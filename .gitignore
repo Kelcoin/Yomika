@@ -1,0 +1,24 @@
+# Local architecture and migration documents
+/docs/
+
+# Planning state
+/.planning/
+
+# Local generated previews and skill work
+/.skill-archive/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+/dist/
+/target/
+/node_modules/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

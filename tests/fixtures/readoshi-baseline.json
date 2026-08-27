@@ -1,0 +1,23 @@
+{
+  "version": "1.6.3",
+  "commit": "b99539f",
+  "tag": "v1.6.3",
+  "capturedAt": "2026-08-26",
+  "sourcePath": "../Readoshi",
+  "dirtyFiles": [
+    "src/lib/superResolution.js",
+    "src/lib/superResolutionOrt.js",
+    "tests/super-resolution.test.mjs"
+  ],
+  "features": [
+    "archives",
+    "reader",
+    "history",
+    "watchlist",
+    "metadata",
+    "uploads",
+    "deduplication",
+    "ehentai",
+    "superResolution"
+  ]
+}
