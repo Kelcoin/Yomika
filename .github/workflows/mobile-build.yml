@@ -83,6 +83,19 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npx tauri ios init --ci
       - run: npm run build
+      - name: Disable Tauri dev-server Xcode phase for unsigned release
+        shell: bash
+        run: |
+          set -euo pipefail
+          project=$(find src-tauri/gen/apple -maxdepth 1 -name '*.xcodeproj' -print -quit)
+          test -n "$project"
+          pbxproj="$project/project.pbxproj"
+          test -f "$pbxproj"
+          ruby -0pi -e 'gsub(/shellScript = "(?:\\\\.|[^"])*xcode-script(?:\\\\.|[^"])*";/, "shellScript = \\\"exit 0\\\";")' "$pbxproj"
+          if grep -q 'xcode-script' "$pbxproj"; then
+            echo 'Tauri xcode-script phase was not disabled' >&2
+            exit 1
+          fi
       - name: Build unsigned iOS app
         run: |
           project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
