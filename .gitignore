@@ -17,6 +17,7 @@
 /target/
 /src-tauri/target/
 /node_modules/
+*.tsbuildinfo
 /vite.config.js
 /vitest.config.js
 
