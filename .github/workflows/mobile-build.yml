@@ -26,11 +26,11 @@ jobs:
           $exe = 'src-tauri/target/release/yomika.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw "Missing portable executable: $exe" }
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Compress-Archive -LiteralPath $exe -DestinationPath 'artifacts/Yomika-windows-portable.zip' -Force
+          Copy-Item -LiteralPath $exe -Destination 'artifacts/yomika.exe' -Force
       - uses: actions/upload-artifact@v4
         with:
           name: yomika-windows-portable
-          path: artifacts/Yomika-windows-portable.zip
+          path: artifacts
           if-no-files-found: error
 
   android:
@@ -52,9 +52,13 @@ jobs:
         shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           test -n "$ANDROID_KEYSTORE_BASE64"
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > src-tauri/gen/android/release.keystore
+          keytool -list -keystore src-tauri/gen/android/release.keystore -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
       - name: Build signed Android packages
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -81,8 +85,11 @@ jobs:
       - run: npm run build
       - name: Build unsigned iOS app
         run: |
-          xcodebuild -project src-tauri/gen/apple/yomika.xcodeproj -scheme yomika -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
-          app="$RUNNER_TEMP/yomika-ios/Build/Products/Release-iphoneos/yomika.app"
+          project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
+          scheme=$(xcodebuild -list -project "$project" | awk '/Schemes:/{getline; gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}')
+          test -n "$scheme"
+          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+          app=$(find "$RUNNER_TEMP/yomika-ios/Build/Products" -type d -name '*.app' -path '*iphoneos*' -print -quit)
           test -d "$app"
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app

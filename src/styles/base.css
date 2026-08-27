@@ -10,6 +10,7 @@ html {
   font-synthesis: none;
   letter-spacing: 0;
   text-rendering: optimizeLegibility;
+  overflow-x: hidden;
 }
 
 body {
@@ -19,6 +20,7 @@ body {
   margin: 0;
   background: var(--surface-canvas);
   color: var(--ink-primary);
+  overflow-x: hidden;
 }
 
 button,
@@ -42,6 +44,36 @@ a {
 
 button {
   border: 0;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  color: var(--ink-primary);
+}
+
+input,
+select {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+textarea {
+  min-height: 96px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--brand-cyan);
+  outline: none;
 }
 
 :focus-visible {

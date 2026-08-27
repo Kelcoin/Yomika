@@ -4,11 +4,13 @@ import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
 import type { CommandResult } from '../domain/result';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { usePreferences } from '../app/preferences';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 
 const repository = new NativeLibraryRepository();
+const legacyRepository = new NativeLegacyRepository();
 
 export function SettingsWorkspace() {
   const preferenceState = usePreferences();
@@ -20,6 +22,11 @@ export function SettingsWorkspace() {
   const [legacyPending, setLegacyPending] = useState(false);
   const [legacyMessage, setLegacyMessage] = useState<string>();
   const [legacyError, setLegacyError] = useState(false);
+  const [fullLegacyExport, setFullLegacyExport] = useState('');
+  const [fullLegacyScope, setFullLegacyScope] = useState('');
+  const [fullLegacyPending, setFullLegacyPending] = useState(false);
+  const [fullLegacyMessage, setFullLegacyMessage] = useState<string>();
+  const [fullLegacyError, setFullLegacyError] = useState(false);
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>();
@@ -60,6 +67,24 @@ export function SettingsWorkspace() {
       setLegacyError(true);
     }
     setLegacyPending(false);
+  }
+
+  async function importFullLegacyExport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setFullLegacyPending(true);
+    setFullLegacyMessage(undefined);
+    setFullLegacyError(false);
+    const result = await legacyRepository.importExport(fullLegacyScope.trim(), fullLegacyExport.trim());
+    if (result.ok) {
+      setFullLegacyExport('');
+      setFullLegacyMessage(`已导入 ${result.value} 项本地记录`);
+      const refreshed = await repository.listServers();
+      if (refreshed.ok) setServers(refreshed.value);
+    } else {
+      setFullLegacyMessage(result.error.message);
+      setFullLegacyError(true);
+    }
+    setFullLegacyPending(false);
   }
 
   async function saveServer(input: { identity: ServerIdentity; apiKey: string }): Promise<CommandResult<ServerIdentity>> {
@@ -148,6 +173,23 @@ export function SettingsWorkspace() {
           )}
           <button className="secondary-action" type="submit" disabled={legacyPending || !legacyExport.trim()}>
             {legacyPending ? '导入中' : '导入旧配置'}
+          </button>
+        </form>
+      </section>
+      <section className="settings-section" aria-labelledby="legacy-full-title">
+        <div>
+          <p className="eyebrow">迁移</p>
+          <h2 id="legacy-full-title">完整本地数据</h2>
+          <p>导入历史、待看和不重复档案记录。服务器凭据仍需单独配置并保存到系统安全存储。</p>
+        </div>
+        <form className="legacy-import-form" onSubmit={importFullLegacyExport}>
+          <label htmlFor="legacy-scope">数据范围 ID</label>
+          <input id="legacy-scope" value={fullLegacyScope} onChange={(event) => setFullLegacyScope(event.target.value)} required />
+          <label htmlFor="legacy-full-export">完整 JSON 导出</label>
+          <textarea id="legacy-full-export" value={fullLegacyExport} onChange={(event) => setFullLegacyExport(event.target.value)} rows={5} required />
+          {fullLegacyMessage && <p className={fullLegacyError ? 'form-error' : 'form-success'} role={fullLegacyError ? 'alert' : 'status'}>{fullLegacyMessage}</p>}
+          <button className="secondary-action" type="submit" disabled={fullLegacyPending || !fullLegacyExport.trim() || !fullLegacyScope.trim()}>
+            {fullLegacyPending ? '导入中' : '导入完整数据'}
           </button>
         </form>
       </section>

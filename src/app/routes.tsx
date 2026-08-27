@@ -23,13 +23,31 @@ const workspaces = {
 } as const;
 
 function HomeWorkspace() {
+  const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>>>();
+  useEffect(() => {
+    let active = true;
+    void repository.listServers().then((result) => { if (active) setServers(result); });
+    return () => { active = false; };
+  }, []);
+  const connected = servers?.ok && servers.value.length > 0;
   return (
     <div className="workspace-home">
       <header className="workspace-heading">
         <p className="workspace-kicker">本地书架</p>
         <h1>首页</h1>
       </header>
-      <section className="first-run" aria-labelledby="first-run-title">
+      {connected ? (
+        <section className="first-run" aria-labelledby="first-run-title">
+          <div className="first-run-copy">
+            <Server aria-hidden="true" />
+            <p className="eyebrow">已连接</p>
+            <h2 id="first-run-title">{servers.value?.[0]?.name ?? 'LANraragi'}</h2>
+            <p>服务器已配置，可以开始浏览档案。</p>
+          </div>
+          <Link className="primary-action" to="/library">打开档案库<ArrowRight aria-hidden="true" /></Link>
+        </section>
+      ) : (
+        <section className="first-run" aria-labelledby="first-run-title">
         <div className="first-run-copy">
           <Server aria-hidden="true" />
           <p className="eyebrow">未连接</p>
@@ -40,7 +58,8 @@ function HomeWorkspace() {
           添加服务器
           <ArrowRight aria-hidden="true" />
         </Link>
-      </section>
+        </section>
+      )}
       <div className="shelf-rule" aria-hidden="true">
         <span>最近阅读</span>
         <span>00</span>

@@ -18,6 +18,7 @@
 /src-tauri/target/
 /node_modules/
 *.tsbuildinfo
+.codex-gh/
 /vite.config.js
 /vitest.config.js
 

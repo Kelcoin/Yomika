@@ -17,8 +17,10 @@ impl Database {
             .path()
             .app_data_dir()
             .map_err(|error| error.to_string())?;
-        fs::create_dir_all(&app_data).map_err(|error| error.to_string())?;
-        let path: PathBuf = app_data.join("yomika.sqlite3");
+        let path = resolve_database_path(app_data)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
         Self::open_path(path)
     }
 
@@ -32,6 +34,28 @@ impl Database {
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+}
+
+fn resolve_database_path(app_data: PathBuf) -> Result<PathBuf, String> {
+    if cfg!(all(target_os = "windows", not(debug_assertions))) {
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let parent = executable
+            .parent()
+            .ok_or_else(|| "Executable directory unavailable".to_string())?;
+        return Ok(parent.join("data").join("yomika.sqlite3"));
+    }
+    Ok(app_data.join("yomika.sqlite3"))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn default_database_path_stays_under_app_data_in_tests() {
+        let path = resolve_database_path(PathBuf::from("C:/Users/test/AppData/Yomika")).unwrap();
+        assert_eq!(path, PathBuf::from("C:/Users/test/AppData/Yomika/yomika.sqlite3"));
     }
 }
 
