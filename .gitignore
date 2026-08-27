@@ -15,7 +15,10 @@
 # Build artifacts
 /dist/
 /target/
+/src-tauri/target/
 /node_modules/
+/vite.config.js
+/vitest.config.js
 
 # OS/editor
 .DS_Store

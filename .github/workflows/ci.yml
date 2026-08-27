@@ -32,3 +32,19 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+  rust-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Run native tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml

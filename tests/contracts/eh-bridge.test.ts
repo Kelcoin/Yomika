@@ -23,15 +23,15 @@ describe('native EH search bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: searchResponse }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.searchGalleries('test query', { category: 2, page: 1 })).toEqual({ ok: true, value: searchResponse });
-    expect(adapter).toHaveBeenCalledWith('search_eh_galleries', { query: 'test query', params: { category: 2, page: 1 } });
+    expect(await repository.searchGalleries('eh-a', 'test query', { category: 2, page: 1 })).toEqual({ ok: true, value: searchResponse });
+    expect(adapter).toHaveBeenCalledWith('search_eh_galleries', { accountId: 'eh-a', query: 'test query', params: { category: 2, page: 1 } });
   });
 
   it('returns error result when bridge returns error', async () => {
     const adapter = vi.fn(async () => ({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.searchGalleries('query')).toEqual({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } });
+    expect(await repository.searchGalleries('eh-a', 'query')).toEqual({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } });
   });
 });
 
@@ -40,15 +40,15 @@ describe('native EH removeFavorite bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: undefined }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.removeFavorite('12345', 'abcdef')).toEqual({ ok: true, value: undefined });
-    expect(adapter).toHaveBeenCalledWith('remove_eh_favorite', { galleryId: '12345', token: 'abcdef' });
+    expect(await repository.removeFavorite('eh-a', '12345', 'abcdef')).toEqual({ ok: true, value: undefined });
+    expect(adapter).toHaveBeenCalledWith('remove_eh_favorite', { accountId: 'eh-a', galleryId: '12345', token: 'abcdef' });
   });
 
   it('returns error result when removeFavorite bridge fails', async () => {
     const adapter = vi.fn(async () => ({ ok: false, error: { code: 'EH_REAUTH_REQUIRED', message: 'Login required', retryable: false } }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.removeFavorite('12345', 'abcdef')).toEqual({ ok: false, error: { code: 'EH_REAUTH_REQUIRED', message: 'Login required', retryable: false } });
+    expect(await repository.removeFavorite('eh-a', '12345', 'abcdef')).toEqual({ ok: false, error: { code: 'EH_REAUTH_REQUIRED', message: 'Login required', retryable: false } });
   });
 });
 
@@ -57,15 +57,15 @@ describe('native EH voteComment bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: undefined }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.voteComment('12345', 'abcdef', '777', 1)).toEqual({ ok: true, value: undefined });
-    expect(adapter).toHaveBeenCalledWith('vote_eh_comment', { galleryId: '12345', token: 'abcdef', commentId: '777', vote: 1 });
+    expect(await repository.voteComment('eh-a', '12345', 'abcdef', '777', 1)).toEqual({ ok: true, value: undefined });
+    expect(adapter).toHaveBeenCalledWith('vote_eh_comment', { accountId: 'eh-a', galleryId: '12345', token: 'abcdef', commentId: '777', vote: 1 });
   });
 
   it('returns error result when voteComment bridge fails', async () => {
     const adapter = vi.fn(async () => ({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.voteComment('12345', 'abcdef', '777', -1)).toEqual({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } });
+    expect(await repository.voteComment('eh-a', '12345', 'abcdef', '777', -1)).toEqual({ ok: false, error: { code: 'EH_RATE_LIMIT', message: 'Rate limit', retryable: true } });
   });
 });
 
@@ -74,15 +74,15 @@ describe('native EH login health check bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: { loggedIn: true } }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.checkLoginHealth()).toEqual({ ok: true, value: { loggedIn: true } });
-    expect(adapter).toHaveBeenCalledWith('check_eh_login_health', {});
+    expect(await repository.checkLoginHealth('eh-a')).toEqual({ ok: true, value: { loggedIn: true } });
+    expect(adapter).toHaveBeenCalledWith('check_eh_login_health', { accountId: 'eh-a' });
   });
 
   it('returns error result when login health check bridge fails', async () => {
     const adapter = vi.fn(async () => ({ ok: false, error: { code: 'EH_CLOUDFLARE', message: 'Cloudflare blocked', retryable: false } }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.checkLoginHealth()).toEqual({ ok: false, error: { code: 'EH_CLOUDFLARE', message: 'Cloudflare blocked', retryable: false } });
+    expect(await repository.checkLoginHealth('eh-a')).toEqual({ ok: false, error: { code: 'EH_CLOUDFLARE', message: 'Cloudflare blocked', retryable: false } });
   });
 });
 

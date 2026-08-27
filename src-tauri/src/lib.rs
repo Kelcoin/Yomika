@@ -24,7 +24,7 @@ use commands::sync::{
 };
 use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_model, inference_pause, inference_probe, inference_resume, inference_start, inference_validate_model};
 use dedup::{dedup_check_file, dedup_find_exact, dedup_save_feature};
-use commands::eh::{list_eh_accounts, save_eh_account};
+use commands::eh::{check_eh_login_health, list_eh_accounts, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
 use commands::legacy::import_legacy_export;
 use db::Database;
 use tauri::Manager;
@@ -93,6 +93,11 @@ pub fn run() {
             inference_clear_cache,
             save_eh_account,
             list_eh_accounts,
+            search_eh_galleries,
+            remove_eh_favorite,
+            vote_eh_comment,
+            check_eh_login_health,
+            set_active_eh_account,
             dedup_check_file,
             dedup_save_feature,
             dedup_find_exact,

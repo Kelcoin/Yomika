@@ -143,7 +143,7 @@ function EhRouteWorkspace() {
           setSearching(false);
           return;
         }
-        const result = await ehRepository.searchGalleries(query);
+        const result = await ehRepository.searchGalleries(activeAccount.id, query);
         if (result.ok) {
           setResults(result.value.galleries);
           setSearched(true);
@@ -151,6 +151,27 @@ function EhRouteWorkspace() {
           setSearchError(result.error.message);
         }
         setSearching(false);
+      }}
+      onSwitchAccount={async (accountId) => {
+        const result = await ehRepository.setActiveAccount(accountId);
+        if (!result.ok) {
+          setSearchError(result.error.message);
+          return;
+        }
+        setAccounts((current) => current.map((account) => ({
+          ...account,
+          isActive: account.id === accountId,
+        })));
+      }}
+      onCheckHealth={async (accountId) => {
+        const result = await ehRepository.checkLoginHealth(accountId);
+        if (!result.ok) {
+          setSearchError(result.error.message);
+          return;
+        }
+        setAccounts((current) => current.map((account) => account.id === accountId
+          ? { ...account, status: result.value.loggedIn ? 'verified' : 'error' }
+          : account));
       }}
     />
   );
