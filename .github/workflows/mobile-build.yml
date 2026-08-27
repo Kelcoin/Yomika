@@ -80,9 +80,13 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
       - run: npm ci --no-audit --no-fund
       - run: npx tauri ios init --ci
       - run: npm run build
+      - name: Build Rust for iOS
+        run: cargo build --target aarch64-apple-ios --manifest-path src-tauri/Cargo.toml
       - name: Disable Tauri dev-server Xcode phase for unsigned release
         shell: bash
         run: |
