@@ -91,7 +91,7 @@ jobs:
           test -n "$project"
           pbxproj="$project/project.pbxproj"
           test -f "$pbxproj"
-          ruby -0pi -e 'gsub(/shellScript = "(?:\\\\.|[^"])*xcode-script(?:\\\\.|[^"])*";/, "shellScript = \\\"exit 0\\\";")' "$pbxproj"
+          ruby -pi -e '$_ = $_.sub(/shellScript = .*xcode-script.*;/, %q{shellScript = "exit 0";}) if $_.include?("xcode-script")' "$pbxproj"
           if grep -q 'xcode-script' "$pbxproj"; then
             echo 'Tauri xcode-script phase was not disabled' >&2
             exit 1
