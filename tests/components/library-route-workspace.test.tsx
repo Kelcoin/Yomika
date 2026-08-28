@@ -17,6 +17,26 @@ function renderLibrary() {
 }
 
 describe('library route workspace', () => {
+  it('explains how to recover when history has no configured server', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
+
+    expect(await screen.findByText('尚未连接 LANraragi')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
+  });
+
+  it('labels sync as externally unavailable instead of completed', async () => {
+    render(<MemoryRouter initialEntries={['/sync']}><App /></MemoryRouter>);
+
+    expect(screen.getByRole('heading', { name: '同步尚未配置' })).toBeInTheDocument();
+    expect(screen.getByText(/WebDAV/)).toBeInTheDocument();
+  });
+
   it('loads archives from the first configured server scope', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') {

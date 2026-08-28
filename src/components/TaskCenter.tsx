@@ -69,7 +69,7 @@ export function TaskCenter() {
       <header className="workspace-heading"><h1>下载</h1></header>
       <button className="primary-action" type="button" onClick={() => void upload()}>上传档案</button>
       {message && <p role="status">{message}</p>}
-      {loading && <p role="status">正在读取任务...</p>}
+      {loading && <p className="server-list-message" role="status">正在读取任务…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {!loading && !error && tasks.length === 0 && <p>暂无下载任务</p>}
       {!loading && !error && tasks.length > 0 && (

@@ -179,23 +179,6 @@
 .tooltip-content { z-index: 40; padding: 6px 9px; border-radius: 6px; background: var(--surface-overlay); color: #fff; font-size: 11px; line-height: 1; box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); user-select: none; }
 .tooltip-arrow { fill: var(--surface-overlay); }
 
-.task-count {
-  position: absolute;
-  top: 4px;
-  right: 3px;
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--surface-canvas);
-  border-radius: 50%;
-  background: var(--brand-vermilion);
-  color: #fff;
-  font-family: var(--font-utility);
-  font-size: 8px;
-  font-weight: 700;
-}
-
 .workspace {
   width: min(100%, 1600px);
   min-height: 0;
@@ -764,6 +747,18 @@
 
 .status-warning svg {
   color: var(--state-warning);
+}
+
+.status-success svg {
+  color: var(--state-success);
+}
+
+.status-active svg {
+  color: var(--brand-cyan);
+}
+
+.empty-state-action {
+  margin-top: calc(-1 * var(--space-5));
 }
 
 .compact-nav {

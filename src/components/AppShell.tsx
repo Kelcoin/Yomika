@@ -13,19 +13,19 @@ import {
 import { motion, useReducedMotion } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { ReactNode } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { StatusBar } from './StatusBar';
 
 const navigation = [
-  { to: '/', label: '首页', icon: Home },
-  { to: '/library', label: '档案库', icon: Archive },
-  { to: '/history', label: '历史', icon: History },
-  { to: '/watchlist', label: '待看', icon: Star },
-  { to: '/eh', label: 'E-Hentai', icon: Globe },
-  { to: '/downloads', label: '下载', icon: Download, desktopOnly: true },
-  { to: '/sync', label: '同步', icon: Waypoints, desktopOnly: true },
-  { to: '/settings', label: '设置', icon: Settings },
+  { to: '/', label: '首页', icon: Home, mobile: true },
+  { to: '/library', label: '档案库', icon: Archive, mobile: true },
+  { to: '/history', label: '历史', icon: History, mobile: true },
+  { to: '/watchlist', label: '待看', icon: Star, mobile: true },
+  { to: '/eh', label: 'E-Hentai', icon: Globe, mobile: false },
+  { to: '/downloads', label: '下载', icon: Download, mobile: false },
+  { to: '/sync', label: '同步', icon: Waypoints, mobile: false },
+  { to: '/settings', label: '设置', icon: Settings, mobile: true },
 ] as const;
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
@@ -38,7 +38,7 @@ interface AppShellProps {
 function Navigation({ compact = false }: { compact?: boolean }) {
   return (
     <nav className={compact ? 'compact-nav' : 'side-nav'} aria-label={compact ? '移动导航' : '主导航'}>
-      {navigation.filter((item) => !compact || !('desktopOnly' in item)).map(({ to, label, icon: Icon }) => (
+      {navigation.filter((item) => !compact || item.mobile).map(({ to, label, icon: Icon }) => (
         <NavLink
           className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
           end={to === '/'}
@@ -79,11 +79,11 @@ export function AppShell({ children }: AppShellProps) {
           <div className="context-actions">
             <Tooltip.Provider delayDuration={450}>
               <Tooltip.Root>
-                <Tooltip.Trigger asChild><button className="icon-button" type="button" aria-label="搜索"><Search aria-hidden="true" /></button></Tooltip.Trigger>
+                <Tooltip.Trigger asChild><Link className="icon-button" to="/library" aria-label="搜索"><Search aria-hidden="true" /></Link></Tooltip.Trigger>
                 <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>搜索<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
               </Tooltip.Root>
               <Tooltip.Root>
-                <Tooltip.Trigger asChild><button className="icon-button" type="button" aria-label="任务中心"><ListTodo aria-hidden="true" /><span className="task-count">0</span></button></Tooltip.Trigger>
+                <Tooltip.Trigger asChild><Link className="icon-button" to="/downloads" aria-label="任务中心"><ListTodo aria-hidden="true" /></Link></Tooltip.Trigger>
                 <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>任务中心<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
               </Tooltip.Root>
             </Tooltip.Provider>

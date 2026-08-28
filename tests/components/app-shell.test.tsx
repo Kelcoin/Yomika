@@ -1,7 +1,11 @@
 import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { afterEach } from 'vitest';
 
 import { App } from '../../src/app/App';
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+
+afterEach(resetInvokeAdapterForTests);
 
 function renderAt(path = '/') {
   return render(
@@ -20,8 +24,8 @@ describe('application shell', () => {
     expect(within(desktop).getByRole('link', { name: '同步' })).toBeInTheDocument();
 
     const compact = screen.getByRole('navigation', { name: '移动导航' });
-    expect(within(compact).getAllByRole('link')).toHaveLength(6);
-    expect(within(compact).getByRole('link', { name: 'E-Hentai' })).toBeInTheDocument();
+    expect(within(compact).getAllByRole('link')).toHaveLength(5);
+    expect(within(compact).queryByRole('link', { name: 'E-Hentai' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '下载' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
   });
@@ -49,10 +53,27 @@ describe('application shell', () => {
     expect(screen.getByRole('status', { name: '缓存状态' })).toHaveTextContent('0 B');
   });
 
-  it('keeps tooltip icon controls accessible by name', () => {
+  it('shows repository-backed server and task status', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_tasks') return { ok: true, value: [
+        { id: 'one', kind: 'download', label: '下载', status: 'running', progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z' },
+        { id: 'two', kind: 'sync', label: '同步', status: 'queued', progress: 0, cancelable: true, retryable: true, createdAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z' },
+      ] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
     renderAt();
 
-    expect(screen.getByRole('button', { name: '搜索' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '任务中心' })).toBeInTheDocument();
+    expect(await screen.findByRole('status', { name: '连接状态' })).toHaveTextContent('Home');
+    expect(screen.getByRole('status', { name: '任务状态' })).toHaveTextContent('2');
+  });
+
+  it('links tooltip icon controls to their workspaces', () => {
+    renderAt();
+
+    expect(screen.getByRole('link', { name: '搜索' })).toHaveAttribute('href', '/library');
+    expect(screen.getByRole('link', { name: '任务中心' })).toHaveAttribute('href', '/downloads');
   });
 });

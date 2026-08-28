@@ -1,4 +1,4 @@
-import { ArrowRight, FolderHeart, Server } from 'lucide-react';
+import { ArrowRight, FolderHeart, Server, Waypoints } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, Route, Routes, useParams } from 'react-router-dom';
 
@@ -15,11 +15,8 @@ import type { EhAccount } from '../domain/eh';
 import type { EhSearchResult } from '../services/ehClient';
 
 const workspaces = {
-  library: ['档案库', '连接服务器后，档案会显示在这里。'],
   history: ['历史', '开始阅读后，进度会保存在这里。'],
   watchlist: ['待看', '加入待看的档案会显示在这里。'],
-  downloads: ['下载', '当前没有下载任务。'],
-  sync: ['同步', '添加 WebDAV 账户后可查看同步状态。'],
 } as const;
 
 function HomeWorkspace() {
@@ -79,19 +76,22 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const [hasServer, setHasServer] = useState(true);
   useEffect(() => {
     let active = true;
     void (async () => {
       const servers = await repository.listServers();
       if (!active) return;
-      if (!servers.ok) { setError(servers.error.message); return; }
+      if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
       const scopeId = servers.value[0]?.scopeId;
-      if (!scopeId) return;
+      if (!scopeId) { setHasServer(false); setLoading(false); return; }
       const result = name === 'history' ? await repository.listHistory(scopeId) : await repository.listWatchlist(scopeId);
       if (!active) return;
       if (!result.ok) setError(result.error.message);
       else if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setWatchlist(result.value as WatchlistRecord[]);
+      setLoading(false);
     })();
     return () => { active = false; };
   }, [name]);
@@ -100,26 +100,35 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   return (
     <div>
       <header className="workspace-heading"><h1>{title}</h1></header>
+      {loading && <p className="server-list-message" role="status">正在读取{title}…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {records.length === 0 ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} /> : (
+      {!loading && !error && !hasServer && (
+        <>
+          <EmptyState icon={Server} title="尚未连接 LANraragi" description="添加服务器后即可读取和同步本机记录。" />
+          <Link className="primary-action empty-state-action" to="/settings">添加服务器<ArrowRight aria-hidden="true" /></Link>
+        </>
+      )}
+      {!loading && !error && hasServer && (records.length === 0 ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} /> : (
         <ul className="state-list">
           {name === 'history'
             ? history.map((item) => <li key={item.archiveId}><strong>{item.archiveId}</strong><span>第 {item.pageIndex + 1} 页</span></li>)
             : watchlist.map((item) => <li key={item.archiveId}><strong>{item.archiveId}</strong><span>待看</span></li>)}
         </ul>
-      )}
+      ))}
     </div>
   );
 }
 
-function EmptyWorkspace({ name }: { name: keyof typeof workspaces }) {
-  const [title, description] = workspaces[name];
+function SyncWorkspace() {
   return (
     <div>
-      <header className="workspace-heading">
-        <h1>{title}</h1>
-      </header>
-      <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
+      <header className="workspace-heading"><p className="workspace-kicker">外部服务</p><h1>同步</h1></header>
+      <EmptyState
+        icon={Waypoints}
+        title="同步尚未配置"
+        description="WebDAV 增量同步需要先完成服务地址和加密口令配置；当前不会伪造远端同步状态。"
+      />
+      <Link className="secondary-action empty-state-action" to="/settings">打开设置</Link>
     </div>
   );
 }
@@ -205,7 +214,7 @@ export function WorkspaceRoutes() {
       <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
-      <Route path="/sync" element={<EmptyWorkspace name="sync" />} />
+      <Route path="/sync" element={<SyncWorkspace />} />
       <Route path="/settings" element={<SettingsWorkspace />} />
       <Route path="*" element={<HomeWorkspace />} />
     </Routes>
