@@ -1,8 +1,9 @@
 .app-shell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -113,8 +114,9 @@
   display: grid;
   grid-template-rows: 72px minmax(0, 1fr) 28px;
   min-width: 0;
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 .context-bar {
@@ -196,7 +198,11 @@
 
 .workspace {
   width: min(100%, 1600px);
+  min-height: 0;
   padding: clamp(32px, 5vw, 72px) clamp(20px, 5vw, 72px) 80px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .workspace-heading {
@@ -434,6 +440,10 @@
   transform: translateY(-1px);
 }
 
+.primary-action:active {
+  transform: translateY(0);
+}
+
 .primary-action svg {
   width: 17px;
   height: 17px;
@@ -597,6 +607,7 @@
   max-height: calc(100dvh - 32px);
   padding: var(--space-6);
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--surface-panel);
@@ -669,6 +680,12 @@
   background: var(--surface-elevated);
   color: var(--ink-secondary);
   cursor: pointer;
+  transition: background-color var(--motion-standard), color var(--motion-standard);
+}
+
+.secondary-action:hover {
+  background: var(--brand-paper);
+  color: var(--ink-primary);
 }
 
 .primary-action:disabled {
@@ -765,8 +782,8 @@
 
   .app-main {
     grid-template-rows: 60px minmax(0, 1fr);
-    min-height: 100vh;
-    min-height: 100dvh;
+    height: 100vh;
+    height: 100dvh;
   }
 
   .context-bar {

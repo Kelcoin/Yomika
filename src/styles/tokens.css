@@ -1,7 +1,7 @@
 :root {
   color-scheme: light dark;
   --surface-canvas: #f6f4f8;
-  --surface-panel: #fffaff;
+  --surface-panel: #fffdff;
   --surface-elevated: #ffffff;
   --surface-overlay: rgb(30 27 36 / 0.84);
   --ink-primary: #1e1b24;
@@ -11,15 +11,20 @@
   --brand-vermilion: #b63a2e;
   --brand-paper: #f3eee4;
   --brand-violet: #6e57c8;
-  --brand-cyan: #2f8fa3;
-  --state-success: #287a59;
-  --state-warning: #a65f24;
-  --state-danger: #b53654;
+  --brand-cyan: #57c1d7;
+  --state-success: #3c9d77;
+  --state-warning: #c67a33;
+  --state-danger: #c64b67;
   --hairline: rgb(30 27 36 / 0.1);
   --focus-ring: #6e57c8;
   --font-body: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
   --font-utility: ui-monospace, "Cascadia Code", monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 20px;
+  --text-title: 32px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -37,7 +42,7 @@
 :root[data-theme='light'] {
   color-scheme: light;
   --surface-canvas: #f6f4f8;
-  --surface-panel: #fffaff;
+  --surface-panel: #fffdff;
   --surface-elevated: #ffffff;
   --surface-overlay: rgb(30 27 36 / 0.84);
   --ink-primary: #1e1b24;
@@ -47,10 +52,10 @@
   --brand-vermilion: #b63a2e;
   --brand-paper: #f3eee4;
   --brand-violet: #6e57c8;
-  --brand-cyan: #2f8fa3;
-  --state-success: #287a59;
-  --state-warning: #a65f24;
-  --state-danger: #b53654;
+  --brand-cyan: #57c1d7;
+  --state-success: #3c9d77;
+  --state-warning: #c67a33;
+  --state-danger: #c64b67;
   --hairline: rgb(30 27 36 / 0.1);
   --focus-ring: #6e57c8;
 }
