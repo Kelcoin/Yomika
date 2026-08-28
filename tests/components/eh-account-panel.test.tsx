@@ -57,6 +57,6 @@ describe('EhAccountPanel', () => {
 
   it('shows loading state', () => {
     render(<EhAccountPanel accounts={[]} loading />);
-    expect(screen.getByText('正在读取账户...')).toBeDefined();
+    expect(screen.getByText('正在读取账户…')).toBeDefined();
   });
 });

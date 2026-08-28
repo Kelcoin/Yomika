@@ -1,11 +1,15 @@
 import { CheckCircle, RefreshCw, ArrowRightLeft } from 'lucide-react';
+import { useState, type FormEvent } from 'react';
 import type { EhAccount } from '../domain/eh';
+import type { SaveEhAccountInput } from '../domain/eh';
 
 interface EhAccountPanelProps {
   accounts: EhAccount[];
   onSwitch?: ((accountId: string) => void) | undefined;
   onCheckHealth?: ((accountId: string) => void) | undefined;
   loading?: boolean | undefined;
+  onSave?: ((input: SaveEhAccountInput) => Promise<void>) | undefined;
+  saving?: boolean | undefined;
 }
 
 function statusLabel(status: EhAccount['status']): string {
@@ -14,25 +18,52 @@ function statusLabel(status: EhAccount['status']): string {
   return '未验证';
 }
 
-export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading }: EhAccountPanelProps) {
+export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onSave, saving }: EhAccountPanelProps) {
+  const [formError, setFormError] = useState<string>();
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!onSave) return;
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const usernameHint = String(data.get('ehUsernameHint') ?? '').trim();
+    setFormError(undefined);
+    try {
+      await onSave({
+        id: String(data.get('ehAccountId') ?? '').trim(),
+        label: String(data.get('ehAccountLabel') ?? '').trim(),
+        host: String(data.get('ehAccountHost') ?? 'e-hentai.org') as SaveEhAccountInput['host'],
+        ...(usernameHint ? { usernameHint } : {}),
+        cookie: String(data.get('ehCookie') ?? ''),
+      });
+      form.reset();
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : '账户保存失败');
+    }
+  }
   if (loading) {
     return (
       <section className="eh-account-panel" aria-label="E-Hentai 账户">
-        <p role="status">正在读取账户...</p>
-      </section>
-    );
-  }
-
-  if (accounts.length === 0) {
-    return (
-      <section className="eh-account-panel" aria-label="E-Hentai 账户">
-        <p>尚未添加 E-Hentai 账户</p>
+        <p role="status">正在读取账户…</p>
       </section>
     );
   }
 
   return (
     <section className="eh-account-panel" aria-label="E-Hentai 账户">
+      {accounts.length === 0 && <p>尚未添加 E-Hentai 账户</p>}
+      {onSave && (
+        <form className="eh-account-form" onSubmit={submit}>
+          <label>账户 ID<input name="ehAccountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" /></label>
+          <label>名称<input name="ehAccountLabel" required autoComplete="off" /></label>
+          <label>站点<select name="ehAccountHost" defaultValue="e-hentai.org"><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
+          <label>用户名提示<input name="ehUsernameHint" autoComplete="username" spellCheck={false} /></label>
+          <label>Cookie<input name="ehCookie" required type="password" autoComplete="current-password" spellCheck={false} /></label>
+          <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存 E-Hentai 账户'}</button>
+          {formError && <p className="form-error" role="alert">{formError}</p>}
+        </form>
+      )}
+      {accounts.length === 0 ? null : (
       <ul>
         {accounts.map((account) => (
           <li key={account.id} className={account.isActive ? 'active' : ''}>
@@ -57,6 +88,7 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading }: E
           </li>
         ))}
       </ul>
+      )}
     </section>
   );
 }

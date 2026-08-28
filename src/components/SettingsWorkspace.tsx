@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -18,6 +19,7 @@ export function SettingsWorkspace() {
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
   const [preferencePending, setPreferencePending] = useState(false);
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
+  const [preferenceError, setPreferenceError] = useState(false);
   const [legacyExport, setLegacyExport] = useState('');
   const [legacyPending, setLegacyPending] = useState(false);
   const [legacyMessage, setLegacyMessage] = useState<string>();
@@ -46,8 +48,10 @@ export function SettingsWorkspace() {
     event.preventDefault();
     setPreferencePending(true);
     setPreferenceMessage(undefined);
+    setPreferenceError(false);
     const result = await preferenceState.save(preferenceDraft);
     if (result.ok) setPreferenceDraft(result.value);
+    else setPreferenceError(true);
     setPreferenceMessage(result.ok ? '偏好已保存' : result.error.message);
     setPreferencePending(false);
   }
@@ -109,7 +113,7 @@ export function SettingsWorkspace() {
           <p className="eyebrow">本机</p>
           <h2 id="preferences-title">阅读与存储</h2>
         </div>
-        {preferenceState.loading ? <p className="server-list-message">正在读取偏好...</p> : (
+        {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
           <form className="preferences-form" onSubmit={savePreferences}>
             <fieldset>
               <legend>主题</legend>
@@ -136,7 +140,7 @@ export function SettingsWorkspace() {
               </div>
             </fieldset>
             <label className="preference-select">图片缓存上限
-              <select value={preferenceDraft.cacheMaxBytes} onChange={(event) => setPreferenceDraft({ ...preferenceDraft, cacheMaxBytes: Number(event.target.value) })}>
+              <select name="cacheMaxBytes" value={preferenceDraft.cacheMaxBytes} onChange={(event) => setPreferenceDraft({ ...preferenceDraft, cacheMaxBytes: Number(event.target.value) })}>
                 <option value={536_870_912}>512 MiB</option>
                 <option value={2_147_483_648}>2 GiB</option>
                 <option value={4_294_967_296}>4 GiB</option>
@@ -144,11 +148,11 @@ export function SettingsWorkspace() {
               </select>
             </label>
             {(preferenceState.error || preferenceMessage) && (
-              <p className={preferenceState.error || preferenceMessage !== '偏好已保存' ? 'form-error' : 'form-success'} role={preferenceState.error || preferenceMessage !== '偏好已保存' ? 'alert' : 'status'}>
+              <p className={preferenceState.error || preferenceError ? 'form-error' : 'form-success'} role={preferenceState.error || preferenceError ? 'alert' : 'status'}>
                 {preferenceState.error ?? preferenceMessage}
               </p>
             )}
-            <button className="primary-action" type="submit" disabled={preferencePending}>{preferencePending ? '保存中' : '保存偏好'}</button>
+            <button className="primary-action" type="submit" disabled={preferencePending} aria-busy={preferencePending}>{preferencePending ? '保存中…' : '保存偏好'}</button>
           </form>
         )}
       </section>
@@ -161,6 +165,9 @@ export function SettingsWorkspace() {
           <label htmlFor="legacy-config-export">旧配置导出</label>
           <textarea
             id="legacy-config-export"
+            name="legacyConfigExport"
+            autoComplete="off"
+            spellCheck={false}
             value={legacyExport}
             onChange={(event) => setLegacyExport(event.target.value)}
             rows={4}
@@ -171,8 +178,8 @@ export function SettingsWorkspace() {
               {legacyMessage}
             </p>
           )}
-          <button className="secondary-action" type="submit" disabled={legacyPending || !legacyExport.trim()}>
-            {legacyPending ? '导入中' : '导入旧配置'}
+          <button className="secondary-action" type="submit" disabled={legacyPending || !legacyExport.trim()} aria-busy={legacyPending}>
+            {legacyPending ? '导入中…' : '导入旧配置'}
           </button>
         </form>
       </section>
@@ -184,12 +191,12 @@ export function SettingsWorkspace() {
         </div>
         <form className="legacy-import-form" onSubmit={importFullLegacyExport}>
           <label htmlFor="legacy-scope">数据范围 ID</label>
-          <input id="legacy-scope" value={fullLegacyScope} onChange={(event) => setFullLegacyScope(event.target.value)} required />
+          <input id="legacy-scope" name="legacyScope" autoComplete="off" spellCheck={false} value={fullLegacyScope} onChange={(event) => setFullLegacyScope(event.target.value)} required />
           <label htmlFor="legacy-full-export">完整 JSON 导出</label>
-          <textarea id="legacy-full-export" value={fullLegacyExport} onChange={(event) => setFullLegacyExport(event.target.value)} rows={5} required />
+          <textarea id="legacy-full-export" name="legacyFullExport" autoComplete="off" spellCheck={false} value={fullLegacyExport} onChange={(event) => setFullLegacyExport(event.target.value)} rows={5} required />
           {fullLegacyMessage && <p className={fullLegacyError ? 'form-error' : 'form-success'} role={fullLegacyError ? 'alert' : 'status'}>{fullLegacyMessage}</p>}
-          <button className="secondary-action" type="submit" disabled={fullLegacyPending || !fullLegacyExport.trim() || !fullLegacyScope.trim()}>
-            {fullLegacyPending ? '导入中' : '导入完整数据'}
+          <button className="secondary-action" type="submit" disabled={fullLegacyPending || !fullLegacyExport.trim() || !fullLegacyScope.trim()} aria-busy={fullLegacyPending}>
+            {fullLegacyPending ? '导入中…' : '导入完整数据'}
           </button>
         </form>
       </section>
@@ -201,8 +208,16 @@ export function SettingsWorkspace() {
         </div>
         <ServerSetupDialog onSave={saveServer} />
       </section>
+      <section className="settings-section" aria-labelledby="sync-settings-title">
+        <div>
+          <p className="eyebrow">同步</p>
+          <h2 id="sync-settings-title">WebDAV 账户</h2>
+          <p>配置加密增量同步账户并手动验证当前服务器范围。</p>
+        </div>
+        <Link className="secondary-action" to="/sync">打开同步中心</Link>
+      </section>
       <div className="server-list" aria-live="polite">
-        {loading && <p className="server-list-message">正在读取服务器...</p>}
+        {loading && <p className="server-list-message" role="status">正在读取服务器…</p>}
         {!loading && loadError && <p className="form-error" role="alert">{loadError}</p>}
         {!loading && !loadError && servers.length === 0 && (
           <p className="server-list-message">尚未添加 LANraragi 服务器。</p>

@@ -22,6 +22,29 @@ function renderEhRoute() {
 }
 
 describe('EH route workspace', () => {
+  it('saves an account through the native secure-storage contract', async () => {
+    const saved = { id: 'eh-new', label: 'My EH', host: 'e-hentai.org', cookieRef: 'keyring://eh-new', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'save_eh_account') return { ok: true, value: saved };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const user = userEvent.setup();
+    renderEhRoute();
+
+    await user.type(await screen.findByLabelText('账户 ID'), 'eh-new');
+    await user.type(screen.getByLabelText('名称'), 'My EH');
+    await user.type(screen.getByLabelText('Cookie'), 'ipb_member_id=secret');
+    await user.click(screen.getByRole('button', { name: '保存 E-Hentai 账户' }));
+
+    expect(adapter).toHaveBeenCalledWith('save_eh_account', { input: {
+      id: 'eh-new', label: 'My EH', host: 'e-hentai.org', cookie: 'ipb_member_id=secret',
+    } });
+    expect(await screen.findByText('My EH')).toBeInTheDocument();
+    expect(screen.queryByText('ipb_member_id=secret')).not.toBeInTheDocument();
+  });
+
   it('scopes searches to the active account', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: accounts };
@@ -33,7 +56,7 @@ describe('EH route workspace', () => {
     renderEhRoute();
 
     await screen.findByText('EH Main');
-    await user.type(screen.getByPlaceholderText('搜索 E-Hentai...'), 'test query');
+    await user.type(screen.getByRole('searchbox', { name: '搜索 E-Hentai' }), 'test query');
     await user.keyboard('{Enter}');
 
     expect(adapter).toHaveBeenCalledWith('search_eh_galleries', {

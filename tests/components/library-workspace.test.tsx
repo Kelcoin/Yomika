@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { vi } from 'vitest';
 
 import { LibraryWorkspace } from '../../src/components/LibraryWorkspace';
 import type { ArchiveRecord } from '../../src/domain/library';
@@ -46,5 +47,16 @@ describe('library workspace', () => {
 
     await user.click(screen.getByRole('button', { name: '按标题升序' }));
     expect(screen.getByText('5 项')).toBeInTheDocument();
+  });
+
+  it('submits the selected category through local component state', async () => {
+    const user = userEvent.setup();
+    const onAddCategory = vi.fn();
+    render(<LibraryWorkspace archives={archives.slice(0, 1)} categories={[{ id: 'favorite', name: '收藏', pinned: false, search: null, archives: [] }]} onAddCategory={onAddCategory} />);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '分类' }), 'favorite');
+    await user.click(screen.getByRole('button', { name: '加入分类' }));
+
+    expect(onAddCategory).toHaveBeenCalledWith('favorite');
   });
 });

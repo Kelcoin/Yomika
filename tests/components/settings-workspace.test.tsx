@@ -80,6 +80,7 @@ describe('settings workspace', () => {
     expect(screen.getByRole('radio', { name: '从右到左' })).toBeChecked();
     expect(screen.getByLabelText('图片缓存上限')).toHaveValue('4294967296');
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
 
     await user.click(screen.getByRole('radio', { name: '浅色' }));
     await user.click(screen.getByRole('radio', { name: '单页' }));
@@ -87,6 +88,7 @@ describe('settings workspace', () => {
 
     expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute('data-theme', 'light');
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...loaded, theme: 'light', defaultLayout: 'single' },
     });

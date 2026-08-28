@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -23,38 +23,39 @@ export function LibraryRouteWorkspace() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string>();
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      const servers = await repository.listServers();
-      if (!active) return;
-      if (!servers.ok) {
-        setError(servers.error.message);
-        setLoading(false);
-        return;
-      }
-      const server = servers.value[0];
-      if (!server) {
-        setLoading(false);
-        return;
-      }
-      setServerId(server.id);
-      const categoryResult = await repository.listCategories(server.id);
-      if (active && categoryResult.ok) setCategories(categoryResult.value);
-      const result = await repository.listArchives(server.id);
-      if (!active) return;
-      if (result.ok) setArchives(result.value);
-      else setError(result.error.message);
+  const loadLibrary = useCallback(async () => {
+    setLoading(true);
+    setError(undefined);
+    const servers = await repository.listServers();
+    if (!servers.ok) {
+      setError(servers.error.message);
       setLoading(false);
-    })();
-    return () => { active = false; };
+      return;
+    }
+    const server = servers.value[0];
+    if (!server) {
+      setServerId(undefined);
+      setLoading(false);
+      return;
+    }
+    setServerId(server.id);
+    const categoryResult = await repository.listCategories(server.id);
+    if (categoryResult.ok) setCategories(categoryResult.value);
+    const result = await repository.listArchives(server.id);
+    if (result.ok) setArchives(result.value);
+    else setError(result.error.message);
+    setLoading(false);
   }, []);
+
+  useEffect(() => {
+    void loadLibrary();
+  }, [loadLibrary]);
 
   if (loading) {
     return (
       <div>
         <header className="workspace-heading"><h1>档案库</h1></header>
-        <p className="server-list-message" role="status">正在读取档案...</p>
+        <p className="server-list-message" role="status">正在读取档案…</p>
       </div>
     );
   }
@@ -64,6 +65,7 @@ export function LibraryRouteWorkspace() {
       <div>
         <header className="workspace-heading"><h1>档案库</h1></header>
         <p className="form-error" role="alert">{error}</p>
+        <button className="secondary-action" type="button" onClick={() => void loadLibrary()}>重试读取档案库</button>
       </div>
     );
   }

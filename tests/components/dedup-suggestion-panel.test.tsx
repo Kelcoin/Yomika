@@ -49,7 +49,7 @@ describe('DedupSuggestionPanel', () => {
 
   it('shows loading state when checking is true', () => {
     render(<DedupSuggestionPanel matches={[]} checking />);
-    expect(screen.getByText('正在检查重复...')).toBeDefined();
+    expect(screen.getByText('正在检查重复…')).toBeDefined();
   });
 
   it('renders distance color indicator for close matches', () => {

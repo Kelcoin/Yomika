@@ -66,7 +66,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [archiveId]);
 
   if (error) return <main className="reader-screen"><section className="reader-error"><h1>阅读器加载失败</h1><p role="alert">{error}</p></section></main>;
-  if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面...</p></main>;
+  if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面…</p></main>;
 
   return (
     <ReaderScreen

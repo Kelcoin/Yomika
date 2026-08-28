@@ -1,6 +1,6 @@
 import { ArrowLeft, ChevronLeft, ChevronRight, Maximize2, Minimize2, Minus, RotateCcw, ZoomIn } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type WheelEvent } from 'react';
 import { Link } from 'react-router-dom';
 
 import { advanceReader, applyZoom, clampZoom, createReaderState, createZoomState, resolveReaderLayout, resetZoom, toggleDoubleTapZoom, toggleReaderChrome, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
@@ -65,6 +65,19 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
   }
 
+  function handleWheel(event: WheelEvent<HTMLElement>) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (
+      state.layout === 'webtoon'
+      || zoomScaleRef.current > 1
+      || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller')
+    ) return;
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    if (delta === 0) return;
+    event.preventDefault();
+    move(delta > 0 ? 'next' : 'previous');
+  }
+
   function stopChromeToggle(event: MouseEvent) {
     event.stopPropagation();
   }
@@ -125,6 +138,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       className="reader-screen"
       onClick={() => setState(toggleReaderChrome)}
       onKeyDown={handleKeyDown}
+      onWheel={handleWheel}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
       tabIndex={0}
@@ -173,10 +187,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
               <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
               <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
-              <button type="button" aria-label="单页" onClick={() => setState((current) => ({ ...current, layout: 'single' }))}>单页</button>
-              <button type="button" aria-label="双页" onClick={() => setState((current) => ({ ...current, layout: 'double' }))}>双页</button>
-              <button type="button" aria-label="连续滚动" onClick={() => setState((current) => ({ ...current, layout: current.layout === 'webtoon' ? 'single' : 'webtoon' }))}>连续滚动</button>
-              <button type="button" aria-label="切换阅读方向" onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? '从左到右' : '从右到左'}</button>
+              <button type="button" aria-label="单页" aria-pressed={state.layout === 'single' || state.layout === 'auto'} onClick={() => setState((current) => ({ ...current, layout: 'single' }))}>单页</button>
+              <button type="button" aria-label="双页" aria-pressed={state.layout === 'double'} onClick={() => setState((current) => ({ ...current, layout: 'double' }))}>双页</button>
+              <button type="button" aria-label="连续滚动" aria-pressed={state.layout === 'webtoon'} onClick={() => setState((current) => ({ ...current, layout: 'webtoon' }))}>连续滚动</button>
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed="true" onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? '从左到右' : '从右到左'}</button>
               <button type="button" aria-label="放大" onClick={zoomIn}><ZoomIn aria-hidden="true" /></button>
               <button type="button" aria-label="缩小" onClick={zoomOut}><Minus aria-hidden="true" /></button>
               {zoom.scale > 1 && <button type="button" aria-label="重置缩放" onClick={zoomReset}><RotateCcw aria-hidden="true" /></button>}

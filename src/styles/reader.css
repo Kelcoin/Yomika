@@ -91,7 +91,7 @@
   align-items: center;
   gap: var(--space-3);
   min-height: 64px;
-  padding: 8px clamp(12px, 3vw, 32px);
+  padding: calc(8px + env(safe-area-inset-top)) clamp(12px, 3vw, 32px) 8px;
   background: rgb(5 5 7 / 0.82);
   backdrop-filter: blur(14px);
   pointer-events: auto;
@@ -120,21 +120,50 @@
   background: rgb(255 255 255 / 0.1);
 }
 
+.reader-toolbar button[aria-pressed="true"] {
+  background: #f8f6fa;
+  color: #070709;
+}
+
 .reader-toolbar {
-  display: grid;
-  grid-template-columns: 44px minmax(72px, auto) 44px;
+  grid-row: 3;
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-3);
   min-height: 72px;
   padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
   background: rgb(5 5 7 / 0.82);
   backdrop-filter: blur(14px);
   pointer-events: auto;
 }
 
 .reader-toolbar span {
+  flex: 0 0 auto;
+  min-width: 64px;
   font-family: var(--font-utility);
   font-size: 12px;
   text-align: center;
+}
+
+.reader-toolbar button {
+  flex: 0 0 44px;
+}
+
+.reader-toolbar button[aria-label="单页"],
+.reader-toolbar button[aria-label="双页"],
+.reader-toolbar button[aria-label="连续滚动"],
+.reader-toolbar button[aria-label="从左到右"],
+.reader-toolbar button[aria-label="从右到左"] {
+  width: auto;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .reader-toolbar {
+    justify-content: flex-start;
+  }
 }

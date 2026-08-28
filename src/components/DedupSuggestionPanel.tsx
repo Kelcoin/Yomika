@@ -18,7 +18,7 @@ export function DedupSuggestionPanel({ matches, dismissedIds = new Set(), onDism
   if (checking) {
     return (
       <section className="dedup-panel" aria-label="查重建议">
-        <p role="status">正在检查重复...</p>
+        <p role="status">正在检查重复…</p>
       </section>
     );
   }

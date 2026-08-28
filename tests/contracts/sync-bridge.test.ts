@@ -100,10 +100,10 @@ describe('native sync repository bridge', () => {
   it('runs the WebDAV sync orchestration command', async () => {
     const adapter = vi.fn(async () => ({ ok: true, value: 2 }));
     setInvokeAdapterForTests(adapter);
-    expect(await new NativeSyncRepository().syncWebdavScope('account-a', 'scope-a', 'device-a'))
+    expect(await new NativeSyncRepository().syncWebdavScope('account-a', 'scope-a'))
       .toEqual({ ok: true, value: 2 });
     expect(adapter).toHaveBeenCalledWith('sync_webdav_scope', {
-      accountId: 'account-a', scopeId: 'scope-a', deviceId: 'device-a',
+      accountId: 'account-a', scopeId: 'scope-a',
     });
   });
 });

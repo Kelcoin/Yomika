@@ -17,14 +17,14 @@ describe('EhWorkspace', () => {
   it('renders account panel and search input', () => {
     render(<EhWorkspace accounts={sampleAccounts} />);
     expect(screen.getByLabelText('E-Hentai 账户')).toBeDefined();
-    expect(screen.getByPlaceholderText('搜索 E-Hentai...')).toBeDefined();
+    expect(screen.getByRole('searchbox', { name: '搜索 E-Hentai' })).toBeDefined();
   });
 
   it('calls onSearch when search form submitted', async () => {
     const onSearch = vi.fn();
     const user = userEvent.setup();
     render(<EhWorkspace accounts={sampleAccounts} onSearch={onSearch} />);
-    const input = screen.getByPlaceholderText('搜索 E-Hentai...');
+    const input = screen.getByRole('searchbox', { name: '搜索 E-Hentai' });
     await user.type(input, 'test query');
     await user.keyboard('{Enter}');
     expect(onSearch).toHaveBeenCalledWith('test query');
@@ -45,11 +45,18 @@ describe('EhWorkspace', () => {
 
   it('shows loading state during search', () => {
     render(<EhWorkspace accounts={sampleAccounts} searching />);
-    expect(screen.getByText('正在搜索...')).toBeDefined();
+    expect(screen.getByText('正在搜索…')).toBeDefined();
   });
 
   it('displays search error when provided', () => {
     render(<EhWorkspace accounts={sampleAccounts} searchError="Rate limit reached" />);
     expect(screen.getByRole('alert')).toHaveTextContent('Rate limit reached');
+  });
+
+  it('blocks search and explains the missing active account', () => {
+    render(<EhWorkspace accounts={[]} onSearch={vi.fn()} />);
+
+    expect(screen.getByRole('searchbox', { name: '搜索 E-Hentai' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('请先添加并激活一个 E-Hentai 账户');
   });
 });

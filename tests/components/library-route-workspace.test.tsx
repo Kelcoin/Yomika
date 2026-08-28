@@ -30,11 +30,31 @@ describe('library route workspace', () => {
     expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
   });
 
-  it('labels sync as externally unavailable instead of completed', async () => {
+  it('resolves history records to archive titles and server context', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
+      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '历史档案标题', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('link', { name: /历史档案标题/ })).toHaveAttribute('href', '/reader/a1');
+    expect(screen.getByText('Home · 第 5 页')).toBeInTheDocument();
+  });
+
+  it('shows an actionable empty state when WebDAV is not configured', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
     render(<MemoryRouter initialEntries={['/sync']}><App /></MemoryRouter>);
 
-    expect(screen.getByRole('heading', { name: '同步尚未配置' })).toBeInTheDocument();
-    expect(screen.getByText(/WebDAV/)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '同步尚未配置' })).toBeInTheDocument();
+    expect(screen.getByText('添加 WebDAV 账户后，本地阅读进度、历史和待看变更会以密文增量同步。')).toBeInTheDocument();
   });
 
   it('loads archives from the first configured server scope', async () => {
@@ -70,6 +90,28 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('数据库读取失败');
     expect(screen.queryByRole('heading', { name: '暂无档案库' })).not.toBeInTheDocument();
+  });
+
+  it('retries an initial archive load failure', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'list_archives') {
+        attempts += 1;
+        return attempts === 1
+          ? { ok: false, error: { code: 'UNKNOWN', message: '数据库读取失败', retryable: true } }
+          : { ok: true, value: [{ serverId: 'scope-a', archiveId: 'recovered', title: 'Recovered', pageCount: 1, updatedAt: '2026-08-28T00:00:00Z' }] };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole('button', { name: '重试读取档案库' }));
+
+    expect(await screen.findByRole('button', { name: /^Recovered\b/ })).toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
 
   it('loads archive metadata when an archive is selected', async () => {

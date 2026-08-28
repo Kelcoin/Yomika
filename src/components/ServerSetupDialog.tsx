@@ -49,12 +49,12 @@ export function ServerSetupDialog({ onSave }: ServerSetupDialogProps) {
           </div>
           <form className="server-form" onSubmit={handleSubmit}>
             <label>名称<input name="name" required autoComplete="off" /></label>
-            <label>服务器地址<input name="baseUrl" required type="url" inputMode="url" placeholder="https://library.example.com" autoComplete="url" /></label>
-            <label>API Key<input name="apiKey" type="password" autoComplete="off" /></label>
+            <label>服务器地址<input name="baseUrl" required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
+            <label>API Key<input name="apiKey" type="password" autoComplete="off" spellCheck={false} /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
-              <button className="primary-action" type="submit" disabled={pending}>{pending ? '保存中' : '保存服务器'}</button>
+              <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}>{pending ? '保存中…' : '保存服务器'}</button>
             </div>
           </form>
         </Dialog.Content>

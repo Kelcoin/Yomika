@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach } from 'vitest';
 
@@ -16,9 +17,16 @@ function renderAt(path = '/') {
 }
 
 describe('application shell', () => {
-  it('exposes full desktop navigation and compact five-item navigation', () => {
+  it('exposes full desktop navigation and compact five-item navigation', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
     renderAt();
 
+    expect(screen.getByRole('link', { name: '跳到主内容' })).toHaveAttribute('href', '#main-content');
+    await screen.findByRole('heading', { name: '书架还是空的' });
     const desktop = screen.getByRole('navigation', { name: '主导航' });
     expect(within(desktop).getByRole('link', { name: '下载' })).toBeInTheDocument();
     expect(within(desktop).getByRole('link', { name: '同步' })).toBeInTheDocument();
@@ -42,6 +50,23 @@ describe('application shell', () => {
     renderAt();
 
     expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
+  });
+
+  it('shows repository-backed recent reading on home', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
+      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderAt();
+
+    expect(await screen.findByRole('link', { name: /最近阅读档案/ })).toHaveAttribute('href', '/reader/a1');
+    expect(screen.getByText('第 5 页')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '书架还是空的' })).not.toBeInTheDocument();
   });
 
   it('announces connection, sync, task, and cache status', () => {
@@ -75,5 +100,22 @@ describe('application shell', () => {
 
     expect(screen.getByRole('link', { name: '搜索' })).toHaveAttribute('href', '/library');
     expect(screen.getByRole('link', { name: '任务中心' })).toHaveAttribute('href', '/downloads');
+  });
+
+  it('collapses desktop navigation to an icon rail', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderAt();
+
+    await screen.findByRole('status', { name: '连接状态' });
+    const collapse = screen.getByRole('button', { name: '折叠侧栏' });
+    expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    await user.click(collapse);
+
+    expect(screen.getByRole('button', { name: '展开侧栏' })).toHaveAttribute('aria-expanded', 'false');
   });
 });

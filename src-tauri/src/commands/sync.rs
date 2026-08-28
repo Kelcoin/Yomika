@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use url::Url;
 
-use crate::{db::Database, domain::result::CommandResult, network::webdav::WebdavClient};
+use crate::{db::Database, domain::result::CommandResult, network::webdav::WebdavClient, settings::get_or_create_device_id};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -567,11 +567,10 @@ fn sync_error(error: impl std::fmt::Display) -> String { error.to_string() }
 pub fn sync_webdav_scope(
     account_id: String,
     scope_id: String,
-    device_id: String,
     database: State<'_, Database>,
 ) -> CommandResult<usize> {
     tauri::async_runtime::block_on(async move {
-    let (account, key, claimed, segment) = {
+    let (account, key, claimed, segment, device_id) = {
         let mut connection = match database.connection.lock() {
             Ok(connection) => connection,
             Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
@@ -583,6 +582,20 @@ pub fn sync_webdav_scope(
         let key = match load_sync_key(&account_id) {
             Ok(key) => key,
             Err(error) => return CommandResult::failure("UNKNOWN", error, false),
+        };
+        let device_id = {
+            let transaction = match connection.transaction() {
+                Ok(transaction) => transaction,
+                Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+            };
+            let device_id = match get_or_create_device_id(&transaction) {
+                Ok(device_id) => device_id,
+                Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+            };
+            if let Err(error) = transaction.commit() {
+                return CommandResult::failure("UNKNOWN", error.to_string(), true);
+            }
+            device_id
         };
         let claimed = match claim_journal_entries(&mut connection, &scope_id, 256) {
             Ok(records) => records,
@@ -600,7 +613,7 @@ pub fn sync_webdav_scope(
                 return CommandResult::failure("INVALID_RESPONSE", error, false);
             }
         };
-        (account, key, claimed, segment)
+        (account, key, claimed, segment, device_id)
     };
 
     let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref) {

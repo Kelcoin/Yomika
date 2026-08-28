@@ -5,6 +5,8 @@ import {
   History,
   Home,
   ListTodo,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Settings,
   Star,
@@ -12,7 +14,7 @@ import {
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { StatusBar } from './StatusBar';
@@ -29,7 +31,7 @@ const navigation = [
 ] as const;
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
-const markUrl = new URL('../../assets/yomika-mark-print.svg', import.meta.url).href;
+const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 
 interface AppShellProps {
   children: ReactNode;
@@ -57,17 +59,31 @@ function Navigation({ compact = false }: { compact?: boolean }) {
 export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
   const reduceMotion = useReducedMotion();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const title = routeTitles[pathname] ?? 'Yomika';
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
+      <a className="skip-link" href="#main-content">跳到主内容</a>
+      <aside className="sidebar" aria-label="应用侧栏">
         <NavLink className="brand" to="/" aria-label="Yomika 首页">
-          <img src={markUrl} alt="" />
+          <img src={markUrl} alt="" width="38" height="38" />
           <span>Yomika</span>
         </NavLink>
         <Navigation />
-        <p className="sidebar-footnote">LOCAL / 01</p>
+        <div className="sidebar-footer">
+          <p className="sidebar-footnote">LOCAL / 01</p>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}
+            onClick={() => setSidebarCollapsed((current) => !current)}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+          </button>
+        </div>
       </aside>
 
       <div className="app-main">
@@ -91,7 +107,9 @@ export function AppShell({ children }: AppShellProps) {
         </header>
 
         <motion.main
+          id="main-content"
           className="workspace"
+          tabIndex={-1}
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: reduceMotion ? 0 : 0.28, ease: [0.32, 0.72, 0, 1] }}

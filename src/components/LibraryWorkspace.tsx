@@ -28,6 +28,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [selectedCategoryId, setSelectedCategoryId] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const [selectedId, setSelectedId] = useState(archives[0]?.archiveId);
 
@@ -63,8 +64,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           <span className="sr-only">搜索档案</span>
           <input
             aria-label="搜索档案"
+            name="archiveQuery"
             type="search"
-            placeholder="搜索档案..."
+            autoComplete="off"
+            placeholder="搜索档案…"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -119,14 +122,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             <section className="archive-detail" aria-labelledby="archive-detail-title">
               <p className="eyebrow">档案详情</p>
               <h2 id="archive-detail-title">{selected.title}</h2>
-              {thumbnail && <img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} />}
+              {thumbnail && <img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" />}
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && !editingMetadata && (
                 <button className="secondary-action" type="button" onClick={() => {
                   setEditingMetadata(true);
                 }}>编辑元数据</button>
               )}
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && editingMetadata && (
-                <form onSubmit={(event) => {
+                <form className="metadata-form" onSubmit={(event) => {
                   event.preventDefault();
                   const controls = event.currentTarget.elements;
                   setSavingMetadata(true);
@@ -139,24 +142,21 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     if (result.ok) setEditingMetadata(false);
                   });
                 }}>
-                  <label>标题<input name="title" aria-label="标题" defaultValue={metadata.title || selected.title} /></label>
-                  <label>标签<input name="tags" aria-label="标签" defaultValue={metadata.tags} /></label>
+                  <label>标题<input name="title" aria-label="标题" autoComplete="off" defaultValue={metadata.title || selected.title} /></label>
+                  <label>标签<input name="tags" aria-label="标签" autoComplete="off" spellCheck={false} defaultValue={metadata.tags} /></label>
                   <label>简介<textarea name="summary" aria-label="简介" defaultValue={metadata.summary ?? ''} /></label>
-                  <button className="primary-action" type="submit" disabled={savingMetadata}>{savingMetadata ? '保存中…' : '保存元数据'}</button>
+                  <button className="primary-action" type="submit" disabled={savingMetadata} aria-busy={savingMetadata}>{savingMetadata ? '保存中…' : '保存元数据'}</button>
                 </form>
               )}
               {categories && onAddCategory && (
                 <div className="category-controls">
                   <label>分类
-                    <select aria-label="分类" defaultValue="">
+                    <select name="category" aria-label="分类" value={selectedCategoryId} onChange={(event) => setSelectedCategoryId(event.target.value)}>
                       <option value="">选择分类</option>
                       {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
                     </select>
                   </label>
-                  <button className="secondary-action" type="button" onClick={() => {
-                    const select = document.querySelector<HTMLSelectElement>('select[aria-label="分类"]');
-                    if (select?.value) onAddCategory(select.value);
-                  }}>加入分类</button>
+                  <button className="secondary-action" type="button" disabled={!selectedCategoryId} onClick={() => onAddCategory(selectedCategoryId)}>加入分类</button>
                 </div>
               )}
               {onDelete && (
@@ -211,9 +211,10 @@ function LibraryHeading({ count, onRefresh, refreshing }: { count: number; onRef
             className="secondary-action"
             type="button"
             disabled={refreshing}
+            aria-busy={refreshing}
             onClick={onRefresh}
           >
-            {refreshing ? '刷新中...' : '刷新档案库'}
+            {refreshing ? '刷新中…' : '刷新档案库'}
           </button>
         )}
       </span>

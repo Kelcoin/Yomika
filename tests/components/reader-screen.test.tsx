@@ -48,6 +48,31 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
   });
 
+  it('pages with the mouse wheel only on paged reading canvas', () => {
+    const { unmount } = renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+
+    fireEvent.wheel(reader, { deltaY: 120 });
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    fireEvent.wheel(reader, { deltaY: -120 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    const horizontalScroller = document.createElement('div');
+    horizontalScroller.className = 'horizontal-scroller';
+    reader.append(horizontalScroller);
+
+    fireEvent.wheel(horizontalScroller, { deltaY: 120 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+
+    unmount();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="webtoon" />
+      </MemoryRouter>,
+    );
+    fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 });
+    expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
+  });
+
   it('renders double pages and webtoon pages as distinct layouts', async () => {
     const user = userEvent.setup();
     render(
@@ -61,6 +86,19 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '连续滚动' }));
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
+  });
+
+  it('exposes the selected reader layout and direction', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    expect(screen.getByRole('button', { name: '单页' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: '从左到右' })).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByRole('button', { name: '双页' }));
+    expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('resolves auto layout to a double spread on wide portrait pages', () => {

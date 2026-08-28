@@ -46,7 +46,7 @@ export class NativeSyncRepository {
     return invokeCommand('claim_sync_journal', { scopeId, limit }, z.array(SyncJournalRecordSchema));
   }
 
-  syncWebdavScope(accountId: string, scopeId: string, deviceId: string): Promise<CommandResult<number>> {
-    return invokeCommand('sync_webdav_scope', { accountId, scopeId, deviceId }, z.number().int().nonnegative());
+  syncWebdavScope(accountId: string, scopeId: string): Promise<CommandResult<number>> {
+    return invokeCommand('sync_webdav_scope', { accountId, scopeId }, z.number().int().nonnegative());
   }
 }

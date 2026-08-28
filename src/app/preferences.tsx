@@ -22,6 +22,14 @@ const repository = new NativeSettingsRepository();
 function applyTheme(theme: PreferenceSnapshot['theme']) {
   if (theme === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = theme;
+  let themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!themeColor) {
+    themeColor = document.createElement('meta');
+    themeColor.name = 'theme-color';
+    document.head.append(themeColor);
+  }
+  const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  themeColor.content = dark ? '#09090b' : '#f3eee4';
 }
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
