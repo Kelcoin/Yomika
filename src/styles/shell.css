@@ -568,6 +568,44 @@
   color: var(--ink-faint);
 }
 
+.watchlist-controls {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.watchlist-sort {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.watchlist-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.watchlist-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+}
+
+.watchlist-row > input {
+  justify-self: center;
+}
+
+.watchlist-row > a {
+  min-width: 0;
+}
+
 .empty-state {
   display: flex;
   align-items: flex-start;
@@ -723,6 +761,12 @@
   border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
   object-fit: cover;
+}
+
+.archive-detail-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin: var(--space-5) 0;
 }
 
 .metadata-form,
@@ -1233,9 +1277,16 @@
   .task-heading,
   .eh-search-form,
   .task-row,
-  .sync-account-row {
+  .sync-account-row,
+  .watchlist-controls {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .watchlist-controls .search-label,
+  .watchlist-controls .secondary-action,
+  .watchlist-sort select {
+    width: 100%;
   }
 
   .library-heading-actions {

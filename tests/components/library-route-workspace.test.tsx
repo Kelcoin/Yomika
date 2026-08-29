@@ -45,6 +45,93 @@ describe('library route workspace', () => {
     expect(screen.getByText('Home · 第 5 页')).toBeInTheDocument();
   });
 
+  it('filters and sorts watchlist records by resolved archive title', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_watchlist') return { ok: true, value: [
+        { scopeId: 'scope-a', archiveId: 'b', addedAt: '2026-08-27T00:00:00Z', updatedAt: '2026-08-27T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
+        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 2, deleted: false },
+      ] };
+      if (command === 'list_archives') return { ok: true, value: [
+        { serverId: 'scope-a', archiveId: 'a', title: 'Alpha archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'b', title: 'Beta archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
+      ] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
+
+    const alpha = await screen.findByRole('link', { name: /Alpha archive/ });
+    const beta = screen.getByRole('link', { name: /Beta archive/ });
+    expect(alpha.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.type(screen.getByRole('searchbox', { name: '筛选待看' }), 'beta');
+    expect(screen.queryByRole('link', { name: /Alpha archive/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Beta archive/ })).toBeInTheDocument();
+
+    await user.clear(screen.getByRole('searchbox', { name: '筛选待看' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: '待看排序' }), 'recent');
+    const recentFirst = screen.getByRole('link', { name: /Alpha archive/ });
+    const recentSecond = screen.getByRole('link', { name: /Beta archive/ });
+    expect(recentFirst.compareDocumentPosition(recentSecond) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('removes selected watchlist records locally and reports pending sync', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_watchlist') return { ok: true, value: [
+        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
+      ] };
+      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a', title: 'Remove archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'set_watchlist') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T01:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-28T01:00:00Z', revision: 2, deleted: true } };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
+
+    await user.click(await screen.findByRole('checkbox', { name: '选择 Remove archive' }));
+    await user.click(screen.getByRole('button', { name: '移除所选' }));
+
+    expect(adapter).toHaveBeenCalledWith('set_watchlist', { scopeId: 'scope-a', archiveId: 'a', added: false });
+    expect(screen.queryByRole('link', { name: /Remove archive/ })).not.toBeInTheDocument();
+    expect(screen.getByText('已保存在本机，等待同步')).toBeInTheDocument();
+  });
+
+  it('keeps failed watchlist removals selected and explains the partial failure', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_watchlist') return { ok: true, value: [
+        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
+        { scopeId: 'scope-a', archiveId: 'b', addedAt: '2026-08-27T00:00:00Z', updatedAt: '2026-08-27T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
+      ] };
+      if (command === 'list_archives') return { ok: true, value: [
+        { serverId: 'scope-a', archiveId: 'a', title: 'Alpha archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'b', title: 'Beta archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' },
+      ] };
+      if (command === 'set_watchlist' && args?.archiveId === 'a') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-29T00:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-29T00:00:00Z', revision: 2, deleted: true } };
+      if (command === 'set_watchlist') return { ok: false, error: { code: 'UNKNOWN', message: '本地写入失败', retryable: true } };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
+
+    await user.click(await screen.findByRole('checkbox', { name: '全选当前结果' }));
+    await user.click(screen.getByRole('button', { name: '移除所选' }));
+
+    expect(screen.queryByRole('link', { name: /Alpha archive/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Beta archive/ })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: '选择 Beta archive' })).toBeChecked();
+    expect(screen.getByRole('alert')).toHaveTextContent('有 1 项未能移除：本地写入失败');
+  });
+
   it('shows an actionable empty state when WebDAV is not configured', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -149,6 +236,23 @@ describe('library route workspace', () => {
     expect(await screen.findByText('second.cbz')).toBeInTheDocument();
     expect(screen.getByText('Remote summary')).toBeInTheDocument();
     expect(adapter).toHaveBeenCalledWith('load_archive_metadata', { serverId: 'scope-a', archiveId: 'a2' });
+  });
+
+  it('loads the first archive detail without requiring a redundant row click', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'first', title: 'First archive', pageCount: 3, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'first', title: 'First archive', filename: 'first.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 3, lastReadTime: 0, size: 3 } };
+      if (command === 'load_archive_thumbnail') return { ok: true, value: [255, 216, 255] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    expect(await screen.findByText('first.cbz')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '阅读 First archive' })).toHaveAttribute('href', '/reader/first');
+    expect(adapter).toHaveBeenCalledWith('load_archive_metadata', { serverId: 'scope-a', archiveId: 'first' });
   });
 
   it('requires confirmation before deleting the selected archive', async () => {

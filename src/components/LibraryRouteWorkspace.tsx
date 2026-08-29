@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -22,6 +22,36 @@ export function LibraryRouteWorkspace() {
   const [thumbnail, setThumbnailUrl] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string>();
+  const detailRequest = useRef(0);
+
+  const loadArchiveDetails = useCallback((currentServerId: string, archive: ArchiveRecord) => {
+    const request = ++detailRequest.current;
+    setSelectedArchiveId(archive.archiveId);
+    setMetadata(undefined);
+    setMetadataLoading(true);
+
+    const cached = getThumbnail(currentServerId, archive.archiveId);
+    if (cached) {
+      setThumbnailUrl(cached);
+    } else {
+      setThumbnailUrl(undefined);
+      void repository.loadArchiveThumbnail(currentServerId, archive.archiveId).then((result) => {
+        if (request !== detailRequest.current || !result.ok) return;
+        const values = new Uint8Array(result.value);
+        let binary = '';
+        for (const value of values) binary += String.fromCharCode(value);
+        const url = `data:application/octet-stream;base64,${btoa(binary)}`;
+        setThumbnail(currentServerId, archive.archiveId, url);
+        setThumbnailUrl(url);
+      });
+    }
+
+    void repository.loadArchiveMetadata(currentServerId, archive.archiveId).then((result) => {
+      if (request !== detailRequest.current) return;
+      if (result.ok) setMetadata(result.value);
+      setMetadataLoading(false);
+    });
+  }, []);
 
   const loadLibrary = useCallback(async () => {
     setLoading(true);
@@ -50,6 +80,13 @@ export function LibraryRouteWorkspace() {
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+
+  useEffect(() => {
+    if (!serverId || archives.length === 0) return;
+    if (selectedArchiveId && archives.some((archive) => archive.archiveId === selectedArchiveId)) return;
+    const firstArchive = archives[0];
+    if (firstArchive) loadArchiveDetails(serverId, firstArchive);
+  }, [archives, loadArchiveDetails, selectedArchiveId, serverId]);
 
   if (loading) {
     return (
@@ -123,27 +160,8 @@ export function LibraryRouteWorkspace() {
         return result;
       }}
       onSelect={(archive) => {
-        setSelectedArchiveId(archive.archiveId);
         if (!serverId) return;
-        const cached = getThumbnail(serverId, archive.archiveId);
-        if (cached) setThumbnailUrl(cached);
-        else {
-          setThumbnailUrl(undefined);
-          void repository.loadArchiveThumbnail(serverId, archive.archiveId).then((result) => {
-            if (!result.ok) return;
-            const values = new Uint8Array(result.value);
-            let binary = '';
-            for (const value of values) binary += String.fromCharCode(value);
-            const url = `data:application/octet-stream;base64,${btoa(binary)}`;
-            setThumbnail(serverId, archive.archiveId, url);
-            setThumbnailUrl(url);
-          });
-        }
-        setMetadataLoading(true);
-        void repository.loadArchiveMetadata(serverId, archive.archiveId).then((result) => {
-          if (result.ok) setMetadata(result.value);
-          setMetadataLoading(false);
-        });
+        loadArchiveDetails(serverId, archive);
         }}
       />
       {categoryMessage && <p role="status">{categoryMessage}</p>}

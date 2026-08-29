@@ -1,5 +1,5 @@
 import { ArrowRight, FolderHeart, Server } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, Route, Routes, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
@@ -121,9 +121,16 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [archives, setArchives] = useState<ArchiveRecord[]>([]);
   const [serverName, setServerName] = useState('LANraragi');
+  const [scopeId, setScopeId] = useState<string>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [hasServer, setHasServer] = useState(true);
+  const [watchlistQuery, setWatchlistQuery] = useState('');
+  const [watchlistSort, setWatchlistSort] = useState<'title' | 'recent'>('title');
+  const [selectedWatchlist, setSelectedWatchlist] = useState<Set<string>>(() => new Set());
+  const [watchlistPending, setWatchlistPending] = useState(false);
+  const [watchlistMessage, setWatchlistMessage] = useState<string>();
+  const [watchlistError, setWatchlistError] = useState<string>();
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -133,6 +140,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
       const server = servers.value[0];
       if (!server) { setHasServer(false); setLoading(false); return; }
       setServerName(server.name);
+      setScopeId(server.scopeId);
       const [result, archiveResult] = await Promise.all([
         name === 'history' ? repository.listHistory(server.scopeId) : repository.listWatchlist(server.scopeId),
         repository.listArchives(server.id),
@@ -148,8 +156,41 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
     return () => { active = false; };
   }, [name]);
   const [title, description] = workspaces[name];
-  const records = name === 'history' ? history : watchlist;
   const archiveTitles = new Map(archives.map((archive) => [archive.archiveId, archive.title]));
+  const activeWatchlist = watchlist.filter((item) => !item.deleted);
+  const visibleWatchlist = useMemo(() => {
+    if (name !== 'watchlist') return [];
+    const query = watchlistQuery.trim().toLocaleLowerCase();
+    return activeWatchlist
+      .filter((item) => !query || (archiveTitles.get(item.archiveId) ?? item.archiveId).toLocaleLowerCase().includes(query))
+      .sort((left, right) => watchlistSort === 'recent'
+        ? right.addedAt.localeCompare(left.addedAt)
+        : (archiveTitles.get(left.archiveId) ?? left.archiveId).localeCompare(archiveTitles.get(right.archiveId) ?? right.archiveId));
+  }, [activeWatchlist, archiveTitles, name, watchlistQuery, watchlistSort]);
+  const records = name === 'history' ? history : activeWatchlist;
+
+  const removeSelectedWatchlist = async () => {
+    if (!scopeId || selectedWatchlist.size === 0) return;
+    setWatchlistPending(true);
+    setWatchlistError(undefined);
+    setWatchlistMessage(undefined);
+    const results = await Promise.all([...selectedWatchlist].map(async (archiveId) => ({
+      archiveId,
+      result: await repository.setWatchlist(scopeId, archiveId, false),
+    })));
+    const removed = new Set(results.filter(({ result }) => result.ok).map(({ archiveId }) => archiveId));
+    const failures = results.filter(({ result }) => !result.ok);
+    if (removed.size > 0) {
+      setWatchlist((current) => current.filter((item) => !removed.has(item.archiveId)));
+      setWatchlistMessage('已保存在本机，等待同步');
+    }
+    setSelectedWatchlist(new Set(failures.map(({ archiveId }) => archiveId)));
+    if (failures.length > 0) {
+      const reason = failures[0]?.result;
+      setWatchlistError(`有 ${failures.length} 项未能移除：${reason && !reason.ok ? reason.error.message : '未知错误'}`);
+    }
+    setWatchlistPending(false);
+  };
   return (
     <div>
       <header className="workspace-heading"><h1>{title}</h1></header>
@@ -161,8 +202,49 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
           <Link className="primary-action empty-state-action" to="/settings">添加服务器<ArrowRight aria-hidden="true" /></Link>
         </>
       )}
+      {!loading && !error && hasServer && name === 'watchlist' && activeWatchlist.length > 0 && (
+        <div className="watchlist-controls">
+          <label className="search-label">
+            <span className="sr-only">筛选待看</span>
+            <input
+              aria-label="筛选待看"
+              type="search"
+              autoComplete="off"
+              placeholder="筛选待看…"
+              value={watchlistQuery}
+              onChange={(event) => setWatchlistQuery(event.target.value)}
+            />
+          </label>
+          <label className="watchlist-sort">排序
+            <select aria-label="待看排序" value={watchlistSort} onChange={(event) => setWatchlistSort(event.target.value as 'title' | 'recent')}>
+              <option value="title">标题</option>
+              <option value="recent">最近加入</option>
+            </select>
+          </label>
+          <label className="watchlist-select-all">
+            <input
+              type="checkbox"
+              checked={visibleWatchlist.length > 0 && visibleWatchlist.every((item) => selectedWatchlist.has(item.archiveId))}
+              onChange={(event) => setSelectedWatchlist((current) => {
+                const next = new Set(current);
+                for (const item of visibleWatchlist) {
+                  if (event.target.checked) next.add(item.archiveId);
+                  else next.delete(item.archiveId);
+                }
+                return next;
+              })}
+            />
+            全选当前结果
+          </label>
+          <button className="secondary-action" type="button" disabled={selectedWatchlist.size === 0 || watchlistPending} aria-busy={watchlistPending} onClick={() => void removeSelectedWatchlist()}>
+            {watchlistPending ? '移除中…' : '移除所选'}
+          </button>
+        </div>
+      )}
+      {watchlistError && <p className="form-error" role="alert">{watchlistError}</p>}
+      {watchlistMessage && <p className="server-list-message" role="status">{watchlistMessage}</p>}
       {!loading && !error && hasServer && (records.length === 0 ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} /> : (
-        <ul className="state-list">
+        <ul className="state-list" aria-label={title}>
           {name === 'history'
             ? history.map((item) => (
               <li key={item.archiveId}>
@@ -173,17 +255,34 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
                 </Link>
               </li>
             ))
-            : watchlist.map((item) => (
-              <li key={item.archiveId}>
+            : visibleWatchlist.map((item) => {
+              const itemTitle = archiveTitles.get(item.archiveId) ?? item.archiveId;
+              return (
+              <li className="watchlist-row" key={item.archiveId}>
+                <input
+                  type="checkbox"
+                  aria-label={`选择 ${itemTitle}`}
+                  checked={selectedWatchlist.has(item.archiveId)}
+                  onChange={(event) => setSelectedWatchlist((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.add(item.archiveId);
+                    else next.delete(item.archiveId);
+                    return next;
+                  })}
+                />
                 <Link to={`/reader/${item.archiveId}`}>
-                  <strong>{archiveTitles.get(item.archiveId) ?? item.archiveId}</strong>
+                  <strong>{itemTitle}</strong>
                   <span>{serverName} · 待看</span>
                   <ArrowRight aria-hidden="true" />
                 </Link>
               </li>
-            ))}
+              );
+            })}
         </ul>
       ))}
+      {!loading && !error && hasServer && name === 'watchlist' && activeWatchlist.length > 0 && visibleWatchlist.length === 0 && (
+        <p className="server-list-message" role="status">没有匹配的待看档案。</p>
+      )}
     </div>
   );
 }

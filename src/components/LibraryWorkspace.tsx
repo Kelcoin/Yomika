@@ -1,7 +1,8 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronRight, FolderHeart, ArrowDownAZ, ArrowUpAZ } from 'lucide-react';
+import { ChevronRight, FolderHeart, ArrowDownAZ, ArrowUpAZ, BookOpen } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import type { ArchiveRecord } from '../domain/library';
@@ -123,6 +124,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               <p className="eyebrow">档案详情</p>
               <h2 id="archive-detail-title">{selected.title}</h2>
               {thumbnail && <img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" />}
+              <div className="archive-detail-actions">
+                <Link className="primary-action" to={`/reader/${selected.archiveId}`} aria-label={`阅读 ${selected.title}`}>
+                  <BookOpen aria-hidden="true" />
+                  阅读
+                </Link>
+              </div>
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && !editingMetadata && (
                 <button className="secondary-action" type="button" onClick={() => {
                   setEditingMetadata(true);
