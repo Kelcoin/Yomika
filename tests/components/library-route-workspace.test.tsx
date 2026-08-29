@@ -45,6 +45,28 @@ describe('library route workspace', () => {
     expect(screen.getByText('Home · 第 5 页')).toBeInTheDocument();
   });
 
+  it('orders history by most recent visit regardless of native return order', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [
+        { scopeId: 'scope-a', archiveId: 'older', pageIndex: 1, visitedAt: '2026-08-27T00:00:00Z', deviceId: 'device-a', revision: 1 },
+        { scopeId: 'scope-a', archiveId: 'newer', pageIndex: 2, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 2 },
+      ] };
+      if (command === 'list_archives') return { ok: true, value: [
+        { serverId: 'scope-a', archiveId: 'older', title: 'Older visit', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'newer', title: 'Newer visit', pageCount: 3, updatedAt: '2026-08-28T00:00:00Z' },
+      ] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
+
+    const newer = await screen.findByRole('link', { name: /Newer visit/ });
+    const older = screen.getByRole('link', { name: /Older visit/ });
+    expect(newer.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('filters and sorts watchlist records by resolved archive title', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {

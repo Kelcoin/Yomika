@@ -157,6 +157,10 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   }, [name]);
   const [title, description] = workspaces[name];
   const archiveTitles = new Map(archives.map((archive) => [archive.archiveId, archive.title]));
+  const sortedHistory = useMemo(
+    () => [...history].sort((left, right) => right.visitedAt.localeCompare(left.visitedAt)),
+    [history],
+  );
   const activeWatchlist = watchlist.filter((item) => !item.deleted);
   const visibleWatchlist = useMemo(() => {
     if (name !== 'watchlist') return [];
@@ -167,7 +171,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
         ? right.addedAt.localeCompare(left.addedAt)
         : (archiveTitles.get(left.archiveId) ?? left.archiveId).localeCompare(archiveTitles.get(right.archiveId) ?? right.archiveId));
   }, [activeWatchlist, archiveTitles, name, watchlistQuery, watchlistSort]);
-  const records = name === 'history' ? history : activeWatchlist;
+  const records = name === 'history' ? sortedHistory : activeWatchlist;
 
   const removeSelectedWatchlist = async () => {
     if (!scopeId || selectedWatchlist.size === 0) return;
@@ -246,7 +250,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
       {!loading && !error && hasServer && (records.length === 0 ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} /> : (
         <ul className="state-list" aria-label={title}>
           {name === 'history'
-            ? history.map((item) => (
+            ? sortedHistory.map((item) => (
               <li key={item.archiveId}>
                 <Link to={`/reader/${item.archiveId}`}>
                   <strong>{archiveTitles.get(item.archiveId) ?? item.archiveId}</strong>
