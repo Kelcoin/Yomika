@@ -29,6 +29,20 @@ function texturedSignature(patch = false) {
   return { width: 8, height: 8, ratio: 1, pixels };
 }
 
+function exactFilenameWatermarkSignature(patch = false) {
+  const pixels = new Uint8ClampedArray(16 * 16 * 4);
+  for (let y = 0; y < 16; y += 1) for (let x = 0; x < 16; x += 1) {
+    const offset = (y * 16 + x) * 4;
+    let value = (x * 19 + y * 11) % 256;
+    if (patch && x >= 10 && y >= 1) value = 255 - value;
+    pixels[offset] = value;
+    pixels[offset + 1] = value;
+    pixels[offset + 2] = value;
+    pixels[offset + 3] = 255;
+  }
+  return { width: 16, height: 16, ratio: 1, filename: '[Circle] Longer Work [DL版]', pixels };
+}
+
 describe('deduplication domain', () => {
   it('creates a stable key only for a non-empty, non-self pair', () => {
     expect(toPairKey('B', 'A')).toBe('A|B');
@@ -78,6 +92,10 @@ describe('deduplication domain', () => {
     const groups = [['A', 'B'], ['A', 'C'], ['B', 'C']];
     expect(normalizeDuplicateSelection(groups, ['A', 'B', 'C'])).toEqual(['A', 'B']);
     expect([...getDuplicateSelectionDisabledIds(groups, new Set(['A', 'B']))]).toEqual(['C']);
+  });
+
+  it('uses id when arcid is present but empty', () => {
+    expect(normalizeDuplicateSelection([[{ arcid: '', id: 'B' }, { arcid: 'C' }]], ['B'])).toEqual(['B']);
   });
 
   it('chooses deletion candidates using the Readoshi quality ordering', () => {
@@ -143,5 +161,15 @@ describe('deduplication domain', () => {
     const light = { ...dark, filename: '[Circle] Longer Work [中国翻訳]', pixels: new Uint8ClampedArray(8 * 8 * 4).fill(255) };
     findDuplicatePairs(new Map([['A', dark], ['B', light]]), new Set(), { onPair: (pair) => sources.push(pair.source) });
     expect(sources).toEqual(['filename']);
+  });
+
+  it('reports image provenance when an exact filename pair matches through a large aligned watermark', () => {
+    const sources: string[] = [];
+    const original = exactFilenameWatermarkSignature();
+    const watermarked = { ...exactFilenameWatermarkSignature(true), filename: '[Circle] Longer Work [中国翻訳]' };
+    expect(findDuplicatePairs(new Map([['A', original], ['B', watermarked]]), new Set(), {
+      onPair: (pair) => sources.push(pair.source),
+    })).toEqual([{ left: 'A', right: 'B' }]);
+    expect(sources).toEqual(['image']);
   });
 });

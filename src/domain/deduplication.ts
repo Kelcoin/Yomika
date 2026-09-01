@@ -97,7 +97,7 @@ function archiveId(item: unknown): string {
   if (typeof item === 'string' || typeof item === 'number') return String(item).trim();
   if (!item || typeof item !== 'object') return '';
   const archive = item as DedupeArchive;
-  return String(archive.arcid ?? archive.id ?? '').trim();
+  return String(archive.arcid || archive.id || '').trim();
 }
 
 function duplicateGroupIds(group: readonly unknown[]): string[] {
@@ -358,8 +358,12 @@ export function findDuplicatePairs(signatures: ReadonlyMap<string, DedupeSignatu
     if (!key || ignoredPairKeys.has(key)) continue;
     const evidence = filenameEvidence(left, right);
     if (signatureTexture(left).isUniform || signatureTexture(right).isUniform) continue;
-    if (!evidence.similar && (shapeMismatch(left, right, 1.15, 2) || Math.abs(signatureTexture(left).mean - signatureTexture(right).mean) > 96 || lowInformationPair(signatureTexture(left), signatureTexture(right)))) continue;
-    const imageOptions = evidence.similar ? { ...options, allowLowInformationMatch: true, percentDifference: Math.max(options.percentDifference ?? 0.2, 0.28) } : options;
+    if (!evidence.exact && !evidence.similar && (shapeMismatch(left, right, 1.15, 2) || Math.abs(signatureTexture(left).mean - signatureTexture(right).mean) > 96 || lowInformationPair(signatureTexture(left), signatureTexture(right)))) continue;
+    const imageOptions = evidence.exact && nameCounts.get(evidence.leftName)! <= 2
+      ? { ...options, allowLowInformationMatch: true, outlierPercent: Math.max(options.outlierPercent ?? 0.15, 0.35) }
+      : evidence.similar
+        ? { ...options, allowLowInformationMatch: true, percentDifference: Math.max(options.percentDifference ?? 0.2, 0.28) }
+        : options;
     if (areSignaturesDuplicate(left, right, imageOptions)) {
       if (exactPairKeys.has(key)) imageMatchedPairKeys.add(key);
       else { pairs.push({ left: leftId, right: rightId }); options.onPair?.({ left: leftId, right: rightId, source: 'image' }); }
