@@ -48,6 +48,18 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('accepts archive metadata without a LANraragi summary', async () => {
+    const value = {
+      archiveId: 'a1', title: 'Archive', filename: 'archive.cbz', tags: 'artist:test',
+      summary: null, extension: 'cbz', progress: 0, pageCount: 10, lastReadTime: 0, size: 123,
+    };
+    setInvokeAdapterForTests(async () => ({ ok: true, value }));
+
+    const result = await new NativeLibraryRepository().loadArchiveMetadata('scope-a', 'a1');
+
+    expect(result).toEqual({ ok: true, value });
+  });
+
   it('deletes an archive through a scoped native command', async () => {
     const adapter = vi.fn(async () => ({ ok: true, value: null }));
     setInvokeAdapterForTests(adapter);

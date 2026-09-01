@@ -35,7 +35,7 @@ export const ArchiveMetadataSchema = z.object({
   title: z.string(),
   filename: z.string(),
   tags: z.string(),
-  summary: z.string().optional(),
+  summary: z.string().nullable().optional(),
   extension: z.string(),
   progress: z.number().int(),
   pageCount: z.number().int().nonnegative(),

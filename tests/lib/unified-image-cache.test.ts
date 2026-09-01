@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import tauriConfig from '../../src-tauri/tauri.conf.json';
 import {
   UnifiedImageCache,
   type ImageCacheRepository,
@@ -30,6 +31,29 @@ function repository(bytes = new Uint8Array([1, 2, 3])): ImageCacheRepository & {
 afterEach(() => vi.restoreAllMocks());
 
 describe('UnifiedImageCache', () => {
+  it('produces image URLs allowed by the desktop content security policy', async () => {
+    const repo = repository();
+    const cache = new UnifiedImageCache(repo, {
+      createObjectURL: () => 'blob:https://tauri.localhost/image-1',
+      revokeObjectURL: vi.fn(),
+      maxBytes: 1024,
+    });
+
+    const handle = await cache.load({
+      scopeId: 'scope-a',
+      archiveId: 'archive-a',
+      rendition: 'cover',
+      pageIndex: 0,
+    });
+    const imageSources = tauriConfig.app.security.csp
+      .split(';')
+      .map((directive) => directive.trim().split(/\s+/))
+      .find(([name]) => name === 'img-src')
+      ?.slice(1) ?? [];
+
+    expect(imageSources).toContain(`${new URL(handle.url).protocol}`);
+  });
+
   it('coalesces concurrent reads and releases the blob only after the final consumer', async () => {
     const urls = blobUrlFactory();
     const repo = repository();
