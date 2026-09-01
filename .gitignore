@@ -1,6 +1,5 @@
 # Local architecture and migration documents
 /docs/*
-!/docs/19-windows-local-build.md
 !/docs/20-cross-platform-ui-logic-standards.md
 
 # Planning state
@@ -9,6 +8,11 @@
 # Local generated previews and skill work
 /.skill-archive/
 /.superpowers/
+/docs/superpowers/
+
+# Local build helpers
+/build_exe.bat
+/tools/windows/
 
 # Secrets and local environment
 .env
