@@ -41,6 +41,20 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: '按标题降序' })).toBeInTheDocument();
   });
 
+  it('surfaces archive classification and reading metadata as compact chips', () => {
+    renderWorkspace({ archives: [{ ...archives[0]!, category: 'Manga', language: '中文' }] });
+
+    expect(screen.getAllByText('Manga').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
+    expect(screen.getAllByText('中文').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
+    expect(screen.getAllByText('1 页').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
+  });
+
+  it('uses an icon on the archive refresh tool', () => {
+    renderWorkspace({ archives, onRefresh: vi.fn() });
+
+    expect(screen.getByRole('button', { name: '刷新档案库' }).querySelector('svg')).toBeTruthy();
+  });
+
   it('sorts archives by title ascending and descending', async () => {
     const user = userEvent.setup();
     renderWorkspace({ archives: archives.slice(0, 5) });
@@ -54,15 +68,9 @@ describe('library workspace', () => {
     expect(screen.getByText('5 项')).toBeInTheDocument();
   });
 
-  it('submits the selected category through local component state', async () => {
-    const user = userEvent.setup();
-    const onAddCategory = vi.fn();
-    renderWorkspace({ archives: archives.slice(0, 1), categories: [{ id: 'favorite', name: '收藏', pinned: false, search: null, archives: [] }], onAddCategory });
-
-    await user.selectOptions(screen.getByRole('combobox', { name: '分类' }), 'favorite');
-    await user.click(screen.getByRole('button', { name: '加入分类' }));
-
-    expect(onAddCategory).toHaveBeenCalledWith('favorite');
+  it('does not render the obsolete category assignment control', () => {
+    renderWorkspace({ archives: archives.slice(0, 1), categories: [{ id: 'favorite', name: '收藏', pinned: false, search: null, archives: [] }] });
+    expect(screen.queryByRole('button', { name: '加入分类' })).not.toBeInTheDocument();
   });
 
   it('opens the selected archive in the reader from the primary detail action', () => {

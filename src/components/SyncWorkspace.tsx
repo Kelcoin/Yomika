@@ -10,7 +10,7 @@ import { EmptyState } from './EmptyState';
 const libraryRepository = new NativeLibraryRepository();
 const syncRepository = new NativeSyncRepository();
 
-export function SyncWorkspace() {
+export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {}) {
   const [accounts, setAccounts] = useState<WebdavAccount[]>([]);
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -85,10 +85,7 @@ export function SyncWorkspace() {
 
   return (
     <div className="sync-workspace">
-      <header className="workspace-heading">
-        <p className="workspace-kicker">加密增量传输</p>
-        <h1>同步</h1>
-      </header>
+      {!embedded && <header className="workspace-heading"><h1>同步</h1></header>}
       {loading && <p className="server-list-message" role="status">正在读取同步账户…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {message && <p className="form-success" role="status">{message}</p>}
@@ -115,7 +112,7 @@ export function SyncWorkspace() {
       <section className="sync-setup" aria-labelledby="sync-setup-title">
         <div>
           <KeyRound aria-hidden="true" />
-          <div><p className="eyebrow">本机凭据</p><h2 id="sync-setup-title">添加或更新 WebDAV</h2></div>
+          <div><h2 id="sync-setup-title">添加或更新 WebDAV</h2></div>
         </div>
         <form className="sync-form" onSubmit={saveAccount}>
           <label>账户 ID<input name="accountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" spellCheck={false} /></label>

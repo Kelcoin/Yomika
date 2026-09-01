@@ -199,6 +199,31 @@ describe('native library repository bridge', () => {
     expect(result).toMatchObject({ ok: true, value: [{ archiveId: 'a1' }] });
   });
 
+  it('loads archives in bounded pages for large libraries', async () => {
+    const value = { items: [], total: 14447, hasMore: true };
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().listArchivesPage('s1', 100, 100);
+
+    expect(adapter).toHaveBeenCalledWith('list_archives_page', {
+      input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, offset: 100, limit: 100 },
+    });
+    expect(result).toEqual({ ok: true, value });
+  });
+
+  it('accepts nullable archive fields returned from sqlite native rows', async () => {
+    setInvokeAdapterForTests(async () => ({ ok: true, value: [{
+      serverId: 's1', archiveId: 'a1', title: 'Archive', pageCount: 8,
+      summary: null, category: null, language: null, coverPage: null,
+      isDeleted: false, updatedAt: '2026-08-26 00:00:00',
+    }] }));
+
+    const result = await new NativeLibraryRepository().listArchives('s1');
+
+    expect(result).toMatchObject({ ok: true, value: [{ archiveId: 'a1' }] });
+  });
+
   it('rejects malformed archive rows from native code', async () => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: [{ archiveId: 'a1' }] }));
     expect(await new NativeLibraryRepository().listArchives('s1')).toMatchObject({ ok: false, error: { code: 'INVALID_RESPONSE' } });

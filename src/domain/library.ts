@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const ServerRecordSchema = z.object({
   id: z.string().min(1),
-  name: z.string().min(1),
+  name: z.string(),
   baseUrl: z.string().url(),
   scopeId: z.string().min(1),
 });
@@ -14,15 +14,24 @@ export const ArchiveRecordSchema = z.object({
   archiveId: z.string().min(1),
   title: z.string(),
   pageCount: z.number().int().nonnegative(),
-  summary: z.string().optional(),
-  category: z.string().optional(),
-  language: z.string().optional(),
-  coverPage: z.number().int().nonnegative().optional(),
+  summary: z.string().nullable().optional(),
+  category: z.string().nullable().optional(),
+  language: z.string().nullable().optional(),
+  coverPage: z.number().int().nonnegative().nullable().optional(),
   isDeleted: z.boolean().optional(),
   updatedAt: z.string().min(1),
+  addedAt: z.number().int().nonnegative().nullable().optional(),
+  tags: z.array(z.string()).optional(),
 });
 
 export type ArchiveRecord = z.infer<typeof ArchiveRecordSchema>;
+
+export const ArchivePageSchema = z.object({
+  items: z.array(ArchiveRecordSchema),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+});
+export type ArchivePage = z.infer<typeof ArchivePageSchema>;
 
 export const ReadingProgressSchema = z.object({
   scopeId: z.string().min(1),

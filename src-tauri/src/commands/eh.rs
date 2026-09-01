@@ -34,16 +34,51 @@ fn read_account_cookie(connection: &Connection, store: &dyn EhCookieReader, acco
 
 fn classify_eh_status(status: u16, body: &str) -> Option<(&'static str, String, bool)> {
     let lower = body.to_lowercase();
+    // EH and ExHentai can return a non-gallery page with HTTP 200 or 404.
+    // Inspect the body first so copyright removals are not reduced to 404.
+    if lower.contains("copyright claim")
+        || lower.contains("copyright infringement")
+        || lower.contains("copyright complaint")
+        || lower.contains("copyright holder")
+        || lower.contains("dmca")
+        || lower.contains("removed due to copyright")
+        || lower.contains("unavailable due to a copyright")
+    {
+        return Some(("EH_GALLERY_COPYRIGHT_REMOVED", "E-Hentai gallery was removed due to a copyright claim".into(), false));
+    }
+    if lower.contains("cf-browser-verification")
+        || lower.contains("_cf_chl_opt")
+        || lower.contains("cf-challenge")
+        || lower.contains("just a moment")
+        || lower.contains("checking your browser")
+    {
+        return Some(("EH_CLOUDFLARE", "E-Hentai Cloudflare challenge blocked request".into(), false));
+    }
     if status == 429 || lower.contains("rate limit") || lower.contains("too many requests") {
         return Some(("EH_RATE_LIMIT", "E-Hentai rate limit reached".into(), true));
     }
     if status == 403 && (lower.contains("cloudflare") || lower.contains("cf-chl") || lower.contains("captcha")) {
         return Some(("EH_CLOUDFLARE", "E-Hentai Cloudflare challenge blocked request".into(), false));
     }
-    if status == 401 || lower.contains("not logged in") || lower.contains("login required") {
+    if status == 401
+        || lower.contains("<title>login</title>")
+        || lower.contains("please login")
+        || lower.contains("you must be logged in")
+        || lower.contains("not logged in")
+        || lower.contains("login required")
+        || lower.contains("your ip address has been temporarily banned")
+    {
         return Some(("EH_REAUTH_REQUIRED", "E-Hentai login is required".into(), false));
     }
-    if status == 404 || lower.contains("gallery does not exist") || lower.contains("gallery has been removed") {
+    if lower.contains("you are seeing this page because")
+        || (lower.contains("content warning") && lower.contains("<h1"))
+    {
+        return Some(("EH_CONTENT_WARNING", "E-Hentai content warning requires confirmation or login".into(), false));
+    }
+    if status == 403 {
+        return Some(("EH_ACCESS_BLOCKED", "E-Hentai access was blocked".into(), false));
+    }
+    if status == 404 || lower.contains("gallery not found") || lower.contains("gallery does not exist") || lower.contains("gallery has been removed") {
         return Some(("EH_GALLERY_DELETED", "E-Hentai gallery was deleted or not found".into(), false));
     }
     if status >= 500 || status < 200 {
@@ -209,6 +244,9 @@ async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<Eh
     };
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
+    }
+    if body.trim().is_empty() {
+        return CommandResult::failure("EH_EMPTY_RESPONSE", "E-Hentai returned an empty response", true);
     }
     let galleries = parse_search_results(&body);
     CommandResult::success(EhSearchResponse { galleries })
@@ -658,10 +696,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_prioritizes_copyright_removal_over_404() {
+        let result = classify_eh_status(404, "This gallery is unavailable due to a copyright claim by FAKKU.");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, "EH_GALLERY_COPYRIGHT_REMOVED");
+    }
+
+    #[test]
+    fn classify_recognizes_worker_non_gallery_pages() {
+        assert_eq!(classify_eh_status(200, "<title>Just a moment...</title>").unwrap().0, "EH_CLOUDFLARE");
+        assert_eq!(classify_eh_status(200, "<title>Login</title><p>Please login</p>").unwrap().0, "EH_REAUTH_REQUIRED");
+        assert_eq!(classify_eh_status(200, "<h1>Content Warning</h1><p>You are seeing this page because</p>").unwrap().0, "EH_CONTENT_WARNING");
+        assert_eq!(classify_eh_status(403, "Access Denied").unwrap().0, "EH_ACCESS_BLOCKED");
+        assert_eq!(classify_eh_status(200, "<title>Gallery Not Found</title>").unwrap().0, "EH_GALLERY_DELETED");
+    }
+
+    #[test]
     fn classify_passes_200_ok() {
         let result = classify_eh_status(200, "You are logged in");
         assert!(result.is_none());
     }
+
 
     // ── parse_search_results tests ────────────────────────────────────────
 

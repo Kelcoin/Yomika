@@ -6,6 +6,20 @@ import { ServerSetupDialog } from '../../src/components/ServerSetupDialog';
 import { ok } from '../../src/domain/result';
 
 describe('server setup dialog', () => {
+  it('does not submit when the API key is empty', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async ({ identity }: Parameters<NonNullable<React.ComponentProps<typeof ServerSetupDialog>['onSave']>>[0]) => ok(identity));
+    render(<ServerSetupDialog onSave={onSave} />);
+
+    await user.click(screen.getByRole('button', { name: '添加服务器' }));
+    await user.type(screen.getByLabelText('名称'), 'Home');
+    await user.type(screen.getByLabelText('服务器地址'), 'https://example.com');
+    await user.click(screen.getByRole('button', { name: '保存服务器' }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('API Key')).toBeInvalid();
+  });
+
   it('validates and submits a normalized server without exposing the key', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async ({ identity }: Parameters<NonNullable<React.ComponentProps<typeof ServerSetupDialog>['onSave']>>[0]) => ok(identity));
@@ -31,6 +45,7 @@ describe('server setup dialog', () => {
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     await user.type(screen.getByLabelText('名称'), 'Home');
     await user.type(screen.getByLabelText('服务器地址'), 'https://example.com');
+    await user.type(screen.getByLabelText('API Key'), 'secret-value');
     await user.click(screen.getByRole('button', { name: '保存服务器' }));
 
     expect(screen.getByRole('alert')).toHaveTextContent('安全存储不可用');
@@ -45,6 +60,7 @@ describe('server setup dialog', () => {
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     await user.type(screen.getByLabelText('名称'), 'Home');
     await user.type(screen.getByLabelText('服务器地址'), 'https://example.com');
+    await user.type(screen.getByLabelText('API Key'), 'secret-value');
     await user.click(screen.getByRole('button', { name: '保存服务器' }));
 
     const pending = screen.getByRole('button', { name: '保存中…' });

@@ -8,6 +8,7 @@ import {
   createZoomState,
   filterArchivesByQuery,
   getPrefetchPages,
+  getVisiblePageIndexes,
   resolveReaderLayout,
   resetZoom,
   sortArchivesByTitle,
@@ -46,10 +47,17 @@ describe('reader domain', () => {
     expect(getPrefetchPages(3, 5, 2)).toEqual([1, 2, 4]);
   });
 
-  it('advances by two pages in double layout and exposes visible pages', () => {
-    const state = createReaderState({ archiveId: 'a1', pageCount: 5, layout: 'double' });
-    expect(advanceReader(state, 'next').pageIndex).toBe(2);
-    expect(advanceReader({ ...state, pageIndex: 4 }, 'next').pageIndex).toBe(4);
+  it('keeps the cover standalone and pairs all subsequent pages', () => {
+    const state = createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'double' });
+    expect(getVisiblePageIndexes(state)).toEqual([0]);
+    expect(advanceReader(state, 'next').pageIndex).toBe(1);
+    expect(getVisiblePageIndexes({ ...state, pageIndex: 1 })).toEqual([1, 2]);
+    expect(advanceReader({ ...state, pageIndex: 1 }, 'next').pageIndex).toBe(3);
+    expect(getVisiblePageIndexes({ ...state, pageIndex: 3 })).toEqual([3, 4]);
+    expect(advanceReader({ ...state, pageIndex: 3 }, 'next').pageIndex).toBe(5);
+    expect(getVisiblePageIndexes({ ...state, pageIndex: 5 })).toEqual([5]);
+    expect(advanceReader({ ...state, pageIndex: 5 }, 'previous').pageIndex).toBe(3);
+    expect(advanceReader({ ...state, pageIndex: 1 }, 'previous').pageIndex).toBe(0);
   });
 
   describe('zoom domain', () => {

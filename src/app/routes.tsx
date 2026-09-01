@@ -1,71 +1,109 @@
-import { ArrowRight, FolderHeart, Server } from 'lucide-react';
+import { ArrowRight, FolderHeart, RefreshCw, Server } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { Link, Route, Routes, useParams } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
 import { EhWorkspace } from '../components/EhWorkspace';
-import { LibraryRouteWorkspace } from '../components/LibraryRouteWorkspace';
+import { LibraryShell } from '../components/LibraryShell';
 import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
 import { SettingsWorkspace } from '../components/SettingsWorkspace';
 import { TaskCenter } from '../components/TaskCenter';
 import { SyncWorkspace } from '../components/SyncWorkspace';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
+import { MetadataEditRoute } from '../components/MetadataEditRoute';
+import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
+import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
-import type { EhSearchResult } from '../services/ehClient';
+import { presentEhError, type EhSearchResult } from '../services/ehClient';
 
 const workspaces = {
   history: ['历史', '开始阅读后，进度会保存在这里。'],
-  watchlist: ['待看', '加入待看的档案会显示在这里。'],
+  watchlist: ['收藏夹', '收藏的档案会显示在这里。'],
 } as const;
 
 function HomeWorkspace() {
   const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>>>();
   const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
+  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [archives, setArchives] = useState<ArchiveRecord[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [recentError, setRecentError] = useState<string>();
+  const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     void (async () => {
+      setRecentLoading(true);
+      setRecentError(undefined);
       const result = await repository.listServers();
       if (!active) return;
       setServers(result);
-      const server = result.ok ? result.value[0] : undefined;
+      if (!result.ok) {
+        setRecentLoading(false);
+        return;
+      }
+      const server = result.value[0];
       if (!server) {
         setRecentLoading(false);
         return;
       }
-      const [historyResult, archiveResult] = await Promise.all([
+      const [historyResult, watchlistResult, archiveResult] = await Promise.all([
         repository.listHistory(server.scopeId),
+        repository.listWatchlist(server.scopeId),
         repository.listArchives(server.id),
       ]);
       if (!active) return;
       if (!historyResult.ok) setRecentError(historyResult.error.message);
+      else if (!watchlistResult.ok) setRecentError(watchlistResult.error.message);
       else if (!archiveResult.ok) setRecentError(archiveResult.error.message);
       else {
         setHistory(historyResult.value);
+        setWatchlist(watchlistResult.value);
         setArchives(archiveResult.value);
       }
       setRecentLoading(false);
     })();
     return () => { active = false; };
-  }, []);
+  }, [serverLoadAttempt]);
   const connected = servers?.ok && servers.value.length > 0;
+  const serverFailure = servers && !servers.ok ? servers : undefined;
+  const connectionError = serverFailure?.error.message;
   const titles = new Map(archives.map((archive) => [archive.archiveId, archive.title]));
   const recent = history.slice(0, 6);
+  const archiveById = new Map(archives.map((archive) => [archive.archiveId, archive]));
+  const continueReading = recent.map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item));
+  const toRead = watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8);
+  const random = useMemo(() => [...archives].sort(() => Math.random() - 0.5).slice(0, 8), [archives, serverLoadAttempt]);
   return (
     <div className="workspace-home">
       <header className="workspace-heading">
-        <p className="workspace-kicker">本地书架</p>
         <h1>首页</h1>
       </header>
-      {connected ? (
+      {connectionError ? (
         <section className="first-run" aria-labelledby="first-run-title">
           <div className="first-run-copy">
             <Server aria-hidden="true" />
-            <p className="eyebrow">已连接</p>
+            <h2 id="first-run-title">无法读取服务器</h2>
+            <p className="form-error" role="alert">{connectionError}</p>
+          </div>
+          <div className="first-run-actions">
+            {serverFailure?.error.retryable && (
+              <button className="secondary-action" type="button" onClick={() => {
+                setServers(undefined);
+                setServerLoadAttempt((attempt) => attempt + 1);
+              }}>
+                <RefreshCw aria-hidden="true" />
+                重试读取服务器
+              </button>
+            )}
+            <Link className="secondary-action" to="/settings">打开设置</Link>
+          </div>
+        </section>
+      ) : connected ? (
+        <section className="first-run" aria-labelledby="first-run-title">
+          <div className="first-run-copy">
+            <Server aria-hidden="true" />
             <h2 id="first-run-title">{servers.value?.[0]?.name ?? 'LANraragi'}</h2>
             <p>服务器已配置，可以开始浏览档案。</p>
           </div>
@@ -85,13 +123,15 @@ function HomeWorkspace() {
         </Link>
         </section>
       )}
-      <div className="shelf-rule" aria-hidden="true">
-        <span>最近阅读</span>
-        <span>{String(recent.length).padStart(2, '0')}</span>
-      </div>
+      {connected && servers.value?.[0] && <>
+      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} wide />
+      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} />
+      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} />
+      </>}
+      <div className="shelf-rule" aria-hidden="true"><span>最近阅读</span><span>{String(recent.length).padStart(2, '0')}</span></div>
       {recentLoading && <p className="server-list-message" role="status">正在读取最近阅读…</p>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
-      {!recentLoading && !recentError && (recent.length > 0 ? (
+      {!recentLoading && !recentError && !connectionError && (recent.length > 0 ? (
         <ul className="home-recent-list" aria-label="最近阅读">
           {recent.map((item) => (
             <li key={item.archiveId}>
@@ -276,7 +316,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
                 />
                 <Link to={`/reader/${item.archiveId}`}>
                   <strong>{itemTitle}</strong>
-                  <span>{serverName} · 待看</span>
+                  <span>{serverName} · 收藏夹</span>
                   <ArrowRight aria-hidden="true" />
                 </Link>
               </li>
@@ -335,14 +375,14 @@ function EhRouteWorkspace() {
           setResults(result.value.galleries);
           setSearched(true);
         } else {
-          setSearchError(result.error.message);
+          setSearchError(presentEhError(result.error.code, result.error.message));
         }
         setSearching(false);
       }}
       onSwitchAccount={async (accountId) => {
         const result = await ehRepository.setActiveAccount(accountId);
         if (!result.ok) {
-          setSearchError(result.error.message);
+          setSearchError(presentEhError(result.error.code, result.error.message));
           return;
         }
         setAccounts((current) => current.map((account) => ({
@@ -353,7 +393,7 @@ function EhRouteWorkspace() {
       onCheckHealth={async (accountId) => {
         const result = await ehRepository.checkLoginHealth(accountId);
         if (!result.ok) {
-          setSearchError(result.error.message);
+          setSearchError(presentEhError(result.error.code, result.error.message));
           return;
         }
         setAccounts((current) => current.map((account) => account.id === accountId
@@ -365,7 +405,7 @@ function EhRouteWorkspace() {
         setSavingAccount(true);
         const result = await ehRepository.saveAccount(input);
         setSavingAccount(false);
-        if (!result.ok) throw new Error(result.error.message);
+        if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
         setAccounts((current) => [...current.filter((account) => account.id !== result.value.id), result.value]);
       }}
     />
@@ -376,16 +416,24 @@ export function WorkspaceRoutes() {
   return (
     <Routes>
       <Route path="/" element={<HomeWorkspace />} />
-      <Route path="/library" element={<LibraryRouteWorkspace />} />
+      <Route path="/library" element={<LibraryShell />} />
+      <Route path="/library/:archiveId" element={<LibraryShell />} />
+      <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
       <Route path="/history" element={<StateWorkspace name="history" />} />
       <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
-      <Route path="/sync" element={<SyncWorkspace />} />
+      <Route path="/dedup" element={<DeduplicationWorkspace />} />
+      <Route path="/sync" element={<Navigate to="/settings?section=sync" replace />} />
       <Route path="/settings" element={<SettingsWorkspace />} />
       <Route path="*" element={<HomeWorkspace />} />
     </Routes>
   );
+}
+
+function MetadataEditRouteRoute() {
+  const { archiveId = '' } = useParams();
+  return <MetadataEditRoute archiveId={archiveId} />;
 }
 
 export function ReaderRoutes() {

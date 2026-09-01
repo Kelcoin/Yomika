@@ -18,3 +18,7 @@ class TestResizeObserver implements ResizeObserver {
 }
 
 window.ResizeObserver = TestResizeObserver;
+
+let blobUrlSequence = 0;
+if (!URL.createObjectURL) URL.createObjectURL = () => `blob:test-${blobUrlSequence++}`;
+if (!URL.revokeObjectURL) URL.revokeObjectURL = () => undefined;

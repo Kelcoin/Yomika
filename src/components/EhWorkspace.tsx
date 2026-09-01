@@ -32,7 +32,6 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
   return (
     <div>
       <header className="workspace-heading">
-        <p className="workspace-kicker">E-Hentai</p>
         <h1>账户与搜索</h1>
       </header>
       <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} saving={savingAccount} />
@@ -64,9 +63,9 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
             {results.map((result) => (
               <li key={result.galleryKey}>
                 <strong>{result.title}</strong>
-                <span>{result.category}</span>
+                <span className="metadata-chip" data-category={result.category}>{result.category}</span>
                 <span>{result.uploader}</span>
-                <span>{result.pageCount} pages</span>
+                <span className="metadata-chip metadata-chip-page">{result.pageCount} pages</span>
               </li>
             ))}
           </ul>

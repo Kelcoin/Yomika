@@ -9,6 +9,9 @@ const THEME_KEY: &str = "preferences.theme";
 const LAYOUT_KEY: &str = "preferences.default_layout";
 const DIRECTION_KEY: &str = "preferences.default_direction";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
+pub const GIB_BYTES: u64 = 1_073_741_824;
+pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
+pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
 
 pub(crate) fn get_or_create_device_id(
     transaction: &rusqlite::Transaction<'_>,
@@ -69,8 +72,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
     if !matches!(value.theme.as_str(), "system" | "light" | "dark")
         || !matches!(value.default_layout.as_str(), "auto" | "single" | "double" | "webtoon")
         || !matches!(value.default_direction.as_str(), "ltr" | "rtl")
-        || value.cache_max_bytes == 0
-        || value.cache_max_bytes > i64::MAX as u64
+        || !(MIN_CACHE_BYTES..=MAX_CACHE_BYTES).contains(&value.cache_max_bytes)
+        || value.cache_max_bytes % GIB_BYTES != 0
     {
         return Err("Invalid preference snapshot".into());
     }
@@ -298,6 +301,14 @@ mod tests {
             ..PreferenceSnapshot::default()
         };
         assert!(save_preferences_to(&mut connection, invalid_quota).is_err());
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            cache_max_bytes: 1_073_741_823,
+            ..PreferenceSnapshot::default()
+        }).is_err());
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            cache_max_bytes: 34_359_738_369,
+            ..PreferenceSnapshot::default()
+        }).is_err());
     }
 
     #[test]

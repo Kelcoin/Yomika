@@ -2,6 +2,7 @@ import { CheckCircle, RefreshCw, ArrowRightLeft } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { EhAccount } from '../domain/eh';
 import type { SaveEhAccountInput } from '../domain/eh';
+import { SelectField } from './SelectField';
 
 interface EhAccountPanelProps {
   accounts: EhAccount[];
@@ -19,6 +20,7 @@ function statusLabel(status: EhAccount['status']): string {
 }
 
 export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onSave, saving }: EhAccountPanelProps) {
+  const [host, setHost] = useState('e-hentai.org');
   const [formError, setFormError] = useState<string>();
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -56,7 +58,7 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
         <form className="eh-account-form" onSubmit={submit}>
           <label>账户 ID<input name="ehAccountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" /></label>
           <label>名称<input name="ehAccountLabel" required autoComplete="off" /></label>
-          <label>站点<select name="ehAccountHost" defaultValue="e-hentai.org"><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
+          <label>站点<SelectField name="ehAccountHost" value={host} options={[{ value: 'e-hentai.org', label: 'e-hentai.org' }, { value: 'exhentai.org', label: 'exhentai.org' }]} onChange={setHost} /></label>
           <label>用户名提示<input name="ehUsernameHint" autoComplete="username" spellCheck={false} /></label>
           <label>Cookie<input name="ehCookie" required type="password" autoComplete="current-password" spellCheck={false} /></label>
           <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存 E-Hentai 账户'}</button>

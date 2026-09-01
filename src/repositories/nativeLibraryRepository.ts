@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { invokeCommand } from '../bridge/invoke';
 import {
   ArchiveRecordSchema,
+  ArchivePageSchema,
   ReadingProgressSchema,
   ServerRecordSchema,
   type ArchiveRecord,
+  type ArchivePage,
   type ReadingProgress,
   type ServerRecord,
   TaskRecordSchema,
@@ -54,6 +56,13 @@ const CategorySchema = z.object({
   archives: z.array(z.string()),
 });
 export type Category = z.infer<typeof CategorySchema>;
+const ServerStatusSchema = z.object({
+  serverId: z.string().min(1),
+  online: z.boolean(),
+  name: z.string().optional().nullable(),
+  error: z.string().optional().nullable(),
+});
+export type ServerStatus = z.infer<typeof ServerStatusSchema>;
 const OperationResultSchema = z.object({
   operation: z.string().min(1),
   success: z.literal(1),
@@ -118,8 +127,19 @@ export class NativeLibraryRepository {
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema);
   }
+  listMetadataPlugins(serverId: string): Promise<CommandResult<unknown>> {
+    return invokeCommand('list_metadata_plugins', { serverId }, z.unknown());
+  }
+  useMetadataPlugin(serverId: string, archiveId: string, plugin: string, arg = ''): Promise<CommandResult<Record<string, unknown>>> {
+    return invokeCommand('use_metadata_plugin', { serverId, archiveId, plugin, arg }, z.record(z.unknown()));
+  }
   async loadArchiveThumbnail(serverId: string, archiveId: string): Promise<CommandResult<ArrayBuffer>> {
     const result = await invokeCommand('load_archive_thumbnail', { serverId, archiveId }, z.array(z.number().int().min(0).max(255)));
+    if (result.ok) window.dispatchEvent(new Event('yomika:cache-changed'));
+    return result.ok ? { ok: true, value: new Uint8Array(result.value).buffer } : result;
+  }
+  async loadArchivePageThumbnail(serverId: string, archiveId: string, page: number): Promise<CommandResult<ArrayBuffer>> {
+    const result = await invokeCommand('load_archive_page_thumbnail', { serverId, archiveId, page }, z.array(z.number().int().min(0).max(255)));
     return result.ok ? { ok: true, value: new Uint8Array(result.value).buffer } : result;
   }
   loadReaderManifest(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ReaderManifestSchema>>> {
@@ -128,6 +148,7 @@ export class NativeLibraryRepository {
 
   async loadReaderPage(serverId: string, archiveId: string, pageIndex: number, path: string): Promise<CommandResult<ArrayBuffer>> {
     const result = await invokeCommand('load_reader_page', { serverId, archiveId, pageIndex, path }, z.array(z.number().int().min(0).max(255)));
+    if (result.ok) window.dispatchEvent(new Event('yomika:cache-changed'));
     return result.ok
       ? { ok: true, value: new Uint8Array(result.value).buffer }
       : result;
@@ -158,6 +179,10 @@ export class NativeLibraryRepository {
     return invokeCommand('list_servers', {}, z.array(ServerRecordSchema));
   }
 
+  checkServerStatus(): Promise<CommandResult<ServerStatus[]>> {
+    return invokeCommand('check_server_status', {}, z.array(ServerStatusSchema));
+  }
+
   saveServer(input: { identity: ServerIdentity; apiKey: string }): Promise<CommandResult<ServerRecord>> {
     return invokeCommand('save_server', {
       server: input.identity,
@@ -167,6 +192,29 @@ export class NativeLibraryRepository {
 
   listArchives(serverId: string): Promise<CommandResult<ArchiveRecord[]>> {
     return invokeCommand('list_archives', { serverId }, z.array(ArchiveRecordSchema));
+  }
+  async listArchivesPage(
+    serverId: string,
+    offset = 0,
+    limit = 100,
+    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null } = {},
+  ): Promise<CommandResult<ArchivePage>> {
+    const result = await invokeCommand('list_archives_page', {
+      input: {
+        serverId,
+        query: query.query ?? '',
+        sortBy: query.sortBy ?? 'added',
+        order: query.order ?? 'desc',
+        categoryId: query.categoryId ?? null,
+        offset,
+        limit,
+      },
+    }, ArchivePageSchema);
+    if (result.ok || !['INVALID_RESPONSE', 'UNKNOWN'].includes(result.error.code) || offset !== 0) return result;
+    const legacy = await this.listArchives(serverId);
+    return legacy.ok
+      ? { ok: true, value: { items: legacy.value.slice(0, limit), total: legacy.value.length, hasMore: legacy.value.length > limit } }
+      : legacy;
   }
 
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {

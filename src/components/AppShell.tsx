@@ -10,11 +10,12 @@ import {
   Search,
   Settings,
   Star,
-  Waypoints,
+  ArrowUp,
+  CopyCheck,
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { StatusBar } from './StatusBar';
@@ -23,14 +24,15 @@ const navigation = [
   { to: '/', label: '首页', icon: Home, mobile: true },
   { to: '/library', label: '档案库', icon: Archive, mobile: true },
   { to: '/history', label: '历史', icon: History, mobile: true },
-  { to: '/watchlist', label: '待看', icon: Star, mobile: true },
+  { to: '/watchlist', label: '收藏夹', icon: Star, mobile: true },
   { to: '/eh', label: 'E-Hentai', icon: Globe, mobile: false },
   { to: '/downloads', label: '下载', icon: Download, mobile: false },
-  { to: '/sync', label: '同步', icon: Waypoints, mobile: false },
+  { to: '/dedup', label: '查重', icon: CopyCheck, mobile: false },
   { to: '/settings', label: '设置', icon: Settings, mobile: true },
 ] as const;
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
+routeTitles['/dedup'] = '查重';
 const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 
 interface AppShellProps {
@@ -38,11 +40,18 @@ interface AppShellProps {
 }
 
 function Navigation({ compact = false }: { compact?: boolean }) {
+  const location = useLocation();
   return (
     <nav className={compact ? 'compact-nav' : 'side-nav'} aria-label={compact ? '移动导航' : '主导航'}>
       {navigation.filter((item) => !compact || item.mobile).map(({ to, label, icon: Icon }) => (
         <NavLink
-          className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
+          className={({ isActive }) => {
+            const queryOnly = to.includes('?');
+            const active = queryOnly
+              ? isActive && location.search === to.slice(to.indexOf('?'))
+              : isActive;
+            return `nav-link${active ? ' is-active' : ''}`;
+          }}
           end={to === '/'}
           key={to}
           to={to}
@@ -60,7 +69,34 @@ export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
   const reduceMotion = useReducedMotion();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const title = routeTitles[pathname] ?? 'Yomika';
+  const title = pathname.startsWith('/library/') ? '档案详情' : routeTitles[pathname] ?? 'Yomika';
+  const workspaceRef = useRef<HTMLElement>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+
+  useEffect(() => {
+    const previous = new Map<HTMLElement, number>();
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      const region = target instanceof HTMLElement ? target : undefined;
+      if (!region) return;
+      if (region !== workspaceRef.current && !region.matches('[data-scroll-region]')) return;
+      const current = region.scrollTop;
+      const before = previous.get(region) ?? current;
+      previous.set(region, current);
+      if (current <= 8 || current >= before) {
+        setShowScrollTop(false);
+      } else {
+        setShowScrollTop(true);
+      }
+    };
+    const workspace = workspaceRef.current;
+    if (workspace) previous.set(workspace, workspace.scrollTop);
+    // Capture scroll events so dynamically mounted library/detail regions are
+    // covered without needing a second effect or a fragile mount ordering.
+    document.addEventListener('scroll', handleScroll, { capture: true, passive: true });
+    setShowScrollTop(false);
+    return () => document.removeEventListener('scroll', handleScroll, true);
+  }, [pathname]);
 
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
@@ -72,7 +108,7 @@ export function AppShell({ children }: AppShellProps) {
         </NavLink>
         <Navigation />
         <div className="sidebar-footer">
-          <p className="sidebar-footnote">LOCAL / 01</p>
+          <span aria-hidden="true" />
           <button
             className="sidebar-toggle"
             type="button"
@@ -89,7 +125,6 @@ export function AppShell({ children }: AppShellProps) {
       <div className="app-main">
         <header className="context-bar">
           <div>
-            <span className="context-label">YOMIKA</span>
             <strong>{title}</strong>
           </div>
           <div className="context-actions">
@@ -108,7 +143,8 @@ export function AppShell({ children }: AppShellProps) {
 
         <motion.main
           id="main-content"
-          className="workspace"
+          className={`workspace${/^\/library(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          ref={workspaceRef}
           tabIndex={-1}
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -116,6 +152,11 @@ export function AppShell({ children }: AppShellProps) {
         >
           {children}
         </motion.main>
+        <button className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
+          workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+          document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => region.scrollTo({ top: 0, behavior: 'smooth' }));
+          setShowScrollTop(false);
+        }}><ArrowUp aria-hidden="true" /></button>
         <StatusBar />
       </div>
 

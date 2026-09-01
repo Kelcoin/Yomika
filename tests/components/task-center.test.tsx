@@ -50,6 +50,8 @@ describe('task center upload', () => {
     setInvokeAdapterForTests(adapter);
 
     render(<MemoryRouter initialEntries={['/downloads']}><App /></MemoryRouter>);
+    expect(await screen.findByText('失败')).toHaveClass('status-chip', 'status-chip-danger');
+    expect(screen.getByText('进行中')).toHaveClass('status-chip', 'status-chip-active');
     await user.click(await screen.findByRole('button', { name: '重试失败任务' }));
     await user.click(screen.getByRole('button', { name: '暂停运行任务' }));
 
@@ -79,5 +81,45 @@ describe('task center upload', () => {
 
     resolveUpload({ ok: true, value: { operation: 'upload', success: 1, id: 'archive-1' } });
     expect(await screen.findByText('上传完成')).toBeInTheDocument();
+  });
+
+  it('locks task actions while a native task update is pending', async () => {
+    const user = userEvent.setup();
+    let resolveUpdate!: (value: unknown) => void;
+    const adapter = vi.fn(async (command: string, args) => {
+      if (command === 'list_tasks') return { ok: true, value: [{ kind: 'download', id: 'running', label: '运行任务', status: 'running', progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z' }] };
+      if (command === 'update_task') return new Promise((resolve) => { resolveUpdate = () => resolve({ ok: true, value: { kind: 'download', id: String(args?.id), label: '运行任务', status: 'paused', progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z' } }); });
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    render(<MemoryRouter initialEntries={['/downloads']}><App /></MemoryRouter>);
+    const pause = await screen.findByRole('button', { name: '暂停运行任务' });
+    await user.click(pause);
+
+    expect(pause).toBeDisabled();
+    expect(pause).toHaveAttribute('aria-busy', 'true');
+    expect(adapter.mock.calls.filter(([command]) => command === 'update_task')).toHaveLength(1);
+
+    resolveUpdate(undefined);
+    expect(await screen.findByRole('button', { name: '恢复运行任务' })).toBeInTheDocument();
+  });
+
+  it('marks upload busy while the file picker is open', async () => {
+    const user = userEvent.setup();
+    let resolvePicker!: (path: string | null) => void;
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setFilePickerForTests(() => new Promise<string | null>((resolve) => { resolvePicker = resolve; }));
+
+    render(<MemoryRouter initialEntries={['/downloads']}><App /></MemoryRouter>);
+    const upload = await screen.findByRole('button', { name: '上传档案' });
+    await user.click(upload);
+
+    expect(screen.getByRole('button', { name: '上传中…' })).toBeDisabled();
+    resolvePicker(null);
+    expect(await screen.findByRole('button', { name: '上传档案' })).not.toBeDisabled();
   });
 });

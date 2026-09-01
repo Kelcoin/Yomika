@@ -10,6 +10,21 @@ describe('EH HTTP boundary', () => {
     expect(classifyEhResponse(404, 'gallery does not exist')).toEqual({ kind: 'gallery_deleted', retryable: false, reauthRequired: false });
   });
 
+  it('prioritizes copyright removal over the generic 404 classification', () => {
+    const body = '<title>Gallery Not Available</title><p>This gallery is unavailable due to a copyright claim by FAKKU.</p>';
+    expect(classifyEhResponse(404, body)).toEqual({ kind: 'gallery_copyright_removed', retryable: false, reauthRequired: false });
+    expect(classifyEhResponse(200, body)).toEqual({ kind: 'gallery_copyright_removed', retryable: false, reauthRequired: false });
+    expect(classifyEhResponse(404, 'This gallery was removed at the request of the copyright holder.')).toEqual({ kind: 'gallery_copyright_removed', retryable: false, reauthRequired: false });
+  });
+
+  it('recognizes Worker non-gallery pages regardless of their HTTP status', () => {
+    expect(classifyEhResponse(200, '<title>Just a moment...</title>')).toEqual({ kind: 'cloudflare', retryable: false, reauthRequired: false });
+    expect(classifyEhResponse(200, '<title>Login</title><p>Please login</p>')).toEqual({ kind: 'unauthorized', retryable: false, reauthRequired: true });
+    expect(classifyEhResponse(200, '<h1>Content Warning</h1><p>You are seeing this page because this gallery contains content that may be objectionable.</p>')).toEqual({ kind: 'content_warning', retryable: false, reauthRequired: true });
+    expect(classifyEhResponse(403, 'Access Denied')).toEqual({ kind: 'access_blocked', retryable: false, reauthRequired: false });
+    expect(classifyEhResponse(200, '<title>Gallery Not Found</title>')).toEqual({ kind: 'gallery_deleted', retryable: false, reauthRequired: false });
+  });
+
   it('injects cookies only for matching EH host and filters temporary values', () => {
     const jar = new EhCookieJar();
     jar.setFromHeader('e-hentai.org', 'igneous=mystery; Path=/');
@@ -96,6 +111,28 @@ describe('EH HTTP boundary', () => {
     });
     await expect(client.getComments('https://e-hentai.org/g/123/abcdef/')).resolves.toEqual({
       ok: true, value: [{ id: '7', author: 'Bob', body: 'Hello', score: 0 }],
+    });
+  });
+
+  it('returns a specific error for a copyright-removal comments page', async () => {
+    const client = new EhHttpClient({
+      baseUrl: 'https://e-hentai.org', cookieJar: new EhCookieJar(),
+      fetcher: async () => new Response('<p>This gallery is unavailable due to a copyright claim by FAKKU.</p>', { status: 404 }),
+    });
+    await expect(client.getComments('https://e-hentai.org/g/2793202/0b248815aa/')).resolves.toEqual({
+      ok: false,
+      error: { code: 'EH_GALLERY_COPYRIGHT_REMOVED', message: 'E-Hentai gallery was removed due to a copyright claim', retryable: false },
+    });
+  });
+
+  it('distinguishes an empty page response from a valid empty POST response', async () => {
+    const client = new EhHttpClient({
+      baseUrl: 'https://e-hentai.org', cookieJar: new EhCookieJar(),
+      fetcher: async () => new Response('', { status: 200 }),
+    });
+    await expect(client.getGallery('https://e-hentai.org/g/123/abcdef/')).resolves.toEqual({
+      ok: false,
+      error: { code: 'EH_EMPTY_RESPONSE', message: 'E-Hentai returned an empty response', retryable: true },
     });
   });
 

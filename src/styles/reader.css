@@ -7,9 +7,10 @@
   min-height: 100vh;
   min-height: 100dvh;
   overflow: hidden;
-  background: #070709;
-  color: #f8f6fa;
+  background: var(--reader-canvas);
+  color: var(--reader-ink);
   outline: none;
+  touch-action: pan-y;
 }
 
 .reader-screen:focus-visible {
@@ -59,7 +60,7 @@
 }
 
 .reader-error p {
-  color: #aaa5b1;
+  color: var(--reader-muted);
   line-height: 1.6;
 }
 
@@ -92,7 +93,7 @@
   gap: var(--space-3);
   min-height: 64px;
   padding: calc(8px + env(safe-area-inset-top)) clamp(12px, 3vw, 32px) 8px;
-  background: rgb(5 5 7 / 0.82);
+  background: var(--reader-chrome);
   backdrop-filter: blur(14px);
   pointer-events: auto;
 }
@@ -107,8 +108,9 @@
 .reader-toolbar button {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: var(--icon-button-size);
+  height: var(--icon-button-size);
+  min-width: var(--icon-button-size);
   border-radius: var(--radius-control);
   background: transparent;
   color: inherit;
@@ -121,8 +123,8 @@
 }
 
 .reader-toolbar button[aria-pressed="true"] {
-  background: #f8f6fa;
-  color: #070709;
+  background: var(--reader-ink);
+  color: var(--reader-canvas);
 }
 
 .reader-toolbar {
@@ -135,7 +137,7 @@
   padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  background: rgb(5 5 7 / 0.82);
+  background: var(--reader-chrome);
   backdrop-filter: blur(14px);
   pointer-events: auto;
 }
@@ -161,6 +163,37 @@
   padding: 0 12px;
   white-space: nowrap;
 }
+
+.reader-thumbnail-panel {
+  position: absolute;
+  top: 72px;
+  right: 0;
+  bottom: 72px;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(2, 72px);
+  gap: 8px;
+  width: min(180px, 45vw);
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--reader-chrome);
+  border-left: 1px solid rgb(255 255 255 / 0.16);
+  backdrop-filter: blur(14px);
+}
+
+.reader-thumbnail-panel button {
+  display: grid;
+  place-items: center;
+  min-height: 92px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  background: rgb(0 0 0 / 0.24);
+  color: inherit;
+  cursor: pointer;
+}
+
+.reader-thumbnail-panel button[aria-current="true"] { border-color: var(--brand-cyan); }
+.reader-thumbnail-panel img { width: 100%; height: 100%; object-fit: cover; }
 
 @media (max-width: 767px) {
   .reader-toolbar {

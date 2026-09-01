@@ -58,6 +58,18 @@ export interface ReaderState {
   phase: ReaderPhase;
 }
 
+/** Returns the page indexes rendered for the current spread.
+ * In double-page mode the cover (index 0) is always a standalone page;
+ * body pages are paired as (1,2), (3,4), ... .
+ */
+export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout'>): number[] {
+  if (state.pageCount <= 0) return [];
+  const start = Math.min(Math.max(0, Math.floor(state.pageIndex)), state.pageCount - 1);
+  if (state.layout !== 'double' || start === 0) return [start];
+  const pairStart = start % 2 === 0 ? start - 1 : start;
+  return [pairStart, pairStart + 1].filter((index) => index < state.pageCount);
+}
+
 interface LayoutContext {
   viewportWidth: number;
   viewportHeight: number;
@@ -93,8 +105,17 @@ export function createReaderState(input: {
 export function advanceReader(state: ReaderState, intent: 'next' | 'previous'): ReaderState {
   const forward = intent === 'next' ? 1 : -1;
   const direction = state.direction === 'rtl' ? -forward : forward;
-  const step = state.layout === 'double' ? 2 : 1;
-  return { ...state, pageIndex: clampPage(state.pageIndex + direction * step, state.pageCount), phase: 'ready' };
+  if (state.layout !== 'double') {
+    return { ...state, pageIndex: clampPage(state.pageIndex + direction, state.pageCount), phase: 'ready' };
+  }
+
+  const visible = getVisiblePageIndexes(state);
+  const first = visible[0] ?? 0;
+  const last = visible[visible.length - 1] ?? first;
+  const nextIndex = direction > 0
+    ? (state.pageIndex === 0 ? 1 : last + 1)
+    : (state.pageIndex <= 1 ? 0 : first - 2);
+  return { ...state, pageIndex: clampPage(nextIndex, state.pageCount), phase: 'ready' };
 }
 
 export function toggleReaderChrome(state: ReaderState): ReaderState {

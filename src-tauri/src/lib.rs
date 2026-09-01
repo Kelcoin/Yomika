@@ -9,13 +9,13 @@ mod network;
 mod settings;
 
 use commands::library::{
-    add_archive_to_category, create_task, delete_archive, list_archives, list_categories,
-    list_reading_history, list_servers, list_tasks, list_watchlist, load_archive_metadata,
-    load_archive_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
+    add_archive_to_category, check_server_status, create_task, delete_archive, list_archives, list_archives_page,
+    list_categories, list_reading_history, list_servers, list_tasks, list_watchlist, load_archive_metadata,
+    load_archive_thumbnail, load_archive_page_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
     refresh_archives, replace_archives, retry_task, save_reading_progress, save_server, set_watchlist,
-    update_archive_metadata, update_task, upload_archive,
+    update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
 };
-use cache::cache_evict;
+use cache::{cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats, cache_store_image};
 use commands::platform::platform_capabilities;
 use commands::sync::{
     append_sync_journal, build_sync_segment, claim_sync_journal, create_sync_key, decrypt_sync_manifest,
@@ -23,7 +23,7 @@ use commands::sync::{
     save_webdav_account, set_sync_journal_state, sync_webdav_scope,
 };
 use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_model, inference_pause, inference_probe, inference_resume, inference_start, inference_validate_model};
-use dedup::{dedup_check_file, dedup_find_exact, dedup_save_feature};
+use dedup::{dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact, dedup_import_readoshi, dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan};
 use commands::eh::{check_eh_login_health, list_eh_accounts, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
 use commands::legacy::import_legacy_export;
 use db::Database;
@@ -45,15 +45,23 @@ pub fn run() {
             save_preferences,
             import_legacy_preferences,
             cache_evict,
+            cache_clear_images,
+            cache_invalidate_archive,
+            cache_read_image,
+            cache_stats,
+            cache_store_image,
             list_servers,
+            check_server_status,
             save_server,
             replace_archives,
             refresh_archives,
             load_reader_manifest,
             load_reader_page,
             list_archives,
+            list_archives_page,
             load_archive_metadata,
             load_archive_thumbnail,
+            load_archive_page_thumbnail,
             delete_archive,
             create_task,
             list_tasks,
@@ -63,6 +71,8 @@ pub fn run() {
             list_categories,
             add_archive_to_category,
             update_archive_metadata,
+            list_metadata_plugins,
+            use_metadata_plugin,
             save_reading_progress,
             load_reading_progress,
             set_watchlist,
@@ -101,6 +111,16 @@ pub fn run() {
             dedup_check_file,
             dedup_save_feature,
             dedup_find_exact,
+            dedup_start_scan,
+            dedup_scan_chunk,
+            dedup_scan,
+            dedup_cancel_scan,
+            dedup_resume_scan,
+            dedup_load_result,
+            dedup_save_non_duplicate,
+            dedup_remove_non_duplicate,
+            dedup_delete_selected,
+            dedup_import_readoshi,
             import_legacy_export
         ])
         .run(tauri::generate_context!())

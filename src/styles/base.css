@@ -36,6 +36,72 @@ textarea {
   letter-spacing: 0;
 }
 
+.select-field {
+  position: relative;
+  width: 100%;
+}
+
+.select-native-fallback {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+}
+
+.select-trigger {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--control-height);
+  padding: 0 12px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--control-background);
+  color: var(--control-text);
+  font-weight: 600;
+  text-align: left;
+}
+
+.select-trigger svg { width: 17px; height: 17px; margin-left: auto; color: var(--ink-secondary); }
+
+.select-menu {
+  position: absolute;
+  z-index: var(--z-menu);
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-menu);
+  pointer-events: auto;
+}
+
+.select-option {
+  justify-content: space-between;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--control-text);
+  text-align: left;
+}
+
+.select-option:hover,
+.select-option[aria-selected='true'] { background: var(--brand-paper); }
+.select-option svg { width: 16px; height: 16px; color: var(--brand-vermilion); }
+
 select {
   appearance: none;
   padding-right: 36px;
@@ -70,8 +136,20 @@ a {
   text-decoration: none;
 }
 
+::selection {
+  background: var(--selection-background);
+  color: var(--selection-ink);
+}
+
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
   border: 0;
+  font-family: inherit;
+  line-height: 1;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -79,15 +157,17 @@ input,
 select,
 textarea {
   width: 100%;
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
-  background: var(--surface-panel);
-  color: var(--ink-primary);
+  background: var(--control-background);
+  color: var(--control-text);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-primary) 5%, transparent);
+  transition: border-color var(--motion-standard), background-color var(--motion-standard), box-shadow var(--motion-standard);
 }
 
 input,
 select {
-  min-height: 40px;
+  min-height: var(--control-height);
   padding: 0 12px;
 }
 
@@ -100,8 +180,14 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: var(--brand-cyan);
+  border-color: var(--focus-ring);
   outline: none;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ink-secondary) 45%, transparent);
 }
 
 button:active,
@@ -115,6 +201,11 @@ select:disabled,
 textarea:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+select option {
+  background: var(--surface-elevated);
+  color: var(--ink-primary);
 }
 
 :focus-visible {

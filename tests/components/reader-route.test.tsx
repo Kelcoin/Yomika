@@ -1,29 +1,37 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 
-afterEach(resetInvokeAdapterForTests);
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  vi.restoreAllMocks();
+});
 
 describe('reader route', () => {
   it('loads native manifest and page bytes, then persists progress on navigation', async () => {
     const user = userEvent.setup();
     const calls: string[] = [];
-    setInvokeAdapterForTests(async (command: string) => {
+    const progressScopes: string[] = [];
+    setInvokeAdapterForTests(async (command: string, args) => {
       calls.push(command);
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') {
-        return { ok: true, value: [{ id: 'scope-real', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-real' }] };
+        return { ok: true, value: [{ id: 'server-native', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-real' }] };
       }
       if (command === 'load_reader_manifest') {
         return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['00.jpg', '01.jpg'] } };
       }
       if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
-      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'load_reading_progress') {
+        progressScopes.push(String(args?.scopeId));
+        return { ok: true, value: null };
+      }
       if (command === 'save_reading_progress') {
+        progressScopes.push(String((args?.progress as { scopeId?: string } | undefined)?.scopeId));
         return {
           ok: true,
           value: { scopeId: 'scope-real', archiveId: 'a1', pageIndex: 1, pageCount: 2, layout: 'paged', direction: 'ltr', updatedAt: '2026-08-26T00:00:00Z', revision: 1 },
@@ -38,7 +46,29 @@ describe('reader route', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '下一页' }));
     expect(await screen.findByRole('img', { name: '第 2 页' })).toBeInTheDocument();
-    expect(calls).toEqual(['list_servers', 'load_preferences', 'load_reader_manifest', 'load_reading_progress', 'load_reader_page', 'load_reader_page', 'save_reading_progress']);
+    expect(calls).toEqual(['list_servers', 'load_preferences', 'load_reader_manifest', 'load_reading_progress', 'cache_read_image', 'cache_read_image', 'load_reader_page', 'load_reader_page', 'save_reading_progress']);
+    expect(progressScopes).toEqual(['scope-real', 'scope-real']);
+  });
+
+  it('uses and releases persistent reader pages without requesting LANraragi', async () => {
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL');
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'server-cache', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-reader-cache' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'cached-reader', title: 'Cached reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'load_reader_page') throw new Error('reader network should not be called');
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const view = render(<MemoryRouter initialEntries={['/reader/cached-reader']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(adapter).not.toHaveBeenCalledWith('load_reader_page', expect.anything());
+    view.unmount();
+    expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
   it('loads the restored page first and limits initial preloading to adjacent pages', async () => {

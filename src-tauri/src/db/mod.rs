@@ -38,24 +38,64 @@ impl Database {
 }
 
 fn resolve_database_path(app_data: PathBuf) -> Result<PathBuf, String> {
-    if cfg!(all(target_os = "windows", not(debug_assertions))) {
+    let app_data_path = app_data.join("yomika.sqlite3");
+
+    // Keep the database beside Tauri's app data so it follows the same identity
+    // as the Windows keyring. Older experimental portable builds stored it next
+    // to the executable; use that location only when no user database exists.
+    let portable_path = if cfg!(all(target_os = "windows", not(debug_assertions))) {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let parent = executable
-            .parent()
-            .ok_or_else(|| "Executable directory unavailable".to_string())?;
-        return Ok(parent.join("data").join("yomika.sqlite3"));
+        executable.parent().map(|parent| parent.join("data").join("yomika.sqlite3"))
+    } else {
+        None
+    };
+    Ok(select_database_path(app_data_path, portable_path))
+}
+
+fn select_database_path(app_data_path: PathBuf, portable_path: Option<PathBuf>) -> PathBuf {
+    if !app_data_path.exists() {
+        if let Some(path) = portable_path.filter(|path| path.exists()) {
+            return path;
+        }
     }
-    Ok(app_data.join("yomika.sqlite3"))
+    app_data_path
 }
 
 #[cfg(test)]
 mod path_tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn default_database_path_stays_under_app_data_in_tests() {
         let path = resolve_database_path(PathBuf::from("C:/Users/test/AppData/Yomika")).unwrap();
         assert_eq!(path, PathBuf::from("C:/Users/test/AppData/Yomika/yomika.sqlite3"));
+    }
+
+    #[test]
+    fn existing_user_database_wins_over_legacy_portable_database() {
+        let root = std::env::temp_dir().join(format!("yomika-path-{}", std::process::id()));
+        let app_data = root.join("app");
+        let portable = root.join("portable").join("yomika.sqlite3");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(portable.parent().unwrap()).unwrap();
+        fs::write(app_data.join("yomika.sqlite3"), b"user").unwrap();
+        fs::write(&portable, b"portable").unwrap();
+
+        assert_eq!(select_database_path(app_data.join("yomika.sqlite3"), Some(portable.clone())), app_data.join("yomika.sqlite3"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_portable_database_is_used_when_user_database_is_missing() {
+        let root = std::env::temp_dir().join(format!("yomika-path-missing-{}", std::process::id()));
+        let app_data_path = root.join("app").join("yomika.sqlite3");
+        let portable_path = root.join("portable").join("yomika.sqlite3");
+        fs::create_dir_all(portable_path.parent().unwrap()).unwrap();
+        fs::write(&portable_path, b"portable").unwrap();
+
+        assert_eq!(select_database_path(app_data_path, Some(portable_path.clone())), portable_path);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -72,6 +112,10 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         (9, include_str!("../../migrations/0009_inference_jobs.sql")),
         (10, include_str!("../../migrations/0010_cache_path_sharing.sql")),
         (11, include_str!("../../migrations/0011_task_runtime.sql")),
+        (12, include_str!("../../migrations/0012_archive_categories.sql")),
+        (13, include_str!("../../migrations/0013_unified_image_cache.sql")),
+        (14, include_str!("../../migrations/0014_cache_archive_scope.sql")),
+        (15, include_str!("../../migrations/0015_dedup_sessions.sql")),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -132,14 +176,61 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("webdav accounts table");
+            let archive_categories_table: String = connection
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'archive_categories'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("archive categories table");
+            let archive_categories_index: String = connection
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'archive_categories_lookup_idx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("archive categories index");
+            let cache_archive_column: String = connection
+                .query_row(
+                    "SELECT name FROM pragma_table_info('cache_entries') WHERE name='source_archive'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("cache archive column");
+            let cache_archive_index: String = connection
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'cache_entries_archive_idx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("cache archive index");
+            let mut archive_categories_fk_statement = connection
+                .prepare("PRAGMA foreign_key_list(archive_categories)")
+                .expect("archive categories foreign keys");
+            let mut archive_categories_fk_rows = archive_categories_fk_statement
+                .query([])
+                .expect("archive categories foreign key rows");
+            let mut archive_categories_fk_count = 0_i64;
+            while archive_categories_fk_rows
+                .next()
+                .expect("archive categories foreign key row")
+                .is_some()
+            {
+                archive_categories_fk_count += 1;
+            }
             assert_eq!(
                 (
                     version,
                     foreign_keys,
                     server_table.as_str(),
-                    webdav_table.as_str()
+                    webdav_table.as_str(),
+                    archive_categories_table.as_str(),
+                    archive_categories_index.as_str(),
+                    archive_categories_fk_count,
+                    cache_archive_column.as_str(),
+                    cache_archive_index.as_str(),
                 ),
-            (11, 1, "servers", "webdav_accounts")
+                (15, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
             );
             connection.execute(
                 "INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES ('restart-task','download','Restart','running',0.4,1,1)",
@@ -157,7 +248,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 11);
+        assert_eq!(migration_count, 15);
         let recovered_status: String = reopened.connection.lock().expect("database lock")
             .query_row("SELECT status FROM tasks WHERE id='restart-task'", [], |row| row.get(0))
             .expect("recovered task");

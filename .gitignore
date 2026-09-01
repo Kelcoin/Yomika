@@ -1,11 +1,14 @@
 # Local architecture and migration documents
-/docs/
+/docs/*
+!/docs/19-windows-local-build.md
+!/docs/20-cross-platform-ui-logic-standards.md
 
 # Planning state
 /.planning/
 
 # Local generated previews and skill work
 /.skill-archive/
+/.superpowers/
 
 # Secrets and local environment
 .env
@@ -16,7 +19,10 @@
 /dist/
 /target/
 /src-tauri/target/
+/src-tauri/target-fixed/
 /node_modules/
+/.npm-cache/
+/tools/windows/toolchain/
 *.tsbuildinfo
 .codex-gh/
 /vite.config.js

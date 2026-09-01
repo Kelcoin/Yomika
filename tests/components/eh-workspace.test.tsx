@@ -33,9 +33,9 @@ describe('EhWorkspace', () => {
   it('displays search results when provided', () => {
     render(<EhWorkspace accounts={sampleAccounts} results={sampleResults} />);
     expect(screen.getByText('Test Gallery')).toBeDefined();
-    expect(screen.getByText('Doujinshi')).toBeDefined();
+    expect(screen.getByText('Doujinshi')).toHaveClass('metadata-chip');
     expect(screen.getByText('author')).toBeDefined();
-    expect(screen.getByText('10 pages')).toBeDefined();
+    expect(screen.getByText('10 pages')).toHaveClass('metadata-chip');
   });
 
   it('shows empty state when no results', () => {

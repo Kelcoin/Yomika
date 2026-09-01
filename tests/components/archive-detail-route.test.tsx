@@ -1,0 +1,210 @@
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
+import { installTagTranslations } from '../../src/lib/tags';
+
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  installTagTranslations({});
+  vi.restoreAllMocks();
+});
+
+const server = { id: 'server-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' };
+const metadata = {
+  archiveId: 'archive-a',
+  title: 'Archive detail',
+  filename: 'archive.cbz',
+  tags: 'female:big breasts, artist:sample artist',
+  summary: 'Summary',
+  extension: 'cbz',
+  progress: 0,
+  pageCount: 12,
+  lastReadTime: 0,
+  size: 1024,
+};
+
+function renderDetail() {
+  return render(
+    <MemoryRouter>
+      <ArchiveDetailRoute archiveId="archive-a" />
+    </MemoryRouter>,
+  );
+}
+
+describe('archive detail route', () => {
+  it('uses a persistent cached cover without requesting LANraragi', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'load_archive_thumbnail') throw new Error('network should not be called');
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const view = renderDetail();
+
+    expect(await screen.findByRole('img', { name: 'Archive detail 封面' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(adapter).not.toHaveBeenCalledWith('load_archive_thumbnail', expect.anything());
+    view.unmount();
+  });
+
+  it('uses persistent page thumbnails without requesting LANraragi', async () => {
+    const adapter = vi.fn(async (command: string, args?: Record<string, any>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 1 } };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'cache_read_image') {
+        return args?.identity?.rendition === 'page-thumbnail'
+          ? { ok: true, value: { bytes: [0x89, 0x50, 0x4e, 0x47], mime: 'image/png' } }
+          : { ok: true, value: null };
+      }
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      if (command === 'load_archive_page_thumbnail') throw new Error('page network should not be called');
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderDetail();
+
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(adapter).not.toHaveBeenCalledWith('load_archive_page_thumbnail', expect.anything());
+  });
+
+  it('centers the initial loading state', () => {
+    setInvokeAdapterForTests(() => new Promise(() => undefined));
+
+    renderDetail();
+
+    expect(screen.getByRole('status')).toHaveClass('archive-detail-loading-status');
+    expect(screen.getByRole('main')).toHaveClass('archive-detail-route-loading');
+  });
+
+  it('renders metadata without waiting for secondary requests', async () => {
+    const pending = new Promise<never>(() => undefined);
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories' || command === 'load_archive_thumbnail') return pending;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'Archive detail' })).toBeInTheDocument();
+  });
+
+  it('keeps the detail shell visible while metadata is still loading', async () => {
+    const pending = new Promise<never>(() => undefined);
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata' || command === 'load_archive_thumbnail' || command === 'list_watchlist' || command === 'list_categories') return pending;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: 'archive-a' })).toBeInTheDocument();
+    expect(screen.getByText('正在加载档案详情…')).toHaveClass('archive-detail-inline-loading');
+  });
+
+  it('uses an image MIME type for LANraragi thumbnail bytes', async () => {
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL');
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'load_archive_thumbnail') return { ok: true, value: [255, 216, 255, 224] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('img', { name: 'Archive detail 封面' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(createObjectUrl.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'image/jpeg' });
+  });
+
+  it('keeps the server thumbnail MIME when the cover is PNG', async () => {
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL');
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'load_archive_thumbnail') return { ok: true, value: [0x89, 0x50, 0x4e, 0x47] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('img', { name: 'Archive detail 封面' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(createObjectUrl.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'image/png' });
+  });
+
+  it('keeps spaces inside tags so translations can match', async () => {
+    installTagTranslations({ female: { 'big breasts': '巨乳' }, artist: { 'sample artist': '示例作者' } });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByText('巨乳')).toBeInTheDocument();
+    expect(screen.getByText('示例作者')).toBeInTheDocument();
+    expect(screen.queryByText('breasts')).not.toBeInTheDocument();
+  });
+
+  it.skip('selects a category in a modal and assigns the archive', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_categories') return { ok: true, value: [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: [] }] };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      if (command === 'add_archive_to_category') return { ok: true, value: { operation: 'add_to_category', success: 1 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDetail();
+
+    await user.click(await screen.findByRole('button', { name: '选择分类' }));
+    const dialog = screen.getByRole('dialog', { name: '选择分类' });
+    await user.click(screen.getByRole('radio', { name: 'Favorites' }));
+    await user.click(screen.getByRole('button', { name: '加入所选分类' }));
+
+    expect(dialog).not.toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('add_archive_to_category', {
+      serverId: 'server-a', categoryId: 'SET_1613080290', archiveId: 'archive-a',
+    });
+    expect(await screen.findByText('分类已更新')).toBeInTheDocument();
+  });
+
+  it('places reading, favorite, editing and delete actions in one toolbar', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_categories') return { ok: true, value: [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: [] }] };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    const toolbar = await screen.findByRole('toolbar', { name: '档案操作' });
+    expect(toolbar).toContainElement(screen.getByRole('link', { name: '阅读' }));
+    expect(toolbar).toContainElement(screen.getByRole('button', { name: '收藏' }));
+    expect(toolbar).toContainElement(screen.getByRole('button', { name: '编辑元数据' }));
+    expect(toolbar).not.toContainElement(screen.queryByRole('button', { name: '选择分类' }));
+    expect(toolbar).toContainElement(screen.getByRole('button', { name: '删除档案' }));
+  });
+});

@@ -1,10 +1,12 @@
-export type ImageRendition = 'source' | 'thumbnail' | 'preview' | 'enhanced';
+export type ImageRendition = 'source' | 'thumbnail' | 'preview' | 'enhanced' | 'cover' | 'page-thumbnail' | 'reader-page';
 
 export interface ImageCacheIdentity {
   scopeId: string;
+  serverId?: string;
   archiveId: string;
   pageIndex: number;
   rendition: ImageRendition;
+  sourcePath?: string;
   modelVersion?: string;
   transform?: string;
 }

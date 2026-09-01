@@ -13,6 +13,7 @@ export function TaskCenter() {
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [uploading, setUploading] = useState(false);
+  const [pendingTaskId, setPendingTaskId] = useState<string>();
 
   useEffect(() => {
     let active = true;
@@ -28,10 +29,10 @@ export function TaskCenter() {
   async function upload() {
     setError(undefined);
     setMessage(undefined);
-    const filePath = await pickArchiveFile();
-    if (!filePath) return;
     setUploading(true);
     try {
+      const filePath = await pickArchiveFile();
+      if (!filePath) return;
       const servers = await repository.listServers();
       if (!servers.ok || !servers.value[0]) {
         setError(servers.ok ? '尚未配置服务器' : servers.error.message);
@@ -58,22 +59,27 @@ export function TaskCenter() {
 
   async function act(task: TaskRecord, action: 'retry' | 'pause' | 'resume' | 'cancel') {
     setError(undefined);
-    const result = action === 'retry'
-      ? await repository.retryTask(task.id)
-      : await repository.updateTask(task.id, {
-        status: action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'cancelled',
-      });
-    if (!result.ok) {
-      setError(result.error.message);
-      return;
+    setPendingTaskId(task.id);
+    try {
+      const result = action === 'retry'
+        ? await repository.retryTask(task.id)
+        : await repository.updateTask(task.id, {
+          status: action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'cancelled',
+        });
+      if (!result.ok) {
+        setError(result.error.message);
+        return;
+      }
+      setTasks((current) => current.map((item) => item.id === result.value.id ? result.value : item));
+    } finally {
+      setPendingTaskId(undefined);
     }
-    setTasks((current) => current.map((item) => item.id === result.value.id ? result.value : item));
   }
 
   return (
     <div className="task-center">
       <header className="workspace-heading task-heading">
-        <div><p className="workspace-kicker">传输队列</p><h1>下载</h1></div>
+        <div><h1>下载</h1></div>
         <button className="primary-action" type="button" disabled={uploading} aria-busy={uploading} onClick={() => void upload()}>{uploading ? '上传中…' : '上传档案'}</button>
       </header>
       {message && <p role="status">{message}</p>}
@@ -86,22 +92,22 @@ export function TaskCenter() {
             <article className="task-row" key={task.id}>
               <div className="task-summary">
                 <strong>{task.label}</strong>
-                <small>{taskStatusLabel(task.status)}</small>
+                <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
               </div>
               <progress aria-label={`${task.label}进度`} max="100" value={Math.round(task.progress * 100)} />
               <span className="task-progress">{Math.round(task.progress * 100)}%</span>
               <div className="task-actions">
                 {task.status === 'failed' && task.retryable && (
-                  <button type="button" className="icon-button" aria-label={`重试${task.label}`} title="重试" onClick={() => void act(task, 'retry')}><RotateCcw aria-hidden="true" /></button>
+                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-busy={pendingTaskId === task.id} aria-label={`重试${task.label}`} title="重试" onClick={() => void act(task, 'retry')}><RotateCcw aria-hidden="true" /></button>
                 )}
                 {task.status === 'running' && (
-                  <button type="button" className="icon-button" aria-label={`暂停${task.label}`} title="暂停" onClick={() => void act(task, 'pause')}><Pause aria-hidden="true" /></button>
+                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-busy={pendingTaskId === task.id} aria-label={`暂停${task.label}`} title="暂停" onClick={() => void act(task, 'pause')}><Pause aria-hidden="true" /></button>
                 )}
                 {task.status === 'paused' && (
-                  <button type="button" className="icon-button" aria-label={`恢复${task.label}`} title="恢复" onClick={() => void act(task, 'resume')}><Play aria-hidden="true" /></button>
+                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-busy={pendingTaskId === task.id} aria-label={`恢复${task.label}`} title="恢复" onClick={() => void act(task, 'resume')}><Play aria-hidden="true" /></button>
                 )}
                 {task.cancelable && ['queued', 'running', 'paused'].includes(task.status) && (
-                  <button type="button" className="icon-button" aria-label={`取消${task.label}`} title="取消" onClick={() => void act(task, 'cancel')}><X aria-hidden="true" /></button>
+                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-busy={pendingTaskId === task.id} aria-label={`取消${task.label}`} title="取消" onClick={() => void act(task, 'cancel')}><X aria-hidden="true" /></button>
                 )}
               </div>
             </article>
@@ -119,4 +125,12 @@ function taskStatusLabel(status: TaskRecord['status']): string {
   if (status === 'completed') return '已完成';
   if (status === 'failed') return '失败';
   return '已取消';
+}
+
+function taskStatusClass(status: TaskRecord['status']): string {
+  if (status === 'failed' || status === 'cancelled') return 'status-chip-danger';
+  if (status === 'completed') return 'status-chip-success';
+  if (status === 'running') return 'status-chip-active';
+  if (status === 'paused') return 'status-chip-warning';
+  return 'status-chip-neutral';
 }

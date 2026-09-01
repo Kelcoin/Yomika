@@ -769,7 +769,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJournalRecord>
     })
 }
 
-fn append_journal_entry(
+pub(crate) fn append_journal_entry(
     connection: &Connection,
     input: SyncJournalInput,
 ) -> Result<SyncJournalRecord, String> {
@@ -804,6 +804,44 @@ fn append_journal_entry(
             row_to_record,
         )
         .map_err(|error| error.to_string())
+}
+
+/// Append a dedup relation mutation to the shared sync journal.
+/// Kept here so all sync records use the same device/clock/hash rules.
+pub(crate) fn append_dedup_journal(
+    connection: &mut Connection,
+    scope_id: &str,
+    pair_key: &str,
+    operation: &str,
+    left_archive_id: &str,
+    right_archive_id: &str,
+    tombstoned: bool,
+) -> Result<(), String> {
+    if scope_id.trim().is_empty() || pair_key.trim().is_empty() || !matches!(operation, "upsert" | "delete") {
+        return Err("Invalid dedup sync relation".into());
+    }
+    let payload = serde_json::json!({
+        "pairKey": pair_key,
+        "leftArchiveId": left_archive_id,
+        "rightArchiveId": right_archive_id,
+        "tombstoned": tombstoned,
+    });
+    let payload_json = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+    let payload_hash = format!("{:x}", sha2::Sha256::digest(payload_json.as_bytes()));
+    use sha2::Digest as _;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let device_id = get_or_create_device_id(&transaction)?;
+    let logical_clock: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?2",
+        params![scope_id, pair_key],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO sync_journal (scope_id,object_id,object_type,operation,device_id,logical_clock,payload_hash,payload_json)
+         VALUES (?1,?2,'dedup_non_duplicate',?3,?4,?5,?6,?7)",
+        params![scope_id, pair_key, operation, device_id, logical_clock, payload_hash, payload_json],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn query_journal_entries(

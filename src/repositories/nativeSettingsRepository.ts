@@ -7,7 +7,7 @@ export const PreferenceSnapshotSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
   defaultLayout: z.enum(['auto', 'single', 'double', 'webtoon']),
   defaultDirection: z.enum(['ltr', 'rtl']),
-  cacheMaxBytes: z.number().int().positive().safe(),
+  cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
 });
 
 export type PreferenceSnapshot = z.infer<typeof PreferenceSnapshotSchema>;

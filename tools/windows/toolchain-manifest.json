@@ -1,0 +1,15 @@
+{
+  "platform": "windows-x86_64",
+  "layout": {
+    "node": "toolchain/node/node.exe",
+    "npm": "toolchain/node/npm.cmd",
+    "cargo": "toolchain/rust/bin/cargo.exe",
+    "rustc": "toolchain/rust/bin/rustc.exe"
+  },
+  "versions": {
+    "node": ">=22",
+    "rust": "stable",
+    "tauri-cli": "2.8.x"
+  },
+  "note": "Binaries are intentionally not committed. Provision this directory from approved portable tool archives."
+}

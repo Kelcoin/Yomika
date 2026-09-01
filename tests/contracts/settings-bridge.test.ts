@@ -41,6 +41,12 @@ describe('native settings bridge', () => {
     });
   });
 
+  it('rejects cache quotas outside one through thirty-two GiB', async () => {
+    const repository = new NativeSettingsRepository();
+    await expect(repository.save({ ...preferences, cacheMaxBytes: 1_073_741_823 })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, cacheMaxBytes: 34_359_738_369 })).resolves.toMatchObject({ ok: false });
+  });
+
   it('imports a validated legacy ordinary-preference result', async () => {
     const imported = { preferences, importedCount: 3 };
     const adapter = vi.fn(async () => ({ ok: true, value: imported }));

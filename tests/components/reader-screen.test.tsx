@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
 
 import { App } from '../../src/app/App';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
@@ -48,14 +48,25 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
   });
 
-  it('pages with the mouse wheel only on paged reading canvas', () => {
+  it('releases loaded pages outside the visible prefetch window', async () => {
+    const releasePage = vi.fn();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={[...pages, pages[0]!, pages[1]!]} releasePage={releasePage} />
+      </MemoryRouter>,
+    );
+
+    await vi.waitFor(() => expect(releasePage.mock.calls.map(([index]) => index)).toEqual([2, 3, 4]));
+  });
+
+  it('uses the mouse wheel for zoom on paged reading canvas', () => {
     const { unmount } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
 
     fireEvent.wheel(reader, { deltaY: 120 });
-    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(0.76) translate(0px, 0px)');
     fireEvent.wheel(reader, { deltaY: -120 });
-    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(1) translate(0px, 0px)');
     const horizontalScroller = document.createElement('div');
     horizontalScroller.className = 'horizontal-scroller';
     reader.append(horizontalScroller);
@@ -81,8 +92,11 @@ describe('reader screen', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '连续滚动' }));
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
@@ -109,6 +123,8 @@ describe('reader screen', () => {
     Object.defineProperty(first, 'naturalWidth', { configurable: true, value: 700 });
     Object.defineProperty(first, 'naturalHeight', { configurable: true, value: 1000 });
     fireEvent.load(first);
+    expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
   });
 

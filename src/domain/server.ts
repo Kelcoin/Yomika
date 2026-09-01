@@ -21,7 +21,6 @@ export function normalizeServerUrl(value: string): string {
 
 export async function createServerIdentity(input: ServerIdentityInput): Promise<ServerIdentity> {
   const name = input.name.trim();
-  if (!name) throw new Error('Server name is required');
   const baseUrl = normalizeServerUrl(input.baseUrl);
   const origin = new URL(baseUrl).origin;
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${origin}\n${name.toLocaleLowerCase()}`));

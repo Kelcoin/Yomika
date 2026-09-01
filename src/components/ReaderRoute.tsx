@@ -1,69 +1,150 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
 import { getPrefetchPages } from '../domain/reader';
+import { getNativeImageCache } from '../lib/nativeImageCache';
+import type { ImageHandle } from '../lib/unifiedImageCache';
 
 const repository = new NativeLibraryRepository();
+const imageCache = getNativeImageCache();
 
-function bytesToDataUrl(bytes: ArrayBuffer): string {
-  const values = new Uint8Array(bytes);
-  let binary = '';
-  for (const value of values) binary += String.fromCharCode(value);
-  return `data:application/octet-stream;base64,${btoa(binary)}`;
+interface ReaderContext {
+  generation: number;
+  serverId: string;
+  scopeId: string;
+  archiveId: string;
+  paths: string[];
 }
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
-  const [serverId, setServerId] = useState<string>();
+  const [searchParams] = useSearchParams();
+  const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
+  const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
   const [title, setTitle] = useState('阅读器');
   const [pages, setPages] = useState<string[]>([]);
-  const [pagePaths, setPagePaths] = useState<string[]>([]);
   const [error, setError] = useState<string>();
+  const contextRef = useRef<ReaderContext>();
+  const pageHandlesRef = useRef(new Map<number, ImageHandle>());
+  const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
+  const generationRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  const releasePage = useCallback((pageIndex: number) => {
+    const handle = pageHandlesRef.current.get(pageIndex);
+    if (!handle) return;
+    pageHandlesRef.current.delete(pageIndex);
+    imageCache.release(handle);
+  }, []);
+
+  const releaseAllPages = useCallback(() => {
+    for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
+    pageHandlesRef.current.clear();
+    pendingPagesRef.current.clear();
+  }, []);
+
+  const loadPage = useCallback(async (pageIndex: number, signal?: AbortSignal) => {
+    const context = contextRef.current;
+    const path = context?.paths[pageIndex];
+    if (!context || !path || pageIndex < 0) return undefined;
+    const existing = pageHandlesRef.current.get(pageIndex);
+    if (existing) return existing.url;
+    const pending = pendingPagesRef.current.get(pageIndex);
+    if (pending) return pending;
+
+    const promise = (async () => {
+      const handle = await imageCache.load({
+        scopeId: context.scopeId,
+        serverId: context.serverId,
+        archiveId: context.archiveId,
+        pageIndex,
+        rendition: 'reader-page',
+        sourcePath: path,
+      }, signal ? { signal } : {});
+      const current = contextRef.current;
+      if (!mountedRef.current || !current || current.generation !== context.generation || signal?.aborted) {
+        imageCache.release(handle);
+        return undefined;
+      }
+      const occupied = pageHandlesRef.current.get(pageIndex);
+      if (occupied) {
+        imageCache.release(handle);
+        return occupied.url;
+      }
+      pageHandlesRef.current.set(pageIndex, handle);
+      return handle.url;
+    })().catch(() => undefined);
+    pendingPagesRef.current.set(pageIndex, promise);
+    void promise.then(() => {
+      if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
+    }, () => {
+      if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
+    });
+    return promise;
+  }, []);
 
   useEffect(() => {
-    let active = true;
+    mountedRef.current = true;
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    const controller = new AbortController();
+    contextRef.current = undefined;
+    releaseAllPages();
+    setScopeId(undefined);
+    setPages([]);
+    setError(undefined);
+
     void (async () => {
       const servers = await repository.listServers();
-      if (!servers.ok || !servers.value[0]) {
-        setError(servers.ok ? '尚未配置服务器' : servers.error.message);
+      if (!mountedRef.current || !servers.ok || !servers.value[0]) {
+        if (mountedRef.current) setError(servers.ok ? '尚未配置服务器' : servers.error.message);
         return;
       }
-      const selectedServerId = servers.value[0].id;
-      setServerId(selectedServerId);
-      const manifest = await repository.loadReaderManifest(selectedServerId, archiveId);
-      if (!active) return;
-      if (!manifest.ok) {
-        setError(manifest.error.message);
+      const server = servers.value[0];
+      const manifest = await repository.loadReaderManifest(server.id, archiveId);
+      if (!mountedRef.current || !manifest.ok) {
+        if (mountedRef.current && !manifest.ok) setError(manifest.error.message);
         return;
       }
+      const context: ReaderContext = {
+        generation,
+        serverId: server.id,
+        scopeId: server.scopeId,
+        archiveId,
+        paths: manifest.value.pages,
+      };
+      contextRef.current = context;
+      setScopeId(server.scopeId);
       setTitle(manifest.value.title);
-      setPagePaths(manifest.value.pages);
-      const progress = await repository.loadProgress(selectedServerId, archiveId);
-      if (!active) return;
-      if (progress.ok && progress.value) {
-        setInitialPage(Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1)));
-      }
-      const firstPage = progress.ok && progress.value
+      const progress = await repository.loadProgress(server.scopeId, archiveId);
+      if (!mountedRef.current || contextRef.current !== context) return;
+      const firstPage = requestedPage > 0
+        ? Math.min(requestedPage, Math.max(0, manifest.value.pages.length - 1))
+        : progress.ok && progress.value
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
         : 0;
+      setInitialPage(firstPage);
       const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, 1)];
-      const loaded = await Promise.all(indices.map(async (index) => {
-        const path = manifest.value.pages[index];
-        return [index, path ? await repository.loadReaderPage(selectedServerId, archiveId, index, path) : { ok: false as const, error: { code: 'INVALID_RESPONSE' as const, message: 'Invalid reader page path', retryable: false } }] as const;
-      }));
-      if (!active) return;
-      const failed = loaded.find(([, result]) => !result.ok);
-      if (failed && !failed[1].ok) {
-        setError(failed[1].error.message);
+      const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
+      if (!mountedRef.current || contextRef.current !== context) return;
+      if (loaded.some(([, source]) => !source)) {
+        setError('阅读页面加载失败');
         return;
       }
       const pageSources = Array<string>(manifest.value.pages.length).fill('');
-      for (const [index, result] of loaded) if (result.ok) pageSources[index] = bytesToDataUrl(result.value);
+      for (const [index, source] of loaded) if (source) pageSources[index] = source;
       setPages(pageSources);
     })();
-    return () => { active = false; };
-  }, [archiveId]);
+
+    return () => {
+      mountedRef.current = false;
+      controller.abort();
+      if (contextRef.current?.generation === generation) contextRef.current = undefined;
+      releaseAllPages();
+    };
+  }, [archiveId, loadPage, releaseAllPages, requestedPage]);
 
   if (error) return <main className="reader-screen"><section className="reader-error"><h1>阅读器加载失败</h1><p role="alert">{error}</p></section></main>;
   if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面…</p></main>;
@@ -74,23 +155,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       title={title}
       pages={pages}
       initialPage={initialPage}
-      loadPage={async (pageIndex) => {
-        if (!serverId) return undefined;
-        const path = pagePaths[pageIndex];
-        if (!path) return undefined;
-        const result = await repository.loadReaderPage(serverId, archiveId, pageIndex, path);
-        return result.ok ? bytesToDataUrl(result.value) : undefined;
-      }}
+      loadPage={loadPage}
+      releasePage={releasePage}
       onProgress={(pageIndex) => {
-        if (!serverId) return;
-        void repository.saveProgress({
-          scopeId: serverId,
-          archiveId,
-          pageIndex,
-          pageCount: pages.length,
-          layout: 'paged',
-          direction: 'ltr',
-        });
+        if (!scopeId) return;
+        void repository.saveProgress({ scopeId, archiveId, pageIndex, pageCount: pages.length, layout: 'paged', direction: 'ltr' });
       }}
     />
   );

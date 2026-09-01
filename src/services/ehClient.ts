@@ -4,10 +4,17 @@ import type { DomainErrorCode } from '../domain/errors';
 export type EhResponseClassification =
   | { kind: 'ok' }
   | { kind: 'cloudflare'; retryable: boolean; reauthRequired: boolean }
+  | { kind: 'access_blocked'; retryable: boolean; reauthRequired: boolean }
   | { kind: 'rate_limit'; retryable: boolean; reauthRequired: boolean }
   | { kind: 'unauthorized'; retryable: boolean; reauthRequired: boolean }
+  | { kind: 'content_warning'; retryable: boolean; reauthRequired: boolean }
   | { kind: 'gallery_deleted'; retryable: boolean; reauthRequired: boolean }
+  | { kind: 'gallery_copyright_removed'; retryable: boolean; reauthRequired: boolean }
+  | { kind: 'empty_response'; retryable: boolean; reauthRequired: boolean }
+  | { kind: 'unexpected_page'; retryable: boolean; reauthRequired: boolean }
   | { kind: 'unavailable'; retryable: boolean; reauthRequired: boolean };
+
+export type EhResponseContext = 'generic' | 'page';
 
 const TEMPORARY_COOKIES = new Set(['__utmp', 'igneous']);
 
@@ -128,19 +135,44 @@ export class EhCookieJar {
   }
 }
 
-export function classifyEhResponse(status: number, body: string): EhResponseClassification {
+export function classifyEhResponse(status: number, body: string, context: EhResponseContext = 'generic'): EhResponseClassification {
   const normalized = body.toLowerCase();
+  // EH sometimes returns these pages with HTTP 200 (and the copyright page
+  // currently returns 404), so inspect the body before relying on status.
+  if (normalized.includes('copyright claim')
+    || normalized.includes('copyright infringement')
+    || normalized.includes('copyright complaint')
+    || normalized.includes('copyright holder')
+    || normalized.includes('dmca')
+    || normalized.includes('removed due to copyright')
+    || normalized.includes('unavailable due to a copyright')) {
+    return { kind: 'gallery_copyright_removed', retryable: false, reauthRequired: false };
+  }
+  if (normalized.includes('cf-browser-verification')
+    || normalized.includes('_cf_chl_opt')
+    || normalized.includes('cf-challenge')
+    || normalized.includes('just a moment')
+    || normalized.includes('checking your browser')) {
+    return { kind: 'cloudflare', retryable: false, reauthRequired: false };
+  }
   if (status === 429 || normalized.includes('rate limit') || normalized.includes('too many requests')) {
     return { kind: 'rate_limit', retryable: true, reauthRequired: false };
   }
   if (status === 403 && (normalized.includes('cloudflare') || normalized.includes('cf-chl') || normalized.includes('captcha'))) {
     return { kind: 'cloudflare', retryable: false, reauthRequired: false };
   }
-  if (status === 401 || normalized.includes('not logged in') || normalized.includes('login required')) {
+  if (status === 401 || normalized.includes('<title>login</title>') || normalized.includes('please login') || normalized.includes('you must be logged in') || normalized.includes('not logged in') || normalized.includes('login required') || normalized.includes('your ip address has been temporarily banned')) {
     return { kind: 'unauthorized', retryable: false, reauthRequired: true };
   }
-  if (status === 404 || normalized.includes('gallery does not exist') || normalized.includes('gallery has been removed')) {
+  if (normalized.includes('you are seeing this page because') || /<h1\b[^>]*>[\s\S]*content warning[\s\S]*<\/h1>/i.test(body)) {
+    return { kind: 'content_warning', retryable: false, reauthRequired: true };
+  }
+  if (status === 403) return { kind: 'access_blocked', retryable: false, reauthRequired: false };
+  if (status === 404 || normalized.includes('gallery not found') || normalized.includes('gallery does not exist') || normalized.includes('gallery has been removed')) {
     return { kind: 'gallery_deleted', retryable: false, reauthRequired: false };
+  }
+  if (context === 'page' && status >= 200 && status < 300 && body.trim().length === 0) {
+    return { kind: 'empty_response', retryable: true, reauthRequired: false };
   }
   if (status >= 500 || status < 200) return { kind: 'unavailable', retryable: true, reauthRequired: false };
   return { kind: 'ok' };
@@ -192,10 +224,10 @@ export class EhHttpClient {
       const body = await response.text();
       const setCookie = response.headers.get('set-cookie');
       if (setCookie) this.cookieJar.setFromHeader(this.host, setCookie);
-      const classification = classifyEhResponse(response.status, body);
+      const classification = classifyEhResponse(response.status, body, 'page');
       if (classification.kind !== 'ok') return err(this.errorCode(classification.kind), this.errorMessage(classification.kind), classification.retryable);
       const gallery = parseEhGallery(body, target.toString());
-      return gallery.galleryKey ? ok(gallery) : err('INVALID_RESPONSE', 'Invalid E-Hentai gallery page', false);
+      return gallery.galleryKey ? ok(gallery) : err('EH_UNEXPECTED_PAGE', 'E-Hentai returned an unrecognized gallery page', false);
     } catch (cause) {
       return err('EH_UNAVAILABLE', cause instanceof Error ? cause.message : 'E-Hentai request failed', true);
     }
@@ -210,7 +242,7 @@ export class EhHttpClient {
       const body = await response.text();
       const setCookie = response.headers.get('set-cookie');
       if (setCookie) this.cookieJar.setFromHeader(this.host, setCookie);
-      const classification = classifyEhResponse(response.status, body);
+      const classification = classifyEhResponse(response.status, body, 'page');
       if (classification.kind !== 'ok') return err(this.errorCode(classification.kind), this.errorMessage(classification.kind), classification.retryable);
       return ok(parseEhComments(body));
     } catch (cause) {
@@ -281,7 +313,7 @@ export class EhHttpClient {
       const body = await response.text();
       const setCookie = response.headers.get('set-cookie');
       if (setCookie) this.cookieJar.setFromHeader(this.host, setCookie);
-      const classification = classifyEhResponse(response.status, body);
+      const classification = classifyEhResponse(response.status, body, 'page');
       if (classification.kind !== 'ok') return err(this.errorCode(classification.kind), this.errorMessage(classification.kind), classification.retryable);
       return ok({ galleries: parseEhSearchResults(body) });
     } catch (cause) {
@@ -324,18 +356,43 @@ export class EhHttpClient {
   }
 
   private errorCode(kind: Exclude<EhResponseClassification, { kind: 'ok' }>['kind']): DomainErrorCode {
+    if (kind === 'gallery_copyright_removed') return 'EH_GALLERY_COPYRIGHT_REMOVED';
     if (kind === 'gallery_deleted') return 'EH_GALLERY_DELETED';
     if (kind === 'unauthorized') return 'EH_REAUTH_REQUIRED';
     if (kind === 'rate_limit') return 'EH_RATE_LIMIT';
     if (kind === 'cloudflare') return 'EH_CLOUDFLARE';
+    if (kind === 'access_blocked') return 'EH_ACCESS_BLOCKED';
+    if (kind === 'content_warning') return 'EH_CONTENT_WARNING';
+    if (kind === 'empty_response') return 'EH_EMPTY_RESPONSE';
+    if (kind === 'unexpected_page') return 'EH_UNEXPECTED_PAGE';
     return 'EH_UNAVAILABLE';
   }
 
   private errorMessage(kind: Exclude<EhResponseClassification, { kind: 'ok' }>['kind']): string {
+    if (kind === 'gallery_copyright_removed') return 'E-Hentai gallery was removed due to a copyright claim';
     if (kind === 'gallery_deleted') return 'E-Hentai gallery was deleted or not found';
     if (kind === 'unauthorized') return 'E-Hentai login is required';
     if (kind === 'rate_limit') return 'E-Hentai rate limit reached';
     if (kind === 'cloudflare') return 'E-Hentai Cloudflare challenge blocked request';
+    if (kind === 'access_blocked') return 'E-Hentai access was blocked';
+    if (kind === 'content_warning') return 'E-Hentai content warning requires confirmation or login';
+    if (kind === 'empty_response') return 'E-Hentai returned an empty response';
+    if (kind === 'unexpected_page') return 'E-Hentai returned an unrecognized page';
     return 'E-Hentai is unavailable';
   }
+}
+
+export function presentEhError(code: string, fallback: string): string {
+  const messages: Record<string, string> = {
+    EH_GALLERY_COPYRIGHT_REMOVED: '画廊因版权要求被移除，评论不可用。',
+    EH_GALLERY_DELETED: '画廊不存在或已被删除。',
+    EH_CONTENT_WARNING: 'E-Hentai 内容警告页面需要登录或确认。',
+    EH_ACCESS_BLOCKED: 'E-Hentai 拒绝了当前请求，可能是 Cookie、IP 或访问权限问题。',
+    EH_CLOUDFLARE: 'E-Hentai 的 Cloudflare 验证拦截了请求。',
+    EH_REAUTH_REQUIRED: 'E-Hentai 登录已失效，请重新配置 Cookie。',
+    EH_RATE_LIMIT: 'E-Hentai 请求过于频繁，请稍后重试。',
+    EH_EMPTY_RESPONSE: 'E-Hentai 返回了空响应。',
+    EH_UNEXPECTED_PAGE: 'E-Hentai 返回了无法识别的页面。',
+  };
+  return messages[code] ?? fallback;
 }
