@@ -14,6 +14,9 @@ if ($content -notmatch 'pushd "%~dp0"') {
 if ($content -notmatch 'tools\\windows\\build\.ps1') {
     throw 'The entrypoint must invoke tools\\windows\\build.ps1.'
 }
+if ($content -notmatch '-UseHostTools') {
+    throw 'The entrypoint must opt into host tools by default.'
+}
 if ($content -notmatch '%\*') {
     throw 'The entrypoint must forward caller arguments to the PowerShell build script.'
 }
