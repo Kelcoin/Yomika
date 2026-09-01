@@ -13,6 +13,7 @@ import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCa
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
+import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -42,10 +43,11 @@ interface LibraryWorkspaceProps {
   onSortOrderChange?: ((value: 'asc' | 'desc') => void) | undefined;
   categoryFilter?: string | undefined;
   onCategoryFilterChange?: ((value: string) => void) | undefined;
+  readingProgressByArchiveId?: ReadonlyMap<string, number> | undefined;
   showDetail?: boolean | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, showDetail = true }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -56,6 +58,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState(archives[0]?.archiveId);
+  const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const navigate = useNavigate();
   useTagTranslations();
 
@@ -143,7 +146,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 if (!archive) return null;
                 return (
                   <div
-                    className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''}`}
+                    className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
                     key={archive.archiveId}
                     role="listitem"
                     style={{ height: row.size, transform: `translateY(${row.start}px)` }}
@@ -158,15 +161,20 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                       }}
                       type="button"
                     >
-                      {displayMode !== 'compact' && <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} eager={row.index < 8} />}
+                      {displayMode !== 'compact' && <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
+                        const next = new Set(current);
+                        if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
+                        else next.delete(archive.archiveId);
+                        return next;
+                      })} eager={row.index < 8} />}
                       <span className="archive-row-copy">
                         <strong>{archive.title}</strong>
-                        <span className="archive-row-meta">
-                          <small className="metadata-chip metadata-chip-page">{archive.pageCount} 页</small>
+                        {(archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language) && <span className="archive-row-meta archive-row-classification">
                           {(archive.category || archiveCategories.get(archive.archiveId)?.[0]) && <small className="metadata-chip" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0]}</small>}
                           {archive.language && <small className="metadata-chip">{archive.language}</small>}
-                        </span>
+                        </span>}
                         {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{(archive.tags ?? []).slice(0, 7).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
+                        <span className="archive-row-meta"><small>{formatArchiveDate(archive.addedAt)}</small><small>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</small></span>
                       </span>
                       <ChevronRight aria-hidden="true" />
                     </button>
@@ -259,10 +267,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
 }
 
-function LazyThumbnail({ archive, onLoad, onRelease, eager = false }: {
+function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = false }: {
   archive: ArchiveRecord;
   onLoad?: ((archive: ArchiveRecord, signal?: AbortSignal) => Promise<ImageHandle | undefined>) | undefined;
   onRelease?: ((handle: ImageHandle) => void) | undefined;
+  onAspectRatio?: ((ratio: number) => void) | undefined;
   eager?: boolean;
 }) {
   const [src, setSrc] = useState<string>();
@@ -313,7 +322,10 @@ function LazyThumbnail({ archive, onLoad, onRelease, eager = false }: {
       handleRef.current = undefined;
     };
   }, [archive, eager, onLoad, onRelease, retry]);
-  return <div ref={ref} className={`archive-row-thumb${!src ? ' is-skeleton' : ''}`}>{src ? <img src={src} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" /> : <span aria-hidden="true" />}</div>;
+  return <div ref={ref} className={`archive-row-thumb${!src ? ' is-skeleton' : ''}`}>{src ? <img src={src} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" onLoad={(event) => {
+    const image = event.currentTarget;
+    if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
+  }} /> : <span aria-hidden="true" />}</div>;
 }
 
 function LibraryHeading({ count, onRefresh, refreshing }: { count: number; onRefresh?: (() => void) | undefined; refreshing?: boolean | undefined }) {

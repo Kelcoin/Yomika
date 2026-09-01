@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import type { ArchiveRecord } from '../domain/library';
@@ -34,6 +34,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [hasMoreArchives, setHasMoreArchives] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
+  const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
   const initialArchivesLoaded = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -129,8 +130,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       if (categoryResult.ok) setCategories(categoryResult.value);
       else setCategoryError(categoryResult.error.message);
     });
-    const watchlistResult = await repository.listWatchlist(server.scopeId);
+    const [watchlistResult, historyResult] = await Promise.all([
+      repository.listWatchlist(server.scopeId),
+      repository.listHistory(server.scopeId),
+    ]);
     if (watchlistResult.ok) setWatchlist(watchlistResult.value);
+    if (historyResult.ok) setReadingHistory(historyResult.value);
     setLoading(false);
   }, []);
 
@@ -208,6 +213,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (firstArchive) loadArchiveDetails(serverId, scopeId, firstArchive);
   }, [archives, loadArchiveDetails, scopeId, selectedArchiveId, serverId]);
 
+  const readingProgressByArchiveId = useMemo(
+    () => new Map(readingHistory.map((item) => [item.archiveId, item.pageIndex + 1])),
+    [readingHistory],
+  );
+
   if (loading) {
     return (
       <div>
@@ -281,6 +291,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         onSortOrderChange={setSortOrder}
         categoryFilter={categoryFilter}
         onCategoryFilterChange={setCategoryFilter}
+        readingProgressByArchiveId={readingProgressByArchiveId}
         isFavorite={!!watchlist.find((item) => item.archiveId === selectedArchiveId && !item.deleted)}
         onToggleFavorite={async () => {
           if (!serverId || !selectedArchiveId) return;

@@ -1,11 +1,12 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
+import { ToastProvider } from '../../src/components/Toast';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -111,6 +112,31 @@ describe('archive detail route', () => {
 
     expect(await screen.findByRole('heading', { name: 'archive-a' })).toBeInTheDocument();
     expect(screen.getByText('正在加载档案详情…')).toHaveClass('archive-detail-inline-loading');
+  });
+
+  it('leaves a detail route when LANraragi confirms the archive is missing', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: '档案不存在', retryable: false } };
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: '档案不存在', retryable: false } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/library/archive-a']}>
+        <ToastProvider>
+          <Routes>
+            <Route path="/library/:archiveId" element={<ArchiveDetailRoute archiveId="archive-a" />} />
+            <Route path="/library" element={<main>档案库已恢复</main>} />
+          </Routes>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('档案库已恢复')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('该档案已从 LANraragi 移除');
   });
 
   it('uses an image MIME type for LANraragi thumbnail bytes', async () => {

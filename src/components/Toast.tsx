@@ -5,6 +5,7 @@ type ToastType = 'info' | 'success' | 'error';
 type ToastItem = { id: number; text: string; type: ToastType; closing: boolean };
 type ToastContextValue = { showToast: (text: string, type?: ToastType, duration?: number) => void };
 const ToastContext = createContext<ToastContextValue | null>(null);
+const fallbackToastContext: ToastContextValue = { showToast: () => undefined };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
@@ -34,5 +35,5 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 export function useToast(): ToastContextValue {
   const value = useContext(ToastContext);
-  return value ?? { showToast: () => undefined };
+  return value ?? fallbackToastContext;
 }

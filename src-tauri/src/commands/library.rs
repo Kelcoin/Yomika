@@ -434,6 +434,22 @@ fn server_connection(
         .map_err(|error| error.to_string())
 }
 
+fn reconcile_missing_archive_status(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    archive_id: &str,
+    status: reqwest::StatusCode,
+) -> Result<bool, String> {
+    if !matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+        return Ok(false);
+    }
+    connection.execute(
+        "UPDATE archives SET is_deleted = 1, local_updated_at = CURRENT_TIMESTAMP WHERE server_id = ?1 AND archive_id = ?2",
+        params![server_id, archive_id],
+    ).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 async fn reader_request(
     method: reqwest::Method,
     url: String,
@@ -842,6 +858,22 @@ pub async fn load_archive_metadata(
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
+    let status = response.status();
+    if matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+        let reconciliation = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|connection| reconcile_missing_archive_status(&connection, &server_id, &archive_id, status));
+        if let Err(error) = reconciliation {
+            return Ok(CommandResult::failure("UNKNOWN", error, true));
+        }
+        return Ok(CommandResult::failure(
+            "LRR_NOT_FOUND",
+            "该档案已从 LANraragi 移除",
+            false,
+        ));
+    }
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
             "REMOTE_UNAVAILABLE",
@@ -2928,6 +2960,43 @@ mod tests {
             )
             .expect("tombstoned archive");
         assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn missing_metadata_status_tombstones_only_definitively_missing_archives() {
+        let connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://example.com', 'scope-a')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, is_deleted) VALUES ('scope-a', 'archive-a', 'Stale', 'stale', '[]', 1, 0)",
+            [],
+        ).unwrap();
+
+        assert!(!reconcile_missing_archive_status(
+            &connection,
+            "scope-a",
+            "archive-a",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ).unwrap());
+        assert_eq!(connection.query_row(
+            "SELECT is_deleted FROM archives WHERE server_id='scope-a' AND archive_id='archive-a'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        assert!(reconcile_missing_archive_status(
+            &connection,
+            "scope-a",
+            "archive-a",
+            reqwest::StatusCode::BAD_REQUEST,
+        ).unwrap());
+        assert_eq!(connection.query_row(
+            "SELECT is_deleted FROM archives WHERE server_id='scope-a' AND archive_id='archive-a'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
     }
 
     #[test]

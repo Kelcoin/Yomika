@@ -73,7 +73,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       void repository.loadArchiveMetadata(server.id, archiveId).then((result) => {
         if (!active) return;
         if (result.ok) setMetadata(result.value);
-        else setError(result.error.message);
+        else if (result.error.code === 'LRR_NOT_FOUND') {
+          showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
+          navigate('/library', { replace: true });
+        } else setError(result.error.message);
         setMetadataLoading(false);
       });
       void getNativeImageCache().load({
@@ -100,7 +103,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       coverController.abort();
       if (coverHandle) getNativeImageCache().release(coverHandle);
     };
-  }, [archiveId]);
+  }, [archiveId, navigate, showToast]);
 
   if (error && !metadata && !serverId) {
     return (

@@ -75,6 +75,7 @@ function HomeWorkspace() {
   const continueReading = recent.map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item));
   const toRead = watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8);
   const random = useMemo(() => [...archives].sort(() => Math.random() - 0.5).slice(0, 8), [archives, serverLoadAttempt]);
+  const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   return (
     <div className="workspace-home">
       <header className="workspace-heading">
@@ -124,9 +125,9 @@ function HomeWorkspace() {
         </section>
       )}
       {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} wide />
-      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} />
-      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} />
+      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
+      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
+      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
       </>}
       <div className="shelf-rule" aria-hidden="true"><span>最近阅读</span><span>{String(recent.length).padStart(2, '0')}</span></div>
       {recentLoading && <p className="server-list-message" role="status">正在读取最近阅读…</p>}
