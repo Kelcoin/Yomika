@@ -36,6 +36,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
+  const loadingMoreRef = useRef(false);
   const initialArchivesLoaded = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortMode, setSortMode] = useState<'title' | 'added'>('added');
@@ -140,19 +141,26 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   }, []);
 
   const loadMoreArchives = useCallback(async () => {
-    if (!serverId || loadingMore || !hasMoreArchives) return;
+    // Scroll events fire many times before React re-renders, so the state flag
+    // alone lets several requests through with the same offset.
+    if (!serverId || loadingMoreRef.current || !hasMoreArchives) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
-    const result = await repository.listArchivesPage(serverId, archives.length, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null });
-    if (result.ok) {
-      setArchives((current) => {
-        const seen = new Set(current.map((item) => item.archiveId));
-        return [...current, ...result.value.items.filter((item) => !seen.has(item.archiveId))];
-      });
-      setTotalArchives(result.value.total);
-      setHasMoreArchives(result.value.hasMore);
+    try {
+      const result = await repository.listArchivesPage(serverId, archives.length, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null });
+      if (result.ok) {
+        setArchives((current) => {
+          const seen = new Set(current.map((item) => item.archiveId));
+          return [...current, ...result.value.items.filter((item) => !seen.has(item.archiveId))];
+        });
+        setTotalArchives(result.value.total);
+        setHasMoreArchives(result.value.hasMore);
+      }
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
     }
-    setLoadingMore(false);
-  }, [archives.length, categoryFilter, hasMoreArchives, loadingMore, searchQuery, sortMode, sortOrder, serverId]);
+  }, [archives.length, categoryFilter, hasMoreArchives, searchQuery, sortMode, sortOrder, serverId]);
 
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!serverId || !scopeId) return undefined;
@@ -211,7 +219,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (selectedArchiveId && archives.some((archive) => archive.archiveId === selectedArchiveId)) return;
     const firstArchive = archives[0];
     if (firstArchive) loadArchiveDetails(serverId, scopeId, firstArchive);
-  }, [archives, loadArchiveDetails, scopeId, selectedArchiveId, serverId]);
+  }, [archives, loadArchiveDetails, scopeId, selectedArchiveId, serverId, showDetail]);
 
   const readingProgressByArchiveId = useMemo(
     () => new Map(readingHistory.map((item) => [item.archiveId, item.pageIndex + 1])),

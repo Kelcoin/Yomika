@@ -91,4 +91,24 @@ describe('reader route', () => {
     expect(loadedPaths[0]).toBe('3.jpg');
     expect(new Set(loadedPaths)).toEqual(new Set(['2.jpg', '3.jpg', '4.jpg']));
   });
+
+  it('opens the restored page even when a neighbour prefetch fails', async () => {
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'load_reader_page') {
+        return String(args?.path) === '1.jpg'
+          ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '页面暂时不可用', retryable: true } }
+          : { ok: true, value: [1] };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.queryByText('阅读页面加载失败')).not.toBeInTheDocument();
+  });
 });

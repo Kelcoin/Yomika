@@ -170,7 +170,13 @@ impl WebdavClient {
         }
         Ok(Self {
             base_url: url,
-            client: Client::new(),
+            // Without an explicit timeout a stalled WebDAV server keeps the sync
+            // task hanging forever; the LANraragi and E-Hentai clients already
+            // set one.
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|error| WebdavError::Request(error.to_string()))?,
             username: username.to_string(),
             password: password.to_string(),
         })

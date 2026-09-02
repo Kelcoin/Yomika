@@ -14,9 +14,13 @@ export interface ImageCacheIdentity {
 export function createImageCacheKey(identity: ImageCacheIdentity): string {
   const fields = [
     identity.scopeId,
+    identity.serverId ?? '',
     identity.archiveId,
     String(Math.max(0, Math.floor(identity.pageIndex))),
     identity.rendition,
+    // Reader page order can change after a forced file-list refresh; without the
+    // source path the same page index would keep serving the old image.
+    identity.sourcePath ?? '',
     identity.modelVersion ?? '',
     identity.transform ?? '',
   ];

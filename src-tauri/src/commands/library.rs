@@ -1043,6 +1043,19 @@ pub async fn load_reader_page(
     path: String,
     database: State<'_, Database>,
     app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_reader_page_bytes(server_id, archive_id, page_index, path, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+async fn load_reader_page_bytes(
+    server_id: String,
+    archive_id: String,
+    page_index: i64,
+    path: String,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
     use tauri::Manager;
 
@@ -1122,6 +1135,17 @@ pub async fn load_reader_page(
 
 #[tauri::command]
 pub async fn load_archive_thumbnail(
+    server_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_archive_thumbnail_bytes(server_id, archive_id, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+pub(crate) async fn load_archive_thumbnail_bytes(
     server_id: String,
     archive_id: String,
     database: State<'_, Database>,
@@ -1228,6 +1252,18 @@ pub async fn load_archive_thumbnail(
 /// Minion job; wait for that job before retrying the binary request.
 #[tauri::command]
 pub async fn load_archive_page_thumbnail(
+    server_id: String,
+    archive_id: String,
+    page: i64,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_archive_page_thumbnail_bytes(server_id, archive_id, page, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+async fn load_archive_page_thumbnail_bytes(
     server_id: String,
     archive_id: String,
     page: i64,
@@ -1406,10 +1442,13 @@ fn archive_added_at(tags: &[String]) -> Option<i64> {
 }
 
 fn archive_search_token(value: &str) -> String {
+    // SQLite's LOWER() only folds A-Z, so the pattern must fold the same way.
+    // Rust's full Unicode to_lowercase() turned a typed "É" into "é" and then
+    // never matched the stored "É" that LOWER() had left untouched.
     value
         .trim()
         .trim_end_matches('$')
-        .to_lowercase()
+        .to_ascii_lowercase()
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
@@ -3030,6 +3069,31 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "target");
         assert_eq!(page.items[0].tags, vec!["artist:alpha", "language:chinese", "date_added:1756512000"]);
+    }
+
+    #[test]
+    fn archive_query_matches_non_ascii_uppercase_titles() {
+        // SQLite's LOWER() leaves "É" alone. Folding the pattern with Rust's
+        // full Unicode to_lowercase() produced "é" and the row never matched.
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'accented', 'Éclair Special', 'éclair special', '[]', 1);",
+        ).unwrap();
+
+        let page = query_archive_page(&connection, &ArchiveQueryInput {
+            server_id: "scope-a".to_string(),
+            query: "Éclair".to_string(),
+            sort_by: "title".to_string(),
+            order: "asc".to_string(),
+            category_id: None,
+            offset: 0,
+            limit: 100,
+        }).expect("accented search");
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].archive_id, "accented");
     }
 
     #[test]

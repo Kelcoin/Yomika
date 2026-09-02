@@ -14,6 +14,7 @@ import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -59,6 +60,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState(archives[0]?.archiveId);
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
+  const [gridWidth, setGridWidth] = useState(0);
   const navigate = useNavigate();
   useTagTranslations();
 
@@ -92,6 +94,67 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscan: 6,
     initialRect: { width: 720, height: 560 },
   });
+
+  // Thumbnail mode is a fixed-width grid, so the column count is measurable and
+  // rows can be virtualized like the list modes. Without this the mode rendered
+  // every loaded archive at once.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const measured = entries[0]?.contentRect.width ?? element.clientWidth;
+      setGridWidth((current) => (Math.abs(current - measured) < 1 ? current : measured));
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const gridColumns = getArchiveGridColumns(gridWidth || 720);
+  const gridRows = useMemo(
+    () => (displayMode === 'thumbnail'
+      ? packArchiveGridRows(filteredArchives, gridColumns, (archive) => wideCoverIds.has(archive.archiveId))
+      : []),
+    [displayMode, filteredArchives, gridColumns, wideCoverIds],
+  );
+  const thumbnailRows = useVirtualizer({
+    count: gridRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ARCHIVE_GRID_ROW_HEIGHT + ARCHIVE_GRID_GAP,
+    overscan: 2,
+    initialRect: { width: 720, height: 560 },
+  });
+
+  const renderArchiveButton = (archive: ArchiveRecord, eager: boolean) => (
+    <button
+      aria-pressed={archive.archiveId === selected?.archiveId}
+      className="archive-row"
+      onClick={() => {
+        setSelectedId(archive.archiveId);
+        onSelect?.(archive);
+        if (!showDetail) navigate(`/library/${archive.archiveId}`);
+      }}
+      type="button"
+    >
+      {displayMode !== 'compact' && <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
+        // Returning a fresh Set on every cover load would re-render the whole
+        // list once per thumbnail.
+        if (current.has(archive.archiveId) === isWideCoverRatio(ratio)) return current;
+        const next = new Set(current);
+        if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
+        else next.delete(archive.archiveId);
+        return next;
+      })} eager={eager} />}
+      <span className="archive-row-copy">
+        <strong>{archive.title}</strong>
+        {(archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language) && <span className="archive-row-meta archive-row-classification">
+          {(archive.category || archiveCategories.get(archive.archiveId)?.[0]) && <small className="metadata-chip" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0]}</small>}
+          {archive.language && <small className="metadata-chip">{archive.language}</small>}
+        </span>}
+        {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{(archive.tags ?? []).slice(0, 7).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
+        <span className="archive-row-meta"><small>{formatArchiveDate(archive.addedAt)}</small><small>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</small></span>
+      </span>
+      <ChevronRight aria-hidden="true" />
+    </button>
+  );
 
   return (
     <div className="library-workspace">
@@ -138,10 +201,29 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
           }}>
             {filteredArchives.length === 0 && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
+            {displayMode === 'thumbnail' ? (
+              <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
+                {thumbnailRows.getVirtualItems().map((virtualRow) => (
+                  <div
+                    className="archive-thumb-grid-row"
+                    key={virtualRow.key}
+                    style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    {(gridRows[virtualRow.index] ?? []).map((archive) => (
+                      <div
+                        className={`archive-row-wrap ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
+                        key={archive.archiveId}
+                        role="listitem"
+                      >
+                        {renderArchiveButton(archive, virtualRow.index < 2)}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : (
             <div className="archive-list-inner" style={{ height: rows.getTotalSize() }}>
-              {(displayMode === 'thumbnail'
-                ? filteredArchives.map((_, index) => ({ index, start: index * 250, size: 250 }))
-                : rows.getVirtualItems()).map((row) => {
+              {rows.getVirtualItems().map((row) => {
                 const archive = filteredArchives[row.index];
                 if (!archive) return null;
                 return (
@@ -151,37 +233,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     role="listitem"
                     style={{ height: row.size, transform: `translateY(${row.start}px)` }}
                   >
-                    <button
-                      aria-pressed={archive.archiveId === selected?.archiveId}
-                      className="archive-row"
-                      onClick={() => {
-                        setSelectedId(archive.archiveId);
-                        onSelect?.(archive);
-                        if (!showDetail) navigate(`/library/${archive.archiveId}`);
-                      }}
-                      type="button"
-                    >
-                      {displayMode !== 'compact' && <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
-                        const next = new Set(current);
-                        if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
-                        else next.delete(archive.archiveId);
-                        return next;
-                      })} eager={row.index < 8} />}
-                      <span className="archive-row-copy">
-                        <strong>{archive.title}</strong>
-                        {(archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language) && <span className="archive-row-meta archive-row-classification">
-                          {(archive.category || archiveCategories.get(archive.archiveId)?.[0]) && <small className="metadata-chip" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0]}</small>}
-                          {archive.language && <small className="metadata-chip">{archive.language}</small>}
-                        </span>}
-                        {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{(archive.tags ?? []).slice(0, 7).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
-                        <span className="archive-row-meta"><small>{formatArchiveDate(archive.addedAt)}</small><small>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</small></span>
-                      </span>
-                      <ChevronRight aria-hidden="true" />
-                    </button>
+                    {renderArchiveButton(archive, row.index < 8)}
                   </div>
                 );
               })}
             </div>
+            )}
           </div>
         </Panel>
         {showDetail && <><Separator className="panel-separator" />

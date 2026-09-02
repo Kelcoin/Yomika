@@ -1,5 +1,8 @@
-const SENSITIVE_KEY = /(?:api[_-]?key|token|password|authorization|cookie|sync[_-]?secret|ipb_member_id|ipb_pass_hash)/i;
-const SENSITIVE_QUERY = /([?&](?:api[_-]?key|token|password|sync[_-]?secret)=)[^&#\s]+/gi;
+const SENSITIVE_NAME = 'api[_-]?key|token|password|passwd|sync[_-]?secret|credential|secret|ipb_member_id|ipb_pass_hash';
+const SENSITIVE_KEY = new RegExp(`(?:${SENSITIVE_NAME}|authorization|cookie)`, 'i');
+// Matches `name=value` / `name: value` anywhere in a string, not only in a query
+// string: E-Hentai auth travels as a raw `Cookie:` header value.
+const SENSITIVE_ASSIGNMENT = new RegExp(`\\b(${SENSITIVE_NAME})(\\s*[=:]\\s*)[^\\s,;&#]+`, 'gi');
 const BEARER_VALUE = /(Bearer\s+)[^\s,;]+/gi;
 
 export function redactSensitive(value: unknown): unknown {
@@ -9,7 +12,7 @@ export function redactSensitive(value: unknown): unknown {
 function redact(value: unknown, seen: WeakSet<object>): unknown {
   if (typeof value === 'string') {
     return value
-      .replace(SENSITIVE_QUERY, '$1[REDACTED]')
+      .replace(SENSITIVE_ASSIGNMENT, '$1$2[REDACTED]')
       .replace(BEARER_VALUE, '$1[REDACTED]');
   }
 

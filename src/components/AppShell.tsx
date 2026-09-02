@@ -32,7 +32,6 @@ const navigation = [
 ] as const;
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
-routeTitles['/dedup'] = '查重';
 const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 
 interface AppShellProps {

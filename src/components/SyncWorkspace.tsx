@@ -119,7 +119,7 @@ export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {})
           <label>名称<input name="label" required autoComplete="off" /></label>
           <label>WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
           <label>用户名<input name="username" autoComplete="username" spellCheck={false} /></label>
-          <label>密码或 Token<input name="credential" required type="password" autoComplete="current-password" spellCheck={false} /></label>
+          <label>密码或 Token<input name="credential" required type="password" autoComplete="off" spellCheck={false} /></label>
           <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存同步账户'}</button>
         </form>
       </section>

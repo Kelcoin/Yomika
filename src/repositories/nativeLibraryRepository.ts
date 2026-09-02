@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { invokeCommand } from '../bridge/invoke';
+import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import {
   ArchiveRecordSchema,
   ArchivePageSchema,
@@ -134,24 +134,21 @@ export class NativeLibraryRepository {
     return invokeCommand('use_metadata_plugin', { serverId, archiveId, plugin, arg }, z.record(z.unknown()));
   }
   async loadArchiveThumbnail(serverId: string, archiveId: string): Promise<CommandResult<ArrayBuffer>> {
-    const result = await invokeCommand('load_archive_thumbnail', { serverId, archiveId }, z.array(z.number().int().min(0).max(255)));
+    const result = await invokeBinaryCommand('load_archive_thumbnail', { serverId, archiveId });
     if (result.ok) window.dispatchEvent(new Event('yomika:cache-changed'));
-    return result.ok ? { ok: true, value: new Uint8Array(result.value).buffer } : result;
+    return result;
   }
-  async loadArchivePageThumbnail(serverId: string, archiveId: string, page: number): Promise<CommandResult<ArrayBuffer>> {
-    const result = await invokeCommand('load_archive_page_thumbnail', { serverId, archiveId, page }, z.array(z.number().int().min(0).max(255)));
-    return result.ok ? { ok: true, value: new Uint8Array(result.value).buffer } : result;
+  loadArchivePageThumbnail(serverId: string, archiveId: string, page: number): Promise<CommandResult<ArrayBuffer>> {
+    return invokeBinaryCommand('load_archive_page_thumbnail', { serverId, archiveId, page });
   }
   loadReaderManifest(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ReaderManifestSchema>>> {
     return invokeCommand('load_reader_manifest', { serverId, archiveId }, ReaderManifestSchema);
   }
 
   async loadReaderPage(serverId: string, archiveId: string, pageIndex: number, path: string): Promise<CommandResult<ArrayBuffer>> {
-    const result = await invokeCommand('load_reader_page', { serverId, archiveId, pageIndex, path }, z.array(z.number().int().min(0).max(255)));
+    const result = await invokeBinaryCommand('load_reader_page', { serverId, archiveId, pageIndex, path });
     if (result.ok) window.dispatchEvent(new Event('yomika:cache-changed'));
-    return result.ok
-      ? { ok: true, value: new Uint8Array(result.value).buffer }
-      : result;
+    return result;
   }
 
   replaceArchives(serverId: string, searchResponseJson: string): Promise<CommandResult<ArchiveRecord[]>> {

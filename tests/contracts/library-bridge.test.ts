@@ -188,6 +188,30 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value: new Uint8Array([255, 216, 255]).buffer });
   });
 
+  it('accepts a binary IPC body for image commands without a JSON envelope', async () => {
+    const adapter = vi.fn(async (command: string) => (command === 'load_reader_page'
+      ? new Uint8Array([255, 216, 255, 224]).buffer
+      : new Uint8Array([137, 80, 78, 71])));
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeLibraryRepository();
+
+    expect(await repository.loadReaderPage('scope-a', 'a1', 0, '00.jpg')).toEqual({
+      ok: true, value: new Uint8Array([255, 216, 255, 224]).buffer,
+    });
+    expect(await repository.loadArchivePageThumbnail('scope-a', 'a1', 3)).toEqual({
+      ok: true, value: new Uint8Array([137, 80, 78, 71]).buffer,
+    });
+  });
+
+  it('keeps the JSON error envelope for failed image commands', async () => {
+    const adapter = vi.fn(async () => ({ ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '页面暂时不可用', retryable: true } }));
+    setInvokeAdapterForTests(adapter);
+
+    expect(await new NativeLibraryRepository().loadReaderPage('scope-a', 'a1', 0, '00.jpg')).toEqual({
+      ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '页面暂时不可用', retryable: true },
+    });
+  });
+
   it('lists schema-validated server records', async () => {
     const value = [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }];
     const adapter = vi.fn(async () => ({ ok: true, value }));

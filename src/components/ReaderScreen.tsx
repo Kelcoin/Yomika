@@ -1,6 +1,6 @@
 import { ArrowLeft, ChevronLeft, ChevronRight, Maximize2, Minimize2, Minus, RotateCcw, ZoomIn, Play, Pause, PanelRight } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type WheelEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
 import { advanceReader, applyZoom, clampZoom, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, resolveReaderLayout, resetZoom, toggleDoubleTapZoom, toggleReaderChrome, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
@@ -13,20 +13,34 @@ interface ReaderScreenProps {
   direction?: ReadingDirection;
   layout?: ReaderLayoutPreference;
   loadPage?: (pageIndex: number, signal?: AbortSignal) => Promise<string | undefined>;
+  loadPageThumbnail?: (pageIndex: number) => Promise<string | undefined>;
   releasePage?: (pageIndex: number) => void;
-  onProgress?: (pageIndex: number) => void;
+  onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection }) => void;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, releasePage, onProgress }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   const [loadedPages, setLoadedPages] = useState(pages);
   const [zoom, setZoom] = useState<ZoomState>(createZoomState);
+  const [thumbnails, setThumbnails] = useState<ReadonlyMap<number, string>>(() => new Map());
+  const rootRef = useRef<HTMLElement>(null);
   const zoomScaleRef = useRef(1);
+  const layoutRef = useRef(state.layout);
+  const reportedPageRef = useRef(state.pageIndex);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
 
   useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
+  useEffect(() => { layoutRef.current = state.layout; }, [state.layout]);
+  // Report from an effect rather than from inside a state updater: every page
+  // change is covered (toolbar, keyboard, swipe, thumbnail jump) and StrictMode
+  // cannot double-fire a save.
+  useEffect(() => {
+    if (reportedPageRef.current === state.pageIndex) return;
+    reportedPageRef.current = state.pageIndex;
+    onProgress?.(state.pageIndex, { layout: state.layout, direction: state.direction });
+  }, [onProgress, state.direction, state.layout, state.pageIndex]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
@@ -35,7 +49,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => {
     if (!releasePage) return;
     const keep = new Set<number>();
-    if (state.layout === 'webtoon' || thumbnailPanelOpen) {
+    if (state.layout === 'webtoon') {
       for (let index = 0; index < loadedPages.length; index += 1) keep.add(index);
     } else {
       for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout })) {
@@ -63,7 +77,44 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (page) setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
       }).finally(() => loadingPagesRef.current.delete(index));
     }
-  }, [loadPage, loadedPages, releasePage, state.layout, state.pageIndex, thumbnailPanelOpen]);
+  }, [loadPage, loadedPages, releasePage, state.layout, state.pageIndex]);
+
+  // The thumbnail panel used to pin every page of the archive as a full-size
+  // image. Load the small page-thumbnail rendition instead, one at a time so a
+  // long archive cannot burst hundreds of requests.
+  useEffect(() => {
+    if (!thumbnailPanelOpen || !loadPageThumbnail) return undefined;
+    let active = true;
+    void (async () => {
+      for (let index = 0; index < pages.length; index += 1) {
+        if (!active) return;
+        const url = await loadPageThumbnail(index);
+        if (!active) return;
+        if (url) setThumbnails((current) => current.get(index) === url ? current : new Map(current).set(index, url));
+      }
+    })();
+    return () => { active = false; };
+  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen]);
+
+  // React registers wheel listeners as passive, so preventDefault() inside
+  // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
+  useEffect(() => {
+    const element = rootRef.current;
+    if (!element) return undefined;
+    const onWheel = (event: globalThis.WheelEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (layoutRef.current === 'webtoon' || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller')) return;
+      if (event.deltaY === 0) return;
+      if (event.cancelable) event.preventDefault();
+      setZoom((current) => applyZoom(current, current.scale - event.deltaY * 0.002, current.panX, current.panY));
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    return () => element.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Arrow keys are bound to the canvas, so it has to own focus from the start;
+  // otherwise the user must click first, and that click toggles the chrome.
+  useEffect(() => { rootRef.current?.focus({ preventScroll: true }); }, []);
 
   useEffect(() => {
     if (!autoPlay) return undefined;
@@ -86,7 +137,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   function move(intent: 'next' | 'previous') {
     setState((current) => {
       const next = advanceReader(current, intent);
-      if (next.pageIndex !== current.pageIndex) onProgress?.(next.pageIndex);
       return current.phase === 'chrome-visible' ? { ...next, phase: 'chrome-visible' } : next;
     });
   }
@@ -101,16 +151,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     } else if (event.key === 'Escape' && state.phase === 'chrome-visible') {
       setState(toggleReaderChrome);
     }
-  }
-
-  function handleWheel(event: WheelEvent<HTMLElement>) {
-    const target = event.target instanceof Element ? event.target : null;
-    if (state.layout === 'webtoon' || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller')) return;
-    if (event.deltaY === 0) return;
-    // Vertical wheel controls zoom in paged modes. Page navigation is handled
-    // by horizontal swipes, arrow keys, and the explicit toolbar buttons.
-    event.preventDefault();
-    setZoom((current) => applyZoom(current, current.scale - event.deltaY * 0.002, current.panX, current.panY));
   }
 
   function stopChromeToggle(event: MouseEvent) {
@@ -171,9 +211,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     <main
       aria-label="漫画阅读器"
       className="reader-screen"
+      ref={rootRef}
       onClick={() => setState(toggleReaderChrome)}
       onKeyDown={handleKeyDown}
-      onWheel={handleWheel}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
       tabIndex={0}
@@ -227,7 +267,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button type="button" aria-label="连续滚动" aria-pressed={state.layout === 'webtoon'} onClick={() => setState((current) => ({ ...current, layout: 'webtoon' }))}>连续滚动</button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
               <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><PanelRight aria-hidden="true" /></button>
-              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed="true" onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? '从左到右' : '从右到左'}</button>
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed={state.direction === 'rtl'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? '从左到右' : '从右到左'}</button>
               <button type="button" aria-label="放大" onClick={zoomIn}><ZoomIn aria-hidden="true" /></button>
               <button type="button" aria-label="缩小" onClick={zoomOut}><Minus aria-hidden="true" /></button>
               {zoom.scale > 1 && <button type="button" aria-label="重置缩放" onClick={zoomReset}><RotateCcw aria-hidden="true" /></button>}
@@ -241,11 +281,17 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       </AnimatePresence>
       {thumbnailPanelOpen && (
         <aside className="reader-thumbnail-panel" aria-label="页面缩略图">
-          {loadedPages.map((page, index) => (
-            <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={() => setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }))}>
-              {page ? <img src={page} alt="" loading="lazy" /> : <span>{index + 1}</span>}
-            </button>
-          ))}
+          {loadedPages.map((page, index) => {
+            const preview = thumbnails.get(index) ?? page;
+            return (
+              <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={(event) => {
+                stopChromeToggle(event);
+                setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
+              }}>
+                {preview ? <img src={preview} alt="" loading="lazy" /> : <span>{index + 1}</span>}
+              </button>
+            );
+          })}
         </aside>
       )}
     </main>

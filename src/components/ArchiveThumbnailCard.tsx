@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, BookOpen, Heart } from 'lucide-react';
+import { BookOpen, Heart } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { translateRawTag } from '../lib/tags';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { useHorizontalScroller } from '../lib/horizontalScroller';
 
 const imageCache = getNativeImageCache();
 const importantNamespaces = ['language', 'artist', 'group', 'parody', 'character', 'female', 'male'];
@@ -42,11 +43,16 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) setAspectRatio(image.naturalWidth / image.naturalHeight);
     }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}</div>
-    <div className="archive-thumb-card-body"><div className="archive-thumb-card-title"><strong>{archive.title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>{tags.length > 0 && <div className="archive-thumb-card-tags">{tags.map((tag) => <span className="metadata-chip" key={tag}>{translateRawTag(tag)}</span>)}</div>}<div className="archive-thumb-card-meta"><span>{formatArchiveDate(archive.addedAt)}</span><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span></div><ArrowRight aria-hidden="true" /></div>
+    <div className="archive-thumb-card-body"><div className="archive-thumb-card-title"><strong>{archive.title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div><div className="archive-thumb-card-tags">{tags.map((tag) => <span className="metadata-chip" key={tag}>{translateRawTag(tag)}</span>)}</div><div className="archive-thumb-card-meta"><span>{formatArchiveDate(archive.addedAt)}</span><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span></div></div>
   </Link>;
 }
 
 export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> }) {
   if (!archives.length) return null;
-  return <section className="archive-rail" aria-label={title}><div className="archive-rail-heading"><h2>{title}</h2><BookOpen aria-hidden="true" /></div><div className="archive-rail-grid">{archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}</div></section>;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} />;
+}
+
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined }) {
+  const scroller = useHorizontalScroller();
+  return <section className="archive-rail" aria-label={title}><div className="archive-rail-heading"><h2>{title}</h2><BookOpen aria-hidden="true" /></div><div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>{archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}</div></section>;
 }

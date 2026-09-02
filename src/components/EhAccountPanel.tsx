@@ -60,7 +60,7 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
           <label>名称<input name="ehAccountLabel" required autoComplete="off" /></label>
           <label>站点<SelectField name="ehAccountHost" value={host} options={[{ value: 'e-hentai.org', label: 'e-hentai.org' }, { value: 'exhentai.org', label: 'exhentai.org' }]} onChange={setHost} /></label>
           <label>用户名提示<input name="ehUsernameHint" autoComplete="username" spellCheck={false} /></label>
-          <label>Cookie<input name="ehCookie" required type="password" autoComplete="current-password" spellCheck={false} /></label>
+          <label>Cookie<input name="ehCookie" required type="password" autoComplete="off" spellCheck={false} /></label>
           <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存 E-Hentai 账户'}</button>
           {formError && <p className="form-error" role="alert">{formError}</p>}
         </form>

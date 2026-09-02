@@ -14,6 +14,7 @@ import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
+import { pickRandomSample } from '../lib/archiveCardPresentation';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { presentEhError, type EhSearchResult } from '../services/ehClient';
@@ -69,12 +70,17 @@ function HomeWorkspace() {
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
-  const titles = new Map(archives.map((archive) => [archive.archiveId, archive.title]));
-  const recent = history.slice(0, 6);
-  const archiveById = new Map(archives.map((archive) => [archive.archiveId, archive]));
-  const continueReading = recent.map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item));
-  const toRead = watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8);
-  const random = useMemo(() => [...archives].sort(() => Math.random() - 0.5).slice(0, 8), [archives, serverLoadAttempt]);
+  const recent = useMemo(() => history.slice(0, 6), [history]);
+  const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
+  const continueReading = useMemo(
+    () => recent.map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)),
+    [archiveById, recent],
+  );
+  const toRead = useMemo(
+    () => watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
+    [archiveById, watchlist],
+  );
+  const random = useMemo(() => pickRandomSample(archives, 8), [archives, serverLoadAttempt]);
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   return (
     <div className="workspace-home">
@@ -137,7 +143,7 @@ function HomeWorkspace() {
           {recent.map((item) => (
             <li key={item.archiveId}>
               <Link to={`/reader/${item.archiveId}`}>
-                <strong>{titles.get(item.archiveId) ?? item.archiveId}</strong>
+                <strong>{archiveById.get(item.archiveId)?.title ?? item.archiveId}</strong>
                 <span>第 {item.pageIndex + 1} 页</span>
                 <ArrowRight aria-hidden="true" />
               </Link>
@@ -197,12 +203,12 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
     return () => { active = false; };
   }, [name]);
   const [title, description] = workspaces[name];
-  const archiveTitles = new Map(archives.map((archive) => [archive.archiveId, archive.title]));
+  const archiveTitles = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive.title])), [archives]);
   const sortedHistory = useMemo(
     () => [...history].sort((left, right) => right.visitedAt.localeCompare(left.visitedAt)),
     [history],
   );
-  const activeWatchlist = watchlist.filter((item) => !item.deleted);
+  const activeWatchlist = useMemo(() => watchlist.filter((item) => !item.deleted), [watchlist]);
   const visibleWatchlist = useMemo(() => {
     if (name !== 'watchlist') return [];
     const query = watchlistQuery.trim().toLocaleLowerCase();

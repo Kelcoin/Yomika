@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, CopyCheck, Download, Play, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import type { ArchiveRecord, ServerRecord } from '../domain/library';
-import { mergeSmartDuplicateSelection, getDedupeGroupFilterData, type DuplicateSource } from '../domain/deduplication';
+import { mergeSmartDuplicateSelection, getDedupeGroupFilterData, toDedupeDayString, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeDedupRepository, type DedupLoadResult, type DedupScanProgress } from '../repositories/nativeDedupRepository';
 import { parseReadoshiNonDuplicateExport } from '../lib/readoShiDedupeImport';
@@ -20,11 +20,12 @@ export function DeduplicationWorkspace() {
   const [result, setResult] = useState<DedupLoadResult>();
   const [sessionId, setSessionId] = useState<string>();
   const [startDate, setStartDate] = useState('2000-01-01');
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [endDate, setEndDate] = useState(() => toDedupeDayString());
   const [sourceFilter, setSourceFilter] = useState<'all' | DuplicateSource>('all');
   const [view, setView] = useState<'groups' | 'chains'>('groups');
   const [importText, setImportText] = useState('');
   const [busy, setBusy] = useState(false);
+  const scanGeneration = useRef(0);
 
   useEffect(() => {
     void library.listServers().then((response) => {
@@ -54,14 +55,19 @@ export function DeduplicationWorkspace() {
 
   async function runScan(resume = false) {
     if (!server) return;
+    const generation = ++scanGeneration.current;
     setBusy(true);
     const id = resume && sessionId ? sessionId : `dedup-${Date.now()}`;
     setSessionId(id);
     const response = await dedup.scan({ sessionId: id, scopeId: server.scopeId, algorithmVersion: ALGORITHM_VERSION, startDate, endDate, chunkSize: 32 });
+    // A cancel bumps the generation; a late scan result must not resurrect the
+    // "scanning" state or overwrite the cancelled progress line.
+    if (generation !== scanGeneration.current) return;
     if (!response.ok) showToast(response.error.message, 'error');
     else {
       setProgress(response.value);
       const loaded = await dedup.loadResult(id);
+      if (generation !== scanGeneration.current) return;
       if (loaded.ok) setResult(loaded.value);
       else showToast(loaded.error.message, 'error');
     }
@@ -72,7 +78,7 @@ export function DeduplicationWorkspace() {
     if (!sessionId) return;
     const response = await dedup.cancelScan(sessionId);
     if (!response.ok) showToast(response.error.message, 'error');
-    else { setProgress((current) => current ? { ...current, status: 'cancelled', stage: 'cancelled' } : current); setBusy(false); }
+    else { scanGeneration.current += 1; setProgress((current) => current ? { ...current, status: 'cancelled', stage: 'cancelled' } : current); setBusy(false); }
   }
 
   async function toggleSelected(archiveId: string, checked: boolean) {
@@ -93,10 +99,22 @@ export function DeduplicationWorkspace() {
   }
 
   async function deleteSelected() {
-    if (!result || selected.size === 0 || !window.confirm('确认删除已选择的重复档案？')) return;
-    const response = await dedup.deleteSelected({ sessionId: result.session.sessionId });
-    if (!response.ok) showToast(response.error.message, 'error');
-    else { if (response.value.rejectedArchiveIds.length) showToast('为保护重复组，部分档案未删除', 'error'); else showToast('删除任务已完成', 'success'); setResult((current) => current ? { ...current, outcomes: response.value.outcomes } : current); }
+    if (!result || selected.size === 0) return;
+    if (!window.confirm(`确认删除已选择的 ${selected.size} 个重复档案？此操作不可撤销。`)) return;
+    const sessionId = result.session.sessionId;
+    const response = await dedup.deleteSelected({ sessionId });
+    if (!response.ok) { showToast(response.error.message, 'error'); return; }
+    if (response.value.rejectedArchiveIds.length) showToast('为保护重复组，部分档案未删除', 'error');
+    else showToast('删除任务已完成', 'success');
+    // Reload from the backend: keeping the stale selection would let a second
+    // click re-issue deletes for archives that are already gone.
+    const reloaded = await dedup.loadResult(sessionId);
+    if (reloaded.ok) setResult(reloaded.value);
+    else setResult((current) => current ? { ...current, outcomes: response.value.outcomes, selectedArchiveIds: [] } : current);
+    if (server) {
+      const refreshed = await library.listArchives(server.id);
+      if (refreshed.ok) setArchives(refreshed.value);
+    }
   }
 
   async function importReadoshi() {

@@ -28,6 +28,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [error, setError] = useState<string>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
+  const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
   const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
@@ -42,7 +43,40 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const releaseAllPages = useCallback(() => {
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
+    for (const handle of thumbnailHandlesRef.current.values()) imageCache.release(handle);
+    thumbnailHandlesRef.current.clear();
     pendingPagesRef.current.clear();
+  }, []);
+
+  // Small per-page rendition for the thumbnail panel; the reader-page rendition
+  // would pull every page of the archive in at full size.
+  const loadPageThumbnail = useCallback(async (pageIndex: number) => {
+    const context = contextRef.current;
+    if (!context || pageIndex < 0 || pageIndex >= context.paths.length) return undefined;
+    const existing = thumbnailHandlesRef.current.get(pageIndex);
+    if (existing) return existing.url;
+    try {
+      const handle = await imageCache.load({
+        scopeId: context.scopeId,
+        serverId: context.serverId,
+        archiveId: context.archiveId,
+        pageIndex,
+        rendition: 'page-thumbnail',
+      });
+      if (!mountedRef.current || contextRef.current?.generation !== context.generation) {
+        imageCache.release(handle);
+        return undefined;
+      }
+      const occupied = thumbnailHandlesRef.current.get(pageIndex);
+      if (occupied) {
+        imageCache.release(handle);
+        return occupied.url;
+      }
+      thumbnailHandlesRef.current.set(pageIndex, handle);
+      return handle.url;
+    } catch {
+      return undefined;
+    }
   }, []);
 
   const loadPage = useCallback(async (pageIndex: number, signal?: AbortSignal) => {
@@ -129,7 +163,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, 1)];
       const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
       if (!mountedRef.current || contextRef.current !== context) return;
-      if (loaded.some(([, source]) => !source)) {
+      // Only the page the reader opens on is required. A failed neighbour
+      // prefetch must not block reading a page that loaded fine.
+      if (!loaded.find(([index]) => index === firstPage)?.[1]) {
         setError('阅读页面加载失败');
         return;
       }
@@ -156,10 +192,18 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       pages={pages}
       initialPage={initialPage}
       loadPage={loadPage}
+      loadPageThumbnail={loadPageThumbnail}
       releasePage={releasePage}
-      onProgress={(pageIndex) => {
+      onProgress={(pageIndex, reading) => {
         if (!scopeId) return;
-        void repository.saveProgress({ scopeId, archiveId, pageIndex, pageCount: pages.length, layout: 'paged', direction: 'ltr' });
+        void repository.saveProgress({
+          scopeId,
+          archiveId,
+          pageIndex,
+          pageCount: pages.length,
+          layout: reading.layout === 'webtoon' ? 'continuous' : 'paged',
+          direction: reading.direction,
+        });
       }}
     />
   );

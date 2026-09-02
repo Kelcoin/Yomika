@@ -41,6 +41,21 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: '按标题降序' })).toBeInTheDocument();
   });
 
+  it('virtualizes the thumbnail grid instead of mounting every archive', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // wide (default) → thumbnail
+    await user.click(screen.getByRole('button', { name: /显示模式：有图列表/ }));
+
+    const items = screen.getAllByRole('listitem');
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.length).toBeLessThan(archives.length / 2);
+    // The last archive of the page must stay unmounted until it scrolls in.
+    expect(screen.queryByRole('button', { name: /^Archive 99\b/ })).not.toBeInTheDocument();
+    expect(document.querySelectorAll('.archive-thumb-grid-row').length).toBeGreaterThan(0);
+  });
+
   it('surfaces archive classification and reading metadata as compact chips', () => {
     renderWorkspace({ archives: [{ ...archives[0]!, category: 'Manga', language: '中文' }] });
 

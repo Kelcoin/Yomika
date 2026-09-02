@@ -63,7 +63,10 @@ describe('reader screen', () => {
     const { unmount } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
 
-    fireEvent.wheel(reader, { deltaY: 120 });
+    // A cancelled event is the proof that the page itself will not scroll:
+    // React registers wheel listeners as passive, so this only holds while the
+    // component binds its own non-passive listener.
+    expect(fireEvent.wheel(reader, { deltaY: 120 })).toBe(false);
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(0.76) translate(0px, 0px)');
     fireEvent.wheel(reader, { deltaY: -120 });
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(1) translate(0px, 0px)');
@@ -71,7 +74,7 @@ describe('reader screen', () => {
     horizontalScroller.className = 'horizontal-scroller';
     reader.append(horizontalScroller);
 
-    fireEvent.wheel(horizontalScroller, { deltaY: 120 });
+    expect(fireEvent.wheel(horizontalScroller, { deltaY: 120 })).toBe(true);
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
 
     unmount();
@@ -80,8 +83,73 @@ describe('reader screen', () => {
         <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="webtoon" />
       </MemoryRouter>,
     );
-    fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 });
+    expect(fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 })).toBe(true);
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
+  });
+
+  it('owns focus on mount so arrow keys page without a chrome-toggling click', () => {
+    renderReader();
+
+    expect(screen.getByRole('main', { name: '漫画阅读器' })).toHaveFocus();
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+  });
+
+  it('reports progress with the active layout and direction for every kind of page change', async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} onProgress={onProgress} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '从左到右' }));
+    await user.click(screen.getByRole('button', { name: '上一页' }));
+
+    expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl' });
+  });
+
+  it('records progress and keeps the chrome open when jumping from the thumbnail panel', async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} onProgress={onProgress} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+    await user.click(screen.getByRole('button', { name: '跳转到第 3 页' }));
+
+    expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr' });
+    expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+  });
+
+  it('previews the thumbnail panel with the small rendition instead of pinning every full page', async () => {
+    const user = userEvent.setup();
+    const loadPage = vi.fn(async (_pageIndex: number) => undefined);
+    const loadPageThumbnail = vi.fn(async (index: number) => `thumb-${index}`);
+    render(
+      <MemoryRouter>
+        <ReaderScreen
+          archiveId="a1"
+          title="Test archive"
+          pages={[pages[0]!, '', '', '', '']}
+          loadPage={loadPage}
+          loadPageThumbnail={loadPageThumbnail}
+          releasePage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+
+    await vi.waitFor(() => expect(loadPageThumbnail.mock.calls.map(([index]) => index)).toEqual([0, 1, 2, 3, 4]));
+    // Only the prefetch window may be fetched at full size, never the whole archive.
+    expect(loadPage.mock.calls.map(([index]) => index)).toEqual([1]);
   });
 
   it('renders double pages and webtoon pages as distinct layouts', async () => {
@@ -109,7 +177,10 @@ describe('reader screen', () => {
 
     expect(screen.getByRole('button', { name: '单页' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByRole('button', { name: '从左到右' })).toHaveAttribute('aria-pressed', 'true');
+    // Right-to-left is the toggled-on state; the button used to always claim pressed.
+    expect(screen.getByRole('button', { name: '从左到右' })).toHaveAttribute('aria-pressed', 'false');
+    await user.click(screen.getByRole('button', { name: '从左到右' }));
+    expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
 
     await user.click(screen.getByRole('button', { name: '双页' }));
     expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'true');

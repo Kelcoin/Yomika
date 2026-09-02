@@ -44,6 +44,17 @@ function exactFilenameWatermarkSignature(patch = false) {
 }
 
 describe('deduplication domain', () => {
+  it('refuses to call a pair duplicate when a pixel buffer is truncated', () => {
+    const complete = texturedSignature();
+    // Same image, buffer cut short: the missing channels used to read as
+    // `undefined`, making every difference NaN and the pair "identical".
+    const truncated = { ...complete, pixels: complete.pixels.slice(0, 8 * 8 * 4 - 6) };
+
+    expect(areSignaturesDuplicate(complete, truncated)).toBe(false);
+    expect(areSignaturesDuplicate(truncated, complete)).toBe(false);
+    expect(areSignaturesDuplicate({ ...complete, width: 0, height: 0 }, complete)).toBe(false);
+  });
+
   it('creates a stable key only for a non-empty, non-self pair', () => {
     expect(toPairKey('B', 'A')).toBe('A|B');
     expect(toPairKey('', 'A')).toBe('');

@@ -29,6 +29,16 @@ describe('sensitive data redaction', () => {
     expect(redacted).not.toContain('auth-secret');
   });
 
+  it('scrubs e-hentai cookie material found inside free-form strings', () => {
+    const redacted = redactSensitive(
+      'eh login failed cookie=ipb_member_id=4242; ipb_pass_hash=deadbeefcafe url=https://exhentai.org/g?ipb_pass_hash=deadbeefcafe',
+    );
+
+    expect(redacted).not.toContain('deadbeefcafe');
+    expect(redacted).not.toContain('4242');
+    expect(redacted).toContain('eh login failed');
+  });
+
   it('handles cyclic objects safely', () => {
     const value: Record<string, unknown> = { password: 'secret' };
     value.self = value;

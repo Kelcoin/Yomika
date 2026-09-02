@@ -4,6 +4,7 @@
 
 # Planning state
 /.planning/
+/debug_outputs/
 
 # Local generated previews and skill work
 /.skill-archive/
@@ -31,6 +32,8 @@
 .codex-gh/
 /vite.config.js
 /vitest.config.js
+/vite.config.d.ts
+/vitest.config.d.ts
 
 # OS/editor
 .DS_Store

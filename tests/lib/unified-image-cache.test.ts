@@ -129,6 +129,25 @@ describe('UnifiedImageCache', () => {
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
     expect(cache.inFlightCount()).toBe(0);
   });
+
+  it('rejects an already aborted memory hit instead of pinning a reference nobody can release', async () => {
+    const urls = blobUrlFactory();
+    const repo = repository();
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+    const key = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'cover' as const, pageIndex: 0 };
+
+    // Keep the entry referenced so the second load takes the memory fast path.
+    const first = await cache.load(key);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(cache.load(key, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+
+    // The aborted consumer must not have taken a reference it can never return.
+    cache.release(first);
+    expect(urls.revoke).toHaveBeenCalledWith(first.url);
+    expect(repo.fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 void (undefined as unknown as ImageHandle);
