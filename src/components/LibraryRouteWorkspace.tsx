@@ -5,6 +5,7 @@ import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { markLibrarySynced, shouldSyncLibrary } from '../lib/librarySync';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 
@@ -201,6 +202,22 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         initialArchivesLoaded.current = true;
         setTotalArchives(result.value.total);
         setHasMoreArchives(result.value.hasMore);
+        // The list above came from the local index. Pull the remote index once
+        // per TTL so archives added in LANraragi since the last sync show up
+        // without the user pressing refresh.
+        if (shouldSyncLibrary(serverId)) {
+          markLibrarySynced(serverId);
+          void repository.refreshArchives(serverId, { sortby: 'date_added', order: 'desc' }).then((synced) => {
+            if (!synced.ok || request !== pageRequest.current) return;
+            if (!searchQuery.trim() && sortMode === 'added' && sortOrder === 'desc' && !categoryFilter) {
+              setArchives(synced.value.slice(0, 100));
+              setTotalArchives(synced.value.length);
+              setHasMoreArchives(synced.value.length > 100);
+            } else {
+              setReloadToken((value) => value + 1);
+            }
+          });
+        }
         // Dynamic LANraragi categories expose a search expression instead of
         // archive IDs; refresh the category cache after the archive index exists
         // so those IDs can be materialized into local membership rows.
@@ -261,8 +278,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           if (!serverId) return;
           setRefreshError(undefined);
           setRefreshing(true);
-          void repository.refreshArchives(serverId, {}).then(async (result) => {
+          void repository.refreshArchives(serverId, { sortby: 'date_added', order: 'desc' }).then(async (result) => {
             if (result.ok) {
+              markLibrarySynced(serverId);
               if (!searchQuery.trim() && sortMode === 'added' && sortOrder === 'desc' && !categoryFilter) {
                 setArchives(result.value.slice(0, 100));
                 setTotalArchives(result.value.length);

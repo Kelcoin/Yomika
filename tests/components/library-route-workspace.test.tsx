@@ -5,9 +5,11 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetLibrarySyncStateForTests } from '../../src/lib/librarySync';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
+  resetLibrarySyncStateForTests();
   vi.restoreAllMocks();
 });
 
@@ -472,12 +474,17 @@ describe('library route workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderLibrary();
 
-    expect(await screen.findByRole('button', { name: /^Old Archive\b/ })).toBeInTheDocument();
+    // The first load syncs the remote index on its own, always with an explicit
+    // sort key: LANraragi warns on every request that omits sortby.
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('refresh_archives', {
+      input: { serverId: 'scope-a', params: { sortby: 'date_added', order: 'desc' } },
+    }));
+    expect(await screen.findByRole('button', { name: /^Updated Archive\b/ })).toBeInTheDocument();
+    expect(callCount).toBe(1);
 
     await user.click(screen.getByRole('button', { name: '刷新档案库' }));
 
-    expect(adapter).toHaveBeenCalledWith('refresh_archives', { input: { serverId: 'scope-a', params: {} } });
-    expect(callCount).toBe(1);
+    expect(callCount).toBe(2);
     expect(await screen.findByRole('button', { name: /^Updated Archive\b/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^New Archive\b/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Old Archive\b/ })).not.toBeInTheDocument();

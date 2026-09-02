@@ -1606,12 +1606,17 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
     if let Some(ref filter) = params.filter {
         query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
     }
-    if let Some(ref sortby) = params.sortby {
-        query.push(format!("sortby={}", url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()));
-    }
-    if let Some(ref order) = params.order {
-        query.push(format!("order={}", url::form_urlencoded::byte_serialize(order.as_bytes()).collect::<String>()));
-    }
+    // LANraragi reads `sortby`/`order` without defaulting them: a missing value
+    // leaves $sortkey undefined, which floods the server log with
+    // "Use of uninitialized value $sortkey" from Model/Search.pm and falls back
+    // to title order. Always send both, defaulting to newest first.
+    let sortby = params.sortby.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or("date_added");
+    query.push(format!("sortby={}", url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()));
+    let order = match params.order.as_deref() {
+        Some("asc") => "asc",
+        _ => "desc",
+    };
+    query.push(format!("order={}", order));
     if let Some(newonly) = params.newonly {
         query.push(format!("newonly={}", newonly));
     }
@@ -3241,8 +3246,26 @@ mod tests {
         .unwrap();
         assert!(url.contains("/api/search?"));
         assert!(url.contains("start=-1"));
+        // LANraragi warns on every request when sortby is missing, so the
+        // builder must always emit a sort key and order.
+        assert!(url.contains("sortby=date_added"));
+        assert!(url.contains("order=desc"));
         assert!(!url.contains("filter="));
         assert!(!url.contains("category="));
+    }
+
+    #[test]
+    fn refresh_archives_query_builder_rejects_a_blank_or_unknown_sort() {
+        let blank = build_refresh_search_url(
+            "https://lrr.example.com",
+            &RefreshSearchParams {
+                filter: None, start: None, sortby: Some("   ".to_string()), order: Some("sideways".to_string()),
+                newonly: None, untaggedonly: None, hidecompleted: None, category: None, groupby_tanks: None,
+            },
+        )
+        .unwrap();
+        assert!(blank.contains("sortby=date_added"));
+        assert!(blank.contains("order=desc"));
     }
 
     #[test]
