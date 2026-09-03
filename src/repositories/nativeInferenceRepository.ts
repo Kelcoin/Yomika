@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { invokeCommand } from '../bridge/invoke';
+import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 
 const CpuRgbaOutputSchema = z.object({
@@ -32,6 +32,12 @@ export interface CpuScaleInput {
 export type CpuRgbaOutput = z.infer<typeof CpuRgbaOutputSchema>;
 
 export class NativeInferenceRepository {
+  /** Upscales one cached reader page; the result is stored as the `enhanced`
+   * rendition, keyed by scale and model version. */
+  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelVersion?: string; tileSize?: number; tileSleepMs?: number }): Promise<CommandResult<ArrayBuffer>> {
+    return invokeBinaryCommand('inference_upscale_page', { input });
+  }
+
   probe(): Promise<CommandResult<InferenceCapabilities>> {
     return invokeCommand('inference_probe', {}, InferenceCapabilitiesSchema);
   }

@@ -1,7 +1,9 @@
 use crate::{db::Database, domain::result::CommandResult};
 use rusqlite::OptionalExtension;
 
-const IMAGE_RENDITIONS: [&str; 3] = ["cover", "page-thumbnail", "reader-page"];
+/// `enhanced` is the upscaler output, keyed by scale and model version in the
+/// identity revision so a model change cannot serve a stale image.
+const IMAGE_RENDITIONS: [&str; 4] = ["cover", "page-thumbnail", "reader-page", "enhanced"];
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;
 const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;

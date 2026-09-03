@@ -136,4 +136,36 @@ describe('reader route', () => {
     await user.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(attempts).toBe(2));
   });
+
+  it('serves the upscaled page when a backend is selected, and falls back when it fails', async () => {
+    const commands: string[] = [];
+    let upscaleWorks = true;
+    setInvokeAdapterForTests(async (command: string) => {
+      commands.push(command);
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan-anime-x2' } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'inference_upscale_page') {
+        return upscaleWorks
+          ? { ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] }
+          : { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'Page is not cached yet', retryable: true } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    await waitFor(() => expect(commands).toContain('inference_upscale_page'));
+    view.unmount();
+
+    // A failing upscale must leave the plain page on screen.
+    upscaleWorks = false;
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+  });
 });

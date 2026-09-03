@@ -26,6 +26,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const { showToast } = useToast();
   const { preferences } = usePreferences();
   const prefetchDistance = preferences.prefetchPages;
+  const upscaleEnabled = preferences.upscaleBackend !== 'off';
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
@@ -104,6 +105,23 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         rendition: 'reader-page',
         sourcePath: path,
       }, signal ? { signal } : {});
+      // With upscaling on, swap in the enhanced rendition once the plain page is
+      // cached; a failure keeps the plain page rather than blanking the reader.
+      const enhanced = upscaleEnabled
+        ? await imageCache.load({
+          scopeId: context.scopeId,
+          serverId: context.serverId,
+          archiveId: context.archiveId,
+          pageIndex,
+          rendition: 'enhanced',
+          ...(preferences.upscaleModel ? { modelVersion: preferences.upscaleModel } : {}),
+        }, signal ? { signal } : {}).catch(() => undefined)
+        : undefined;
+      if (enhanced) {
+        imageCache.release(handle);
+        pageHandlesRef.current.set(pageIndex, enhanced);
+        return enhanced.url;
+      }
       const current = contextRef.current;
       if (!mountedRef.current || !current || current.generation !== context.generation || signal?.aborted) {
         imageCache.release(handle);
@@ -124,7 +142,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
     });
     return promise;
-  }, []);
+  }, [preferences.upscaleModel, upscaleEnabled]);
 
   useEffect(() => {
     mountedRef.current = true;

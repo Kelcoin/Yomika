@@ -216,8 +216,45 @@ pub fn install_model_archive(
     result
 }
 
+pub mod upscale;
+
+/// Execution providers we know how to ask for, most preferred first per
+/// platform. The ONNX Runtime session picks one of these; CPU always works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendId { Cpu }
+pub enum BackendId { DirectMl, CoreMl, Nnapi, Cpu }
+
+impl BackendId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectMl => "directml",
+            Self::CoreMl => "coreml",
+            Self::Nnapi => "nnapi",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn is_hardware_accelerated(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+}
+
+/// Preference order for the current platform. Windows gets DirectML, Apple
+/// platforms CoreML, Android NNAPI — the same split the mihon fork makes when it
+/// chooses a Vulkan/NNAPI device — and CPU is the universal fallback.
+pub fn platform_backend_preference() -> Vec<BackendId> {
+    let mut order = Vec::new();
+    if cfg!(target_os = "windows") {
+        order.push(BackendId::DirectMl);
+    }
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        order.push(BackendId::CoreMl);
+    }
+    if cfg!(target_os = "android") {
+        order.push(BackendId::Nnapi);
+    }
+    order.push(BackendId::Cpu);
+    order
+}
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,8 +266,11 @@ pub struct InferenceCapabilities {
 
 #[tauri::command]
 pub fn inference_probe() -> crate::domain::result::CommandResult<InferenceCapabilities> {
+    let backends = platform_backend_preference();
     crate::domain::result::CommandResult::success(InferenceCapabilities {
-        backends: vec!["cpu".to_string()], max_pixels: 64_000_000, hardware_acceleration: false,
+        hardware_acceleration: backends.iter().any(|backend| backend.is_hardware_accelerated()),
+        backends: backends.into_iter().map(|backend| backend.as_str().to_string()).collect(),
+        max_pixels: 64_000_000,
     })
 }
 
@@ -399,11 +439,18 @@ pub fn inference_clear_cache(
     }
 }
 
+/// Picks the most preferred backend that the model supports and the device has
+/// not blacklisted. Falls back to CPU, which every build can run.
 pub fn select_backend(supported: &[String], blacklist: &[String]) -> BackendId {
-    if supported.iter().any(|backend| backend == "cpu") && !blacklist.iter().any(|backend| backend == "cpu") {
-        return BackendId::Cpu;
-    }
-    BackendId::Cpu
+    let allowed = |backend: BackendId| {
+        let name = backend.as_str();
+        supported.iter().any(|value| value.eq_ignore_ascii_case(name))
+            && !blacklist.iter().any(|value| value.eq_ignore_ascii_case(name))
+    };
+    platform_backend_preference()
+        .into_iter()
+        .find(|backend| allowed(*backend))
+        .unwrap_or(BackendId::Cpu)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -423,6 +470,108 @@ impl serde::Serialize for CpuRgbaOutput {
         state.serialize_field("height", &self.height)?;
         state.end()
     }
+}
+
+/// Upscales one cached reader page and stores the result as the `enhanced`
+/// rendition, keyed by the model version so a model change does not serve a
+/// stale image.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpscalePageInput {
+    pub scope_id: String,
+    pub archive_id: String,
+    pub page_index: i64,
+    #[serde(default)]
+    pub scale: Option<u32>,
+    #[serde(default)]
+    pub model_version: Option<String>,
+    #[serde(default)]
+    pub tile_size: Option<u32>,
+    #[serde(default)]
+    pub tile_sleep_ms: Option<u64>,
+}
+
+#[tauri::command]
+pub fn inference_upscale_page(
+    input: UpscalePageInput,
+    database: tauri::State<'_, crate::db::Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    use tauri::Manager;
+    let app_data = match app.path().app_data_dir() {
+        Ok(value) => value,
+        Err(error) => return Ok(crate::domain::result::into_binary_response(
+            crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        )),
+    };
+    let result = upscale_cached_page(&database, &app_data, &input);
+    Ok(crate::domain::result::into_binary_response(result))
+}
+
+fn upscale_cached_page(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    input: &UpscalePageInput,
+) -> crate::domain::result::CommandResult<Vec<u8>> {
+    use crate::cache::{CacheImageIdentity, load_image_cache, store_image_cache};
+    use crate::domain::result::CommandResult;
+
+    if input.page_index < 0 {
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
+    }
+    let scale = input.scale.unwrap_or(2).clamp(1, 4);
+    let model_version = input.model_version.clone().unwrap_or_default();
+    let mut enhanced = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "enhanced", input.page_index);
+    enhanced.revision = Some(format!("x{scale}:{model_version}"));
+    let source = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index);
+
+    let connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match load_image_cache(&connection, app_data, &enhanced) {
+        Ok(Some(image)) => return CommandResult::success(image.bytes),
+        Ok(None) => {}
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    }
+    let page = match load_image_cache(&connection, app_data, &source) {
+        Ok(Some(image)) => image,
+        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+
+    let decoded = match image::load_from_memory(&page.bytes) {
+        Ok(value) => value.to_rgba8(),
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
+    };
+    let (width, height) = (decoded.width(), decoded.height());
+    let engine = upscale::NearestNeighbourEngine { scale, max_pixels: 64_000_000 };
+    let options = upscale::UpscaleOptions {
+        tile_size: input.tile_size.unwrap_or(upscale::DEFAULT_TILE_SIZE).max(16),
+        tile_sleep_ms: input.tile_sleep_ms.unwrap_or(0),
+        ..upscale::UpscaleOptions::default()
+    };
+    let upscaled = match upscale::upscale_rgba(&engine, decoded.as_raw(), width, height, options) {
+        Ok(value) => value,
+        Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels }) => {
+            return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("Image pixel budget exceeded: {pixels} > {max_pixels}"), false)
+        }
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", format!("{error:?}"), false),
+    };
+
+    let mut encoded = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+    {
+        use image::ImageEncoder;
+        if let Err(error) = encoder.write_image(&upscaled.rgba, upscaled.width, upscaled.height, image::ExtendedColorType::Rgba8) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        }
+    }
+    if let Err(error) = store_image_cache(&connection, app_data, &enhanced, "image/png", &encoded) {
+        // Serving the image still works without a cache entry.
+        eprintln!("yomika: enhanced image cache write failed: {error}");
+    }
+    CommandResult::success(encoded)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -560,6 +709,122 @@ pub fn cpu_scale_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_selection_prefers_the_platform_accelerator_then_falls_back() {
+        let all = ["directml", "coreml", "nnapi", "cpu"].map(str::to_string);
+        let expected = platform_backend_preference()[0];
+        assert_eq!(select_backend(&all, &[]), expected);
+
+        // A device blacklist pushes the choice down the preference order.
+        assert_eq!(select_backend(&all, &[expected.as_str().to_string()]), {
+            let mut rest = platform_backend_preference();
+            rest.retain(|backend| *backend != expected);
+            rest[0]
+        });
+
+        // A model that only ships CPU kernels never gets an accelerator.
+        assert_eq!(select_backend(&["cpu".to_string()], &[]), BackendId::Cpu);
+        // Nothing supported at all still yields a runnable backend.
+        assert_eq!(select_backend(&[], &["cpu".to_string()]), BackendId::Cpu);
+    }
+
+    #[test]
+    fn probe_reports_the_platform_backends_it_would_use() {
+        let capabilities = match inference_probe() {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            _ => panic!("probe must succeed"),
+        };
+        assert!(capabilities.backends.contains(&"cpu".to_string()));
+        assert_eq!(
+            capabilities.hardware_acceleration,
+            platform_backend_preference().iter().any(|backend| backend.is_hardware_accelerated()),
+        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(capabilities.backends.first().map(String::as_str), Some("directml"));
+        }
+    }
+
+    #[test]
+    fn upscaling_a_cached_page_reuses_the_enhanced_rendition() {
+        use crate::cache::{CacheImageIdentity, load_image_cache, store_image_cache};
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-upscale-{}", std::process::id()));
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        // A tiny red PNG stands in for a cached reader page.
+        let mut page = Vec::new();
+        {
+            use image::ImageEncoder;
+            let rgba = vec![255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+            image::codecs::png::PngEncoder::new(&mut page)
+                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
+        store_image_cache(&connection, &app_data, &source, "image/png", &page).unwrap();
+
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+        let input = UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_version: Some("v1".into()), tile_size: None, tile_sleep_ms: None,
+        };
+
+        let first = match upscale_cached_page(&database, &app_data, &input) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("expected success, got {other:?}"),
+        };
+        let decoded = image::load_from_memory(&first).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 4), "a 2x model doubles both axes");
+
+        // The result is cached under the enhanced rendition, keyed by scale and model.
+        let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
+        enhanced.revision = Some("x2:v1".into());
+        let connection = database.connection.lock().unwrap();
+        assert!(load_image_cache(&connection, &app_data, &enhanced).unwrap().is_some());
+        drop(connection);
+
+        let second = match upscale_cached_page(&database, &app_data, &input) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("expected cache hit, got {other:?}"),
+        };
+        assert_eq!(first, second);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn upscaling_reports_a_page_that_is_not_cached_yet() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-upscale-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&app_data).unwrap();
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+
+        let result = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: None, model_version: None, tile_size: None, tile_sleep_ms: None,
+        });
+
+        assert!(matches!(result, crate::domain::result::CommandResult::Failure { .. }));
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
 
     fn model_manifest(bytes: &[u8]) -> ModelManifest {
         use sha2::{Digest, Sha256};
@@ -803,8 +1068,10 @@ mod tests {
     }
 
     #[test]
-    fn backend_selector_always_falls_back_to_cpu() {
-        assert_eq!(select_backend(&["directml".into(), "cpu".into()], &[]), BackendId::Cpu);
+    fn backend_selector_falls_back_to_cpu_when_nothing_else_is_usable() {
+        // Accelerators the platform does not have are never chosen, and an
+        // unsupported or fully blacklisted set still yields a runnable backend.
+        assert_eq!(select_backend(&["nnapi".into(), "coreml".into()], &[]), BackendId::Cpu);
         assert_eq!(select_backend(&["cpu".into()], &["cpu".into()]), BackendId::Cpu);
     }
 
