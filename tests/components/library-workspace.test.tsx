@@ -34,6 +34,33 @@ describe('library workspace', () => {
     expect(screen.getByRole('separator')).toHaveAttribute('aria-orientation', 'vertical');
   });
 
+  it('submits the search on Enter or a finished tag, not on every keystroke', async () => {
+    const user = userEvent.setup();
+    const onSearchQueryChange = vi.fn();
+    renderWorkspace({ archives, searchQuery: '', onSearchQueryChange });
+    const input = screen.getByLabelText('搜索档案');
+    // Focus directly: in jsdom a pointer click inside the panel group lands on
+    // the resizable separator (tabIndex=0) instead of the input.
+    input.focus();
+
+    await user.keyboard('artist');
+    expect(input).toHaveValue('artist');
+    expect(onSearchQueryChange).not.toHaveBeenCalled();
+
+    await user.keyboard('{Enter}');
+    expect(onSearchQueryChange).toHaveBeenCalledWith('artist');
+
+    onSearchQueryChange.mockClear();
+    await user.clear(input);
+    expect(onSearchQueryChange).toHaveBeenCalledWith('');
+
+    onSearchQueryChange.mockClear();
+    await user.keyboard('female:glasses');
+    expect(onSearchQueryChange).not.toHaveBeenCalled();
+    await user.keyboard('$');
+    expect(onSearchQueryChange).toHaveBeenCalledWith('female:glasses$');
+  });
+
   it('renders search input and sort controls', () => {
     renderWorkspace({ archives });
 

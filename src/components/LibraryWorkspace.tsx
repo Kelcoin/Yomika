@@ -15,6 +15,7 @@ import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
+import { isCommittableSearchQuery } from '../lib/searchQuery';
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -60,6 +61,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState(archives[0]?.archiveId);
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
+  const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
   const navigate = useNavigate();
   useTagTranslations();
@@ -71,6 +73,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const displayCategories = useMemo(() => sortCategoriesForDisplay((categories ?? []).filter((category) => category.name !== FAVORITES_CATEGORY_NAME)), [categories]);
   const filteredArchives = archives;
   const updateSearchQuery = (value: string) => { setLocalSearchQuery(value); onSearchQueryChange?.(value); };
+  // The draft is what the user sees; only committed values reach the server.
+  useEffect(() => { setSearchDraft(searchQuery); }, [searchQuery]);
+  const editSearchDraft = (value: string) => {
+    setSearchDraft(value);
+    if (isCommittableSearchQuery(value)) updateSearchQuery(value);
+  };
   const updateSortMode = (value: 'title' | 'added') => { setLocalSortMode(value); onSortModeChange?.(value); };
   const updateSortOrder = (value: 'asc' | 'desc') => { setLocalSortOrder(value); onSortOrderChange?.(value); };
   const updateCategoryFilter = (value: string) => { setLocalCategoryFilter(value); onCategoryFilterChange?.(value); };
@@ -167,11 +175,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             name="archiveQuery"
             type="search"
             autoComplete="off"
-            placeholder="搜索档案…"
-            value={searchQuery}
-            onChange={(e) => updateSearchQuery(e.target.value)}
+            placeholder="搜索档案，回车提交…"
+            value={searchDraft}
+            onChange={(e) => editSearchDraft(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              updateSearchQuery(searchDraft);
+            }}
           />
-          <TagSuggest inputValue={searchQuery} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchQuery.slice(0, searchQuery.lastIndexOf(',') + 1)}${searchQuery.includes(',') ? ' ' : ''}${tag}, `)} />
+          <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />
         </label>
       </div>
       <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
