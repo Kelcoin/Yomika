@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -234,5 +234,47 @@ describe('archive detail route', () => {
     expect(toolbar).toContainElement(screen.getByRole('button', { name: '编辑元数据' }));
     expect(toolbar).not.toContainElement(screen.queryByRole('button', { name: '选择分类' }));
     expect(toolbar).toContainElement(screen.getByRole('button', { name: '删除档案' }));
+  });
+
+  it('recommends by shared tags and same creator above the page thumbnails', async () => {
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_archive_metadata') {
+        return { ok: true, value: {
+          archiveId: 'archive-a', title: 'Source', filename: 'a.cbz',
+          tags: 'artist:someone, female:glasses, female:futanari, category:manga',
+          extension: 'cbz', progress: 0, pageCount: 1, lastReadTime: 0, size: 1,
+        } };
+      }
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_archives_page') {
+        const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
+        const rows = query.startsWith('artist:')
+          ? [{ serverId: 'scope-a', archiveId: 'by-same-artist', title: 'By same artist', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['artist:someone'] }]
+          : [
+            { serverId: 'scope-a', archiveId: 'strong', title: 'Strong match', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:futanari', 'category:manga'] },
+            { serverId: 'scope-a', archiveId: 'weak', title: 'Weak match', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['language:chinese'] },
+          ];
+        return { ok: true, value: { items: rows, total: rows.length, hasMore: false } };
+      }
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    const similar = await screen.findByRole('region', { name: '猜你喜欢' });
+    expect(await within(similar).findByRole('link', { name: /Strong match/ })).toBeInTheDocument();
+    // Sharing only a zero-weight namespace is not a recommendation.
+    expect(within(similar).queryByRole('link', { name: /Weak match/ })).not.toBeInTheDocument();
+
+    const creator = await screen.findByRole('region', { name: '同作者作品' });
+    expect(await within(creator).findByRole('link', { name: /By same artist/ })).toBeInTheDocument();
+
+    const thumbnails = screen.getByRole('region', { name: '页面缩略图' });
+    expect(similar.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

@@ -6,10 +6,11 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { categorizeTags, parseArchiveTagString } from '../lib/tags';
+import { pickSeedTags, rankRecommendations, sameCreatorTags } from '../lib/recommendation';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import {
@@ -195,6 +196,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         )}
       </div>
 
+      {/* Recommendations sit above the page thumbnails: they are about what to
+          read next, not about this archive's pages. */}
+      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
           <div className="archive-page-thumbnails-grid">
@@ -206,15 +211,49 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
-      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} />}
     </main>
   );
 }
 
-function Recommendations({ scopeId, serverId, currentArchiveId }: { scopeId: string; serverId: string; currentArchiveId: string }) {
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  useEffect(() => { void repository.listArchives(serverId).then((result) => { if (result.ok) setArchives(result.value.filter((item) => item.archiveId !== currentArchiveId).slice(0, 8)); }); }, [currentArchiveId, serverId]);
-  return <ArchiveThumbnailRail title="推荐档案" archives={archives} scopeId={scopeId} serverId={serverId} />;
+function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
+  const [similar, setSimilar] = useState<ArchiveRecord[]>([]);
+  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
+  const creator = useMemo(() => sameCreatorTags(tags), [tags]);
+
+  useEffect(() => {
+    if (tags.length === 0) return undefined;
+    let active = true;
+    const searchByTags = async (seeds: readonly string[]) => {
+      const found = new Map<string, ArchiveRecord>();
+      for (const seed of seeds) {
+        const result = await repository.listArchivesPage(serverId, 0, 100, { query: seed });
+        if (!active) return found;
+        if (!result.ok) continue;
+        for (const archive of result.value.items) {
+          if (archive.archiveId !== currentArchiveId) found.set(archive.archiveId, archive);
+        }
+      }
+      return found;
+    };
+
+    void (async () => {
+      const seeds = pickSeedTags(tags);
+      const candidates = await searchByTags(seeds);
+      if (!active) return;
+      setSimilar(rankRecommendations(tags, [...candidates.values()]).slice(0, 12));
+      const creatorMatches = await searchByTags(creator.tags);
+      if (!active) return;
+      setSameCreator([...creatorMatches.values()].slice(0, 12));
+    })();
+    return () => { active = false; };
+  }, [creator, currentArchiveId, serverId, tags]);
+
+  return (
+    <>
+      <ArchiveThumbnailRail title="猜你喜欢" archives={similar} scopeId={scopeId} serverId={serverId} />
+      <ArchiveThumbnailRail title={creator.namespace === 'cosplayer' ? '同 Coser 作品' : '同作者作品'} archives={sameCreator} scopeId={scopeId} serverId={serverId} />
+    </>
+  );
 }
 
 function ArchivePageThumbnail({
