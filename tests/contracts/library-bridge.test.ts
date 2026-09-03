@@ -143,11 +143,16 @@ describe('native library repository bridge', () => {
     const value = [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: ['a1'] }];
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
+    const repository = new NativeLibraryRepository();
 
-    const result = await new NativeLibraryRepository().listCategories('scope-a');
+    const result = await repository.listCategories('scope-a');
 
-    expect(adapter).toHaveBeenCalledWith('list_categories', { serverId: 'scope-a' });
+    // Navigation must not re-resolve dynamic categories on the server.
+    expect(adapter).toHaveBeenNthCalledWith(1, 'list_categories', { serverId: 'scope-a', force: false });
     expect(result).toEqual({ ok: true, value });
+
+    await repository.listCategories('scope-a', true);
+    expect(adapter).toHaveBeenNthCalledWith(2, 'list_categories', { serverId: 'scope-a', force: true });
   });
 
   it('adds an archive to a category through the native command', async () => {

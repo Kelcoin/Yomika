@@ -125,13 +125,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     }
     setServerId(server.id);
     setScopeId(server.scopeId);
-    // Category discovery may fan out into dynamic searches. Load it in the
-    // background so the archive list can render immediately.
+    // Categories are loaded once, by the effect below: it holds the TTL gate and
+    // the native side serves a persisted snapshot. Loading them here as well
+    // meant every visit to the library re-resolved every dynamic category.
     setCategoryError(undefined);
-    void repository.listCategories(server.id).then((categoryResult) => {
-      if (categoryResult.ok) setCategories(categoryResult.value);
-      else setCategoryError(categoryResult.error.message);
-    });
     const [watchlistResult, historyResult] = await Promise.all([
       repository.listWatchlist(server.scopeId),
       repository.listHistory(server.scopeId),
@@ -215,6 +212,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
     if (!synced.ok) return synced;
     markLibrarySynced(currentServerId);
+    // An explicit refresh is also the moment to re-resolve dynamic categories.
+    markCategoriesRefreshed(currentServerId);
+    void repository.listCategories(currentServerId, true).then((categoryResult) => {
+      if (categoryResult.ok) setCategories(categoryResult.value);
+      else setCategoryError(categoryResult.error.message);
+    });
     await loadFirstPage(currentServerId);
     return synced;
   }, [loadFirstPage]);
@@ -226,17 +229,26 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       if (shouldSyncLibrary(serverId)) {
         markLibrarySynced(serverId);
         void syncRemoteIndex(serverId);
-      }
-      // Dynamic LANraragi categories expose a search expression instead of
-      // archive IDs, and resolving each one is an unpaged /api/search. Refresh
-      // them on the same TTL as the index instead of on every navigation.
-      if (shouldRefreshCategories(serverId)) {
-        markCategoriesRefreshed(serverId);
-        void repository.listCategories(serverId).then((categoryResult) => {
-          if (categoryResult.ok) setCategories(categoryResult.value);
-          else setCategoryError(categoryResult.error.message);
+      } else {
+        // The sync TTL alone means an archive added in LANraragi stays invisible
+        // for minutes. Probing the newest page costs one paged search, so ask
+        // whether a full pull is actually warranted.
+        void repository.probeNewArchives(serverId).then((probe) => {
+          if (!probe.ok || !probe.value) return;
+          markLibrarySynced(serverId);
+          void syncRemoteIndex(serverId);
         });
       }
+      // Dynamic LANraragi categories expose a search expression instead of
+      // archive IDs, and resolving each one is an unpaged /api/search. Read the
+      // native snapshot on every mount (local, no HTTP) and only pay for a real
+      // re-resolution when the TTL says the snapshot is due.
+      const wantsFreshCategories = shouldRefreshCategories(serverId);
+      if (wantsFreshCategories) markCategoriesRefreshed(serverId);
+      void repository.listCategories(serverId, wantsFreshCategories).then((categoryResult) => {
+        if (categoryResult.ok) setCategories(categoryResult.value);
+        else setCategoryError(categoryResult.error.message);
+      });
     });
   }, [loadFirstPage, reloadToken, serverId, syncRemoteIndex]);
 

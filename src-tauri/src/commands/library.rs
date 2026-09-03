@@ -491,8 +491,19 @@ async fn reader_request(
 #[tauri::command]
 pub async fn list_categories(
     server_id: String,
+    force: Option<bool>,
     database: State<'_, Database>,
 ) -> Result<CommandResult<Vec<CategoryRecord>>, String> {
+    // Resolving dynamic categories costs one unpaged /api/search per category,
+    // so a plain navigation must not trigger it. Serve the persisted snapshot
+    // until it ages out, and only refetch when the caller asks for it.
+    if !force.unwrap_or(false) {
+        match read_category_cache(&database, &server_id) {
+            Ok(Some(categories)) => return Ok(CommandResult::success(categories)),
+            Ok(None) => {}
+            Err(error) => return Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+        }
+    }
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -581,7 +592,7 @@ pub async fn list_categories(
         let base_url = base_url.clone();
         let api_key = api_key.clone();
         dynamic_categories.spawn(async move {
-            let url = build_category_search_url(&base_url, &search);
+            let url = build_category_search_url(&base_url, &search).ok()?;
             let response = reader_request(reqwest::Method::GET, url, api_key).await.ok()?;
             if !response.status().is_success() {
                 return None;
@@ -632,6 +643,7 @@ pub async fn list_categories(
         transaction
             .commit()
             .map_err(|error| format!("提交分类缓存失败：{error}"))?;
+        write_category_cache(&connection, &server_id, &categories)?;
         Ok(())
     })();
     if let Err(error) = sync_result {
@@ -1678,7 +1690,7 @@ pub struct RefreshSearchParams {
 /// through the same builder: LANraragi reads `sortby` without a default, and a
 /// missing one both floods its log with "uninitialized value $sortkey" and
 /// defeats its search cache (every request becomes a full DB parse).
-fn build_category_search_url(base_url: &str, filter: &str) -> String {
+fn build_category_search_url(base_url: &str, filter: &str) -> Result<String, String> {
     let params = RefreshSearchParams {
         filter: Some(filter.to_string()),
         start: Some(-1),
@@ -1690,7 +1702,86 @@ fn build_category_search_url(base_url: &str, filter: &str) -> String {
         category: None,
         groupby_tanks: None,
     };
-    build_refresh_search_url(base_url, &params).unwrap_or_else(|_| format!("{}/api/search", base_url.trim_end_matches('/')))
+    build_refresh_search_url(base_url, &params)
+}
+
+/// How long a resolved category snapshot stays good. Long enough that browsing
+/// never re-resolves, short enough that a category edited in LANraragi shows up
+/// without a manual refresh.
+const CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
+
+fn category_cache_key(server_id: &str) -> String {
+    format!("categories.cache.{server_id}")
+}
+
+#[derive(Serialize, Deserialize)]
+struct CategoryCacheEnvelope {
+    synced_at: i64,
+    categories: Vec<CategoryRecord>,
+}
+
+fn read_category_cache(
+    database: &State<'_, Database>,
+    server_id: &str,
+) -> Result<Option<Vec<CategoryRecord>>, String> {
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "数据库锁定失败".to_string())?;
+    read_category_cache_from(&connection, server_id, current_unix_seconds())
+}
+
+fn read_category_cache_from(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    now: i64,
+) -> Result<Option<Vec<CategoryRecord>>, String> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [category_cache_key(server_id)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取分类缓存失败：{error}"))?;
+    let Some(stored) = stored else { return Ok(None) };
+    let envelope: CategoryCacheEnvelope = match serde_json::from_str(&stored) {
+        Ok(value) => value,
+        // A snapshot written by an older schema is simply refetched.
+        Err(_) => return Ok(None),
+    };
+    let age = now.saturating_sub(envelope.synced_at);
+    if age < 0 || age > CATEGORY_CACHE_MAX_AGE_SECONDS {
+        return Ok(None);
+    }
+    Ok(Some(envelope.categories))
+}
+
+fn write_category_cache(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    categories: &[CategoryRecord],
+) -> Result<(), String> {
+    let envelope = CategoryCacheEnvelope {
+        synced_at: current_unix_seconds(),
+        categories: categories.to_vec(),
+    };
+    let payload = serde_json::to_string(&envelope).map_err(|error| format!("序列化分类缓存失败：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![category_cache_key(server_id), payload],
+        )
+        .map_err(|error| format!("写入分类缓存失败：{error}"))?;
+    Ok(())
+}
+
+fn current_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Result<String, String> {
@@ -1834,6 +1925,95 @@ fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, S
         _ if status.is_server_error() => Some(("REMOTE_UNAVAILABLE", format!("Server error ({})", status), true)),
         _ if !status.is_success() => Some(("REMOTE_UNAVAILABLE", format!("Unexpected status ({})", status), false)),
         _ => None,
+    }
+}
+
+/// Newest-first first page used to detect archives added in LANraragi. A full
+/// `refresh_archives` asks for `start=-1`, i.e. the entire library in one
+/// response; this asks for one page, so it is cheap enough to run on entering
+/// the library instead of waiting for the sync TTL to lapse.
+fn build_probe_search_url(base_url: &str) -> Result<String, String> {
+    build_refresh_search_url(base_url, &RefreshSearchParams {
+        filter: None,
+        start: Some(0),
+        sortby: Some("date_added".to_string()),
+        order: Some("desc".to_string()),
+        newonly: None,
+        untaggedonly: None,
+        hidecompleted: None,
+        category: None,
+        groupby_tanks: None,
+    })
+}
+
+/// Archive ids from the probe page that the local index does not know yet.
+fn unknown_probe_archive_ids(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    archive_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut unknown = Vec::new();
+    let mut statement = connection
+        .prepare("SELECT 1 FROM archives WHERE server_id = ?1 AND archive_id = ?2 AND is_deleted = 0")
+        .map_err(|error| error.to_string())?;
+    for archive_id in archive_ids {
+        let known = statement
+            .exists(params![server_id, archive_id])
+            .map_err(|error| error.to_string())?;
+        if !known {
+            unknown.push(archive_id.clone());
+        }
+    }
+    Ok(unknown)
+}
+
+/// Reports whether LANraragi holds archives the local index is missing, without
+/// pulling the whole library.
+#[tauri::command]
+pub async fn probe_new_archives(
+    server_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<bool>, String> {
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let url = match build_probe_search_url(&base_url) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("INVALID_INPUT", error, false)),
+    };
+    let response = match reader_request(reqwest::Method::GET, url, api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    if let Some((code, message, retryable)) = search_status_failure(response.status()) {
+        return Ok(CommandResult::failure(code, message, retryable));
+    }
+    let body = match response.text().await {
+        Ok(text) => text,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+    };
+    let archives = match parse_search_response(&body) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+    };
+    let archive_ids: Vec<String> = archives.into_iter().map(|archive| archive.archive_id).collect();
+    let connection = match database.connection.lock() {
+        Ok(conn) => conn,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    match unknown_probe_archive_ids(&connection, &server_id, &archive_ids) {
+        Ok(unknown) => Ok(CommandResult::success(!unknown.is_empty())),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
     }
 }
 
@@ -2649,7 +2829,7 @@ struct CategoryWire {
     archives: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategoryRecord {
     id: String,
@@ -3570,11 +3750,74 @@ mod tests {
     }
 
     #[test]
+    fn probe_only_asks_for_the_newest_page_and_flags_unknown_archives() {
+        // A full refresh is start=-1 (whole library); the probe must stay on one
+        // page so it can run on entering the library.
+        let url = build_probe_search_url("https://lrr.example.com/").expect("probe url");
+        assert!(url.contains("start=0"), "{url}");
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=desc"), "{url}");
+        assert!(!url.contains("filter="), "{url}");
+
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'known', 'Known', 'known', '[]', 1),
+               ('scope-a', 'tombstoned', 'Gone', 'gone', '[]', 1);
+             UPDATE archives SET is_deleted = 1 WHERE archive_id = 'tombstoned';",
+        ).unwrap();
+
+        let unknown = unknown_probe_archive_ids(
+            &connection,
+            "scope-a",
+            &["known".to_string(), "fresh".to_string(), "tombstoned".to_string()],
+        ).expect("probe diff");
+
+        assert_eq!(unknown, vec!["fresh".to_string(), "tombstoned".to_string()]);
+        assert!(unknown_probe_archive_ids(&connection, "scope-a", &["known".to_string()])
+            .expect("known only")
+            .is_empty());
+    }
+
+    #[test]
+    fn category_cache_serves_a_fresh_snapshot_and_expires_an_old_one() {
+        // Every dynamic category costs one unpaged /api/search, so navigating
+        // back to the library must read this snapshot instead of re-resolving.
+        let connection = migrated_connection();
+        let categories = vec![CategoryRecord {
+            id: "SET_1613080290".to_string(),
+            name: "Dynamic".to_string(),
+            pinned: true,
+            search: Some("artist:someone$".to_string()),
+            archives: vec!["archive-a".to_string()],
+        }];
+        write_category_cache(&connection, "scope-a", &categories).expect("write");
+
+        let fresh = read_category_cache_from(&connection, "scope-a", current_unix_seconds())
+            .expect("read fresh");
+        assert_eq!(fresh.as_ref().map(|items| items.len()), Some(1));
+        assert_eq!(fresh.expect("snapshot")[0].search.as_deref(), Some("artist:someone$"));
+
+        let stale = read_category_cache_from(
+            &connection,
+            "scope-a",
+            current_unix_seconds() + CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+        )
+        .expect("read stale");
+        assert!(stale.is_none(), "an aged snapshot must be refetched");
+        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+            .expect("read other scope")
+            .is_none());
+    }
+
+    #[test]
     fn dynamic_category_search_always_carries_a_sort_key() {
         // LANraragi's Controller/Api/Search.pm reads `sortby` with no default,
         // so an omitted one logs "uninitialized value $sortkey" at
         // Model/Search.pm:51/52/57 and skips its search cache.
-        let url = build_category_search_url("https://lrr.example.com/", "artist:someone$");
+        let url = build_category_search_url("https://lrr.example.com/", "artist:someone$")
+            .expect("dynamic category url");
         assert!(url.starts_with("https://lrr.example.com/api/search?"));
         assert!(url.contains("sortby=date_added"), "{url}");
         assert!(url.contains("order=desc"), "{url}");

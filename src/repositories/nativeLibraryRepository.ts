@@ -118,8 +118,11 @@ export class NativeLibraryRepository {
   uploadArchive(input: { serverId: string; taskId: string; filePath: string }): Promise<CommandResult<z.infer<typeof UploadArchiveResultSchema>>> {
     return invokeCommand('upload_archive', input, UploadArchiveResultSchema);
   }
-  listCategories(serverId: string): Promise<CommandResult<Category[]>> {
-    return invokeCommand('list_categories', { serverId }, z.array(CategorySchema));
+  /** `force` re-resolves dynamic categories on the server (one unpaged
+   * `/api/search` each). Leave it off for navigation: the native side serves a
+   * persisted snapshot instead. */
+  listCategories(serverId: string, force = false): Promise<CommandResult<Category[]>> {
+    return invokeCommand('list_categories', { serverId, force }, z.array(CategorySchema));
   }
   addArchiveToCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema);
@@ -182,6 +185,13 @@ export class NativeLibraryRepository {
         ...(query.categoryId ? { category: query.categoryId } : {}),
       },
     }, z.array(ArchiveRecordSchema));
+  }
+
+  /** True when LANraragi's newest page holds archives the local index misses.
+   * One page instead of the whole library, so it is cheap enough to run on
+   * entering the library. */
+  probeNewArchives(serverId: string): Promise<CommandResult<boolean>> {
+    return invokeCommand('probe_new_archives', { serverId }, z.boolean());
   }
 
   listServers(): Promise<CommandResult<ServerRecord[]>> {
