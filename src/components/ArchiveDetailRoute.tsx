@@ -218,6 +218,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
   const [similar, setSimilar] = useState<ArchiveRecord[]>([]);
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
+  const [tab, setTab] = useState<'similar' | 'creator'>('similar');
   const creator = useMemo(() => sameCreatorTags(tags), [tags]);
 
   useEffect(() => {
@@ -248,11 +249,25 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
     return () => { active = false; };
   }, [creator, currentArchiveId, serverId, tags]);
 
+  // One rail with tabs instead of two stacked rails: the section used to take
+  // two full card rows before the page thumbnails were even reachable.
+  const creatorLabel = creator.namespace === 'cosplayer' ? '同 Coser' : '同作者';
+  const activeTab = tab === 'creator' && sameCreator.length === 0 ? 'similar' : tab;
+  const visible = activeTab === 'creator' ? sameCreator : similar;
+  if (similar.length === 0 && sameCreator.length === 0) return null;
+
   return (
-    <>
-      <ArchiveThumbnailRail title="猜你喜欢" archives={similar} scopeId={scopeId} serverId={serverId} />
-      <ArchiveThumbnailRail title={creator.namespace === 'cosplayer' ? '同 Coser 作品' : '同作者作品'} archives={sameCreator} scopeId={scopeId} serverId={serverId} />
-    </>
+    <section className="archive-recommendations" aria-label="推荐">
+      <div className="archive-recommendations-tabs" role="tablist" aria-label="推荐分组">
+        {similar.length > 0 && (
+          <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
+        )}
+        {sameCreator.length > 0 && (
+          <button type="button" role="tab" aria-selected={activeTab === 'creator'} className={activeTab === 'creator' ? 'is-active' : ''} onClick={() => setTab('creator')}>{creatorLabel}</button>
+        )}
+      </div>
+      <ArchiveThumbnailRail title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'} archives={visible} scopeId={scopeId} serverId={serverId} headingHidden />
+    </section>
   );
 }
 
@@ -318,7 +333,8 @@ function ArchivePageThumbnail({
     <button ref={setNode} className={`archive-page-thumbnail${src ? '' : ' is-skeleton'}`} type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
       {/* Loading is conveyed by the shimmer, the same as library covers; no
           "加载中" text on top of the image slot. */}
-      {src ? <img src={src} alt={`第 ${page} 页`} loading="lazy" /> : <span aria-hidden="true">{state === 'idle' ? `P. ${page}` : ''}</span>}
+      {src ? <img src={src} alt="" loading="lazy" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true">{state === 'idle' ? page : ''}</span>}
+      <span className="archive-page-thumbnail-number" aria-hidden="true">{page}</span>
     </button>
   );
 }

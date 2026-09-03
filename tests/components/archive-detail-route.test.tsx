@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -73,7 +73,9 @@ describe('archive detail route', () => {
 
     renderDetail();
 
-    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    // The page image itself is decorative: the visible page number labels it.
+    const thumbnail = await screen.findByRole('button', { name: '查看第 1 页' });
+    await vi.waitFor(() => expect(thumbnail.querySelector('img')).toHaveAttribute('src', expect.stringMatching(/^blob:/)));
     expect(adapter).not.toHaveBeenCalledWith('load_archive_page_thumbnail', expect.anything());
   });
 
@@ -271,10 +273,14 @@ describe('archive detail route', () => {
     // Sharing only a zero-weight namespace is not a recommendation.
     expect(within(similar).queryByRole('link', { name: /Weak match/ })).not.toBeInTheDocument();
 
+    // Same-creator results live behind a tab in the same rail, so the section
+    // costs one card row instead of two.
+    const creatorTab = await screen.findByRole('tab', { name: '同作者' });
+    fireEvent.click(creatorTab);
     const creator = await screen.findByRole('region', { name: '同作者作品' });
     expect(await within(creator).findByRole('link', { name: /By same artist/ })).toBeInTheDocument();
 
     const thumbnails = screen.getByRole('region', { name: '页面缩略图' });
-    expect(similar.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(creator.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

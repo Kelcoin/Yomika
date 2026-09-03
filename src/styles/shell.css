@@ -1664,6 +1664,7 @@ body::-webkit-scrollbar,
 }
 .archive-page-thumbnails-grid::-webkit-scrollbar { display: none; }
 .archive-page-thumbnail {
+  position: relative;
   display: grid;
   place-items: center;
   min-width: 0;
@@ -1681,6 +1682,53 @@ body::-webkit-scrollbar,
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* Page number under the thumbnail: without it a grid of covers gives no way to
+   tell which page you are about to open. */
+.archive-page-thumbnail-number {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 1px 0 2px;
+  background: color-mix(in srgb, var(--surface-overlay) 72%, transparent);
+  color: var(--ink-on-overlay);
+  font-family: var(--font-utility);
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+}
+
+.archive-page-thumbnail-placeholder { font-size: 11px; }
+
+/* Recommendations: one tabbed rail instead of two stacked ones. */
+.archive-recommendations {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.archive-recommendations-tabs {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.archive-recommendations-tabs button {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.archive-recommendations-tabs button.is-active {
+  border-color: color-mix(in srgb, var(--brand-vermilion) 50%, var(--hairline));
+  background: color-mix(in srgb, var(--brand-vermilion) 12%, var(--surface-elevated));
+  color: var(--ink-primary);
 }
 
 /* One loading treatment across every image slot: the library cover shimmer. */
