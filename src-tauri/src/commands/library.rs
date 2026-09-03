@@ -90,14 +90,26 @@ pub struct RemoteArchive {
 struct SearchArchiveWire {
     arcid: String,
     title: String,
+    // Only arcid/title/tags/summary/pagecount/size are consumed. The rest is
+    // optional on purpose: `progress` and `lastreadtime` only appear when the
+    // server tracks progress, and a missing field used to fail the entire sync.
+    #[serde(default)]
     filename: String,
+    #[serde(default)]
     tags: String,
+    #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
     isnew: serde_json::Value,
+    #[serde(default)]
     extension: String,
+    #[serde(default)]
     progress: i64,
+    #[serde(default)]
     pagecount: i64,
+    #[serde(default)]
     lastreadtime: i64,
+    #[serde(default)]
     size: i64,
 }
 
@@ -108,6 +120,12 @@ struct SearchResponseWire {
     data: Vec<SearchArchiveWire>,
     records_filtered: i64,
     records_total: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomResponseWire {
+    #[serde(default)]
+    data: Vec<SearchArchiveWire>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1368,8 +1386,18 @@ fn parse_search_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
     if response.records_filtered < 0 || response.records_total < 0 {
         return Err("Invalid LANraragi result counts".to_string());
     }
-    response
-        .data
+    parse_archive_entries(response.data)
+}
+
+/// `/api/search/random` answers with `{ "data": [...] }` and no result counts.
+fn parse_random_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+    let response: RandomResponseWire =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    parse_archive_entries(response.data)
+}
+
+fn parse_archive_entries(entries: Vec<SearchArchiveWire>) -> Result<Vec<RemoteArchive>, String> {
+    entries
         .into_iter()
         .map(|archive| {
             let valid_id = (archive.arcid.len() == 40
@@ -1520,18 +1548,7 @@ fn query_archive_page(
     Ok(ArchivePage { has_more: safe_offset + (items.len() as i64) < total, items, total })
 }
 
-fn replace_server_archives(
-    connection: &mut rusqlite::Connection,
-    server_id: &str,
-    archives: &[RemoteArchive],
-) -> Result<Vec<ArchiveRecord>, String> {
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute("UPDATE archives SET is_deleted = 1, local_updated_at = CURRENT_TIMESTAMP WHERE server_id = ?1", [server_id])
-        .map_err(|error| error.to_string())?;
-    const UPSERT: &str = "INSERT INTO archives (
+const ARCHIVE_UPSERT: &str = "INSERT INTO archives (
         server_id, archive_id, title, title_sort, summary, tags_json, page_count, file_size, local_updated_at, metadata_revision, is_deleted, added_at, first_seen_at
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, 1, 0, ?9, unixepoch())
       ON CONFLICT(server_id, archive_id) DO UPDATE SET
@@ -1540,11 +1557,17 @@ fn replace_server_archives(
         local_updated_at = CURRENT_TIMESTAMP, metadata_revision = archives.metadata_revision + 1, is_deleted = 0,
         added_at = COALESCE(excluded.added_at, archives.added_at),
         first_seen_at = COALESCE(archives.first_seen_at, excluded.first_seen_at)";
+
+fn upsert_archive_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &str,
+    archives: &[RemoteArchive],
+) -> Result<(), String> {
     for archive in archives {
         let tags_json = serde_json::to_string(&archive.tags).map_err(|error| error.to_string())?;
         transaction
             .execute(
-                UPSERT,
+                ARCHIVE_UPSERT,
                 params![
                     server_id,
                     archive.archive_id,
@@ -1559,8 +1582,37 @@ fn replace_server_archives(
             )
             .map_err(|error| error.to_string())?;
     }
+    Ok(())
+}
+
+fn replace_server_archives(
+    connection: &mut rusqlite::Connection,
+    server_id: &str,
+    archives: &[RemoteArchive],
+) -> Result<Vec<ArchiveRecord>, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("UPDATE archives SET is_deleted = 1, local_updated_at = CURRENT_TIMESTAMP WHERE server_id = ?1", [server_id])
+        .map_err(|error| error.to_string())?;
+    upsert_archive_rows(&transaction, server_id, archives)?;
     transaction.commit().map_err(|error| error.to_string())?;
     query_archive_records(connection, server_id)
+}
+
+/// Adds or updates rows without tombstoning anything else. `/api/search/random`
+/// returns a handful of archives, so the full-replace path would wipe the index.
+fn upsert_server_archives(
+    connection: &mut rusqlite::Connection,
+    server_id: &str,
+    archives: &[RemoteArchive],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    upsert_archive_rows(&transaction, server_id, archives)?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1730,6 +1782,141 @@ pub async fn refresh_archives(
     match apply_search_response_to_archives(&mut connection, &input.server_id, &body) {
         Ok(records) => Ok(CommandResult::success(records)),
         Err(error) => Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+    }
+}
+
+/// Shared HTTP status mapping for the LANraragi search endpoints.
+fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, String, bool)> {
+    match status {
+        reqwest::StatusCode::NO_CONTENT => Some(("LRR_NOT_FOUND", "Search index not ready (204 No Content)".to_string(), true)),
+        reqwest::StatusCode::UNAUTHORIZED => Some(("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false)),
+        reqwest::StatusCode::NOT_FOUND => Some(("LRR_NOT_FOUND", "Server not found (404)".to_string(), false)),
+        reqwest::StatusCode::CONFLICT => Some(("REMOTE_CONFLICT", "Server conflict (409)".to_string(), false)),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Some(("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true)),
+        _ if status.is_server_error() => Some(("REMOTE_UNAVAILABLE", format!("Server error ({})", status), true)),
+        _ if !status.is_success() => Some(("REMOTE_UNAVAILABLE", format!("Unexpected status ({})", status), false)),
+        _ => None,
+    }
+}
+
+fn query_archive_records_by_ids(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    archive_ids: &[String],
+) -> Result<Vec<ArchiveRecord>, String> {
+    if archive_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (0..archive_ids.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+         FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
+    );
+    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(archive_ids.len() + 1);
+    values.push(&server_id);
+    for id in archive_ids {
+        values.push(id);
+    }
+    let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(values.as_slice(), |row| {
+            let tags = archive_tags(row.get::<_, String>(10)?);
+            Ok(ArchiveRecord {
+                server_id: row.get(0)?,
+                archive_id: row.get(1)?,
+                title: row.get(2)?,
+                page_count: row.get(3)?,
+                summary: row.get(4)?,
+                category: row.get(5)?,
+                language: row.get(6)?,
+                cover_page: row.get(7)?,
+                is_deleted: row.get::<_, i64>(8)? != 0,
+                updated_at: row.get(9)?,
+                added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
+                tags,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let mut found = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    // Preserve the order the server answered with: for a random pull that order
+    // *is* the result.
+    let mut ordered = Vec::with_capacity(found.len());
+    for id in archive_ids {
+        if let Some(position) = found.iter().position(|record| &record.archive_id == id) {
+            ordered.push(found.remove(position));
+        }
+    }
+    Ok(ordered)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RandomArchivesInput {
+    server_id: String,
+    count: Option<i64>,
+    filter: Option<String>,
+    category: Option<String>,
+}
+
+fn build_random_search_url(base_url: &str, input: &RandomArchivesInput) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let count = input.count.unwrap_or(8).clamp(1, 100);
+    let mut query = vec![format!("count={count}")];
+    if let Some(filter) = input.filter.as_deref().filter(|value| !value.trim().is_empty()) {
+        query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
+    }
+    if let Some(category) = input.category.as_deref().filter(|value| !value.trim().is_empty()) {
+        query.push(format!("category={}", url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()));
+    }
+    format!("{}/api/search/random?{}", trimmed, query.join("&"))
+}
+
+/// Randomly selected archives straight from LANraragi, instead of shuffling a
+/// full local index client-side (which required pulling the whole library).
+#[tauri::command]
+pub async fn search_random_archives(
+    input: RandomArchivesInput,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Vec<ArchiveRecord>>, String> {
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &input.server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let response = match reader_request(reqwest::Method::GET, build_random_search_url(&base_url, &input), api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    if let Some((code, message, retryable)) = search_status_failure(response.status()) {
+        return Ok(CommandResult::failure(code, message, retryable));
+    }
+    let body = match response.text().await {
+        Ok(text) => text,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+    };
+    let archives = match parse_random_response(&body) {
+        Ok(archives) => archives,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+    };
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
+        return Ok(CommandResult::failure("UNKNOWN", error, true));
+    }
+    let ids = archives.iter().map(|archive| archive.archive_id.clone()).collect::<Vec<_>>();
+    match query_archive_records_by_ids(&connection, &input.server_id, &ids) {
+        Ok(records) => Ok(CommandResult::success(records)),
+        Err(error) => Ok(CommandResult::failure("UNKNOWN", error, true)),
     }
 }
 
@@ -3286,6 +3473,62 @@ mod tests {
         assert!(url.contains("order=desc"));
         assert!(!url.contains("filter="));
         assert!(!url.contains("category="));
+    }
+
+    #[test]
+    fn random_search_url_uses_the_native_endpoint_with_a_clamped_count() {
+        let url = build_random_search_url("https://lrr.example.com/", &RandomArchivesInput {
+            server_id: "scope-a".to_string(), count: Some(8), filter: None, category: None,
+        });
+        assert_eq!(url, "https://lrr.example.com/api/search/random?count=8");
+
+        let clamped = build_random_search_url("https://lrr.example.com", &RandomArchivesInput {
+            server_id: "scope-a".to_string(), count: Some(9999), filter: Some("fate$".to_string()), category: Some("SET_1613080290".to_string()),
+        });
+        assert!(clamped.contains("count=100"));
+        assert!(clamped.contains("filter=fate%24"));
+        assert!(clamped.contains("category=SET_1613080290"));
+    }
+
+    #[test]
+    fn random_response_parses_without_result_counts() {
+        let archives = parse_random_response(
+            r#"{"data":[{"arcid":"0123456789012345678901234567890123456789","title":"Random","tags":"artist:someone, date_added:1756512000","pagecount":12,"size":2048,"summary":null}]}"#,
+        ).expect("random payload");
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].page_count, 12);
+    }
+
+    #[test]
+    fn random_upsert_keeps_the_rest_of_the_index_alive() {
+        let mut connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at) VALUES
+               ('scope-a', 'keep-me', 'Keep', 'keep', '[]', 1, 100);",
+        ).unwrap();
+        let random = vec![RemoteArchive {
+            archive_id: "0123456789012345678901234567890123456789".to_string(),
+            title: "Random".to_string(),
+            summary: None,
+            tags: vec!["date_added:200".to_string()],
+            page_count: 3,
+            size: 10,
+        }];
+
+        upsert_server_archives(&mut connection, "scope-a", &random).expect("upsert");
+
+        let alive: i64 = connection
+            .query_row("SELECT COUNT(*) FROM archives WHERE server_id='scope-a' AND is_deleted=0", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(alive, 2, "a random pull must not tombstone the library");
+
+        let records = query_archive_records_by_ids(
+            &connection,
+            "scope-a",
+            &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
+        ).expect("records by id");
+        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
     }
 
     #[test]

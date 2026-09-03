@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -110,5 +110,30 @@ describe('reader route', () => {
 
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     expect(screen.queryByText('阅读页面加载失败')).not.toBeInTheDocument();
+  });
+
+  it('offers a way out and a retry when the reader cannot load', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') {
+        attempts += 1;
+        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '服务器暂时不可用', retryable: true } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('服务器暂时不可用');
+    // The route is shell-free, so it has to offer its own exit; the message also
+    // has to reach the shared toast.
+    expect(await screen.findByRole('link', { name: '返回档案库' })).toHaveAttribute('href', '/library');
+    expect(screen.getAllByText('服务器暂时不可用').length).toBeGreaterThan(1);
+
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(attempts).toBe(2));
   });
 });

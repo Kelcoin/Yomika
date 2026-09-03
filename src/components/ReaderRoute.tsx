@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
 import { getPrefetchPages } from '../domain/reader';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { useToast } from './Toast';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 
 const repository = new NativeLibraryRepository();
@@ -20,12 +22,14 @@ interface ReaderContext {
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [searchParams] = useSearchParams();
+  const { showToast } = useToast();
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
   const [title, setTitle] = useState('阅读器');
   const [pages, setPages] = useState<string[]>([]);
   const [error, setError] = useState<string>();
+  const [retryToken, setRetryToken] = useState(0);
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
   const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
@@ -180,9 +184,30 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (contextRef.current?.generation === generation) contextRef.current = undefined;
       releaseAllPages();
     };
-  }, [archiveId, loadPage, releaseAllPages, requestedPage]);
+  }, [archiveId, loadPage, releaseAllPages, requestedPage, retryToken]);
 
-  if (error) return <main className="reader-screen"><section className="reader-error"><h1>阅读器加载失败</h1><p role="alert">{error}</p></section></main>;
+  // Reader failures used to render as inline text only, on a shell-free route
+  // with no way out. Surface them through the shared toast as well.
+  useEffect(() => {
+    if (error) showToast(error, 'error');
+  }, [error, showToast]);
+
+  if (error) {
+    return (
+      <main className="reader-screen">
+        <section className="reader-error">
+          <h1>阅读器加载失败</h1>
+          <p role="alert">{error}</p>
+          <div className="reader-error-actions">
+            <button className="secondary-action" type="button" onClick={() => setRetryToken((value) => value + 1)}>
+              <RotateCcw aria-hidden="true" />重试
+            </button>
+            <Link className="primary-action" to="/library"><ArrowLeft aria-hidden="true" />返回档案库</Link>
+          </div>
+        </section>
+      </main>
+    );
+  }
   if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面…</p></main>;
 
   return (

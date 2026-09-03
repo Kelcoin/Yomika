@@ -212,6 +212,17 @@ describe('native library repository bridge', () => {
     });
   });
 
+  it('asks LANraragi for the random selection instead of shuffling locally', async () => {
+    const value = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Random', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z' }];
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().searchRandomArchives('scope-a', 8);
+
+    expect(adapter).toHaveBeenCalledWith('search_random_archives', { input: { serverId: 'scope-a', count: 8 } });
+    expect(result).toEqual({ ok: true, value });
+  });
+
   it('lists schema-validated server records', async () => {
     const value = [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }];
     const adapter = vi.fn(async () => ({ ok: true, value }));

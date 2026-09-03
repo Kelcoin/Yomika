@@ -29,6 +29,7 @@ function HomeWorkspace() {
   const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [archives, setArchives] = useState<ArchiveRecord[]>([]);
+  const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [recentError, setRecentError] = useState<string>();
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
@@ -63,6 +64,11 @@ function HomeWorkspace() {
         setWatchlist(watchlistResult.value);
         setArchives(archiveResult.value);
       }
+      // LANraragi picks the random set: the alternative was shuffling the whole
+      // local index client-side.
+      const random = await repository.searchRandomArchives(server.id, 8);
+      if (!active) return;
+      if (random.ok) setRandomArchives(random.value);
       setRecentLoading(false);
     })();
     return () => { active = false; };
@@ -80,7 +86,10 @@ function HomeWorkspace() {
     () => watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
     [archiveById, watchlist],
   );
-  const random = useMemo(() => pickRandomSample(archives, 8), [archives, serverLoadAttempt]);
+  const random = useMemo(
+    () => (randomArchives.length > 0 ? randomArchives : pickRandomSample(archives, 8)),
+    [archives, randomArchives, serverLoadAttempt],
+  );
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   return (
     <div className="workspace-home">

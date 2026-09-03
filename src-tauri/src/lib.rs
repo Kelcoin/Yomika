@@ -13,6 +13,7 @@ use commands::library::{
     list_categories, list_reading_history, list_servers, list_tasks, list_watchlist, load_archive_metadata,
     load_archive_thumbnail, load_archive_page_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
     refresh_archives, replace_archives, retry_task, save_reading_progress, save_server, set_watchlist,
+    search_random_archives,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
 };
 use cache::{cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats, cache_store_image};
@@ -55,6 +56,7 @@ pub fn run() {
             save_server,
             replace_archives,
             refresh_archives,
+            search_random_archives,
             load_reader_manifest,
             load_reader_page,
             list_archives,

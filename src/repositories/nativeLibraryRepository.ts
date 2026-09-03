@@ -172,6 +172,18 @@ export class NativeLibraryRepository {
     return invokeCommand('refresh_archives', { input: { serverId, params } }, z.array(ArchiveRecordSchema));
   }
 
+  /** LANraragi picks the archives; no need to hold the whole index locally. */
+  searchRandomArchives(serverId: string, count = 8, query: { filter?: string; categoryId?: string | null } = {}): Promise<CommandResult<ArchiveRecord[]>> {
+    return invokeCommand('search_random_archives', {
+      input: {
+        serverId,
+        count,
+        ...(query.filter ? { filter: query.filter } : {}),
+        ...(query.categoryId ? { category: query.categoryId } : {}),
+      },
+    }, z.array(ArchiveRecordSchema));
+  }
+
   listServers(): Promise<CommandResult<ServerRecord[]>> {
     return invokeCommand('list_servers', {}, z.array(ServerRecordSchema));
   }
