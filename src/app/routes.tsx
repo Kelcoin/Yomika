@@ -93,9 +93,6 @@ function HomeWorkspace() {
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   return (
     <div className="workspace-home">
-      <header className="workspace-heading">
-        <h1>首页</h1>
-      </header>
       {connectionError ? (
         <section className="first-run" aria-labelledby="first-run-title">
           <div className="first-run-copy">
@@ -116,16 +113,8 @@ function HomeWorkspace() {
             <Link className="secondary-action" to="/settings">打开设置</Link>
           </div>
         </section>
-      ) : connected ? (
-        <section className="first-run" aria-labelledby="first-run-title">
-          <div className="first-run-copy">
-            <Server aria-hidden="true" />
-            <h2 id="first-run-title">{servers.value?.[0]?.name ?? 'LANraragi'}</h2>
-            <p>服务器已配置，可以开始浏览档案。</p>
-          </div>
-          <Link className="primary-action" to="/library">打开档案库<ArrowRight aria-hidden="true" /></Link>
-        </section>
-      ) : (
+      ) : !connected && (
+        // Only an unusable setup gets a prompt; a working server needs no banner.
         <section className="first-run" aria-labelledby="first-run-title">
         <div className="first-run-copy">
           <Server aria-hidden="true" />
@@ -144,28 +133,14 @@ function HomeWorkspace() {
       <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
       <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
       </>}
-      <div className="shelf-rule" aria-hidden="true"><span>最近阅读</span><span>{String(recent.length).padStart(2, '0')}</span></div>
-      {recentLoading && <p className="server-list-message" role="status">正在读取最近阅读…</p>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
-      {!recentLoading && !recentError && !connectionError && (recent.length > 0 ? (
-        <ul className="home-recent-list" aria-label="最近阅读">
-          {recent.map((item) => (
-            <li key={item.archiveId}>
-              <Link to={`/reader/${item.archiveId}`}>
-                <strong>{archiveById.get(item.archiveId)?.title ?? item.archiveId}</strong>
-                <span>第 {item.pageIndex + 1} 页</span>
-                <ArrowRight aria-hidden="true" />
-              </Link>
-            </li>
-          ))}
-        </ul>
-      ) : (
+      {!recentLoading && !recentError && connected && continueReading.length === 0 && toRead.length === 0 && (
         <EmptyState
           icon={FolderHeart}
           title="书架还是空的"
-          description={connected ? '开始阅读后，最近阅读内容会出现在这里。' : '连接服务器后，最近阅读和待看内容会出现在这里。'}
+          description="开始阅读后，最近阅读内容会出现在这里。"
         />
-      ))}
+      )}
     </div>
   );
 }

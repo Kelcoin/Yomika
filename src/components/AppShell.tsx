@@ -4,17 +4,14 @@ import {
   Globe,
   History,
   Home,
-  ListTodo,
   PanelLeftClose,
   PanelLeftOpen,
-  Search,
   Settings,
   Star,
   ArrowUp,
   CopyCheck,
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
-import * as Tooltip from '@radix-ui/react-tooltip';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
@@ -68,7 +65,6 @@ export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
   const reduceMotion = useReducedMotion();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const title = pathname.startsWith('/library/') ? '档案详情' : routeTitles[pathname] ?? 'Yomika';
   const workspaceRef = useRef<HTMLElement>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
 
@@ -122,24 +118,6 @@ export function AppShell({ children }: AppShellProps) {
       </aside>
 
       <div className="app-main">
-        <header className="context-bar">
-          <div>
-            <strong>{title}</strong>
-          </div>
-          <div className="context-actions">
-            <Tooltip.Provider delayDuration={450}>
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild><Link className="icon-button" to="/library" aria-label="搜索"><Search aria-hidden="true" /></Link></Tooltip.Trigger>
-                <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>搜索<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
-              </Tooltip.Root>
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild><Link className="icon-button" to="/downloads" aria-label="任务中心"><ListTodo aria-hidden="true" /></Link></Tooltip.Trigger>
-                <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>任务中心<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
-              </Tooltip.Root>
-            </Tooltip.Provider>
-          </div>
-        </header>
-
         <motion.main
           id="main-content"
           className={`workspace${/^\/library(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}

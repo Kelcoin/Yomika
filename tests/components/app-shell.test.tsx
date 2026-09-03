@@ -67,7 +67,7 @@ describe('application shell', () => {
     renderAt();
 
     expect(screen.getByRole('link', { name: '跳到主内容' })).toHaveAttribute('href', '#main-content');
-    await screen.findByRole('heading', { name: '书架还是空的' });
+    await screen.findByRole('heading', { name: '添加你的 LANraragi' });
     const desktop = screen.getByRole('navigation', { name: '主导航' });
     expect(within(desktop).getByRole('link', { name: '下载' })).toBeInTheDocument();
     expect(within(desktop).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
@@ -99,6 +99,7 @@ describe('application shell', () => {
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
       if (command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'search_random_archives') return { ok: true, value: [] };
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
@@ -106,9 +107,11 @@ describe('application shell', () => {
 
     renderAt();
 
-    const recentList = await screen.findByRole('list', { name: '最近阅读' });
-    expect(within(recentList).getByRole('link', { name: /最近阅读档案/ })).toHaveAttribute('href', '/reader/a1');
-    expect(screen.getByText('第 5 页')).toBeInTheDocument();
+    // One rail only: the duplicate "最近阅读" list under it is gone.
+    const rail = await screen.findByRole('region', { name: '继续阅读' });
+    expect(within(rail).getByRole('link', { name: /最近阅读档案/ })).toHaveAttribute('href', '/library/a1');
+    expect(within(rail).getByText('5/12 页')).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: '最近阅读' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '书架还是空的' })).not.toBeInTheDocument();
   });
 
@@ -140,6 +143,7 @@ describe('application shell', () => {
       if (command === 'list_reading_history') return { ok: true, value: [] };
       if (command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'list_archives') return { ok: true, value: [] };
+      if (command === 'search_random_archives') return { ok: true, value: [] };
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
@@ -150,7 +154,9 @@ describe('application shell', () => {
     await screen.findByRole('alert');
     await user.click(screen.getByRole('button', { name: '重试读取服务器' }));
 
-    expect(await screen.findByRole('heading', { name: 'Home' })).toBeInTheDocument();
+    // A working server no longer gets a banner; an empty library shows the shelf
+    // empty state instead.
+    expect(await screen.findByRole('heading', { name: '书架还是空的' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -193,13 +199,6 @@ describe('application shell', () => {
     renderAt();
 
     expect(await screen.findByRole('status', { name: '连接状态' })).toHaveTextContent('离线');
-  });
-
-  it('links tooltip icon controls to their workspaces', () => {
-    renderAt();
-
-    expect(screen.getByRole('link', { name: '搜索' })).toHaveAttribute('href', '/library');
-    expect(screen.getByRole('link', { name: '任务中心' })).toHaveAttribute('href', '/downloads');
   });
 
   it('collapses desktop navigation to an icon rail', async () => {
