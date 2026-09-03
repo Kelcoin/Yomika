@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import tauriConfig from '../../src-tauri/tauri.conf.json';
 import {
   UnifiedImageCache,
+  type CachedImageData,
   type ImageCacheRepository,
   type ImageHandle,
 } from '../../src/lib/unifiedImageCache';
@@ -147,6 +148,42 @@ describe('UnifiedImageCache', () => {
     cache.release(first);
     expect(urls.revoke).toHaveBeenCalledWith(first.url);
     expect(repo.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps how many repository fetches run at once', async () => {
+    const urls = blobUrlFactory();
+    const repo = repository();
+    let started = 0;
+    let peak = 0;
+    let inFlight = 0;
+    const release: Array<() => void> = [];
+    repo.fetch = vi.fn(() => {
+      started += 1;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      return new Promise<CachedImageData>((resolve) => release.push(() => {
+        inFlight -= 1;
+        resolve({ bytes: new Uint8Array([1]), mime: 'image/jpeg' });
+      }));
+    });
+    const cache = new UnifiedImageCache(repo, {
+      createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024, maxConcurrentFetches: 4,
+    });
+
+    const loads = Array.from({ length: 20 }, (_, index) => cache.load({
+      scopeId: 'scope-a', archiveId: `archive-${index}`, rendition: 'cover' as const, pageIndex: 0,
+    }));
+    await vi.waitFor(() => expect(started).toBe(4));
+
+    // Release one at a time: a queued fetch may only start as one finishes.
+    for (let index = 0; index < 20; index += 1) {
+      await vi.waitFor(() => expect(release.length).toBeGreaterThan(0));
+      release.shift()!();
+    }
+    await Promise.all(loads);
+
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(repo.fetch).toHaveBeenCalledTimes(20);
   });
 });
 
