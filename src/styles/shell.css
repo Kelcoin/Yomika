@@ -1443,11 +1443,14 @@ body::-webkit-scrollbar,
 
 .archive-list.is-thumbnail .archive-row {
   display: grid;
-  grid-template-rows: minmax(220px, auto) minmax(92px, auto);
+  /* Exact geometry: 220 cover + 8 gap + 92 copy + 2x8 padding = 336px, the row
+     height the virtualizer places cards at (src/lib/archiveGridLayout.ts). A
+     growable row let cards overlap the next one. */
+  grid-template-rows: 220px 92px;
   align-content: start;
-  gap: var(--space-2);
-  min-height: 320px;
-  height: auto;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 336px;
   padding: var(--space-2);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
@@ -1470,12 +1473,11 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail .archive-row > svg { display: none; }
-.archive-list.is-thumbnail .archive-row-copy { align-content: space-between; min-height: 92px; }
+.archive-list.is-thumbnail .archive-row-copy { align-content: space-between; height: 92px; overflow: hidden; }
 .archive-list.is-thumbnail .archive-row strong { white-space: normal; overflow-wrap: anywhere; }
-.archive-list.is-thumbnail .archive-row-thumb { height: 220px; }
 
-.archive-list.is-thumbnail .archive-row-wrap.is-cover-wide .archive-row { grid-template-rows: minmax(180px, auto) minmax(92px, auto); }
-.archive-list.is-thumbnail .archive-row-wrap.is-cover-wide .archive-row-thumb { height: auto; aspect-ratio: 16 / 9; }
+/* A wide cover only takes two columns of width; its height stays identical to a
+   narrow card so every card in a row is the same height. */
 
 .archive-list.is-wide .archive-row-wrap { height: 132px !important; }
 .archive-list.is-wide .archive-row {

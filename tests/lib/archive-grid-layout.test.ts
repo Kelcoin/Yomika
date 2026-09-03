@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ARCHIVE_GRID_CARD_WIDTH,
+  ARCHIVE_GRID_COPY_HEIGHT,
+  ARCHIVE_GRID_COVER_HEIGHT,
   ARCHIVE_GRID_GAP,
+  ARCHIVE_GRID_ROW_HEIGHT,
   getArchiveGridColumns,
   getWideArchiveCardWidth,
   packArchiveGridRows,
@@ -11,6 +14,12 @@ import {
 const wide = (item: string) => item.startsWith('W');
 
 describe('archive grid layout', () => {
+  it('derives the row height from the fixed card geometry', () => {
+    // Cards must be exactly as tall as the row they are placed in, otherwise
+    // the absolutely positioned rows overlap.
+    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(ARCHIVE_GRID_COVER_HEIGHT + 8 + ARCHIVE_GRID_COPY_HEIGHT + 16);
+    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(336);
+  });
   it('keeps a wide card exactly two columns plus the gap', () => {
     expect(getWideArchiveCardWidth()).toBe(ARCHIVE_GRID_CARD_WIDTH * 2 + ARCHIVE_GRID_GAP);
     expect(getWideArchiveCardWidth(20)).toBe(ARCHIVE_GRID_CARD_WIDTH * 2 + 20);

@@ -118,7 +118,10 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-grid-row\s*\{[\s\S]*position:\s*absolute[\s\S]*display:\s*flex[\s\S]*gap:\s*12px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\s*\{[\s\S]*width:\s*180px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\.is-cover-wide\s*\{[\s\S]*width:\s*372px/);
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio:\s*16 \/ 9/);
+    // Fixed card geometry: 220 cover + 8 gap + 92 copy + 2x8 padding = 336px.
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row\s*\{[\s\S]*grid-template-rows:\s*220px 92px[\s\S]*height:\s*336px/);
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy\s*\{[\s\S]*height:\s*92px/);
+    expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
   });
 
   it('uses the project font and stable icon slots for status chrome', () => {

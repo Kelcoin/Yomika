@@ -7,7 +7,16 @@
  */
 export const ARCHIVE_GRID_CARD_WIDTH = 180;
 export const ARCHIVE_GRID_GAP = 12;
-export const ARCHIVE_GRID_ROW_HEIGHT = 320;
+/** Card geometry is fixed so the row height is exact. A `minmax()` row plus a
+ * `min-height` let a card grow past the row it was placed in, and neighbouring
+ * rows then overlapped it. Keep these in step with `.archive-list.is-thumbnail`
+ * in shell.css. */
+export const ARCHIVE_GRID_COVER_HEIGHT = 220;
+export const ARCHIVE_GRID_COPY_HEIGHT = 92;
+export const ARCHIVE_GRID_CARD_PADDING = 8;
+export const ARCHIVE_GRID_CARD_GAP = 8;
+export const ARCHIVE_GRID_ROW_HEIGHT =
+  ARCHIVE_GRID_COVER_HEIGHT + ARCHIVE_GRID_CARD_GAP + ARCHIVE_GRID_COPY_HEIGHT + ARCHIVE_GRID_CARD_PADDING * 2;
 
 export function getWideArchiveCardWidth(gap = ARCHIVE_GRID_GAP): number {
   const safeGap = Number.isFinite(gap) && gap >= 0 ? gap : ARCHIVE_GRID_GAP;
