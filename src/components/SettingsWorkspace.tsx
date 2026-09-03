@@ -10,6 +10,8 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { SyncWorkspace } from './SyncWorkspace';
+import { UploadPanel } from './UploadPanel';
+import { DeduplicationWorkspace } from './DeduplicationWorkspace';
 import { usePreferences } from '../app/preferences';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 
@@ -36,6 +38,7 @@ const settingsSections = [
   { id: 'settings-server', label: '服务器连接' },
   { id: 'settings-migration', label: '数据迁移' },
   { id: 'settings-sync', label: '同步账户' },
+  { id: 'settings-tools', label: '工具' },
 ] as const;
 
 export function SettingsWorkspace() {
@@ -346,6 +349,17 @@ export function SettingsWorkspace() {
       {selectedSettingsSection === 'settings-sync' && (
       <section className="settings-section" id="settings-sync" aria-labelledby="sync-settings-title">
         <div className="settings-sync-content"><SyncWorkspace embedded /></div>
+      </section>
+      )}
+      {selectedSettingsSection === 'settings-tools' && (
+      <section className="settings-section" id="settings-tools" aria-labelledby="tools-title">
+        <div>
+          <h2 id="tools-title">工具</h2>
+        </div>
+        <div className="settings-tools-panels">
+          <UploadPanel />
+          <DeduplicationWorkspace embedded />
+        </div>
       </section>
       )}
         </div>

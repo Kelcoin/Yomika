@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, CopyCheck, Download, Play, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
+import { Check, CopyCheck, Play, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import type { ArchiveRecord, ServerRecord } from '../domain/library';
 import { mergeSmartDuplicateSelection, getDedupeGroupFilterData, toDedupeDayString, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeDedupRepository, type DedupLoadResult, type DedupScanProgress } from '../repositories/nativeDedupRepository';
-import { parseReadoshiNonDuplicateExport } from '../lib/readoShiDedupeImport';
 import { useToast } from './Toast';
 
 const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
 const ALGORITHM_VERSION = 'readoshi-v1';
 
-export function DeduplicationWorkspace() {
+export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolean } = {}) {
   const { showToast } = useToast();
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [server, setServer] = useState<ServerRecord>();
@@ -23,7 +22,6 @@ export function DeduplicationWorkspace() {
   const [endDate, setEndDate] = useState(() => toDedupeDayString());
   const [sourceFilter, setSourceFilter] = useState<'all' | DuplicateSource>('all');
   const [view, setView] = useState<'groups' | 'chains'>('groups');
-  const [importText, setImportText] = useState('');
   const [busy, setBusy] = useState(false);
   const scanGeneration = useRef(0);
 
@@ -117,18 +115,8 @@ export function DeduplicationWorkspace() {
     }
   }
 
-  async function importReadoshi() {
-    if (!server || !importText.trim()) return;
-    try {
-      const parsed = parseReadoshiNonDuplicateExport(importText, server.scopeId);
-      const response = await dedup.importReadoshi({ scopeId: server.scopeId, pairs: parsed.pairs });
-      if (!response.ok) showToast(response.error.message, 'error');
-      else { setImportText(''); showToast(`已导入 ${parsed.pairs.length} 条不重复关系`, 'success'); }
-    } catch (error) { showToast(error instanceof Error ? error.message : '导入失败', 'error'); }
-  }
-
   return <div className="workspace-stack dedup-workspace">
-    <header className="workspace-heading"><div><span className="eyebrow">重复管理</span><h1>查重工作区</h1></div><CopyCheck aria-hidden="true" /></header>
+    {!embedded && <header className="workspace-heading"><div><span className="eyebrow">重复管理</span><h1>查重工作区</h1></div><CopyCheck aria-hidden="true" /></header>}
     <section className="toolbar-row" aria-label="查重设置">
       <label>服务器<select value={server?.id ?? ''} onChange={(event) => setServer(servers.find((item) => item.id === event.target.value))}>{servers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       <label>起始日期<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
@@ -138,7 +126,6 @@ export function DeduplicationWorkspace() {
       {progress?.status === 'cancelled' && <button className="secondary-action" type="button" onClick={() => void runScan(true)}><RefreshCw aria-hidden="true" />恢复</button>}
     </section>
     {progress && <div className="progress-line" role="status">{progress.stage} · {progress.processed}/{progress.total} · 命中 {progress.pairCount}{progress.degraded ? ' · 结果不完整' : ''}</div>}
-    <section className="dedup-import panel"><div className="section-heading"><h2>导入 Readoshi 不重复关系</h2><Download aria-hidden="true" /></div><textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="粘贴 JSON 导出内容" rows={3} /><button className="secondary-action" type="button" disabled={!server || !importText.trim()} onClick={() => void importReadoshi()}><Download aria-hidden="true" />导入</button></section>
     {result && <>
       <section className="toolbar-row dedup-filters"><label>来源<select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="image">封面相似</option><option value="filename">文件名</option></select></label><label>视图<select value={view} onChange={(event) => setView(event.target.value as typeof view)}><option value="groups">重复组</option><option value="chains">重复链</option></select></label><button className="secondary-action" type="button" onClick={() => void smartSelect()}><ShieldCheck aria-hidden="true" />智能选择</button><button className="danger-action" type="button" disabled={!selected.size} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />删除所选</button></section>
       <ul className="dedup-groups" aria-label="重复结果">{visibleGroups.map((group, index) => <li className="dedup-group" key={`${index}-${group.map((item) => item.archiveId).join('-')}`}><div className="dedup-group-heading"><strong>重复组 {index + 1}</strong><span>{group.length} 项</span></div><ul>{group.map((archive) => <li key={archive.archiveId}><label><input type="checkbox" checked={selected.has(archive.archiveId)} onChange={(event) => void toggleSelected(archive.archiveId, event.target.checked)} /><span>{archive.title || archive.archiveId}</span><small>{archive.archiveId}</small></label>{selected.has(archive.archiveId) && <Check aria-hidden="true" />}</li>)}</ul>{group.length > 1 && <button className="icon-button" type="button" title="标记为不重复" aria-label="标记为不重复" onClick={() => server && void dedup.saveNonDuplicate({ scopeId: server.scopeId, leftArchiveId: group[0]!.archiveId, rightArchiveId: group[1]!.archiveId })}><X aria-hidden="true" /></button>}</li>)}</ul>

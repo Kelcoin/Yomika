@@ -2561,3 +2561,41 @@ body::-webkit-scrollbar,
     transform: none;
   }
 }
+
+.settings-tools-panels {
+  display: grid;
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+.settings-tool-panel {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-card);
+  background: var(--surface-panel);
+}
+
+.settings-tool-panel .section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-tool-panel h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.settings-tool-hint {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.settings-tool-panel .primary-action {
+  justify-self: start;
+}

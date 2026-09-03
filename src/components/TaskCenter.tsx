@@ -3,7 +3,6 @@ import { Pause, Play, RotateCcw, X } from 'lucide-react';
 
 import type { TaskRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-import { pickArchiveFile } from '../bridge/filePicker';
 
 const repository = new NativeLibraryRepository();
 
@@ -11,8 +10,6 @@ export function TaskCenter() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [message, setMessage] = useState<string>();
-  const [uploading, setUploading] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string>();
 
   useEffect(() => {
@@ -25,37 +22,6 @@ export function TaskCenter() {
     });
     return () => { active = false; };
   }, []);
-
-  async function upload() {
-    setError(undefined);
-    setMessage(undefined);
-    setUploading(true);
-    try {
-      const filePath = await pickArchiveFile();
-      if (!filePath) return;
-      const servers = await repository.listServers();
-      if (!servers.ok || !servers.value[0]) {
-        setError(servers.ok ? '尚未配置服务器' : servers.error.message);
-        return;
-      }
-      const filename = filePath.split(/[\\/]/).pop() ?? filePath;
-      const created = await repository.createTask({ kind: 'download', label: `上传 ${filename}` });
-      if (!created.ok) {
-        setError(created.error.message);
-        return;
-      }
-      const uploaded = await repository.uploadArchive({ serverId: servers.value[0].id, taskId: created.value.id, filePath });
-      if (!uploaded.ok) {
-        setError(uploaded.error.message);
-        return;
-      }
-      setMessage('上传完成');
-      const refreshed = await repository.listTasks();
-      if (refreshed.ok) setTasks(refreshed.value);
-    } finally {
-      setUploading(false);
-    }
-  }
 
   async function act(task: TaskRecord, action: 'retry' | 'pause' | 'resume' | 'cancel') {
     setError(undefined);
@@ -80,9 +46,7 @@ export function TaskCenter() {
     <div className="task-center">
       <header className="workspace-heading task-heading">
         <div><h1>下载</h1></div>
-        <button className="primary-action" type="button" disabled={uploading} aria-busy={uploading} onClick={() => void upload()}>{uploading ? '上传中…' : '上传档案'}</button>
       </header>
-      {message && <p role="status">{message}</p>}
       {loading && <p className="server-list-message" role="status">正在读取任务…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {!loading && !error && tasks.length === 0 && <p className="server-list-message">暂无下载任务</p>}
