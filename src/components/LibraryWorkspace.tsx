@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronRight, FolderHeart, ArrowDown, ArrowUp, BookOpen, RefreshCw, Star, Grid2X2, List, Rows3 } from 'lucide-react';
+import { ChevronRight, FolderHeart, ArrowDown, ArrowUp, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -47,15 +47,22 @@ interface LibraryWorkspaceProps {
   onCategoryFilterChange?: ((value: string) => void) | undefined;
   readingProgressByArchiveId?: ReadonlyMap<string, number> | undefined;
   showDetail?: boolean | undefined;
+  /** `null` renders no heading; watchlist/history supply their own. */
+  heading?: string | null | undefined;
+  /** Watchlist/history filter their own records, so the tag search is hidden. */
+  showSearch?: boolean | undefined;
+  /** Supplying a toggle turns each card into a selectable row. */
+  selectedArchiveIds?: ReadonlySet<string> | undefined;
+  onToggleSelected?: ((archiveId: string, checked: boolean) => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
   const [localSortOrder, setLocalSortOrder] = useState<'asc' | 'desc'>('asc');
   const [localSortMode, setLocalSortMode] = useState<'title' | 'added'>('title');
-  const [displayMode, setDisplayMode] = useState<'compact' | 'thumbnail' | 'wide'>('wide');
+  const [displayMode, setDisplayMode] = useState<'thumbnail' | 'wide'>('wide');
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -132,6 +139,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   });
 
   const renderArchiveButton = (archive: ArchiveRecord, eager: boolean) => (
+    <>
+    {onToggleSelected && (
+      <input
+        className="archive-row-select"
+        type="checkbox"
+        aria-label={`选择 ${archive.title}`}
+        checked={selectedArchiveIds?.has(archive.archiveId) ?? false}
+        onChange={(event) => onToggleSelected(archive.archiveId, event.target.checked)}
+      />
+    )}
     <button
       aria-pressed={archive.archiveId === selected?.archiveId}
       className="archive-row"
@@ -142,7 +159,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       }}
       type="button"
     >
-      {displayMode !== 'compact' && <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
+      {<LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
         // Returning a fresh Set on every cover load would re-render the whole
         // list once per thumbnail.
         if (current.has(archive.archiveId) === isWideCoverRatio(ratio)) return current;
@@ -162,12 +179,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       </span>
       <ChevronRight aria-hidden="true" />
     </button>
+    </>
   );
 
   return (
     <div className="library-workspace">
-      <LibraryHeading count={totalCount ?? filteredArchives.length} onRefresh={onRefresh} refreshing={refreshing} />
-      <div className="library-controls">
+      {heading !== null && <LibraryHeading heading={heading} count={totalCount ?? filteredArchives.length} onRefresh={onRefresh} refreshing={refreshing} />}
+      {showSearch && <div className="library-controls">
         <label className="search-label">
           <input
             ref={searchInputRef}
@@ -186,15 +204,15 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           />
           <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />
         </label>
-      </div>
+      </div>}
       <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
         <button
           className="secondary-action library-display-cycle"
           type="button"
-          aria-label={`显示模式：${displayMode === 'compact' ? '无图列表' : displayMode === 'wide' ? '有图列表' : '缩略图'}，点击切换`}
-          onClick={() => setDisplayMode((mode) => mode === 'compact' ? 'wide' : mode === 'wide' ? 'thumbnail' : 'compact')}
+          aria-label={`显示模式：${displayMode === 'wide' ? '缩略图列表' : '缩略图卡片'}，点击切换`}
+          onClick={() => setDisplayMode((mode) => (mode === 'wide' ? 'thumbnail' : 'wide'))}
         >
-          {displayMode === 'compact' ? <List aria-hidden="true" /> : displayMode === 'wide' ? <Rows3 aria-hidden="true" /> : <Grid2X2 aria-hidden="true" />}
+          {displayMode === 'wide' ? <Rows3 aria-hidden="true" /> : <Grid2X2 aria-hidden="true" />}
         </button>
         <button
           className="secondary-action library-sort-direction"
@@ -205,7 +223,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           {sortOrder === 'asc' ? <ArrowDown aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
         </button>
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
-        {displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
+        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
       </div>
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
         <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">
@@ -398,11 +416,11 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
   }} /> : <span aria-hidden="true" />}</div>;
 }
 
-function LibraryHeading({ count, onRefresh, refreshing }: { count: number; onRefresh?: (() => void) | undefined; refreshing?: boolean | undefined }) {
+function LibraryHeading({ heading, count, onRefresh, refreshing }: { heading: string; count: number; onRefresh?: (() => void) | undefined; refreshing?: boolean | undefined }) {
   return (
     <header className="workspace-heading library-heading">
       <div>
-        <h1>档案库</h1>
+        <h1>{heading}</h1>
       </div>
       <span className="library-heading-actions">
         <span>{count} 项</span>

@@ -1,10 +1,11 @@
 import { ArrowRight, FolderHeart, RefreshCw, Server } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
 import { EhWorkspace } from '../components/EhWorkspace';
 import { LibraryShell } from '../components/LibraryShell';
+import { LibraryWorkspace } from '../components/LibraryWorkspace';
 import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
 import { SettingsWorkspace } from '../components/SettingsWorkspace';
 import { TaskCenter } from '../components/TaskCenter';
@@ -15,6 +16,8 @@ import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
+import { getNativeImageCache } from '../lib/nativeImageCache';
+import type { ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { presentEhError, type EhSearchResult } from '../services/ehClient';
@@ -146,12 +149,13 @@ function HomeWorkspace() {
 }
 
 const repository = new NativeLibraryRepository();
+const stateImageCache = getNativeImageCache();
 
 function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  const [serverName, setServerName] = useState('LANraragi');
+  const [serverId, setServerId] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -170,7 +174,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
       if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
       const server = servers.value[0];
       if (!server) { setHasServer(false); setLoading(false); return; }
-      setServerName(server.name);
+      setServerId(server.id);
       setScopeId(server.scopeId);
       const [result, archiveResult] = await Promise.all([
         name === 'history' ? repository.listHistory(server.scopeId) : repository.listWatchlist(server.scopeId),
@@ -202,7 +206,27 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
         ? right.addedAt.localeCompare(left.addedAt)
         : (archiveTitles.get(left.archiveId) ?? left.archiveId).localeCompare(archiveTitles.get(right.archiveId) ?? right.archiveId));
   }, [activeWatchlist, archiveTitles, name, watchlistQuery, watchlistSort]);
-  const records = name === 'history' ? sortedHistory : activeWatchlist;
+  const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
+  const visibleArchives = useMemo(() => {
+    const ids = name === 'history' ? sortedHistory.map((item) => item.archiveId) : visibleWatchlist.map((item) => item.archiveId);
+    return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
+  }, [archiveById, name, sortedHistory, visibleWatchlist]);
+  const progressByArchiveId = useMemo(
+    () => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])),
+    [history],
+  );
+  const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
+    if (!scopeId || !serverId) return undefined;
+    try {
+      return await stateImageCache.load(
+        { scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 },
+        signal ? { signal } : {},
+      );
+    } catch {
+      return undefined;
+    }
+  }, [scopeId, serverId]);
+  const releaseThumbnail = useCallback((handle: ImageHandle) => stateImageCache.release(handle), []);
 
   const removeSelectedWatchlist = async () => {
     if (!scopeId || selectedWatchlist.size === 0) return;
@@ -278,43 +302,29 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
       )}
       {watchlistError && <p className="form-error" role="alert">{watchlistError}</p>}
       {watchlistMessage && <p className="server-list-message" role="status">{watchlistMessage}</p>}
-      {!loading && !error && hasServer && (records.length === 0 ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} /> : (
-        <ul className="state-list" aria-label={title}>
-          {name === 'history'
-            ? sortedHistory.map((item) => (
-              <li key={item.archiveId}>
-                <Link to={`/reader/${item.archiveId}`}>
-                  <strong>{archiveTitles.get(item.archiveId) ?? item.archiveId}</strong>
-                  <span>{serverName} · 第 {item.pageIndex + 1} 页</span>
-                  <ArrowRight aria-hidden="true" />
-                </Link>
-              </li>
-            ))
-            : visibleWatchlist.map((item) => {
-              const itemTitle = archiveTitles.get(item.archiveId) ?? item.archiveId;
-              return (
-              <li className="watchlist-row" key={item.archiveId}>
-                <input
-                  type="checkbox"
-                  aria-label={`选择 ${itemTitle}`}
-                  checked={selectedWatchlist.has(item.archiveId)}
-                  onChange={(event) => setSelectedWatchlist((current) => {
-                    const next = new Set(current);
-                    if (event.target.checked) next.add(item.archiveId);
-                    else next.delete(item.archiveId);
-                    return next;
-                  })}
-                />
-                <Link to={`/reader/${item.archiveId}`}>
-                  <strong>{itemTitle}</strong>
-                  <span>{serverName} · 收藏夹</span>
-                  <ArrowRight aria-hidden="true" />
-                </Link>
-              </li>
-              );
-            })}
-        </ul>
-      ))}
+      {!loading && !error && hasServer && (visibleArchives.length === 0
+        ? <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
+        : (
+          // Same list and card system as the library, so display mode and sort
+          // behave identically here.
+          <LibraryWorkspace
+            archives={visibleArchives}
+            heading={null}
+            showSearch={false}
+            showDetail={false}
+            readingProgressByArchiveId={progressByArchiveId}
+            {...(name === 'watchlist' ? {
+              selectedArchiveIds: selectedWatchlist,
+              onToggleSelected: (archiveId: string, checked: boolean) => setSelectedWatchlist((current) => {
+                const next = new Set(current);
+                if (checked) next.add(archiveId);
+                else next.delete(archiveId);
+                return next;
+              }),
+            } : {})}
+            {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
+          />
+        ))}
       {!loading && !error && hasServer && name === 'watchlist' && activeWatchlist.length > 0 && visibleWatchlist.length === 0 && (
         <p className="server-list-message" role="status">没有匹配的待看档案。</p>
       )}

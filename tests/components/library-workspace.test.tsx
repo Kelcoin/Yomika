@@ -61,6 +61,18 @@ describe('library workspace', () => {
     expect(onSearchQueryChange).toHaveBeenCalledWith('female:glasses$');
   });
 
+  it('cycles between the two cover-bearing display modes only', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // The no-cover "compact" mode is gone: wide ⇄ thumbnail.
+    const cycle = screen.getByRole('button', { name: /显示模式：缩略图列表/ });
+    await user.click(cycle);
+    expect(screen.getByRole('button', { name: /显示模式：缩略图卡片/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /显示模式：缩略图卡片/ }));
+    expect(screen.getByRole('button', { name: /显示模式：缩略图列表/ })).toBeInTheDocument();
+  });
+
   it('renders search input and sort controls', () => {
     renderWorkspace({ archives });
 
@@ -72,8 +84,8 @@ describe('library workspace', () => {
     const user = userEvent.setup();
     renderWorkspace({ archives });
 
-    // wide (default) → thumbnail
-    await user.click(screen.getByRole('button', { name: /显示模式：有图列表/ }));
+    // wide (default) → thumbnail; the no-cover compact mode is gone
+    await user.click(screen.getByRole('button', { name: /显示模式：缩略图列表/ }));
 
     const items = screen.getAllByRole('listitem');
     expect(items.length).toBeGreaterThan(0);

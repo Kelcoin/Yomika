@@ -46,8 +46,10 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole('link', { name: /历史档案标题/ })).toHaveAttribute('href', '/reader/a1');
-    expect(screen.getByText('Home · 第 5 页')).toBeInTheDocument();
+    // History reuses the library card, so the row is a button and the progress
+    // renders in the shared card metadata slot.
+    expect(await screen.findByRole('button', { name: /历史档案标题/ })).toBeInTheDocument();
+    expect(screen.getByText('5/12 页')).toBeInTheDocument();
   });
 
   it('orders history by most recent visit regardless of native return order', async () => {
@@ -67,8 +69,8 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
 
-    const newer = await screen.findByRole('link', { name: /Newer visit/ });
-    const older = screen.getByRole('link', { name: /Older visit/ });
+    const newer = await screen.findByRole('button', { name: /Newer visit/ });
+    const older = screen.getByRole('button', { name: /Older visit/ });
     expect(newer.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -90,18 +92,18 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
 
-    const alpha = await screen.findByRole('link', { name: /Alpha archive/ });
-    const beta = screen.getByRole('link', { name: /Beta archive/ });
+    const alpha = await screen.findByRole('button', { name: /Alpha archive/ });
+    const beta = screen.getByRole('button', { name: /Beta archive/ });
     expect(alpha.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.type(screen.getByRole('searchbox', { name: '筛选待看' }), 'beta');
-    expect(screen.queryByRole('link', { name: /Alpha archive/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Beta archive/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Alpha archive/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Beta archive/ })).toBeInTheDocument();
 
     await user.clear(screen.getByRole('searchbox', { name: '筛选待看' }));
     await user.selectOptions(screen.getByRole('combobox', { name: '待看排序' }), 'recent');
-    const recentFirst = screen.getByRole('link', { name: /Alpha archive/ });
-    const recentSecond = screen.getByRole('link', { name: /Beta archive/ });
+    const recentFirst = screen.getByRole('button', { name: /Alpha archive/ });
+    const recentSecond = screen.getByRole('button', { name: /Beta archive/ });
     expect(recentFirst.compareDocumentPosition(recentSecond) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -153,8 +155,8 @@ describe('library route workspace', () => {
     await user.click(await screen.findByRole('checkbox', { name: '全选当前结果' }));
     await user.click(screen.getByRole('button', { name: '移除所选' }));
 
-    expect(screen.queryByRole('link', { name: /Alpha archive/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Beta archive/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Alpha archive/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Beta archive/ })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: '选择 Beta archive' })).toBeChecked();
     expect(screen.getByRole('alert')).toHaveTextContent('有 1 项未能移除：本地写入失败');
   });
