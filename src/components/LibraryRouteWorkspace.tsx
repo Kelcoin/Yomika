@@ -5,7 +5,7 @@ import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { markLibrarySynced, shouldSyncLibrary } from '../lib/librarySync';
+import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories, shouldSyncLibrary } from '../lib/librarySync';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 
@@ -228,12 +228,15 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         void syncRemoteIndex(serverId);
       }
       // Dynamic LANraragi categories expose a search expression instead of
-      // archive IDs; refresh the category cache after the archive index exists
-      // so those IDs can be materialized into local membership rows.
-      void repository.listCategories(serverId).then((categoryResult) => {
-        if (categoryResult.ok) setCategories(categoryResult.value);
-        else setCategoryError(categoryResult.error.message);
-      });
+      // archive IDs, and resolving each one is an unpaged /api/search. Refresh
+      // them on the same TTL as the index instead of on every navigation.
+      if (shouldRefreshCategories(serverId)) {
+        markCategoriesRefreshed(serverId);
+        void repository.listCategories(serverId).then((categoryResult) => {
+          if (categoryResult.ok) setCategories(categoryResult.value);
+          else setCategoryError(categoryResult.error.message);
+        });
+      }
     });
   }, [loadFirstPage, reloadToken, serverId, syncRemoteIndex]);
 

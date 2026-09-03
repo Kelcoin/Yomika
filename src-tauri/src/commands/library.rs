@@ -566,7 +566,11 @@ pub async fn list_categories(
     // LANraragi leaves `archives` empty for dynamic categories. Resolve those
     // categories concurrently through their documented search expression so
     // one slow category cannot serialize the entire detail page.
+    // Two at a time: each resolution is an unpaged full-library search, and a
+    // library with many dynamic categories would otherwise fire them all at once.
+    const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
     let mut dynamic_categories = JoinSet::new();
+    let mut resolved = Vec::new();
     for (index, category) in categories.iter().enumerate() {
         if !category.archives.is_empty() {
             continue;
@@ -577,8 +581,7 @@ pub async fn list_categories(
         let base_url = base_url.clone();
         let api_key = api_key.clone();
         dynamic_categories.spawn(async move {
-            let encoded = url::form_urlencoded::byte_serialize(search.as_bytes()).collect::<String>();
-            let url = format!("{}/api/search?filter={encoded}&start=-1", base_url.trim_end_matches('/'));
+            let url = build_category_search_url(&base_url, &search);
             let response = reader_request(reqwest::Method::GET, url, api_key).await.ok()?;
             if !response.status().is_success() {
                 return None;
@@ -587,12 +590,20 @@ pub async fn list_categories(
             let archives = parse_search_response(&body).ok()?;
             Some((index, archives.into_iter().map(|archive| archive.archive_id).collect::<Vec<_>>()))
         });
+        if dynamic_categories.len() >= MAX_PARALLEL_CATEGORY_SEARCHES {
+            if let Some(Ok(Some(entry))) = dynamic_categories.join_next().await {
+                resolved.push(entry);
+            }
+        }
     }
     while let Some(result) = dynamic_categories.join_next().await {
-        if let Ok(Some((index, archives))) = result {
-            if let Some(category) = categories.get_mut(index) {
-                category.archives = archives;
-            }
+        if let Ok(Some(entry)) = result {
+            resolved.push(entry);
+        }
+    }
+    for (index, archives) in resolved {
+        if let Some(category) = categories.get_mut(index) {
+            category.archives = archives;
         }
     }
     let sync_result = (|| -> Result<(), String> {
@@ -1661,6 +1672,25 @@ pub struct RefreshSearchParams {
     hidecompleted: Option<bool>,
     category: Option<String>,
     groupby_tanks: Option<bool>,
+}
+
+/// Dynamic categories are resolved through the same search endpoint, so they go
+/// through the same builder: LANraragi reads `sortby` without a default, and a
+/// missing one both floods its log with "uninitialized value $sortkey" and
+/// defeats its search cache (every request becomes a full DB parse).
+fn build_category_search_url(base_url: &str, filter: &str) -> String {
+    let params = RefreshSearchParams {
+        filter: Some(filter.to_string()),
+        start: Some(-1),
+        sortby: None,
+        order: None,
+        newonly: None,
+        untaggedonly: None,
+        hidecompleted: None,
+        category: None,
+        groupby_tanks: None,
+    };
+    build_refresh_search_url(base_url, &params).unwrap_or_else(|_| format!("{}/api/search", base_url.trim_end_matches('/')))
 }
 
 fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Result<String, String> {
@@ -3537,6 +3567,19 @@ mod tests {
             &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
         ).expect("records by id");
         assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
+    }
+
+    #[test]
+    fn dynamic_category_search_always_carries_a_sort_key() {
+        // LANraragi's Controller/Api/Search.pm reads `sortby` with no default,
+        // so an omitted one logs "uninitialized value $sortkey" at
+        // Model/Search.pm:51/52/57 and skips its search cache.
+        let url = build_category_search_url("https://lrr.example.com/", "artist:someone$");
+        assert!(url.starts_with("https://lrr.example.com/api/search?"));
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=desc"), "{url}");
+        assert!(url.contains("start=-1"), "{url}");
+        assert!(url.contains("filter=artist%3Asomeone%24"), "{url}");
     }
 
     #[test]

@@ -18,6 +18,22 @@ export function markLibrarySynced(serverId: string, now = Date.now()): void {
   if (serverId) lastSyncedAt.set(serverId, now);
 }
 
+/** Category listing resolves every dynamic category through an unpaged
+ * `/api/search`, so re-running it on every navigation is a burst of
+ * full-library parses on the server. */
+const lastCategoriesAt = new Map<string, number>();
+
+export function shouldRefreshCategories(serverId: string, now = Date.now()): boolean {
+  if (!serverId) return false;
+  const last = lastCategoriesAt.get(serverId);
+  return last === undefined || now - last >= REMOTE_SYNC_TTL_MS;
+}
+
+export function markCategoriesRefreshed(serverId: string, now = Date.now()): void {
+  if (serverId) lastCategoriesAt.set(serverId, now);
+}
+
 export function resetLibrarySyncStateForTests(): void {
   lastSyncedAt.clear();
+  lastCategoriesAt.clear();
 }
