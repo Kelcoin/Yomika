@@ -2621,3 +2621,27 @@ body::-webkit-scrollbar,
   flex-wrap: wrap;
   gap: var(--space-3);
 }
+
+.accent-picker {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.accent-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.accent-swatch {
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.accent-swatch.is-active {
+  border-color: var(--ink-primary);
+  box-shadow: 0 0 0 2px var(--surface-canvas) inset;
+}

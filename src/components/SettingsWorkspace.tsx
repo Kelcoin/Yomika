@@ -14,6 +14,7 @@ import { UploadPanel } from './UploadPanel';
 import { DeduplicationWorkspace } from './DeduplicationWorkspace';
 import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
+import { ACCENT_PRESETS, DEFAULT_ACCENT_COLOR, contrastRatio, isAccessibleAccent, normalizeAccentColor } from '../lib/accentColor';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -47,6 +48,7 @@ export function SettingsWorkspace() {
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
+  const accentPreview = normalizeAccentColor(preferenceDraft.accentColor);
   const [preferencePending, setPreferencePending] = useState(false);
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
@@ -118,7 +120,10 @@ export function SettingsWorkspace() {
     setPreferencePending(true);
     setPreferenceMessage(undefined);
     setPreferenceError(false);
-    const result = await preferenceState.save(preferenceDraft);
+    const result = await preferenceState.save({
+      ...preferenceDraft,
+      accentColor: normalizeAccentColor(preferenceDraft.accentColor) ?? DEFAULT_ACCENT_COLOR,
+    });
     if (result.ok) setPreferenceDraft(result.value);
     else setPreferenceError(true);
     setPreferenceMessage(result.ok ? '偏好已保存' : result.error.message);
@@ -254,6 +259,82 @@ export function SettingsWorkspace() {
               <SelectField name="direction" aria-label="默认方向" value={preferenceDraft.defaultDirection} options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
               <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
             </fieldset>
+            <fieldset className="accent-picker">
+              <legend>强调色</legend>
+              <div className="accent-swatches">
+                {ACCENT_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    className={`accent-swatch${preferenceDraft.accentColor === preset.value ? ' is-active' : ''}`}
+                    style={{ background: preset.value }}
+                    aria-label={preset.label}
+                    aria-pressed={preferenceDraft.accentColor === preset.value}
+                    onClick={() => setPreferenceDraft({ ...preferenceDraft, accentColor: preset.value })}
+                  />
+                ))}
+              </div>
+              <label className="preference-select">自定义色值
+                <input
+                  name="accentColor"
+                  aria-label="自定义强调色"
+                  value={preferenceDraft.accentColor}
+                  spellCheck={false}
+                  // Keep the raw text while typing: expanding #abc mid-word
+                  // would rewrite the field under the cursor. Normalization
+                  // happens on save.
+                  onChange={(event) => setPreferenceDraft({ ...preferenceDraft, accentColor: event.target.value.trim().toLowerCase() })}
+                />
+              </label>
+              {accentPreview
+                ? !isAccessibleAccent(accentPreview) && (
+                  <p className="form-error" role="alert">
+                    与白色文字的对比度为 {contrastRatio(accentPreview, '#ffffff')}:1，低于 WCAG AA 要求的 4.5:1
+                  </p>
+                )
+                : <p className="form-error" role="alert">强调色需要是 #rrggbb 形式的十六进制色值</p>}
+            </fieldset>
+            <label className="preference-select">预加载页数
+              <input
+                name="prefetchPages"
+                aria-label="预加载页数"
+                type="number"
+                min={0}
+                max={5}
+                step={1}
+                value={preferenceDraft.prefetchPages}
+                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, prefetchPages: Number(event.target.value) })}
+              />
+            </label>
+            <label className="preference-select">封面并发请求
+              <input
+                name="coverConcurrency"
+                aria-label="封面并发请求"
+                type="number"
+                min={1}
+                max={8}
+                step={1}
+                value={preferenceDraft.coverConcurrency}
+                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, coverConcurrency: Number(event.target.value) })}
+              />
+            </label>
+            <fieldset>
+              <legend>超分后端</legend>
+              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'off', label: '关闭' }, { value: 'cpu', label: 'CPU' }, { value: 'auto', label: '自动（优先 GPU）' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+            </fieldset>
+            {preferenceDraft.upscaleBackend !== 'off' && (
+              <label className="preference-select">超分模型
+                <input
+                  name="upscaleModel"
+                  aria-label="超分模型"
+                  value={preferenceDraft.upscaleModel}
+                  spellCheck={false}
+                  placeholder="例如 real-esrgan-anime-x2"
+                  onChange={(event) => setPreferenceDraft({ ...preferenceDraft, upscaleModel: event.target.value })}
+                />
+              </label>
+            )}
             <label className="preference-select">图片缓存上限（GB）
               <input
                 name="cacheMaxBytes"

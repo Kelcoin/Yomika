@@ -10,6 +10,11 @@ const preferences = {
   defaultLayout: 'double' as const,
   defaultDirection: 'rtl' as const,
   cacheMaxBytes: 4_294_967_296,
+  accentColor: '#1f6f8b',
+  prefetchPages: 2,
+  coverConcurrency: 4,
+  upscaleBackend: 'off' as const,
+  upscaleModel: '',
 };
 
 describe('native settings bridge', () => {
@@ -45,6 +50,15 @@ describe('native settings bridge', () => {
     const repository = new NativeSettingsRepository();
     await expect(repository.save({ ...preferences, cacheMaxBytes: 1_073_741_823 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, cacheMaxBytes: 34_359_738_369 })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('rejects an unusable accent colour, preload distance, or upscale backend', async () => {
+    const repository = new NativeSettingsRepository();
+    await expect(repository.save({ ...preferences, accentColor: 'red' })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, accentColor: '#FFFFFF' })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, prefetchPages: 9 })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, coverConcurrency: 0 })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, upscaleBackend: 'gpu' as never })).resolves.toMatchObject({ ok: false });
   });
 
   it('imports a validated legacy ordinary-preference result', async () => {

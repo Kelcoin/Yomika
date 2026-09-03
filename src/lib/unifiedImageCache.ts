@@ -41,13 +41,18 @@ interface PendingEntry {
 }
 
 export class UnifiedImageCache {
-  private readonly fetchGate: Semaphore;
+  private fetchGate: Semaphore;
 
   constructor(
     private readonly repository: ImageCacheRepository,
     private readonly options: UnifiedImageCacheOptions,
   ) {
     this.fetchGate = createSemaphore(options.maxConcurrentFetches ?? 4);
+  }
+
+  /** Applied from preferences once they load. */
+  setMaxConcurrentFetches(limit: number): void {
+    this.fetchGate = createSemaphore(limit);
   }
 
   private readonly memory = new Map<string, MemoryEntry>();

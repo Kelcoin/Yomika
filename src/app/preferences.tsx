@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
+import { DEFAULT_ACCENT_COLOR, normalizeAccentColor } from '../lib/accentColor';
+import { getNativeImageCache } from '../lib/nativeImageCache';
 import {
   DEFAULT_PREFERENCES,
   NativeSettingsRepository,
@@ -19,6 +21,7 @@ interface PreferencesContextValue {
 const PreferencesContext = createContext<PreferencesContextValue | undefined>(undefined);
 const repository = new NativeSettingsRepository();
 
+
 function applyTheme(theme: PreferenceSnapshot['theme']) {
   if (theme === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = theme;
@@ -32,6 +35,20 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
   themeColor.content = dark ? '#09090b' : '#f3eee4';
 }
 
+/** Every accent in the design system resolves through --brand-vermilion, so a
+ * custom accent is one inline override (which also wins over the dark-theme
+ * block in tokens.css). */
+function applyAppearance(preferences: PreferenceSnapshot) {
+  const accent = normalizeAccentColor(preferences.accentColor) ?? DEFAULT_ACCENT_COLOR;
+  document.documentElement.style.setProperty('--brand-vermilion', accent);
+  getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
+}
+
+function applyPreferences(preferences: PreferenceSnapshot) {
+  applyTheme(preferences.theme);
+  applyAppearance(preferences);
+}
+
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [preferences, setPreferences] = useState(DEFAULT_PREFERENCES);
   const [loading, setLoading] = useState(true);
@@ -43,7 +60,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       if (!active) return;
       if (result.ok) {
         setPreferences(result.value);
-        applyTheme(result.value.theme);
+        applyPreferences(result.value);
       } else {
         setError(result.error.message);
       }
@@ -56,7 +73,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     const result = await repository.save(input);
     if (result.ok) {
       setPreferences(result.value);
-      applyTheme(result.value.theme);
+      applyPreferences(result.value);
       setError(undefined);
     }
     return result;
@@ -66,7 +83,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     const result = await repository.importLegacy(encoded);
     if (result.ok) {
       setPreferences(result.value.preferences);
-      applyTheme(result.value.preferences.theme);
+      applyPreferences(result.value.preferences);
       setError(undefined);
     }
     return result;

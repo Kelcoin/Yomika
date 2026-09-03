@@ -14,11 +14,13 @@ interface ReaderScreenProps {
   layout?: ReaderLayoutPreference;
   loadPage?: (pageIndex: number, signal?: AbortSignal) => Promise<string | undefined>;
   loadPageThumbnail?: (pageIndex: number) => Promise<string | undefined>;
+  /** How many pages either side to keep loaded (preference-driven). */
+  prefetchDistance?: number;
   releasePage?: (pageIndex: number) => void;
   onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection }) => void;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   const [loadedPages, setLoadedPages] = useState(pages);
@@ -54,7 +56,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     } else {
       for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout })) {
         keep.add(index);
-        for (const adjacent of getPrefetchPages(index, loadedPages.length, 1)) keep.add(adjacent);
+        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) keep.add(adjacent);
       }
     }
     setLoadedPages((current) => {
@@ -77,7 +79,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (page) setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
       }).finally(() => loadingPagesRef.current.delete(index));
     }
-  }, [loadPage, loadedPages, releasePage, state.layout, state.pageIndex]);
+  }, [loadPage, loadedPages, prefetchDistance, releasePage, state.layout, state.pageIndex]);
 
   // The thumbnail panel used to pin every page of the archive as a full-size
   // image. Load the small page-thumbnail rendition instead, one at a time so a

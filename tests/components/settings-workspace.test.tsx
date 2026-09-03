@@ -105,7 +105,7 @@ describe('settings workspace', () => {
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296 };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -134,6 +134,63 @@ describe('settings workspace', () => {
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...loaded, theme: 'light', defaultLayout: 'single', cacheMaxBytes: 7_516_192_768 },
+    });
+  });
+
+  it('applies a custom accent colour and warns when it fails contrast', async () => {
+    const user = userEvent.setup();
+    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '' };
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderSettings();
+    await screen.findByRole('radio', { name: '浅色' });
+
+    await user.click(screen.getByRole('button', { name: '靛蓝' }));
+    await user.click(screen.getByRole('button', { name: '保存偏好' }));
+
+    expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...loaded, accentColor: '#1f6f8b' } });
+    expect(document.documentElement.style.getPropertyValue('--brand-vermilion')).toBe('#1f6f8b');
+
+    const custom = screen.getByLabelText('自定义强调色');
+    await user.clear(custom);
+    await user.type(custom, '#ffe066');
+    expect(screen.getByRole('alert')).toHaveTextContent('低于 WCAG AA');
+  });
+
+  it('exposes reader preload, cover concurrency, and upscale settings', async () => {
+    const user = userEvent.setup();
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '' };
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderSettings();
+    const preload = await screen.findByLabelText('预加载页数');
+    await user.clear(preload);
+    await user.type(preload, '3');
+    const concurrency = screen.getByLabelText('封面并发请求');
+    await user.clear(concurrency);
+    await user.type(concurrency, '2');
+    // The model field only matters once a backend is chosen.
+    expect(screen.queryByLabelText('超分模型')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: 'CPU' }));
+    await user.type(screen.getByLabelText('超分模型'), 'real-esrgan-anime-x2');
+    await user.click(screen.getByRole('button', { name: '保存偏好' }));
+
+    expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('save_preferences', {
+      input: { ...loaded, prefetchPages: 3, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan-anime-x2' },
     });
   });
 

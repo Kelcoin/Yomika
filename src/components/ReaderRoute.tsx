@@ -7,6 +7,7 @@ import { ReaderScreen } from './ReaderScreen';
 import { getPrefetchPages } from '../domain/reader';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
+import { usePreferences } from '../app/preferences';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 
 const repository = new NativeLibraryRepository();
@@ -23,6 +24,8 @@ interface ReaderContext {
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [searchParams] = useSearchParams();
   const { showToast } = useToast();
+  const { preferences } = usePreferences();
+  const prefetchDistance = preferences.prefetchPages;
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
@@ -164,7 +167,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
         : 0;
       setInitialPage(firstPage);
-      const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, 1)];
+      const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, prefetchDistance)];
       const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
       if (!mountedRef.current || contextRef.current !== context) return;
       // Only the page the reader opens on is required. A failed neighbour
@@ -184,7 +187,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (contextRef.current?.generation === generation) contextRef.current = undefined;
       releaseAllPages();
     };
-  }, [archiveId, loadPage, releaseAllPages, requestedPage, retryToken]);
+  }, [archiveId, loadPage, prefetchDistance, releaseAllPages, requestedPage, retryToken]);
 
   // Reader failures used to render as inline text only, on a shell-free route
   // with no way out. Surface them through the shared toast as well.
@@ -218,6 +221,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       initialPage={initialPage}
       loadPage={loadPage}
       loadPageThumbnail={loadPageThumbnail}
+      prefetchDistance={prefetchDistance}
       releasePage={releasePage}
       onProgress={(pageIndex, reading) => {
         if (!scopeId) return;
