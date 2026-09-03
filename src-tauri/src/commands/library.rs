@@ -1139,7 +1139,11 @@ async fn load_reader_page_bytes(
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                let _ = store_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index, &mime, &bytes);
+                // A failed cache write means every later read re-fetches, so it
+                // must not vanish silently.
+                if let Err(error) = store_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index, &mime, &bytes) {
+                    eprintln!("yomika: reader page cache write failed: {error}");
+                }
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -1254,7 +1258,9 @@ pub(crate) async fn load_archive_thumbnail_bytes(
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                let _ = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes);
+                if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes) {
+                    eprintln!("yomika: image cache write failed: {error}");
+                }
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -1368,7 +1374,9 @@ async fn load_archive_page_thumbnail_bytes(
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                let _ = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes);
+                if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes) {
+                    eprintln!("yomika: image cache write failed: {error}");
+                }
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
