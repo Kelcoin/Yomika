@@ -118,9 +118,13 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-grid-row\s*\{[\s\S]*position:\s*absolute[\s\S]*display:\s*flex[\s\S]*gap:\s*12px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\s*\{[\s\S]*width:\s*180px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\.is-cover-wide\s*\{[\s\S]*width:\s*372px/);
-    // Fixed card geometry: 220 cover + 8 gap + 92 copy + 2x8 padding = 336px.
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row\s*\{[\s\S]*grid-template-rows:\s*220px 92px[\s\S]*height:\s*336px/);
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy\s*\{[\s\S]*height:\s*92px/);
+    // Fixed card geometry: 220 cover + 8 gap + 100 copy + 2x8 padding = 344px.
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row\s*\{[\s\S]*grid-template-rows:\s*220px 100px[\s\S]*height:\s*344px/);
+    // Three fixed copy slots so the second row of chips is never clipped.
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy\s*\{[\s\S]*grid-template-rows:\s*34px 42px 16px[\s\S]*height:\s*100px/);
+    // List rows share the footer layout and drop the trailing chevron column.
+    expect(shell).toMatch(/\.archive-row-footer\s*\{[\s\S]*justify-content:\s*space-between/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[\s\S]*grid-template-columns:\s*92px minmax\(0, 1fr\);/);
     expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
   });
 

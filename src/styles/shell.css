@@ -322,12 +322,6 @@ body::-webkit-scrollbar,
 @keyframes toast-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-exit { to { opacity: 0; transform: translateY(8px); } }
 
-@container app-main (max-width: 1280px) {
-  .library-shell.has-detail { grid-template-columns: minmax(0, 1fr); }
-  .library-shell.has-detail .library-shell-list { display: none; }
-  .library-shell-detail { border-left: 0; width: 100%; min-width: 0; }
-}
-
 .scroll-to-top:hover { color: var(--brand-vermilion); transform: translateY(-2px); }
 .scroll-to-top svg { width: 19px; height: 19px; }
 
@@ -923,6 +917,15 @@ body::-webkit-scrollbar,
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+/* Must come after the two-column rule above: the detail pane used to keep half
+   the width at mid sizes because this override was declared earlier in the file
+   and lost on source order. */
+@container app-main (max-width: 1280px) {
+  .library-shell.has-detail { grid-template-columns: minmax(0, 1fr); }
+  .library-shell.has-detail .library-shell-list { display: none; }
+  .library-shell-detail { border-left: 0; width: 100%; min-width: 0; }
+}
+
 .library-shell-list,
 .library-shell-detail {
   min-width: 0;
@@ -1375,14 +1378,14 @@ body::-webkit-scrollbar,
 
 .archive-list.is-thumbnail .archive-row {
   display: grid;
-  /* Exact geometry: 220 cover + 8 gap + 92 copy + 2x8 padding = 336px, the row
+  /* Exact geometry: 220 cover + 8 gap + 100 copy + 2x8 padding = 344px, the row
      height the virtualizer places cards at (src/lib/archiveGridLayout.ts). A
      growable row let cards overlap the next one. */
-  grid-template-rows: 220px 92px;
+  grid-template-rows: 220px 100px;
   align-content: start;
   gap: 8px;
   box-sizing: border-box;
-  height: 336px;
+  height: 344px;
   padding: var(--space-2);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
@@ -1405,8 +1408,24 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail .archive-row > svg { display: none; }
-.archive-list.is-thumbnail .archive-row-copy { align-content: space-between; height: 92px; overflow: hidden; }
-.archive-list.is-thumbnail .archive-row strong { white-space: normal; overflow-wrap: anywhere; }
+/* Three fixed slots — 34 title + 42 tags + 16 footer + 2x4 gap = 100 — so two
+   rows of chips always land inside the card instead of being clipped. */
+.archive-list.is-thumbnail .archive-row-copy {
+  grid-template-rows: 34px 42px 16px;
+  gap: 4px !important;
+  height: 100px;
+  overflow: hidden;
+}
+.archive-list.is-thumbnail .archive-row strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 17px;
+}
 
 /* A wide cover only takes two columns of width; its height stays identical to a
    narrow card so every card in a row is the same height. */
@@ -1414,8 +1433,12 @@ body::-webkit-scrollbar,
 .archive-list.is-wide .archive-row-wrap { height: 132px !important; }
 .archive-list.is-wide .archive-row {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr) auto;
+  /* No trailing chevron column: the whole row is the button, so the arrow only
+     stole width from the tag area. */
+  grid-template-columns: 92px minmax(0, 1fr);
   gap: var(--space-3);
+  box-sizing: border-box;
+  height: 132px;
   padding: var(--space-2);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
@@ -1425,6 +1448,20 @@ body::-webkit-scrollbar,
   border-color: color-mix(in srgb, var(--brand-vermilion) 45%, var(--hairline));
 }
 .archive-list.is-wide .archive-row-thumb { width: 92px; height: 116px; }
+/* Same three-slot copy block as a thumbnail card, just wider: title pinned to
+   the top, tags in the middle, category and stats on the footer line. */
+.archive-list.is-wide .archive-row-copy {
+  grid-template-rows: 20px minmax(0, 1fr) 16px;
+  gap: 6px !important;
+  height: 116px;
+  overflow: hidden;
+}
+.archive-list.is-wide .archive-row strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 20px;
+}
 
 .archive-list-inner {
   position: relative;
@@ -1489,16 +1526,48 @@ body::-webkit-scrollbar,
 .archive-row-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-content: flex-start;
+  gap: 3px;
   min-width: 0;
   overflow: hidden;
   color: var(--ink-faint);
   font-size: 12px;
   line-height: 1.35;
-  max-height: 48px;
 }
 
-.archive-row-tags .metadata-chip { min-height: 20px; max-width: 18ch; font-size: 10px; }
+/* Compact chips: the card only has room for two rows, so a taller chip means
+   fewer tags rather than a taller card. */
+.archive-row-tags .metadata-chip {
+  min-height: 18px;
+  max-width: 12ch;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 18px;
+}
+
+/* Fixed footer: category bottom-left, page count and added date bottom-right,
+   the same reading order in both card modes. */
+.archive-row-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.archive-row-category,
+.archive-row-stats {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.archive-row-category { color: var(--ink-secondary); font-weight: 650; }
+.archive-row-stats { flex: none; }
 
 .archive-detail-meta {
   display: flex;
@@ -2348,7 +2417,10 @@ body::-webkit-scrollbar,
   }
 
   .app-main {
-    grid-template-rows: 60px minmax(0, 1fr);
+    /* The context bar is gone and the status bar is hidden here, so the
+       workspace is the only row. Reserving 60px for a removed element squeezed
+       the whole page into that strip. */
+    grid-template-rows: minmax(0, 1fr);
     height: 100vh;
     height: 100dvh;
   }

@@ -18,7 +18,7 @@ describe('archive grid layout', () => {
     // Cards must be exactly as tall as the row they are placed in, otherwise
     // the absolutely positioned rows overlap.
     expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(ARCHIVE_GRID_COVER_HEIGHT + 8 + ARCHIVE_GRID_COPY_HEIGHT + 16);
-    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(336);
+    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(344);
   });
   it('keeps a wide card exactly two columns plus the gap', () => {
     expect(getWideArchiveCardWidth()).toBe(ARCHIVE_GRID_CARD_WIDTH * 2 + ARCHIVE_GRID_GAP);

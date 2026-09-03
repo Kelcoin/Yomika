@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronRight, FolderHeart, ArrowDown, ArrowUp, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -170,14 +170,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       })} eager={eager} />}
       <span className="archive-row-copy">
         <strong>{archive.title}</strong>
-        {(archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language) && <span className="archive-row-meta archive-row-classification">
-          {(archive.category || archiveCategories.get(archive.archiveId)?.[0]) && <small className="metadata-chip" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0]}</small>}
-          {archive.language && <small className="metadata-chip">{archive.language}</small>}
-        </span>}
-        {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? 6 : 8).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
-        <span className="archive-row-meta"><small>{formatArchiveDate(archive.addedAt)}</small><small>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</small></span>
+        <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? 8 : 12).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
+        <span className="archive-row-footer">
+          <small className="archive-row-category" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language || ''}</small>
+          <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
+        </span>
       </span>
-      <ChevronRight aria-hidden="true" />
     </button>
     </>
   );
@@ -350,7 +348,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           )}
         </Panel></>}
       </Group>
-      {hasMore && <p className="server-list-message" role="status">{loadingMore ? '正在加载更多档案…' : `已加载 ${archives.length} / ${totalCount ?? archives.length}`}</p>}
+      {hasMore && loadingMore && <p className="server-list-message" role="status">正在加载更多档案…</p>}
     </div>
   );
 }

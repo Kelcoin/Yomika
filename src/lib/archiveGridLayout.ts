@@ -12,7 +12,15 @@ export const ARCHIVE_GRID_GAP = 12;
  * rows then overlapped it. Keep these in step with `.archive-list.is-thumbnail`
  * in shell.css. */
 export const ARCHIVE_GRID_COVER_HEIGHT = 220;
-export const ARCHIVE_GRID_COPY_HEIGHT = 92;
+/** The copy block is three fixed slots, not a flexible column: a two-line title,
+ * two rows of tag chips, and one footer row. Sizing it by content let the tag
+ * rows spill past `overflow: hidden`, which cut the second row in half. */
+export const ARCHIVE_GRID_TITLE_HEIGHT = 34;
+export const ARCHIVE_GRID_TAGS_HEIGHT = 42;
+export const ARCHIVE_GRID_FOOTER_HEIGHT = 16;
+export const ARCHIVE_GRID_COPY_GAP = 4;
+export const ARCHIVE_GRID_COPY_HEIGHT =
+  ARCHIVE_GRID_TITLE_HEIGHT + ARCHIVE_GRID_TAGS_HEIGHT + ARCHIVE_GRID_FOOTER_HEIGHT + ARCHIVE_GRID_COPY_GAP * 2;
 export const ARCHIVE_GRID_CARD_PADDING = 8;
 export const ARCHIVE_GRID_CARD_GAP = 8;
 export const ARCHIVE_GRID_ROW_HEIGHT =
