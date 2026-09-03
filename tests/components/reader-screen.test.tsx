@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
@@ -168,6 +168,18 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '连续滚动' }));
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
+  });
+
+  it('uses icons for every chrome control, no text buttons', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
+    for (const button of within(toolbar).getAllByRole('button')) {
+      expect(button.querySelector('svg')).toBeTruthy();
+      expect(button.textContent?.trim()).toBe('');
+    }
   });
 
   it('exposes the selected reader layout and direction', async () => {

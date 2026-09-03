@@ -169,16 +169,7 @@
   flex: 0 0 44px;
 }
 
-.reader-toolbar button[aria-label="单页"],
-.reader-toolbar button[aria-label="双页"],
-.reader-toolbar button[aria-label="连续滚动"],
-.reader-toolbar button[aria-label="从左到右"],
-.reader-toolbar button[aria-label="从右到左"] {
-  width: auto;
-  padding: 0 12px;
-  white-space: nowrap;
-}
-
+/* Every control is an icon now, so no button needs extra text width. */
 .reader-thumbnail-panel {
   position: absolute;
   top: 72px;
