@@ -97,9 +97,9 @@ describe('settings workspace', () => {
     renderSettings();
 
     expect(await screen.findByRole('heading', { name: '阅读与存储' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '旧配置' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '数据迁移' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: /数据迁移/ }));
-    expect(screen.getByRole('heading', { name: '旧配置' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '数据迁移' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '阅读与存储' })).not.toBeInTheDocument();
   });
 
@@ -229,15 +229,35 @@ describe('settings workspace', () => {
     renderSettings();
 
     await userEvent.setup().click(await screen.findByRole('link', { name: /数据迁移/ }));
-    await user.type(screen.getByLabelText('旧配置导出'), 'encoded-config');
-    await user.click(screen.getByRole('button', { name: '导入旧配置' }));
+    await user.type(screen.getByLabelText('导出 JSON'), 'encoded-config');
+    await user.click(screen.getByRole('button', { name: '导入数据' }));
 
-    expect(await screen.findByText('已导入 3 项普通偏好')).toBeInTheDocument();
+    expect(await screen.findByText('已导入 3 项偏好设置')).toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: /阅读与存储/ }));
     expect(screen.getByRole('radio', { name: '浅色' })).toBeChecked();
     expect(screen.getByRole('radio', { name: '条漫' })).toBeChecked();
     expect(screen.getByRole('radio', { name: '从右到左' })).toBeChecked();
     expect(adapter).toHaveBeenCalledWith('import_legacy_preferences', { encoded: 'encoded-config' });
+  });
+
+  it('exports local records as the unified migration envelope', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-09-01T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
+      if (command === 'list_watchlist') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a2', addedAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false }] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderSettings();
+
+    await user.click(await screen.findByRole('link', { name: /数据迁移/ }));
+    await user.click(screen.getByRole('button', { name: '导出数据' }));
+
+    expect(await screen.findByText('已导出 2 项本地记录')).toBeInTheDocument();
+    const exported = JSON.parse((screen.getByLabelText('导出 JSON') as HTMLTextAreaElement).value);
+    expect(exported).toMatchObject({ schemaVersion: 1, scopeId: 'scope-a', deleted: [] });
+    expect(exported.items.map((item: { archiveId: string }) => item.archiveId)).toEqual(['a1', 'a2']);
   });
 
   it('shows legacy import failure without changing preferences', async () => {
@@ -251,8 +271,8 @@ describe('settings workspace', () => {
     renderSettings();
 
     await userEvent.setup().click(await screen.findByRole('link', { name: /数据迁移/ }));
-    await user.type(screen.getByLabelText('旧配置导出'), 'secret-only');
-    await user.click(screen.getByRole('button', { name: '导入旧配置' }));
+    await user.type(screen.getByLabelText('导出 JSON'), 'secret-only');
+    await user.click(screen.getByRole('button', { name: '导入数据' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('旧配置无有效普通偏好');
     await user.click(screen.getByRole('link', { name: /阅读与存储/ }));

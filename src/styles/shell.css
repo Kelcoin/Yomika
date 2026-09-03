@@ -2615,3 +2615,9 @@ body::-webkit-scrollbar,
 .settings-tool-panel .primary-action {
   justify-self: start;
 }
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}

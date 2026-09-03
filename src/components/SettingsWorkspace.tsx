@@ -13,6 +13,7 @@ import { SyncWorkspace } from './SyncWorkspace';
 import { UploadPanel } from './UploadPanel';
 import { DeduplicationWorkspace } from './DeduplicationWorkspace';
 import { usePreferences } from '../app/preferences';
+import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -49,15 +50,10 @@ export function SettingsWorkspace() {
   const [preferencePending, setPreferencePending] = useState(false);
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
-  const [legacyExport, setLegacyExport] = useState('');
-  const [legacyPending, setLegacyPending] = useState(false);
-  const [legacyMessage, setLegacyMessage] = useState<string>();
-  const [legacyError, setLegacyError] = useState(false);
-  const [fullLegacyExport, setFullLegacyExport] = useState('');
-  const [fullLegacyScope, setFullLegacyScope] = useState('');
-  const [fullLegacyPending, setFullLegacyPending] = useState(false);
-  const [fullLegacyMessage, setFullLegacyMessage] = useState<string>();
-  const [fullLegacyError, setFullLegacyError] = useState(false);
+  const [migrationText, setMigrationText] = useState('');
+  const [migrationPending, setMigrationPending] = useState(false);
+  const [migrationMessage, setMigrationMessage] = useState<string>();
+  const [migrationError, setMigrationError] = useState(false);
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>();
@@ -129,39 +125,77 @@ export function SettingsWorkspace() {
     setPreferencePending(false);
   }
 
-  async function importLegacyPreferences(event: FormEvent<HTMLFormElement>) {
+  /** One control pair for both payload shapes: a unified export (Readoshi's
+   * worker envelope) goes to the native importer, anything else is treated as a
+   * legacy preferences blob. */
+  async function runMigrationImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setLegacyPending(true);
-    setLegacyMessage(undefined);
-    setLegacyError(false);
-    const result = await preferenceState.importLegacy(legacyExport.trim());
-    if (result.ok) {
-      setPreferenceDraft(result.value.preferences);
-      setLegacyExport('');
-      setLegacyMessage(`已导入 ${result.value.importedCount} 项普通偏好`);
-    } else {
-      setLegacyMessage(result.error.message);
-      setLegacyError(true);
+    setMigrationPending(true);
+    setMigrationMessage(undefined);
+    setMigrationError(false);
+    const parsed = parseMigrationExport(migrationText);
+    if (parsed.kind === 'invalid') {
+      setMigrationMessage(parsed.reason);
+      setMigrationError(true);
+      setMigrationPending(false);
+      return;
     }
-    setLegacyPending(false);
+    if (parsed.kind === 'legacy') {
+      const result = await preferenceState.importLegacy(migrationText.trim());
+      if (result.ok) {
+        setPreferenceDraft(result.value.preferences);
+        setMigrationText('');
+        setMigrationMessage(`已导入 ${result.value.importedCount} 项偏好设置`);
+      } else {
+        setMigrationMessage(result.error.message);
+        setMigrationError(true);
+      }
+      setMigrationPending(false);
+      return;
+    }
+    const scopeId = parsed.payload.scopeId || servers[0]?.scopeId;
+    if (!scopeId) {
+      setMigrationMessage('导出内容没有数据范围，且本机尚未配置服务器');
+      setMigrationError(true);
+      setMigrationPending(false);
+      return;
+    }
+    const result = await legacyRepository.importExport(scopeId, migrationText.trim());
+    if (result.ok) {
+      setMigrationText('');
+      setMigrationMessage(`已导入 ${result.value} 项本地记录`);
+    } else {
+      setMigrationMessage(result.error.message);
+      setMigrationError(true);
+    }
+    setMigrationPending(false);
   }
 
-  async function importFullLegacyExport(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setFullLegacyPending(true);
-    setFullLegacyMessage(undefined);
-    setFullLegacyError(false);
-    const result = await legacyRepository.importExport(fullLegacyScope.trim(), fullLegacyExport.trim());
-    if (result.ok) {
-      setFullLegacyExport('');
-      setFullLegacyMessage(`已导入 ${result.value} 项本地记录`);
-      const refreshed = await repository.listServers();
-      if (refreshed.ok) setServers(refreshed.value);
-    } else {
-      setFullLegacyMessage(result.error.message);
-      setFullLegacyError(true);
+  async function runMigrationExport() {
+    setMigrationPending(true);
+    setMigrationMessage(undefined);
+    setMigrationError(false);
+    const scopeId = servers[0]?.scopeId;
+    if (!scopeId) {
+      setMigrationMessage('尚未配置服务器，无法确定导出范围');
+      setMigrationError(true);
+      setMigrationPending(false);
+      return;
     }
-    setFullLegacyPending(false);
+    const [history, watchlist] = await Promise.all([
+      repository.listHistory(scopeId),
+      repository.listWatchlist(scopeId),
+    ]);
+    if (!history.ok || !watchlist.ok) {
+      setMigrationMessage(history.ok ? (watchlist.ok ? '导出失败' : watchlist.error.message) : history.error.message);
+      setMigrationError(true);
+      setMigrationPending(false);
+      return;
+    }
+    const payload = buildMigrationExport({ scopeId, history: history.value, watchlist: watchlist.value });
+    setMigrationText(JSON.stringify(payload, null, 2));
+    setMigrationMessage(`已导出 ${payload.items.length} 项本地记录`);
+    setMigrationPending(false);
   }
 
   async function saveServer(input: { identity: ServerIdentity; apiKey: string }): Promise<CommandResult<ServerIdentity>> {
@@ -261,50 +295,37 @@ export function SettingsWorkspace() {
       </section>
       )}
       {selectedSettingsSection === 'settings-migration' && (
-      <>
-      <section className="settings-section" id="settings-migration" aria-labelledby="legacy-config-title">
+      <section className="settings-section" id="settings-migration" aria-labelledby="migration-title">
         <div>
-          <h2 id="legacy-config-title">旧配置</h2>
+          <h2 id="migration-title">数据迁移</h2>
+          <p>导出阅读历史与待看记录，或粘贴导出内容导入。服务器凭据不在导出范围内，需要单独配置。</p>
         </div>
-        <form className="legacy-import-form" onSubmit={importLegacyPreferences}>
-          <label htmlFor="legacy-config-export">旧配置导出</label>
+        <form className="legacy-import-form" onSubmit={runMigrationImport}>
+          <label htmlFor="migration-json">导出 JSON</label>
           <textarea
-            id="legacy-config-export"
-            name="legacyConfigExport"
+            id="migration-json"
+            name="migrationJson"
             autoComplete="off"
             spellCheck={false}
-            value={legacyExport}
-            onChange={(event) => setLegacyExport(event.target.value)}
-            rows={4}
-            required
+            value={migrationText}
+            onChange={(event) => setMigrationText(event.target.value)}
+            rows={6}
           />
-          {legacyMessage && (
-            <p className={legacyError ? 'form-error' : 'form-success'} role={legacyError ? 'alert' : 'status'}>
-              {legacyMessage}
+          {migrationMessage && (
+            <p className={migrationError ? 'form-error' : 'form-success'} role={migrationError ? 'alert' : 'status'}>
+              {migrationMessage}
             </p>
           )}
-          <button className="secondary-action" type="submit" disabled={legacyPending || !legacyExport.trim()} aria-busy={legacyPending}>
-            {legacyPending ? '导入中…' : '导入旧配置'}
-          </button>
+          <div className="settings-actions">
+            <button className="secondary-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+              {migrationPending ? '处理中…' : '导出数据'}
+            </button>
+            <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
+              {migrationPending ? '处理中…' : '导入数据'}
+            </button>
+          </div>
         </form>
       </section>
-      <section className="settings-section settings-section-subsection" aria-labelledby="legacy-full-title">
-        <div>
-          <h2 id="legacy-full-title">完整本地数据</h2>
-          <p>导入历史、待看和不重复档案记录。服务器凭据仍需单独配置并保存到系统安全存储。</p>
-        </div>
-        <form className="legacy-import-form" onSubmit={importFullLegacyExport}>
-          <label htmlFor="legacy-scope">数据范围 ID</label>
-          <input id="legacy-scope" name="legacyScope" autoComplete="off" spellCheck={false} value={fullLegacyScope} onChange={(event) => setFullLegacyScope(event.target.value)} required />
-          <label htmlFor="legacy-full-export">完整 JSON 导出</label>
-          <textarea id="legacy-full-export" name="legacyFullExport" autoComplete="off" spellCheck={false} value={fullLegacyExport} onChange={(event) => setFullLegacyExport(event.target.value)} rows={5} required />
-          {fullLegacyMessage && <p className={fullLegacyError ? 'form-error' : 'form-success'} role={fullLegacyError ? 'alert' : 'status'}>{fullLegacyMessage}</p>}
-          <button className="secondary-action" type="submit" disabled={fullLegacyPending || !fullLegacyExport.trim() || !fullLegacyScope.trim()} aria-busy={fullLegacyPending}>
-            {fullLegacyPending ? '导入中…' : '导入完整数据'}
-          </button>
-        </form>
-      </section>
-      </>
       )}
       {selectedSettingsSection === 'settings-server' && (
       <>
