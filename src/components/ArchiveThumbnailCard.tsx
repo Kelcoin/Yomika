@@ -4,26 +4,16 @@ import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { translateRawTag } from '../lib/tags';
-import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 
 const imageCache = getNativeImageCache();
-const importantNamespaces = ['language', 'artist', 'group', 'parody', 'character', 'female', 'male'];
-
-function importantTags(tags: string[] = []): string[] {
-  return [...tags].sort((left, right) => {
-    const leftNs = left.split(':', 1)[0]!.toLowerCase();
-    const rightNs = right.split(':', 1)[0]!.toLowerCase();
-    return (importantNamespaces.indexOf(leftNs) < 0 ? 99 : importantNamespaces.indexOf(leftNs))
-      - (importantNamespaces.indexOf(rightNs) < 0 ? 99 : importantNamespaces.indexOf(rightNs));
-  }).slice(0, 5);
-}
 
 export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; progressPage?: number | null | undefined }) {
   const [src, setSrc] = useState<string>();
   const [aspectRatio, setAspectRatio] = useState<number>();
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
-  const tags = useMemo(() => importantTags(archive.tags), [archive.tags]);
+  const tags = useMemo(() => pickCardTags(archive.tags, 6), [archive.tags]);
   const isWide = isWideCoverRatio(aspectRatio);
   useEffect(() => {
     if (!node) return undefined;

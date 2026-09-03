@@ -2,6 +2,30 @@ export function isWideCoverRatio(ratio: number | null | undefined): boolean {
   return ratio != null && Number.isFinite(ratio) && ratio > 1.0;
 }
 
+/** Namespaces that tell a reader what an archive is, most telling first. A card
+ * has room for a handful of chips, so the choice matters more than the count:
+ * `female:`/`male:` content tags and `character:`/`parody:` beat bookkeeping
+ * namespaces like language or date_added. */
+export const CARD_TAG_NAMESPACE_PRIORITY = [
+  'female', 'male', 'mixed', 'other', 'character', 'parody', 'artist', 'group', 'series', 'cosplayer', 'language',
+];
+
+const HIDDEN_CARD_TAG_NAMESPACES = ['date_added', 'dateadded', 'timestamp', 'source', 'uploader', 'category'];
+
+export function pickCardTags(tags: readonly string[] = [], limit = 6): string[] {
+  const rank = (tag: string) => {
+    const namespace = tag.split(':', 1)[0]!.trim().toLowerCase();
+    const index = CARD_TAG_NAMESPACE_PRIORITY.indexOf(namespace);
+    return index < 0 ? CARD_TAG_NAMESPACE_PRIORITY.length : index;
+  };
+  return tags
+    .filter((tag) => !HIDDEN_CARD_TAG_NAMESPACES.includes(tag.split(':', 1)[0]!.trim().toLowerCase()))
+    .map((tag, index) => ({ tag, index, rank: rank(tag) }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .slice(0, Math.max(0, limit))
+    .map((entry) => entry.tag);
+}
+
 /** Uniform sample without replacement. `sort(() => Math.random() - 0.5)` is not
  * a shuffle: the comparator is intransitive, so the engine's sort keeps most of
  * the original order. */

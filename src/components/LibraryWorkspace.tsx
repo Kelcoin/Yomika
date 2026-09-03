@@ -13,7 +13,7 @@ import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCa
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 
@@ -174,7 +174,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           {(archive.category || archiveCategories.get(archive.archiveId)?.[0]) && <small className="metadata-chip" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0]}</small>}
           {archive.language && <small className="metadata-chip">{archive.language}</small>}
         </span>}
-        {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{(archive.tags ?? []).slice(0, 7).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
+        {(archive.tags ?? []).length > 0 && <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? 6 : 8).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
         <span className="archive-row-meta"><small>{formatArchiveDate(archive.addedAt)}</small><small>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</small></span>
       </span>
       <ChevronRight aria-hidden="true" />

@@ -4,6 +4,7 @@ import {
   formatArchiveDate,
   formatArchivePageMeta,
   isWideCoverRatio,
+  pickCardTags,
   pickRandomSample,
 } from '../../src/lib/archiveCardPresentation';
 
@@ -42,5 +43,29 @@ describe('archive card presentation', () => {
     expect(pickRandomSample([1, 2], 8, () => 0)).toEqual([1, 2]);
     expect(pickRandomSample([], 8)).toEqual([]);
     expect(pickRandomSample([1, 2, 3], -1)).toEqual([]);
+  });
+
+  it('ranks content namespaces ahead of bookkeeping ones on a card', () => {
+    const tags = ['language:chinese', 'artist:someone', 'female:big breasts', 'parody:original', 'male:glasses', 'character:alice'];
+
+    expect(pickCardTags(tags, 4)).toEqual(['female:big breasts', 'male:glasses', 'character:alice', 'parody:original']);
+  });
+
+  it('drops namespaces a card already shows elsewhere', () => {
+    const tags = ['date_added:1760742000', 'source:example.com', 'uploader:someone', 'category:manga', 'timestamp:1760742000', 'female:tag'];
+
+    expect(pickCardTags(tags, 6)).toEqual(['female:tag']);
+  });
+
+  it('keeps the original order inside one namespace and honours the limit', () => {
+    const tags = ['female:b', 'female:a', 'female:c', 'group:z'];
+
+    expect(pickCardTags(tags, 2)).toEqual(['female:b', 'female:a']);
+    expect(pickCardTags(tags, 0)).toEqual([]);
+    expect(pickCardTags(undefined, 3)).toEqual([]);
+  });
+
+  it('keeps unknown namespaces last instead of dropping them', () => {
+    expect(pickCardTags(['weird:tag', 'female:tag'], 5)).toEqual(['female:tag', 'weird:tag']);
   });
 });
