@@ -111,7 +111,9 @@ describe('archive detail route', () => {
     renderDetail();
 
     expect(await screen.findByRole('heading', { name: 'archive-a' })).toBeInTheDocument();
-    expect(screen.getByText('正在加载档案详情…')).toHaveClass('archive-detail-inline-loading');
+    // Loading is a shimmer placeholder, not a spinner with text.
+    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line');
+    expect(screen.queryByText('正在加载档案详情…')).not.toBeInTheDocument();
   });
 
   it('leaves a detail route when LANraragi confirms the archive is missing', async () => {

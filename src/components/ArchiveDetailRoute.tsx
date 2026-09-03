@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   BookOpen,
   Heart,
-  LoaderCircle,
   Pencil,
   Trash2,
 } from 'lucide-react';
@@ -138,7 +137,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         <div className="archive-detail-route-cover">
           {cover
             ? <img src={cover} alt={`${title} 封面`} />
-            : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'}>{coverLoading && <LoaderCircle className="spin" aria-hidden="true" />}</div>}
+            : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
           {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-title" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /></div>}
@@ -157,7 +156,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
               ))}
             </div>
           )}
-          {tags.length === 0 && <div className="archive-detail-meta archive-detail-meta-footer">{metadata ? <><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></> : <span className="archive-detail-inline-loading" role="status"><LoaderCircle className="spin" aria-hidden="true" />正在加载档案详情…</span>}</div>}
+          {tags.length === 0 && <div className="archive-detail-meta archive-detail-meta-footer">{metadata ? <><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></> : <span className="metadata-chip skeleton-line skeleton-line-short" role="status" aria-label="正在加载档案详情" />}</div>}
         </div>
       </div>
 
@@ -277,8 +276,10 @@ function ArchivePageThumbnail({
     };
   }, [archiveId, node, page, retry, scopeId, serverId]);
   return (
-    <button ref={setNode} className="archive-page-thumbnail" type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
-      {src ? <img src={src} alt={`第 ${page} 页`} loading="lazy" /> : <span>{state === 'loading' ? '加载中…' : state === 'error' ? '重试中…' : `P. ${page}`}</span>}
+    <button ref={setNode} className={`archive-page-thumbnail${src ? '' : ' is-skeleton'}`} type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
+      {/* Loading is conveyed by the shimmer, the same as library covers; no
+          "加载中" text on top of the image slot. */}
+      {src ? <img src={src} alt={`第 ${page} 页`} loading="lazy" /> : <span aria-hidden="true">{state === 'idle' ? `P. ${page}` : ''}</span>}
     </button>
   );
 }
