@@ -116,6 +116,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         (13, include_str!("../../migrations/0013_unified_image_cache.sql")),
         (14, include_str!("../../migrations/0014_cache_archive_scope.sql")),
         (15, include_str!("../../migrations/0015_dedup_sessions.sql")),
+        (16, include_str!("../../migrations/0016_archive_added_at.sql")),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -230,7 +231,7 @@ mod tests {
                     cache_archive_column.as_str(),
                     cache_archive_index.as_str(),
                 ),
-                (15, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
+                (16, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
             );
             connection.execute(
                 "INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES ('restart-task','download','Restart','running',0.4,1,1)",

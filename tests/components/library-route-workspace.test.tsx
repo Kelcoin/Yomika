@@ -450,24 +450,20 @@ describe('library route workspace', () => {
   it('refreshes archives from remote server and replaces the local list', async () => {
     const user = userEvent.setup();
     let callCount = 0;
+    // Models the native side: refresh writes the local index, and the list is
+    // always read back through list_archives_page.
+    let indexed = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Old Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }];
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'list_archives') {
-        return {
-          ok: true,
-          value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Old Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }],
-        };
-      }
+      if (command === 'list_archives_page') return { ok: true, value: { items: indexed, total: indexed.length, hasMore: false } };
       if (command === 'refresh_archives') {
         callCount += 1;
-        return {
-          ok: true,
-          value: [
-            { serverId: 'scope-a', archiveId: 'a1', title: 'Updated Archive', pageCount: 10, updatedAt: '2026-08-27T00:00:00Z' },
-            { serverId: 'scope-a', archiveId: 'a2', title: 'New Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
-          ],
-        };
+        indexed = [
+          { serverId: 'scope-a', archiveId: 'a1', title: 'Updated Archive', pageCount: 10, updatedAt: '2026-08-27T00:00:00Z' },
+          { serverId: 'scope-a', archiveId: 'a2', title: 'New Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
+        ];
+        return { ok: true, value: indexed };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -480,14 +476,13 @@ describe('library route workspace', () => {
       input: { serverId: 'scope-a', params: { sortby: 'date_added', order: 'desc' } },
     }));
     expect(await screen.findByRole('button', { name: /^Updated Archive\b/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^New Archive\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Old Archive\b/ })).not.toBeInTheDocument();
     expect(callCount).toBe(1);
 
     await user.click(screen.getByRole('button', { name: '刷新档案库' }));
 
-    expect(callCount).toBe(2);
-    expect(await screen.findByRole('button', { name: /^Updated Archive\b/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^New Archive\b/ })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Old Archive\b/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(callCount).toBe(2));
   });
 
   it('keeps the old archive list when refresh fails', async () => {

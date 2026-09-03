@@ -184,51 +184,58 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     void loadLibrary();
   }, [loadLibrary]);
 
-  useEffect(() => {
-    if (!serverId) return;
+  const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean } = {}) => {
     const request = ++pageRequest.current;
     // Keep the existing input/list mounted while a filter request is in flight.
     // Unmounting the workspace here loses focus after the first typed character.
     if (!initialArchivesLoaded.current) setLoading(true);
     setError(undefined);
-    setArchives([]);
-    void repository.listArchivesPage(serverId, 0, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null }).then((result) => {
-      if (request !== pageRequest.current) return;
-      if (!result.ok) {
-        setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
-        setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
-      } else {
-        setArchives(result.value.items);
-        initialArchivesLoaded.current = true;
-        setTotalArchives(result.value.total);
-        setHasMoreArchives(result.value.hasMore);
-        // The list above came from the local index. Pull the remote index once
-        // per TTL so archives added in LANraragi since the last sync show up
-        // without the user pressing refresh.
-        if (shouldSyncLibrary(serverId)) {
-          markLibrarySynced(serverId);
-          void repository.refreshArchives(serverId, { sortby: 'date_added', order: 'desc' }).then((synced) => {
-            if (!synced.ok || request !== pageRequest.current) return;
-            if (!searchQuery.trim() && sortMode === 'added' && sortOrder === 'desc' && !categoryFilter) {
-              setArchives(synced.value.slice(0, 100));
-              setTotalArchives(synced.value.length);
-              setHasMoreArchives(synced.value.length > 100);
-            } else {
-              setReloadToken((value) => value + 1);
-            }
-          });
-        }
-        // Dynamic LANraragi categories expose a search expression instead of
-        // archive IDs; refresh the category cache after the archive index exists
-        // so those IDs can be materialized into local membership rows.
-        void repository.listCategories(serverId).then((categoryResult) => {
-          if (categoryResult.ok) setCategories(categoryResult.value);
-          else setCategoryError(categoryResult.error.message);
-        });
-      }
+    if (options.clear) setArchives([]);
+    const result = await repository.listArchivesPage(currentServerId, 0, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null });
+    if (request !== pageRequest.current) return false;
+    if (!result.ok) {
+      setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
+      setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
       setLoading(false);
+      return false;
+    }
+    setArchives(result.value.items);
+    initialArchivesLoaded.current = true;
+    setTotalArchives(result.value.total);
+    setHasMoreArchives(result.value.hasMore);
+    setLoading(false);
+    return true;
+  }, [categoryFilter, searchQuery, sortMode, sortOrder]);
+
+  const syncRemoteIndex = useCallback(async (currentServerId: string) => {
+    // The list is served from the local index, so a remote pull is the only way
+    // archives added in LANraragi become visible. Re-read page one afterwards
+    // instead of slicing the returned array: ordering and paging belong to the
+    // query, and the array is the whole library.
+    const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
+    if (!synced.ok) return synced;
+    markLibrarySynced(currentServerId);
+    await loadFirstPage(currentServerId);
+    return synced;
+  }, [loadFirstPage]);
+
+  useEffect(() => {
+    if (!serverId) return;
+    void loadFirstPage(serverId, { clear: true }).then((loaded) => {
+      if (!loaded) return;
+      if (shouldSyncLibrary(serverId)) {
+        markLibrarySynced(serverId);
+        void syncRemoteIndex(serverId);
+      }
+      // Dynamic LANraragi categories expose a search expression instead of
+      // archive IDs; refresh the category cache after the archive index exists
+      // so those IDs can be materialized into local membership rows.
+      void repository.listCategories(serverId).then((categoryResult) => {
+        if (categoryResult.ok) setCategories(categoryResult.value);
+        else setCategoryError(categoryResult.error.message);
+      });
     });
-  }, [categoryFilter, reloadToken, searchQuery, sortMode, sortOrder, serverId]);
+  }, [loadFirstPage, reloadToken, serverId, syncRemoteIndex]);
 
   useEffect(() => {
     if (!serverId || !scopeId || archives.length === 0) return;
@@ -278,28 +285,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           if (!serverId) return;
           setRefreshError(undefined);
           setRefreshing(true);
-          void repository.refreshArchives(serverId, { sortby: 'date_added', order: 'desc' }).then(async (result) => {
-            if (result.ok) {
-              markLibrarySynced(serverId);
-              if (!searchQuery.trim() && sortMode === 'added' && sortOrder === 'desc' && !categoryFilter) {
-                setArchives(result.value.slice(0, 100));
-                setTotalArchives(result.value.length);
-                setHasMoreArchives(result.value.length > 100);
-              } else {
-                const page = await repository.listArchivesPage(serverId, 0, 100, {
-                  query: searchQuery,
-                  sortBy: sortMode,
-                  order: sortOrder,
-                  categoryId: categoryFilter || null,
-                });
-                if (!page.ok) { setRefreshError(page.error.message); return; }
-                setArchives(page.value.items);
-                setTotalArchives(page.value.total);
-                setHasMoreArchives(page.value.hasMore);
-              }
-            } else {
-              setRefreshError(result.error.message);
-            }
+          void syncRemoteIndex(serverId).then((result) => {
+            if (!result.ok) setRefreshError(result.error.message);
           }).catch((cause: unknown) => {
             setRefreshError(cause instanceof Error ? cause.message : '刷新档案库失败');
           }).finally(() => setRefreshing(false));

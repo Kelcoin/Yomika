@@ -1406,8 +1406,9 @@ fn query_archive_records(
     server_id: &str,
 ) -> Result<Vec<ArchiveRecord>, String> {
     let mut statement = connection.prepare(
-        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json
-         FROM archives WHERE server_id = ?1 AND is_deleted = 0 ORDER BY local_updated_at DESC",
+        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+         FROM archives WHERE server_id = ?1 AND is_deleted = 0
+         ORDER BY COALESCE(added_at, first_seen_at, 0) DESC, archive_id ASC",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([server_id], |row| {
@@ -1423,7 +1424,7 @@ fn query_archive_records(
                 cover_page: row.get(7)?,
                 is_deleted: row.get::<_, i64>(8)? != 0,
                 updated_at: row.get(9)?,
-                added_at: archive_added_at(&tags),
+                added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
                 tags,
             })
         })
@@ -1496,10 +1497,13 @@ fn query_archive_page(
     let sort = if input.sort_by == "title" {
         "a.title_sort COLLATE NOCASE"
     } else {
-        "COALESCE((SELECT MAX(CAST(substr(value, 12) AS INTEGER)) FROM json_each(a.tags_json) WHERE value LIKE 'date_added:%'), 0)"
+        // Stored column, not a json_each scan over tags: the date_added
+        // namespace can be excluded server-side, and per-row scanning made the
+        // sort O(tags) for every archive.
+        "COALESCE(a.added_at, a.first_seen_at, 0)"
     };
     let page_sql = format!(
-        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json
+        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json, COALESCE(a.added_at, a.first_seen_at)
          FROM archives a WHERE {where_sql} ORDER BY {sort} {direction}, a.archive_id ASC LIMIT {safe_limit} OFFSET {safe_offset}"
     );
     let mut statement = connection.prepare(&page_sql).map_err(|error| error.to_string())?;
@@ -1509,7 +1513,7 @@ fn query_archive_page(
             server_id: row.get(0)?, archive_id: row.get(1)?, title: row.get(2)?, page_count: row.get(3)?,
             summary: row.get(4)?, category: row.get(5)?, language: row.get(6)?, cover_page: row.get(7)?,
             is_deleted: row.get::<_, i64>(8)? != 0, updated_at: row.get(9)?,
-            added_at: archive_added_at(&tags), tags,
+            added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)), tags,
         })
     }).map_err(|error| error.to_string())?;
     let items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
@@ -1528,12 +1532,14 @@ fn replace_server_archives(
         .execute("UPDATE archives SET is_deleted = 1, local_updated_at = CURRENT_TIMESTAMP WHERE server_id = ?1", [server_id])
         .map_err(|error| error.to_string())?;
     const UPSERT: &str = "INSERT INTO archives (
-        server_id, archive_id, title, title_sort, summary, tags_json, page_count, file_size, local_updated_at, metadata_revision, is_deleted
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, 1, 0)
+        server_id, archive_id, title, title_sort, summary, tags_json, page_count, file_size, local_updated_at, metadata_revision, is_deleted, added_at, first_seen_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, 1, 0, ?9, unixepoch())
       ON CONFLICT(server_id, archive_id) DO UPDATE SET
         title = excluded.title, title_sort = excluded.title_sort, summary = excluded.summary,
         tags_json = excluded.tags_json, page_count = excluded.page_count, file_size = excluded.file_size,
-        local_updated_at = CURRENT_TIMESTAMP, metadata_revision = archives.metadata_revision + 1, is_deleted = 0";
+        local_updated_at = CURRENT_TIMESTAMP, metadata_revision = archives.metadata_revision + 1, is_deleted = 0,
+        added_at = COALESCE(excluded.added_at, archives.added_at),
+        first_seen_at = COALESCE(archives.first_seen_at, excluded.first_seen_at)";
     for archive in archives {
         let tags_json = serde_json::to_string(&archive.tags).map_err(|error| error.to_string())?;
         transaction
@@ -1548,6 +1554,7 @@ fn replace_server_archives(
                     tags_json,
                     archive.page_count,
                     archive.size,
+                    archive_added_at(&archive.tags),
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -2705,6 +2712,9 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0014_cache_archive_scope.sql"))
             .expect("cache archive scope migration");
         connection
+            .execute_batch(include_str!("../../migrations/0016_archive_added_at.sql"))
+            .expect("archive added_at migration");
+        connection
     }
 
     #[test]
@@ -3127,13 +3137,15 @@ mod tests {
     }
 
     #[test]
-    fn archive_query_sorts_by_lanraragi_date_added_tag() {
+    fn archive_query_sorts_by_stored_added_at() {
         let connection = migrated_connection();
         connection.execute_batch(
             "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, local_updated_at, added_at) VALUES
+               ('scope-a', 'a-old', 'Old', 'old', '[\"date_added:100\"]', 1, '2026-08-30 00:00:00', 100),
+               ('scope-a', 'z-new', 'New', 'new', '[\"date_added:200\"]', 1, '2026-08-30 00:00:00', 200);
              INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, local_updated_at) VALUES
-               ('scope-a', 'a-old', 'Old', 'old', '[\"date_added:100\"]', 1, '2026-08-30 00:00:00'),
-               ('scope-a', 'z-new', 'New', 'new', '[\"date_added:200\"]', 1, '2026-08-30 00:00:00');",
+               ('scope-a', 'm-legacy', 'Legacy', 'legacy', '[\"date_added:150\"]', 1, '2026-08-30 00:00:00');",
         ).unwrap();
 
         let page = query_archive_page(&connection, &ArchiveQueryInput {
@@ -3146,8 +3158,30 @@ mod tests {
             limit: 100,
         }).expect("date-added query");
 
-        assert_eq!(page.items.iter().map(|item| item.archive_id.as_str()).collect::<Vec<_>>(), vec!["z-new", "a-old"]);
-        assert_eq!(page.items.iter().map(|item| item.added_at).collect::<Vec<_>>(), vec![Some(200), Some(100)]);
+        // Stored values drive the order; a row with no stored value (only
+        // possible before the 0016 backfill) sorts last but still reports the
+        // date carried by its tags.
+        assert_eq!(page.items.iter().map(|item| item.archive_id.as_str()).collect::<Vec<_>>(), vec!["z-new", "a-old", "m-legacy"]);
+        assert_eq!(page.items.iter().map(|item| item.added_at).collect::<Vec<_>>(), vec![Some(200), Some(100), Some(150)]);
+    }
+
+    #[test]
+    fn archive_added_at_migration_backfills_the_date_added_tag() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection.execute_batch(include_str!("../../migrations/0001_initial.sql")).expect("initial");
+        connection.execute_batch(include_str!("../../migrations/0002_local_library.sql")).expect("library");
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'legacy', 'Legacy', 'legacy', '[\"artist:someone\",\"date_added:1756512000\"]', 1);",
+        ).expect("legacy row");
+
+        connection.execute_batch(include_str!("../../migrations/0016_archive_added_at.sql")).expect("added_at migration");
+
+        let added: Option<i64> = connection
+            .query_row("SELECT added_at FROM archives WHERE archive_id = 'legacy'", [], |row| row.get(0))
+            .expect("backfilled row");
+        assert_eq!(added, Some(1_756_512_000));
     }
 
     #[test]
