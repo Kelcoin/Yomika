@@ -233,6 +233,75 @@ async fn read_http_response(request: reqwest::RequestBuilder) -> Result<(u16, St
     Ok((status, body))
 }
 
+/// Collects the two authentication cookies out of a login response's
+/// `set-cookie` headers. Extracted so the parsing is testable without network.
+fn extract_login_cookie(set_cookie_values: &[String]) -> Option<String> {
+    let mut member_id = None;
+    let mut pass_hash = None;
+    let mut igneous = None;
+    for header in set_cookie_values {
+        for pair in header.split(';') {
+            let mut parts = pair.splitn(2, '=');
+            let name = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+            let value = parts.next().unwrap_or("").trim().to_string();
+            if value.is_empty() || value == "deleted" {
+                continue;
+            }
+            match name.as_str() {
+                "ipb_member_id" => member_id = Some(value),
+                "ipb_pass_hash" => pass_hash = Some(value),
+                "igneous" if value != "mystery" => igneous = Some(value),
+                _ => {}
+            }
+        }
+    }
+    let (member_id, pass_hash) = (member_id?, pass_hash?);
+    let mut cookie = format!("ipb_member_id={member_id}; ipb_pass_hash={pass_hash}");
+    if let Some(igneous) = igneous {
+        cookie.push_str(&format!("; igneous={igneous}"));
+    }
+    Some(cookie)
+}
+
+/// Signs in on the E-Hentai forums and returns the cookie string the app stores.
+/// Users should not have to copy cookies out of a browser by hand.
+#[tauri::command]
+pub async fn login_eh_account(username: String, password: String) -> Result<CommandResult<String>, String> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Ok(CommandResult::failure("INVALID_RESPONSE", "用户名与密码不能为空", false));
+    }
+    let client = match eh_http_client() {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+    };
+    let response = client
+        .post("https://forums.e-hentai.org/index.php?act=Login&CODE=01")
+        .form(&[
+            ("CookieDate", "1"),
+            ("b", ""),
+            ("bt", ""),
+            ("UserName", username.trim()),
+            ("PassWord", password.as_str()),
+            ("ipb_login_submit", "Login!"),
+        ])
+        .send()
+        .await;
+    let response = match response {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error.to_string(), true)),
+    };
+    let cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_string))
+        .collect::<Vec<_>>();
+    match extract_login_cookie(&cookies) {
+        Some(cookie) => Ok(CommandResult::success(cookie)),
+        None => Ok(CommandResult::failure("EH_REAUTH_REQUIRED", "登录失败：请检查用户名与密码".to_string(), false)),
+    }
+}
+
 async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<EhSearchResponse> {
     let client = match eh_http_client() {
         Ok(value) => value,
@@ -512,6 +581,42 @@ pub fn set_active_eh_account(account_id: String, database: State<'_, Database>) 
 mod tests {
     use std::sync::Mutex;
     use super::*;
+
+    #[test]
+    fn login_cookie_extraction_keeps_only_the_authentication_pair() {
+        let headers = vec![
+            "ipb_member_id=1234; path=/; domain=.e-hentai.org".to_string(),
+            "ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; path=/".to_string(),
+            "igneous=abcdef1234; path=/".to_string(),
+            "sl=dm_2; path=/".to_string(),
+        ];
+        assert_eq!(
+            extract_login_cookie(&headers).as_deref(),
+            Some("ipb_member_id=1234; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; igneous=abcdef1234"),
+        );
+    }
+
+    #[test]
+    fn login_cookie_extraction_rejects_a_failed_sign_in() {
+        // A rejected login answers with deletion cookies only.
+        let headers = vec![
+            "ipb_member_id=deleted; expires=Thu, 01-Jan-1970 00:00:00 GMT".to_string(),
+            "ipb_pass_hash=deleted; expires=Thu, 01-Jan-1970 00:00:00 GMT".to_string(),
+        ];
+        assert_eq!(extract_login_cookie(&headers), None);
+        assert_eq!(extract_login_cookie(&[]), None);
+    }
+
+    #[test]
+    fn login_cookie_extraction_drops_the_mystery_igneous() {
+        let headers = vec![
+            "ipb_member_id=7; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; igneous=mystery".to_string(),
+        ];
+        assert_eq!(
+            extract_login_cookie(&headers).as_deref(),
+            Some("ipb_member_id=7; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+        );
+    }
 
     struct MemoryStore { writes: Mutex<Vec<(String, String)>>, deletes: Mutex<Vec<String>> }
     impl EhCookieStore for MemoryStore {

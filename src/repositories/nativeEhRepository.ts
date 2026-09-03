@@ -23,6 +23,10 @@ export class NativeEhRepository {
   saveAccount(input: SaveEhAccountInput): Promise<CommandResult<EhAccount>> {
     return invokeCommand('save_eh_account', { input }, EhAccountSchema);
   }
+  /** Signs in and returns the cookie string to store; saves nothing itself. */
+  loginWithPassword(username: string, password: string): Promise<CommandResult<string>> {
+    return invokeCommand('login_eh_account', { username, password }, z.string().min(1));
+  }
   listAccounts(): Promise<CommandResult<EhAccount[]>> {
     return invokeCommand('list_eh_accounts', {}, z.array(EhAccountSchema));
   }

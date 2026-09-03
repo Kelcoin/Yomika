@@ -22,8 +22,9 @@ function renderEhRoute() {
 }
 
 describe('EH route workspace', () => {
-  it('saves an account through the native secure-storage contract', async () => {
-    const saved = { id: 'eh-new', label: 'My EH', host: 'e-hentai.org', cookieRef: 'keyring://eh-new', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };
+  it('derives the account from a pasted cookie instead of asking for ids', async () => {
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const saved = { id: 'eh-1234', label: 'E-Hentai 1234', host: 'exhentai.org', cookieRef: 'keyring://eh-1234', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'save_eh_account') return { ok: true, value: saved };
@@ -33,16 +34,39 @@ describe('EH route workspace', () => {
     const user = userEvent.setup();
     renderEhRoute();
 
-    await user.type(await screen.findByLabelText('账户 ID'), 'eh-new');
-    await user.type(screen.getByLabelText('名称'), 'My EH');
-    await user.type(screen.getByLabelText('Cookie'), 'ipb_member_id=secret');
-    await user.click(screen.getByRole('button', { name: '保存 E-Hentai 账户' }));
+    await user.click(await screen.findByRole('tab', { name: 'Cookie 导入' }));
+    await user.type(screen.getByLabelText('Cookie'), `ipb_member_id=1234; ipb_pass_hash=${hash}; igneous=abcdef1234`);
+    await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
 
+    // The site is derived from igneous, the id from the member id.
     expect(adapter).toHaveBeenCalledWith('save_eh_account', { input: {
-      id: 'eh-new', label: 'My EH', host: 'e-hentai.org', cookie: 'ipb_member_id=secret',
+      id: 'eh-1234', label: 'E-Hentai 1234', host: 'exhentai.org',
+      cookie: `ipb_member_id=1234; ipb_pass_hash=${hash}; igneous=abcdef1234`,
     } });
-    expect(await screen.findByText('My EH')).toBeInTheDocument();
-    expect(screen.queryByText('ipb_member_id=secret')).not.toBeInTheDocument();
+    expect(await screen.findByText('E-Hentai 1234')).toBeInTheDocument();
+    expect(screen.queryByText(hash)).not.toBeInTheDocument();
+  });
+
+  it('signs in with a username and password and stores the returned cookie', async () => {
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const saved = { id: 'eh-77', label: 'E-Hentai 77', host: 'e-hentai.org', cookieRef: 'keyring://eh-77', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'login_eh_account') return { ok: true, value: `ipb_member_id=77; ipb_pass_hash=${hash}` };
+      if (command === 'save_eh_account') return { ok: true, value: saved };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const user = userEvent.setup();
+    renderEhRoute();
+
+    await user.type(await screen.findByLabelText('用户名'), 'reader');
+    await user.type(screen.getByLabelText('密码'), 'secret-password');
+    await user.click(screen.getByRole('button', { name: '登录 E-Hentai' }));
+
+    expect(adapter).toHaveBeenCalledWith('login_eh_account', { username: 'reader', password: 'secret-password' });
+    expect(await screen.findByText('E-Hentai 77')).toBeInTheDocument();
+    expect(screen.queryByText('secret-password')).not.toBeInTheDocument();
   });
 
   it('scopes searches to the active account', async () => {

@@ -53,10 +53,10 @@ describe('EhWorkspace', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Rate limit reached');
   });
 
-  it('blocks search and explains the missing active account', () => {
+  it('hides search entirely until an account is active', () => {
     render(<EhWorkspace accounts={[]} onSearch={vi.fn()} />);
 
-    expect(screen.getByRole('searchbox', { name: '搜索 E-Hentai' })).toBeDisabled();
-    expect(screen.getByRole('status')).toHaveTextContent('请先添加并激活一个 E-Hentai 账户');
+    expect(screen.queryByRole('searchbox', { name: '搜索 E-Hentai' })).not.toBeInTheDocument();
+    expect(screen.queryByText('请先添加并激活一个 E-Hentai 账户')).not.toBeInTheDocument();
   });
 });

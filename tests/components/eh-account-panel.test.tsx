@@ -50,9 +50,10 @@ describe('EhAccountPanel', () => {
     expect(onCheckHealth).toHaveBeenCalledWith('eh-a');
   });
 
-  it('shows empty state when no accounts', () => {
+  it('renders nothing but the panel when there are no accounts and no way to add one', () => {
     render(<EhAccountPanel accounts={[]} />);
-    expect(screen.getByText('尚未添加 E-Hentai 账户')).toBeDefined();
+    // No nagging copy: the panel is simply empty until a login path is offered.
+    expect(screen.getByLabelText('E-Hentai 账户')).toBeEmptyDOMElement();
   });
 
   it('shows loading state', () => {

@@ -409,6 +409,13 @@ function EhRouteWorkspace() {
         if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
         setAccounts((current) => [...current.filter((account) => account.id !== result.value.id), result.value]);
       }}
+      onPasswordLogin={async (username: string, password: string) => {
+        setSavingAccount(true);
+        const result = await ehRepository.loginWithPassword(username, password);
+        setSavingAccount(false);
+        if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
+        return result.value;
+      }}
     />
   );
 }
