@@ -1,7 +1,9 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, Pencil, Trash2 } from 'lucide-react';
+import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2 } from 'lucide-react';
 
+import { getCategoryDisplayName } from '../lib/tags';
 import type { ArchiveRecord } from '../domain/library';
+import type { Category } from '../repositories/nativeLibraryRepository';
 
 export interface ArchiveContextMenuTarget {
   archive: ArchiveRecord;
@@ -19,6 +21,9 @@ interface ArchiveContextMenuProps {
   /** Absent when the caller has no reading list, e.g. the dedup workspace. */
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
   inReadingList?: boolean | undefined;
+  /** Static categories only — see the submenu comment. */
+  categories?: Category[] | undefined;
+  onAddCategory?: ((archive: ArchiveRecord, categoryId: string) => void) | undefined;
   onDelete?: ((archive: ArchiveRecord) => void) | undefined;
 }
 
@@ -36,6 +41,8 @@ export function ArchiveContextMenu({
   onCopyId,
   onToggleReadingList,
   inReadingList = false,
+  categories,
+  onAddCategory,
   onDelete,
 }: ArchiveContextMenuProps) {
   if (!target) return null;
@@ -71,6 +78,29 @@ export function ArchiveContextMenu({
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onCopyId(archive)}>
               <Clipboard aria-hidden="true" />复制档案 ID
             </DropdownMenu.Item>
+          )}
+          {onAddCategory && categories && categories.length > 0 && (
+            // A labelled group in the same menu rather than a submenu: one click
+            // instead of a hover path, and the list is short because callers
+            // pass static categories only — a dynamic category's membership
+            // comes from its search expression, so there is nothing to assign
+            // into.
+            <>
+              <DropdownMenu.Separator className="archive-context-menu-separator" />
+              <DropdownMenu.Label className="archive-context-menu-label">
+                <FolderPlus aria-hidden="true" />加入分类
+              </DropdownMenu.Label>
+              {categories.map((category) => (
+                <DropdownMenu.Item
+                  key={category.id}
+                  className="archive-context-menu-item is-nested"
+                  disabled={category.archives.includes(archive.archiveId)}
+                  onSelect={() => onAddCategory(archive, category.id)}
+                >
+                  {getCategoryDisplayName(category.name)}
+                </DropdownMenu.Item>
+              ))}
+            </>
           )}
           {onDelete && (
             <>

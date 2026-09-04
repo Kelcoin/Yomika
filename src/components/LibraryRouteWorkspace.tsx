@@ -7,6 +7,7 @@ import { LibraryWorkspace } from './LibraryWorkspace';
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories, shouldSyncLibrary } from '../lib/librarySync';
+import { assignableCategories } from '../lib/tags';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
@@ -44,7 +45,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [deleteError, setDeleteError] = useState<string>();
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? []);
   const [categoryError, setCategoryError] = useState<string>();
-  const [categoryMessage, setCategoryMessage] = useState<string>();
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
   const [thumbnail, setThumbnailUrl] = useState<string>();
@@ -80,9 +80,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   useEffect(() => {
     if (refreshError) showToast(refreshError, 'error');
   }, [refreshError, showToast]);
-  useEffect(() => {
-    if (categoryMessage) showToast(categoryMessage, 'success');
-  }, [categoryMessage, showToast]);
   useEffect(() => {
     if (categoryError) showToast(`读取分类失败：${categoryError}`, 'error');
   }, [categoryError, showToast]);
@@ -376,14 +373,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         }}
         onLoadThumbnail={loadThumbnail}
         onReleaseThumbnail={releaseThumbnail}
-        onAddCategory={(categoryId) => {
-          const selectedArchive = archives.find((archive) => archive.archiveId === selectedArchiveId) ?? archives[0];
-          if (!serverId || !selectedArchive) return;
-          void repository.addArchiveToCategory(serverId, categoryId, selectedArchive.archiveId).then((result) => {
-            if (result.ok) setCategoryMessage('分类已更新');
-            else setDeleteError(result.error.message);
-          });
-        }}
         onUpdateMetadata={async (input) => {
           if (!serverId || !selectedArchiveId) return { ok: false, error: { message: '档案未选择' } };
           const result = await repository.updateArchiveMetadata(serverId, selectedArchiveId, input);
@@ -401,6 +390,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           return result;
         }
         setArchives((current) => current.filter((item) => item.archiveId !== archive.archiveId));
+        // A static category was still listing it.
+        setCategories((current) => current.map((category) => category.archives.includes(archive.archiveId)
+          ? { ...category, archives: category.archives.filter((id) => id !== archive.archiveId) }
+          : category));
         setMetadata(undefined);
         return result;
       }}
@@ -456,6 +449,21 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           );
         }}
         inReadingList={contextTarget ? readingList.some((item) => item.archiveId === contextTarget.archive.archiveId && !item.deleted) : false}
+        categories={assignableCategories(categories)}
+        onAddCategory={(archive, categoryId) => {
+          if (!serverId) return;
+          void repository.addArchiveToCategory(serverId, categoryId, archive.archiveId).then((result) => {
+            if (!result.ok) { showToast(result.error.message, 'error'); return; }
+            showToast('分类已更新', 'success');
+            // Patch the list in place rather than re-reading it: only static
+            // categories accept an assignment, so the new membership is known
+            // exactly, and a re-read would re-resolve every dynamic category
+            // through an unpaged /api/search.
+            setCategories((current) => current.map((category) => category.id === categoryId && !category.archives.includes(archive.archiveId)
+              ? { ...category, archives: [...category.archives, archive.archiveId] }
+              : category));
+          });
+        }}
         onToggleReadingList={(archive, next) => {
           if (!scopeId) return;
           void repository.setReadingList(scopeId, archive.archiveId, next).then((result) => {

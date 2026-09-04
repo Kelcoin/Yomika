@@ -12,6 +12,13 @@ export function getCategoryDisplayName(name: string): string { return name === F
 export function sortCategoriesForDisplay<T extends { name: string }>(categories: T[] = []): T[] {
   return [...categories].sort((left, right) => Number(right.name === FAVORITES_CATEGORY_NAME) - Number(left.name === FAVORITES_CATEGORY_NAME));
 }
+/** Categories an archive can be put into by hand. A dynamic category's contents
+ * come from its search expression — LANraragi's own schema treats `archives` and
+ * `search` as either/or — so offering one as a target would be a no-op. The
+ * favourites category has its own toggle. */
+export function assignableCategories<T extends { name: string; search?: string | null | undefined }>(categories: T[] = []): T[] {
+  return categories.filter((category) => !category.search && category.name !== FAVORITES_CATEGORY_NAME);
+}
 const CATEGORY_TRANSLATIONS: Record<string, string> = { manga: '漫画', doujinshi: '同人志', 'game cg': '游戏 CG', 'image set': '图片集', western: '欧美', artistcg: '作者 CG', cosplay: 'Cosplay', imageset: '图片集' };
 export type TranslationMap = Record<string, Record<string, string>>;
 let translations: TranslationMap = {};

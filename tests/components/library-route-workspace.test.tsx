@@ -353,27 +353,38 @@ describe('library route workspace', () => {
     expect(screen.getByText('50%')).toBeInTheDocument();
   });
 
-  it.skip('loads categories and assigns the selected archive to one', async () => {
+  it('assigns an archive to a static category from the card menu', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
-      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Categorize me', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }] };
-      if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'a1', title: 'Categorize me', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
-      if (command === 'list_categories') return { ok: true, value: [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: [] }] };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://lrr.test', scopeId: 'scope-a' }] };
+      if (command === 'list_archives_page') {
+        return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'a1', title: 'Categorize me', pageCount: 2, updatedAt: '2026-09-03T00:00:00Z' }], total: 1, hasMore: false } };
+      }
+      if (command === 'list_categories') return { ok: true, value: [
+        { id: 'SET_1613080290', name: 'Static shelf', pinned: false, search: null, archives: [] },
+        { id: 'SET_1613080291', name: 'Dynamic shelf', pinned: false, search: 'artist:someone$', archives: [] },
+      ] };
+      if (command === 'list_watchlist' || command === 'list_reading_history' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'probe_new_archives') return { ok: true, value: false };
+      if (command === 'load_archive_metadata') {
+        return { ok: true, value: { archiveId: 'a1', title: 'Categorize me', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 100 } };
+      }
       if (command === 'add_archive_to_category') return { ok: true, value: { operation: 'add_to_category', success: 1 } };
-      throw new Error(`Unexpected command: ${command}`);
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
     });
     setInvokeAdapterForTests(adapter);
-    renderLibrary('/library/a1');
 
-    await user.click(await screen.findByRole('button', { name: /^Categorize me\b/ }));
-    await user.click(await screen.findByRole('button', { name: '选择分类' }));
-    expect(screen.getByRole('dialog', { name: '选择分类' })).toBeInTheDocument();
-    await user.click(screen.getByRole('radio', { name: 'Favorites' }));
-    await user.click(screen.getByRole('button', { name: '加入所选分类' }));
+    render(<MemoryRouter initialEntries={['/library']}><App /></MemoryRouter>);
 
-    expect(adapter).toHaveBeenCalledWith('add_archive_to_category', { serverId: 'scope-a', categoryId: 'SET_1613080290', archiveId: 'a1' });
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /^Categorize me/ }), { clientX: 120, clientY: 80 });
+    const menu = await screen.findByRole('menu');
+    // A dynamic category's contents come from its search expression, so it is
+    // not an assignment target.
+    expect(within(menu).queryByRole('menuitem', { name: 'Dynamic shelf' })).not.toBeInTheDocument();
+    await user.click(within(menu).getByRole('menuitem', { name: 'Static shelf' }));
+
+    expect(adapter).toHaveBeenCalledWith('add_archive_to_category', { serverId: 'server-a', categoryId: 'SET_1613080290', archiveId: 'a1' });
     expect(await screen.findByText('分类已更新')).toBeInTheDocument();
   });
 

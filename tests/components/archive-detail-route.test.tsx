@@ -192,32 +192,6 @@ describe('archive detail route', () => {
     expect(screen.queryByText('breasts')).not.toBeInTheDocument();
   });
 
-  it.skip('selects a category in a modal and assigns the archive', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string) => {
-      if (command === 'list_servers') return { ok: true, value: [server] };
-      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
-      if (command === 'list_categories') return { ok: true, value: [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: [] }] };
-      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
-      if (command === 'add_archive_to_category') return { ok: true, value: { operation: 'add_to_category', success: 1 } };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    setInvokeAdapterForTests(adapter);
-    renderDetail();
-
-    await user.click(await screen.findByRole('button', { name: '选择分类' }));
-    const dialog = screen.getByRole('dialog', { name: '选择分类' });
-    await user.click(screen.getByRole('radio', { name: 'Favorites' }));
-    await user.click(screen.getByRole('button', { name: '加入所选分类' }));
-
-    expect(dialog).not.toBeInTheDocument();
-    expect(adapter).toHaveBeenCalledWith('add_archive_to_category', {
-      serverId: 'server-a', categoryId: 'SET_1613080290', archiveId: 'archive-a',
-    });
-    expect(await screen.findByText('分类已更新')).toBeInTheDocument();
-  });
-
   it('places reading, favorite, editing and delete actions in one toolbar', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [server] };

@@ -744,6 +744,12 @@ pub async fn add_archive_to_category(
             false,
         ));
     }
+    if let Ok(connection) = database.connection.lock() {
+        // Best effort: the assignment already succeeded on the server, so a
+        // failure to drop the local snapshot must not turn into a failed call.
+        // The stale window is 6 hours at worst, not permanent.
+        let _ = invalidate_category_cache(&connection, &server_id);
+    }
     Ok(CommandResult::success(record))
 }
 
@@ -827,6 +833,13 @@ pub async fn update_archive_metadata(
             "LANraragi rejected metadata update",
             false,
         ));
+    }
+    if metadata.tags.is_some() {
+        // Dynamic categories are saved searches over tags, so editing tags can
+        // move an archive in or out of one.
+        if let Ok(connection) = database.connection.lock() {
+            let _ = invalidate_category_cache(&connection, &server_id);
+        }
     }
     Ok(CommandResult::success(record))
 }
@@ -1035,6 +1048,8 @@ pub async fn delete_archive(
     ) {
         return Ok(CommandResult::failure("UNKNOWN", error.to_string(), true));
     }
+    // A static category still lists the id it was holding.
+    let _ = invalidate_category_cache(&connection, &server_id);
     Ok(CommandResult::success(()))
 }
 
@@ -1806,6 +1821,17 @@ fn write_category_cache(
         )
         .map_err(|error| format!("写入分类缓存失败：{error}"))?;
     Ok(())
+}
+
+/// Assigning an archive to a category changes what that category holds, so the
+/// snapshot taken for the 6-hour window is wrong the moment the assignment
+/// lands. Dropping the row makes the next read refetch rather than serve a
+/// category that is missing the archive just added to it.
+fn invalidate_category_cache(connection: &rusqlite::Connection, server_id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM settings WHERE key = ?1", [category_cache_key(server_id)])
+        .map(|_| ())
+        .map_err(|error| format!("清除分类缓存失败：{error}"))
 }
 
 fn current_unix_seconds() -> i64 {
@@ -4249,6 +4275,33 @@ mod tests {
         assert!(unknown_probe_archive_ids(&connection, "scope-a", &["known".to_string()])
             .expect("known only")
             .is_empty());
+    }
+
+    #[test]
+    fn invalidating_the_category_cache_only_drops_the_named_server() {
+        // Assigning, retagging or deleting an archive changes what a category
+        // holds, so the snapshot has to go — but only that server's, and asking
+        // twice must not turn into an error.
+        let connection = migrated_connection();
+        let categories = vec![CategoryRecord {
+            id: "SET_1613080290".to_string(),
+            name: "Static".to_string(),
+            pinned: false,
+            search: None,
+            archives: vec!["archive-a".to_string()],
+        }];
+        write_category_cache(&connection, "scope-a", &categories).expect("write a");
+        write_category_cache(&connection, "scope-b", &categories).expect("write b");
+
+        invalidate_category_cache(&connection, "scope-a").expect("invalidate");
+        invalidate_category_cache(&connection, "scope-a").expect("invalidate again");
+
+        assert!(read_category_cache_from(&connection, "scope-a", current_unix_seconds())
+            .expect("read a")
+            .is_none());
+        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+            .expect("read b")
+            .is_some(), "the other server's snapshot must survive");
     }
 
     #[test]
