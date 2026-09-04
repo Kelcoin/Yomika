@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { RefreshCw, Upload, CopyCheck } from 'lucide-react';
+import { RefreshCw, Upload, CopyCheck, Eraser } from 'lucide-react';
 import { SelectField } from './SelectField';
 import { EhRouteWorkspace } from '../app/routes';
+import { useToast } from './Toast';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -45,6 +46,7 @@ const settingsSections = [
 
 export function SettingsWorkspace() {
   const location = useLocation();
+  const { showToast } = useToast();
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
@@ -64,8 +66,18 @@ export function SettingsWorkspace() {
   const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-preferences');
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
-  const [cacheMessage, setCacheMessage] = useState<string>();
-  const [cacheError, setCacheError] = useState(false);
+
+  // Saving preferences, clearing the cache and migrating data all report through
+  // the shared toast now; the inline lines they used to print were easy to miss.
+  useEffect(() => {
+    if (preferenceMessage) showToast(preferenceMessage, preferenceError ? 'error' : 'success');
+  }, [preferenceError, preferenceMessage, showToast]);
+  useEffect(() => {
+    if (migrationMessage) showToast(migrationMessage, migrationError ? 'error' : 'success');
+  }, [migrationError, migrationMessage, showToast]);
+  useEffect(() => {
+    if (preferenceState.error) showToast(preferenceState.error, 'error');
+  }, [preferenceState.error, showToast]);
 
   useEffect(() => {
     const requested = new URLSearchParams(location.search).get('section');
@@ -102,15 +114,14 @@ export function SettingsWorkspace() {
 
   async function clearImageCache() {
     setCacheClearing(true);
-    setCacheMessage(undefined);
-    setCacheError(false);
     const result = await cacheRepository.clearImages();
+    // Results go to the shared toast: an inline line inside the cache box was
+    // easy to miss and inconsistent with every other action in the app.
     if (result.ok) {
-      setCacheMessage(`已释放 ${formatCacheBytes(result.value.bytesFreed)}，保留 ${formatCacheBytes(result.value.protectedBytes)} 受保护缓存`);
+      showToast(`已释放 ${formatCacheBytes(result.value.bytesFreed)}，保留 ${formatCacheBytes(result.value.protectedBytes)} 受保护缓存`, 'success');
       await refreshCacheStats();
     } else {
-      setCacheMessage(result.error.message);
-      setCacheError(true);
+      showToast(result.error.message, 'error');
     }
     setCacheClearing(false);
   }
@@ -349,27 +360,47 @@ export function SettingsWorkspace() {
             </label>
             <section className="cache-settings" aria-labelledby="cache-settings-title">
               <div className="cache-settings-heading">
+                {/* Clearing sits next to the number it changes. */}
+                <button
+                  className="icon-button cache-clear-button"
+                  type="button"
+                  disabled={cacheClearing}
+                  aria-busy={cacheClearing}
+                  aria-label="清空图片缓存"
+                  title="清空图片缓存"
+                  onClick={() => void clearImageCache()}
+                >
+                  <Eraser aria-hidden="true" />
+                </button>
                 <span id="cache-settings-title">图片缓存</span>
                 <strong>{cacheStats ? formatCacheBytes(cacheStats.bytes) : '正在统计…'}</strong>
               </div>
-              {cacheStats && (
-                <div className="cache-breakdown" aria-label="图片缓存明细">
-                  <span>封面 {formatCacheBytes(cacheStats.byRendition.cover.bytes)}</span>
-                  <span>页缩略图 {formatCacheBytes(cacheStats.byRendition['page-thumbnail'].bytes)}</span>
-                  <span>阅读页 {formatCacheBytes(cacheStats.byRendition['reader-page'].bytes)}</span>
-                  {cacheStats.byRendition.other.bytes > 0 && <span>其他 {formatCacheBytes(cacheStats.byRendition.other.bytes)}</span>}
+              {cacheStats && cacheStats.bytes > 0 && (
+                /* Proportions read faster than four byte counts side by side. */
+                <div className="cache-bar" aria-hidden="true">
+                  {([
+                    ['cover', cacheStats.byRendition.cover.bytes],
+                    ['page-thumbnail', cacheStats.byRendition['page-thumbnail'].bytes],
+                    ['reader-page', cacheStats.byRendition['reader-page'].bytes],
+                    ['other', cacheStats.byRendition.other.bytes],
+                  ] as const).filter(([, bytes]) => bytes > 0).map(([kind, bytes]) => (
+                    <span
+                      key={kind}
+                      className={`cache-bar-slice is-${kind}`}
+                      style={{ width: `${Math.max(1, Math.round((bytes / cacheStats.bytes) * 100))}%` }}
+                    />
+                  ))}
                 </div>
               )}
-              {cacheMessage && <p className={cacheError ? 'form-error' : 'form-success'} role={cacheError ? 'alert' : 'status'}>{cacheMessage}</p>}
-              <button className="secondary-action" type="button" disabled={cacheClearing} aria-busy={cacheClearing} onClick={() => void clearImageCache()}>
-                {cacheClearing ? '正在清空…' : '清空图片缓存'}
-              </button>
+              {cacheStats && (
+                <div className="cache-breakdown" aria-label="图片缓存明细">
+                  <span><i className="cache-swatch is-cover" aria-hidden="true" />封面 {formatCacheBytes(cacheStats.byRendition.cover.bytes)}</span>
+                  <span><i className="cache-swatch is-page-thumbnail" aria-hidden="true" />页缩略图 {formatCacheBytes(cacheStats.byRendition['page-thumbnail'].bytes)}</span>
+                  <span><i className="cache-swatch is-reader-page" aria-hidden="true" />阅读页 {formatCacheBytes(cacheStats.byRendition['reader-page'].bytes)}</span>
+                  {cacheStats.byRendition.other.bytes > 0 && <span><i className="cache-swatch is-other" aria-hidden="true" />其他 {formatCacheBytes(cacheStats.byRendition.other.bytes)}</span>}
+                </div>
+              )}
             </section>
-            {(preferenceState.error || preferenceMessage) && (
-              <p className={preferenceState.error || preferenceError ? 'form-error' : 'form-success'} role={preferenceState.error || preferenceError ? 'alert' : 'status'}>
-                {preferenceState.error ?? preferenceMessage}
-              </p>
-            )}
             <button className="primary-action" type="submit" disabled={preferencePending} aria-busy={preferencePending}>{preferencePending ? '保存中…' : '保存偏好'}</button>
           </form>
         )}
@@ -392,11 +423,6 @@ export function SettingsWorkspace() {
             onChange={(event) => setMigrationText(event.target.value)}
             rows={6}
           />
-          {migrationMessage && (
-            <p className={migrationError ? 'form-error' : 'form-success'} role={migrationError ? 'alert' : 'status'}>
-              {migrationMessage}
-            </p>
-          )}
           <div className="settings-actions">
             <button className="secondary-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
               {migrationPending ? '处理中…' : '导出数据'}

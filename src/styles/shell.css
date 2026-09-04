@@ -2744,6 +2744,39 @@ body::-webkit-scrollbar,
 
 .settings-eh-content { min-width: 0; }
 
+/* Cache breakdown as proportions, with the clear action beside the number. */
+.cache-clear-button { flex: none; width: 32px; height: 32px; min-width: 32px; }
+.cache-clear-button svg { width: 16px; height: 16px; }
+
+.cache-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+}
+
+.cache-bar-slice { display: block; height: 100%; }
+.cache-bar-slice.is-cover { background: var(--brand-vermilion); }
+.cache-bar-slice.is-page-thumbnail { background: var(--brand-cyan); }
+.cache-bar-slice.is-reader-page { background: var(--state-success); }
+.cache-bar-slice.is-other { background: var(--ink-faint); }
+
+.cache-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.cache-swatch.is-cover { background: var(--brand-vermilion); }
+.cache-swatch.is-page-thumbnail { background: var(--brand-cyan); }
+.cache-swatch.is-reader-page { background: var(--state-success); }
+.cache-swatch.is-other { background: var(--ink-faint); }
+
 .settings-tool-panel {
   display: grid;
   gap: var(--space-3);
