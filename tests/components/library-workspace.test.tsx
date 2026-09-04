@@ -80,6 +80,30 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: '按标题降序' })).toBeInTheDocument();
   });
 
+  it('applies and saves search presets from the toolbar', async () => {
+    const user = userEvent.setup();
+    const preset = {
+      scopeId: 'scope-a', presetId: 'p1', name: '中文汉化', query: 'language:chinese$',
+      sortBy: 'title' as const, sortOrder: 'asc' as const, categoryId: null,
+      createdAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z',
+      deviceId: 'device-a', revision: 1, deleted: false,
+    };
+    const onApplyPreset = vi.fn();
+    const onSavePreset = vi.fn();
+    const onDeletePreset = vi.fn();
+    renderWorkspace({ archives, presets: [preset], onApplyPreset, onSavePreset, onDeletePreset });
+
+    // A preset carries the whole toolbar state, so applying is one click.
+    await user.click(screen.getByRole('button', { name: '中文汉化' }));
+    expect(onApplyPreset).toHaveBeenCalledWith(preset);
+
+    await user.click(screen.getByRole('button', { name: '存为预设' }));
+    expect(onSavePreset).toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '删除预设 中文汉化' }));
+    expect(onDeletePreset).toHaveBeenCalledWith(preset);
+  });
+
   it('virtualizes the thumbnail grid instead of mounting every archive', async () => {
     const user = userEvent.setup();
     renderWorkspace({ archives });

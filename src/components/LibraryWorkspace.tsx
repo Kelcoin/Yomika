@@ -1,12 +1,12 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import type { ArchiveRecord } from '../domain/library';
-import type { ArchiveMetadata, Category } from '../repositories/nativeLibraryRepository';
+import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
 import { EmptyState } from './EmptyState';
 import { SelectField } from './SelectField';
 import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
@@ -57,9 +57,14 @@ interface LibraryWorkspaceProps {
   /** Opens the card context menu at the pointer; cards are the only elements
    * that answer a right click. */
   onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined;
+  /** Saved searches; absent for workspaces that have no preset store. */
+  presets?: SearchPreset[] | undefined;
+  onApplyPreset?: ((preset: SearchPreset) => void) | undefined;
+  onSavePreset?: (() => void) | undefined;
+  onDeletePreset?: ((preset: SearchPreset) => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -212,6 +217,24 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           />
           <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />
         </label>
+        {presets && presets.length > 0 && (
+          /* Saved searches restore the whole toolbar state, not just the query. */
+          <div className="search-presets" role="group" aria-label="检索预设">
+            {presets.map((preset) => (
+              <span className="search-preset" key={preset.presetId}>
+                <button type="button" className="search-preset-apply" onClick={() => onApplyPreset?.(preset)}>{preset.name}</button>
+                {onDeletePreset && (
+                  <button type="button" className="search-preset-remove" aria-label={`删除预设 ${preset.name}`} onClick={() => onDeletePreset(preset)}>×</button>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+        {onSavePreset && (
+          <button type="button" className="secondary-action search-preset-save" onClick={() => onSavePreset()}>
+            <BookmarkPlus aria-hidden="true" />存为预设
+          </button>
+        )}
       </div>}
       <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
         <button

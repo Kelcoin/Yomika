@@ -68,6 +68,31 @@ const OperationResultSchema = z.object({
   success: z.literal(1),
 });
 
+export const SearchPresetSchema = z.object({
+  scopeId: z.string().min(1),
+  presetId: z.string().min(1),
+  name: z.string().min(1),
+  query: z.string(),
+  sortBy: z.enum(['title', 'added']),
+  sortOrder: z.enum(['asc', 'desc']),
+  categoryId: z.string().nullable().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+  deviceId: z.string().min(1),
+  revision: z.number().int().positive(),
+  deleted: z.boolean(),
+});
+export type SearchPreset = z.infer<typeof SearchPresetSchema>;
+export interface SearchPresetInput {
+  scopeId: string;
+  presetId: string;
+  name: string;
+  query: string;
+  sortBy: 'title' | 'added';
+  sortOrder: 'asc' | 'desc';
+  categoryId: string | null;
+}
+
 export class NativeLibraryRepository {
   setWatchlist(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
     return invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema);
@@ -82,6 +107,17 @@ export class NativeLibraryRepository {
   }
   listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
+  }
+  /** Saved searches sync with everything else, so they live in the database
+   * rather than local settings. */
+  listSearchPresets(scopeId: string): Promise<CommandResult<SearchPreset[]>> {
+    return invokeCommand('list_search_presets', { scopeId }, z.array(SearchPresetSchema));
+  }
+  saveSearchPreset(input: SearchPresetInput): Promise<CommandResult<SearchPreset>> {
+    return invokeCommand('save_search_preset', { input }, SearchPresetSchema);
+  }
+  deleteSearchPreset(scopeId: string, presetId: string): Promise<CommandResult<SearchPreset>> {
+    return invokeCommand('delete_search_preset', { scopeId, presetId }, SearchPresetSchema);
   }
   listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
     return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));

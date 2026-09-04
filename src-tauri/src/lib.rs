@@ -15,6 +15,7 @@ use commands::library::{
     probe_new_archives,
     refresh_archives, replace_archives, retry_task, save_reading_progress, save_server, set_watchlist,
     list_reading_list, set_reading_list,
+    delete_search_preset, list_search_presets, save_search_preset,
     search_random_archives,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
 };
@@ -85,6 +86,9 @@ pub fn run() {
             list_reading_history,
             set_reading_list,
             list_reading_list,
+            save_search_preset,
+            list_search_presets,
+            delete_search_preset,
             append_sync_journal,
             claim_sync_journal,
             list_sync_journal,

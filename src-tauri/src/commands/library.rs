@@ -189,6 +189,37 @@ pub struct ReadingProgressRecord {
     revision: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPresetRecord {
+    pub scope_id: String,
+    pub preset_id: String,
+    pub name: String,
+    pub query: String,
+    pub sort_by: String,
+    pub sort_order: String,
+    pub category_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub device_id: String,
+    pub revision: i64,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPresetInput {
+    pub scope_id: String,
+    pub preset_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub query: String,
+    pub sort_by: String,
+    pub sort_order: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchlistRecord {
@@ -2688,6 +2719,203 @@ fn set_reading_list_entry(
     Ok(record)
 }
 
+fn journal_search_preset(
+    connection: &rusqlite::Connection,
+    record: &SearchPresetRecord,
+    upsert: bool,
+) -> Result<(), String> {
+    let payload_json = serde_json::json!({
+        "presetId": record.preset_id,
+        "name": record.name,
+        "query": record.query,
+        "sortBy": record.sort_by,
+        "sortOrder": record.sort_order,
+        "categoryId": record.category_id,
+        "deleted": record.deleted,
+    })
+    .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    connection
+        .execute(
+            "INSERT INTO sync_journal (
+                scope_id, object_id, object_type, operation, device_id,
+                logical_clock, payload_hash, payload_json
+             ) VALUES (?1, ?2, 'search_preset', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
+            params![
+                record.scope_id,
+                format!("{}/{}", record.scope_id, record.preset_id),
+                upsert,
+                record.device_id,
+                record.revision,
+                format!("{:x}", hasher.finalize()),
+                payload_json,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn write_search_preset(
+    connection: &mut rusqlite::Connection,
+    input: &SearchPresetInput,
+) -> Result<SearchPresetRecord, String> {
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let device_id = get_or_create_device_id(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO search_presets (scope_id, preset_id, name, query, sort_by, sort_order, category_id, device_id, deleted_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 1)
+             ON CONFLICT(scope_id, preset_id) DO UPDATE SET
+               name = excluded.name, query = excluded.query, sort_by = excluded.sort_by,
+               sort_order = excluded.sort_order, category_id = excluded.category_id,
+               updated_at = CURRENT_TIMESTAMP, device_id = excluded.device_id,
+               deleted_at = NULL, revision = search_presets.revision + 1",
+            params![
+                input.scope_id, input.preset_id, input.name.trim(), input.query,
+                input.sort_by, input.sort_order, input.category_id, device_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let record = read_search_preset(&transaction, &input.scope_id, &input.preset_id)?;
+    journal_search_preset(&transaction, &record, true)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+fn read_search_preset(
+    connection: &rusqlite::Connection,
+    scope_id: &str,
+    preset_id: &str,
+) -> Result<SearchPresetRecord, String> {
+    connection
+        .query_row(
+            "SELECT scope_id, preset_id, name, query, sort_by, sort_order, category_id,
+                    created_at, updated_at, device_id, revision, deleted_at
+             FROM search_presets WHERE scope_id = ?1 AND preset_id = ?2",
+            params![scope_id, preset_id],
+            |row| {
+                let deleted_at: Option<String> = row.get(11)?;
+                Ok(SearchPresetRecord {
+                    scope_id: row.get(0)?,
+                    preset_id: row.get(1)?,
+                    name: row.get(2)?,
+                    query: row.get(3)?,
+                    sort_by: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    category_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    device_id: row.get(9)?,
+                    revision: row.get(10)?,
+                    deleted: deleted_at.is_some(),
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Saved searches: the library toolbar state under a name. Stored per scope and
+/// journalled like the watchlist, so a preset made on one device arrives on the
+/// next sync instead of living only in local settings.
+#[tauri::command]
+pub fn save_search_preset(
+    input: SearchPresetInput,
+    database: State<'_, Database>,
+) -> CommandResult<SearchPresetRecord> {
+    if input.name.trim().is_empty() || input.preset_id.trim().is_empty() {
+        return CommandResult::failure("INVALID_INPUT", "预设需要名称", false);
+    }
+    if !matches!(input.sort_by.as_str(), "title" | "added")
+        || !matches!(input.sort_order.as_str(), "asc" | "desc")
+    {
+        return CommandResult::failure("INVALID_INPUT", "预设排序无效", false);
+    }
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match write_search_preset(&mut connection, &input) {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn delete_search_preset(
+    scope_id: String,
+    preset_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<SearchPresetRecord> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<SearchPresetRecord, String> {
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE search_presets SET deleted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP, revision = revision + 1
+                 WHERE scope_id = ?1 AND preset_id = ?2",
+                params![scope_id, preset_id],
+            )
+            .map_err(|error| error.to_string())?;
+        let record = read_search_preset(&transaction, &scope_id, &preset_id)?;
+        journal_search_preset(&transaction, &record, false)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(record)
+    })();
+    match result {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn list_search_presets(
+    scope_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<SearchPresetRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<Vec<SearchPresetRecord>, String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT scope_id, preset_id, name, query, sort_by, sort_order, category_id,
+                        created_at, updated_at, device_id, revision, deleted_at
+                 FROM search_presets WHERE scope_id = ?1 AND deleted_at IS NULL
+                 ORDER BY name COLLATE NOCASE",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![scope_id], |row| {
+                Ok(SearchPresetRecord {
+                    scope_id: row.get(0)?,
+                    preset_id: row.get(1)?,
+                    name: row.get(2)?,
+                    query: row.get(3)?,
+                    sort_by: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    category_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    device_id: row.get(9)?,
+                    revision: row.get(10)?,
+                    deleted: false,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(records) => CommandResult::success(records),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 #[tauri::command]
 pub fn set_reading_list(
     scope_id: String,
@@ -3242,6 +3470,12 @@ mod tests {
         connection
             .execute_batch(include_str!("../../migrations/0016_archive_added_at.sql"))
             .expect("archive added_at migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0017_reading_list.sql"))
+            .expect("reading list migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0018_search_presets.sql"))
+            .expect("search presets migration");
         connection
     }
 
@@ -3870,6 +4104,40 @@ mod tests {
             &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
         ).expect("records by id");
         assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
+    }
+
+    #[test]
+    fn search_presets_round_trip_tombstone_and_journal() {
+        // Presets sync like every other user record, so saving one has to leave a
+        // journal row; deleting is a tombstone, not a hard delete, or a delete
+        // would never reach the other device.
+        let mut connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a')",
+            [],
+        ).unwrap();
+
+        let input = SearchPresetInput {
+            scope_id: "scope-a".to_string(),
+            preset_id: "preset-1".to_string(),
+            name: "  中文汉化  ".to_string(),
+            query: "language:chinese$".to_string(),
+            sort_by: "added".to_string(),
+            sort_order: "desc".to_string(),
+            category_id: None,
+        };
+        let saved = write_search_preset(&mut connection, &input).expect("save preset");
+        assert_eq!(saved.name, "中文汉化");
+        assert_eq!(saved.revision, 1);
+        assert!(!saved.deleted);
+
+        let again = write_search_preset(&mut connection, &input).expect("update preset");
+        assert_eq!(again.revision, 2);
+
+        let journalled: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='search_preset'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journalled, 2);
     }
 
     #[test]

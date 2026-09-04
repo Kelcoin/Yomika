@@ -55,6 +55,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [loadingMore, setLoadingMore] = useState(false);
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [readingList, setReadingList] = useState<import('../domain/library').WatchlistRecord[]>([]);
+  const [presets, setPresets] = useState<import('../repositories/nativeLibraryRepository').SearchPreset[]>([]);
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
   const loadingMoreRef = useRef(false);
@@ -159,6 +160,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (watchlistResult.ok) setWatchlist(watchlistResult.value);
     if (historyResult.ok) setReadingHistory(historyResult.value);
     if (readingListResult.ok) setReadingList(readingListResult.value);
+    void repository.listSearchPresets(server.scopeId).then((result) => {
+      if (result.ok) setPresets(result.value);
+    });
     setLoading(false);
   }, []);
 
@@ -405,6 +409,39 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         loadArchiveDetails(serverId, scopeId, archive);
         }}
       onArchiveContextMenu={(archive, at) => setContextTarget({ archive, ...at })}
+      presets={presets}
+      onApplyPreset={(preset) => {
+        // A preset restores the whole toolbar state, not just the query text.
+        setSearchQuery(preset.query);
+        setSortMode(preset.sortBy);
+        setSortOrder(preset.sortOrder);
+        setCategoryFilter(preset.categoryId ?? '');
+      }}
+      onSavePreset={() => {
+        if (!scopeId) return;
+        const name = window.prompt('预设名称', searchQuery || '全部档案');
+        if (!name?.trim()) return;
+        void repository.saveSearchPreset({
+          scopeId,
+          presetId: `preset-${Date.now()}`,
+          name: name.trim(),
+          query: searchQuery,
+          sortBy: sortMode,
+          sortOrder,
+          categoryId: categoryFilter || null,
+        }).then((result) => {
+          if (!result.ok) { showToast(result.error.message, 'error'); return; }
+          setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
+          showToast('预设已保存', 'success');
+        });
+      }}
+      onDeletePreset={(preset) => {
+        if (!scopeId) return;
+        void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
+          if (!result.ok) { showToast(result.error.message, 'error'); return; }
+          setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
+        });
+      }}
       />
       <ArchiveContextMenu
         target={contextTarget}

@@ -1201,13 +1201,18 @@ body::-webkit-scrollbar,
 }
 
 .library-controls {
-  display: block;
+  /* Search box on its own row, then presets and the save action beside it. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
   margin-bottom: var(--space-4);
 }
 
 .search-label {
+  flex: 1 1 240px;
   display: block;
-  width: 100%;
+  width: auto;
   max-width: none;
 }
 
@@ -2821,6 +2826,47 @@ body::-webkit-scrollbar,
 
 .date-field:hover::-webkit-calendar-picker-indicator { opacity: 1; }
 .date-field:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* Saved searches sit beside the search box as removable chips. */
+.search-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.search-preset {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+}
+
+.search-preset-apply {
+  min-height: 28px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.search-preset-apply:hover { color: var(--ink-primary); }
+
+.search-preset-remove {
+  min-height: 28px;
+  padding: 0 8px 0 4px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.search-preset-remove:hover { color: var(--state-danger); }
+.search-preset-save { flex: none; }
 
 /* Custom CSS editor: presets, a monospace box, and a length readout. */
 .custom-css-editor {
