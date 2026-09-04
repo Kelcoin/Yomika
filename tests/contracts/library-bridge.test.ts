@@ -139,6 +139,20 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('keeps the reading list separate from the watchlist', async () => {
+    const record = { scopeId: 'scope-a', archiveId: 'a1', addedAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false };
+    const adapter = vi.fn(async () => ({ ok: true, value: record }));
+    setInvokeAdapterForTests(adapter);
+
+    // "I plan to read this" and "I liked this" are different lists, and both
+    // sync, so they are different commands against different tables.
+    await new NativeLibraryRepository().setReadingList('scope-a', 'a1', true);
+    expect(adapter).toHaveBeenCalledWith('set_reading_list', { scopeId: 'scope-a', archiveId: 'a1', added: true });
+
+    setInvokeAdapterForTests(vi.fn(async () => ({ ok: true, value: [record] })));
+    expect(await new NativeLibraryRepository().listReadingList('scope-a')).toEqual({ ok: true, value: [record] });
+  });
+
   it('lists LANraragi categories through the native command', async () => {
     const value = [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: ['a1'] }];
     const adapter = vi.fn(async () => ({ ok: true, value }));

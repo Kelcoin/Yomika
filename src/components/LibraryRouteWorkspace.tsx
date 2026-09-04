@@ -54,6 +54,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [hasMoreArchives, setHasMoreArchives] = useState(snapshot?.hasMoreArchives ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
+  const [readingList, setReadingList] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
   const loadingMoreRef = useRef(false);
@@ -150,12 +151,14 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // the native side serves a persisted snapshot. Loading them here as well
     // meant every visit to the library re-resolved every dynamic category.
     setCategoryError(undefined);
-    const [watchlistResult, historyResult] = await Promise.all([
+    const [watchlistResult, historyResult, readingListResult] = await Promise.all([
       repository.listWatchlist(server.scopeId),
       repository.listHistory(server.scopeId),
+      repository.listReadingList(server.scopeId),
     ]);
     if (watchlistResult.ok) setWatchlist(watchlistResult.value);
     if (historyResult.ok) setReadingHistory(historyResult.value);
+    if (readingListResult.ok) setReadingList(readingListResult.value);
     setLoading(false);
   }, []);
 
@@ -415,12 +418,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
             () => showToast('复制失败', 'error'),
           );
         }}
-        inReadingList={contextTarget ? watchlist.some((item) => item.archiveId === contextTarget.archive.archiveId && !item.deleted) : false}
+        inReadingList={contextTarget ? readingList.some((item) => item.archiveId === contextTarget.archive.archiveId && !item.deleted) : false}
         onToggleReadingList={(archive, next) => {
           if (!scopeId) return;
-          void repository.setWatchlist(scopeId, archive.archiveId, next).then((result) => {
+          void repository.setReadingList(scopeId, archive.archiveId, next).then((result) => {
             if (!result.ok) { showToast(result.error.message, 'error'); return; }
-            setWatchlist((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
+            setReadingList((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
             showToast(next ? '已加入待看' : '已移出待看', 'success');
           });
         }}

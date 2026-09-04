@@ -75,6 +75,14 @@ export class NativeLibraryRepository {
   listWatchlist(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_watchlist', { scopeId }, z.array(WatchlistRecordSchema));
   }
+  /** Reading list ("待看") is a second list beside the watchlist ("收藏夹"):
+   * intent to read versus having liked something. */
+  setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
+    return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema);
+  }
+  listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
+    return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
+  }
   listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
     return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
   }

@@ -1,5 +1,6 @@
 import {
   Archive,
+  Bookmark,
   Download,
   History,
   Home,
@@ -20,6 +21,7 @@ const navigation = [
   { to: '/library', label: '档案库', icon: Archive, mobile: true },
   { to: '/history', label: '历史', icon: History, mobile: true },
   { to: '/watchlist', label: '收藏夹', icon: Star, mobile: true },
+  { to: '/to-read', label: '待看', icon: Bookmark, mobile: false },
   { to: '/downloads', label: '下载', icon: Download, mobile: false },
   { to: '/settings', label: '设置', icon: Settings, mobile: true },
 ] as const;

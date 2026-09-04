@@ -14,6 +14,7 @@ use commands::library::{
     load_archive_thumbnail, load_archive_page_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
     probe_new_archives,
     refresh_archives, replace_archives, retry_task, save_reading_progress, save_server, set_watchlist,
+    list_reading_list, set_reading_list,
     search_random_archives,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
 };
@@ -82,6 +83,8 @@ pub fn run() {
             set_watchlist,
             list_watchlist,
             list_reading_history,
+            set_reading_list,
+            list_reading_list,
             append_sync_journal,
             claim_sync_journal,
             list_sync_journal,

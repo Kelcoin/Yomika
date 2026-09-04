@@ -1,7 +1,10 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
+  Bookmark,
+  BookmarkX,
   BookOpen,
+  EyeOff,
   Heart,
   Pencil,
   Trash2,
@@ -32,6 +35,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [serverId, setServerId] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const [favorite, setFavorite] = useState(false);
+  const [inReadingList, setInReadingList] = useState(false);
   const [message, setMessage] = useState<string>();
   const navigate = useNavigate();
   const { showToast } = useToast();
@@ -95,6 +99,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       void repository.listWatchlist(server.scopeId).then((result) => {
         if (!active || !result.ok) return;
         setFavorite(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
+      });
+      void repository.listReadingList(server.scopeId).then((result) => {
+        if (!active || !result.ok) return;
+        setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
       });
     });
 
@@ -164,6 +172,17 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
       <div className="archive-detail-route-actions" role="toolbar" aria-label="档案操作">
         <Link className="archive-action-button archive-action-primary" to={`/reader/${archiveId}`} aria-label="阅读" title="阅读"><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
+        <Link className="archive-action-button" to={`/reader/${archiveId}?incognito=1`} aria-label="无痕阅读" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" /><span className="archive-action-label">无痕</span></Link>
+        <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
+          if (!scopeId) return;
+          void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
+            if (result.ok) setInReadingList(!result.value.deleted);
+            else setMessage(result.error.message);
+          });
+        }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
+          {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
+          <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
+        </button>
         <button className="archive-action-button" type="button" aria-pressed={favorite} onClick={() => {
           if (!scopeId) return;
           void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {

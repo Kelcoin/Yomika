@@ -26,6 +26,9 @@ import { presentEhError, type EhSearchResult } from '../services/ehClient';
 const workspaces = {
   history: ['历史', '开始阅读后，进度会保存在这里。'],
   watchlist: ['收藏夹', '收藏的档案会显示在这里。'],
+  // Separate from the watchlist on purpose: "I plan to read this" is not the
+  // same statement as "I liked this".
+  toRead: ['待看档案', '加入待看的档案会排在这里，读完可以移出。'],
 } as const;
 
 function HomeWorkspace() {
@@ -152,7 +155,7 @@ function HomeWorkspace() {
 const repository = new NativeLibraryRepository();
 const stateImageCache = getNativeImageCache();
 
-function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
+function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) {
   const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
   const [archives, setArchives] = useState<ArchiveRecord[]>([]);
@@ -178,7 +181,11 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
       setServerId(server.id);
       setScopeId(server.scopeId);
       const [result, archiveResult] = await Promise.all([
-        name === 'history' ? repository.listHistory(server.scopeId) : repository.listWatchlist(server.scopeId),
+        name === 'history'
+          ? repository.listHistory(server.scopeId)
+          : name === 'toRead'
+            ? repository.listReadingList(server.scopeId)
+            : repository.listWatchlist(server.scopeId),
         repository.listArchives(server.id),
       ]);
       if (!active) return;
@@ -199,7 +206,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
   );
   const activeWatchlist = useMemo(() => watchlist.filter((item) => !item.deleted), [watchlist]);
   const visibleWatchlist = useMemo(() => {
-    if (name !== 'watchlist') return [];
+    if (name === 'history') return [];
     const query = watchlistQuery.trim().toLocaleLowerCase();
     return activeWatchlist
       .filter((item) => !query || (archiveTitles.get(item.archiveId) ?? item.archiveId).toLocaleLowerCase().includes(query))
@@ -236,7 +243,9 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
     setWatchlistMessage(undefined);
     const results = await Promise.all([...selectedWatchlist].map(async (archiveId) => ({
       archiveId,
-      result: await repository.setWatchlist(scopeId, archiveId, false),
+      result: name === 'toRead'
+        ? await repository.setReadingList(scopeId, archiveId, false)
+        : await repository.setWatchlist(scopeId, archiveId, false),
     })));
     const removed = new Set(results.filter(({ result }) => result.ok).map(({ archiveId }) => archiveId));
     const failures = results.filter(({ result }) => !result.ok);
@@ -442,6 +451,7 @@ export function WorkspaceRoutes() {
       <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
       <Route path="/history" element={<StateWorkspace name="history" />} />
       <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
+      <Route path="/to-read" element={<StateWorkspace name="toRead" />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
       {/* Tools live on their own routes; the settings section is only an index. */}

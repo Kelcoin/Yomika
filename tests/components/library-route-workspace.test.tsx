@@ -523,12 +523,12 @@ describe('library route workspace', () => {
         return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'a1', title: 'Archive One', pageCount: 4, updatedAt: '2026-09-03T00:00:00Z' }], total: 1, hasMore: false } };
       }
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'list_watchlist' || command === 'list_reading_history') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_history' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'probe_new_archives') return { ok: true, value: false };
       if (command === 'load_archive_metadata') {
         return { ok: true, value: { archiveId: 'a1', title: 'Archive One', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 4, lastReadTime: 0, size: 100 } };
       }
-      if (command === 'set_watchlist') {
+      if (command === 'set_reading_list') {
         return { ok: true, value: { scopeId: 'scope-a', archiveId: String((args as { archiveId?: string }).archiveId), addedAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false } };
       }
       return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };

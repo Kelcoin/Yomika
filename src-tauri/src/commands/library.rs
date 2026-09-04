@@ -2618,6 +2618,129 @@ fn set_watchlist_entry(
     Ok(record)
 }
 
+/// Reading list ("待看") is deliberately a second list, not a flag on the
+/// watchlist: "I like this" and "I plan to read this" are different answers, and
+/// both have to sync, so this mirrors the watchlist journal shape.
+fn set_reading_list_entry(
+    connection: &mut rusqlite::Connection,
+    scope_id: &str,
+    archive_id: &str,
+    added: bool,
+) -> Result<WatchlistRecord, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let device_id = get_or_create_device_id(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision)
+         VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN NULL ELSE CURRENT_TIMESTAMP END, 1)
+         ON CONFLICT(scope_id, archive_id) DO UPDATE SET
+           updated_at = CURRENT_TIMESTAMP, device_id = excluded.device_id,
+           deleted_at = CASE WHEN ?4 THEN NULL ELSE CURRENT_TIMESTAMP END,
+           revision = reading_list.revision + 1",
+            params![scope_id, archive_id, device_id, added],
+        )
+        .map_err(|error| error.to_string())?;
+    let record = transaction
+        .query_row(
+            "SELECT scope_id, archive_id, added_at, updated_at, device_id, deleted_at, revision
+         FROM reading_list WHERE scope_id = ?1 AND archive_id = ?2",
+            params![scope_id, archive_id],
+            |row| {
+                let deleted_at: Option<String> = row.get(5)?;
+                Ok(WatchlistRecord {
+                    scope_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    added_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    device_id: row.get(4)?,
+                    deleted: deleted_at.is_some(),
+                    deleted_at,
+                    revision: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let payload_json = serde_json::json!({
+        "archiveId": record.archive_id,
+        "deleted": record.deleted,
+    })
+    .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    transaction.execute(
+        "INSERT INTO sync_journal (
+            scope_id, object_id, object_type, operation, device_id,
+            logical_clock, payload_hash, payload_json
+         ) VALUES (?1, ?2, 'reading_list', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
+        params![
+            record.scope_id,
+            format!("{}/{}", record.scope_id, record.archive_id),
+            added,
+            record.device_id,
+            record.revision,
+            format!("{:x}", hasher.finalize()),
+            payload_json,
+        ],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+#[tauri::command]
+pub fn set_reading_list(
+    scope_id: String,
+    archive_id: String,
+    added: bool,
+    database: State<'_, Database>,
+) -> CommandResult<WatchlistRecord> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match set_reading_list_entry(&mut connection, &scope_id, &archive_id, added) {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn list_reading_list(
+    scope_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<WatchlistRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<Vec<WatchlistRecord>, String> {
+        let mut statement = connection.prepare(
+            "SELECT scope_id, archive_id, added_at, updated_at, device_id, deleted_at, revision
+             FROM reading_list WHERE scope_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![scope_id], |row| {
+                Ok(WatchlistRecord {
+                    scope_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    added_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    device_id: row.get(4)?,
+                    deleted_at: row.get(5)?,
+                    revision: row.get(6)?,
+                    deleted: false,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(records) => CommandResult::success(records),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 #[tauri::command]
 pub fn set_watchlist(
     scope_id: String,
