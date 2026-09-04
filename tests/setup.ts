@@ -1,4 +1,11 @@
 import '@testing-library/jest-dom/vitest';
+import { afterEach } from 'vitest';
+
+import { resetRouteCacheForTests } from '../src/lib/routeCache';
+
+// Cross-route snapshots are module-level, so one test's library state would
+// otherwise seed the next test's first render.
+afterEach(resetRouteCacheForTests);
 
 class TestResizeObserver implements ResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}

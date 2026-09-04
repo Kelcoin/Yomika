@@ -7,16 +7,34 @@ import { LibraryWorkspace } from './LibraryWorkspace';
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories, shouldSyncLibrary } from '../lib/librarySync';
+import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 
+const LIBRARY_SNAPSHOT_KEY = 'library:workspace';
+
+interface LibrarySnapshot {
+  archives: ArchiveRecord[];
+  categories: import('../repositories/nativeLibraryRepository').Category[];
+  selectedArchiveId: string | undefined;
+  totalArchives: number;
+  hasMoreArchives: boolean;
+  searchQuery: string;
+  sortMode: 'title' | 'added';
+  sortOrder: 'asc' | 'desc';
+  categoryFilter: string;
+}
+
 export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: boolean } = {}) {
   const { showToast } = useToast();
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Snapshot from the last visit: switching to another route and back used to
+  // start from an empty list and a closed detail pane.
+  const snapshot = readRouteCache<LibrarySnapshot>(LIBRARY_SNAPSHOT_KEY);
+  const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  const [loading, setLoading] = useState(!snapshot);
   const [error, setError] = useState<string>();
   const [needsCredentials, setNeedsCredentials] = useState(false);
   const [serverId, setServerId] = useState<string>();
@@ -24,26 +42,26 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [metadata, setMetadata] = useState<import('../repositories/nativeLibraryRepository').ArchiveMetadata>();
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
-  const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>([]);
+  const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? []);
   const [categoryError, setCategoryError] = useState<string>();
   const [categoryMessage, setCategoryMessage] = useState<string>();
-  const [selectedArchiveId, setSelectedArchiveId] = useState<string>();
+  const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
   const [thumbnail, setThumbnailUrl] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string>();
-  const [totalArchives, setTotalArchives] = useState(0);
-  const [hasMoreArchives, setHasMoreArchives] = useState(false);
+  const [totalArchives, setTotalArchives] = useState(snapshot?.totalArchives ?? 0);
+  const [hasMoreArchives, setHasMoreArchives] = useState(snapshot?.hasMoreArchives ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
   const loadingMoreRef = useRef(false);
-  const initialArchivesLoaded = useRef(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sortMode, setSortMode] = useState<'title' | 'added'>('added');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-  const [categoryFilter, setCategoryFilter] = useState('');
+  const initialArchivesLoaded = useRef(Boolean(snapshot));
+  const [searchQuery, setSearchQuery] = useState(snapshot?.searchQuery ?? '');
+  const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
+  const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
   const [reloadToken, setReloadToken] = useState(0);
   const [contextTarget, setContextTarget] = useState<ArchiveContextMenuTarget>();
   const navigate = useNavigate();
@@ -267,6 +285,22 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     () => new Map(readingHistory.map((item) => [item.archiveId, item.pageIndex + 1])),
     [readingHistory],
   );
+
+  // Keep the snapshot current so the next visit renders instantly.
+  useEffect(() => {
+    if (archives.length === 0) return;
+    writeRouteCache(LIBRARY_SNAPSHOT_KEY, {
+      archives,
+      categories,
+      selectedArchiveId,
+      totalArchives,
+      hasMoreArchives,
+      searchQuery,
+      sortMode,
+      sortOrder,
+      categoryFilter,
+    } satisfies LibrarySnapshot);
+  }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, sortMode, sortOrder, totalArchives]);
 
   if (loading) {
     return (
