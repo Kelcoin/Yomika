@@ -110,17 +110,24 @@ export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {})
       )}
       {!loading && servers.length === 0 && <p className="server-list-message">需要先添加 LANraragi 服务器，才能确定本地同步范围。</p>}
       <section className="sync-setup" aria-labelledby="sync-setup-title">
-        <div>
+        <div className="sync-setup-heading">
           <KeyRound aria-hidden="true" />
-          <div><h2 id="sync-setup-title">添加或更新 WebDAV</h2></div>
+          <div>
+            <h2 id="sync-setup-title">添加或更新 WebDAV</h2>
+            <p>账户信息保存在本机，口令进入系统安全存储。</p>
+          </div>
         </div>
+        {/* Two columns of labelled fields with the wide URL row spanning both:
+            everything used to sit in one cramped stack. */}
         <form className="sync-form" onSubmit={saveAccount}>
-          <label>账户 ID<input name="accountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" spellCheck={false} /></label>
-          <label>名称<input name="label" required autoComplete="off" /></label>
-          <label>WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
+          <label>账户 ID<input name="accountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" spellCheck={false} placeholder="dav-home" /></label>
+          <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" /></label>
+          <label className="sync-form-wide">WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
           <label>用户名<input name="username" autoComplete="username" spellCheck={false} /></label>
           <label>密码或 Token<input name="credential" required type="password" autoComplete="off" spellCheck={false} /></label>
-          <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存同步账户'}</button>
+          <div className="sync-form-actions">
+            <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存同步账户'}</button>
+          </div>
         </form>
       </section>
     </div>

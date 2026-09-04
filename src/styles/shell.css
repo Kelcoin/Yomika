@@ -2230,20 +2230,42 @@ body::-webkit-scrollbar,
 }
 
 .sync-setup {
+  /* Heading above the fields instead of a narrow side column: the form was
+     squeezed into a third of the width and every field wrapped. */
   display: grid;
-  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
-  gap: var(--space-8);
+  gap: var(--space-4);
   padding: var(--space-8) 0;
   border-top: 1px solid var(--hairline);
 }
 
-.sync-setup > div {
+.sync-setup-heading {
   display: flex;
   align-items: flex-start;
   gap: var(--space-4);
 }
 
-.sync-setup > div > svg {
+.sync-setup-heading p {
+  margin: 4px 0 0;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.sync-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4);
+  align-items: end;
+  max-width: 880px;
+}
+
+.sync-form-wide { grid-column: 1 / -1; }
+.sync-form-actions { grid-column: 1 / -1; }
+
+.sync-setup > div {
+  min-width: 0;
+}
+
+.sync-setup-heading > svg {
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
@@ -2776,6 +2798,29 @@ body::-webkit-scrollbar,
 .cache-swatch.is-page-thumbnail { background: var(--brand-cyan); }
 .cache-swatch.is-reader-page { background: var(--state-success); }
 .cache-swatch.is-other { background: var(--ink-faint); }
+
+/* Themed date input: the native control keeps its picker but matches the rest
+   of the form instead of the platform default. */
+.date-field {
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--control-background);
+  color: var(--ink-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color-scheme: light dark;
+}
+
+.date-field::-webkit-calendar-picker-indicator {
+  opacity: 0.6;
+  cursor: pointer;
+  filter: grayscale(1);
+}
+
+.date-field:hover::-webkit-calendar-picker-indicator { opacity: 1; }
+.date-field:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
 .settings-tool-panel {
   display: grid;

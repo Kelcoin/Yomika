@@ -4,6 +4,7 @@ import type { ArchiveRecord, ServerRecord } from '../domain/library';
 import { mergeSmartDuplicateSelection, getDedupeGroupFilterData, toDedupeDayString, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeDedupRepository, type DedupLoadResult, type DedupScanProgress } from '../repositories/nativeDedupRepository';
+import { SelectField } from './SelectField';
 import { useToast } from './Toast';
 
 const library = new NativeLibraryRepository();
@@ -118,16 +119,16 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
   return <div className="workspace-stack dedup-workspace">
     {!embedded && <header className="workspace-heading"><div><span className="eyebrow">重复管理</span><h1>查重工作区</h1></div><CopyCheck aria-hidden="true" /></header>}
     <section className="toolbar-row" aria-label="查重设置">
-      <label>服务器<select value={server?.id ?? ''} onChange={(event) => setServer(servers.find((item) => item.id === event.target.value))}>{servers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-      <label>起始日期<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
-      <label>结束日期<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
+      <label>服务器<SelectField name="dedupServer" aria-label="服务器" value={server?.id ?? ''} options={servers.map((item) => ({ value: item.id, label: item.name }))} onChange={(value) => setServer(servers.find((item) => item.id === value))} /></label>
+      <label>起始日期<input className="date-field" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
+      <label>结束日期<input className="date-field" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
       <button className="primary-action" type="button" disabled={!server || busy} onClick={() => void runScan()}><Play aria-hidden="true" />{busy ? '扫描中…' : '开始扫描'}</button>
       {busy && <button className="secondary-action" type="button" onClick={() => void cancelScan()}><X aria-hidden="true" />取消</button>}
       {progress?.status === 'cancelled' && <button className="secondary-action" type="button" onClick={() => void runScan(true)}><RefreshCw aria-hidden="true" />恢复</button>}
     </section>
     {progress && <div className="progress-line" role="status">{progress.stage} · {progress.processed}/{progress.total} · 命中 {progress.pairCount}{progress.degraded ? ' · 结果不完整' : ''}</div>}
     {result && <>
-      <section className="toolbar-row dedup-filters"><label>来源<select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="image">封面相似</option><option value="filename">文件名</option></select></label><label>视图<select value={view} onChange={(event) => setView(event.target.value as typeof view)}><option value="groups">重复组</option><option value="chains">重复链</option></select></label><button className="secondary-action" type="button" onClick={() => void smartSelect()}><ShieldCheck aria-hidden="true" />智能选择</button><button className="danger-action" type="button" disabled={!selected.size} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />删除所选</button></section>
+      <section className="toolbar-row dedup-filters"><label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label><label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }]} onChange={(value) => setView(value as typeof view)} /></label><button className="secondary-action" type="button" onClick={() => void smartSelect()}><ShieldCheck aria-hidden="true" />智能选择</button><button className="danger-action" type="button" disabled={!selected.size} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />删除所选</button></section>
       <ul className="dedup-groups" aria-label="重复结果">{visibleGroups.map((group, index) => <li className="dedup-group" key={`${index}-${group.map((item) => item.archiveId).join('-')}`}><div className="dedup-group-heading"><strong>重复组 {index + 1}</strong><span>{group.length} 项</span></div><ul>{group.map((archive) => <li key={archive.archiveId}><label><input type="checkbox" checked={selected.has(archive.archiveId)} onChange={(event) => void toggleSelected(archive.archiveId, event.target.checked)} /><span>{archive.title || archive.archiveId}</span><small>{archive.archiveId}</small></label>{selected.has(archive.archiveId) && <Check aria-hidden="true" />}</li>)}</ul>{group.length > 1 && <button className="icon-button" type="button" title="标记为不重复" aria-label="标记为不重复" onClick={() => server && void dedup.saveNonDuplicate({ scopeId: server.scopeId, leftArchiveId: group[0]!.archiveId, rightArchiveId: group[1]!.archiveId })}><X aria-hidden="true" /></button>}</li>)}</ul>
     </>}
     {!result && !busy && <p className="empty-state">尚未运行查重扫描。</p>}
