@@ -10,6 +10,7 @@ const LAYOUT_KEY: &str = "preferences.default_layout";
 const DIRECTION_KEY: &str = "preferences.default_direction";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
 const ACCENT_COLOR_KEY: &str = "preferences.accent_color";
+const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
@@ -68,6 +69,11 @@ pub struct PreferenceSnapshot {
     pub upscale_backend: String,
     #[serde(default)]
     pub upscale_model: String,
+    /// Free-form CSS appended after the design tokens. A single text blob is the
+    /// whole customisation surface: one accent colour could not express the
+    /// themes people actually want.
+    #[serde(default)]
+    pub custom_css: String,
 }
 
 fn default_accent_color() -> String { DEFAULT_ACCENT_COLOR.to_string() }
@@ -87,6 +93,7 @@ impl Default for PreferenceSnapshot {
             cover_concurrency: default_cover_concurrency(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
+            custom_css: String::new(),
         }
     }
 }
@@ -109,6 +116,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || !(1..=8).contains(&value.cover_concurrency)
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
+        // Bounded so a paste cannot bloat the settings row; enough for a theme.
+        || value.custom_css.len() > 20_000
     {
         return Err("Invalid preference snapshot".into());
     }
@@ -152,6 +161,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         cover_concurrency: load_value(connection, COVER_CONCURRENCY_KEY, defaults.cover_concurrency)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
+        custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
     };
     validate_preferences(&value)?;
     Ok(value)
@@ -173,6 +183,7 @@ pub fn save_preferences_to(
         (COVER_CONCURRENCY_KEY, serde_json::to_string(&value.cover_concurrency)),
         (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
         (UPSCALE_MODEL_KEY, serde_json::to_string(&value.upscale_model)),
+        (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
     ] {
         transaction
             .execute(
@@ -330,6 +341,7 @@ mod tests {
             cover_concurrency: 6,
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
+            custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");
         assert_eq!(load_preferences_from(&connection).expect("saved preferences"), wanted);
@@ -341,6 +353,20 @@ mod tests {
             )
             .expect("unrelated setting preserved");
         assert_eq!(device_id, "\"secret-device\"");
+    }
+
+    #[test]
+    fn custom_css_is_free_form_but_bounded() {
+        // One accent colour could not express a whole theme, so the surface is a
+        // CSS blob; the only rule is that it cannot bloat the settings row.
+        let mut connection = settings_db();
+        let themed = PreferenceSnapshot { custom_css: "body { letter-spacing: 0.01em; }".into(), ..PreferenceSnapshot::default() };
+        assert_eq!(save_preferences_to(&mut connection, themed.clone()).expect("save css"), themed);
+        assert_eq!(load_preferences_from(&connection).expect("load css").custom_css, "body { letter-spacing: 0.01em; }");
+
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            custom_css: "a".repeat(20_001), ..PreferenceSnapshot::default()
+        }).is_err());
     }
 
     #[test]

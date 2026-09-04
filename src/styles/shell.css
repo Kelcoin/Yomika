@@ -2822,6 +2822,39 @@ body::-webkit-scrollbar,
 .date-field:hover::-webkit-calendar-picker-indicator { opacity: 1; }
 .date-field:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
+/* Custom CSS editor: presets, a monospace box, and a length readout. */
+.custom-css-editor {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 680px;
+  padding: 0;
+  border: 0;
+}
+
+.custom-css-hint { margin: 0; color: var(--ink-secondary); font-size: 12px; }
+
+.custom-css-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.custom-css-editor textarea {
+  width: 100%;
+  font-family: var(--font-utility);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.custom-css-count {
+  margin: 0;
+  color: var(--ink-faint);
+  font-family: var(--font-utility);
+  font-size: 11px;
+  text-align: right;
+}
+
 .settings-tool-panel {
   display: grid;
   gap: var(--space-3);

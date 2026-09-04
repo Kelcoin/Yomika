@@ -16,6 +16,8 @@ export const PreferenceSnapshotSchema = z.object({
   coverConcurrency: z.number().int().min(1).max(8).default(4),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
+  /** Free-form CSS appended after the design tokens. */
+  customCss: z.string().max(20_000).default(''),
 });
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
@@ -41,6 +43,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   coverConcurrency: 4,
   upscaleBackend: 'off',
   upscaleModel: '',
+  customCss: '',
 };
 
 export class NativeSettingsRepository {

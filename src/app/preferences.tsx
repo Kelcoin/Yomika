@@ -47,6 +47,24 @@ function applyAppearance(preferences: PreferenceSnapshot) {
 function applyPreferences(preferences: PreferenceSnapshot) {
   applyTheme(preferences.theme);
   applyAppearance(preferences);
+  applyCustomCss(preferences.customCss);
+}
+
+const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
+
+/** User CSS goes into one managed <style> at the end of head, so it overrides
+ * the design tokens without the app having to know what it contains. */
+function applyCustomCss(css: string) {
+  if (typeof document === 'undefined') return;
+  const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);
+  if (!css.trim()) {
+    existing?.remove();
+    return;
+  }
+  const element = existing ?? document.createElement('style');
+  element.id = CUSTOM_CSS_ELEMENT_ID;
+  element.textContent = css;
+  if (!existing) document.head.append(element);
 }
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {

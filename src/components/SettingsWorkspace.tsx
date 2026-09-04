@@ -15,6 +15,7 @@ import { SyncWorkspace } from './SyncWorkspace';
 import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
 import { ACCENT_PRESETS, DEFAULT_ACCENT_COLOR, contrastRatio, isAccessibleAccent, normalizeAccentColor } from '../lib/accentColor';
+import { CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -304,6 +305,35 @@ export function SettingsWorkspace() {
                   </p>
                 )
                 : <p className="form-error" role="alert">强调色需要是 #rrggbb 形式的十六进制色值</p>}
+            </fieldset>
+            <fieldset className="custom-css-editor">
+              <legend>自定义 CSS</legend>
+              <p className="custom-css-hint">
+                在设计令牌之后追加，可覆盖任意变量与样式。保存后立即生效，清空即恢复默认。
+              </p>
+              <div className="custom-css-presets">
+                {CSS_THEME_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className="secondary-action"
+                    title={preset.description}
+                    onClick={() => setPreferenceDraft({ ...preferenceDraft, customCss: preset.css })}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                name="customCss"
+                aria-label="自定义 CSS"
+                className="is-selectable"
+                spellCheck={false}
+                rows={8}
+                value={preferenceDraft.customCss}
+                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, customCss: event.target.value })}
+              />
+              <p className="custom-css-count">{preferenceDraft.customCss.length} / 20000</p>
             </fieldset>
             <label className="preference-select">预加载页数
               <input

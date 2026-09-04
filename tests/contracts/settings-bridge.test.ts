@@ -15,6 +15,7 @@ const preferences = {
   coverConcurrency: 4,
   upscaleBackend: 'off' as const,
   upscaleModel: '',
+  customCss: '',
 };
 
 describe('native settings bridge', () => {
