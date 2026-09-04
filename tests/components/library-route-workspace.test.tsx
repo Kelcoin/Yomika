@@ -21,6 +21,13 @@ function renderLibrary(path = '/library') {
   );
 }
 
+/** One page of `search_archives_page`. The library list comes from LANraragi, so
+ * tests about something else — metadata, covers, menus — still have to answer
+ * the page request before they get to their own subject. */
+function servedPage(items: unknown[]) {
+  return { ok: true, value: { items, total: items.length, hasMore: false } };
+}
+
 describe('library route workspace', () => {
   it('explains how to recover when history has no configured server', async () => {
     setInvokeAdapterForTests(async (command) => {
@@ -178,11 +185,8 @@ describe('library route workspace', () => {
       if (command === 'list_servers') {
         return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       }
-      if (command === 'list_archives') {
-        return {
-          ok: true,
-          value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Loaded Archive', pageCount: 12, updatedAt: '2026-08-26T00:00:00Z' }],
-        };
+      if (command === 'search_archives_page') {
+        return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Loaded Archive', pageCount: 12, updatedAt: '2026-08-26T00:00:00Z' }]);
       }
       if (command === 'list_categories' || command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: true, value: [255, 216, 255] };
@@ -193,7 +197,9 @@ describe('library route workspace', () => {
     renderLibrary();
 
     expect(await screen.findByRole('button', { name: /^Loaded Archive\b/ })).toBeInTheDocument();
-    expect(adapter).toHaveBeenCalledWith('list_archives', { serverId: 'scope-a' });
+    expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, start: 0 },
+    });
   });
 
   it('shows repository failures instead of a misleading empty library', async () => {
@@ -241,12 +247,13 @@ describe('library route workspace', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'list_archives') {
+      if (command === 'search_archives_page') {
         attempts += 1;
         return attempts === 1
           ? { ok: false, error: { code: 'UNKNOWN', message: '数据库读取失败', retryable: true } }
-          : { ok: true, value: [{ serverId: 'scope-a', archiveId: 'recovered', title: 'Recovered', pageCount: 1, updatedAt: '2026-08-28T00:00:00Z' }] };
+          : servedPage([{ serverId: 'scope-a', archiveId: 'recovered', title: 'Recovered', pageCount: 1, updatedAt: '2026-08-28T00:00:00Z' }]);
       }
+      if (command === 'list_archives_page') return { ok: false, error: { code: 'UNKNOWN', message: '本机索引也读不到', retryable: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
     renderLibrary();
@@ -263,14 +270,11 @@ describe('library route workspace', () => {
       if (command === 'list_servers') {
         return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       }
-      if (command === 'list_archives') {
-        return {
-          ok: true,
-          value: [
-            { serverId: 'scope-a', archiveId: 'a1', title: 'First', pageCount: 12, updatedAt: '2026-08-26T00:00:00Z' },
-            { serverId: 'scope-a', archiveId: 'a2', title: 'Second', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z' },
-          ],
-        };
+      if (command === 'search_archives_page') {
+        return servedPage([
+          { serverId: 'scope-a', archiveId: 'a1', title: 'First', pageCount: 12, updatedAt: '2026-08-26T00:00:00Z' },
+          { serverId: 'scope-a', archiveId: 'a2', title: 'Second', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z' },
+        ]);
       }
       if (command === 'load_archive_metadata') {
         return {
@@ -300,7 +304,7 @@ describe('library route workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'list_watchlist') return { ok: true, value: [] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'first', title: 'First archive', pageCount: 3, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'first', title: 'First archive', pageCount: 3, updatedAt: '2026-08-28T00:00:00Z' }]);
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'first', title: 'First archive', filename: 'first.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 3, lastReadTime: 0, size: 3 } };
       if (command === 'load_archive_thumbnail') return { ok: true, value: [255, 216, 255] };
       throw new Error(`Unexpected command: ${command}`);
@@ -318,7 +322,7 @@ describe('library route workspace', () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Delete me', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Delete me', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories' || command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'a1', title: 'Delete me', filename: 'delete.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
       if (command === 'delete_archive') return { ok: true, value: null };
@@ -358,7 +362,7 @@ describe('library route workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://lrr.test', scopeId: 'scope-a' }] };
-      if (command === 'list_archives_page') {
+      if (command === 'search_archives_page') {
         return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'a1', title: 'Categorize me', pageCount: 2, updatedAt: '2026-09-03T00:00:00Z' }], total: 1, hasMore: false } };
       }
       if (command === 'list_categories') return { ok: true, value: [
@@ -366,7 +370,6 @@ describe('library route workspace', () => {
         { id: 'SET_1613080291', name: 'Dynamic shelf', pinned: false, search: 'artist:someone$', archives: [] },
       ] };
       if (command === 'list_watchlist' || command === 'list_reading_history' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'probe_new_archives') return { ok: true, value: false };
       if (command === 'load_archive_metadata') {
         return { ok: true, value: { archiveId: 'a1', title: 'Categorize me', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 100 } };
       }
@@ -393,7 +396,7 @@ describe('library route workspace', () => {
     let metadataTitle = 'Original title';
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Original title', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Original title', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'a1', title: metadataTitle, filename: 'a.cbz', tags: 'artist:old', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
@@ -425,7 +428,7 @@ describe('library route workspace', () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'cover-a', title: 'Covered', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'cover-a', title: 'Covered', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'cover-a', title: 'Covered', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
       if (command === 'load_archive_thumbnail') return { ok: true, value: [255, 216, 255] };
@@ -442,7 +445,7 @@ describe('library route workspace', () => {
     const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL');
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-persistent' }] };
-      if (command === 'list_archives') return { ok: true, value: [{ serverId: 'server-a', archiveId: 'persistent-cover', title: 'Persistent cover', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'server-a', archiveId: 'persistent-cover', title: 'Persistent cover', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories' || command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'persistent-cover', title: 'Persistent cover', filename: 'cached.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
       if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
@@ -460,54 +463,69 @@ describe('library route workspace', () => {
     expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
-  it('refreshes archives from remote server and replaces the local list', async () => {
+  it('reads the list from the server and only rebuilds the offline index on demand', async () => {
     const user = userEvent.setup();
-    let callCount = 0;
-    // Models the native side: refresh writes the local index, and the list is
-    // always read back through list_archives_page.
-    let indexed = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Old Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }];
+    let refreshCount = 0;
+    // The server owns the list, so what it answers on the first page is what the
+    // user sees — no full-library pull stands between them.
+    let served = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Newest Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }];
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'list_archives_page') return { ok: true, value: { items: indexed, total: indexed.length, hasMore: false } };
+      if (command === 'search_archives_page') return { ok: true, value: { items: served, total: served.length, hasMore: false } };
       if (command === 'refresh_archives') {
-        callCount += 1;
-        indexed = [
-          { serverId: 'scope-a', archiveId: 'a1', title: 'Updated Archive', pageCount: 10, updatedAt: '2026-08-27T00:00:00Z' },
-          { serverId: 'scope-a', archiveId: 'a2', title: 'New Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
-        ];
-        return { ok: true, value: indexed };
+        refreshCount += 1;
+        served = [{ serverId: 'scope-a', archiveId: 'a2', title: 'Rebuilt Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' }];
+        return { ok: true, value: served };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     renderLibrary();
 
-    // The first load syncs the remote index on its own, always with an explicit
-    // sort key: LANraragi warns on every request that omits sortby.
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('refresh_archives', {
-      input: { serverId: 'scope-a', params: { sortby: 'date_added', order: 'desc' } },
-    }));
-    expect(await screen.findByRole('button', { name: /^Updated Archive\b/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^New Archive\b/ })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Old Archive\b/ })).not.toBeInTheDocument();
-    expect(callCount).toBe(1);
+    expect(await screen.findByRole('button', { name: /^Newest Archive\b/ })).toBeInTheDocument();
+    // Entering the library used to trigger a whole-library pull, which against a
+    // real library timed out and left the list stale.
+    expect(refreshCount).toBe(0);
+    // The offset is an item offset, and LANraragi decides the page size.
+    expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, start: 0 },
+    });
 
     await user.click(screen.getByRole('button', { name: '刷新档案库' }));
 
-    await waitFor(() => expect(callCount).toBe(2));
+    await waitFor(() => expect(refreshCount).toBe(1));
+    expect(adapter).toHaveBeenCalledWith('refresh_archives', {
+      input: { serverId: 'scope-a', params: { sortby: 'date_added', order: 'desc' } },
+    });
+    expect(await screen.findByRole('button', { name: /^Rebuilt Archive\b/ })).toBeInTheDocument();
   });
 
-  it('keeps the old archive list when refresh fails', async () => {
+  it('falls back to the local mirror when the server cannot be reached', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'error sending request for url', retryable: true } };
+      if (command === 'list_archives_page') {
+        return { ok: true, value: { items: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Last Seen Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }], total: 1, hasMore: false } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    // An unreachable server means a stale list, not an empty one.
+    expect(await screen.findByRole('button', { name: /^Last Seen Archive\b/ })).toBeInTheDocument();
+    expect(await screen.findByText('无法连接 LANraragi，正在显示本机上次同步的档案。')).toBeInTheDocument();
+  });
+
+  it('keeps the archive list when rebuilding the offline index fails', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'list_archives') {
-        return {
-          ok: true,
-          value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Stable Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }],
-        };
+      if (command === 'search_archives_page') {
+        return { ok: true, value: { items: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Stable Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }], total: 1, hasMore: false } };
       }
       if (command === 'refresh_archives') {
         return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'Network error', retryable: true } };
@@ -530,12 +548,11 @@ describe('library route workspace', () => {
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://lrr.test', scopeId: 'scope-a' }] };
-      if (command === 'list_archives_page') {
+      if (command === 'search_archives_page') {
         return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'a1', title: 'Archive One', pageCount: 4, updatedAt: '2026-09-03T00:00:00Z' }], total: 1, hasMore: false } };
       }
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'list_watchlist' || command === 'list_reading_history' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'probe_new_archives') return { ok: true, value: false };
       if (command === 'load_archive_metadata') {
         return { ok: true, value: { archiveId: 'a1', title: 'Archive One', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 4, lastReadTime: 0, size: 100 } };
       }

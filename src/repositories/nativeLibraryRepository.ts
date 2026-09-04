@@ -264,6 +264,32 @@ export class NativeLibraryRepository {
     if (archiveIds.length === 0) return { ok: true, value: [] };
     return invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
   }
+  /** The library list, straight from LANraragi.
+   *
+   * `start` is an item offset, not a page number, and the page size is a
+   * server-side preference we cannot set — callers read it off the length of
+   * page zero. The local index is a cache behind this call, not its source:
+   * asking it for the list meant an archive added on the server stayed invisible
+   * until a whole-library pull happened to succeed. Search and category are
+   * resolved by LANraragi too, so its own syntax works and a dynamic category
+   * costs us nothing. */
+  searchArchivesPage(
+    serverId: string,
+    start = 0,
+    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null } = {},
+  ): Promise<CommandResult<ArchivePage>> {
+    return invokeCommand('search_archives_page', {
+      input: {
+        serverId,
+        query: query.query ?? '',
+        sortBy: query.sortBy ?? 'added',
+        order: query.order ?? 'desc',
+        categoryId: query.categoryId ?? null,
+        start,
+      },
+    }, ArchivePageSchema);
+  }
+
   async listArchivesPage(
     serverId: string,
     offset = 0,

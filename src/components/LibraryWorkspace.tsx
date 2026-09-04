@@ -13,7 +13,7 @@ import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCa
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 
@@ -26,6 +26,9 @@ interface LibraryWorkspaceProps {
   onRefresh?: (() => void) | undefined;
   refreshing?: boolean | undefined;
   categories?: Category[] | undefined;
+  /** Categories arrive after the list does, so the filter has to hold its place
+   * rather than pop into the toolbar and shift everything beside it. */
+  categoriesLoading?: boolean | undefined;
   onUpdateMetadata?: ((metadata: { title: string; tags: string; summary: string }) => Promise<{ ok: boolean; error?: { message: string } }>) | undefined;
   thumbnail?: string | undefined;
   onLoadThumbnail?: ((archive: ArchiveRecord, signal?: AbortSignal) => Promise<ImageHandle | undefined>) | undefined;
@@ -63,7 +66,7 @@ interface LibraryWorkspaceProps {
   onDeletePreset?: ((preset: SearchPreset) => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -111,7 +114,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const rows = useVirtualizer({
     count: filteredArchives.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => displayMode === 'wide' ? 132 : 66,
+    // Keep in step with `.archive-list.is-wide .archive-row` in shell.css: the
+    // virtualizer positions rows, so a mismatch overlaps them.
+    estimateSize: () => displayMode === 'wide' ? 158 : 66,
     getItemKey: (index) => filteredArchives[index]?.archiveId ?? index,
     overscan: 6,
     initialRect: { width: 720, height: 560 },
@@ -186,7 +191,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <strong>{archive.title}</strong>
         <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? 8 : 12).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
         <span className="archive-row-footer">
-          <small className="archive-row-category" data-category={archive.category || ''}>{archive.category || archiveCategories.get(archive.archiveId)?.[0] || archive.language || ''}</small>
+          <small className="archive-row-category" data-category={archiveCategoryLabel(archive)}>{archiveCategoryLabel(archive) || archiveCategories.get(archive.archiveId)?.[0] || archiveLanguageLabel(archive)}</small>
           <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
         </span>
       </span>
@@ -230,8 +235,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </div>
         )}
         {onSavePreset && (
-          <button type="button" className="secondary-action search-preset-save" onClick={() => onSavePreset()}>
-            <BookmarkPlus aria-hidden="true" />存为预设
+          <button type="button" className="icon-action search-preset-save" onClick={() => onSavePreset()} aria-label="存为预设" title="存为预设">
+            <BookmarkPlus aria-hidden="true" />
           </button>
         )}
       </div>}
@@ -254,6 +259,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         </button>
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
         {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
+        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}
       </div>
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
         <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">
@@ -309,8 +315,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               <h2 id="archive-detail-title">{selected.title}</h2>
               <div className="archive-detail-meta" aria-label="档案摘要">
                 <span className="metadata-chip metadata-chip-page">{selected.pageCount} 页</span>
-                {(selected.category || archiveCategories.get(selected.archiveId)?.[0]) && <span className="metadata-chip" data-category={selected.category || ''}>{selected.category || archiveCategories.get(selected.archiveId)?.[0]}</span>}
-                {selected.language && <span className="metadata-chip">{selected.language}</span>}
+                {(archiveCategoryLabel(selected) || archiveCategories.get(selected.archiveId)?.[0]) && <span className="metadata-chip" data-category={archiveCategoryLabel(selected)}>{archiveCategoryLabel(selected) || archiveCategories.get(selected.archiveId)?.[0]}</span>}
+                {archiveLanguageLabel(selected) && <span className="metadata-chip">{archiveLanguageLabel(selected)}</span>}
               </div>
               {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}
               {(selected.tags ?? []).length > 0 && <div className="archive-detail-tags" aria-label="档案标签">{categorizeTags(selected.tags ?? []).map((group) => <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}><h3>{group.label}</h3><div>{group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`}>{tag}</span>)}</div></section>)}</div>}
@@ -456,14 +462,15 @@ function LibraryHeading({ heading, count, onRefresh, refreshing }: { heading: st
         <span>{count} 项</span>
         {onRefresh && (
           <button
-            className="secondary-action"
+            className="icon-action"
             type="button"
             disabled={refreshing}
             aria-busy={refreshing}
+            aria-label="刷新档案库"
+            title="刷新档案库"
             onClick={onRefresh}
           >
-            <RefreshCw aria-hidden="true" />
-            {refreshing ? '刷新中…' : '刷新档案库'}
+            <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
           </button>
         )}
       </span>

@@ -40,6 +40,56 @@ export function pickRandomSample<T>(items: readonly T[], count: number, random: 
   return pool.slice(0, size);
 }
 
+/** First value under a namespace, e.g. `category:Manga` → `Manga`. */
+function firstTagValue(tags: readonly string[], namespace: string): string {
+  const prefix = `${namespace}:`;
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    if (trimmed.toLowerCase().startsWith(prefix)) {
+      const value = trimmed.slice(prefix.length).trim();
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+/** LANraragi's category tag values, in the display form the chip accents key on
+ * (`.metadata-chip[data-category='Game CG']`). */
+const CATEGORY_TAG_LABELS: Record<string, string> = {
+  manga: 'Manga',
+  doujinshi: 'Doujinshi',
+  artistcg: 'Artist CG',
+  'artist cg': 'Artist CG',
+  gamecg: 'Game CG',
+  'game cg': 'Game CG',
+  imageset: 'Image Set',
+  'image set': 'Image Set',
+  western: 'Western',
+  'non-h': 'Non-H',
+  cosplay: 'Cosplay',
+  asianporn: 'Asian Porn',
+  misc: 'Misc',
+};
+
+/** The category a card shows.
+ *
+ * The local `archives` table has a `category` column, but nothing on the sync
+ * path ever wrote it — LANraragi keeps the category in the tags, as
+ * `category:Manga`. Cards read the empty column, fell through to a category
+ * membership lookup that only covers static categories, and ended up blank. */
+export function archiveCategoryLabel(archive: { category?: string | null | undefined; tags?: readonly string[] | undefined }): string {
+  const stored = archive.category?.trim();
+  if (stored) return stored;
+  const tagged = firstTagValue(archive.tags ?? [], 'category');
+  return CATEGORY_TAG_LABELS[tagged.toLowerCase()] ?? tagged;
+}
+
+/** Same story as the category: `language:chinese` lives in the tags, not in the
+ * column the card used to read. */
+export function archiveLanguageLabel(archive: { language?: string | null | undefined; tags?: readonly string[] | undefined }): string {
+  return archive.language?.trim() || firstTagValue(archive.tags ?? [], 'language');
+}
+
 export function formatArchiveDate(timestampSeconds: number | null | undefined): string {
   if (!timestampSeconds || !Number.isFinite(timestampSeconds) || timestampSeconds <= 0) return '';
   const date = new Date(timestampSeconds * 1000);

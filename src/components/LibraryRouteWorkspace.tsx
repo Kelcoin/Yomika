@@ -6,7 +6,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories, shouldSyncLibrary } from '../lib/librarySync';
+import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
@@ -16,6 +16,10 @@ const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 
 const LIBRARY_SNAPSHOT_KEY = 'library:workspace';
+
+/** The offline mirror has no page size of its own, so it borrows one. Only the
+ * fallback path uses it: online, the page size is LANraragi's to decide. */
+const OFFLINE_PAGE_SIZE = 100;
 
 interface LibrarySnapshot {
   archives: ArchiveRecord[];
@@ -44,12 +48,16 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? []);
+  const [categoriesLoading, setCategoriesLoading] = useState(!snapshot?.categories?.length);
   const [categoryError, setCategoryError] = useState<string>();
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
   const [thumbnail, setThumbnailUrl] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string>();
+  // True when the list came from the local mirror because LANraragi could not be
+  // reached. Worth saying out loud: the list is then as old as the last sync.
+  const [offline, setOffline] = useState(false);
   const [totalArchives, setTotalArchives] = useState(snapshot?.totalArchives ?? 0);
   const [hasMoreArchives, setHasMoreArchives] = useState(snapshot?.hasMoreArchives ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -83,6 +91,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   useEffect(() => {
     if (categoryError) showToast(`读取分类失败：${categoryError}`, 'error');
   }, [categoryError, showToast]);
+  useEffect(() => {
+    // Fires on the transition into offline only: the state does not change again
+    // while page after page keeps falling back.
+    if (offline) showToast('无法连接 LANraragi，正在显示本机上次同步的档案。', 'error');
+  }, [offline, showToast]);
   useEffect(() => {
     if (metadataMessage) showToast(metadataMessage, 'success');
   }, [metadataMessage, showToast]);
@@ -163,6 +176,26 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setLoading(false);
   }, []);
 
+  // One page of the list. LANraragi is the source of truth: it owns ordering,
+  // filtering and paging, so an archive added on the server shows up the moment
+  // the page is fetched. The local index is the offline fallback behind it —
+  // asking it first is what left the list stuck on whatever the last successful
+  // whole-library pull happened to store.
+  const fetchArchivePage = useCallback(async (currentServerId: string, start: number) => {
+    const query = { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null };
+    const remote = await repository.searchArchivesPage(currentServerId, start, query);
+    if (remote.ok) {
+      setOffline(false);
+      return remote;
+    }
+    // A missing API key is the user's to fix; falling back would hide it.
+    if (remote.error.code === 'PLATFORM_UNAVAILABLE') return remote;
+    const local = await repository.listArchivesPage(currentServerId, start, OFFLINE_PAGE_SIZE, query);
+    if (!local.ok) return remote;
+    setOffline(true);
+    return local;
+  }, [categoryFilter, searchQuery, sortMode, sortOrder]);
+
   const loadMoreArchives = useCallback(async () => {
     // Scroll events fire many times before React re-renders, so the state flag
     // alone lets several requests through with the same offset.
@@ -170,7 +203,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const result = await repository.listArchivesPage(serverId, archives.length, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null });
+      const result = await fetchArchivePage(serverId, archives.length);
       if (result.ok) {
         setArchives((current) => {
           const seen = new Set(current.map((item) => item.archiveId));
@@ -183,7 +216,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [archives.length, categoryFilter, hasMoreArchives, searchQuery, sortMode, sortOrder, serverId]);
+  }, [archives.length, fetchArchivePage, hasMoreArchives, serverId]);
 
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!serverId || !scopeId) return undefined;
@@ -213,7 +246,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (!initialArchivesLoaded.current) setLoading(true);
     setError(undefined);
     if (options.clear) setArchives([]);
-    const result = await repository.listArchivesPage(currentServerId, 0, 100, { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null });
+    const result = await fetchArchivePage(currentServerId, 0);
     if (request !== pageRequest.current) return false;
     if (!result.ok) {
       setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
@@ -227,17 +260,15 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setHasMoreArchives(result.value.hasMore);
     setLoading(false);
     return true;
-  }, [categoryFilter, searchQuery, sortMode, sortOrder]);
+  }, [fetchArchivePage]);
 
   const syncRemoteIndex = useCallback(async (currentServerId: string) => {
-    // The list is served from the local index, so a remote pull is the only way
-    // archives added in LANraragi become visible. Re-read page one afterwards
-    // instead of slicing the returned array: ordering and paging belong to the
-    // query, and the array is the whole library.
+    // Rebuilds the offline mirror. The list itself no longer waits on this — it
+    // reads LANraragi directly — so this is the user asking for the local copy to
+    // be brought up to date, plus a re-resolution of the dynamic categories.
     const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
     if (!synced.ok) return synced;
     markLibrarySynced(currentServerId);
-    // An explicit refresh is also the moment to re-resolve dynamic categories.
     markCategoriesRefreshed(currentServerId);
     void repository.listCategories(currentServerId, true).then((categoryResult) => {
       if (categoryResult.ok) setCategories(categoryResult.value);
@@ -249,33 +280,26 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   useEffect(() => {
     if (!serverId) return;
-    void loadFirstPage(serverId, { clear: true }).then((loaded) => {
-      if (!loaded) return;
-      if (shouldSyncLibrary(serverId)) {
-        markLibrarySynced(serverId);
-        void syncRemoteIndex(serverId);
-      } else {
-        // The sync TTL alone means an archive added in LANraragi stays invisible
-        // for minutes. Probing the newest page costs one paged search, so ask
-        // whether a full pull is actually warranted.
-        void repository.probeNewArchives(serverId).then((probe) => {
-          if (!probe.ok || !probe.value) return;
-          markLibrarySynced(serverId);
-          void syncRemoteIndex(serverId);
-        });
-      }
-      // Dynamic LANraragi categories expose a search expression instead of
-      // archive IDs, and resolving each one is an unpaged /api/search. Read the
-      // native snapshot on every mount (local, no HTTP) and only pay for a real
-      // re-resolution when the TTL says the snapshot is due.
-      const wantsFreshCategories = shouldRefreshCategories(serverId);
-      if (wantsFreshCategories) markCategoriesRefreshed(serverId);
-      void repository.listCategories(serverId, wantsFreshCategories).then((categoryResult) => {
-        if (categoryResult.ok) setCategories(categoryResult.value);
-        else setCategoryError(categoryResult.error.message);
-      });
-    });
-  }, [loadFirstPage, reloadToken, serverId, syncRemoteIndex]);
+    // Re-runs whenever the query, sort or category changes, because all three are
+    // resolved by the server now. No probe and no full pull on mount: the page
+    // that just arrived already reflects what LANraragi holds.
+    void loadFirstPage(serverId, { clear: true });
+  }, [loadFirstPage, reloadToken, serverId]);
+
+  useEffect(() => {
+    if (!serverId) return;
+    // Categories are only needed for the filter menu and the "add to category"
+    // entries, not for filtering itself — LANraragi resolves that. The native
+    // side serves a persisted snapshot, so a mount costs no HTTP; only a lapsed
+    // TTL pays to re-resolve the dynamic ones.
+    const wantsFreshCategories = shouldRefreshCategories(serverId);
+    if (wantsFreshCategories) markCategoriesRefreshed(serverId);
+    setCategoriesLoading(true);
+    void repository.listCategories(serverId, wantsFreshCategories).then((categoryResult) => {
+      if (categoryResult.ok) setCategories(categoryResult.value);
+      else setCategoryError(categoryResult.error.message);
+    }).finally(() => setCategoriesLoading(false));
+  }, [reloadToken, serverId]);
 
   useEffect(() => {
     if (!serverId || !scopeId || archives.length === 0) return;
@@ -348,6 +372,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           }).finally(() => setRefreshing(false));
         }}
         categories={categories}
+        categoriesLoading={categoriesLoading}
         totalCount={totalArchives}
         hasMore={hasMoreArchives}
         loadingMore={loadingMore}

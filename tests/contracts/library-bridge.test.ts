@@ -278,6 +278,24 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('reads the library list from the server by item offset', async () => {
+    const value = { items: [], total: 14447, hasMore: true };
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().searchArchivesPage('s1', 240, {
+      query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290',
+    });
+
+    // `start` is an item offset, and the query and category go to LANraragi:
+    // resolving them locally is what made an archive added on the server
+    // invisible until a whole-library pull happened to succeed.
+    expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: { serverId: 's1', query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290', start: 240 },
+    });
+    expect(result).toEqual({ ok: true, value });
+  });
+
   it('resolves shelf ids without reading the whole library', async () => {
     const adapter = vi.fn(async () => ({ ok: true, value: [{
       serverId: 's1', archiveId: 'a2', title: 'Second', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z',

@@ -1457,13 +1457,21 @@ fn authorization_value(api_key: &str) -> String {
     format!("Bearer {}", BASE64_STANDARD.encode(api_key.as_bytes()))
 }
 
-fn parse_search_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+/// The whole `/api/search` answer: the rows plus the counts a client needs to
+/// page. `recordsFiltered` is the size of the result set the query selected, so
+/// it — not a local `COUNT(*)` — is what "how many pages are there" means.
+fn parse_search_page(json: &str) -> Result<(Vec<RemoteArchive>, i64, i64), String> {
     let response: SearchResponseWire =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
     if response.records_filtered < 0 || response.records_total < 0 {
         return Err("Invalid LANraragi result counts".to_string());
     }
-    parse_archive_entries(response.data)
+    let (filtered, total) = (response.records_filtered, response.records_total);
+    Ok((parse_archive_entries(response.data)?, filtered, total))
+}
+
+fn parse_search_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+    parse_search_page(json).map(|(archives, _, _)| archives)
 }
 
 /// `/api/search/random` answers with `{ "data": [...] }` and no result counts.
@@ -1718,7 +1726,7 @@ pub fn replace_archives(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshSearchParams {
     filter: Option<String>,
@@ -1845,7 +1853,11 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
     let trimmed = base_url.trim_end_matches('/');
     let mut query: Vec<String> = Vec::new();
 
-    let start_value = params.start.unwrap_or(-1);
+    // `start` is an item offset. `-1` is LANraragi's "the whole library, unpaged"
+    // escape hatch, and it is never a safe default: against a large library the
+    // response cannot finish inside the request timeout. Callers that genuinely
+    // want every row ask for it explicitly.
+    let start_value = params.start.unwrap_or(0);
     query.push(format!("start={}", start_value));
 
     if let Some(ref filter) = params.filter {
@@ -1881,13 +1893,74 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
     Ok(format!("{}/api/search?{}", trimmed, query.join("&")))
 }
 
-fn apply_search_response_to_archives(
-    connection: &mut rusqlite::Connection,
-    server_id: &str,
-    search_response_json: &str,
-) -> Result<Vec<ArchiveRecord>, String> {
-    let archives = parse_search_response(search_response_json)?;
-    replace_server_archives(connection, server_id, &archives)
+/// A failure shaped the way `CommandResult::failure` wants it, so the fetch
+/// helpers can report HTTP, transport and decode problems through one channel.
+type SearchFailure = (&'static str, String, bool);
+
+/// One page of `/api/search`, plus `recordsFiltered` and `recordsTotal`.
+async fn fetch_search_page(
+    base_url: &str,
+    api_key: &str,
+    params: &RefreshSearchParams,
+) -> Result<(Vec<RemoteArchive>, i64, i64), SearchFailure> {
+    let url = build_refresh_search_url(base_url, params)
+        .map_err(|error| ("INVALID_INPUT", error, false))?;
+    let response = reader_request(reqwest::Method::GET, url, api_key.to_string())
+        .await
+        .map_err(|error| ("REMOTE_UNAVAILABLE", error, true))?;
+    if let Some(failure) = search_status_failure(response.status()) {
+        return Err(failure);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ("INVALID_RESPONSE", error.to_string(), true))?;
+    parse_search_page(&body).map_err(|error| ("INVALID_RESPONSE", error, false))
+}
+
+/// Walks every page of a query. A server that keeps answering with a full page
+/// no matter the offset would otherwise loop forever, so the walk is capped.
+const MAX_SYNC_PAGES: usize = 2_000;
+
+/// Whether a page walk has reached the end of the result set.
+///
+/// A page shorter than the first one is the last one — LANraragi holds its page
+/// size constant and only the tail is short. The count check covers the case
+/// where every page comes back full because the walk has already consumed
+/// everything `recordsFiltered` promised.
+fn search_walk_is_done(received: usize, first_page_size: usize, collected: i64, filtered: i64) -> bool {
+    received == 0 || received < first_page_size || collected >= filtered
+}
+
+/// Every row a query selects, gathered one page at a time.
+///
+/// The single-request alternative is `start=-1`, which asks LANraragi to
+/// serialise the entire library into one response — for a ten-thousand-archive
+/// library that never finishes inside the request timeout, so the pull failed
+/// and the local index kept serving whatever it last managed to store. Page size
+/// is a server-side preference the client cannot set, so it is learned from the
+/// first response rather than assumed.
+async fn fetch_all_search_pages(
+    base_url: &str,
+    api_key: &str,
+    params: &RefreshSearchParams,
+) -> Result<Vec<RemoteArchive>, SearchFailure> {
+    let mut collected: Vec<RemoteArchive> = Vec::new();
+    let mut page_size: Option<usize> = None;
+    for _ in 0..MAX_SYNC_PAGES {
+        let mut page_params = params.clone();
+        page_params.start = Some(collected.len() as i64);
+        let (archives, filtered, _) = fetch_search_page(base_url, api_key, &page_params).await?;
+        let received = archives.len();
+        collected.extend(archives);
+        // `max(1)` keeps an empty first page from recording a size of zero, which
+        // would read as "no page is ever short" and never end the walk.
+        let size = *page_size.get_or_insert(received.max(1));
+        if search_walk_is_done(received, size, collected.len() as i64, filtered) {
+            break;
+        }
+    }
+    Ok(collected)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1897,6 +1970,12 @@ pub struct RefreshArchivesInput {
     params: RefreshSearchParams,
 }
 
+/// Rebuilds the local offline index from LANraragi.
+///
+/// This is no longer what makes the library list current — `search_archives_page`
+/// reads the server directly for that. What is left is the offline mirror: the
+/// rows the shelves and the duplicate finder read when the server is not
+/// reachable, which is also the only reason a full walk is worth doing.
 #[tauri::command]
 pub async fn refresh_archives(
     input: RefreshArchivesInput,
@@ -1915,59 +1994,19 @@ pub async fn refresh_archives(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
     };
-    let url = match build_refresh_search_url(&base_url, &input.params) {
+    let archives = match fetch_all_search_pages(&base_url, &api_key, &input.params).await {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("INVALID_INPUT", error, false)),
-    };
-    let response = match reader_request(reqwest::Method::GET, url, api_key).await {
-        Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
-    };
-    let status = response.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
-        return Ok(CommandResult::failure(
-            "LRR_NOT_FOUND",
-            "Search index not ready (204 No Content)".to_string(),
-            true,
-        ));
-    }
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(CommandResult::failure("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false));
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(CommandResult::failure("LRR_NOT_FOUND", "Server not found (404)".to_string(), false));
-    }
-    if status == reqwest::StatusCode::CONFLICT {
-        return Ok(CommandResult::failure("REMOTE_CONFLICT", "Server conflict (409)".to_string(), false));
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Ok(CommandResult::failure("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true));
-    }
-    if status.is_server_error() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("Server error ({})", status),
-            true,
-        ));
-    }
-    if !status.is_success() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("Unexpected status ({})", status),
-            response.status().is_server_error(),
-        ));
-    }
-    let body = match response.text().await {
-        Ok(text) => text,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
     };
     let mut connection = match database.connection.lock() {
         Ok(conn) => conn,
         Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
     };
-    match apply_search_response_to_archives(&mut connection, &input.server_id, &body) {
+    // Tombstoning happens once, after every page is in hand: doing it per page
+    // would mark the rest of the library deleted between requests.
+    match replace_server_archives(&mut connection, &input.server_id, &archives) {
         Ok(records) => Ok(CommandResult::success(records)),
-        Err(error) => Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
     }
 }
 
@@ -1985,10 +2024,8 @@ fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, S
     }
 }
 
-/// Newest-first first page used to detect archives added in LANraragi. A full
-/// `refresh_archives` asks for `start=-1`, i.e. the entire library in one
-/// response; this asks for one page, so it is cheap enough to run on entering
-/// the library instead of waiting for the sync TTL to lapse.
+/// Newest-first first page, used to detect archives added in LANraragi without
+/// paying for the offline index rebuild that `refresh_archives` performs.
 fn build_probe_search_url(base_url: &str) -> Result<String, String> {
     build_refresh_search_url(base_url, &RefreshSearchParams {
         filter: None,
@@ -2070,6 +2107,106 @@ pub async fn probe_new_archives(
     };
     match unknown_probe_archive_ids(&connection, &server_id, &archive_ids) {
         Ok(unknown) => Ok(CommandResult::success(!unknown.is_empty())),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSearchInput {
+    server_id: String,
+    #[serde(default)]
+    query: String,
+    sort_by: String,
+    order: String,
+    #[serde(default)]
+    category_id: Option<String>,
+    start: i64,
+}
+
+/// LANraragi's sort keys. The UI calls it "added"; the server calls it
+/// `date_added`.
+fn remote_sort_key(sort_by: &str) -> Option<&'static str> {
+    match sort_by {
+        "added" | "date_added" => Some("date_added"),
+        "title" => Some("title"),
+        _ => None,
+    }
+}
+
+/// The library list, read from LANraragi one page at a time.
+///
+/// The local index used to *be* the list, so an archive added on the server
+/// stayed invisible until a full-library pull happened to succeed — and with
+/// `start=-1` against a large library that pull never finished. Here the server
+/// owns ordering, filtering and paging, because it is the only party that knows
+/// what it currently holds. Rows are upserted on the way through, so the local
+/// index keeps working as a cache for covers, the shelves and offline reads.
+///
+/// `start` is an item offset. Page size is a LANraragi preference the client
+/// cannot set, so callers learn it from the length of page zero rather than
+/// asking for a size the server will ignore.
+#[tauri::command]
+pub async fn search_archives_page(
+    input: RemoteSearchInput,
+    database: State<'_, Database>,
+) -> Result<CommandResult<ArchivePage>, String> {
+    let Some(sortby) = remote_sort_key(&input.sort_by) else {
+        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort key".to_string(), false));
+    };
+    if !matches!(input.order.as_str(), "asc" | "desc") {
+        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort order".to_string(), false));
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &input.server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let start = input.start.max(0);
+    // The filter and the category go to the server. LANraragi's own search syntax
+    // ("$" for an exact tag, "-" to exclude) then works as documented instead of
+    // being half-reimplemented in local SQL, and a dynamic category resolves
+    // server-side instead of costing the client one unpaged search per category.
+    let params = RefreshSearchParams {
+        filter: Some(input.query.trim().to_string()).filter(|value| !value.is_empty()),
+        start: Some(start),
+        sortby: Some(sortby.to_string()),
+        order: Some(input.order.clone()),
+        newonly: None,
+        untaggedonly: None,
+        hidecompleted: None,
+        category: input.category_id.clone().filter(|value| !value.is_empty()),
+        groupby_tanks: None,
+    };
+    let (archives, filtered, _) = match fetch_search_page(&base_url, &api_key, &params).await {
+        Ok(value) => value,
+        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
+    };
+    let archive_ids: Vec<String> = archives.iter().map(|archive| archive.archive_id.clone()).collect();
+    let mut connection = match database.connection.lock() {
+        Ok(conn) => conn,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
+        return Ok(CommandResult::failure("LOCAL_DATABASE", error, true));
+    }
+    // Read the rows back instead of mapping the wire payload: `category`,
+    // `language` and `first_seen_at` are local columns with no equivalent in a
+    // search response, and the cards render them.
+    match query_archive_records_by_ids(&connection, &input.server_id, &archive_ids) {
+        Ok(items) => Ok(CommandResult::success(ArchivePage {
+            has_more: start.saturating_add(items.len() as i64) < filtered,
+            total: filtered,
+            items,
+        })),
         Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
     }
 }
@@ -4096,7 +4233,10 @@ mod tests {
         )
         .unwrap();
         assert!(url.contains("/api/search?"));
-        assert!(url.contains("start=-1"));
+        // Defaulting to `start=-1` asked for the whole library unpaged, which no
+        // caller should get by accident: it is the request that could not finish
+        // inside the timeout. An omitted offset means the first page.
+        assert!(url.contains("start=0"), "{url}");
         // LANraragi warns on every request when sortby is missing, so the
         // builder must always emit a sort key and order.
         assert!(url.contains("sortby=date_added"));
@@ -4247,9 +4387,77 @@ mod tests {
     }
 
     #[test]
+    fn search_page_carries_the_result_counts() {
+        let json = r#"{
+            "data": [
+                {"arcid":"aaaa1111bbbb2222cccc3333dddd4444eeee5555","title":"One","filename":"one","tags":"artist:test","isnew":false,"extension":"zip","progress":0,"pagecount":20,"lastreadtime":0,"size":2048}
+            ],
+            "recordsFiltered": 137,
+            "recordsTotal": 9001
+        }"#;
+        // How many pages there are is `recordsFiltered`, not a local COUNT(*):
+        // the query ran on the server, so only the server knows what it selected.
+        let (archives, filtered, total) = parse_search_page(json).expect("page");
+        assert_eq!(archives.len(), 1);
+        assert_eq!(filtered, 137);
+        assert_eq!(total, 9001);
+    }
+
+    #[test]
+    fn a_page_walk_stops_on_a_short_page_or_a_satisfied_count() {
+        // A full page is not the end, even when it is the only page seen so far.
+        assert!(!search_walk_is_done(100, 100, 100, 250));
+        // The tail is short.
+        assert!(search_walk_is_done(50, 100, 250, 250));
+        // Every page came back full and the count is satisfied, so there is
+        // nothing left to ask for — without this the walk would keep requesting
+        // offsets past the end of the result set.
+        assert!(search_walk_is_done(100, 100, 200, 200));
+        // An empty answer ends the walk whatever the server claimed to hold.
+        assert!(search_walk_is_done(0, 100, 0, 500));
+    }
+
+    #[test]
+    fn the_remote_list_sends_filter_and_category_to_the_server() {
+        // The point of the rework: LANraragi resolves the search expression and
+        // the category, so a dynamic category costs the client nothing and the
+        // list shows what the server holds right now.
+        let url = build_refresh_search_url(
+            "https://lrr.example.com",
+            &RefreshSearchParams {
+                filter: Some("artist:someone$".to_string()),
+                start: Some(240),
+                sortby: Some("date_added".to_string()),
+                order: Some("asc".to_string()),
+                newonly: None,
+                untaggedonly: None,
+                hidecompleted: None,
+                category: Some("SET_1613080290".to_string()),
+                groupby_tanks: None,
+            },
+        )
+        .expect("remote list url");
+        assert!(url.contains("start=240"), "{url}");
+        assert!(url.contains("filter=artist%3Asomeone%24"), "{url}");
+        assert!(url.contains("category=SET_1613080290"), "{url}");
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=asc"), "{url}");
+    }
+
+    #[test]
+    fn the_ui_sort_key_maps_onto_the_lanraragi_one() {
+        assert_eq!(remote_sort_key("added"), Some("date_added"));
+        assert_eq!(remote_sort_key("title"), Some("title"));
+        // An unknown key is rejected rather than quietly sorted by title, which
+        // is what LANraragi itself falls back to.
+        assert_eq!(remote_sort_key("size"), None);
+        assert_eq!(remote_sort_key(""), None);
+    }
+
+    #[test]
     fn probe_only_asks_for_the_newest_page_and_flags_unknown_archives() {
-        // A full refresh is start=-1 (whole library); the probe must stay on one
-        // page so it can run on entering the library.
+        // The probe answers "is there anything new" and must stay on one page,
+        // whatever the offline index rebuild happens to cost.
         let url = build_probe_search_url("https://lrr.example.com/").expect("probe url");
         assert!(url.contains("start=0"), "{url}");
         assert!(url.contains("sortby=date_added"), "{url}");
@@ -4436,11 +4644,8 @@ mod tests {
             .unwrap();
         assert_eq!(old_count, 1);
 
-        let result = apply_search_response_to_archives(
-            &mut connection,
-            "scope-refresh",
-            "not valid json at all {{{",
-        );
+        let result = parse_search_response("not valid json at all {{{")
+            .and_then(|archives| replace_server_archives(&mut connection, "scope-refresh", &archives));
         assert!(result.is_err());
 
         let still_old: i64 = connection
@@ -4486,7 +4691,9 @@ mod tests {
             "recordsTotal": 2
         }"#;
 
-        let records = apply_search_response_to_archives(&mut connection, "scope-atomic", search_json).unwrap();
+        let records = parse_search_response(search_json)
+            .and_then(|archives| replace_server_archives(&mut connection, "scope-atomic", &archives))
+            .unwrap();
         assert_eq!(records.len(), 2);
 
         let all_count: i64 = connection
