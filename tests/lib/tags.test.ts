@@ -63,4 +63,16 @@ describe('tag translations', () => {
     expect(translateTag('timestamp', '1760742000000')).toBe(formatArchiveDate(1_760_742_000));
     expect(translateTag('date_added', 'not-a-date')).toBe('not-a-date');
   });
+
+  it('finds a Chinese label by full pinyin and by initials', () => {
+    // A latin keyboard cannot reach 眼镜 otherwise: this is what "typing
+    // yanjing suggests female:glasses$" means.
+    installTagTranslations({ female: { glasses: '眼镜', 'big breasts': '巨乳' }, artist: { sample: '示例作者' } });
+
+    expect(searchTags('yanjing').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('yanj').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('yj').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('juru').map((item) => `${item.namespace}:${item.key}`)).toContain('female:big breasts');
+    expect(searchTags('zzzz')).toEqual([]);
+  });
 });

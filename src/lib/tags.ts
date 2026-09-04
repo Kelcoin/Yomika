@@ -1,3 +1,5 @@
+import pinyin from 'tiny-pinyin';
+
 import { formatArchiveDate } from './archiveCardPresentation';
 
 export const TAG_NAMESPACE_LABELS: Record<string, string> = {
@@ -69,14 +71,43 @@ export function normalizeTranslationDb(raw: unknown): TranslationMap {
 }
 
 export const NS_CN_LABELS: Record<string, string> = TAG_NAMESPACE_LABELS;
-interface SearchIndexEntry { namespace: string; key: string; label: string; keyLower: string; labelLower: string }
+interface SearchIndexEntry {
+  namespace: string;
+  key: string;
+  label: string;
+  keyLower: string;
+  labelLower: string;
+  /** Full pinyin of the Chinese label, e.g. `yanjing` for 眼镜. */
+  pinyin: string;
+  /** First letter of each syllable, e.g. `yj`. */
+  pinyinInitials: string;
+}
 let searchIndex: SearchIndexEntry[] = [];
+
+/** Latin queries cannot reach a Chinese label: typing `yanjing` has to find
+ * 眼镜 (female:glasses). Both the full pinyin and the initials are precomputed
+ * with the label's lower case, because the suggest box searches per keystroke. */
+function toPinyinForms(label: string): { pinyin: string; pinyinInitials: string } {
+  if (!/[㐀-鿿]/.test(label)) return { pinyin: '', pinyinInitials: '' };
+  try {
+    const syllables = pinyin.convertToPinyin(label, ' ', true).split(/\s+/).filter(Boolean);
+    if (syllables.length === 0) return { pinyin: '', pinyinInitials: '' };
+    return {
+      pinyin: syllables.join(''),
+      pinyinInitials: syllables.map((syllable) => syllable[0] ?? '').join(''),
+    };
+  } catch {
+    // A label outside the bundled character table simply has no pinyin form.
+    return { pinyin: '', pinyinInitials: '' };
+  }
+}
 
 function rebuildSearchIndex(): void {
   // Lower-casing here instead of per keystroke: the installed database holds
   // tens of thousands of entries and the suggest box searches on every input.
   searchIndex = Object.entries(translations).flatMap(([namespace, entries]) => Object.entries(entries).map(([key, label]) => ({
     namespace, key, label, keyLower: key.toLowerCase(), labelLower: label.toLowerCase(),
+    ...toPinyinForms(label),
   })));
 }
 
@@ -100,8 +131,14 @@ export function searchTags(query: string, limit = 30): TagSuggestion[] {
       : item.keyLower.startsWith(valueQuery) ? 80
         : item.labelLower === valueQuery ? 70
           : item.labelLower.startsWith(valueQuery) ? 60
-            : item.keyLower.includes(valueQuery) || item.labelLower.includes(valueQuery) ? 30
-              : 0;
+            // Pinyin ranks below the literal forms: an exact `yanjing` should
+            // still lose to a tag literally named that.
+            : item.pinyin === valueQuery ? 55
+              : item.pinyin.startsWith(valueQuery) ? 45
+                : item.pinyinInitials === valueQuery ? 40
+                  : item.keyLower.includes(valueQuery) || item.labelLower.includes(valueQuery) ? 30
+                    : item.pinyin.includes(valueQuery) ? 20
+                      : 0;
     if (score) matches.push({ namespace: item.namespace, key: item.key, label: item.label, score });
   }
   return matches.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label)).slice(0, limit);
