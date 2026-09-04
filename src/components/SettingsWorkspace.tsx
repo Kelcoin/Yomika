@@ -1,8 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { RefreshCw, Upload, CopyCheck, Eraser } from 'lucide-react';
 import { SelectField } from './SelectField';
-import { EhRouteWorkspace } from '../app/routes';
+import { EhRouteWorkspace } from './EhRouteWorkspace';
 import { useToast } from './Toast';
 
 import type { ServerRecord } from '../domain/library';
@@ -36,14 +36,22 @@ function formatCacheBytes(value: number): string {
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
 }
 
+/** Grouped by topic: one "阅读与存储" panel used to hold the theme, the reader
+ * defaults, the cache and the upscaler at once. */
 const settingsSections = [
-  { id: 'settings-preferences', label: '阅读与存储' },
-  { id: 'settings-server', label: '服务器连接' },
+  { id: 'settings-general', label: '通用' },
+  { id: 'settings-reading', label: '阅读' },
+  { id: 'settings-appearance', label: '样式' },
   { id: 'settings-eh', label: 'E-Hentai' },
-  { id: 'settings-migration', label: '数据迁移' },
-  { id: 'settings-sync', label: '同步账户' },
+  { id: 'settings-downloads', label: '下载' },
+  { id: 'settings-sync', label: '同步' },
+  { id: 'settings-advanced', label: '高级' },
   { id: 'settings-tools', label: '工具' },
+  { id: 'settings-about', label: '关于' },
 ] as const;
+
+/** Sections whose content lives inside the single preferences form. */
+const PREFERENCE_SECTIONS = ['settings-reading', 'settings-appearance', 'settings-advanced'] as const;
 
 export function SettingsWorkspace() {
   const location = useLocation();
@@ -64,9 +72,10 @@ export function SettingsWorkspace() {
   const [loadError, setLoadError] = useState<string>();
   const [loadRetryable, setLoadRetryable] = useState(false);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
-  const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-preferences');
+  const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-general');
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
+  const statsRequestedRef = useRef(false);
 
   // Saving preferences, clearing the cache and migrating data all report through
   // the shared toast now; the inline lines they used to print were easy to miss.
@@ -110,7 +119,12 @@ export function SettingsWorkspace() {
   }
 
   useEffect(() => {
-    if (selectedSettingsSection === 'settings-preferences') void refreshCacheStats();
+    // Once per visit to the section: the URL effect and the initial render used
+    // to fire two identical cache_stats calls back to back.
+    if (selectedSettingsSection !== 'settings-advanced') return;
+    if (statsRequestedRef.current) return;
+    statsRequestedRef.current = true;
+    void refreshCacheStats();
   }, [selectedSettingsSection]);
 
   async function clearImageCache() {
@@ -249,29 +263,29 @@ export function SettingsWorkspace() {
           </nav>
         </aside>
         <div className="settings-content">
-      {selectedSettingsSection === 'settings-preferences' && (
-      <section className="preferences-panel" id="settings-preferences" aria-labelledby="preferences-title">
+      {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
+      <section className="preferences-panel" id={selectedSettingsSection} aria-labelledby="preferences-title">
         <div>
-          <h2 id="preferences-title">阅读与存储</h2>
+          <h2 id="preferences-title">{selectedSettingsSection === 'settings-reading' ? '阅读' : selectedSettingsSection === 'settings-appearance' ? '样式' : '高级'}</h2>
         </div>
         {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
           <form className="preferences-form" onSubmit={savePreferences}>
-            <fieldset>
+            {selectedSettingsSection === 'settings-appearance' && <fieldset>
               <legend>主题</legend>
               <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, theme: value as PreferenceSnapshot['theme'] })} />
               <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, theme: value as PreferenceSnapshot['theme'] })} />
-            </fieldset>
-            <fieldset>
+            </fieldset>}
+            {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>默认布局</legend>
               <SelectField name="layout" aria-label="默认布局" value={preferenceDraft.defaultLayout} options={[{ value: 'auto', label: '自动' }, { value: 'single', label: '单页' }, { value: 'double', label: '双页' }, { value: 'webtoon', label: '条漫' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
               <PreferenceRadioFallback name="layout" value={preferenceDraft.defaultLayout} options={[['auto', '自动'], ['single', '单页'], ['double', '双页'], ['webtoon', '条漫']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
-            </fieldset>
-            <fieldset>
+            </fieldset>}
+            {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>默认方向</legend>
               <SelectField name="direction" aria-label="默认方向" value={preferenceDraft.defaultDirection} options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
               <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
-            </fieldset>
-            <fieldset className="accent-picker">
+            </fieldset>}
+            {selectedSettingsSection === 'settings-appearance' && <fieldset className="accent-picker">
               <legend>强调色</legend>
               <div className="accent-swatches">
                 {ACCENT_PRESETS.map((preset) => (
@@ -305,8 +319,8 @@ export function SettingsWorkspace() {
                   </p>
                 )
                 : <p className="form-error" role="alert">强调色需要是 #rrggbb 形式的十六进制色值</p>}
-            </fieldset>
-            <fieldset className="custom-css-editor">
+            </fieldset>}
+            {selectedSettingsSection === 'settings-appearance' && <fieldset className="custom-css-editor">
               <legend>自定义 CSS</legend>
               <p className="custom-css-hint">
                 在设计令牌之后追加，可覆盖任意变量与样式。保存后立即生效，清空即恢复默认。
@@ -334,8 +348,8 @@ export function SettingsWorkspace() {
                 onChange={(event) => setPreferenceDraft({ ...preferenceDraft, customCss: event.target.value })}
               />
               <p className="custom-css-count">{preferenceDraft.customCss.length} / 20000</p>
-            </fieldset>
-            <label className="preference-select">预加载页数
+            </fieldset>}
+            {selectedSettingsSection === 'settings-reading' && <label className="preference-select">预加载页数
               <input
                 name="prefetchPages"
                 aria-label="预加载页数"
@@ -346,8 +360,8 @@ export function SettingsWorkspace() {
                 value={preferenceDraft.prefetchPages}
                 onChange={(event) => setPreferenceDraft({ ...preferenceDraft, prefetchPages: Number(event.target.value) })}
               />
-            </label>
-            <label className="preference-select">封面并发请求
+            </label>}
+            {selectedSettingsSection === 'settings-reading' && <label className="preference-select">封面并发请求
               <input
                 name="coverConcurrency"
                 aria-label="封面并发请求"
@@ -358,13 +372,13 @@ export function SettingsWorkspace() {
                 value={preferenceDraft.coverConcurrency}
                 onChange={(event) => setPreferenceDraft({ ...preferenceDraft, coverConcurrency: Number(event.target.value) })}
               />
-            </label>
-            <fieldset>
+            </label>}
+            {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>超分后端</legend>
               <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'off', label: '关闭' }, { value: 'cpu', label: 'CPU' }, { value: 'auto', label: '自动（优先 GPU）' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
               <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-            </fieldset>
-            {preferenceDraft.upscaleBackend !== 'off' && (
+            </fieldset>}
+            {selectedSettingsSection === 'settings-reading' && preferenceDraft.upscaleBackend !== 'off' && (
               <label className="preference-select">超分模型
                 <input
                   name="upscaleModel"
@@ -376,7 +390,7 @@ export function SettingsWorkspace() {
                 />
               </label>
             )}
-            <label className="preference-select">图片缓存上限（GB）
+            {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）
               <input
                 name="cacheMaxBytes"
                 aria-label="图片缓存上限"
@@ -387,8 +401,8 @@ export function SettingsWorkspace() {
                 value={preferenceDraft.cacheMaxBytes / GIB}
                 onChange={(event) => setPreferenceDraft({ ...preferenceDraft, cacheMaxBytes: Number(event.target.value) * GIB })}
               />
-            </label>
-            <section className="cache-settings" aria-labelledby="cache-settings-title">
+            </label>}
+            {selectedSettingsSection === 'settings-advanced' && <section className="cache-settings" aria-labelledby="cache-settings-title">
               <div className="cache-settings-heading">
                 {/* Clearing sits next to the number it changes. */}
                 <button
@@ -430,13 +444,13 @@ export function SettingsWorkspace() {
                   {cacheStats.byRendition.other.bytes > 0 && <span><i className="cache-swatch is-other" aria-hidden="true" />其他 {formatCacheBytes(cacheStats.byRendition.other.bytes)}</span>}
                 </div>
               )}
-            </section>
+            </section>}
             <button className="primary-action" type="submit" disabled={preferencePending} aria-busy={preferencePending}>{preferencePending ? '保存中…' : '保存偏好'}</button>
           </form>
         )}
       </section>
       )}
-      {selectedSettingsSection === 'settings-migration' && (
+      {selectedSettingsSection === 'settings-advanced' && (
       <section className="settings-section" id="settings-migration" aria-labelledby="migration-title">
         <div>
           <h2 id="migration-title">数据迁移</h2>
@@ -464,7 +478,7 @@ export function SettingsWorkspace() {
         </form>
       </section>
       )}
-      {selectedSettingsSection === 'settings-server' && (
+      {selectedSettingsSection === 'settings-general' && (
       <>
       <section className="settings-section" id="settings-server" aria-labelledby="servers-title">
         <div>
@@ -517,6 +531,30 @@ export function SettingsWorkspace() {
           <h2 id="eh-settings-title">E-Hentai</h2>
         </div>
         <div className="settings-eh-content"><EhRouteWorkspace /></div>
+      </section>
+      )}
+      {selectedSettingsSection === 'settings-downloads' && (
+      <section className="settings-section" id="settings-downloads" aria-labelledby="downloads-title">
+        <div>
+          <h2 id="downloads-title">下载</h2>
+          <p>下载与上传任务在独立页面中管理。</p>
+        </div>
+        <div className="settings-tools-links">
+          <Link className="secondary-action" to="/downloads"><RefreshCw aria-hidden="true" />任务列表</Link>
+          <Link className="secondary-action" to="/tools/upload"><Upload aria-hidden="true" />上传档案</Link>
+        </div>
+      </section>
+      )}
+      {selectedSettingsSection === 'settings-about' && (
+      <section className="settings-section" id="settings-about" aria-labelledby="about-title">
+        <div>
+          <h2 id="about-title">关于</h2>
+        </div>
+        <dl className="settings-about-list">
+          <div><dt>应用</dt><dd>Yomika</dd></div>
+          <div><dt>数据目录</dt><dd>由系统的应用数据目录决定（Tauri app_data_dir）</dd></div>
+          <div><dt>图片缓存</dt><dd>{cacheStats ? formatCacheBytes(cacheStats.bytes) : '进入「高级」查看'}</dd></div>
+        </dl>
       </section>
       )}
       {selectedSettingsSection === 'settings-tools' && (

@@ -8,9 +8,11 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 
 afterEach(resetInvokeAdapterForTests);
 
-function renderSettings() {
+/** Sections are grouped by topic, and `?section=` opens one directly, which is
+ * how a test reaches the controls it asserts on without clicking through. */
+function renderSettings(section?: string) {
   return render(
-    <MemoryRouter initialEntries={['/settings']}>
+    <MemoryRouter initialEntries={[section ? `/settings?section=${section}` : '/settings']}>
       <App />
     </MemoryRouter>,
   );
@@ -26,7 +28,7 @@ describe('settings workspace', () => {
 
     renderSettings();
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /服务器连接/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
     expect(await screen.findByRole('heading', { name: 'Home' })).toBeInTheDocument();
     expect(screen.getByText('https://example.com')).toBeInTheDocument();
     expect(screen.getByText('已配置')).toBeInTheDocument();
@@ -48,7 +50,7 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings();
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /服务器连接/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
     await screen.findByText('尚未添加 LANraragi 服务器。');
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     await user.type(screen.getByLabelText('名称'), 'Home');
@@ -75,7 +77,7 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings();
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /服务器连接/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
     await screen.findByRole('button', { name: '编辑 Home' });
     await user.click(screen.getByRole('button', { name: '编辑 Home' }));
     expect(screen.getByRole('dialog')).toHaveTextContent('更新 LANraragi');
@@ -96,11 +98,11 @@ describe('settings workspace', () => {
     });
     renderSettings();
 
-    expect(await screen.findByRole('heading', { name: '阅读与存储' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '服务器' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '数据迁移' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('link', { name: /数据迁移/ }));
+    await user.click(screen.getByRole('link', { name: /高级/ }));
     expect(screen.getByRole('heading', { name: '数据迁移' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '阅读与存储' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
   });
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
@@ -114,27 +116,41 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings();
+    renderSettings('appearance');
 
     expect(await screen.findByRole('radio', { name: '深色' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: '双页' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: '从右到左' })).toBeChecked();
-    expect(screen.getByLabelText('图片缓存上限')).toHaveValue(4);
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
 
     await user.click(screen.getByRole('radio', { name: '浅色' }));
-    await user.click(screen.getByRole('radio', { name: '单页' }));
-    await user.clear(screen.getByLabelText('图片缓存上限'));
-    await user.type(screen.getByLabelText('图片缓存上限'), '7');
     await user.click(screen.getByRole('button', { name: '保存偏好' }));
 
     expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute('data-theme', 'light');
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
+    // Saving one section still writes the whole snapshot.
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, theme: 'light', defaultLayout: 'single', cacheMaxBytes: 7_516_192_768 },
+      input: { ...loaded, theme: 'light' },
     });
+  });
+
+  it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const view = renderSettings('reading');
+    expect(await screen.findByRole('radio', { name: '双页' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: '从右到左' })).toBeChecked();
+    expect(screen.queryByLabelText('图片缓存上限')).not.toBeInTheDocument();
+    view.unmount();
+
+    renderSettings('advanced');
+    expect(await screen.findByLabelText('图片缓存上限')).toHaveValue(4);
+    expect(screen.queryByRole('radio', { name: '双页' })).not.toBeInTheDocument();
   });
 
   it('applies a custom accent colour and warns when it fails contrast', async () => {
@@ -148,7 +164,7 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings();
+    renderSettings('appearance');
     await screen.findByRole('radio', { name: '浅色' });
 
     await user.click(screen.getByRole('button', { name: '靛蓝' }));
@@ -175,7 +191,7 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings();
+    renderSettings('reading');
     const preload = await screen.findByLabelText('预加载页数');
     await user.clear(preload);
     await user.type(preload, '3');
@@ -196,13 +212,14 @@ describe('settings workspace', () => {
 
   it('shows cache usage by rendition and clears unprotected images', async () => {
     const user = userEvent.setup();
-    let statsCalls = 0;
+    // Keyed on whether the cache was cleared rather than on a call count: the
+    // number of stats refreshes is an implementation detail.
+    let cleared = false;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'cache_stats') {
-        statsCalls += 1;
-        return { ok: true, value: statsCalls === 1 ? {
+        return { ok: true, value: !cleared ? {
           bytes: 7168,
           entries: 4,
           byRendition: {
@@ -222,17 +239,22 @@ describe('settings workspace', () => {
           },
         } };
       }
-      if (command === 'cache_clear_images') return { ok: true, value: { removedEntries: 3, removedFiles: 3, bytesFreed: 7040, protectedBytes: 128 } };
+      if (command === 'cache_clear_images') {
+        cleared = true;
+        return { ok: true, value: { removedEntries: 3, removedFiles: 3, bytesFreed: 7040, protectedBytes: 128 } };
+      }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings();
+    renderSettings('advanced');
 
+    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
     expect(await screen.findByText('7 KB')).toBeInTheDocument();
-    expect(screen.getByText('封面 1 KB')).toBeInTheDocument();
-    expect(screen.getByText('页缩略图 2 KB')).toBeInTheDocument();
-    expect(screen.getByText('阅读页 4 KB')).toBeInTheDocument();
+    const breakdown = screen.getByLabelText('图片缓存明细');
+    expect(breakdown).toHaveTextContent('封面 1 KB');
+    expect(breakdown).toHaveTextContent('页缩略图 2 KB');
+    expect(breakdown).toHaveTextContent('阅读页 4 KB');
     await user.click(screen.getByRole('button', { name: '清空图片缓存' }));
     expect(adapter).toHaveBeenCalledWith('cache_clear_images', {});
     expect(await screen.findByText('已释放 6.88 KB，保留 128 B 受保护缓存')).toBeInTheDocument();
@@ -267,7 +289,7 @@ describe('settings workspace', () => {
 
     renderSettings();
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /服务器连接/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
     await screen.findByRole('alert');
     await user.click(screen.getByRole('button', { name: '重试读取服务器' }));
     expect(await screen.findByRole('heading', { name: 'Home' })).toBeInTheDocument();
@@ -283,15 +305,18 @@ describe('settings workspace', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings();
+    renderSettings('advanced');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /数据迁移/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
     await user.type(screen.getByLabelText('导出 JSON'), 'encoded-config');
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
     expect(await screen.findByText('已导入 3 项偏好设置')).toBeInTheDocument();
-    await user.click(screen.getByRole('link', { name: /阅读与存储/ }));
+    // The imported snapshot lands across sections: theme in 样式, reader
+    // defaults in 阅读.
+    await user.click(screen.getByRole('link', { name: /样式/ }));
     expect(screen.getByRole('radio', { name: '浅色' })).toBeChecked();
+    await user.click(screen.getByRole('link', { name: /阅读/ }));
     expect(screen.getByRole('radio', { name: '条漫' })).toBeChecked();
     expect(screen.getByRole('radio', { name: '从右到左' })).toBeChecked();
     expect(adapter).toHaveBeenCalledWith('import_legacy_preferences', { encoded: 'encoded-config' });
@@ -306,9 +331,9 @@ describe('settings workspace', () => {
       if (command === 'list_watchlist') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a2', addedAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false }] };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings();
+    renderSettings('advanced');
 
-    await user.click(await screen.findByRole('link', { name: /数据迁移/ }));
+    await user.click(await screen.findByRole('link', { name: /高级/ }));
     await user.click(screen.getByRole('button', { name: '导出数据' }));
 
     expect(await screen.findByText('已导出 2 项本地记录')).toBeInTheDocument();
@@ -325,14 +350,14 @@ describe('settings workspace', () => {
       if (command === 'import_legacy_preferences') return { ok: false, error: { code: 'INVALID_RESPONSE', message: '旧配置无有效普通偏好', retryable: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings();
+    renderSettings('advanced');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /数据迁移/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
     await user.type(screen.getByLabelText('导出 JSON'), 'secret-only');
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('旧配置无有效普通偏好');
-    await user.click(screen.getByRole('link', { name: /阅读与存储/ }));
+    await user.click(screen.getByRole('link', { name: /样式/ }));
     expect(screen.getByRole('radio', { name: '深色' })).toBeChecked();
   });
 
@@ -349,6 +374,7 @@ describe('settings workspace', () => {
     renderSettings();
 
     // A single accent colour could not express a theme, so presets seed the box.
+    await user.click(await screen.findByRole('link', { name: /样式/ }));
     await user.click(await screen.findByRole('button', { name: '紧凑' }));
     expect((screen.getByLabelText('自定义 CSS') as HTMLTextAreaElement).value).toContain('.archive-row-tags .metadata-chip');
 
