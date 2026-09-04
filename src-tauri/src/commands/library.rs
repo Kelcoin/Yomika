@@ -2056,43 +2056,53 @@ fn query_archive_records_by_ids(
     if archive_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = (0..archive_ids.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
-         FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
-    );
-    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(archive_ids.len() + 1);
-    values.push(&server_id);
-    for id in archive_ids {
-        values.push(id);
-    }
-    let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map(values.as_slice(), |row| {
-            let tags = archive_tags(row.get::<_, String>(10)?);
-            Ok(ArchiveRecord {
-                server_id: row.get(0)?,
-                archive_id: row.get(1)?,
-                title: row.get(2)?,
-                page_count: row.get(3)?,
-                summary: row.get(4)?,
-                category: row.get(5)?,
-                language: row.get(6)?,
-                cover_page: row.get(7)?,
-                is_deleted: row.get::<_, i64>(8)? != 0,
-                updated_at: row.get(9)?,
-                added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
-                tags,
+    // SQLite caps bound parameters (999 on older builds), and these lists come
+    // from the history and watchlist tables, which have no upper bound.
+    const CHUNK: usize = 500;
+    let mut by_id: std::collections::HashMap<String, ArchiveRecord> =
+        std::collections::HashMap::with_capacity(archive_ids.len());
+    for chunk in archive_ids.chunks(CHUNK) {
+        let placeholders = (0..chunk.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+             FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&server_id);
+        for id in chunk {
+            values.push(id);
+        }
+        let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(values.as_slice(), |row| {
+                let tags = archive_tags(row.get::<_, String>(10)?);
+                Ok(ArchiveRecord {
+                    server_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    title: row.get(2)?,
+                    page_count: row.get(3)?,
+                    summary: row.get(4)?,
+                    category: row.get(5)?,
+                    language: row.get(6)?,
+                    cover_page: row.get(7)?,
+                    is_deleted: row.get::<_, i64>(8)? != 0,
+                    updated_at: row.get(9)?,
+                    added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
+                    tags,
+                })
             })
-        })
-        .map_err(|error| error.to_string())?;
-    let mut found = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    // Preserve the order the server answered with: for a random pull that order
-    // *is* the result.
-    let mut ordered = Vec::with_capacity(found.len());
+            .map_err(|error| error.to_string())?;
+        for record in rows {
+            let record = record.map_err(|error| error.to_string())?;
+            by_id.insert(record.archive_id.clone(), record);
+        }
+    }
+    // Preserve the order the caller asked in: for a random pull that order *is*
+    // the result, and for history it is already sorted by last visit.
+    let mut ordered = Vec::with_capacity(by_id.len());
     for id in archive_ids {
-        if let Some(position) = found.iter().position(|record| &record.archive_id == id) {
-            ordered.push(found.remove(position));
+        if let Some(record) = by_id.remove(id) {
+            ordered.push(record);
         }
     }
     Ok(ordered)
@@ -2431,6 +2441,25 @@ pub fn list_archives_page(
     };
     match query_archive_page(&connection, &input) {
         Ok(page) => CommandResult::success(page),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// The shelves (home, history, favourites, to-read) hold a handful of archive
+/// ids and need the records behind them. Reading the whole library to resolve
+/// fourteen titles scaled with the library instead of with the shelf.
+#[tauri::command]
+pub fn list_archives_by_ids(
+    server_id: String,
+    archive_ids: Vec<String>,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<ArchiveRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match query_archive_records_by_ids(&connection, &server_id, &archive_ids) {
+        Ok(archives) => CommandResult::success(archives),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
 }
@@ -4104,6 +4133,57 @@ mod tests {
             &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
         ).expect("records by id");
         assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
+    }
+
+    #[test]
+    fn archives_by_ids_answers_in_order_past_the_parameter_cap() {
+        // The shelves pass their whole id list, which has no upper bound, so the
+        // query chunks. Order still has to follow the ids as asked, and ids the
+        // local index has not seen are dropped rather than faked.
+        let mut connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a')",
+            [],
+        ).unwrap();
+        let total = 1_200;
+        {
+            let transaction = connection.transaction().unwrap();
+            for index in 0..total {
+                transaction.execute(
+                    "INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at) VALUES ('scope-a', ?1, ?2, ?2, '[]', 1, ?3)",
+                    rusqlite::params![format!("id-{index:04}"), format!("title {index}"), index as i64],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        // Reversed, so a wrong answer would come back in insert or rowid order.
+        let mut requested = (0..total).rev().map(|index| format!("id-{index:04}")).collect::<Vec<_>>();
+        requested.push("never-indexed".to_string());
+        let records = query_archive_records_by_ids(&connection, "scope-a", &requested).expect("records by id");
+
+        assert_eq!(records.len(), total as usize, "the unknown id must not add a row");
+        assert_eq!(records.first().map(|record| record.archive_id.as_str()), Some("id-1199"));
+        assert_eq!(records.last().map(|record| record.archive_id.as_str()), Some("id-0000"));
+    }
+
+    #[test]
+    fn archives_by_ids_skips_tombstoned_rows() {
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at, is_deleted) VALUES
+               ('scope-a', 'alive', 'Alive', 'alive', '[]', 1, 100, 0),
+               ('scope-a', 'gone', 'Gone', 'gone', '[]', 1, 200, 1);",
+        ).unwrap();
+
+        let records = query_archive_records_by_ids(
+            &connection,
+            "scope-a",
+            &["gone".to_string(), "alive".to_string()],
+        ).expect("records by id");
+
+        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["alive"]);
     }
 
     #[test]

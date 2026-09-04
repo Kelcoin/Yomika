@@ -9,7 +9,8 @@ mod network;
 mod settings;
 
 use commands::library::{
-    add_archive_to_category, check_server_status, create_task, delete_archive, list_archives, list_archives_page,
+    add_archive_to_category, check_server_status, create_task, delete_archive, list_archives, list_archives_by_ids,
+    list_archives_page,
     list_categories, list_reading_history, list_servers, list_tasks, list_watchlist, load_archive_metadata,
     load_archive_thumbnail, load_archive_page_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
     probe_new_archives,
@@ -64,6 +65,7 @@ pub fn run() {
             load_reader_manifest,
             load_reader_page,
             list_archives,
+            list_archives_by_ids,
             list_archives_page,
             load_archive_metadata,
             load_archive_thumbnail,

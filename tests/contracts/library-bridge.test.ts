@@ -278,6 +278,26 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('resolves shelf ids without reading the whole library', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [{
+      serverId: 's1', archiveId: 'a2', title: 'Second', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z',
+    }] }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().listArchivesByIds('s1', ['a2', 'a1']);
+
+    expect(adapter).toHaveBeenCalledWith('list_archives_by_ids', { serverId: 's1', archiveIds: ['a2', 'a1'] });
+    expect(result).toMatchObject({ ok: true, value: [{ archiveId: 'a2' }] });
+  });
+
+  it('answers an empty shelf without crossing the bridge', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [] }));
+    setInvokeAdapterForTests(adapter);
+
+    expect(await new NativeLibraryRepository().listArchivesByIds('s1', [])).toEqual({ ok: true, value: [] });
+    expect(adapter).not.toHaveBeenCalled();
+  });
+
   it('accepts nullable archive fields returned from sqlite native rows', async () => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: [{
       serverId: 's1', archiveId: 'a1', title: 'Archive', pageCount: 8,

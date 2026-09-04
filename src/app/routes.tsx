@@ -57,25 +57,38 @@ function HomeWorkspace() {
         setRecentLoading(false);
         return;
       }
-      const [historyResult, watchlistResult, archiveResult] = await Promise.all([
+      const [historyResult, watchlistResult] = await Promise.all([
         repository.listHistory(server.scopeId),
         repository.listWatchlist(server.scopeId),
-        repository.listArchives(server.id),
       ]);
       if (!active) return;
-      if (!historyResult.ok) setRecentError(historyResult.error.message);
-      else if (!watchlistResult.ok) setRecentError(watchlistResult.error.message);
-      else if (!archiveResult.ok) setRecentError(archiveResult.error.message);
-      else {
-        setHistory(historyResult.value);
-        setWatchlist(watchlistResult.value);
-        setArchives(archiveResult.value);
-      }
+      if (!historyResult.ok) { setRecentError(historyResult.error.message); setRecentLoading(false); return; }
+      if (!watchlistResult.ok) { setRecentError(watchlistResult.error.message); setRecentLoading(false); return; }
+      setHistory(historyResult.value);
+      setWatchlist(watchlistResult.value);
+      // Resolve only the ids the two rails can show. The window is wider than
+      // the rails so an id the local index has not seen yet gets backfilled by
+      // the next one instead of leaving a hole.
+      const shelfIds = [...new Set([
+        ...historyResult.value.slice(0, 6).map((item) => item.archiveId),
+        ...watchlistResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
+      ])];
+      const archiveResult = await repository.listArchivesByIds(server.id, shelfIds);
+      if (!active) return;
+      if (!archiveResult.ok) setRecentError(archiveResult.error.message);
+      else setArchives(archiveResult.value);
       // LANraragi picks the random set: the alternative was shuffling the whole
       // local index client-side.
       const random = await repository.searchRandomArchives(server.id, 8);
       if (!active) return;
       if (random.ok) setRandomArchives(random.value);
+      else {
+        // Server could not answer. Sample the newest page for a pool rather
+        // than reading the whole library to pick eight cards.
+        const page = await repository.listArchivesPage(server.id, 0, 60, { sortBy: 'added', order: 'desc' });
+        if (!active) return;
+        if (page.ok) setRandomArchives(pickRandomSample(page.value.items, 8));
+      }
       setRecentLoading(false);
     })();
     return () => { active = false; };
@@ -93,10 +106,10 @@ function HomeWorkspace() {
     () => watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
     [archiveById, watchlist],
   );
-  const random = useMemo(
-    () => (randomArchives.length > 0 ? randomArchives : pickRandomSample(archives, 8)),
-    [archives, randomArchives, serverLoadAttempt],
-  );
+  // The effect already picked the random set (server first, newest page as the
+  // fallback). Sampling `archives` here would just re-show the shelf, because
+  // `archives` now holds only the ids the shelves asked for.
+  const random = randomArchives;
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   return (
     <div className="workspace-home">
@@ -180,20 +193,24 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       if (!server) { setHasServer(false); setLoading(false); return; }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      const [result, archiveResult] = await Promise.all([
-        name === 'history'
-          ? repository.listHistory(server.scopeId)
-          : name === 'toRead'
-            ? repository.listReadingList(server.scopeId)
-            : repository.listWatchlist(server.scopeId),
-        repository.listArchives(server.id),
-      ]);
+      const result = await (name === 'history'
+        ? repository.listHistory(server.scopeId)
+        : name === 'toRead'
+          ? repository.listReadingList(server.scopeId)
+          : repository.listWatchlist(server.scopeId));
       if (!active) return;
-      if (!result.ok) setError(result.error.message);
-      else if (!archiveResult.ok) setError(archiveResult.error.message);
-      else if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
+      if (!result.ok) { setError(result.error.message); setLoading(false); return; }
+      if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setWatchlist(result.value as WatchlistRecord[]);
-      if (archiveResult.ok) setArchives(archiveResult.value);
+      // This shelf's own ids, not the whole library: the page shows every entry
+      // it holds, so the id list is already the bound.
+      const shelfIds = name === 'history'
+        ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
+        : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
+      const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
+      if (!active) return;
+      if (!archiveResult.ok) setError(archiveResult.error.message);
+      else setArchives(archiveResult.value);
       setLoading(false);
     })();
     return () => { active = false; };

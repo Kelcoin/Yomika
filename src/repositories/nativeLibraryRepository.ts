@@ -256,6 +256,14 @@ export class NativeLibraryRepository {
   listArchives(serverId: string): Promise<CommandResult<ArchiveRecord[]>> {
     return invokeCommand('list_archives', { serverId }, z.array(ArchiveRecordSchema));
   }
+  /** For the shelves, which know their archive ids and only need the records
+   * behind them — reading the whole library to resolve a dozen titles scaled
+   * with the library instead of with the shelf. Answers in the requested id
+   * order and silently drops ids the local index has not seen. */
+  async listArchivesByIds(serverId: string, archiveIds: string[]): Promise<CommandResult<ArchiveRecord[]>> {
+    if (archiveIds.length === 0) return { ok: true, value: [] };
+    return invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
+  }
   async listArchivesPage(
     serverId: string,
     offset = 0,
