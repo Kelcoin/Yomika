@@ -16,7 +16,10 @@ export const ARCHIVE_GRID_COVER_HEIGHT = 220;
  * two rows of tag chips, and one footer row. Sizing it by content let the tag
  * rows spill past `overflow: hidden`, which cut the second row in half. */
 export const ARCHIVE_GRID_TITLE_HEIGHT = 34;
-export const ARCHIVE_GRID_TAGS_HEIGHT = 42;
+/** Two chip rows, exactly. A chip is 20px tall including its 1px border, so at
+ * 42px the second row was clipped by a pixel and read as cut off — the slot has
+ * to hold 20 + 4 + 20 with a little slack, not 18 + 3 + 18. */
+export const ARCHIVE_GRID_TAGS_HEIGHT = 48;
 export const ARCHIVE_GRID_FOOTER_HEIGHT = 16;
 export const ARCHIVE_GRID_COPY_GAP = 4;
 export const ARCHIVE_GRID_COPY_HEIGHT =

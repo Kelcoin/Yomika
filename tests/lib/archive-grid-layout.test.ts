@@ -6,6 +6,7 @@ import {
   ARCHIVE_GRID_COVER_HEIGHT,
   ARCHIVE_GRID_GAP,
   ARCHIVE_GRID_ROW_HEIGHT,
+  ARCHIVE_GRID_TAGS_HEIGHT,
   getArchiveGridColumns,
   getWideArchiveCardWidth,
   packArchiveGridRows,
@@ -18,7 +19,14 @@ describe('archive grid layout', () => {
     // Cards must be exactly as tall as the row they are placed in, otherwise
     // the absolutely positioned rows overlap.
     expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(ARCHIVE_GRID_COVER_HEIGHT + 8 + ARCHIVE_GRID_COPY_HEIGHT + 16);
-    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(344);
+    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(350);
+  });
+
+  it('gives the tag slot room for two whole chip rows', () => {
+    // A chip is 20px tall including its border. At 42px the slot held 20 + 4 + 20
+    // with nothing to spare, and the second row read as clipped — which is what
+    // made the card look like it could only show three or four tags.
+    expect(ARCHIVE_GRID_TAGS_HEIGHT).toBeGreaterThanOrEqual(20 + 4 + 20);
   });
   it('keeps a wide card exactly two columns plus the gap', () => {
     expect(getWideArchiveCardWidth()).toBe(ARCHIVE_GRID_CARD_WIDTH * 2 + ARCHIVE_GRID_GAP);

@@ -15,10 +15,12 @@
   --surface-elevated: #ffffff;
   --surface-overlay: rgb(30 27 36 / 0.84);
 
-  /* Ink */
+  /* Ink. Both secondary tiers clear 4.5:1 against --surface-panel: the previous
+     --ink-faint sat at 2.8:1, which is what made tags, dates and page counts
+     hard to read rather than merely quiet. */
   --ink-primary: #1e1b24;
-  --ink-secondary: #716b7c;
-  --ink-faint: #9a93a4;
+  --ink-secondary: #5a5464;
+  --ink-faint: #6f6a7b;
   --ink-on-brand: #ffffff;
   --ink-on-overlay: #ffffff;
 
@@ -125,8 +127,8 @@
     --surface-elevated: #1c1c25;
     --surface-overlay: rgb(5 5 6 / 0.88);
     --ink-primary: #f4f1f8;
-    --ink-secondary: #a7a0b4;
-    --ink-faint: #777080;
+    --ink-secondary: #b4adc0;
+    --ink-faint: #948da2;
     --ink-on-brand: #0b0b0f;
     --brand-ink: #f4f1f8;
     --brand-vermilion: #e36a5c;
@@ -150,8 +152,8 @@
   --surface-elevated: #1c1c25;
   --surface-overlay: rgb(5 5 6 / 0.88);
   --ink-primary: #f4f1f8;
-  --ink-secondary: #a7a0b4;
-  --ink-faint: #777080;
+  --ink-secondary: #b4adc0;
+  --ink-faint: #948da2;
   --ink-on-brand: #0b0b0f;
   --brand-ink: #f4f1f8;
   --brand-vermilion: #e36a5c;

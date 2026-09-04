@@ -111,20 +111,26 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);
-    expect(shell).toMatch(/\.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*40px 42px 15px[\s\S]*height:\s*133px/);
+    expect(shell).toMatch(/\.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*40px 44px 15px[\s\S]*height:\s*135px/);
     expect(shell).toMatch(/\.archive-thumb-card-tags\s*\{[\s\S]*align-items:\s*flex-start[\s\S]*align-content:\s*flex-start/);
+    // The rail card is 150px wide, so its chips run at the same compact size as
+    // the library grid's rather than the default 12px.
+    expect(shell).toMatch(/\.archive-thumb-card-tags \.metadata-chip\s*\{[\s\S]*min-height:\s*20px[\s\S]*font-size:\s*11px/);
     // Thumbnail grid rows are packed in JS (fixed 180px columns, wide covers
     // exactly two columns plus the 12px gap) so the grid can virtualize by row.
     expect(shell).toMatch(/\.archive-thumb-grid-row\s*\{[\s\S]*position:\s*absolute[\s\S]*display:\s*flex[\s\S]*gap:\s*12px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\s*\{[\s\S]*width:\s*180px/);
     expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-wrap\.is-cover-wide\s*\{[\s\S]*width:\s*372px/);
-    // Fixed card geometry: 220 cover + 8 gap + 100 copy + 2x8 padding = 344px.
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row\s*\{[\s\S]*grid-template-rows:\s*220px 100px[\s\S]*height:\s*344px/);
+    // Fixed card geometry: 220 cover + 8 gap + 106 copy + 2x8 padding = 350px.
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row\s*\{[\s\S]*grid-template-rows:\s*220px 106px[\s\S]*height:\s*350px/);
     // Three fixed copy slots so the second row of chips is never clipped.
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy\s*\{[\s\S]*grid-template-rows:\s*34px 42px 16px[\s\S]*height:\s*100px/);
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy\s*\{[\s\S]*grid-template-rows:\s*34px 48px 16px[\s\S]*height:\s*106px/);
     // List rows share the footer layout and drop the trailing chevron column.
     expect(shell).toMatch(/\.archive-row-footer\s*\{[\s\S]*justify-content:\s*space-between/);
-    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[\s\S]*grid-template-columns:\s*92px minmax\(0, 1fr\);/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[\s\S]*grid-template-columns:\s*100px minmax\(0, 1fr\);/);
+    // The wide card has the biggest tag area in the app, so it gets full-size
+    // chips: it used to pair the largest area with the smallest chips.
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{[\s\S]*font-size:\s*12px/);
     expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
   });
 

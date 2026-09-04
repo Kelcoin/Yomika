@@ -39,7 +39,22 @@ function HomeWorkspace() {
   const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [recentError, setRecentError] = useState<string>();
+  const [randomLoading, setRandomLoading] = useState(true);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
+  // LANraragi picks the random set. Behind a callback so the rail's refresh
+  // button can ask for another draw without reloading the whole page.
+  const loadRandom = useCallback(async (serverId: string) => {
+    setRandomLoading(true);
+    const random = await repository.searchRandomArchives(serverId, 8);
+    if (random.ok) setRandomArchives(random.value);
+    else {
+      // Server could not answer. Sample the newest page from the local mirror
+      // rather than reading the whole index to pick eight cards.
+      const page = await repository.listArchivesPage(serverId, 0, 60, { sortBy: 'added', order: 'desc' });
+      if (page.ok) setRandomArchives(pickRandomSample(page.value.items, 8));
+    }
+    setRandomLoading(false);
+  }, []);
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -50,11 +65,13 @@ function HomeWorkspace() {
       setServers(result);
       if (!result.ok) {
         setRecentLoading(false);
+        setRandomLoading(false);
         return;
       }
       const server = result.value[0];
       if (!server) {
         setRecentLoading(false);
+        setRandomLoading(false);
         return;
       }
       const [historyResult, watchlistResult] = await Promise.all([
@@ -62,8 +79,10 @@ function HomeWorkspace() {
         repository.listWatchlist(server.scopeId),
       ]);
       if (!active) return;
-      if (!historyResult.ok) { setRecentError(historyResult.error.message); setRecentLoading(false); return; }
-      if (!watchlistResult.ok) { setRecentError(watchlistResult.error.message); setRecentLoading(false); return; }
+      // Every early exit clears both flags: a rail left on `loading` shimmers
+      // forever instead of admitting it has nothing.
+      if (!historyResult.ok) { setRecentError(historyResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
+      if (!watchlistResult.ok) { setRecentError(watchlistResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
       setHistory(historyResult.value);
       setWatchlist(watchlistResult.value);
       // Resolve only the ids the two rails can show. The window is wider than
@@ -77,22 +96,11 @@ function HomeWorkspace() {
       if (!active) return;
       if (!archiveResult.ok) setRecentError(archiveResult.error.message);
       else setArchives(archiveResult.value);
-      // LANraragi picks the random set: the alternative was shuffling the whole
-      // local index client-side.
-      const random = await repository.searchRandomArchives(server.id, 8);
-      if (!active) return;
-      if (random.ok) setRandomArchives(random.value);
-      else {
-        // Server could not answer. Sample the newest page for a pool rather
-        // than reading the whole library to pick eight cards.
-        const page = await repository.listArchivesPage(server.id, 0, 60, { sortBy: 'added', order: 'desc' });
-        if (!active) return;
-        if (page.ok) setRandomArchives(pickRandomSample(page.value.items, 8));
-      }
       setRecentLoading(false);
+      await loadRandom(server.id);
     })();
     return () => { active = false; };
-  }, [serverLoadAttempt]);
+  }, [loadRandom, serverLoadAttempt]);
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
@@ -149,9 +157,9 @@ function HomeWorkspace() {
         </section>
       )}
       {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
-      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
-      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} />
+      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} />
+      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} />
+      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} />
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
       {!recentLoading && !recentError && connected && continueReading.length === 0 && toRead.length === 0 && (

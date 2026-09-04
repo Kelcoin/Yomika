@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Heart } from 'lucide-react';
+import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -37,14 +37,41 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean }) {
-  if (!archives.length) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} />;
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, onRefresh, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; onRefresh?: (() => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+  // A rail that will have content shows its shape while loading. One that has
+  // finished with nothing to show is not a rail at all.
+  if (!archives.length && !loading) return null;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} onRefresh={onRefresh} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail (the detail page's tab strip). */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean }) {
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, onRefresh, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; onRefresh: (() => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
-  return <section className="archive-rail" aria-label={title}>{!headingHidden && <div className="archive-rail-heading"><h2>{title}</h2><BookOpen aria-hidden="true" /></div>}<div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>{archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}</div></section>;
+  return <section className="archive-rail" aria-label={title}>
+    {!headingHidden && <div className="archive-rail-heading">
+      <h2>{title}</h2>
+      {onRefresh && <button className="icon-action" type="button" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing} aria-label={`刷新${title}`} title={`刷新${title}`}>
+        <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
+      </button>}
+    </div>}
+    <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
+      {archives.length === 0 && loading
+        ? Array.from({ length: skeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
+    </div>
+  </section>;
+}
+
+/** The card's own shape while the rail waits on data, so the page does not jump
+ * once the archives land. */
+function ArchiveThumbnailCardSkeleton() {
+  return <div className="archive-thumb-card is-skeleton" aria-hidden="true">
+    <div className="archive-thumb-card-media"><span className="archive-thumb-card-skeleton" /></div>
+    <div className="archive-thumb-card-body">
+      <div className="archive-thumb-card-title"><span className="skeleton-line" /></div>
+      <div className="archive-thumb-card-tags"><span className="skeleton-line is-chip" /><span className="skeleton-line is-chip" /></div>
+      <div className="archive-thumb-card-meta"><span className="skeleton-line" /></div>
+    </div>
+  </div>;
 }
