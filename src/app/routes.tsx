@@ -9,6 +9,7 @@ import { LibraryWorkspace } from '../components/LibraryWorkspace';
 import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
 import { SettingsWorkspace } from '../components/SettingsWorkspace';
 import { TaskCenter } from '../components/TaskCenter';
+import { UploadPanel } from '../components/UploadPanel';
 import { SyncWorkspace } from '../components/SyncWorkspace';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -334,7 +335,19 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' }) {
 
 const ehRepository = new NativeEhRepository();
 
-function EhRouteWorkspace() {
+/** Upload is a page of its own, not a panel inside settings. */
+function UploadRoute() {
+  return (
+    <div className="workspace-stack">
+      <header className="workspace-heading"><h1>上传档案</h1></header>
+      <UploadPanel />
+    </div>
+  );
+}
+
+/** Exported so the settings page can host it: the sidebar entry is gone, but
+ * `/eh` stays as a deep link. */
+export function EhRouteWorkspace() {
   const [accounts, setAccounts] = useState<EhAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [results, setResults] = useState<EhSearchResult[]>();
@@ -431,7 +444,10 @@ export function WorkspaceRoutes() {
       <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
-      <Route path="/dedup" element={<DeduplicationWorkspace />} />
+      {/* Tools live on their own routes; the settings section is only an index. */}
+      <Route path="/tools/upload" element={<UploadRoute />} />
+      <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
+      <Route path="/dedup" element={<Navigate to="/tools/dedup" replace />} />
       <Route path="/sync" element={<Navigate to="/settings?section=sync" replace />} />
       <Route path="/settings" element={<SettingsWorkspace />} />
       <Route path="*" element={<HomeWorkspace />} />

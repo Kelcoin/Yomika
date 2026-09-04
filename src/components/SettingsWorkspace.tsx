@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Upload, CopyCheck } from 'lucide-react';
 import { SelectField } from './SelectField';
+import { EhRouteWorkspace } from '../app/routes';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -10,8 +11,6 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { SyncWorkspace } from './SyncWorkspace';
-import { UploadPanel } from './UploadPanel';
-import { DeduplicationWorkspace } from './DeduplicationWorkspace';
 import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
 import { ACCENT_PRESETS, DEFAULT_ACCENT_COLOR, contrastRatio, isAccessibleAccent, normalizeAccentColor } from '../lib/accentColor';
@@ -38,6 +37,7 @@ function formatCacheBytes(value: number): string {
 const settingsSections = [
   { id: 'settings-preferences', label: '阅读与存储' },
   { id: 'settings-server', label: '服务器连接' },
+  { id: 'settings-eh', label: 'E-Hentai' },
   { id: 'settings-migration', label: '数据迁移' },
   { id: 'settings-sync', label: '同步账户' },
   { id: 'settings-tools', label: '工具' },
@@ -453,14 +453,26 @@ export function SettingsWorkspace() {
         <div className="settings-sync-content"><SyncWorkspace embedded /></div>
       </section>
       )}
+      {selectedSettingsSection === 'settings-eh' && (
+      /* The sidebar no longer carries an E-Hentai entry; the account form and the
+         browse workspace live here. */
+      <section className="settings-section" id="settings-eh" aria-labelledby="eh-settings-title">
+        <div>
+          <h2 id="eh-settings-title">E-Hentai</h2>
+        </div>
+        <div className="settings-eh-content"><EhRouteWorkspace /></div>
+      </section>
+      )}
       {selectedSettingsSection === 'settings-tools' && (
       <section className="settings-section" id="settings-tools" aria-labelledby="tools-title">
         <div>
           <h2 id="tools-title">工具</h2>
         </div>
-        <div className="settings-tools-panels">
-          <UploadPanel />
-          <DeduplicationWorkspace embedded />
+        {/* Index only: the upload and dedup workspaces are full routes, so they
+            get their own scroll area instead of being squeezed in here. */}
+        <div className="settings-tools-links">
+          <Link className="secondary-action" to="/tools/upload"><Upload aria-hidden="true" />上传档案</Link>
+          <Link className="secondary-action" to="/tools/dedup"><CopyCheck aria-hidden="true" />重复档案查重</Link>
         </div>
       </section>
       )}

@@ -14,8 +14,10 @@ afterEach(() => {
 
 const preferences = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 };
 
+// Upload and dedup are full routes now; the settings tools section is an index
+// of links to them.
 function renderTools() {
-  return render(<MemoryRouter initialEntries={['/settings?section=tools']}><App /></MemoryRouter>);
+  return render(<MemoryRouter initialEntries={['/tools/upload']}><App /></MemoryRouter>);
 }
 
 describe('settings tools upload', () => {
@@ -87,7 +89,7 @@ describe('settings tools upload', () => {
     expect(await screen.findByRole('button', { name: '选择文件并上传' })).not.toBeDisabled();
   });
 
-  it('keeps deduplication in the tools section without the Readoshi import', async () => {
+  it('keeps deduplication on its own route without the Readoshi import', async () => {
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: preferences };
       if (command === 'list_archives' || command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
@@ -95,10 +97,23 @@ describe('settings tools upload', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    renderTools();
+    render(<MemoryRouter initialEntries={['/tools/dedup']}><App /></MemoryRouter>);
 
     expect(await screen.findByRole('button', { name: /开始扫描/ })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '导入 Readoshi 不重复关系' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '查重工作区' })).not.toBeInTheDocument();
+  });
+
+  it('reaches both tools from the settings index', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: preferences };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'cache_stats') return { ok: true, value: { imageBytes: 0, imageEntries: 0, maxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/settings?section=tools']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('link', { name: '上传档案' })).toHaveAttribute('href', '/tools/upload');
+    expect(screen.getByRole('link', { name: '重复档案查重' })).toHaveAttribute('href', '/tools/dedup');
   });
 });

@@ -2735,6 +2735,15 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
+/* Tools section is an index of links; the workspaces themselves are routes. */
+.settings-tools-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.settings-eh-content { min-width: 0; }
+
 .settings-tool-panel {
   display: grid;
   gap: var(--space-3);

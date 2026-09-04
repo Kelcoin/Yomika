@@ -1,7 +1,6 @@
 import {
   Archive,
   Download,
-  Globe,
   History,
   Home,
   PanelLeftClose,
@@ -9,7 +8,6 @@ import {
   Settings,
   Star,
   ArrowUp,
-  CopyCheck,
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -22,9 +20,7 @@ const navigation = [
   { to: '/library', label: '档案库', icon: Archive, mobile: true },
   { to: '/history', label: '历史', icon: History, mobile: true },
   { to: '/watchlist', label: '收藏夹', icon: Star, mobile: true },
-  { to: '/eh', label: 'E-Hentai', icon: Globe, mobile: false },
   { to: '/downloads', label: '下载', icon: Download, mobile: false },
-  { to: '/dedup', label: '查重', icon: CopyCheck, mobile: false },
   { to: '/settings', label: '设置', icon: Settings, mobile: true },
 ] as const;
 
