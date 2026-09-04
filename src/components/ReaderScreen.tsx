@@ -1,9 +1,11 @@
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, ChevronLeft, ChevronRight, Columns2, File, Maximize2, Minimize2, Minus, RotateCcw, ScrollText, ZoomIn, Play, Pause, PanelRight } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, applyZoom, clampZoom, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, resolveReaderLayout, resetZoom, toggleDoubleTapZoom, toggleReaderChrome, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { formatByteSize, pickCardTags } from '../lib/archiveCardPresentation';
+import { translateRawTag } from '../lib/tags';
 
 interface ReaderScreenProps {
   archiveId: string;
@@ -18,9 +20,13 @@ interface ReaderScreenProps {
   prefetchDistance?: number;
   releasePage?: (pageIndex: number) => void;
   onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection }) => void;
+  /** Retry hook for the failure state; the reader itself cannot refetch pages. */
+  onRetry?: () => void;
+  /** Archive facts for the overview panel (cover, tags, byte size). */
+  info?: { cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined } | undefined;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, prefetchDistance = 1 }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   const [loadedPages, setLoadedPages] = useState(pages);
@@ -32,6 +38,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const reportedPageRef = useRef(state.pageIndex);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
+  const dragPagedRef = useRef(false);
 
   useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
   useEffect(() => { layoutRef.current = state.layout; }, [state.layout]);
@@ -103,15 +110,23 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => {
     const element = rootRef.current;
     if (!element) return undefined;
+    let settleTimer: number | undefined;
     const onWheel = (event: globalThis.WheelEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (layoutRef.current === 'webtoon' || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller')) return;
+      if (layoutRef.current === 'webtoon' || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller, .reader-overview')) return;
       if (event.deltaY === 0) return;
       if (event.cancelable) event.preventDefault();
-      setZoom((current) => applyZoom(current, current.scale - event.deltaY * 0.002, current.panX, current.panY));
+      setZoom((current) => zoomByWheel(current, event.deltaY));
+      // Springs an overshoot back once the wheel goes quiet, so the limits feel
+      // elastic instead of hard-stopping mid-gesture.
+      window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(() => setZoom(settleZoom), 180);
     };
     element.addEventListener('wheel', onWheel, { passive: false });
-    return () => element.removeEventListener('wheel', onWheel);
+    return () => {
+      window.clearTimeout(settleTimer);
+      element.removeEventListener('wheel', onWheel);
+    };
   }, []);
 
   // Arrow keys are bound to the canvas, so it has to own focus from the start;
@@ -194,39 +209,82 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   function zoomIn() {
-    setZoom((current) => applyZoom(current, current.scale + 0.5, current.panX, current.panY));
+    setZoom((current) => zoomByStep(current, 1));
   }
 
   function zoomOut() {
-    setZoom((current) => applyZoom(current, current.scale - 0.5, current.panX, current.panY));
+    setZoom((current) => zoomByStep(current, -1));
   }
 
   function zoomReset() {
     setZoom(resetZoom);
   }
 
+  /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
+   * press-drag-release gesture here; touch keeps its own swipe handler. */
+  const pointerStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
+  const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    pointerStartRef.current = { x: event.clientX, y: event.clientY, time: Date.now() };
+  }, []);
+
+  const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
+    const start = pointerStartRef.current;
+    pointerStartRef.current = null;
+    if (!start || event.button !== 0) return;
+    if (zoomScaleRef.current > 1) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (Date.now() - start.time > 700) return;
+    if (Math.abs(dx) < SWIPE_THRESHOLD || Math.abs(dx) <= Math.abs(dy)) return;
+    // A drag is a page turn, not a chrome toggle.
+    dragPagedRef.current = true;
+    move(dx < 0 ? 'next' : 'previous');
+  }, []);
+
   const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout });
   const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
   const chromeVisible = state.phase === 'chrome-visible';
+  // One transform for everything on screen: scaling each image on its own made a
+  // double spread overlap, because both grew from their own centre.
+  const zoomStyle = {
+    transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`,
+    transformOrigin: 'center center',
+    transition: 'transform 140ms ease-out',
+  } as const;
 
   return (
     <main
       aria-label="漫画阅读器"
       className="reader-screen"
       ref={rootRef}
-      onClick={() => setState(toggleReaderChrome)}
+      onClick={(event) => {
+        // A drag that turned the page, and the second click of a double click,
+        // must not also toggle the chrome.
+        if (dragPagedRef.current) { dragPagedRef.current = false; return; }
+        if (event.detail > 1) return;
+        setState(toggleReaderChrome);
+      }}
+      onDoubleClick={() => setZoom((current) => toggleDoubleTapZoom(current))}
       onKeyDown={handleKeyDown}
+      onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
       tabIndex={0}
     >
       {state.layout === 'webtoon' ? (
-        <section className="reader-webtoon" aria-label="连续阅读">
-          {loadedPages.map((page, index) => page ? <img key={`${page}-${index}`} className="reader-page" style={{ transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`, transformOrigin: 'center center' }} src={page} alt={`第 ${index + 1} 页`} /> : null)}
+        // Explicit toggle: relying on the bubble from a scrolling container left
+        // the chrome unreachable in this mode.
+        <section className="reader-webtoon" aria-label="连续阅读" onClick={() => setState(toggleReaderChrome)}>
+          <div className="reader-webtoon-inner" style={zoomStyle}>
+            {loadedPages.map((page, index) => page ? <img key={`${page}-${index}`} className="reader-page" src={page} alt={`第 ${index + 1} 页`} /> : null)}
+          </div>
         </section>
       ) : visiblePages[0] ? (
-        <section className={state.layout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读">
-          {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" style={{ transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`, transformOrigin: 'center center' }} alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
+        <section className={state.layout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读" style={zoomStyle}>
+          {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
             if (state.layout === 'auto') {
               const image = event.currentTarget;
               setState((current) => ({ ...current, layout: resolveReaderLayout('auto', {
@@ -239,10 +297,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           }} /> : null)}
         </section>
       ) : (
+        /* JHenTai-style failure state: the message and a retry icon, nothing
+           else. Leaving is the top bar's job. */
         <section className="reader-error" onClick={stopChromeToggle}>
-          <h1>档案页尚未载入</h1>
-          <p>返回档案详情并重新加载页面列表。</p>
-          <Link to="/library"><ArrowLeft aria-hidden="true" />返回档案库</Link>
+          <p role="alert">页面加载失败</p>
+          <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={() => onRetry?.()}>
+            <RotateCcw aria-hidden="true" />
+          </button>
         </section>
       )}
 
@@ -264,14 +325,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
               <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
               <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
-              <button type="button" aria-label="单页" aria-pressed={state.layout === 'single' || state.layout === 'auto'} onClick={() => setState((current) => ({ ...current, layout: 'single' }))}><File aria-hidden="true" /></button>
-              <button type="button" aria-label="双页" aria-pressed={state.layout === 'double'} onClick={() => setState((current) => ({ ...current, layout: 'double' }))}><Columns2 aria-hidden="true" /></button>
-              <button type="button" aria-label="连续滚动" aria-pressed={state.layout === 'webtoon'} onClick={() => setState((current) => ({ ...current, layout: 'webtoon' }))}><ScrollText aria-hidden="true" /></button>
+              <button type="button" aria-label="单页" aria-pressed={state.layout === 'single' || state.layout === 'auto'} onClick={() => setState((current) => ({ ...current, layout: 'single' }))}><RectangleVertical aria-hidden="true" /></button>
+              <button type="button" aria-label="双页" aria-pressed={state.layout === 'double'} onClick={() => setState((current) => ({ ...current, layout: 'double' }))}><BookOpen aria-hidden="true" /></button>
+              <button type="button" aria-label="连续滚动" aria-pressed={state.layout === 'webtoon'} onClick={() => setState((current) => ({ ...current, layout: 'webtoon' }))}><GalleryVertical aria-hidden="true" /></button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
-              <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><PanelRight aria-hidden="true" /></button>
+              <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
               <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed={state.direction === 'rtl'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
               <button type="button" aria-label="放大" onClick={zoomIn}><ZoomIn aria-hidden="true" /></button>
-              <button type="button" aria-label="缩小" onClick={zoomOut}><Minus aria-hidden="true" /></button>
+              <button type="button" aria-label="缩小" onClick={zoomOut}><ZoomOut aria-hidden="true" /></button>
               {zoom.scale > 1 && <button type="button" aria-label="重置缩放" onClick={zoomReset}><RotateCcw aria-hidden="true" /></button>}
               {zoom.scale > 1 && <span>{Math.round(zoom.scale * 100)}%</span>}
               <button type="button" aria-label={isFullscreen ? '退出全屏' : '全屏'} onClick={toggleFullscreen}>
@@ -282,19 +343,42 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         )}
       </AnimatePresence>
       {thumbnailPanelOpen && (
-        <aside className="reader-thumbnail-panel" aria-label="页面缩略图">
-          {loadedPages.map((page, index) => {
-            const preview = thumbnails.get(index) ?? page;
-            return (
-              <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={(event) => {
-                stopChromeToggle(event);
-                setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
-              }}>
-                {preview ? <img src={preview} alt="" loading="lazy" /> : <span>{index + 1}</span>}
-              </button>
-            );
-          })}
-        </aside>
+        /* Centred overlay rather than a side drawer: it doubles as the archive
+           overview (cover, size, tags) plus the page grid. */
+        <div className="reader-overview-backdrop" onClick={() => setThumbnailPanelOpen(false)}>
+          <aside className="reader-overview" aria-label="档案概览" onClick={stopChromeToggle}>
+            <header className="reader-overview-heading">
+              <strong>{title}</strong>
+              <button type="button" className="reader-icon-button" aria-label="关闭概览" onClick={() => setThumbnailPanelOpen(false)}><X aria-hidden="true" /></button>
+            </header>
+            <div className="reader-overview-summary">
+              {info?.cover && <img className="reader-overview-cover" src={info.cover} alt="" />}
+              <div className="reader-overview-facts">
+                <p className="reader-overview-stats">{[`${pages.length} 页`, info?.sizeBytes ? formatByteSize(info.sizeBytes) : ''].filter(Boolean).join(' · ')}</p>
+                {(info?.tags?.length ?? 0) > 0 && (
+                  <div className="reader-overview-tags">
+                    {pickCardTags(info?.tags, 14).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="reader-overview-thumbnails">
+              {loadedPages.map((page, index) => {
+                const preview = thumbnails.get(index) ?? page;
+                return (
+                  <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={(event) => {
+                    stopChromeToggle(event);
+                    setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
+                    setThumbnailPanelOpen(false);
+                  }}>
+                    {preview ? <img src={preview} alt="" loading="lazy" /> : <span aria-hidden="true">{index + 1}</span>}
+                    <span className="reader-overview-page-number" aria-hidden="true">{index + 1}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+        </div>
       )}
     </main>
   );

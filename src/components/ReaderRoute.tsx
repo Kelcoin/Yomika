@@ -34,6 +34,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [pages, setPages] = useState<string[]>([]);
   const [error, setError] = useState<string>();
   const [retryToken, setRetryToken] = useState(0);
+  /** Cover, tags and byte size for the overview panel. Fetched once alongside
+   * the manifest; the panel is the only consumer. */
+  const [info, setInfo] = useState<{ cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined }>();
+  const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
   const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
@@ -53,6 +57,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     pageHandlesRef.current.clear();
     for (const handle of thumbnailHandlesRef.current.values()) imageCache.release(handle);
     thumbnailHandlesRef.current.clear();
+    if (coverHandleRef.current) imageCache.release(coverHandleRef.current);
+    coverHandleRef.current = undefined;
     pendingPagesRef.current.clear();
   }, []);
 
@@ -177,6 +183,26 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       contextRef.current = context;
       setScopeId(server.scopeId);
       setTitle(manifest.value.title);
+      // Overview facts load in the background: the panel is optional chrome, so
+      // it must not delay the first page.
+      void repository.loadArchiveMetadata(server.id, archiveId).then((metadata) => {
+        if (!mountedRef.current || contextRef.current !== context || !metadata.ok) return;
+        setInfo((current) => ({
+          ...current,
+          tags: metadata.value.tags ? metadata.value.tags.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
+          sizeBytes: metadata.value.size,
+        }));
+      });
+      void imageCache.load({ scopeId: server.scopeId, serverId: server.id, archiveId, rendition: 'cover', pageIndex: 0 })
+        .then((handle) => {
+          if (!mountedRef.current || contextRef.current !== context) {
+            imageCache.release(handle);
+            return;
+          }
+          coverHandleRef.current = handle;
+          setInfo((current) => ({ ...current, cover: handle.url }));
+        })
+        .catch(() => undefined);
       const progress = await repository.loadProgress(server.scopeId, archiveId);
       if (!mountedRef.current || contextRef.current !== context) return;
       const firstPage = requestedPage > 0
@@ -214,17 +240,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [error, showToast]);
 
   if (error) {
+    // JHenTai-style: the canvas holds the message and a retry icon, and leaving
+    // is the top bar's job rather than a second competing button.
     return (
-      <main className="reader-screen">
+      <main className="reader-screen reader-screen-error">
+        <header className="reader-error-bar">
+          <Link className="reader-icon-button" to="/library" aria-label="返回档案库"><ArrowLeft aria-hidden="true" /></Link>
+          <strong>{title}</strong>
+        </header>
         <section className="reader-error">
-          <h1>阅读器加载失败</h1>
           <p role="alert">{error}</p>
-          <div className="reader-error-actions">
-            <button className="secondary-action" type="button" onClick={() => setRetryToken((value) => value + 1)}>
-              <RotateCcw aria-hidden="true" />重试
-            </button>
-            <Link className="primary-action" to="/library"><ArrowLeft aria-hidden="true" />返回档案库</Link>
-          </div>
+          <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={() => setRetryToken((value) => value + 1)}>
+            <RotateCcw aria-hidden="true" />
+          </button>
         </section>
       </main>
     );
@@ -241,6 +269,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       loadPageThumbnail={loadPageThumbnail}
       prefetchDistance={prefetchDistance}
       releasePage={releasePage}
+      onRetry={() => setRetryToken((value) => value + 1)}
+      info={info}
       onProgress={(pageIndex, reading) => {
         if (!scopeId) return;
         void repository.saveProgress({

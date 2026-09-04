@@ -52,3 +52,10 @@ export function formatArchivePageMeta(pageCount: number, progressPage?: number |
   const current = progressPage != null && progressPage > 0 ? Math.min(progressPage, pageCount) : 0;
   return current > 0 ? `${current}/${pageCount} 页` : `${pageCount} 页`;
 }
+
+export function formatByteSize(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}

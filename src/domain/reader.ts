@@ -21,6 +21,13 @@ export type ReaderPhase = 'booting' | 'loading-page' | 'ready' | 'chrome-visible
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 const DOUBLE_TAP_ZOOM = 2;
+/** Gestures may overshoot the limits and spring back, the way native viewers
+ * behave; only `settleZoom` enforces the hard bounds. */
+export const ZOOM_RUBBER_MIN = 0.35;
+export const ZOOM_RUBBER_MAX = 4;
+/** Wheel steps land on 100% instead of sliding past it. */
+const ZOOM_SNAP_TOLERANCE = 0.05;
+const WHEEL_ZOOM_SENSITIVITY = 0.0015;
 
 export interface ZoomState {
   scale: number;
@@ -34,6 +41,31 @@ export function createZoomState(): ZoomState {
 
 export function clampZoom(scale: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale));
+}
+
+/** Multiplicative wheel zoom: a fixed additive step feels violent at 50% and
+ * sluggish at 300%, which is why the old linear curve never settled on 100%. */
+export function zoomByWheel(zoom: ZoomState, deltaY: number): ZoomState {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return zoom;
+  const scaled = zoom.scale * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY);
+  const snapped = Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
+  const scale = Math.min(ZOOM_RUBBER_MAX, Math.max(ZOOM_RUBBER_MIN, snapped));
+  return scale === 1 ? { scale: 1, panX: 0, panY: 0 } : { ...zoom, scale };
+}
+
+/** Applied when a gesture ends: pulls an overshoot back inside the limits and
+ * drops the pan once the page fits again. */
+export function settleZoom(zoom: ZoomState): ZoomState {
+  const scale = clampZoom(zoom.scale);
+  if (scale === zoom.scale) return scale <= 1 ? { scale, panX: 0, panY: 0 } : zoom;
+  return scale <= 1 ? { scale, panX: 0, panY: 0 } : { ...zoom, scale };
+}
+
+/** Button and double-click zoom share one ratio so repeated presses feel even. */
+export function zoomByStep(zoom: ZoomState, direction: 1 | -1): ZoomState {
+  const scale = clampZoom(zoom.scale * (direction > 0 ? 1.25 : 1 / 1.25));
+  const snapped = Math.abs(scale - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scale;
+  return snapped <= 1 ? { scale: snapped, panX: 0, panY: 0 } : { ...zoom, scale: snapped };
 }
 
 export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {

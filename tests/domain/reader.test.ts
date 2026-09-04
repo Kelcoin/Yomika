@@ -11,9 +11,12 @@ import {
   getVisiblePageIndexes,
   resolveReaderLayout,
   resetZoom,
+  settleZoom,
   sortArchivesByTitle,
   toggleDoubleTapZoom,
   toggleReaderChrome,
+  zoomByStep,
+  zoomByWheel,
   type ZoomState,
 } from '../../src/domain/reader';
 
@@ -133,6 +136,36 @@ describe('reader domain', () => {
 
       const desc = sortArchivesByTitle(items, 'desc');
       expect(desc.map((i) => i.title)).toEqual(['Gamma', 'Beta', 'Alpha Beta', 'Alpha']);
+    });
+  });
+
+  describe('zoom curve', () => {
+    it('zooms multiplicatively, snaps onto 100%, and springs back after a gesture', () => {
+      const start = createZoomState();
+
+      // A wheel notch scales by exp(-delta * 0.0015) rather than a fixed step, so
+      // the curve feels the same at 50% and at 300%.
+      const zoomedOut = zoomByWheel(start, 120);
+      expect(zoomedOut.scale).toBeCloseTo(Math.exp(-0.18), 5);
+      expect(zoomByWheel(zoomedOut, -120).scale).toBe(1);
+
+      // Coming back within the snap tolerance lands exactly on 100%, pan cleared.
+      expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, -1)).toEqual({ scale: 1, panX: 0, panY: 0 });
+
+      // Gestures may overshoot the hard limits...
+      const overshot = zoomByWheel({ scale: 2.9, panX: 0, panY: 0 }, -600);
+      expect(overshot.scale).toBeGreaterThan(3);
+      expect(overshot.scale).toBeLessThanOrEqual(4);
+      // ...and settling pulls them back in.
+      expect(settleZoom(overshot).scale).toBe(3);
+      expect(settleZoom({ scale: 0.36, panX: 5, panY: 5 })).toEqual({ scale: 0.5, panX: 0, panY: 0 });
+      expect(settleZoom({ scale: 2, panX: 5, panY: 5 })).toEqual({ scale: 2, panX: 5, panY: 5 });
+
+      // Button steps share the ratio and clamp hard.
+      expect(zoomByStep(start, 1).scale).toBeCloseTo(1.25, 5);
+      expect(zoomByStep({ scale: 2.8, panX: 0, panY: 0 }, 1).scale).toBe(3);
+      expect(zoomByStep({ scale: 0.5, panX: 0, panY: 0 }, -1).scale).toBe(0.5);
+      expect(zoomByWheel(start, 0)).toBe(start);
     });
   });
 });

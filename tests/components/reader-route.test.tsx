@@ -46,7 +46,16 @@ describe('reader route', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '下一页' }));
     expect(await screen.findByRole('img', { name: '第 2 页' })).toBeInTheDocument();
-    expect(calls).toEqual(['list_servers', 'load_preferences', 'load_reader_manifest', 'load_reading_progress', 'cache_read_image', 'cache_read_image', 'load_reader_page', 'load_reader_page', 'save_reading_progress']);
+    // The overview panel's facts (metadata + cover) load in the background, so
+    // their exact interleaving is not fixed; what matters is which commands run
+    // and that progress is written after the page turn.
+    expect(new Set(calls)).toEqual(new Set([
+      'list_servers', 'load_preferences', 'load_reader_manifest', 'load_archive_metadata',
+      'load_reading_progress', 'load_archive_thumbnail', 'cache_read_image', 'load_reader_page',
+      'save_reading_progress',
+    ]));
+    expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
+    expect(calls.at(-1)).toBe('save_reading_progress');
     expect(progressScopes).toEqual(['scope-real', 'scope-real']);
   });
 
@@ -133,7 +142,7 @@ describe('reader route', () => {
     expect(await screen.findByRole('link', { name: '返回档案库' })).toHaveAttribute('href', '/library');
     expect(screen.getAllByText('服务器暂时不可用').length).toBeGreaterThan(1);
 
-    await user.click(screen.getByRole('button', { name: '重试' }));
+    await user.click(screen.getByRole('button', { name: '重试加载' }));
     await waitFor(() => expect(attempts).toBe(2));
   });
 

@@ -67,9 +67,15 @@ describe('reader screen', () => {
     // React registers wheel listeners as passive, so this only holds while the
     // component binds its own non-passive listener.
     expect(fireEvent.wheel(reader, { deltaY: 120 })).toBe(false);
-    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(0.76) translate(0px, 0px)');
+    // One transform on the spread, not one per image: a double spread used to
+    // overlap because both pages scaled from their own centre. The curve is
+    // multiplicative, so 120 units of wheel is exp(-0.18) ≈ 0.835.
+    const spread = screen.getByRole('region', { name: '分页阅读' });
+    expect(spread.getAttribute('style')).toMatch(/scale\(0\.83/);
+    expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
-    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveStyle('transform: scale(1) translate(0px, 0px)');
+    // Coming back within 5% of 100% snaps exactly onto it.
+    expect(spread).toHaveStyle('transform: scale(1) translate(0px, 0px)');
     const horizontalScroller = document.createElement('div');
     horizontalScroller.className = 'horizontal-scroller';
     reader.append(horizontalScroller);
@@ -150,6 +156,51 @@ describe('reader screen', () => {
     await vi.waitFor(() => expect(loadPageThumbnail.mock.calls.map(([index]) => index)).toEqual([0, 1, 2, 3, 4]));
     // Only the prefetch window may be fetched at full size, never the whole archive.
     expect(loadPage.mock.calls.map(([index]) => index)).toEqual([1]);
+  });
+
+  it('turns pages with a pointer drag on desktop', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+
+    // Windows drags arrive as mouse events, so paging cannot rely on touch only.
+    fireEvent.mouseDown(reader, { button: 0, clientX: 400, clientY: 200 });
+    fireEvent.mouseUp(reader, { button: 0, clientX: 200, clientY: 210 });
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+
+    fireEvent.mouseDown(reader, { button: 0, clientX: 200, clientY: 200 });
+    fireEvent.mouseUp(reader, { button: 0, clientX: 400, clientY: 205 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+
+    // A press without sideways travel is a tap, not a page turn.
+    fireEvent.mouseDown(reader, { button: 0, clientX: 300, clientY: 200 });
+    fireEvent.mouseUp(reader, { button: 0, clientX: 305, clientY: 200 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('opens the overview panel in the centre with archive facts', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <ReaderScreen
+          archiveId="a1"
+          title="Test archive"
+          pages={pages}
+          info={{ tags: ['female:big breasts', 'language:chinese'], sizeBytes: 5 * 1024 * 1024 }}
+        />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+
+    const overview = screen.getByRole('complementary', { name: '档案概览' });
+    expect(overview).toBeInTheDocument();
+    expect(within(overview).getByText('3 页 · 5.0 MB')).toBeInTheDocument();
+    expect(within(overview).getByText(/big breasts|巨乳/)).toBeInTheDocument();
+    // Jumping from the panel closes it and moves the reader.
+    await user.click(within(overview).getByRole('button', { name: '跳转到第 3 页' }));
+    expect(screen.queryByRole('complementary', { name: '档案概览' })).not.toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
   });
 
   it('renders double pages and webtoon pages as distinct layouts', async () => {
@@ -252,16 +303,18 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
 
+    // Steps are multiplicative (x1.25), so repeated presses feel even instead of
+    // jumping in fixed 50% increments.
     await user.click(screen.getByRole('button', { name: '放大' }));
     expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-    expect(screen.getByText('150%')).toBeInTheDocument();
+    expect(screen.getByText('125%')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '放大' }));
-    expect(screen.getByText('200%')).toBeInTheDocument();
+    expect(screen.getByText('156%')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '重置缩放' }));
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
-    expect(screen.queryByText('150%')).not.toBeInTheDocument();
+    expect(screen.queryByText('125%')).not.toBeInTheDocument();
   });
 
   it('clamps zoom to maximum and minimum via buttons', async () => {
@@ -285,10 +338,12 @@ describe('reader screen', () => {
 
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
 
-    await user.click(zoomIn);
-    await user.click(zoomIn);
+    // Back above 100% the readout returns; the exact stop depends on the ratio,
+    // so assert the invariant rather than a magic number.
+    for (let i = 0; i < 4; i++) {
+      await user.click(zoomIn);
+    }
     expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-    expect(screen.getByText('150%')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '重置缩放' }));
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
