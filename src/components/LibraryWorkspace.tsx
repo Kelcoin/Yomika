@@ -54,9 +54,12 @@ interface LibraryWorkspaceProps {
   /** Supplying a toggle turns each card into a selectable row. */
   selectedArchiveIds?: ReadonlySet<string> | undefined;
   onToggleSelected?: ((archiveId: string, checked: boolean) => void) | undefined;
+  /** Opens the card context menu at the pointer; cards are the only elements
+   * that answer a right click. */
+  onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, onAddCategory, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -157,6 +160,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         onSelect?.(archive);
         if (!showDetail) navigate(`/library/${archive.archiveId}`);
       }}
+      onContextMenu={onArchiveContextMenu ? (event) => {
+        // Cards are the only elements with a menu; everything else keeps the
+        // platform default (which Tauri suppresses anyway).
+        event.preventDefault();
+        event.stopPropagation();
+        onArchiveContextMenu(archive, { x: event.clientX, y: event.clientY });
+      } : undefined}
       type="button"
     >
       {<LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {

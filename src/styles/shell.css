@@ -1702,6 +1702,37 @@ body::-webkit-scrollbar,
 
 .archive-page-thumbnail-placeholder { font-size: 11px; }
 
+/* Card context menu (cards only; other elements keep the platform default). */
+.archive-context-menu {
+  z-index: var(--z-menu, 60);
+  display: grid;
+  gap: 2px;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-menu);
+}
+
+.archive-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 var(--space-2);
+  border-radius: 6px;
+  color: var(--ink-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  outline: none;
+}
+
+.archive-context-menu-item[data-highlighted] { background: var(--surface-muted); }
+.archive-context-menu-item.is-danger { color: var(--state-danger); }
+.archive-context-menu-item svg { width: 16px; height: 16px; }
+.archive-context-menu-separator { height: 1px; margin: 4px 2px; background: var(--hairline); }
+
 /* Recommendations: one tabbed rail instead of two stacked ones. */
 .archive-recommendations {
   display: grid;

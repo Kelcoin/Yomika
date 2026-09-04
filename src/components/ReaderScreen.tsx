@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -24,9 +24,11 @@ interface ReaderScreenProps {
   onRetry?: () => void;
   /** Archive facts for the overview panel (cover, tags, byte size). */
   info?: { cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined } | undefined;
+  /** Marks the session as unrecorded; the caller skips progress writes. */
+  incognito?: boolean;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, prefetchDistance = 1 }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   const [loadedPages, setLoadedPages] = useState(pages);
@@ -320,6 +322,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             <header>
               <Link className="reader-icon-button" to="/library" aria-label="返回档案库"><ArrowLeft aria-hidden="true" /></Link>
               <strong>{title}</strong>
+              {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
             </header>
             <div className="reader-toolbar" role="toolbar" aria-label="阅读控制">
               <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>

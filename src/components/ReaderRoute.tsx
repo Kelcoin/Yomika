@@ -28,6 +28,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const prefetchDistance = preferences.prefetchPages;
   const upscaleEnabled = preferences.upscaleBackend !== 'off';
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
+  /** Incognito reading: no progress, no history. The reader shows a marker so it
+   * is obvious the session is not being recorded. */
+  const incognito = searchParams.get('incognito') === '1';
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
   const [title, setTitle] = useState('阅读器');
@@ -272,7 +275,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       onRetry={() => setRetryToken((value) => value + 1)}
       info={info}
       onProgress={(pageIndex, reading) => {
-        if (!scopeId) return;
+        if (!scopeId || incognito) return;
         void repository.saveProgress({
           scopeId,
           archiveId,
@@ -282,6 +285,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           direction: reading.direction,
         });
       }}
+      incognito={incognito}
     />
   );
 }

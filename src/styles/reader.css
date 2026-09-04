@@ -146,6 +146,20 @@
   white-space: nowrap;
 }
 
+.reader-incognito-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-utility);
+  font-size: 11px;
+}
+
+.reader-incognito-badge svg { width: 14px; height: 14px; }
+
 .reader-icon-button,
 .reader-toolbar button {
   display: grid;

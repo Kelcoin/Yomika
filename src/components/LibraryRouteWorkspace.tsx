@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
+import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories, shouldSyncLibrary } from '../lib/librarySync';
 import type { ImageHandle } from '../lib/unifiedImageCache';
@@ -44,6 +45,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
+  const [contextTarget, setContextTarget] = useState<ArchiveContextMenuTarget>();
+  const navigate = useNavigate();
   const detailRequest = useRef(0);
   const detailThumbnailHandle = useRef<ImageHandle>();
   const detailThumbnailAbort = useRef<AbortController>();
@@ -363,6 +366,29 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       onSelect={(archive) => {
         if (!serverId || !scopeId) return;
         loadArchiveDetails(serverId, scopeId, archive);
+        }}
+      onArchiveContextMenu={(archive, at) => setContextTarget({ archive, ...at })}
+      />
+      <ArchiveContextMenu
+        target={contextTarget}
+        onClose={() => setContextTarget(undefined)}
+        onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}`)}
+        onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1`)}
+        onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`)}
+        onCopyId={(archive) => {
+          void navigator.clipboard?.writeText(archive.archiveId).then(
+            () => showToast('档案 ID 已复制', 'success'),
+            () => showToast('复制失败', 'error'),
+          );
+        }}
+        inReadingList={contextTarget ? watchlist.some((item) => item.archiveId === contextTarget.archive.archiveId && !item.deleted) : false}
+        onToggleReadingList={(archive, next) => {
+          if (!scopeId) return;
+          void repository.setWatchlist(scopeId, archive.archiveId, next).then((result) => {
+            if (!result.ok) { showToast(result.error.message, 'error'); return; }
+            setWatchlist((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
+            showToast(next ? '已加入待看' : '已移出待看', 'success');
+          });
         }}
       />
     </>

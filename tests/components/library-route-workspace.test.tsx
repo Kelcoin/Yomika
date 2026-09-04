@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -512,5 +512,37 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Network error');
     expect(screen.getByRole('button', { name: /^Stable Archive\b/ })).toBeInTheDocument();
+  });
+
+  it('opens a card context menu with incognito reading and the reading list', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://lrr.test', scopeId: 'scope-a' }] };
+      if (command === 'list_archives_page') {
+        return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'a1', title: 'Archive One', pageCount: 4, updatedAt: '2026-09-03T00:00:00Z' }], total: 1, hasMore: false } };
+      }
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_history') return { ok: true, value: [] };
+      if (command === 'probe_new_archives') return { ok: true, value: false };
+      if (command === 'load_archive_metadata') {
+        return { ok: true, value: { archiveId: 'a1', title: 'Archive One', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 4, lastReadTime: 0, size: 100 } };
+      }
+      if (command === 'set_watchlist') {
+        return { ok: true, value: { scopeId: 'scope-a', archiveId: String((args as { archiveId?: string }).archiveId), addedAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false } };
+      }
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/library']}><App /></MemoryRouter>);
+
+    const card = await screen.findByRole('button', { name: /^Archive One/ });
+    // Only cards answer a right click.
+    fireEvent.contextMenu(card, { clientX: 120, clientY: 80 });
+
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: '无痕阅读' })).toBeInTheDocument();
+    await user.click(within(menu).getByRole('menuitem', { name: '加入待看' }));
+    expect(await screen.findByText('已加入待看')).toBeInTheDocument();
   });
 });
