@@ -13,6 +13,7 @@ const preferences = {
   prefetchPages: 2,
   coverConcurrency: 4,
   startupRoute: 'home' as const,
+  cardStyle: 'wide' as const,
   upscaleBackend: 'off' as const,
   upscaleModel: '', decensorModel: '',
   customCss: '',

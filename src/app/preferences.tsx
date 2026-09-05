@@ -111,3 +111,16 @@ export function usePreferences(): PreferencesContextValue {
   if (!value) throw new Error('PreferencesProvider is missing');
   return value;
 }
+
+/** The archive card style, and a setter that persists it.
+ *
+ * The library and the three shelves render the same list and have to agree on
+ * how a card is drawn, so the choice is a preference rather than either one's
+ * component state — as state it also reset to the default on every navigation. */
+export function useCardStyle(): { cardStyle: PreferenceSnapshot['cardStyle']; setCardStyle: (value: PreferenceSnapshot['cardStyle']) => void } {
+  const { preferences, save } = usePreferences();
+  return {
+    cardStyle: preferences.cardStyle,
+    setCardStyle: (value) => { void save({ ...preferences, cardStyle: value }); },
+  };
+}

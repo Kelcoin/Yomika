@@ -20,6 +20,8 @@ import type { Category } from '../repositories/nativeLibraryRepository';
 export function useArchiveContextMenu(options: {
   inReadingList?: ((archiveId: string) => boolean) | undefined;
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
+  /** Renames that menu item, for a shelf that is not the reading list. */
+  readingListLabels?: { add: string; remove: string } | undefined;
   categories?: Category[] | undefined;
   onAddCategory?: ((archive: ArchiveRecord, categoryId: string) => void) | undefined;
 } = {}): {
@@ -51,6 +53,7 @@ export function useArchiveContextMenu(options: {
       }}
       inReadingList={target ? options.inReadingList?.(target.archive.archiveId) ?? false : false}
       {...(options.onToggleReadingList ? { onToggleReadingList: options.onToggleReadingList } : {})}
+      {...(options.readingListLabels ? { readingListLabels: options.readingListLabels } : {})}
       {...(options.categories ? { categories: options.categories } : {})}
       {...(options.onAddCategory ? { onAddCategory: options.onAddCategory } : {})}
     />

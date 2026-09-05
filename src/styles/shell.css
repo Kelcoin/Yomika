@@ -929,57 +929,35 @@ body::-webkit-scrollbar,
   transform: translateX(3px);
 }
 
-.watchlist-controls {
-  display: flex;
-  align-items: end;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.watchlist-sort {
-  display: grid;
-  gap: var(--space-2);
-  color: var(--ink-secondary);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.watchlist-select-all {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 44px;
-  color: var(--ink-secondary);
-  font-size: 13px;
-}
-
-.watchlist-row {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  align-items: center;
-}
-
-.watchlist-row > input {
-  justify-self: center;
-}
-
-.watchlist-row > a {
-  min-width: 0;
-}
-
 .empty-state {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-5);
-  min-height: 180px;
-  padding: var(--space-8) 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 320px;
+  padding: var(--space-8) var(--space-5);
+  text-align: center;
 }
 
 .empty-state > svg {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   color: var(--ink-faint);
   stroke-width: 1.4;
+}
+
+.empty-state h2 { margin: 0; }
+.empty-state p { margin: 0; max-width: 48ch; }
+.empty-state > .primary-action,
+.empty-state > .secondary-action { margin-top: var(--space-2); }
+
+/* The shelves are the list and nothing else: no page title, no control bar. */
+.shelf-workspace {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
 }
 
 .library-heading {
@@ -1015,12 +993,33 @@ body::-webkit-scrollbar,
   .archive-detail-route-actions .archive-action-label { display: none; }
 }
 
+/* The status bar is a 28px band of --surface-panel pinned to the bottom of every
+   route. Every other route keeps 80px of workspace padding above it, so it reads
+   as chrome; the library zeroes that padding to run edge to edge, which left the
+   last row of cards flush against a dark strip. Give the panels the same air.
+   The bar itself is not the canvas colour on purpose — it is a bar — but it does
+   not need the panel's full contrast to say so. */
 .library-shell-list,
 .library-shell-detail {
   min-width: 0;
   min-height: 0;
+  padding: var(--space-4) var(--space-4) var(--space-6);
+}
+
+/* The loading state keeps the route's own heading — it is the same 32px 档案库
+   the workspace draws, so the list appearing under it is not a jump — and puts
+   the indicator in the middle of what is still empty. */
+.library-shell-loading {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  place-items: center;
+  min-height: 320px;
+  height: 100%;
   padding: var(--space-4);
 }
+
+.library-shell-loading .workspace-heading { justify-self: start; }
+.library-shell-loading .loading-indicator { align-self: center; }
 
 .library-shell-list {
   position: relative;
@@ -1537,6 +1536,51 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail { padding: var(--space-3); }
+
+/* A timeline down the right of the list: one time per row, on a rail so a run of
+   rows reads as a sequence. Only the history has a time worth showing. */
+.archive-list.is-wide .archive-row:has(.archive-row-timeline) {
+  grid-template-columns: 100px minmax(0, 1fr) 64px;
+}
+
+.archive-row-timeline {
+  position: relative;
+  align-self: stretch;
+  display: grid;
+  align-content: start;
+  justify-items: end;
+  padding: var(--space-2) var(--space-2) 0 var(--space-4);
+  color: var(--ink-faint);
+  font-family: var(--font-utility);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.archive-row-timeline::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 6px;
+  width: 1px;
+  background: var(--hairline);
+  content: "";
+}
+
+.archive-row-timeline::after {
+  position: absolute;
+  top: 12px;
+  left: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--brand-vermilion) 70%, var(--surface-panel));
+  content: "";
+}
+
+/* The thumbnail grid has no row to hang a rail on, so the time rides the card. */
+.archive-list.is-thumbnail .archive-row-timeline {
+  display: none;
+}
 
 .archive-list.is-thumbnail .archive-list-inner {
   position: relative;
@@ -2597,7 +2641,7 @@ body::-webkit-scrollbar,
   padding: 0 clamp(20px, 3vw, 48px);
   overflow: hidden;
   border-top: 1px solid var(--hairline);
-  background: var(--surface-panel);
+  background: color-mix(in srgb, var(--surface-panel) 55%, var(--surface-canvas));
 }
 
 .status-item {
@@ -2731,10 +2775,6 @@ body::-webkit-scrollbar,
 
 .status-active svg {
   color: var(--brand-cyan);
-}
-
-.empty-state-action {
-  margin-top: calc(-1 * var(--space-5));
 }
 
 .compact-nav {
@@ -2942,8 +2982,7 @@ body::-webkit-scrollbar,
   .eh-search-form,
   .task-row,
   .server-row,
-  .sync-account-row,
-  .watchlist-controls {
+  .sync-account-row {
     align-items: stretch;
     flex-direction: column;
   }
@@ -2951,12 +2990,6 @@ body::-webkit-scrollbar,
   .server-row-actions {
     width: 100%;
     justify-content: space-between;
-  }
-
-  .watchlist-controls .search-label,
-  .watchlist-controls .secondary-action,
-  .watchlist-sort select {
-    width: 100%;
   }
 
   .library-heading-actions {

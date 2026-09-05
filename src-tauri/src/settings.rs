@@ -13,6 +13,7 @@ const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
+const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
 const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
@@ -68,6 +69,11 @@ pub struct PreferenceSnapshot {
     /// Which page the app opens at launch: "home" or "library".
     #[serde(default = "default_startup_route")]
     pub startup_route: String,
+    /// How archive cards are drawn: "wide" (a list row) or "thumbnail" (a grid).
+    /// A preference rather than view state because the shelves follow the same
+    /// choice, and it used to reset to the default on every navigation.
+    #[serde(default = "default_card_style")]
+    pub card_style: String,
     #[serde(default = "default_upscale_backend")]
     pub upscale_backend: String,
     #[serde(default)]
@@ -88,6 +94,7 @@ pub struct PreferenceSnapshot {
 fn default_prefetch_pages() -> u8 { 1 }
 fn default_cover_concurrency() -> u8 { 4 }
 fn default_startup_route() -> String { "home".to_string() }
+fn default_card_style() -> String { "wide".to_string() }
 fn default_upscale_backend() -> String { "off".to_string() }
 
 impl Default for PreferenceSnapshot {
@@ -100,6 +107,7 @@ impl Default for PreferenceSnapshot {
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
             startup_route: default_startup_route(),
+            card_style: default_card_style(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
             decensor_model: String::new(),
@@ -124,6 +132,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || value.prefetch_pages > MAX_PREFETCH_PAGES
         || !(1..=8).contains(&value.cover_concurrency)
         || !matches!(value.startup_route.as_str(), "home" | "library")
+        || !matches!(value.card_style.as_str(), "wide" | "thumbnail")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
         || value.decensor_model.len() > 128
@@ -164,6 +173,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         prefetch_pages: load_value(connection, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: load_value(connection, COVER_CONCURRENCY_KEY, defaults.cover_concurrency)?,
         startup_route: load_value(connection, STARTUP_ROUTE_KEY, defaults.startup_route)?,
+        card_style: load_value(connection, CARD_STYLE_KEY, defaults.card_style)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
         decensor_model: load_value(connection, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
@@ -187,6 +197,7 @@ pub fn save_preferences_to(
         (PREFETCH_PAGES_KEY, serde_json::to_string(&value.prefetch_pages)),
         (COVER_CONCURRENCY_KEY, serde_json::to_string(&value.cover_concurrency)),
         (STARTUP_ROUTE_KEY, serde_json::to_string(&value.startup_route)),
+        (CARD_STYLE_KEY, serde_json::to_string(&value.card_style)),
         (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
         (UPSCALE_MODEL_KEY, serde_json::to_string(&value.upscale_model)),
         (DECENSOR_MODEL_KEY, serde_json::to_string(&value.decensor_model)),
@@ -346,6 +357,7 @@ mod tests {
             prefetch_pages: 3,
             cover_concurrency: 6,
             startup_route: "library".into(),
+            card_style: "thumbnail".into(),
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
             decensor_model: "aletheia-lens".into(),

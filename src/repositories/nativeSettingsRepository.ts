@@ -18,6 +18,10 @@ export const PreferenceSnapshotSchema = z.object({
   /** Which page opens at launch. Someone who lives in the library should not
    * have to step through the home page every time. */
   startupRoute: z.enum(['home', 'library']).default('home'),
+  /** How archive cards are drawn. A preference, not view state: the shelves
+   * follow the same choice, and as component state it reset to the default on
+   * every navigation. */
+  cardStyle: z.enum(['wide', 'thumbnail']).default('wide'),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
   /** Installed de-censoring bundle to run on reader pages. Empty means off:
@@ -51,6 +55,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   prefetchPages: 1,
   coverConcurrency: 4,
   startupRoute: 'home',
+  cardStyle: 'wide',
   upscaleBackend: 'off',
   upscaleModel: '',
   decensorModel: '',

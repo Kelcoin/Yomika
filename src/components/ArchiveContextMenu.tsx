@@ -21,6 +21,9 @@ interface ArchiveContextMenuProps {
   /** Absent when the caller has no reading list, e.g. the dedup workspace. */
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
   inReadingList?: boolean | undefined;
+  /** What that item is called. The favourites shelf uses the same slot to remove
+   * a favourite, and calling that 移出待看 named the wrong shelf. */
+  readingListLabels?: { add: string; remove: string } | undefined;
   /** Static categories only — see the submenu comment. */
   categories?: Category[] | undefined;
   onAddCategory?: ((archive: ArchiveRecord, categoryId: string) => void) | undefined;
@@ -41,6 +44,7 @@ export function ArchiveContextMenu({
   onCopyId,
   onToggleReadingList,
   inReadingList = false,
+  readingListLabels = { add: '加入待看', remove: '移出待看' },
   categories,
   onAddCategory,
   onDelete,
@@ -66,7 +70,7 @@ export function ArchiveContextMenu({
           {onToggleReadingList && (
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onToggleReadingList(archive, !inReadingList)}>
               {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
-              {inReadingList ? '移出待看' : '加入待看'}
+              {inReadingList ? readingListLabels.remove : readingListLabels.add}
             </DropdownMenu.Item>
           )}
           {onEditMetadata && (

@@ -101,7 +101,7 @@ describe('application shell', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
@@ -126,7 +126,7 @@ describe('application shell', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
@@ -157,7 +157,7 @@ describe('application shell', () => {
           { scopeId: 'scope-a', archiveId: 'kept', pageIndex: 2, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 },
         ] };
       }
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') {
         return { ok: true, value: [
           { serverId: 'scope-a', archiveId: 'gone', title: '已删除的档案', pageCount: 3, updatedAt: '2026-08-29T00:00:00Z' },
@@ -206,7 +206,7 @@ describe('application shell', () => {
           : { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       }
       if (command === 'list_reading_history') return { ok: true, value: [] };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };

@@ -81,7 +81,7 @@ describe('library route workspace', () => {
     expect(newer.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('filters and sorts watchlist records by resolved archive title', async () => {
+  it('searches a shelf with the library search bar, newest entry first', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
@@ -99,22 +99,20 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
 
+    // Most recently added first. The sort control offered "title" or "recent";
+    // recency is the only order that says anything about a shelf.
     const alpha = await screen.findByRole('button', { name: /Alpha archive/ });
     const beta = screen.getByRole('button', { name: /Beta archive/ });
     expect(alpha.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    await user.type(screen.getByRole('searchbox', { name: '筛选待看' }), 'beta');
+    // The library's own search bar, scoped to this shelf: it filters the records
+    // the page already holds, so it applies per keystroke rather than on Enter.
+    await user.type(screen.getByRole('searchbox', { name: '搜索收藏夹' }), 'beta');
     expect(screen.queryByRole('button', { name: /Alpha archive/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Beta archive/ })).toBeInTheDocument();
-
-    await user.clear(screen.getByRole('searchbox', { name: '筛选待看' }));
-    await user.selectOptions(screen.getByRole('combobox', { name: '待看排序' }), 'recent');
-    const recentFirst = screen.getByRole('button', { name: /Alpha archive/ });
-    const recentSecond = screen.getByRole('button', { name: /Beta archive/ });
-    expect(recentFirst.compareDocumentPosition(recentSecond) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('removes selected watchlist records locally and reports pending sync', async () => {
+  it('removes a shelf entry from the card context menu', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
@@ -130,42 +128,14 @@ describe('library route workspace', () => {
     setInvokeAdapterForTests(adapter);
     render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
 
-    await user.click(await screen.findByRole('checkbox', { name: '选择 Remove archive' }));
-    await user.click(screen.getByRole('button', { name: '移除所选' }));
+    // The multi-select bar this replaces was the only control on the page, and a
+    // right click already addresses one card.
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /Remove archive/ }));
+    await user.click(await screen.findByRole('menuitem', { name: /移出收藏夹/ }));
 
     expect(adapter).toHaveBeenCalledWith('set_watchlist', { scopeId: 'scope-a', archiveId: 'a', added: false });
-    expect(screen.queryByRole('link', { name: /Remove archive/ })).not.toBeInTheDocument();
-    expect(screen.getByText('已保存在本机，等待同步')).toBeInTheDocument();
-  });
-
-  it('keeps failed watchlist removals selected and explains the partial failure', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_watchlist') return { ok: true, value: [
-        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
-        { scopeId: 'scope-a', archiveId: 'b', addedAt: '2026-08-27T00:00:00Z', updatedAt: '2026-08-27T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
-      ] };
-      if (command === 'list_archives_by_ids') return { ok: true, value: [
-        { serverId: 'scope-a', archiveId: 'a', title: 'Alpha archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' },
-        { serverId: 'scope-a', archiveId: 'b', title: 'Beta archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' },
-      ] };
-      if (command === 'set_watchlist' && args?.archiveId === 'a') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-29T00:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-29T00:00:00Z', revision: 2, deleted: true } };
-      if (command === 'set_watchlist') return { ok: false, error: { code: 'UNKNOWN', message: '本地写入失败', retryable: true } };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    setInvokeAdapterForTests(adapter);
-    render(<MemoryRouter initialEntries={['/watchlist']}><App /></MemoryRouter>);
-
-    await user.click(await screen.findByRole('checkbox', { name: '全选当前结果' }));
-    await user.click(screen.getByRole('button', { name: '移除所选' }));
-
-    expect(screen.queryByRole('button', { name: /Alpha archive/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Beta archive/ })).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: '选择 Beta archive' })).toBeChecked();
-    expect(screen.getByRole('alert')).toHaveTextContent('有 1 项未能移除：本地写入失败');
+    expect(screen.queryByRole('button', { name: /Remove archive/ })).not.toBeInTheDocument();
+    expect(await screen.findByText('已保存在本机，等待同步')).toBeInTheDocument();
   });
 
   it('shows an actionable empty state when WebDAV is not configured', async () => {

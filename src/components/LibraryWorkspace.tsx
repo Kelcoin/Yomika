@@ -75,15 +75,30 @@ interface LibraryWorkspaceProps {
   onApplyPreset?: ((preset: SearchPreset) => void) | undefined;
   onSavePreset?: (() => void) | undefined;
   onDeletePreset?: ((preset: SearchPreset) => void) | undefined;
+  /** Names what the search bar filters. The shelves reuse the library's bar but
+   * filter their own records in the browser, so their query commits on every
+   * keystroke rather than waiting for Enter, and tag suggestions — which come
+   * from the whole library — would be the wrong scope there. */
+  searchScope?: { label: string; placeholder: string } | undefined;
+  /** The sort and display controls. The shelves decide their own order and follow
+   * the library's card style, so the bar there was three inert controls. */
+  showToolbar?: boolean | undefined;
+  /** Right-hand timeline entry per archive, e.g. when it was last read. */
+  timelineByArchiveId?: ReadonlyMap<string, string> | undefined;
+  /** How cards are drawn. Controlled by the route from preferences, because the
+   * shelves and the library have to agree and as component state it reset to the
+   * default on every navigation. */
+  cardStyle?: 'thumbnail' | 'wide' | undefined;
+  onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
   const [localSortOrder, setLocalSortOrder] = useState<'asc' | 'desc'>('asc');
   const [localSortMode, setLocalSortMode] = useState<'title' | 'added'>('title');
-  const [displayMode, setDisplayMode] = useState<'thumbnail' | 'wide'>('wide');
+  const [localCardStyle, setLocalCardStyle] = useState<'thumbnail' | 'wide'>('wide');
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -98,6 +113,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const sortOrder = controlledSortOrder ?? localSortOrder;
   const sortMode = controlledSortMode ?? localSortMode;
   const categoryFilter = controlledCategoryFilter ?? localCategoryFilter;
+  const displayMode = controlledCardStyle ?? localCardStyle;
   const displayCategories = useMemo(() => sortCategoriesForDisplay((categories ?? []).filter((category) => category.name !== FAVORITES_CATEGORY_NAME)), [categories]);
   const filteredArchives = archives;
   const updateSearchQuery = (value: string) => { setLocalSearchQuery(value); onSearchQueryChange?.(value); };
@@ -105,11 +121,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   useEffect(() => { setSearchDraft(searchQuery); }, [searchQuery]);
   const editSearchDraft = (value: string) => {
     setSearchDraft(value);
-    if (isCommittableSearchQuery(value)) updateSearchQuery(value);
+    // A shelf filters in the browser, so every keystroke can apply. The library
+    // sends the query to the server, which is why it waits for a complete term.
+    if (searchScope || isCommittableSearchQuery(value)) updateSearchQuery(value);
   };
   const updateSortMode = (value: 'title' | 'added') => { setLocalSortMode(value); onSortModeChange?.(value); };
   const updateSortOrder = (value: 'asc' | 'desc') => { setLocalSortOrder(value); onSortOrderChange?.(value); };
   const updateCategoryFilter = (value: string) => { setLocalCategoryFilter(value); onCategoryFilterChange?.(value); };
+  const updateCardStyle = (value: 'thumbnail' | 'wide') => { setLocalCardStyle(value); onCardStyleChange?.(value); };
 
   const archiveCategories = useMemo(() => {
     const result = new Map<string, string[]>();
@@ -216,6 +235,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
         </span>
       </span>
+      {/* When the caller has a time for this archive, it goes on the right as a
+          timeline entry rather than being folded into the stats line, so a run of
+          rows reads as a sequence. */}
+      {timelineByArchiveId?.get(archive.archiveId) && (
+        <span className="archive-row-timeline" aria-hidden="true">{timelineByArchiveId.get(archive.archiveId)}</span>
+      )}
     </button>
     </>
   );
@@ -227,11 +252,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <label className="search-label">
           <input
             ref={searchInputRef}
-            aria-label="搜索档案"
+            aria-label={searchScope?.label ?? '搜索档案'}
             name="archiveQuery"
             type="search"
             autoComplete="off"
-            placeholder="搜索档案，回车提交…"
+            placeholder={searchScope?.placeholder ?? '搜索档案，回车提交…'}
             value={searchDraft}
             onChange={(e) => editSearchDraft(e.target.value)}
             onKeyDown={(event) => {
@@ -240,7 +265,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               updateSearchQuery(searchDraft);
             }}
           />
-          <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />
+          {!searchScope && <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />}
         </label>
         {presets && presets.length > 0 && (
           /* Saved searches restore the whole toolbar state, not just the query. */
@@ -261,12 +286,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </button>
         )}
       </div>}
-      <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
+      {showToolbar && <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
         <button
           className="secondary-action library-display-cycle"
           type="button"
           aria-label={`显示模式：${displayMode === 'wide' ? '缩略图列表' : '缩略图卡片'}，点击切换`}
-          onClick={() => setDisplayMode((mode) => (mode === 'wide' ? 'thumbnail' : 'wide'))}
+          onClick={() => updateCardStyle(displayMode === 'wide' ? 'thumbnail' : 'wide')}
         >
           {displayMode === 'wide' ? <Rows3 aria-hidden="true" /> : <Grid2X2 aria-hidden="true" />}
         </button>
@@ -280,7 +305,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         </button>
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
         {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
-        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>
+        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>}
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
         <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">
           <div className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''}`} data-scroll-region ref={scrollRef} role="list" aria-label="档案" onScroll={(event) => {

@@ -14,6 +14,7 @@ import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
+import { useCardStyle } from '../app/preferences';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
@@ -67,6 +68,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const snapshot = readRouteCache<LibrarySnapshot>(LIBRARY_SNAPSHOT_KEY);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
   const [loading, setLoading] = useState(!snapshot);
+  /** True while any first-page request is outstanding. Separate from `loading`,
+   * which only covers the very first one so that refiltering does not unmount the
+   * search field. */
+  const [pageLoading, setPageLoading] = useState(!snapshot);
   const [error, setError] = useState<string>();
   const [needsCredentials, setNeedsCredentials] = useState(false);
   const [serverId, setServerId] = useState<string>();
@@ -107,6 +112,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
   const [reloadToken, setReloadToken] = useState(0);
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  /** Card style lives in preferences: the shelves render the same cards, and as
+   * component state the choice reset on every navigation. */
+  const { cardStyle, setCardStyle } = useCardStyle();
   const navigate = useNavigate();
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
@@ -309,6 +317,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // Keep the existing input/list mounted while a filter request is in flight.
     // Unmounting the workspace here loses focus after the first typed character.
     if (!initialArchivesLoaded.current) setLoading(true);
+    // Any first-page request, not only the first one ever: `loading` deliberately
+    // stays false for a refilter so the input keeps focus, but the list is emptied
+    // all the same — which is how 暂无档案库 flashed before the archives arrived.
+    setPageLoading(true);
     setError(undefined);
     if (options.clear) setArchives([]);
     const result = await fetchArchivePage(currentServerId, 0);
@@ -317,6 +329,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
       setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
       setLoading(false);
+      setPageLoading(false);
       return false;
     }
     // The first page needs the same de-duplication the later ones get: a repeated
@@ -328,6 +341,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setTotalArchives(result.value.total);
     setHasMoreArchives(result.value.hasMore);
     setLoading(false);
+    setPageLoading(false);
     return true;
   }, [fetchArchivePage]);
 
@@ -406,7 +420,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   if (loading) {
     return (
-      <div>
+      <div className="library-shell-loading">
         <header className="workspace-heading"><h1>档案库</h1></header>
         <LoadingIndicator label="正在读取档案" size="lg" />
       </div>
@@ -450,7 +464,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         totalCount={totalArchives}
         hasMore={hasMoreArchives}
         loadingMore={loadingMore}
-        listLoading={loading || (archives.length === 0 && !error && !initialArchivesLoaded.current)}
+        listLoading={loading || pageLoading || (archives.length === 0 && !error && !initialArchivesLoaded.current)}
         onLoadMore={loadMoreArchives}
         searchQuery={searchQuery}
         onSearchQueryChange={setSearchQuery}
@@ -502,6 +516,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         loadArchiveDetails(serverId, scopeId, archive);
         }}
       onArchiveContextMenu={openContextMenu}
+      cardStyle={cardStyle}
+      onCardStyleChange={setCardStyle}
       presets={presets}
       onApplyPreset={(preset) => {
         // A preset restores the whole toolbar state, not just the query text.
