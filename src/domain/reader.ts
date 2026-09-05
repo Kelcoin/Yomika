@@ -257,9 +257,18 @@ export function toggleReaderChrome(state: ReaderState): ReaderState {
   return { ...state, phase: state.phase === 'chrome-visible' ? 'ready' : 'chrome-visible' };
 }
 
+/** Pages to warm around the current one.
+ *
+ * Asymmetric on purpose, following ComicReadScript's split of the same budget
+ * (`memo/img.ts:44-47`): reading runs forward, so pages behind are worth half as
+ * many slots as pages ahead. A symmetric window spent half the budget on pages
+ * the reader has already passed.
+ */
 export function getPrefetchPages(pageIndex: number, pageCount: number, distance = 1): number[] {
+  const ahead = Math.max(0, Math.floor(distance));
+  const behind = Math.floor(ahead / 2);
   const pages: number[] = [];
-  for (let offset = -distance; offset <= distance; offset += 1) {
+  for (let offset = -behind; offset <= ahead; offset += 1) {
     const candidate = pageIndex + offset;
     if (offset !== 0 && candidate >= 0 && candidate < pageCount) pages.push(candidate);
   }

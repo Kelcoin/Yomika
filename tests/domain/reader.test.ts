@@ -116,9 +116,17 @@ describe('reader domain', () => {
     expect(toggleReaderChrome(toggleReaderChrome(state)).phase).toBe('ready');
   });
 
-  it('prefetches adjacent pages without crossing archive bounds', () => {
+  it('spends the prefetch budget ahead of the reader, not behind', () => {
+    // Reading runs forward, so pages already passed get half as many slots as
+    // pages coming up. A symmetric window spent half the budget behind.
     expect(getPrefetchPages(0, 5, 2)).toEqual([1, 2]);
-    expect(getPrefetchPages(3, 5, 2)).toEqual([1, 2, 4]);
+    expect(getPrefetchPages(3, 8, 2)).toEqual([2, 4, 5]);
+    expect(getPrefetchPages(5, 20, 4)).toEqual([3, 4, 6, 7, 8, 9]);
+    // A distance of one has nothing to spare for looking back.
+    expect(getPrefetchPages(3, 8, 1)).toEqual([4]);
+    expect(getPrefetchPages(3, 8, 0)).toEqual([]);
+    // Bounds still hold at both ends.
+    expect(getPrefetchPages(7, 8, 4)).toEqual([5, 6]);
   });
 
   it('keeps the cover standalone and pairs all subsequent pages', () => {

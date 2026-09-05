@@ -80,7 +80,7 @@ describe('reader route', () => {
     expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
-  it('loads the restored page first and limits initial preloading to adjacent pages', async () => {
+  it('loads the restored page first and preloads ahead of it, not behind', async () => {
     const loadedPaths: string[] = [];
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -98,7 +98,9 @@ describe('reader route', () => {
 
     expect(await screen.findByRole('img', { name: '第 4 页' })).toBeInTheDocument();
     expect(loadedPaths[0]).toBe('3.jpg');
-    expect(new Set(loadedPaths)).toEqual(new Set(['2.jpg', '3.jpg', '4.jpg']));
+    // The default budget is one page, and reading runs forward, so it goes
+    // ahead: 2.jpg has already been passed.
+    expect(new Set(loadedPaths)).toEqual(new Set(['3.jpg', '4.jpg']));
   });
 
   it('opens the restored page even when a neighbour prefetch fails', async () => {
