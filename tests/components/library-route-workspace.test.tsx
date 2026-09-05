@@ -577,6 +577,50 @@ describe('library route workspace', () => {
     expect(offsets).toEqual([0, 2, 4]);
   });
 
+  it('restores the paging cursor with the list, not the rendered length', async () => {
+    const offsets: number[] = [];
+    const pages: Record<number, Array<{ serverId: string; archiveId: string; title: string; pageCount: number; updatedAt: string }>> = {
+      0: [
+        { serverId: 'scope-a', archiveId: 'a1', title: 'One', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'a1', title: 'One', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+      ],
+      2: [{ serverId: 'scope-a', archiveId: 'a3', title: 'Three', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' }],
+    };
+    const adapter = vi.fn(async (command: string, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
+        offsets.push(start);
+        const items = pages[start] ?? [];
+        return { ok: true, value: { items, total: 3, hasMore: items.length > 0 && start + items.length < 3 } };
+      }
+      if (command === 'list_tasks') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const user = userEvent.setup();
+    renderLibrary();
+
+    // The server hands over two rows that collapse to one on screen.
+    await screen.findByRole('button', { name: /^One\b/ });
+    expect(offsets).toEqual([0]);
+
+    // Leave and come back inside the freshness window, so the list is restored
+    // from the snapshot rather than refetched.
+    const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
+    await user.click(sidebar.getByRole('link', { name: '下载' }));
+    await screen.findByRole('heading', { name: '下载' });
+    await user.click(sidebar.getByRole('link', { name: '档案库' }));
+    await screen.findByRole('button', { name: /^One\b/ });
+    expect(offsets).toEqual([0]);
+
+    // The restored cursor has to be the server's (2), not the rendered length (1).
+    fireEvent.scroll(screen.getByRole('list', { name: '档案' }), { target: { scrollTop: 10_000 } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Three\b/ })).toBeInTheDocument());
+    expect(offsets).toEqual([0, 2]);
+  });
+
   it('falls back to the local mirror when the server cannot be reached', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

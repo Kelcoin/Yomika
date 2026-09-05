@@ -26,8 +26,27 @@ const LIBRARY_SNAPSHOT_FRESH_MS = 90_000;
  * fallback path uses it: online, the page size is LANraragi's to decide. */
 const OFFLINE_PAGE_SIZE = 100;
 
+/** First occurrence of each archive id, in order.
+ *
+ * A page can repeat a row the previous one already carried — the server
+ * re-sorting between requests is enough — and two cards sharing an id share a
+ * React key. */
+function dedupeArchives(items: readonly ArchiveRecord[], seen = new Set<string>()): ArchiveRecord[] {
+  const unique: ArchiveRecord[] = [];
+  for (const item of items) {
+    if (seen.has(item.archiveId)) continue;
+    seen.add(item.archiveId);
+    unique.push(item);
+  }
+  return unique;
+}
+
 interface LibrarySnapshot {
   archives: ArchiveRecord[];
+  /** Rows the server had handed over when the snapshot was taken. Stored apart
+   * from `archives.length`, which is what survived de-duplication: restoring the
+   * cursor from the rendered length puts it behind the server again. */
+  fetchedCount: number;
   categories: import('../repositories/nativeLibraryRepository').Category[];
   selectedArchiveId: string | undefined;
   totalArchives: number;
@@ -74,7 +93,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const loadingMoreRef = useRef(false);
   /** Rows the server has handed over, which is the offset the next page asks for.
    * The rendered list can be shorter once duplicates are dropped. */
-  const fetchedCount = useRef(snapshot?.archives.length ?? 0);
+  const fetchedCount = useRef(snapshot?.fetchedCount ?? snapshot?.archives.length ?? 0);
   const initialArchivesLoaded = useRef(Boolean(snapshot));
   const snapshotIsFresh = useRef(
     Boolean(snapshot?.archives.length) && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
@@ -222,10 +241,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       const result = await fetchArchivePage(serverId, fetchedCount.current);
       if (result.ok) {
         fetchedCount.current += result.value.items.length;
-        setArchives((current) => {
-          const seen = new Set(current.map((item) => item.archiveId));
-          return [...current, ...result.value.items.filter((item) => !seen.has(item.archiveId))];
-        });
+        setArchives((current) => [
+          ...current,
+          ...dedupeArchives(result.value.items, new Set(current.map((item) => item.archiveId))),
+        ]);
         setTotalArchives(result.value.total);
         setHasMoreArchives(result.value.hasMore);
       }
@@ -271,7 +290,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       setLoading(false);
       return false;
     }
-    setArchives(result.value.items);
+    // The first page needs the same de-duplication the later ones get: a repeated
+    // row rendered twice, and gave two cards the same React key.
+    const unique = dedupeArchives(result.value.items);
+    setArchives(unique);
     fetchedCount.current = result.value.items.length;
     initialArchivesLoaded.current = true;
     setTotalArchives(result.value.total);
@@ -342,6 +364,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (archives.length === 0) return;
     writeRouteCache(LIBRARY_SNAPSHOT_KEY, {
       archives,
+      fetchedCount: fetchedCount.current,
       categories,
       selectedArchiveId,
       totalArchives,
