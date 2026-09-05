@@ -1,11 +1,11 @@
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, Wand2, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
-import { formatByteSize, pickCardTags } from '../lib/archiveCardPresentation';
-import { translateRawTag } from '../lib/tags';
+import { advanceReader, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { formatByteSize } from '../lib/archiveCardPresentation';
+import { categorizeTags } from '../lib/tags';
 
 interface ReaderScreenProps {
   archiveId: string;
@@ -328,9 +328,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
               <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
               <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
-              <button type="button" aria-label="单页" aria-pressed={state.layout === 'single' || state.layout === 'auto'} onClick={() => setState((current) => ({ ...current, layout: 'single' }))}><RectangleVertical aria-hidden="true" /></button>
-              <button type="button" aria-label="双页" aria-pressed={state.layout === 'double'} onClick={() => setState((current) => ({ ...current, layout: 'double' }))}><BookOpen aria-hidden="true" /></button>
-              <button type="button" aria-label="连续滚动" aria-pressed={state.layout === 'webtoon'} onClick={() => setState((current) => ({ ...current, layout: 'webtoon' }))}><GalleryVertical aria-hidden="true" /></button>
+              {/* One control, cycling 自动 → 单页 → 双页 → webtoon. Three separate
+                  buttons spent three toolbar slots to express one choice, and
+                  none of them could select 自动 once you left it. */}
+              <button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
+                {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
+              </button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
               <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
               <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed={state.direction === 'rtl'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
@@ -359,8 +362,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <div className="reader-overview-facts">
                 <p className="reader-overview-stats">{[`${pages.length} 页`, info?.sizeBytes ? formatByteSize(info.sizeBytes) : ''].filter(Boolean).join(' · ')}</p>
                 {(info?.tags?.length ?? 0) > 0 && (
-                  <div className="reader-overview-tags">
-                    {pickCardTags(info?.tags, 14).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}
+                  /* Grouped by namespace, the way the detail page shows them: a
+                     flat run of chips gave no clue which were artists and which
+                     were content tags. */
+                  <div className="reader-overview-tags" aria-label="档案标签">
+                    {categorizeTags(info?.tags ?? []).map((group) => (
+                      <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
+                        <h3>{group.label}</h3>
+                        <div>{group.values.map((tag, index) => <small className="metadata-chip" key={`${group.namespace}-${tag}-${index}`}>{tag}</small>)}</div>
+                      </section>
+                    ))}
                   </div>
                 )}
               </div>

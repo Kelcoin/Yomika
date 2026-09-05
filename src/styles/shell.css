@@ -960,6 +960,12 @@ body::-webkit-scrollbar,
   .library-shell-detail { border-left: 0; width: 100%; min-width: 0; }
 }
 
+/* Six labelled actions need roughly this much room. Below it they keep their
+   icons and lose the words rather than folding onto a second row. */
+@container app-main (max-width: 700px) {
+  .archive-detail-route-actions .archive-action-label { display: none; }
+}
+
 .library-shell-list,
 .library-shell-detail {
   min-width: 0;
@@ -1061,19 +1067,23 @@ body::-webkit-scrollbar,
 
 .archive-detail-overview-copy { min-width: 0; }
 
+/* One row, always. This was `repeat(4, minmax(0, 1fr))` while the toolbar grew
+   to six actions, so grid put the last two on a second row — at every width, not
+   only narrow ones. Flex without wrapping keeps them on one line and lets each
+   shrink; the labels drop out below the width where six of them fit, and the
+   icon plus its title still names the action. */
 .archive-detail-route-actions {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
   align-items: stretch;
-  justify-content: center;
   gap: var(--space-2);
   margin-top: var(--space-5);
   width: 100%;
-  overflow-x: hidden;
+  min-width: 0;
+  overflow: hidden;
   padding: var(--space-4) 0 var(--space-1);
   border-top: 1px solid var(--hairline);
-  scrollbar-width: none;
   border-bottom: 0;
+  scrollbar-width: none;
 }
 
 .archive-detail-route-actions::-webkit-scrollbar {
@@ -1082,14 +1092,14 @@ body::-webkit-scrollbar,
 
 .archive-action-button {
   display: inline-flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
   min-height: var(--control-height);
-  width: 100%;
   min-width: 0;
-  padding: 0;
+  overflow: hidden;
+  padding: 0 var(--space-2);
   border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
   background: var(--surface-elevated);
@@ -1101,6 +1111,8 @@ body::-webkit-scrollbar,
   white-space: nowrap;
   transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
 }
+
+.archive-action-button svg { flex: none; }
 
 .archive-action-button:hover {
   border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
@@ -2575,16 +2587,11 @@ body::-webkit-scrollbar,
   .archive-detail-overview { grid-template-columns: 1fr; }
   .archive-detail-route-cover { justify-content: center; }
   .archive-detail-route-cover img { width: min(70vw, 280px); }
-  .archive-detail-route-actions {
-    display: flex;
-    justify-content: stretch;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
+  /* The toolbar is already a single non-wrapping flex row; on a phone the six
+     icon buttons only need a floor so they stay tappable. */
   .archive-detail-route-actions > .archive-action-button,
   .archive-detail-route-actions > a.archive-action-button {
-    flex: 1 0 56px;
-    max-width: none;
+    flex: 1 1 44px;
   }
   .scroll-to-top { right: var(--space-4); bottom: calc(76px + env(safe-area-inset-bottom)); }
   .app-shell {

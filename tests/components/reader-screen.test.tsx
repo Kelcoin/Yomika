@@ -216,7 +216,9 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '下一页' }));
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '连续滚动' }));
+    // One layout control, cycling 自动 → 单页 → 双页 → webtoon: from 双页 the next
+    // press lands on continuous scrolling.
+    await user.click(screen.getByRole('button', { name: '阅读布局：双页，点击切换' }));
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
   });
@@ -233,20 +235,28 @@ describe('reader screen', () => {
     }
   });
 
-  it('exposes the selected reader layout and direction', async () => {
+  it('cycles the reader layout from one control and toggles direction', async () => {
     const user = userEvent.setup();
     renderReader();
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
-    expect(screen.getByRole('button', { name: '单页' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'false');
+    // Three buttons spent three toolbar slots on one choice, and none of them
+    // could get back to 自动 once it had been left.
+    const layoutButton = () => screen.getByRole('button', { name: /^阅读布局：/ });
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：自动，点击切换');
+    await user.click(layoutButton());
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：单页，点击切换');
+    await user.click(layoutButton());
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：双页，点击切换');
+    await user.click(layoutButton());
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：连续滚动，点击切换');
+    await user.click(layoutButton());
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：自动，点击切换');
+
     // Right-to-left is the toggled-on state; the button used to always claim pressed.
     expect(screen.getByRole('button', { name: '从左到右' })).toHaveAttribute('aria-pressed', 'false');
     await user.click(screen.getByRole('button', { name: '从左到右' }));
     expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
-
-    await user.click(screen.getByRole('button', { name: '双页' }));
-    expect(screen.getByRole('button', { name: '双页' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('resolves auto layout to a double spread on wide portrait pages', () => {

@@ -1,5 +1,5 @@
 import { ArrowRight, FolderHeart, RefreshCw, Server } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
@@ -17,6 +17,7 @@ import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
+import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
@@ -31,16 +32,31 @@ const workspaces = {
   toRead: ['待看档案', '加入待看的档案会排在这里，读完可以移出。'],
 } as const;
 
+const HOME_SNAPSHOT_KEY = 'home:shelves';
+/** Same reasoning as the library list: switching tabs and coming back should not
+ * re-resolve the shelves and draw a new random set. */
+const HOME_SNAPSHOT_FRESH_MS = 90_000;
+
+interface HomeSnapshot {
+  servers: Awaited<ReturnType<NativeLibraryRepository['listServers']>>;
+  history: ReadingHistoryRecord[];
+  watchlist: WatchlistRecord[];
+  archives: ArchiveRecord[];
+  randomArchives: ArchiveRecord[];
+}
+
 function HomeWorkspace() {
-  const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>>>();
-  const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
-  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>([]);
-  const [recentLoading, setRecentLoading] = useState(true);
+  const snapshot = readRouteCache<HomeSnapshot>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS);
+  const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>> | undefined>(snapshot?.servers);
+  const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
+  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
+  const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>(snapshot?.randomArchives ?? []);
+  const [recentLoading, setRecentLoading] = useState(!snapshot);
   const [recentError, setRecentError] = useState<string>();
-  const [randomLoading, setRandomLoading] = useState(true);
+  const [randomLoading, setRandomLoading] = useState(!snapshot);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
+  const restoredFromSnapshot = useRef(Boolean(snapshot));
   // LANraragi picks the random set. Behind a callback so the rail's refresh
   // button can ask for another draw without reloading the whole page.
   const loadRandom = useCallback(async (serverId: string) => {
@@ -56,6 +72,12 @@ function HomeWorkspace() {
     setRandomLoading(false);
   }, []);
   useEffect(() => {
+    // A fresh snapshot is already on screen; re-resolving the shelves would cost
+    // a round trip and draw a different random set for no reason.
+    if (restoredFromSnapshot.current) {
+      restoredFromSnapshot.current = false;
+      return;
+    }
     let active = true;
     void (async () => {
       setRecentLoading(true);
@@ -119,6 +141,11 @@ function HomeWorkspace() {
   // `archives` now holds only the ids the shelves asked for.
   const random = randomArchives;
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
+  // Snapshot for the next visit, so switching tabs and coming back is free.
+  useEffect(() => {
+    if (!servers) return;
+    writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, watchlist, archives, randomArchives } satisfies HomeSnapshot);
+  }, [archives, history, randomArchives, servers, watchlist]);
   return (
     <div className="workspace-home">
       {connectionError ? (

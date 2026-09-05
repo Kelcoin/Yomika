@@ -8,7 +8,7 @@ import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveCont
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
-import { readRouteCache, writeRouteCache } from '../lib/routeCache';
+import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 
@@ -16,6 +16,11 @@ const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 
 const LIBRARY_SNAPSHOT_KEY = 'library:workspace';
+
+/** How long a restored list is trusted without a re-fetch. Long enough that
+ * switching to settings and back is free; short enough that an archive added on
+ * the server shows up on the next visit rather than the next hour. */
+const LIBRARY_SNAPSHOT_FRESH_MS = 90_000;
 
 /** The offline mirror has no page size of its own, so it borrows one. Only the
  * fallback path uses it: online, the page size is LANraragi's to decide. */
@@ -68,6 +73,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const pageRequest = useRef(0);
   const loadingMoreRef = useRef(false);
   const initialArchivesLoaded = useRef(Boolean(snapshot));
+  const snapshotIsFresh = useRef(
+    Boolean(snapshot?.archives.length) && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
+  );
   const [searchQuery, setSearchQuery] = useState(snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
@@ -281,8 +289,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   useEffect(() => {
     if (!serverId) return;
     // Re-runs whenever the query, sort or category changes, because all three are
-    // resolved by the server now. No probe and no full pull on mount: the page
-    // that just arrived already reflects what LANraragi holds.
+    // resolved by the server now. A list restored from a fresh snapshot skips the
+    // first run: the page it would fetch is the page already on screen, and it is
+    // an HTTP round trip rather than the local query it used to be.
+    if (snapshotIsFresh.current) {
+      snapshotIsFresh.current = false;
+      return;
+    }
     void loadFirstPage(serverId, { clear: true });
   }, [loadFirstPage, reloadToken, serverId]);
 

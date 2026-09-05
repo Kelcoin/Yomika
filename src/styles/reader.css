@@ -288,11 +288,21 @@
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
 .reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: 12px; }
-.reader-overview-tags { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
+/* Grouped like the detail page's tag list, so a namespace is legible at a glance
+   rather than being one run of identical chips. */
+.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
+.reader-overview-tags .tag-group { display: grid; gap: 4px; }
+.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .reader-overview-thumbnails {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  /* `stretch` (the default) overrides a grid item's aspect-ratio, so every row
+     collapsed and the thumbnails stacked on top of each other. Aligning to the
+     start lets the 3:4 ratio size each button. */
+  align-items: start;
+  align-content: start;
   gap: 8px;
   min-height: 0;
   overflow-y: auto;

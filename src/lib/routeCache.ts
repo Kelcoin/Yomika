@@ -1,10 +1,12 @@
 /** Cross-route snapshots so switching pages and coming back does not start from
- * an empty screen.
+ * an empty screen — and, while a snapshot is fresh, does not refetch either.
  *
- * Deliberately stale-while-revalidate: a mounted route renders the snapshot
- * immediately *and* still refreshes in the background. Skipping the refresh
- * would trade a flicker for stale data, and the request itself is already
- * cheap (the archive list is a local SQLite query).
+ * This used to be deliberately stale-while-revalidate: render the snapshot and
+ * refresh anyway, on the grounds that the request was a local SQLite query.
+ * The library list now comes from LANraragi over HTTP, so a refresh on every
+ * mount is a round trip the user pays for each time they switch tabs. A route
+ * reads its snapshot with a max age it chooses, and skips the fetch while that
+ * holds; anything older revalidates as before.
  */
 interface CacheEntry {
   value: unknown;
@@ -22,6 +24,13 @@ export function readRouteCache<T>(key: string, maxAgeMs = DEFAULT_MAX_AGE_MS): T
     return undefined;
   }
   return entry.value as T;
+}
+
+/** Age of a snapshot in milliseconds, or `undefined` if there is none. Lets a
+ * route render a slightly older snapshot while still deciding to revalidate. */
+export function routeCacheAge(key: string): number | undefined {
+  const entry = entries.get(key);
+  return entry ? Date.now() - entry.at : undefined;
 }
 
 export function writeRouteCache(key: string, value: unknown): void {

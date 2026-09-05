@@ -501,6 +501,36 @@ describe('library route workspace', () => {
     expect(await screen.findByRole('button', { name: /^Rebuilt Archive\b/ })).toBeInTheDocument();
   });
 
+  it('reuses a fresh list instead of refetching it on every visit', async () => {
+    const user = userEvent.setup();
+    let pageRequests = 0;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        pageRequests += 1;
+        return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Cached Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }]);
+      }
+      if (command === 'list_tasks') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    expect(await screen.findByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
+    expect(pageRequests).toBe(1);
+
+    // Leaving and returning is a round trip to LANraragi now, not the local query
+    // it used to be, so a snapshot this recent is served as-is.
+    const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
+    await user.click(sidebar.getByRole('link', { name: '下载' }));
+    expect(await screen.findByRole('heading', { name: '下载' })).toBeInTheDocument();
+    await user.click(sidebar.getByRole('link', { name: '档案库' }));
+
+    expect(await screen.findByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
+    expect(pageRequests).toBe(1);
+  });
+
   it('falls back to the local mirror when the server cannot be reached', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

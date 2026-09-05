@@ -116,6 +116,22 @@ export function resolveReaderLayout(preference: ReaderLayoutPreference, context:
   return viewportIsWide && pageIsPortrait ? 'double' : 'single';
 }
 
+/** Cycle order for the reader's single layout control. `auto` is part of the
+ * cycle: with one button per layout there was no way back to it. */
+export const READER_LAYOUT_CYCLE: readonly ReaderLayoutPreference[] = ['auto', 'single', 'double', 'webtoon'];
+
+export const READER_LAYOUT_LABELS: Record<ReaderLayoutPreference, string> = {
+  auto: '自动',
+  single: '单页',
+  double: '双页',
+  webtoon: '连续滚动',
+};
+
+export function nextReaderLayout(current: ReaderLayoutPreference): ReaderLayoutPreference {
+  const index = READER_LAYOUT_CYCLE.indexOf(current);
+  return READER_LAYOUT_CYCLE[(index + 1) % READER_LAYOUT_CYCLE.length]!;
+}
+
 export function createReaderState(input: {
   archiveId: string;
   pageCount: number;
