@@ -10,6 +10,8 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
+import { isCommittableSearchQuery } from '../lib/searchQuery';
+import { TextInputDialog } from './TextInputDialog';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 
@@ -105,6 +107,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
   const [reloadToken, setReloadToken] = useState(0);
   const [contextTarget, setContextTarget] = useState<ArchiveContextMenuTarget>();
+  const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const navigate = useNavigate();
   const detailRequest = useRef(0);
   const detailThumbnailHandle = useRef<ImageHandle>();
@@ -483,24 +486,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         setSortOrder(preset.sortOrder);
         setCategoryFilter(preset.categoryId ?? '');
       }}
-      onSavePreset={() => {
-        if (!scopeId) return;
-        const name = window.prompt('预设名称', searchQuery || '全部档案');
-        if (!name?.trim()) return;
-        void repository.saveSearchPreset({
-          scopeId,
-          presetId: `preset-${Date.now()}`,
-          name: name.trim(),
-          query: searchQuery,
-          sortBy: sortMode,
-          sortOrder,
-          categoryId: categoryFilter || null,
-        }).then((result) => {
-          if (!result.ok) { showToast(result.error.message, 'error'); return; }
-          setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
-          showToast('预设已保存', 'success');
-        });
-      }}
+      onSavePreset={() => setPresetDialogOpen(true)}
       onDeletePreset={(preset) => {
         if (!scopeId) return;
         void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
@@ -543,6 +529,39 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
             if (!result.ok) { showToast(result.error.message, 'error'); return; }
             setReadingList((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
             showToast(next ? '已加入待看' : '已移出待看', 'success');
+          });
+        }}
+      />
+      {/* Drawn, not `window.prompt`: the native one is unstyled, unpositioned and
+          on Windows renders as browser chrome, and it cannot refuse a value. A
+          preset with no complete tag is not saveable. */}
+      <TextInputDialog
+        open={presetDialogOpen}
+        onOpenChange={setPresetDialogOpen}
+        title="存为预设"
+        description="预设会记住当前的搜索、排序与分类。"
+        label="预设名称"
+        confirmLabel="保存预设"
+        defaultValue={searchQuery || '全部档案'}
+        validate={(value) => {
+          if (!value.trim()) return '请填写预设名称';
+          if (searchQuery.trim() && !isCommittableSearchQuery(searchQuery)) return '搜索框里的标签还不完整，补完后再存为预设';
+          return undefined;
+        }}
+        onConfirm={(name) => {
+          if (!scopeId) return;
+          void repository.saveSearchPreset({
+            scopeId,
+            presetId: `preset-${Date.now()}`,
+            name,
+            query: searchQuery,
+            sortBy: sortMode,
+            sortOrder,
+            categoryId: categoryFilter || null,
+          }).then((result) => {
+            if (!result.ok) { showToast(result.error.message, 'error'); return; }
+            setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
+            showToast('预设已保存', 'success');
           });
         }}
       />

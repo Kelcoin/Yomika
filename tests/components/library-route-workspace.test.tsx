@@ -640,6 +640,38 @@ describe('library route workspace', () => {
     expect(screen.queryByText('正在读取档案…')).not.toBeInTheDocument();
   });
 
+  it('saves a search preset through a drawn dialog that can refuse the value', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Preset me', pageCount: 2, updatedAt: '2026-09-05T00:00:00Z' }]);
+      if (command === 'list_search_presets') return { ok: true, value: [] };
+      if (command === 'save_search_preset') return { ok: true, value: { scopeId: 'scope-a', presetId: 'p1', name: '我的预设', query: '', sortBy: 'added', sortOrder: 'desc', categoryId: null, createdAt: '2026-09-05T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z', deviceId: 'd', revision: 1, deleted: false } };
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    await screen.findByRole('button', { name: /^Preset me\b/ });
+    await user.click(screen.getByRole('button', { name: '存为预设' }));
+
+    // A real dialog, not window.prompt: that one is unstyled, renders as browser
+    // chrome on Windows, and cannot refuse a value.
+    const dialog = await screen.findByRole('dialog', { name: '存为预设' });
+    const name = within(dialog).getByLabelText('预设名称');
+    await user.clear(name);
+    expect(within(dialog).getByRole('button', { name: '保存预设' })).toBeDisabled();
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('请填写预设名称');
+
+    await user.type(name, '我的预设');
+    await user.click(within(dialog).getByRole('button', { name: '保存预设' }));
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_search_preset', expect.objectContaining({
+      input: expect.objectContaining({ name: '我的预设' }),
+    })));
+  });
+
   it('falls back to the local mirror when the server cannot be reached', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

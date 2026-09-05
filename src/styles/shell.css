@@ -1273,10 +1273,85 @@ body::-webkit-scrollbar,
 .metadata-edit-form input,
 .metadata-edit-form textarea,
 .metadata-edit-form select { width: 100%; box-sizing: border-box; }
-.metadata-edit-translations { display: grid; gap: var(--space-3); min-height: 24px; }
-.metadata-edit-tag-group { display: grid; gap: 6px; min-width: 0; }
-.metadata-edit-tag-group > div { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.metadata-edit-tag-label { color: var(--ink-faint); font-size: var(--text-xs); font-weight: 700; }
+/* One editable tag list. There used to be a raw textarea plus a read-only run of
+   translated chips underneath, with nothing tying them together. */
+.metadata-tag-field { display: grid; gap: var(--space-2); min-width: 0; }
+.metadata-tag-field-label { color: var(--ink-secondary); font-weight: 650; }
+
+.metadata-tags-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 46px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+}
+
+.metadata-tags-empty { align-self: center; color: var(--ink-faint); font-size: var(--text-sm); }
+
+.metadata-tag {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
+  border-radius: 6px;
+  background: var(--surface-panel);
+}
+
+.metadata-tag-reveal {
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-secondary);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+/* The two labels are stacked, so revealing the original does not reflow the row
+   — the chip keeps the wider of the two widths. */
+.metadata-tag-labels { position: relative; display: grid; min-width: 0; }
+.metadata-tag-label {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--motion-standard);
+}
+.metadata-tag-label.is-original { opacity: 0; }
+.metadata-tag:hover .metadata-tag-label.is-translated,
+.metadata-tag.is-revealed .metadata-tag-label.is-translated { opacity: 0; }
+.metadata-tag:hover .metadata-tag-label.is-original,
+.metadata-tag.is-revealed .metadata-tag-label.is-original { opacity: 1; }
+.metadata-tag.is-untranslated .metadata-tag-label.is-translated { opacity: 1; }
+
+.metadata-tag:hover { border-color: color-mix(in srgb, var(--brand-vermilion) 45%, transparent); }
+.metadata-tag:hover .metadata-tag-reveal { color: var(--ink-primary); }
+
+.metadata-tag-delete {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--ink-secondary) 16%, transparent);
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.metadata-tag-delete:hover { background: color-mix(in srgb, var(--state-danger) 16%, transparent); color: var(--state-danger); }
+.metadata-tag-delete svg { width: 12px; height: 12px; }
+
+.metadata-tag-input { position: relative; display: block; min-width: 0; }
+.metadata-tag-input input { width: 100%; }
+
 .metadata-edit-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
 .metadata-edit-actions > * { justify-content: center; }
 .metadata-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; }
@@ -3138,7 +3213,22 @@ body::-webkit-scrollbar,
 }
 
 .search-preset-remove:hover { color: var(--state-danger); }
-.search-preset-save { flex: none; }
+/* Matches the search input's height exactly: the button was 30px against a 44px
+   field, so it floated in the middle of the row. */
+.search-preset-save {
+  flex: none;
+  width: var(--control-height);
+  height: var(--control-height);
+}
+
+.text-input-dialog-field {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--ink-secondary);
+  font-weight: 650;
+}
+
+.text-input-dialog-field input { width: 100%; }
 
 /* Custom CSS editor: preset cards, a monospace box, and a length readout. */
 .custom-css-editor {
