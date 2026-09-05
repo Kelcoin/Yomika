@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, Wand2, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, BookOpenCheck, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, Wand2, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -73,7 +73,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (effectiveLayout === 'webtoon') {
       for (let index = 0; index < loadedPages.length; index += 1) keep.add(index);
     } else {
-      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes })) {
+      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone })) {
         keep.add(index);
         for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) keep.add(adjacent);
       }
@@ -261,7 +261,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     move(dx < 0 ? 'next' : 'previous');
   }, []);
 
-  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes });
+  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone });
   const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
   const chromeVisible = state.phase === 'chrome-visible';
   // One transform for everything on screen: scaling each image on its own made a
@@ -364,6 +364,21 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                 {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
               </button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
+              {/* Shifts the whole pairing by one. A scan that includes both
+                  inside-cover pages is off by one throughout, and with no spread
+                  anywhere there is nothing for the wide-page rule to key off —
+                  but the person looking at the screen can see it at a glance. */}
+              {effectiveLayout === 'double' && (
+                <button
+                  type="button"
+                  aria-label={state.coverAlone === false ? '封面与第二页并排，点击让封面单独一页' : '封面单独一页，点击与第二页并排'}
+                  title="对页起点"
+                  aria-pressed={state.coverAlone !== false}
+                  onClick={() => setState((current) => ({ ...current, coverAlone: current.coverAlone === false }))}
+                >
+                  <BookOpenCheck aria-hidden="true" />
+                </button>
+              )}
               <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
               <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed={state.direction === 'rtl'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
               <button type="button" aria-label="放大" onClick={zoomIn}><ZoomIn aria-hidden="true" /></button>

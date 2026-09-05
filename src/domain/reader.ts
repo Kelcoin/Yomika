@@ -173,6 +173,16 @@ export interface ReaderState {
    * yet counts as normal: assuming a spread and being wrong splits a page across
    * two slots, while assuming normal only costs a re-pair once it loads. */
   shapes?: readonly PageShape[] | undefined;
+  /** Whether page 0 opens on its own.
+   *
+   * A scan that includes both inside-cover pages pairs off by one all the way
+   * through, and with no spread anywhere in the archive there is nothing for the
+   * wide-page rule to key off. ComicReadScript infers this from per-edge blank
+   * margins measured in a worker and *also* offers a manual override
+   * (`switch.ts:11-21`), because the inference can be wrong. The override is the
+   * half worth having: it costs nothing per page and the person looking at the
+   * screen already knows the answer. */
+  coverAlone?: boolean | undefined;
   phase: ReaderPhase;
 }
 
@@ -183,19 +193,17 @@ export function effectiveReaderLayout(state: Pick<ReaderState, 'layout' | 'resol
   return state.layout === 'auto' ? state.resolvedLayout ?? 'single' : state.layout;
 }
 
-type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes'>;
+type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes' | 'coverAlone'>;
 
 function spreadsFor(state: SpreadInput): number[][] {
   const shapes = state.shapes ?? [];
   const filled: PageShape[] = Array.from({ length: state.pageCount }, (_, index) => shapes[index] ?? 'normal');
-  return planPageSpreads(filled);
+  return planPageSpreads(filled, state.coverAlone ?? true);
 }
 
-/** Returns the page indexes rendered for the current spread.
- * In double-page mode the cover (index 0) is always a standalone page;
- * body pages are paired as (1,2), (3,4), ... .
- */
-export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout' | 'shapes'>): number[] {
+/** Returns the page indexes rendered for the current spread: a wide page alone,
+ * otherwise the pair it belongs to. */
+export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout' | 'shapes' | 'coverAlone'>): number[] {
   if (state.pageCount <= 0) return [];
   const start = Math.min(Math.max(0, Math.floor(state.pageIndex)), state.pageCount - 1);
   if (effectiveReaderLayout(state) !== 'double') return [start];

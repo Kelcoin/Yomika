@@ -88,6 +88,26 @@ describe('reader domain', () => {
       .toEqual([[0], [1, 2], [3], [4]]);
   });
 
+  it('can pair from the first page instead of opening on a cover', () => {
+    const normal = 'normal' as const;
+    // A scan that includes both inside-cover pages is off by one all the way
+    // through, and with no spread anywhere there is nothing for the wide-page
+    // rule to key off — so the pairing start has to be adjustable.
+    expect(planPageSpreads([normal, normal, normal, normal], false))
+      .toEqual([[0, 1], [2, 3]]);
+    expect(planPageSpreads([normal, normal, normal, normal], true))
+      .toEqual([[0], [1, 2], [3]]);
+  });
+
+  it('follows the pairing start through the visible slot and paging', () => {
+    const base = { ...createReaderState({ archiveId: 'a1', pageCount: 4, layout: 'double' }), coverAlone: false };
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 0 })).toEqual([0, 1]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 1 })).toEqual([0, 1]);
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'next').pageIndex).toBe(2);
+    // Absent means the default: the cover opens alone, as a book does.
+    expect(getVisiblePageIndexes({ ...base, coverAlone: undefined, pageIndex: 0 })).toEqual([0]);
+  });
+
   it('steps a spread by one page and a pair by two', () => {
     const shapes = ['normal', 'normal', 'normal', 'wide', 'normal', 'normal'] as const;
     const base = { ...createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'double' }), shapes };

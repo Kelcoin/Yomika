@@ -24,6 +24,27 @@ function renderReader() {
 }
 
 describe('reader screen', () => {
+  it('lets the pairing start move off the cover', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    // The cover opens alone by default, as a printed book does.
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
+
+    // A scan carrying both inside-cover pages is off by one throughout, and with
+    // no spread anywhere there is nothing to detect it from.
+    await user.click(screen.getByRole('button', { name: '封面单独一页，点击与第二页并排' }));
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '封面与第二页并排，点击让封面单独一页' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('shows a page immediately and toggles one unified chrome', async () => {
     const user = userEvent.setup();
     renderReader();
