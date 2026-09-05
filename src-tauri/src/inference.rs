@@ -410,6 +410,37 @@ pub fn fit_enhanced_output(
     (std::borrow::Cow::Owned(resized.into_raw()), target_width, target_height)
 }
 
+/// The de-censoring sessions, kept for the life of the process and keyed by the
+/// bundle they were opened from.
+///
+/// The detector is a 240 MB graph. It was opened per page, so every page turn paid
+/// to load and initialise it again — the model's size is the reason that mattered,
+/// and nothing about the graph is per-page. Keyed by the detector's path so
+/// switching bundles opens the new one instead of serving the old.
+static DECENSOR_ENGINES: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::path::PathBuf, std::sync::Arc<decensor::DecensorEngines>)>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn decensor_engines_for(
+    bundle: &decensor::DecensorBundle,
+) -> Result<std::sync::Arc<decensor::DecensorEngines>, InferenceError> {
+    let cell = DECENSOR_ENGINES.get_or_init(|| std::sync::Mutex::new(None));
+    let mut held = cell
+        .lock()
+        .map_err(|_| InferenceError::InvalidInput("de-censoring session lock poisoned".into()))?;
+    if let Some((path, engines)) = held.as_ref() {
+        if path == &bundle.detector {
+            return Ok(std::sync::Arc::clone(engines));
+        }
+    }
+    // Drop the previous bundle's sessions before opening the next: two 240 MB
+    // detectors resident at once is not a cost worth paying to switch models.
+    *held = None;
+    let engines = std::sync::Arc::new(decensor::DecensorEngines::open(bundle)?);
+    *held = Some((bundle.detector.clone(), std::sync::Arc::clone(&engines)));
+    Ok(engines)
+}
+
 pub const MODEL_KIND_UPSCALE: &str = "upscale";
 pub const MODEL_KIND_DECENSOR: &str = "decensor";
 
@@ -931,7 +962,11 @@ fn decensor_cached_page(
     };
     let (width, height) = (decoded.width(), decoded.height());
     let mut rgba = decoded.into_raw();
-    if let Err(error) = decensor::decensor_page(&bundle, &mut rgba, width, height) {
+    let engines = match decensor_engines_for(&bundle) {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false),
+    };
+    if let Err(error) = decensor::decensor_page(&engines, &mut rgba, width, height) {
         return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false);
     }
 

@@ -222,6 +222,42 @@ impl DetectorEngine {
     }
 
     /// Finds the censored regions of one RGBA page, in page pixels.
+    /// One named output's raw values, for comparing two builds of the same graph.
+    ///
+    /// `detect` answers with regions above the threshold baked into the export, and
+    /// a synthetic page yields none — so comparing regions between a float32 and an
+    /// fp16 build compares two empty lists. The class scores are populated whatever
+    /// the threshold does with them, which makes them the thing to compare.
+    #[cfg(test)]
+    pub(crate) fn raw_output(&self, rgba: &[u8], width: u32, height: u32, name: &str) -> Result<Vec<f32>, InferenceError> {
+        let molded = mold_page(rgba, width, height)?;
+        let side = i64::from(DETECTOR_SIDE);
+        let meta = image_meta(width, height, &molded);
+        let anchors = pyramid_anchors(DETECTOR_SIDE);
+        let anchor_count = (anchors.len() / 4) as i64;
+        let image_input = ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor.clone()))
+            .map_err(|error| InferenceError::InvalidInput(format!("detector input failed: {error}")))?;
+        let meta_input = ort::value::Tensor::from_array((vec![1, meta.len() as i64], meta))
+            .map_err(|error| InferenceError::InvalidInput(format!("detector meta failed: {error}")))?;
+        let anchor_input = ort::value::Tensor::from_array((vec![1, anchor_count, 4], anchors))
+            .map_err(|error| InferenceError::InvalidInput(format!("detector anchors failed: {error}")))?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| InferenceError::InvalidInput("detector session lock poisoned".into()))?;
+        let outputs = session
+            .run(ort::inputs![
+                IMAGE_INPUT => image_input,
+                META_INPUT => meta_input,
+                ANCHOR_INPUT => anchor_input,
+            ])
+            .map_err(|error| InferenceError::InvalidInput(format!("detector run failed: {error}")))?;
+        let (_, values) = outputs[name]
+            .try_extract_tensor::<f32>()
+            .map_err(|error| InferenceError::InvalidInput(format!("detector output {name} failed: {error}")))?;
+        Ok(values.to_vec())
+    }
+
     pub fn detect(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<Detection>, InferenceError> {
         let molded = mold_page(rgba, width, height)?;
         let side = i64::from(DETECTOR_SIDE);
@@ -543,6 +579,102 @@ mod tests {
     ///
     /// `docs/` is gitignored, so the file is absent on a fresh clone and the test
     /// skips rather than failing for the wrong reason.
+    /// Builds the synthetic pages the real-model tests run on: a bar shape and a
+    /// mosaic shape, neither of which the model is required to recognise.
+    #[cfg(test)]
+    fn synthetic_pages() -> Vec<(&'static str, u32, u32, Vec<u8>)> {
+        let (width, height) = (600_u32, 900_u32);
+        let mut bar = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let inside_bar = (200..400).contains(&x) && (400..500).contains(&y);
+                let level = if inside_bar { 0 } else { ((x + y) % 200 + 40) as u8 };
+                bar.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        // Blocky pixelation over a skin-toned field, which is the shape of mosaic
+        // censoring; again without any claim that it must be recognised.
+        let mut mosaic = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let inside = (180..420).contains(&x) && (360..560).contains(&y);
+                let (r, g, b) = if inside {
+                    let block = ((x / 16) * 37 + (y / 16) * 61) % 96;
+                    (200 - block as u8 / 2, 160 - block as u8 / 3, 140 - block as u8 / 4)
+                } else {
+                    (226 - (y % 24) as u8, 188 - (x % 20) as u8, 170)
+                };
+                mosaic.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+        vec![("bar", width, height, bar), ("mosaic", width, height, mosaic)]
+    }
+
+    /// The fp16 detector against the float32 one, when both are on this machine.
+    ///
+    /// The detector is 243 MB in float32 and 122 MB in fp16, which is the reason
+    /// for converting it at all. What this can prove is that the converted graph
+    /// still loads, still accepts the same three float32 tensors — the conversion
+    /// keeps the I/O types, so nothing on this side changes — and answers with the
+    /// same regions on the same input. What it cannot prove is detection quality on
+    /// a real censored page: these inputs are synthetic, and the model returns
+    /// nothing for them, so agreement here is agreement about an empty answer.
+    /// That gap is the same one the anchor ordering has, and it needs a real page.
+    #[test]
+    fn the_fp16_detector_agrees_with_the_float32_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/Aletheia-Lens/_internal");
+        let full = root.join("models/mrcnn/weights.onnx");
+        let half = root.join("models-fp16/mrcnn/weights.onnx");
+        if !full.exists() || !half.exists() {
+            eprintln!("skipping: {} or {} is not present", full.display(), half.display());
+            return;
+        }
+        // Worth stating in the assertion: the point of the conversion is the size.
+        let full_bytes = std::fs::metadata(&full).map(|meta| meta.len()).unwrap_or(0);
+        let half_bytes = std::fs::metadata(&half).map(|meta| meta.len()).unwrap_or(0);
+        assert!(
+            half_bytes * 3 < full_bytes * 2,
+            "the fp16 detector is {half_bytes} bytes against {full_bytes}, which is not a halving",
+        );
+
+        let full_engine = DetectorEngine::open(&full).expect("float32 detector");
+        let half_engine = DetectorEngine::open(&half).expect("fp16 detector");
+        for (name, width, height, rgba) in synthetic_pages() {
+            let expected = full_engine.detect(&rgba, width, height).expect("float32 detect");
+            let actual = half_engine.detect(&rgba, width, height).expect("fp16 detect");
+            // Printed rather than asserted: how many regions a synthetic page yields
+            // is the model's business, and the number is what says whether this
+            // comparison saw anything at all.
+            eprintln!("{name}: float32 found {}, fp16 found {}", expected.len(), actual.len());
+            assert_eq!(actual.len(), expected.len(), "{name}: region count differs");
+            // Neither build detects anything in a synthetic page, so the comparison
+            // above is a comparison of two empty lists. The class scores are the
+            // numbers that exist either way, and they are what says the conversion
+            // preserved the arithmetic.
+            let full_scores = full_engine.raw_output(&rgba, width, height, "mrcnn_class").expect("float32 scores");
+            let half_scores = half_engine.raw_output(&rgba, width, height, "mrcnn_class").expect("fp16 scores");
+            assert_eq!(full_scores.len(), half_scores.len(), "{name}: score tensor size differs");
+            assert!(full_scores.iter().all(|value| value.is_finite()), "{name}: float32 produced non-finite scores");
+            assert!(half_scores.iter().all(|value| value.is_finite()), "{name}: fp16 produced non-finite scores");
+            let worst = full_scores.iter().zip(half_scores.iter())
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0_f32, f32::max);
+            let spread = full_scores.iter().copied().fold(0.0_f32, f32::max);
+            eprintln!("{name}: worst class-score difference {worst:.5} over a range up to {spread:.5}");
+            // fp16 carries about three decimal digits, and these are probabilities.
+            assert!(worst < 0.01, "{name}: class scores differ by {worst}, which is more than rounding");
+            for (left, right) in expected.iter().zip(actual.iter()) {
+                assert_eq!(left.region.kind, right.region.kind, "{name}: class differs");
+                // A box that moves by a pixel or two is fp16 rounding; the window
+                // grown around it is 1.5x and at least 256px, so it is absorbed.
+                let dx = left.region.x.abs_diff(right.region.x);
+                let dy = left.region.y.abs_diff(right.region.y);
+                assert!(dx <= 4 && dy <= 4, "{name}: box moved by ({dx},{dy}): {left:?} vs {right:?}");
+                assert!((left.score - right.score).abs() < 0.05, "{name}: score {} vs {}", left.score, right.score);
+            }
+        }
+    }
+
     #[test]
     fn the_real_detector_accepts_the_three_input_tensors() {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

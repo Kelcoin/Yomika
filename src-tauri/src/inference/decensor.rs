@@ -252,29 +252,63 @@ pub fn paste_masked_rgba(
     Ok(written)
 }
 
+/// The three sessions of one bundle, opened once and shared by every page.
+///
+/// Opening the detector is not a small cost: it is a 240 MB graph, and
+/// `decensor_page` used to open a fresh one for every page — so turning
+/// de-censoring on meant loading and initialising that much ONNX per page turn,
+/// which is most of what made it feel unusable. Nothing about the graphs is
+/// per-page, so nothing about them needs to be rebuilt per page.
+///
+/// The two inpainting sessions stay lazy: a page with only bars should not pay to
+/// load the mosaic model, and an archive with no mosaics never will.
+pub struct DecensorEngines {
+    detector: super::detect::DetectorEngine,
+    bar: std::sync::OnceLock<super::inpaint::InpaintEngine>,
+    mosaic: std::sync::OnceLock<super::inpaint::InpaintEngine>,
+    bundle: DecensorBundle,
+}
+
+impl DecensorEngines {
+    pub fn open(bundle: &DecensorBundle) -> Result<Self, InferenceError> {
+        Ok(Self {
+            detector: super::detect::DetectorEngine::open(&bundle.detector)?,
+            bar: std::sync::OnceLock::new(),
+            mosaic: std::sync::OnceLock::new(),
+            bundle: bundle.clone(),
+        })
+    }
+
+    fn inpainter(&self, kind: CensorKind) -> Result<&super::inpaint::InpaintEngine, InferenceError> {
+        let (slot, path) = match kind {
+            CensorKind::Bar => (&self.bar, &self.bundle.bar),
+            CensorKind::Mosaic => (&self.mosaic, &self.bundle.mosaic),
+        };
+        if let Some(engine) = slot.get() {
+            return Ok(engine);
+        }
+        let engine = super::inpaint::InpaintEngine::open(path, kind)?;
+        // A race only means the loser's session is dropped; both are equivalent.
+        let _ = slot.set(engine);
+        slot.get().ok_or_else(|| InferenceError::InvalidInput("inpainting session unavailable".into()))
+    }
+}
+
 /// Runs the whole pipeline over one page, in place, and reports how many regions
 /// it filled.
 ///
 /// One region at a time, and a region whose mask survives thresholding at all: a
-/// detection is only worth a model run if it actually claims pixels. The detector
-/// is opened once per page and the two inpainting models lazily, because a page
-/// with only bars should not pay to load the mosaic model.
+/// detection is only worth a model run if it actually claims pixels.
 pub fn decensor_page(
-    bundle: &DecensorBundle,
+    engines: &DecensorEngines,
     rgba: &mut [u8],
     width: u32,
     height: u32,
 ) -> Result<usize, InferenceError> {
-    use super::detect::DetectorEngine;
-    use super::inpaint::InpaintEngine;
-
-    let detector = DetectorEngine::open(&bundle.detector)?;
-    let regions = detector.detect(rgba, width, height)?;
+    let regions = engines.detector.detect(rgba, width, height)?;
     if regions.is_empty() {
         return Ok(0);
     }
-    let mut bar: Option<InpaintEngine> = None;
-    let mut mosaic: Option<InpaintEngine> = None;
     let mut filled = 0;
     for detection in &regions {
         let window = inpaint_window(&detection.region, width, height)?;
@@ -282,21 +316,7 @@ pub fn decensor_page(
         if censored.iter().all(|&value| value == 0) {
             continue;
         }
-        let engine = match detection.region.kind {
-            CensorKind::Bar => {
-                if bar.is_none() {
-                    bar = Some(InpaintEngine::open(&bundle.bar, CensorKind::Bar)?);
-                }
-                bar.as_ref()
-            }
-            CensorKind::Mosaic => {
-                if mosaic.is_none() {
-                    mosaic = Some(InpaintEngine::open(&bundle.mosaic, CensorKind::Mosaic)?);
-                }
-                mosaic.as_ref()
-            }
-        };
-        let Some(engine) = engine else { continue };
+        let engine = engines.inpainter(detection.region.kind)?;
         let crop = crop_rgba(rgba, width, height, &window)?;
         let patch = engine.inpaint(&crop, window.width, window.height, &censored)?;
         // Only the censored pixels are the model's; the context it was given stays
@@ -348,6 +368,44 @@ mod tests {
         assert!(install_bundle_from(&partial, &base.join(".2.installing"), &base.join("2")).is_err());
 
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The real bundle, when it is on this machine: the detector session is opened
+    /// once and reused, which is the whole point of holding it.
+    ///
+    /// A 240 MB graph opened per page was most of what made de-censoring unusable,
+    /// and the fix is only observable as a timing: the second open of the same
+    /// bundle must be far cheaper than the first, because it is not an open at all.
+    #[test]
+    fn opening_the_same_bundle_twice_reuses_its_sessions() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/Aletheia-Lens/_internal/models");
+        let Some(bundle) = bundle_in(&root) else {
+            eprintln!("skipping: {} is not present", root.display());
+            return;
+        };
+        let started = std::time::Instant::now();
+        let engines = DecensorEngines::open(&bundle).expect("first open");
+        let cold = started.elapsed();
+
+        // Same bundle, same sessions: `decensor_engines_for` hands back the Arc it
+        // already holds, so this measures the lookup rather than the load.
+        let started = std::time::Instant::now();
+        let again = crate::inference::decensor_engines_for(&bundle).expect("cached open");
+        let warm_first = started.elapsed();
+        let started = std::time::Instant::now();
+        let third = crate::inference::decensor_engines_for(&bundle).expect("cached again");
+        let warm = started.elapsed();
+
+        assert!(std::sync::Arc::ptr_eq(&again, &third), "the same sessions have to come back");
+        // An absolute bound rather than a ratio: ORT memory-maps the initialisers,
+        // so a cold open can itself be quick, and a ratio would then be measuring
+        // noise. A lookup that does not open anything cannot take milliseconds.
+        assert!(
+            warm < std::time::Duration::from_millis(5),
+            "a cached lookup took {warm:?}, so it is opening something (cold open was {cold:?}, first cached call {warm_first:?})",
+        );
+        drop(engines);
     }
 
     #[test]
