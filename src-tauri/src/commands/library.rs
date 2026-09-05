@@ -174,6 +174,10 @@ pub struct ReadingProgressInput {
     page_count: i64,
     layout: String,
     direction: String,
+    /// Whether page 0 opens alone in double-page mode. `None` leaves whatever was
+    /// stored alone, so a caller that does not care cannot erase the setting.
+    #[serde(default)]
+    cover_alone: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +189,7 @@ pub struct ReadingProgressRecord {
     page_count: i64,
     layout: String,
     direction: String,
+    cover_alone: Option<bool>,
     updated_at: String,
     revision: i64,
 }
@@ -2662,11 +2667,14 @@ fn persist_reading_progress(
         Err(error) => return Err(error.to_string()),
     };
     let device_id = get_or_create_device_id(&transaction)?;
-    const UPSERT: &str = "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+    // `cover_alone` uses COALESCE rather than `excluded`: a caller that omits it
+    // (every ordinary page turn does) must not erase a setting the user made.
+    const UPSERT: &str = "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, device_id, revision)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
         ON CONFLICT(scope_id, archive_id) DO UPDATE SET
           page_index = excluded.page_index, page_count = excluded.page_count, layout = excluded.layout,
           direction = excluded.direction, device_id = excluded.device_id,
+          cover_alone = COALESCE(excluded.cover_alone, reading_progress.cover_alone),
           updated_at = CURRENT_TIMESTAMP, revision = reading_progress.revision + 1";
     if let Err(error) = transaction.execute(
         UPSERT,
@@ -2677,18 +2685,20 @@ fn persist_reading_progress(
             progress.page_count,
             progress.layout,
             progress.direction,
+            progress.cover_alone,
             device_id
         ],
     ) {
         return Err(error.to_string());
     }
     let record = transaction.query_row(
-        "SELECT scope_id, archive_id, page_index, page_count, layout, direction, updated_at, revision
+        "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
          FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
         params![progress.scope_id, progress.archive_id],
         |row| Ok(ReadingProgressRecord {
             scope_id: row.get(0)?, archive_id: row.get(1)?, page_index: row.get(2)?, page_count: row.get(3)?,
-            layout: row.get(4)?, direction: row.get(5)?, updated_at: row.get(6)?, revision: row.get(7)?,
+            layout: row.get(4)?, direction: row.get(5)?, cover_alone: row.get(6)?,
+            updated_at: row.get(7)?, revision: row.get(8)?,
         }),
     ).optional();
     let record = match record {
@@ -2702,6 +2712,7 @@ fn persist_reading_progress(
         "pageCount": record.page_count,
         "layout": record.layout,
         "direction": record.direction,
+        "coverAlone": record.cover_alone,
     })
     .to_string();
     let mut hasher = Sha256::new();
@@ -3269,13 +3280,13 @@ pub fn load_reading_progress(
     };
     match connection
         .query_row(
-            "SELECT scope_id, archive_id, page_index, page_count, layout, direction, updated_at, revision
+            "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
              FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
             params![scope_id, archive_id],
             |row| Ok(ReadingProgressRecord {
                 scope_id: row.get(0)?, archive_id: row.get(1)?, page_index: row.get(2)?,
                 page_count: row.get(3)?, layout: row.get(4)?, direction: row.get(5)?,
-                updated_at: row.get(6)?, revision: row.get(7)?,
+                cover_alone: row.get(6)?, updated_at: row.get(7)?, revision: row.get(8)?,
             }),
         )
         .optional()
@@ -3673,6 +3684,9 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0018_search_presets.sql"))
             .expect("search presets migration");
         connection
+            .execute_batch(include_str!("../../migrations/0019_reading_progress_cover_alone.sql"))
+            .expect("reading progress cover_alone migration");
+        connection
     }
 
     #[test]
@@ -3687,6 +3701,7 @@ mod tests {
                 page_count: 10,
                 layout: "paged".to_string(),
                 direction: "ltr".to_string(),
+                cover_alone: None,
             },
         )
         .expect("progress write");

@@ -247,6 +247,7 @@ export function createReaderState(input: {
   pageIndex?: number;
   direction?: ReadingDirection;
   layout?: ReaderLayoutPreference;
+  coverAlone?: boolean | undefined;
 }): ReaderState {
   const pageCount = Math.max(0, Math.floor(input.pageCount));
   return {
@@ -255,6 +256,7 @@ export function createReaderState(input: {
     pageIndex: clampPage(input.pageIndex ?? 0, pageCount),
     direction: input.direction ?? 'ltr',
     layout: input.layout ?? 'auto',
+    coverAlone: input.coverAlone,
     phase: 'ready',
   };
 }

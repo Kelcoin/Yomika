@@ -19,7 +19,9 @@ interface ReaderScreenProps {
   /** How many pages either side to keep loaded (preference-driven). */
   prefetchDistance?: number;
   releasePage?: (pageIndex: number) => void;
-  onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection }) => void;
+  onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection; coverAlone: boolean }) => void;
+  /** Restored pairing start; `undefined` means undecided, i.e. the cover alone. */
+  coverAlone?: boolean | undefined;
   /** Retry hook for the failure state; the reader itself cannot refetch pages. */
   onRetry?: () => void;
   /** Archive facts for the overview panel (cover, tags, byte size). */
@@ -28,14 +30,14 @@ interface ReaderScreenProps {
   incognito?: boolean;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', coverAlone, loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   // Built once. A different archive arrives as an unmount, not a prop change:
   // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
   // branch, which takes this component down with it. That is what keeps the page
   // index, the zoom and the per-index page shapes from leaking into the next
   // archive — so if that loading branch is ever removed, this needs a `key`.
-  const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
+  const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout, coverAlone }));
   // `state.layout` is the preference (which may be `auto`); this is what renders.
   const effectiveLayout = effectiveReaderLayout(state);
   const [loadedPages, setLoadedPages] = useState(pages);
@@ -45,6 +47,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const zoomScaleRef = useRef(1);
   const layoutRef = useRef(effectiveLayout);
   const reportedPageRef = useRef(state.pageIndex);
+  const reportedPairingRef = useRef(state.coverAlone !== false);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
   const dragPagedRef = useRef(false);
@@ -56,12 +59,15 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
   // Report from an effect rather than from inside a state updater: every page
   // change is covered (toolbar, keyboard, swipe, thumbnail jump) and StrictMode
-  // cannot double-fire a save.
+  // cannot double-fire a save. The pairing start is watched too — it does not move
+  // the page, so it would otherwise never be written and would reset on reopen.
   useEffect(() => {
-    if (reportedPageRef.current === state.pageIndex) return;
+    const pairing = state.coverAlone !== false;
+    if (reportedPageRef.current === state.pageIndex && reportedPairingRef.current === pairing) return;
     reportedPageRef.current = state.pageIndex;
-    onProgress?.(state.pageIndex, { layout: state.layout, direction: state.direction });
-  }, [onProgress, state.direction, state.layout, state.pageIndex]);
+    reportedPairingRef.current = pairing;
+    onProgress?.(state.pageIndex, { layout: state.layout, direction: state.direction, coverAlone: pairing });
+  }, [onProgress, state.coverAlone, state.direction, state.layout, state.pageIndex]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);

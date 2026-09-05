@@ -36,6 +36,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const incognito = searchParams.get('incognito') === '1';
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
+  /** Restored pairing start. `undefined` means the archive has no stored choice. */
+  const [coverAlone, setCoverAlone] = useState<boolean | undefined>(undefined);
   const [title, setTitle] = useState('阅读器');
   const [pages, setPages] = useState<string[]>([]);
   const [error, setError] = useState<string>();
@@ -217,6 +219,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
         : 0;
       setInitialPage(firstPage);
+      // Undecided stays undecided rather than becoming `true`: the reader treats
+      // both as "cover alone", but only an explicit choice should be written back.
+      setCoverAlone(progress.ok && progress.value ? progress.value.coverAlone ?? undefined : undefined);
       const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, prefetchDistance)];
       const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
       if (!mountedRef.current || contextRef.current !== context) return;
@@ -274,6 +279,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       title={title}
       pages={pages}
       initialPage={initialPage}
+      coverAlone={coverAlone}
       loadPage={loadPage}
       loadPageThumbnail={loadPageThumbnail}
       prefetchDistance={prefetchDistance}
@@ -289,6 +295,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           pageCount: pages.length,
           layout: reading.layout === 'webtoon' ? 'continuous' : 'paged',
           direction: reading.direction,
+          coverAlone: reading.coverAlone,
         });
       }}
       incognito={incognito}

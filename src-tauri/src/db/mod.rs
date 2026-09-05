@@ -119,6 +119,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         (16, include_str!("../../migrations/0016_archive_added_at.sql")),
         (17, include_str!("../../migrations/0017_reading_list.sql")),
         (18, include_str!("../../migrations/0018_search_presets.sql")),
+        (19, include_str!("../../migrations/0019_reading_progress_cover_alone.sql")),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -233,7 +234,7 @@ mod tests {
                     cache_archive_column.as_str(),
                     cache_archive_index.as_str(),
                 ),
-                (18, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
+                (19, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
             );
             connection.execute(
                 "INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES ('restart-task','download','Restart','running',0.4,1,1)",
@@ -251,7 +252,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 17);
+        assert_eq!(migration_count, 18);
         let recovered_status: String = reopened.connection.lock().expect("database lock")
             .query_row("SELECT status FROM tasks WHERE id='restart-task'", [], |row| row.get(0))
             .expect("recovered task");

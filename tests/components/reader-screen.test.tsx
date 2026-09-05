@@ -24,6 +24,33 @@ function renderReader() {
 }
 
 describe('reader screen', () => {
+  it('remembers the pairing start for the archive', async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    const view = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" onProgress={onProgress} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '封面单独一页，点击与第二页并排' }));
+
+    // The toggle does not move the page, so without its own watch the choice
+    // would never be written and would reset the next time the archive opened.
+    expect(onProgress).toHaveBeenCalledWith(0, { layout: 'double', direction: 'ltr', coverAlone: false });
+    view.unmount();
+
+    // Reopening with the stored value restores the pairing rather than the cover.
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" coverAlone={false} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+  });
+
   it('lets the pairing start move off the cover', async () => {
     const user = userEvent.setup();
     render(
@@ -167,7 +194,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '从左到右' }));
     await user.click(screen.getByRole('button', { name: '上一页' }));
 
-    expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl' });
+    expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl', coverAlone: true });
   });
 
   it('records progress and keeps the chrome open when jumping from the thumbnail panel', async () => {
@@ -183,7 +210,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '缩略面板' }));
     await user.click(screen.getByRole('button', { name: '跳转到第 3 页' }));
 
-    expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr' });
+    expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr', coverAlone: true });
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
   });
 
