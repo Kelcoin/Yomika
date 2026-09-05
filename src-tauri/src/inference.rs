@@ -259,6 +259,7 @@ pub fn install_model_archive(
     result
 }
 
+pub mod decensor;
 pub mod onnx;
 pub mod upscale;
 
@@ -367,7 +368,16 @@ pub struct InstalledModel {
     /// From the installed manifest. `None` means the directory has no manifest,
     /// so the model can be listed but not run.
     pub scale: Option<u32>,
+    /// What the model does, read from the shape of the install rather than from
+    /// the manifest: a directory holding the four de-censoring files is a
+    /// de-censoring bundle whatever its manifest says. Keeps a bundle out of the
+    /// upscaler's picker, where selecting it silently produced plain nearest
+    /// neighbour output.
+    pub kind: String,
 }
+
+pub const MODEL_KIND_UPSCALE: &str = "upscale";
+pub const MODEL_KIND_DECENSOR: &str = "decensor";
 
 /// Models on disk, as `models/<id>/<version>/`, newest version of each id first.
 ///
@@ -393,8 +403,10 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
             .collect();
         ids.sort_by(|left, right| right.cmp(left));
         for version in ids {
-            let scale = read_model_manifest(&model_dir.path().join(&version)).map(|manifest| manifest.scale);
-            found.push(InstalledModel { id: id.clone(), version, scale });
+            let root = model_dir.path().join(&version);
+            let scale = read_model_manifest(&root).map(|manifest| manifest.scale);
+            let kind = if decensor::bundle_in(&root).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE };
+            found.push(InstalledModel { id: id.clone(), version, scale, kind: kind.to_string() });
         }
     }
     found.sort_by(|left, right| left.id.cmp(&right.id));
@@ -447,10 +459,11 @@ pub fn inference_install_model(
         });
 
     match result {
-        Ok(_) => crate::domain::result::CommandResult::success(InstalledModel {
+        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
             id: input.manifest.id,
             version: input.manifest.version,
             scale: Some(input.manifest.scale),
+            kind: if decensor::bundle_in(&install).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE }.to_string(),
         }),
         Err(InferenceError::InvalidInput(message)) => {
             crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
@@ -1188,9 +1201,9 @@ mod tests {
         ).unwrap();
 
         assert_eq!(installed_models_in(&base), vec![
-            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into(), scale: Some(2) },
-            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into(), scale: None },
-            InstalledModel { id: "waifu2x".into(), version: "1".into(), scale: None },
+            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into(), scale: Some(2), kind: MODEL_KIND_UPSCALE.into() },
+            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into(), scale: None, kind: MODEL_KIND_UPSCALE.into() },
+            InstalledModel { id: "waifu2x".into(), version: "1".into(), scale: None, kind: MODEL_KIND_UPSCALE.into() },
         ]);
         // No models directory at all is an empty list, not an error: a fresh
         // install has nowhere to look yet.

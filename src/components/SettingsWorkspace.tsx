@@ -102,8 +102,9 @@ export function SettingsWorkspace() {
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
-  // A model with no recorded scale cannot be run, so it is not a choice.
-  const runnableModels = installedModels?.filter((model) => model.scale);
+  // A model with no recorded scale cannot be run, so it is not a choice; nor is a
+  // de-censoring bundle, which is not an upscaler.
+  const runnableModels = installedModels?.filter((model) => model.scale && model.kind === 'upscale');
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();

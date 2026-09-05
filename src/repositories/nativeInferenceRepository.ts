@@ -17,6 +17,10 @@ const InstalledModelSchema = z.object({
   /** From the installed manifest. Null means the directory has no manifest, so
    * the model is listed but cannot be run — nothing records its scale. */
   scale: z.number().int().positive().nullable().default(null),
+  /** What the model does. Read from the shape of the install on the native side,
+   * so a de-censoring bundle cannot be offered as an upscaler — picking one there
+   * silently produced plain nearest-neighbour output. */
+  kind: z.enum(['upscale', 'decensor']).default('upscale'),
 });
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
 export type InferenceJob = z.infer<typeof InferenceJobSchema>;
