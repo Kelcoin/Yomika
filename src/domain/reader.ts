@@ -106,14 +106,29 @@ export function classifyPageShape(width: number, height: number): PageShape {
  * one for the rest of the archive.
  *
  * Following ComicReadScript's `handleComicData.ts:80-125`, a wide page takes a
- * slot of its own and delimits the runs around it; each run is then paired from
- * its own start, so the mistake cannot propagate past the spread that caused it.
+ * slot of its own and delimits the runs around it, so a mistake cannot propagate
+ * past the spread that caused it.
+ *
+ * A spread is also evidence about the pages *before* it. In a printed book a
+ * double page occupies a left and a right half, so it can only begin where a
+ * pair would — if the run leading up to it has an odd length, that run started
+ * on the wrong foot and its odd page out belongs at the front rather than the
+ * back (`handleComicData.ts:104-113`). A wide page in the last two positions is
+ * exempt: that is usually a scanlation credits page, and letting it re-pair the
+ * whole chapter behind it would be worse than leaving it alone.
  */
 export function planPageSpreads(shapes: readonly PageShape[], coverAlone = true): number[][] {
   const slots: number[][] = [];
   let run: number[] = [];
-  const flush = () => {
-    for (let index = 0; index < run.length; index += 2) {
+  /** `alignToEnd` puts the odd page out at the front of the run instead of the
+   * back, which is what a spread landing on an odd offset implies. */
+  const flush = (alignToEnd = false) => {
+    let start = 0;
+    if (alignToEnd && run.length % 2 === 1) {
+      slots.push([run[0]!]);
+      start = 1;
+    }
+    for (let index = start; index < run.length; index += 2) {
       slots.push(run.slice(index, index + 2));
     }
     run = [];
@@ -125,7 +140,7 @@ export function planPageSpreads(shapes: readonly PageShape[], coverAlone = true)
       continue;
     }
     if (shapes[index] === 'wide') {
-      flush();
+      flush(index < shapes.length - 2);
       slots.push([index]);
       continue;
     }

@@ -63,14 +63,29 @@ describe('reader domain', () => {
     expect(planPageSpreads([normal, normal, normal, normal, normal]))
       .toEqual([[0], [1, 2], [3, 4]]);
 
-    // A spread at index 3 takes a slot of its own. What matters is that page 4
-    // starts a fresh pair instead of every later pair being off by one.
+    // A spread at index 3 takes a slot of its own, and the run before it has an
+    // even length, so nothing upstream needs moving.
     expect(planPageSpreads([normal, normal, normal, wide, normal, normal, normal]))
       .toEqual([[0], [1, 2], [3], [4, 5], [6]]);
 
     // Two spreads in a row, and a trailing odd page.
     expect(planPageSpreads([normal, wide, wide, normal]))
       .toEqual([[0], [1], [2], [3]]);
+  });
+
+  it('treats a spread as evidence about the pages before it', () => {
+    const normal = 'normal' as const;
+    const wide = 'wide' as const;
+    // A printed double page can only begin where a pair would. The run 1..3 is
+    // odd, so page 1 is the one that stands alone and 2,3 pair up — otherwise
+    // the spread would start mid-pair.
+    expect(planPageSpreads([normal, normal, normal, normal, wide, normal, normal]))
+      .toEqual([[0], [1], [2, 3], [4], [5, 6]]);
+
+    // A wide page in the last two positions is usually a credits page, not a
+    // spread, so it does not get to re-pair the chapter behind it.
+    expect(planPageSpreads([normal, normal, normal, normal, wide]))
+      .toEqual([[0], [1, 2], [3], [4]]);
   });
 
   it('steps a spread by one page and a pair by two', () => {
