@@ -10,6 +10,10 @@ export interface ImageCacheIdentity {
   /** Upscale model this rendition was produced with. Part of the key so
    * switching models does not serve the previous one's output. */
   modelId?: string;
+  /** De-censoring bundle this rendition was produced with. On `enhanced` it also
+   * says the upscaler read the de-censored page rather than the plain one, so the
+   * two pipelines chain; part of the key for the same reason as `modelId`. */
+  decensorModelId?: string;
   transform?: string;
 }
 
@@ -24,6 +28,7 @@ export function createImageCacheKey(identity: ImageCacheIdentity): string {
     // source path the same page index would keep serving the old image.
     identity.sourcePath ?? '',
     identity.modelId ?? '',
+    identity.decensorModelId ?? '',
     identity.transform ?? '',
   ];
   return `image:v1:${fields.map((value) => `${value.length}:${value}`).join('')}`;

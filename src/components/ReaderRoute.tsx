@@ -127,12 +127,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         rendition: 'reader-page',
         sourcePath: path,
       }, signal ? { signal } : {});
-      // With upscaling on, swap in the enhanced rendition once the plain page is
-      // cached; a failure keeps the plain page rather than blanking the reader.
-      // De-censoring wins when both are on: the two are separate pipelines, and
-      // chaining them would mean upscaling from the de-censored rendition, which
-      // the upscaler does not read.
-      const derived = decensorEnabled
+      // With either enhancement on, swap the derived rendition in once the plain
+      // page is cached; a failure keeps the plain page rather than blanking the
+      // reader. With both on they chain in this order and only this order: the
+      // detector and the inpainter were trained at page scale, so the regions are
+      // filled first and the finished page is what gets enlarged. Upscaling first
+      // would hand the inpainter interpolated pixels and smeared mosaic blocks.
+      const censoredFilled = decensorEnabled
         ? await imageCache.load({
           scopeId: context.scopeId,
           serverId: context.serverId,
@@ -141,7 +142,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           rendition: 'decensored',
           modelId: preferences.decensorModel,
         }, signal ? { signal } : {}).catch(() => undefined)
-        : upscaleEnabled
+        : undefined;
+      // Upscaling reads the de-censored rendition when there is one, so it has to
+      // wait for that step rather than run beside it.
+      const enhanced = upscaleEnabled && (!decensorEnabled || censoredFilled)
         ? await imageCache.load({
           scopeId: context.scopeId,
           serverId: context.serverId,
@@ -149,9 +153,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           pageIndex,
           rendition: 'enhanced',
           ...(preferences.upscaleModel ? { modelId: preferences.upscaleModel } : {}),
+          ...(censoredFilled ? { decensorModelId: preferences.decensorModel } : {}),
         }, signal ? { signal } : {}).catch(() => undefined)
         : undefined;
+      const derived = enhanced ?? censoredFilled;
       if (derived) {
+        if (enhanced && censoredFilled) imageCache.release(censoredFilled);
         imageCache.release(handle);
         pageHandlesRef.current.set(pageIndex, derived);
         return derived.url;

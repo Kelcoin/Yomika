@@ -30,6 +30,10 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         ...(identity.modelId ? { modelId: identity.modelId } : {}),
+        // Present when de-censoring is also on: the upscaler then reads the
+        // de-censored page, so the regions are filled at the scale the models were
+        // trained on and the finished page is what gets enlarged.
+        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
       });
       if (!upscaled.ok) throw new Error(upscaled.error.message);
       const bytes = new Uint8Array(upscaled.value);

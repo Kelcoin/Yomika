@@ -618,6 +618,14 @@ pub struct UpscalePageInput {
     pub tile_size: Option<u32>,
     #[serde(default)]
     pub tile_sleep_ms: Option<u64>,
+    /// When set, the upscaler reads this page's de-censored rendition instead of
+    /// the plain one, so the two pipelines chain in the order that matters: fill
+    /// the censored regions at the original scale — which is what the detector and
+    /// the inpainter were trained on — and enlarge the finished page afterwards.
+    /// Upscaling first would hand the inpainter interpolated pixels and smeared
+    /// mosaic blocks.
+    #[serde(default)]
+    pub decensor_model: Option<String>,
 }
 
 #[tauri::command]
@@ -660,14 +668,35 @@ fn upscale_cached_page(
         None => input.scale.unwrap_or(2).clamp(1, 4),
     };
     // The revision keys the cache: switching model, version or scale has to miss
-    // rather than serve the previous model's output.
+    // rather than serve the previous model's output. So does chaining onto the
+    // de-censored page, which is a different input entirely.
+    let decensor = input
+        .decensor_model
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| resolve_installed_bundle(app_data, id))
+        .map(|(_, manifest)| format!("{}@{}", manifest.id, manifest.version));
     let revision = match &model {
         Some((_, manifest)) => format!("x{scale}:{}@{}", manifest.id, manifest.version),
         None => format!("x{scale}:nearest"),
     };
+    let revision = match &decensor {
+        Some(bundle) => format!("{revision}+dc:{bundle}"),
+        None => revision,
+    };
     let mut enhanced = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "enhanced", input.page_index);
     enhanced.revision = Some(revision);
-    let source = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index);
+    // Chaining reads the de-censored rendition as the source. Its revision has to
+    // match what the de-censoring command wrote, or this looks for an entry that
+    // does not exist.
+    let source = match &decensor {
+        Some(bundle) => {
+            let mut identity = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "decensored", input.page_index);
+            identity.revision = Some(bundle.clone());
+            identity
+        }
+        None => CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index),
+    };
 
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -680,6 +709,8 @@ fn upscale_cached_page(
     }
     let page = match load_image_cache(&connection, app_data, &source) {
         Ok(Some(image)) => image,
+        // Retryable on purpose: when chaining, the de-censored page may still be
+        // being produced, and the caller asks again once it lands.
         Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
@@ -1015,6 +1046,79 @@ mod tests {
     }
 
     #[test]
+    fn chaining_reads_the_de_censored_page_rather_than_the_plain_one() {
+        // The order matters and only one order is right: the detector and the
+        // inpainter were trained at page scale, so the regions are filled first and
+        // the finished page is what gets enlarged. This proves the chain by leaving
+        // the plain rendition out of the cache entirely — an upscaler that still
+        // read `reader-page` could not produce anything at all.
+        use crate::cache::{store_image_cache, CacheImageIdentity};
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&app_data);
+        // An installed bundle: the four files are what makes a directory a bundle,
+        // and none of them is opened on this path.
+        let install = app_data.join("models").join("aletheia").join("1");
+        for (directory, file) in [
+            ("mrcnn", "weights.onnx"),
+            ("deepcreampy", "bar.onnx"),
+            ("deepcreampy", "mosaic.onnx"),
+            ("esrgan", "4x-Fatal-Pixels.onnx"),
+        ] {
+            std::fs::create_dir_all(install.join(directory)).unwrap();
+            std::fs::write(install.join(directory).join(file), b"stub").unwrap();
+        }
+        let manifest = ModelManifest { id: "aletheia".into(), version: "1".into(), ..model_manifest(b"x") };
+        std::fs::write(install.join(MODEL_MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let mut page = Vec::new();
+        {
+            use image::ImageEncoder;
+            let rgba = vec![9_u8, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255];
+            image::codecs::png::PngEncoder::new(&mut page)
+                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        // Only the de-censored rendition exists, under the revision the de-censoring
+        // command writes.
+        let mut decensored = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 0);
+        decensored.revision = Some("aletheia@1".to_string());
+        store_image_cache(&connection, &app_data, &decensored, "image/png", &page).unwrap();
+
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+        let chained = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None,
+            decensor_model: Some("aletheia".into()),
+        });
+        let bytes = match chained {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("chaining did not read the de-censored page: {other:?}"),
+        };
+        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 4);
+
+        // Without the bundle it looks for the plain page, which is not there.
+        let unchained = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
+        });
+        assert!(
+            matches!(unchained, crate::domain::result::CommandResult::Failure { .. }),
+            "the unchained path must read the plain rendition, which this test never cached",
+        );
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
     fn upscaling_a_cached_page_reuses_the_enhanced_rendition() {
         use crate::cache::{CacheImageIdentity, load_image_cache, store_image_cache};
         let connection = rusqlite::Connection::open_in_memory().unwrap();
@@ -1045,7 +1149,7 @@ mod tests {
         let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
         let input = UpscalePageInput {
             scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
-            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
         };
 
         let first = match upscale_cached_page(&database, &app_data, &input) {
@@ -1089,7 +1193,7 @@ mod tests {
 
         let result = upscale_cached_page(&database, &app_data, &UpscalePageInput {
             scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
-            scale: None, model_id: None, tile_size: None, tile_sleep_ms: None,
+            scale: None, model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
         });
 
         assert!(matches!(result, crate::domain::result::CommandResult::Failure { .. }));

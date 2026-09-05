@@ -50,7 +50,9 @@ export class NativeInferenceRepository {
   /** `modelId` names an installed model; the native side resolves its newest
    * version and reads the scale from that model's manifest, so the caller does
    * not get to ask for a scale the model cannot produce. */
-  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; tileSize?: number; tileSleepMs?: number }): Promise<CommandResult<ArrayBuffer>> {
+  /** `decensorModel` chains the two pipelines: the upscaler then reads this
+   * page's de-censored rendition instead of the plain one. */
+  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; decensorModel?: string; tileSize?: number; tileSleepMs?: number }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('inference_upscale_page', { input });
   }
 
