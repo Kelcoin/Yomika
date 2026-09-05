@@ -185,26 +185,6 @@ pub fn paste_masked_rgba(
     Ok(written)
 }
 
-/// Turns a detector's per-pixel confidence over the crop into the byte mask
-/// `paste_masked_rgba` takes, and reports whether anything survived the
-/// threshold. A mask that selects nothing means the region was a false positive,
-/// and pasting it would be a no-op that still cost a model run.
-pub fn threshold_mask(scores: &[f32], threshold: f32) -> (Vec<u8>, usize) {
-    let mut selected = 0;
-    let mask = scores
-        .iter()
-        .map(|score| {
-            if score.is_finite() && *score >= threshold {
-                selected += 1;
-                1
-            } else {
-                0
-            }
-        })
-        .collect();
-    (mask, selected)
-}
-
 /// Runs the whole pipeline over one page, in place, and reports how many regions
 /// it filled.
 ///
@@ -374,13 +354,4 @@ mod tests {
         assert!(paste_masked_rgba(&mut page, 4, 4, &off_page, &vec![0; 16], &vec![1; 4]).is_err());
     }
 
-    #[test]
-    fn thresholding_reports_an_empty_mask_instead_of_selecting_nothing_silently() {
-        let (mask, selected) = threshold_mask(&[0.1, 0.9, f32::NAN, 0.5], 0.5);
-        assert_eq!(mask, vec![0, 1, 0, 1]);
-        assert_eq!(selected, 2);
-
-        let (_, none) = threshold_mask(&[0.1, 0.2], 0.5);
-        assert_eq!(none, 0, "a region that selects nothing must be reported, not pasted");
-    }
 }

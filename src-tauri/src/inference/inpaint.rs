@@ -98,10 +98,6 @@ impl InpaintEngine {
         Ok(Self { session: Mutex::new(session), kind })
     }
 
-    pub fn kind(&self) -> CensorKind {
-        self.kind
-    }
-
     /// Fills the censored pixels of one RGBA crop, returning an RGBA patch of the
     /// same size.
     ///
