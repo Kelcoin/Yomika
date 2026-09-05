@@ -92,7 +92,13 @@ describe('EH route workspace', () => {
     await user.type(screen.getByLabelText('密码'), 'wrong-password');
     await user.click(screen.getByRole('button', { name: '登录 E-Hentai' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('用户名或密码不正确');
+    // The form keeps its own message and the toast repeats it: this panel is a
+    // section of the settings page, and the failure people needed to see most was
+    // reported at the bottom of it and nowhere else.
+    // The form keeps its own message and the toast repeats it: this panel is a
+    // section of the settings page, and the failure people needed to see most was
+    // reported at the bottom of it and nowhere else.
+    expect((await screen.findAllByText('用户名或密码不正确')).length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText(/登录已失效/)).not.toBeInTheDocument();
     expect(screen.queryByText(/重新配置 Cookie/)).not.toBeInTheDocument();
   });

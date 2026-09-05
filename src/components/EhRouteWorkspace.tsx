@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { EhWorkspace } from './EhWorkspace';
+import { useToast } from './Toast';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { presentEhError, presentEhLoginError, type EhSearchResult } from '../services/ehClient';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
@@ -19,6 +20,7 @@ const BROWSER_LOGIN_TIMEOUT_MS = 5 * 60 * 1_000;
  * other, which left the settings page rendering nothing. `/eh` still routes here
  * as a deep link. */
 export function EhRouteWorkspace() {
+  const { showToast } = useToast();
   const [accounts, setAccounts] = useState<EhAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [results, setResults] = useState<EhSearchResult[]>();
@@ -60,14 +62,19 @@ export function EhRouteWorkspace() {
           setResults(result.value.galleries);
           setSearched(true);
         } else {
-          setSearchError(presentEhError(result.error.code, result.error.message));
+          const reason = presentEhError(result.error.code, result.error.message);
+          setSearchError(reason);
+          showToast(reason, 'error');
         }
         setSearching(false);
       }}
       onSwitchAccount={async (accountId) => {
         const result = await ehRepository.setActiveAccount(accountId);
         if (!result.ok) {
-          setSearchError(presentEhError(result.error.code, result.error.message));
+          // Not a search error: it used to be reported in the search slot, which
+          // only renders when there is an active account — so a switch that left
+          // none reported itself nowhere at all.
+          showToast(presentEhError(result.error.code, result.error.message), 'error');
           return;
         }
         setAccounts((current) => current.map((account) => ({
@@ -78,7 +85,7 @@ export function EhRouteWorkspace() {
       onCheckHealth={async (accountId) => {
         const result = await ehRepository.checkLoginHealth(accountId);
         if (!result.ok) {
-          setSearchError(presentEhError(result.error.code, result.error.message));
+          showToast(presentEhError(result.error.code, result.error.message), 'error');
           return;
         }
         setAccounts((current) => current.map((account) => account.id === accountId

@@ -79,6 +79,14 @@ export function UploadPanel() {
       : item)));
   }
 
+  /** A failed item keeps its reason on its own row *and* says so once, out loud.
+   * The row is easy to miss in a long queue, and a queue that quietly ends with
+   * nothing uploaded is the one case someone needs told. */
+  function fail(item: { id: string; label: string }, reason: string) {
+    markItem(item.id, 'failed', reason);
+    showToast(`${item.label}：${reason}`, 'error');
+  }
+
   async function run() {
     if (running || queued.length === 0) return;
     setRunning(true);

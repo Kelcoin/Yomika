@@ -94,7 +94,12 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
     if (!result) return;
     const selection = mergeSmartDuplicateSelection(groups, [], result.selectedArchiveIds, [], sourceByGroupKey);
     const response = await dedup.scanChunk({ sessionId: result.session.sessionId, algorithmVersion: result.session.algorithmVersion, checkpoint: result.session.checkpoint, archives: [], pairs: [], selectedArchiveIds: selection.archiveIds });
-    if (response.ok) { const loaded = await dedup.loadResult(result.session.sessionId); if (loaded.ok) setResult(loaded.value); }
+    // A failure here left the checkboxes exactly as they were and said nothing, so
+    // the button looked like it had done its job.
+    if (!response.ok) { showToast(response.error.message, 'error'); return; }
+    const loaded = await dedup.loadResult(result.session.sessionId);
+    if (loaded.ok) setResult(loaded.value);
+    else showToast(loaded.error.message, 'error');
   }
 
   async function deleteSelected() {

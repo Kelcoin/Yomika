@@ -3,14 +3,23 @@ import { Pause, Play, RotateCcw, X } from 'lucide-react';
 
 import type { TaskRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { useToast } from './Toast';
 
 const repository = new NativeLibraryRepository();
 
 export function TaskCenter() {
+  const { showToast } = useToast();
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [pendingTaskId, setPendingTaskId] = useState<string>();
+
+  // Failures reach the toast as well as the page: this panel can be scrolled out
+  // of view, embedded in another page, or replaced by what the user did next, and
+  // an error nobody saw is an error nobody can act on.
+  useEffect(() => {
+    if (error) showToast(error, 'error');
+  }, [error, showToast]);
 
   useEffect(() => {
     let active = true;

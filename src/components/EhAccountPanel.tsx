@@ -2,6 +2,7 @@ import { CheckCircle, Globe, KeyRound, LogIn, RefreshCw, ArrowRightLeft } from '
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { ehAccountIdFor, ehHostFor, formatEhCookie, parseEhCookie } from '../lib/ehCookie';
+import { useToast } from './Toast';
 
 interface EhAccountPanelProps {
   accounts: EhAccount[];
@@ -32,8 +33,15 @@ function statusLabel(status: EhAccount['status']): string {
  * before this the only way through was copying cookies out of another browser by
  * hand. */
 export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, saving }: EhAccountPanelProps) {
+  const { showToast } = useToast();
   const [mode, setMode] = useState<'password' | 'browser' | 'cookie'>('password');
   const [formError, setFormError] = useState<string>();
+  // Also a toast. The form is inside a settings section that scrolls, and the
+  // sign-in failure people needed to see most — a bridge error with no obvious
+  // cause — was reported at the bottom of it and nowhere else.
+  useEffect(() => {
+    if (formError) showToast(formError, 'error');
+  }, [formError, showToast]);
   const [browserPending, setBrowserPending] = useState(false);
   const browserAbortRef = useRef<AbortController>();
   useEffect(() => () => browserAbortRef.current?.abort(), []);

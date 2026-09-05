@@ -8,10 +8,12 @@ import { useTagTranslations } from '../lib/tagTranslationService';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { MetadataTagChip } from './MetadataTagChip';
 import { TagSuggest } from './TagSuggest';
+import { useToast } from './Toast';
 
 const repository = new NativeLibraryRepository();
 
 export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
+  const { showToast } = useToast();
   const navigate = useNavigate();
   useTagTranslations();
   const [serverId, setServerId] = useState<string>();
@@ -26,6 +28,16 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const [busy, setBusy] = useState<'save' | 'plugin' | 'delete' | ''>('');
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
+
+  // Both reach the toast as well as the page. This panel is embedded in settings,
+  // where every neighbouring control reports that way, and an error rendered only
+  // at the bottom of a scrolled panel is an error nobody sees.
+  useEffect(() => {
+    if (error) showToast(error, 'error');
+  }, [error, showToast]);
+  useEffect(() => {
+    if (message) showToast(message, 'success');
+  }, [message, showToast]);
 
   useEffect(() => {
     let active = true;
@@ -168,8 +180,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
         </div>
         <label>简介<textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
         {plugins.length > 0 && <div className="metadata-plugin-row"><select aria-label="元数据插件" value={plugin} onChange={(event) => setPlugin(event.target.value)}>{plugins.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
-        {error && <p className="form-error" role="alert">{error}</p>}
-        {message && <p className="server-list-message" role="status">{message}</p>}
+      {/* Same as the sync panel: a save landing or failing is an event, and the
+          toast is where events are reported. */}
         <div className="metadata-edit-actions">
           <button className="primary-action" type="submit" aria-label="保存元数据" disabled={!!busy}><Save aria-hidden="true" />{busy === 'save' ? '保存中…' : '保存元数据'}</button>
           <Link className="secondary-action" to={`/reader/${archiveId}`}><BookOpen aria-hidden="true" />阅读</Link>
