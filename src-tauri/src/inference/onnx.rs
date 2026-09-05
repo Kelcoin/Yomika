@@ -151,4 +151,56 @@ mod tests {
         };
         assert!(matches!(error, InferenceError::InvalidManifest(_)));
     }
+
+    /// The real model, when it is on this machine.
+    ///
+    /// Everything else here tests my own layout assumptions against themselves.
+    /// This is the only check that the assumptions match what a Real-ESRGAN
+    /// graph actually wants — a transposed tensor or a channels-last model would
+    /// pass every other test in this file and produce garbage.
+    ///
+    /// `docs/` is gitignored, so the file is absent on a fresh clone and the test
+    /// skips rather than failing for the wrong reason.
+    #[test]
+    fn the_downloaded_model_upscales_a_tile_by_four() {
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/models/realesr-general-x4v3.onnx");
+        if !model.exists() {
+            eprintln!("skipping: {} is not present", model.display());
+            return;
+        }
+
+        let engine = match OnnxEngine::open(&model, 4, 64_000_000) {
+            Ok(engine) => engine,
+            Err(error) => panic!("opening the downloaded model failed: {error:?}"),
+        };
+
+        // A gradient rather than a flat colour: a transposed input would still
+        // come back the right size, so the content has to be able to disagree.
+        let (width, height) = (16_u32, 16_u32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend_from_slice(&[(x * 16) as u8, (y * 16) as u8, 128, 200]);
+            }
+        }
+
+        let output = match engine.upscale_tile(&rgba, width, height) {
+            Ok(output) => output,
+            Err(error) => panic!("running the downloaded model failed: {error:?}"),
+        };
+        assert_eq!(output.len(), (width * 4 * height * 4 * 4) as usize);
+        // Alpha is carried by the fallback scaler, not the model.
+        assert!(output.chunks_exact(4).all(|pixel| pixel[3] == 200));
+        // The model must have written something other than the nearest-neighbour
+        // input it was handed; identical output means the run was a no-op.
+        let nearest = crate::inference::cpu_scale_rgba(&rgba, width, height, 4, 64_000_000)
+            .expect("nearest-neighbour reference")
+            .rgba;
+        assert_ne!(output, nearest, "the model output matched plain upscaling exactly");
+        // Red still rises left to right in the enlarged tile, so the channels did
+        // not come back permuted.
+        let row = 32 * width as usize * 4 * 4;
+        assert!(output[row] < output[row + 60 * 4], "red no longer increases along x");
+    }
 }

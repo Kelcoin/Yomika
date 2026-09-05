@@ -972,6 +972,48 @@ mod tests {
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
+    /// The whole chain the reader takes, on the real model when it is present:
+    /// a ZIP goes through `install_model_archive`, the installed directory is
+    /// resolved back by id, and the engine built from it upscales a tile.
+    ///
+    /// The temp directory keeps this independent of whatever is installed on
+    /// this machine; `docs/` is gitignored, so a fresh clone skips it.
+    #[test]
+    fn the_downloaded_model_installs_and_resolves_into_a_working_engine() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/models/realesr-general-x4v3.onnx");
+        if !source.exists() {
+            eprintln!("skipping: {} is not present", source.display());
+            return;
+        }
+        let model_bytes = std::fs::read(&source).expect("read the downloaded model");
+
+        let base = std::env::temp_dir().join("yomika-install-real-model");
+        let _ = std::fs::remove_dir_all(&base);
+        let (staging, install) = model_install_roots(&base, "realesr-general-x4v3", "2026.09.04")
+            .expect("install roots");
+
+        let mut manifest = model_manifest(&model_bytes);
+        manifest.id = "realesr-general-x4v3".into();
+        manifest.version = "2026.09.04".into();
+        manifest.scale = 4;
+        install_model_archive(&model_zip(&[("model.onnx", &model_bytes)]), &manifest, &staging, &install)
+            .expect("install the downloaded model");
+
+        let (path, resolved) = resolve_installed_model(&base, "realesr-general-x4v3")
+            .expect("resolve the installed model");
+        assert_eq!(path, install.join("model.onnx"));
+        assert_eq!(resolved, manifest, "the manifest must survive installation verbatim");
+
+        let engine = onnx::OnnxEngine::open(&path, resolved.scale, resolved.max_pixels)
+            .expect("open the installed model");
+        let rgba = vec![128_u8; 8 * 8 * 4];
+        let output = upscale::UpscaleEngine::upscale_tile(&engine, &rgba, 8, 8)
+            .expect("upscale a tile with the installed model");
+        assert_eq!(output.len(), 32 * 32 * 4, "a x4 model turns 8x8 into 32x32");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     fn model_manifest(bytes: &[u8]) -> ModelManifest {
         use sha2::{Digest, Sha256};
         let sha256 = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
