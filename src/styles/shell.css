@@ -277,7 +277,6 @@ body::-webkit-scrollbar,
 .icon-action svg { width: 16px; height: 16px; }
 .icon-action svg.is-spinning { animation: icon-spin 900ms linear infinite; }
 @keyframes icon-spin { to { transform: rotate(360deg); } }
-
 .tooltip-content { z-index: var(--z-tooltip); padding: 6px 9px; border-radius: 6px; background: var(--surface-overlay); color: var(--ink-on-overlay); font-size: 11px; line-height: 1; box-shadow: var(--shadow-tooltip); user-select: none; }
 .tooltip-arrow { fill: var(--surface-overlay); }
 
@@ -1381,6 +1380,10 @@ body::-webkit-scrollbar,
 .archive-list {
   height: 100%;
   overflow: auto;
+  /* The global :focus-visible ring is drawn outside the element, and a scroll
+     container clips whatever leaves its padding box — without this, a
+     keyboard-focused card's ring is cut off against the edges. */
+  padding: 4px;
   scrollbar-width: none;
 }
 
@@ -2458,7 +2461,10 @@ body::-webkit-scrollbar,
 .archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid color-mix(in srgb, var(--ink-secondary) 16%, transparent); border-radius: var(--radius-card); background: var(--surface-panel); }
 .archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .archive-rail-heading h2 { margin: 0; font-size: var(--text-lg); font-weight: 720; letter-spacing: -0.01em; }
-.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 2px 2px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
+/* 6px of padding, not 2: the global :focus-visible ring extends outside the card
+   and a horizontal scroll container clips anything past its padding box, so a
+   keyboard-focused rail card had its ring sliced off. */
+.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); color: inherit; scroll-snap-align: start; transition: transform var(--motion-standard), border-color var(--motion-standard), box-shadow var(--motion-standard); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 .archive-thumb-card:hover { border-color: var(--brand-vermilion); box-shadow: var(--shadow-card); transform: translateY(-2px); }
@@ -2594,6 +2600,9 @@ body::-webkit-scrollbar,
     flex: 1 1 44px;
   }
   .scroll-to-top { right: var(--space-4); bottom: calc(76px + env(safe-area-inset-bottom)); }
+  /* 30px is a comfortable desktop icon button and a mean touch target. */
+  .icon-action { width: 40px; height: 40px; }
+  .icon-action svg { width: 18px; height: 18px; }
   .app-shell {
     display: block;
   }
