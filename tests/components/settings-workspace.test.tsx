@@ -188,7 +188,12 @@ describe('settings workspace', () => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
-      if (command === 'inference_list_models') return { ok: true, value: [{ id: 'realesr-general', version: '2026.09.2' }] };
+      if (command === 'inference_list_models') return { ok: true, value: [
+        { id: 'realesr-general', version: '2026.09.2', scale: 4 },
+        // No manifest means no recorded scale, so this one cannot be run and
+        // must not be offered as a choice.
+        { id: 'mystery-model', version: '1', scale: null },
+      ] };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -205,9 +210,11 @@ describe('settings workspace', () => {
     // The model picker only matters once a backend is chosen.
     expect(screen.queryByLabelText('超分模型')).not.toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: 'CPU' }));
-    // Installed models are offered by name; typing one from memory was a silent
-    // failure at upscale time.
-    await user.click(await screen.findByRole('radio', { name: 'realesr-general · 2026.09.2' }));
+    // Installed models are offered by name, with the scale the model itself
+    // produces; typing a name from memory was a silent failure at upscale time.
+    expect(await screen.findByRole('radio', { name: 'realesr-general · 2026.09.2 · x4' })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /mystery-model/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: 'realesr-general · 2026.09.2 · x4' }));
 
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'realesr-general' },

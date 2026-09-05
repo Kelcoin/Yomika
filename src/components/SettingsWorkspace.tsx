@@ -41,9 +41,14 @@ function formatCacheBytes(value: number): string {
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
 }
 
+/** Names a model by id, version and the scale it produces, since the scale is
+ * the model's to decide and not the user's. */
+function modelOption(model: InstalledModel): { value: string; label: string } {
+  return { value: model.id, label: `${model.id} · ${model.version}${model.scale ? ` · x${model.scale}` : ''}` };
+}
+
 /** Grouped by topic: one "阅读与存储" panel used to hold the theme, the reader
- * defaults, the cache and the upscaler at once. */
-const settingsSections = [
+ * defaults, the cache and the upscaler at once. */const settingsSections = [
   { id: 'settings-general', label: '通用' },
   { id: 'settings-reading', label: '阅读' },
   { id: 'settings-appearance', label: '样式' },
@@ -80,6 +85,8 @@ export function SettingsWorkspace() {
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
+  // A model with no recorded scale cannot be run, so it is not a choice.
+  const runnableModels = installedModels?.filter((model) => model.scale);
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -382,30 +389,29 @@ export function SettingsWorkspace() {
               <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-reading' && preferenceDraft.upscaleBackend !== 'off' && (
-              /* The models that are actually installed, not a name typed from
-                 memory: a typo here used to fail silently at upscale time. */
-              installedModels?.length
+              /* The models that are actually installed and runnable, not a name
+                 typed from memory: a typo here used to fail silently at upscale
+                 time. A model whose directory has no manifest has no recorded
+                 scale, so it cannot be run and is not offered. */
+              runnableModels?.length
                 ? <fieldset>
                     <legend>超分模型</legend>
                     <SelectField
                       name="upscaleModel"
                       aria-label="超分模型"
                       value={preferenceDraft.upscaleModel}
-                      options={[
-                        { value: '', label: '未选择' },
-                        ...installedModels.map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` })),
-                      ]}
+                      options={[{ value: '', label: '未选择' }, ...runnableModels.map(modelOption)]}
                       onChange={(value) => editPreferences({ upscaleModel: value })}
                     />
                     <PreferenceRadioFallback
                       name="upscaleModel"
                       value={preferenceDraft.upscaleModel}
-                      options={installedModels.map((model) => [model.id, `${model.id} · ${model.version}`])}
+                      options={runnableModels.map((model) => [model.id, modelOption(model).label])}
                       onChange={(value) => editPreferences({ upscaleModel: value })}
                     />
                   </fieldset>
                 : <p className="server-list-message" role="status">
-                    {installedModels ? '尚未安装超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
+                    {runnableModels ? '尚未安装可用的超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
                   </p>
             )}
             {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）

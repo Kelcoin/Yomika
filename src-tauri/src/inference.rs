@@ -6,7 +6,7 @@ pub enum InferenceError {
     CacheBusy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
     pub id: String,
@@ -126,6 +126,33 @@ pub fn model_install_roots(
 
 const MAX_MODEL_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
+/// Where the validated manifest is kept inside an installed model directory.
+///
+/// Nothing else records the model's scale, and without it a model cannot be
+/// used: an ONNX output shape is usually dynamic, so the file itself cannot say
+/// how much bigger it makes an image. The name is deliberately ours rather than
+/// `manifest.json`, which an upstream model archive might well contain.
+pub const MODEL_MANIFEST_FILE: &str = "yomika-model.json";
+
+/// The `.onnx` file inside an installed model directory, if there is exactly one.
+pub fn model_file_in(install_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut found = None;
+    for entry in std::fs::read_dir(install_root).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+            && found.replace(path).is_some()
+        {
+            return None;
+        }
+    }
+    found
+}
+
+pub fn read_model_manifest(install_root: &std::path::Path) -> Option<ModelManifest> {
+    let bytes = std::fs::read(install_root.join(MODEL_MANIFEST_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 pub fn install_model_archive(
     archive_bytes: &[u8],
     manifest: &ModelManifest,
@@ -202,6 +229,22 @@ pub fn install_model_archive(
         let model_bytes = std::fs::read(model_path)
             .map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
         validate_model_bytes(manifest, &model_bytes)?;
+        // Written into staging so it lands with the rename: a model directory
+        // without its manifest has no recorded scale and cannot be used. Scoped
+        // so the handle is closed first — Windows refuses to rename a directory
+        // that still has an open file inside it.
+        {
+            let manifest_json = serde_json::to_vec_pretty(manifest)
+                .map_err(|error| InferenceError::InvalidManifest(error.to_string()))?;
+            let mut manifest_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staging_root.join(MODEL_MANIFEST_FILE))
+                .map_err(|_| InferenceError::InvalidManifest(format!("model ZIP must not contain {MODEL_MANIFEST_FILE}")))?;
+            std::io::Write::write_all(&mut manifest_file, &manifest_json)
+                .map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
+            manifest_file.sync_all().map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
+        }
         if install_root.exists() {
             return Err(InferenceError::InvalidInput("model install path already exists".into()));
         }
@@ -216,6 +259,7 @@ pub fn install_model_archive(
     result
 }
 
+pub mod onnx;
 pub mod upscale;
 
 /// Execution providers we know how to ask for, most preferred first per
@@ -316,15 +360,23 @@ pub fn inference_validate_model(input: ModelValidationInput) -> crate::domain::r
 pub struct ModelInstallInput { pub manifest: ModelManifest, pub archive: Vec<u8> }
 
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
-pub struct InstalledModel { pub id: String, pub version: String }
+#[serde(rename_all = "camelCase")]
+pub struct InstalledModel {
+    pub id: String,
+    pub version: String,
+    /// From the installed manifest. `None` means the directory has no manifest,
+    /// so the model can be listed but not run.
+    pub scale: Option<u32>,
+}
 
 /// Models on disk, as `models/<id>/<version>/`, newest version of each id first.
 ///
 /// A partially-extracted install is a `.<version>.installing` sibling, and those
 /// are skipped: offering one as a choice would name a model that cannot load.
 pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel> {
+    let models_dir = app_data_dir.join("models");
     let mut found = Vec::new();
-    let Ok(model_dirs) = std::fs::read_dir(app_data_dir.join("models")) else { return found };
+    let Ok(model_dirs) = std::fs::read_dir(&models_dir) else { return found };
     for model_dir in model_dirs.flatten() {
         if !model_dir.file_type().map(|kind| kind.is_dir()).unwrap_or(false) { continue }
         let id = model_dir.file_name().to_string_lossy().to_string();
@@ -341,11 +393,28 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
             .collect();
         ids.sort_by(|left, right| right.cmp(left));
         for version in ids {
-            found.push(InstalledModel { id: id.clone(), version });
+            let scale = read_model_manifest(&model_dir.path().join(&version)).map(|manifest| manifest.scale);
+            found.push(InstalledModel { id: id.clone(), version, scale });
         }
     }
     found.sort_by(|left, right| left.id.cmp(&right.id));
     found
+}
+
+/// Newest installed version of `model_id` that is actually runnable: it has a
+/// manifest (so a scale) and exactly one ONNX file.
+fn resolve_installed_model(
+    app_data_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<(std::path::PathBuf, ModelManifest)> {
+    installed_models_in(app_data_dir)
+        .into_iter()
+        .filter(|model| model.id == model_id)
+        .find_map(|model| {
+            let root = app_data_dir.join("models").join(&model.id).join(&model.version);
+            let manifest = read_model_manifest(&root)?;
+            model_file_in(&root).map(|path| (path, manifest))
+        })
 }
 
 /// Lets the settings page offer the models that are actually installed instead
@@ -381,6 +450,7 @@ pub fn inference_install_model(
         Ok(_) => crate::domain::result::CommandResult::success(InstalledModel {
             id: input.manifest.id,
             version: input.manifest.version,
+            scale: Some(input.manifest.scale),
         }),
         Err(InferenceError::InvalidInput(message)) => {
             crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
@@ -524,8 +594,11 @@ pub struct UpscalePageInput {
     pub page_index: i64,
     #[serde(default)]
     pub scale: Option<u32>,
+    /// Installed model to run, by id. Absent (or not installed) falls back to the
+    /// nearest-neighbour scaler, which is honest about being model-free rather
+    /// than failing the page.
     #[serde(default)]
-    pub model_version: Option<String>,
+    pub model_id: Option<String>,
     #[serde(default)]
     pub tile_size: Option<u32>,
     #[serde(default)]
@@ -560,10 +633,25 @@ fn upscale_cached_page(
     if input.page_index < 0 {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
     }
-    let scale = input.scale.unwrap_or(2).clamp(1, 4);
-    let model_version = input.model_version.clone().unwrap_or_default();
+    // A model's scale is fixed by the model, so it wins over the requested one.
+    // Only the model-free path is free to honour the request.
+    let model = input
+        .model_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| resolve_installed_model(app_data, id));
+    let scale = match &model {
+        Some((_, manifest)) => manifest.scale.clamp(1, 4),
+        None => input.scale.unwrap_or(2).clamp(1, 4),
+    };
+    // The revision keys the cache: switching model, version or scale has to miss
+    // rather than serve the previous model's output.
+    let revision = match &model {
+        Some((_, manifest)) => format!("x{scale}:{}@{}", manifest.id, manifest.version),
+        None => format!("x{scale}:nearest"),
+    };
     let mut enhanced = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "enhanced", input.page_index);
-    enhanced.revision = Some(format!("x{scale}:{model_version}"));
+    enhanced.revision = Some(revision);
     let source = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index);
 
     let connection = match database.connection.lock() {
@@ -586,13 +674,29 @@ fn upscale_cached_page(
         Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
     };
     let (width, height) = (decoded.width(), decoded.height());
-    let engine = upscale::NearestNeighbourEngine { scale, max_pixels: 64_000_000 };
+    let max_pixels = model.as_ref().map_or(64_000_000, |(_, manifest)| manifest.max_pixels);
+    // An installed model that will not load is reported, not silently swapped for
+    // the nearest-neighbour scaler: the user chose a model and would otherwise
+    // see a blurry page with no explanation.
+    let onnx = match &model {
+        Some((path, manifest)) => match onnx::OnnxEngine::open(path, manifest.scale, max_pixels) {
+            Ok(engine) => Some(engine),
+            Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false),
+        },
+        None => None,
+    };
+    let fallback = upscale::NearestNeighbourEngine { scale, max_pixels };
+    let engine: &dyn upscale::UpscaleEngine = match &onnx {
+        Some(engine) => engine,
+        None => &fallback,
+    };
     let options = upscale::UpscaleOptions {
         tile_size: input.tile_size.unwrap_or(upscale::DEFAULT_TILE_SIZE).max(16),
         tile_sleep_ms: input.tile_sleep_ms.unwrap_or(0),
+        max_pixels,
         ..upscale::UpscaleOptions::default()
     };
-    let upscaled = match upscale::upscale_rgba(&engine, decoded.as_raw(), width, height, options) {
+    let upscaled = match upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options) {
         Ok(value) => value,
         Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels }) => {
             return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("Image pixel budget exceeded: {pixels} > {max_pixels}"), false)
@@ -817,7 +921,7 @@ mod tests {
         let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
         let input = UpscalePageInput {
             scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
-            scale: Some(2), model_version: Some("v1".into()), tile_size: None, tile_sleep_ms: None,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None,
         };
 
         let first = match upscale_cached_page(&database, &app_data, &input) {
@@ -827,9 +931,10 @@ mod tests {
         let decoded = image::load_from_memory(&first).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (4, 4), "a 2x model doubles both axes");
 
-        // The result is cached under the enhanced rendition, keyed by scale and model.
+        // The result is cached under the enhanced rendition, keyed by scale and
+        // by which engine produced it — a later model must not be served this.
         let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
-        enhanced.revision = Some("x2:v1".into());
+        enhanced.revision = Some("x2:nearest".into());
         let connection = database.connection.lock().unwrap();
         assert!(load_image_cache(&connection, &app_data, &enhanced).unwrap().is_some());
         drop(connection);
@@ -860,7 +965,7 @@ mod tests {
 
         let result = upscale_cached_page(&database, &app_data, &UpscalePageInput {
             scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
-            scale: None, model_version: None, tile_size: None, tile_sleep_ms: None,
+            scale: None, model_id: None, tile_size: None, tile_sleep_ms: None,
         });
 
         assert!(matches!(result, crate::domain::result::CommandResult::Failure { .. }));
@@ -1034,15 +1139,43 @@ mod tests {
         ] {
             std::fs::create_dir_all(path).unwrap();
         }
+        // Only one of them records a manifest, so only one has a usable scale.
+        std::fs::write(
+            models.join("realesr-general").join("2026.09.2").join(MODEL_MANIFEST_FILE),
+            serde_json::to_vec(&model_manifest(b"x")).unwrap(),
+        ).unwrap();
 
         assert_eq!(installed_models_in(&base), vec![
-            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into() },
-            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into() },
-            InstalledModel { id: "waifu2x".into(), version: "1".into() },
+            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into(), scale: Some(2) },
+            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into(), scale: None },
+            InstalledModel { id: "waifu2x".into(), version: "1".into(), scale: None },
         ]);
         // No models directory at all is an empty list, not an error: a fresh
         // install has nowhere to look yet.
         assert!(installed_models_in(&base.join("elsewhere")).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolving_a_model_needs_both_a_manifest_and_exactly_one_onnx_file() {
+        let base = std::env::temp_dir().join("yomika-resolve-model");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("models").join("realesr").join("1");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Manifest but no model file.
+        std::fs::write(root.join(MODEL_MANIFEST_FILE), serde_json::to_vec(&model_manifest(b"x")).unwrap()).unwrap();
+        assert!(resolve_installed_model(&base, "realesr").is_none());
+
+        std::fs::write(root.join("model.onnx"), b"onnx").unwrap();
+        let (path, manifest) = resolve_installed_model(&base, "realesr").expect("resolved model");
+        assert_eq!(path, root.join("model.onnx"));
+        assert_eq!(manifest.scale, 2);
+
+        // Two ONNX files is ambiguous: refusing beats picking one at random.
+        std::fs::write(root.join("other.onnx"), b"onnx").unwrap();
+        assert!(model_file_in(&root).is_none());
+        assert!(resolve_installed_model(&base, "realesr").is_none());
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -1058,6 +1191,9 @@ mod tests {
         assert_eq!(installed, install);
         assert_eq!(std::fs::read(install.join("model.onnx")).unwrap(), model);
         assert_eq!(std::fs::read(install.join("assets/config.json")).unwrap(), b"{}");
+        // The manifest travels with the model, because nothing else records the
+        // scale the upscaler needs.
+        assert_eq!(read_model_manifest(&install).expect("installed manifest"), manifest);
         assert!(!staging.exists());
         std::fs::remove_dir_all(base).unwrap();
     }

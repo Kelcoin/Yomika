@@ -13,14 +13,14 @@ describe('image cache key', () => {
       createImageCacheKey({ ...base, rendition: 'thumbnail' }),
       createImageCacheKey({ ...base, rendition: 'reader-page', sourcePath: '01.jpg' }),
       createImageCacheKey({ ...base, rendition: 'reader-page', sourcePath: '02.jpg' }),
-      createImageCacheKey({ ...base, rendition: 'enhanced', modelVersion: 'v1' }),
+      createImageCacheKey({ ...base, rendition: 'enhanced', modelId: 'realesr-general' }),
       createImageCacheKey({ ...base, transform: 'rotate-90' }),
     ]);
     expect(keys.size).toBe(9);
   });
 
   it('is stable regardless of optional property order', () => {
-    expect(createImageCacheKey({ scopeId: 's', archiveId: 'a', pageIndex: 3, rendition: 'enhanced', modelVersion: 'v1', transform: 'none' }))
-      .toBe(createImageCacheKey({ transform: 'none', modelVersion: 'v1', rendition: 'enhanced', pageIndex: 3, archiveId: 'a', scopeId: 's' }));
+    expect(createImageCacheKey({ scopeId: 's', archiveId: 'a', pageIndex: 3, rendition: 'enhanced', modelId: 'realesr-general', transform: 'none' }))
+      .toBe(createImageCacheKey({ transform: 'none', modelId: 'realesr-general', rendition: 'enhanced', pageIndex: 3, archiveId: 'a', scopeId: 's' }));
   });
 });

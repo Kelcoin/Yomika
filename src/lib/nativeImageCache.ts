@@ -29,7 +29,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         scopeId: identity.scopeId,
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
-        ...(identity.modelVersion ? { modelVersion: identity.modelVersion } : {}),
+        ...(identity.modelId ? { modelId: identity.modelId } : {}),
       });
       if (!upscaled.ok) throw new Error(upscaled.error.message);
       const bytes = new Uint8Array(upscaled.value);

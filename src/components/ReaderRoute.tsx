@@ -123,7 +123,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           archiveId: context.archiveId,
           pageIndex,
           rendition: 'enhanced',
-          ...(preferences.upscaleModel ? { modelVersion: preferences.upscaleModel } : {}),
+          ...(preferences.upscaleModel ? { modelId: preferences.upscaleModel } : {}),
         }, signal ? { signal } : {}).catch(() => undefined)
         : undefined;
       if (enhanced) {

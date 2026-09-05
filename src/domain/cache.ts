@@ -7,7 +7,9 @@ export interface ImageCacheIdentity {
   pageIndex: number;
   rendition: ImageRendition;
   sourcePath?: string;
-  modelVersion?: string;
+  /** Upscale model this rendition was produced with. Part of the key so
+   * switching models does not serve the previous one's output. */
+  modelId?: string;
   transform?: string;
 }
 
@@ -21,7 +23,7 @@ export function createImageCacheKey(identity: ImageCacheIdentity): string {
     // Reader page order can change after a forced file-list refresh; without the
     // source path the same page index would keep serving the old image.
     identity.sourcePath ?? '',
-    identity.modelVersion ?? '',
+    identity.modelId ?? '',
     identity.transform ?? '',
   ];
   return `image:v1:${fields.map((value) => `${value.length}:${value}`).join('')}`;

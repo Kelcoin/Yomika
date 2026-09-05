@@ -11,5 +11,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./tests/setup.ts'],
+    // `docs/` holds read-only copies of reference projects (LANreader, JHenTai,
+    // ComicReadScript…), and their own test files are not ours to run — they
+    // fail on dependencies this project does not have.
+    exclude: ['**/node_modules/**', '**/dist/**', 'docs/**'],
   },
 });
