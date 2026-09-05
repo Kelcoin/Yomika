@@ -146,13 +146,14 @@ describe('reader route', () => {
     await waitFor(() => expect(attempts).toBe(2));
   });
 
-  it('serves the upscaled page when a backend is selected, and falls back when it fails', async () => {
+  it('serves the upscaled page when a model is selected, and falls back when it fails', async () => {
     const commands: string[] = [];
     let upscaleWorks = true;
+    let model = 'realesr-general-x4v3';
     setInvokeAdapterForTests(async (command: string) => {
       commands.push(command);
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan-anime-x2' } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: model } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -174,7 +175,17 @@ describe('reader route', () => {
 
     // A failing upscale must leave the plain page on screen.
     upscaleWorks = false;
-    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    const failed = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    failed.unmount();
+
+    // A backend with no model would run the nearest-neighbour fallback, which
+    // returns the same pixels at four times the size. Not worth a round trip.
+    upscaleWorks = true;
+    model = '';
+    commands.length = 0;
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(commands).not.toContain('inference_upscale_page');
   });
 });

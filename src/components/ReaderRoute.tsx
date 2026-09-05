@@ -26,7 +26,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const { showToast } = useToast();
   const { preferences } = usePreferences();
   const prefetchDistance = preferences.prefetchPages;
-  const upscaleEnabled = preferences.upscaleBackend !== 'off';
+  // A backend with no model runs the nearest-neighbour fallback, which returns
+  // the same pixels at four times the bytes — strictly worse than the plain
+  // page. Upscaling therefore needs a model, not just a backend.
+  const upscaleEnabled = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   /** Incognito reading: no progress, no history. The reader shows a marker so it
    * is obvious the session is not being recorded. */
