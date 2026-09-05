@@ -60,4 +60,27 @@ describe('EhAccountPanel', () => {
     render(<EhAccountPanel accounts={[]} loading />);
     expect(screen.getByText('正在读取账户…')).toBeDefined();
   });
+
+  it('saves the account from a web sign-in, which is the only way past a challenge', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => undefined);
+    const onBrowserLogin = vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
+    render(<EhAccountPanel accounts={[]} onSave={onSave} onBrowserLogin={onBrowserLogin} />);
+
+    await user.click(screen.getByRole('tab', { name: /网页登录/ }));
+    await user.click(screen.getByRole('button', { name: /打开登录页面/ }));
+
+    expect(onBrowserLogin).toHaveBeenCalledTimes(1);
+    // The cookies the window hands back go through the same save path as a pasted
+    // one, so the site and the account id are still derived rather than asked for.
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      host: 'e-hentai.org',
+      cookie: 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90',
+    }));
+  });
+
+  it('offers no web sign-in when the caller cannot open a window', () => {
+    render(<EhAccountPanel accounts={[]} onSave={vi.fn()} />);
+    expect(screen.queryByRole('tab', { name: /网页登录/ })).toBeNull();
+  });
 });

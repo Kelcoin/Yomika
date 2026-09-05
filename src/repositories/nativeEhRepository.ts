@@ -27,6 +27,18 @@ export class NativeEhRepository {
   loginWithPassword(username: string, password: string): Promise<CommandResult<string>> {
     return invokeCommand('login_eh_account', { username, password }, z.string().min(1));
   }
+  /** Opens E-Hentai's own sign-in page in a window of its own. A Cloudflare
+   * challenge is a browser check, so no POST from here can answer it. */
+  openLoginWindow(): Promise<CommandResult<void>> {
+    return invokeCommand('open_eh_login_window', {}, z.undefined());
+  }
+  /** The cookie header once that window has one, `null` while it does not. */
+  captureLoginCookies(): Promise<CommandResult<string | null>> {
+    return invokeCommand('capture_eh_login_cookies', {}, z.string().min(1).nullable());
+  }
+  closeLoginWindow(): Promise<CommandResult<void>> {
+    return invokeCommand('close_eh_login_window', {}, z.undefined());
+  }
   listAccounts(): Promise<CommandResult<EhAccount[]>> {
     return invokeCommand('list_eh_accounts', {}, z.array(EhAccountSchema));
   }

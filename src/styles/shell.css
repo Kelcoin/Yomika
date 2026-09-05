@@ -2363,6 +2363,16 @@ body::-webkit-scrollbar,
   resize: vertical;
 }
 
+/* The web sign-in tab is prose plus one button, so it needs the paragraph the
+   other two tabs do not. */
+.eh-login-hint {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 .eh-account-panel ul,
 .eh-results-list,
 .task-list {

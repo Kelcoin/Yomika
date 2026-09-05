@@ -18,10 +18,13 @@ interface EhWorkspaceProps {
   accountsLoading?: boolean | undefined;
   onSaveAccount?: ((input: SaveEhAccountInput) => Promise<void>) | undefined;
   onPasswordLogin?: ((username: string, password: string) => Promise<string>) | undefined;
+  /** Resolves with the cookie header once the user has signed in through the
+   * page E-Hentai serves; the only route through a Cloudflare challenge. */
+  onBrowserLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
   savingAccount?: boolean | undefined;
 }
 
-export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCheckHealth, searching, searched, searchError, accountsLoading, onSaveAccount, onPasswordLogin, savingAccount }: EhWorkspaceProps) {
+export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCheckHealth, searching, searched, searchError, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, savingAccount }: EhWorkspaceProps) {
   const [query, setQuery] = useState('');
   const hasActiveAccount = accounts.some((account) => account.isActive);
 
@@ -35,7 +38,7 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
       <header className="workspace-heading">
         <h1>账户与搜索</h1>
       </header>
-      <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} saving={savingAccount} />
+      <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} saving={savingAccount} />
       {/* Search only exists once an account is active; no nagging placeholder. */}
       {hasActiveAccount && <section className="eh-search-section" aria-label="搜索">
         <form className="eh-search-form" onSubmit={handleSubmit}>

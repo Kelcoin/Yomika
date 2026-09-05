@@ -7,6 +7,13 @@ import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
 const ehRepository = new NativeEhRepository();
 
+/** How often the sign-in window's cookie jar is checked, and how long the wait
+ * lasts. A Cloudflare challenge plus a password is a slow manual job, so the
+ * ceiling is generous; the interval is only as tight as it needs to be to feel
+ * immediate once the session lands. */
+const BROWSER_LOGIN_POLL_MS = 1_500;
+const BROWSER_LOGIN_TIMEOUT_MS = 5 * 60 * 1_000;
+
 /** Its own module rather than a route-file export: the settings page hosts this
  * workspace, and importing it from `app/routes` made the two files import each
  * other, which left the settings page rendering nothing. `/eh` still routes here
@@ -99,6 +106,34 @@ export function EhRouteWorkspace() {
         setSavingAccount(false);
         if (!result.ok) throw new Error(presentEhLoginError(result.error.code, result.error.message));
         return result.value;
+      }}
+      onBrowserLogin={async (signal?: AbortSignal) => {
+        // Open E-Hentai's own page and wait for its cookie jar to hold a session.
+        // Polling rather than an event: the user is the one who decides when the
+        // challenge is cleared and the form submitted, and there is nothing on
+        // the page to hook.
+        const opened = await ehRepository.openLoginWindow();
+        if (!opened.ok) throw new Error(presentEhError(opened.error.code, opened.error.message));
+        const deadline = Date.now() + BROWSER_LOGIN_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          if (signal?.aborted) {
+            await ehRepository.closeLoginWindow();
+            throw new Error('已取消网页登录');
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, BROWSER_LOGIN_POLL_MS));
+          const captured = await ehRepository.captureLoginCookies();
+          if (!captured.ok) {
+            // The window is gone: closing it is how someone gives up.
+            if (captured.error.code === 'EH_LOGIN_WINDOW_CLOSED') throw new Error('登录窗口已关闭');
+            throw new Error(presentEhError(captured.error.code, captured.error.message));
+          }
+          if (captured.value) {
+            await ehRepository.closeLoginWindow();
+            return captured.value;
+          }
+        }
+        await ehRepository.closeLoginWindow();
+        throw new Error('网页登录超时，请重试');
       }}
     />
   );

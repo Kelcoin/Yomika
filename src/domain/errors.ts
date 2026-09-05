@@ -17,6 +17,9 @@ export const DomainErrorCodeSchema = z.enum([
    * means a stored session stopped working: telling someone their login had
    * expired on their first attempt is a contradiction. */
   'EH_LOGIN_REJECTED',
+  // The sign-in window was closed before a session appeared, which is how
+  // someone gives up on the web login.
+  'EH_LOGIN_WINDOW_CLOSED',
   'EH_REAUTH_REQUIRED',
   'EH_RATE_LIMIT',
   'EH_CLOUDFLARE',
