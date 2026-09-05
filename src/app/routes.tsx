@@ -57,6 +57,9 @@ function HomeWorkspace() {
   const [randomLoading, setRandomLoading] = useState(!snapshot);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
   const restoredFromSnapshot = useRef(Boolean(snapshot));
+  /** Re-reads the shelves. Bumping the attempt re-runs the load effect, which is
+   * also how the snapshot gets refreshed on demand. */
+  const reloadShelves = useCallback(() => setServerLoadAttempt((attempt) => attempt + 1), []);
   // LANraragi picks the random set. Behind a callback so the rail's refresh
   // button can ask for another draw without reloading the whole page.
   const loadRandom = useCallback(async (serverId: string) => {
@@ -184,8 +187,8 @@ function HomeWorkspace() {
         </section>
       )}
       {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} />
-      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} />
+      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} />
+      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} />
       <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} />
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
