@@ -14,7 +14,7 @@ const preferences = {
   coverConcurrency: 4,
   startupRoute: 'home' as const,
   upscaleBackend: 'off' as const,
-  upscaleModel: '',
+  upscaleModel: '', decensorModel: '',
   customCss: '',
 };
 

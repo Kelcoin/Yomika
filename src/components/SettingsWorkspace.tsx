@@ -105,6 +105,7 @@ export function SettingsWorkspace() {
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
   // de-censoring bundle, which is not an upscaler.
   const runnableModels = installedModels?.filter((model) => model.scale && model.kind === 'upscale');
+  const decensorBundles = installedModels?.filter((model) => model.kind === 'decensor');
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -450,6 +451,30 @@ export function SettingsWorkspace() {
                 : <p className="server-list-message" role="status">
                     {runnableModels ? '尚未安装可用的超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
                   </p>
+            )}
+            {selectedSettingsSection === 'settings-reading' && (
+              /* De-censoring: choosing a bundle is the switch, so there is no
+                 separate toggle to leave inconsistent with it. Only complete
+                 bundles are offered — a partial install cannot run. */
+              decensorBundles?.length
+                ? <fieldset>
+                    <legend>去码模型</legend>
+                    <SelectField
+                      name="decensorModel"
+                      aria-label="去码模型"
+                      value={preferenceDraft.decensorModel}
+                      options={[{ value: '', label: '关闭' }, ...decensorBundles.map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` }))]}
+                      onChange={(value) => editPreferences({ decensorModel: value })}
+                    />
+                    <PreferenceRadioFallback
+                      name="decensorModel"
+                      value={preferenceDraft.decensorModel}
+                      options={[['', '关闭'], ...decensorBundles.map((model) => [model.id, `${model.id} · ${model.version}`] as [string, string])]}
+                      onChange={(value) => editPreferences({ decensorModel: value })}
+                    />
+                    <p className="settings-tool-hint">在阅读页面上运行检测与修补，结果按页缓存。修补模型固定使用 CPU。</p>
+                  </fieldset>
+                : installedModels && <p className="server-list-message" role="status">尚未安装去码模型包，安装后会出现在这里。</p>
             )}
             {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）
               <input

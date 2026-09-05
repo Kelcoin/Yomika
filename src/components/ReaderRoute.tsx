@@ -31,6 +31,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // the same pixels at four times the bytes — strictly worse than the plain
   // page. Upscaling therefore needs a model, not just a backend.
   const upscaleEnabled = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+  /** De-censoring has no separate switch: choosing a bundle is what turns it on. */
+  const decensorEnabled = preferences.decensorModel !== '';
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   /** Incognito reading: no progress, no history. The reader shows a marker so it
    * is obvious the session is not being recorded. */
@@ -127,7 +129,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }, signal ? { signal } : {});
       // With upscaling on, swap in the enhanced rendition once the plain page is
       // cached; a failure keeps the plain page rather than blanking the reader.
-      const enhanced = upscaleEnabled
+      // De-censoring wins when both are on: the two are separate pipelines, and
+      // chaining them would mean upscaling from the de-censored rendition, which
+      // the upscaler does not read.
+      const derived = decensorEnabled
+        ? await imageCache.load({
+          scopeId: context.scopeId,
+          serverId: context.serverId,
+          archiveId: context.archiveId,
+          pageIndex,
+          rendition: 'decensored',
+          modelId: preferences.decensorModel,
+        }, signal ? { signal } : {}).catch(() => undefined)
+        : upscaleEnabled
         ? await imageCache.load({
           scopeId: context.scopeId,
           serverId: context.serverId,
@@ -137,10 +151,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           ...(preferences.upscaleModel ? { modelId: preferences.upscaleModel } : {}),
         }, signal ? { signal } : {}).catch(() => undefined)
         : undefined;
-      if (enhanced) {
+      if (derived) {
         imageCache.release(handle);
-        pageHandlesRef.current.set(pageIndex, enhanced);
-        return enhanced.url;
+        pageHandlesRef.current.set(pageIndex, derived);
+        return derived.url;
       }
       const current = contextRef.current;
       if (!mountedRef.current || !current || current.generation !== context.generation || signal?.aborted) {
@@ -162,7 +176,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
     });
     return promise;
-  }, [preferences.upscaleModel, upscaleEnabled]);
+  }, [preferences.decensorModel, preferences.upscaleModel, decensorEnabled, upscaleEnabled]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -35,6 +35,20 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       const bytes = new Uint8Array(upscaled.value);
       return { bytes, mime: detectImageMime(bytes) };
     }
+    if (identity.rendition === 'decensored') {
+      // Reads the cached reader page too, and needs a bundle: a missing one is an
+      // error rather than a silent pass-through, since the reader would otherwise
+      // show the censored page while the setting claims otherwise.
+      const filled = await this.inference.decensorPage({
+        scopeId: identity.scopeId,
+        archiveId: identity.archiveId,
+        pageIndex: identity.pageIndex,
+        modelId: identity.modelId ?? '',
+      });
+      if (!filled.ok) throw new Error(filled.error.message);
+      const bytes = new Uint8Array(filled.value);
+      return { bytes, mime: detectImageMime(bytes) };
+    }
     const result = identity.rendition === 'cover'
       ? await this.library.loadArchiveThumbnail(identity.serverId, identity.archiveId)
       : identity.rendition === 'page-thumbnail'

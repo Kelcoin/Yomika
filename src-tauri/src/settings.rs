@@ -15,6 +15,7 @@ const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
+const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -71,6 +72,11 @@ pub struct PreferenceSnapshot {
     pub upscale_backend: String,
     #[serde(default)]
     pub upscale_model: String,
+    /// Installed de-censoring bundle to run on reader pages. Empty means off:
+    /// there is no separate switch, because a bundle that is not chosen is the
+    /// only sense in which the feature can be off.
+    #[serde(default)]
+    pub decensor_model: String,
     /// Free-form CSS appended after the design tokens. This is the whole
     /// customisation surface: it superseded a single accent-colour preference,
     /// which could not express the themes people actually want and became one
@@ -96,6 +102,7 @@ impl Default for PreferenceSnapshot {
             startup_route: default_startup_route(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
+            decensor_model: String::new(),
             custom_css: String::new(),
         }
     }
@@ -119,6 +126,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || !matches!(value.startup_route.as_str(), "home" | "library")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
+        || value.decensor_model.len() > 128
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
         || value.custom_css.len() > 20_000
     {
@@ -158,6 +166,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         startup_route: load_value(connection, STARTUP_ROUTE_KEY, defaults.startup_route)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
+        decensor_model: load_value(connection, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
     };
     validate_preferences(&value)?;
@@ -180,6 +189,7 @@ pub fn save_preferences_to(
         (STARTUP_ROUTE_KEY, serde_json::to_string(&value.startup_route)),
         (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
         (UPSCALE_MODEL_KEY, serde_json::to_string(&value.upscale_model)),
+        (DECENSOR_MODEL_KEY, serde_json::to_string(&value.decensor_model)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
     ] {
         transaction
@@ -338,6 +348,7 @@ mod tests {
             startup_route: "library".into(),
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
+            decensor_model: "aletheia-lens".into(),
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");

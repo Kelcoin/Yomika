@@ -1,4 +1,4 @@
-export type ImageRendition = 'source' | 'thumbnail' | 'preview' | 'enhanced' | 'cover' | 'page-thumbnail' | 'reader-page';
+export type ImageRendition = 'source' | 'thumbnail' | 'preview' | 'enhanced' | 'cover' | 'page-thumbnail' | 'reader-page' | 'decensored';
 
 export interface ImageCacheIdentity {
   scopeId: string;

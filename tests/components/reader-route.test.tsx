@@ -183,10 +183,14 @@ describe('reader route', () => {
 
     // Both settings were read, shown and saved but consumed by nothing: the
     // reader always started on auto/ltr, so choosing either did nothing at all.
+    // The waits are explicit: this reader mounts, loads a manifest, a progress
+    // record and a page, and then re-runs the whole effect once the preferences
+    // land — more than the default one second allows for when the suite runs its
+    // files in parallel, which made this the flakiest test in the file.
     const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
-    await screen.findByRole('img', { name: '第 1 页' });
+    await screen.findByRole('img', { name: '第 1 页' }, { timeout: 5_000 });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    expect(await screen.findByRole('button', { name: '阅读布局：双页，点击切换' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '阅读布局：双页，点击切换' }, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
     view.unmount();
 
@@ -194,7 +198,7 @@ describe('reader route', () => {
     // cannot say whether it meant single or double, so only continuous overrides.
     stored = { scopeId: 'scope-a', archiveId: 'a1', pageIndex: 0, pageCount: 3, layout: 'continuous', direction: 'ltr', updatedAt: '2026-09-05T00:00:00Z', revision: 1 };
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
-    expect(await screen.findByRole('region', { name: '连续阅读' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: '连续阅读' }, { timeout: 5_000 })).toBeInTheDocument();
   });
 
   it('serves the upscaled page when a model is selected, and falls back when it fails', async () => {

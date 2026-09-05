@@ -108,7 +108,7 @@ describe('settings workspace', () => {
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -139,7 +139,7 @@ describe('settings workspace', () => {
   });
 
   it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -159,7 +159,7 @@ describe('settings workspace', () => {
   });
 
   it('themes through custom CSS instead of a separate accent preference', async () => {
-    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -185,7 +185,7 @@ describe('settings workspace', () => {
 
   it('exposes reader preload, cover concurrency, and upscale settings', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -418,7 +418,7 @@ describe('settings workspace', () => {
 
   it('applies a preset theme as soon as it is picked', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };

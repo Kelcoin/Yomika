@@ -54,6 +54,12 @@ export class NativeInferenceRepository {
     return invokeBinaryCommand('inference_upscale_page', { input });
   }
 
+  /** Runs the de-censoring bundle over one cached reader page; the result is
+   * stored as the `decensored` rendition, keyed by bundle version. */
+  decensorPage(input: { scopeId: string; archiveId: string; pageIndex: number; modelId: string }): Promise<CommandResult<ArrayBuffer>> {
+    return invokeBinaryCommand('inference_decensor_page', { input });
+  }
+
   probe(): Promise<CommandResult<InferenceCapabilities>> {
     return invokeCommand('inference_probe', {}, InferenceCapabilitiesSchema);
   }

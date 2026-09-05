@@ -260,6 +260,7 @@ pub fn install_model_archive(
 }
 
 pub mod decensor;
+pub mod detect;
 pub mod inpaint;
 pub mod onnx;
 pub mod upscale;
@@ -729,6 +730,115 @@ fn upscale_cached_page(
     if let Err(error) = store_image_cache(&connection, app_data, &enhanced, "image/png", &encoded) {
         // Serving the image still works without a cache entry.
         eprintln!("yomika: enhanced image cache write failed: {error}");
+    }
+    CommandResult::success(encoded)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecensorPageInput {
+    pub scope_id: String,
+    pub archive_id: String,
+    pub page_index: i64,
+    /// The installed de-censoring bundle to run.
+    pub model_id: String,
+}
+
+#[tauri::command]
+pub fn inference_decensor_page(
+    input: DecensorPageInput,
+    database: tauri::State<'_, crate::db::Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    use tauri::Manager;
+    let app_data = match app.path().app_data_dir() {
+        Ok(value) => value,
+        Err(error) => return Ok(crate::domain::result::into_binary_response(
+            crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        )),
+    };
+    let result = decensor_cached_page(&database, &app_data, &input);
+    Ok(crate::domain::result::into_binary_response(result))
+}
+
+/// The newest installed version of `model_id` that is a complete de-censoring
+/// bundle, with its manifest for the cache revision.
+fn resolve_installed_bundle(
+    app_data_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<(decensor::DecensorBundle, ModelManifest)> {
+    installed_models_in(app_data_dir)
+        .into_iter()
+        .filter(|model| model.id == model_id && model.kind == MODEL_KIND_DECENSOR)
+        .find_map(|model| {
+            let root = app_data_dir.join("models").join(&model.id).join(&model.version);
+            let manifest = read_model_manifest(&root)?;
+            decensor::bundle_in(&root).map(|bundle| (bundle, manifest))
+        })
+}
+
+fn decensor_cached_page(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    input: &DecensorPageInput,
+) -> crate::domain::result::CommandResult<Vec<u8>> {
+    use crate::cache::{load_image_cache, store_image_cache, CacheImageIdentity};
+    use crate::domain::result::CommandResult;
+
+    if input.page_index < 0 {
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
+    }
+    let Some((bundle, manifest)) = resolve_installed_bundle(app_data, &input.model_id) else {
+        return CommandResult::failure(
+            "INFERENCE_UNAVAILABLE",
+            "No complete de-censoring bundle is installed under that id",
+            false,
+        );
+    };
+    // Keyed on the bundle version: a newer bundle has to miss rather than serve the
+    // previous one's output.
+    let mut decensored = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "decensored", input.page_index);
+    decensored.revision = Some(format!("{}@{}", manifest.id, manifest.version));
+    let source = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index);
+
+    let connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match load_image_cache(&connection, app_data, &decensored) {
+        Ok(Some(image)) => return CommandResult::success(image.bytes),
+        Ok(None) => {}
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    }
+    let page = match load_image_cache(&connection, app_data, &source) {
+        Ok(Some(image)) => image,
+        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let decoded = match image::load_from_memory(&page.bytes) {
+        Ok(value) => value.to_rgba8(),
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
+    };
+    let (width, height) = (decoded.width(), decoded.height());
+    let mut rgba = decoded.into_raw();
+    if let Err(error) = decensor::decensor_page(&bundle, &mut rgba, width, height) {
+        return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false);
+    }
+
+    let mut encoded = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+        if let Err(error) = encoder.write_image(&rgba, width, height, image::ExtendedColorType::Rgba8) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        }
+    }
+    // A page with nothing censored is cached unchanged on purpose: detection is the
+    // expensive half, and re-running it on every view would cost seconds to reach
+    // the same answer.
+    if let Err(error) = store_image_cache(&connection, app_data, &decensored, "image/png", &encoded) {
+        // Serving the image still works without a cache entry.
+        eprintln!("yomika: de-censored image cache write failed: {error}");
     }
     CommandResult::success(encoded)
 }

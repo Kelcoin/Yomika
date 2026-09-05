@@ -78,17 +78,17 @@ pub struct CropWindow {
     pub height: u32,
 }
 
-/// Grows a detection into the window handed to the inpainting model.
+/// Grows a detection into the square window the inpainting model is handed.
 ///
-/// The model needs context around the damage to invent anything plausible, so the
-/// box is padded; the padding is then clamped to the page, and the result is
-/// grown (never shrunk) to a multiple of `align` because these graphs take fixed
-/// or block-aligned input. Growing can be blocked by the page edge, so the window
-/// is finally shifted back inside the page rather than left hanging over it.
-pub fn crop_window(
+/// Upstream's rule, and the parts of it that matter: the window is **square**
+/// because the graph is square, and feeding it a rectangle stretched to 256x256
+/// would hand the model geometry it was never trained on. It is `1.5x` the longer
+/// side so there is real context around the damage to work from, never smaller
+/// than the graph's own 256, and never larger than the page's shorter side. It is
+/// centred on the detection and then translated back inside the page rather than
+/// clipped, because clipping would make it non-square again.
+pub fn inpaint_window(
     region: &CensorRegion,
-    pad: u32,
-    align: u32,
     image_width: u32,
     image_height: u32,
 ) -> Result<CropWindow, InferenceError> {
@@ -101,36 +101,21 @@ pub fn crop_window(
     if region.x >= image_width || region.y >= image_height {
         return Err(InferenceError::InvalidInput("region starts outside the page".into()));
     }
-    let align = align.max(1);
+    let longest = region.width.max(region.height);
+    let wanted = ((f64::from(longest) * 1.5).round() as u32).max(INPAINT_WINDOW_MIN);
+    let side = wanted.min(image_width.min(image_height));
 
-    let left = region.x.saturating_sub(pad);
-    let top = region.y.saturating_sub(pad);
-    let right = region.x.saturating_add(region.width).saturating_add(pad).min(image_width);
-    let bottom = region.y.saturating_add(region.height).saturating_add(pad).min(image_height);
-
-    let mut width = align_up(right - left, align).min(align_down_at_least(image_width, align));
-    let mut height = align_up(bottom - top, align).min(align_down_at_least(image_height, align));
-    // A page narrower than one aligned block cannot be aligned at all; the window
-    // is then the page, and the caller pads the tensor instead.
-    width = width.min(image_width);
-    height = height.min(image_height);
-
-    let x = left.min(image_width - width);
-    let y = top.min(image_height - height);
-    Ok(CropWindow { x, y, width, height })
+    let center_x = region.x + region.width / 2;
+    let center_y = region.y + region.height / 2;
+    let x = center_x.saturating_sub(side / 2).min(image_width - side);
+    let y = center_y.saturating_sub(side / 2).min(image_height - side);
+    Ok(CropWindow { x, y, width: side, height: side })
 }
 
-fn align_up(value: u32, align: u32) -> u32 {
-    let remainder = value % align;
-    if remainder == 0 { value } else { value.saturating_add(align - remainder) }
-}
-
-/// The largest multiple of `align` that fits, but never zero: a page smaller than
-/// one block still has to produce a window.
-fn align_down_at_least(value: u32, align: u32) -> u32 {
-    let floor = value - (value % align);
-    if floor == 0 { value } else { floor }
-}
+/// The inpainting graph's own input side, which is also the floor on a window: a
+/// smaller crop would be upscaled into the model rather than downscaled, inventing
+/// detail before the model has seen anything.
+const INPAINT_WINDOW_MIN: u32 = 256;
 
 /// Copies a window out of an RGBA page.
 pub fn crop_rgba(
@@ -220,6 +205,62 @@ pub fn threshold_mask(scores: &[f32], threshold: f32) -> (Vec<u8>, usize) {
     (mask, selected)
 }
 
+/// Runs the whole pipeline over one page, in place, and reports how many regions
+/// it filled.
+///
+/// One region at a time, and a region whose mask survives thresholding at all: a
+/// detection is only worth a model run if it actually claims pixels. The detector
+/// is opened once per page and the two inpainting models lazily, because a page
+/// with only bars should not pay to load the mosaic model.
+pub fn decensor_page(
+    bundle: &DecensorBundle,
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+) -> Result<usize, InferenceError> {
+    use super::detect::DetectorEngine;
+    use super::inpaint::InpaintEngine;
+
+    let detector = DetectorEngine::open(&bundle.detector)?;
+    let regions = detector.detect(rgba, width, height)?;
+    if regions.is_empty() {
+        return Ok(0);
+    }
+    let mut bar: Option<InpaintEngine> = None;
+    let mut mosaic: Option<InpaintEngine> = None;
+    let mut filled = 0;
+    for detection in &regions {
+        let window = inpaint_window(&detection.region, width, height)?;
+        let censored = detection.mask_in_window(&window);
+        if censored.iter().all(|&value| value == 0) {
+            continue;
+        }
+        let engine = match detection.region.kind {
+            CensorKind::Bar => {
+                if bar.is_none() {
+                    bar = Some(InpaintEngine::open(&bundle.bar, CensorKind::Bar)?);
+                }
+                bar.as_ref()
+            }
+            CensorKind::Mosaic => {
+                if mosaic.is_none() {
+                    mosaic = Some(InpaintEngine::open(&bundle.mosaic, CensorKind::Mosaic)?);
+                }
+                mosaic.as_ref()
+            }
+        };
+        let Some(engine) = engine else { continue };
+        let crop = crop_rgba(rgba, width, height, &window)?;
+        let patch = engine.inpaint(&crop, window.width, window.height, &censored)?;
+        // Only the censored pixels are the model's; the context it was given stays
+        // the artwork it already was.
+        if paste_masked_rgba(rgba, width, height, &window, &patch, &censored)? > 0 {
+            filled += 1;
+        }
+    }
+    Ok(filled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,41 +293,43 @@ mod tests {
     }
 
     #[test]
-    fn a_window_pads_the_detection_and_stays_on_the_page() {
-        let window = crop_window(&region(100, 100, 40, 40), 16, 8, 500, 500).expect("window");
-        assert_eq!(window.x, 84);
-        assert_eq!(window.y, 84);
-        // 40 + 2*16 = 72, already a multiple of 8.
-        assert_eq!(window.width, 72);
-        assert_eq!(window.height, 72);
+    fn a_window_is_square_and_gives_the_model_context_around_the_damage() {
+        // 1.5x the longer side, but never below the graph's own 256.
+        let window = inpaint_window(&region(400, 400, 200, 120), 2000, 2000).expect("window");
+        assert_eq!((window.width, window.height), (300, 300));
+        // Centred on the detection: centre 500,460 minus half the side.
+        assert_eq!((window.x, window.y), (350, 310));
+
+        let small = inpaint_window(&region(400, 400, 20, 20), 2000, 2000).expect("window");
+        assert_eq!((small.width, small.height), (256, 256), "a tiny box still gets the graph's own side");
     }
 
     #[test]
-    fn padding_that_would_leave_the_page_shifts_the_window_instead() {
-        // Against the top-left corner the padding has nowhere to go, so the window
-        // starts at the origin rather than at a negative offset.
-        let window = crop_window(&region(4, 4, 20, 20), 16, 8, 200, 200).expect("window");
+    fn a_window_stays_square_at_the_page_edge_rather_than_being_clipped() {
+        // Hard against the corner: clipping would make it a rectangle, which the
+        // square graph would then stretch.
+        let window = inpaint_window(&region(0, 0, 40, 40), 1000, 1200).expect("window");
         assert_eq!((window.x, window.y), (0, 0));
+        assert_eq!(window.width, window.height);
 
-        // Against the bottom-right, aligning up would push past the edge, so the
-        // window slides back inside instead of overhanging.
-        let window = crop_window(&region(180, 180, 18, 18), 16, 8, 200, 200).expect("window");
-        assert!(window.x + window.width <= 200, "window {window:?} leaves the page");
-        assert!(window.y + window.height <= 200, "window {window:?} leaves the page");
-        assert_eq!(window.width % 8, 0);
+        let window = inpaint_window(&region(960, 1160, 40, 40), 1000, 1200).expect("window");
+        assert_eq!(window.width, window.height);
+        assert!(window.x + window.width <= 1000, "window {window:?} leaves the page");
+        assert!(window.y + window.height <= 1200, "window {window:?} leaves the page");
     }
 
     #[test]
-    fn a_page_smaller_than_one_aligned_block_still_produces_a_window() {
-        let window = crop_window(&region(0, 0, 3, 3), 4, 64, 10, 6).expect("window");
-        assert_eq!(window, CropWindow { x: 0, y: 0, width: 10, height: 6 });
+    fn a_page_smaller_than_the_graph_gives_a_window_of_the_whole_page() {
+        // The shorter side is the ceiling, so the window cannot exceed the page.
+        let window = inpaint_window(&region(0, 0, 3, 3), 200, 120).expect("window");
+        assert_eq!(window, CropWindow { x: 0, y: 0, width: 120, height: 120 });
     }
 
     #[test]
     fn an_empty_or_off_page_region_is_rejected() {
-        assert!(crop_window(&region(0, 0, 0, 10), 4, 8, 100, 100).is_err());
-        assert!(crop_window(&region(100, 0, 10, 10), 4, 8, 100, 100).is_err());
-        assert!(crop_window(&region(0, 0, 10, 10), 4, 8, 0, 100).is_err());
+        assert!(inpaint_window(&region(0, 0, 0, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(100, 0, 10, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(0, 0, 10, 10), 0, 100).is_err());
     }
 
     #[test]

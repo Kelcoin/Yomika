@@ -20,6 +20,9 @@ export const PreferenceSnapshotSchema = z.object({
   startupRoute: z.enum(['home', 'library']).default('home'),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
+  /** Installed de-censoring bundle to run on reader pages. Empty means off:
+   * a bundle that is not chosen is the only sense in which it can be off. */
+  decensorModel: z.string().max(128).default(''),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
@@ -50,6 +53,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   startupRoute: 'home',
   upscaleBackend: 'off',
   upscaleModel: '',
+  decensorModel: '',
   customCss: '',
 };
 
