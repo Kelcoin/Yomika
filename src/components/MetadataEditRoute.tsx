@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { parseArchiveTagString } from '../lib/tags';
+import { invalidateRouteCache } from '../lib/routeCache';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { MetadataTagChip } from './MetadataTagChip';
@@ -81,7 +82,13 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     if (!serverId || busy) return;
     setBusy('save'); setError(undefined);
     const result = await repository.updateArchiveMetadata(serverId, archiveId, { title, tags, summary });
-    if (result.ok) setMessage('元数据已更新'); else setError(result.error.message);
+    if (result.ok) {
+      setMessage('元数据已更新');
+      // The detail page paints from a snapshot of this metadata, and the
+      // recommendation rail is keyed on these tags. Both are wrong now.
+      invalidateRouteCache('archive-detail:');
+      invalidateRouteCache('recommendations:');
+    } else setError(result.error.message);
     setBusy('');
   };
   const runPlugin = async () => {
@@ -106,7 +113,12 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     if (!window.confirm('确认删除此档案？此操作不可撤销。')) return;
     setBusy('delete');
     const result = await repository.deleteArchive(serverId, archiveId);
-    if (result.ok) navigate('/library'); else setError(result.error.message);
+    if (result.ok) {
+      // Every cached view of this archive is now a card that leads nowhere.
+      invalidateRouteCache('archive-detail:');
+      invalidateRouteCache('recommendations:');
+      navigate('/library');
+    } else setError(result.error.message);
     setBusy('');
   };
 

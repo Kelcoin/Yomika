@@ -7,7 +7,7 @@ import { LibraryWorkspace } from './LibraryWorkspace';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
+import { markCategoriesRefreshed, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -337,7 +337,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // be brought up to date, plus a re-resolution of the dynamic categories.
     const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
     if (!synced.ok) return synced;
-    markLibrarySynced(currentServerId);
     markCategoriesRefreshed(currentServerId);
     void repository.listCategories(currentServerId, true).then((categoryResult) => {
       if (categoryResult.ok) setCategories(categoryResult.value);

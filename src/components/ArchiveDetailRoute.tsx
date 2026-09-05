@@ -15,6 +15,7 @@ import { categorizeTags, parseArchiveTagString } from '../lib/tags';
 import { pickSeedTags, rankRecommendations, sameCreatorTags } from '../lib/recommendation';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
   NativeLibraryRepository,
   type ArchiveMetadata,
@@ -28,6 +29,11 @@ const repository = new NativeLibraryRepository();
 /** Long enough not to fire on a normal tap, short enough to discover by holding.
  * Matches the platform convention rather than the drag thresholds. */
 const LONG_PRESS_MS = 500;
+
+/** How long a detail page may paint from the previous visit before it insists on
+ * fresh metadata. It revalidates either way; this only decides whether the page
+ * shows a loading state first. */
+const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [metadata, setMetadata] = useState<ArchiveMetadata>();
@@ -106,13 +112,23 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       setServerId(server.id);
       setScopeId(server.scopeId);
 
+      // Stale while revalidating: the page paints from the last visit's metadata
+      // and corrects itself a beat later. Skipping the request instead would show
+      // a stale title after the metadata editor wrote a new one.
+      const cached = readRouteCache<ArchiveMetadata>(`archive-detail:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+      if (cached) {
+        setMetadata(cached);
+        setMetadataLoading(false);
+      }
       void repository.loadArchiveMetadata(server.id, archiveId).then((result) => {
         if (!active) return;
-        if (result.ok) setMetadata(result.value);
-        else if (result.error.code === 'LRR_NOT_FOUND') {
+        if (result.ok) {
+          setMetadata(result.value);
+          writeRouteCache(`archive-detail:${server.id}:${archiveId}`, result.value);
+        } else if (result.error.code === 'LRR_NOT_FOUND') {
           showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
           navigate('/library', { replace: true });
-        } else setError(result.error.message);
+        } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
       void getNativeImageCache().load({
@@ -298,16 +314,35 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   );
 }
 
+interface RecommendationSnapshot {
+  similar: ArchiveRecord[];
+  sameCreator: ArchiveRecord[];
+}
+
+/** Recommendations cost up to a dozen searches on the server, and the answer for
+ * one archive does not change minute to minute. Stepping back into a detail page
+ * should not pay for them again. */
+const RECOMMENDATION_SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
+
 function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
-  const [similar, setSimilar] = useState<ArchiveRecord[]>([]);
-  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
-  const [loading, setLoading] = useState(tags.length > 0);
+  const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
+  const snapshot = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+  const [similar, setSimilar] = useState<ArchiveRecord[]>(snapshot?.similar ?? []);
+  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
+  const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
   const [tab, setTab] = useState<'similar' | 'creator'>('similar');
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
   const creator = useMemo(() => sameCreatorTags(tags), [tags]);
 
   useEffect(() => {
     if (tags.length === 0) return undefined;
+    const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+    if (cached) {
+      setSimilar(cached.similar);
+      setSameCreator(cached.sameCreator);
+      setLoading(false);
+      return undefined;
+    }
     let active = true;
     setLoading(true);
     const searchByTags = async (seeds: readonly string[]) => {
@@ -327,14 +362,17 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       const seeds = pickSeedTags(tags);
       const candidates = await searchByTags(seeds);
       if (!active) return;
-      setSimilar(rankRecommendations(tags, [...candidates.values()]).slice(0, 12));
+      const ranked = rankRecommendations(tags, [...candidates.values()]).slice(0, 12);
+      setSimilar(ranked);
       const creatorMatches = await searchByTags(creator.tags);
       if (!active) return;
-      setSameCreator([...creatorMatches.values()].slice(0, 12));
+      const byCreator = [...creatorMatches.values()].slice(0, 12);
+      setSameCreator(byCreator);
       setLoading(false);
+      writeRouteCache(snapshotKey, { similar: ranked, sameCreator: byCreator } satisfies RecommendationSnapshot);
     })();
     return () => { active = false; };
-  }, [creator, currentArchiveId, serverId, tags]);
+  }, [creator, currentArchiveId, serverId, snapshotKey, tags]);
 
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.

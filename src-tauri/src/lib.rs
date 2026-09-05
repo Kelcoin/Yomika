@@ -20,6 +20,7 @@ use commands::library::{
     search_random_archives, search_archives_page,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
     download_url,
+    verify_archives_exist,
 };
 use cache::{cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats, cache_store_image};
 use commands::platform::platform_capabilities;
@@ -67,6 +68,7 @@ pub fn run() {
             load_reader_page,
             list_archives,
             list_archives_by_ids,
+            verify_archives_exist,
             list_archives_page,
             search_archives_page,
             load_archive_metadata,

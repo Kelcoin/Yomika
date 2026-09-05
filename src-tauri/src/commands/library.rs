@@ -2636,6 +2636,72 @@ pub fn list_archives_by_ids(
     }
 }
 
+/// How many ids one verification pass will check. The shelves show a handful of
+/// cards; a cap keeps a long history from turning into a request storm.
+const VERIFY_ARCHIVE_LIMIT: usize = 32;
+
+/// Confirms that archives the local mirror is about to show still exist on the
+/// server, tombstoning the ones that do not, and answers with those ids.
+///
+/// The mirror only learns about a deletion when a full refresh runs or when
+/// something opens the archive and gets a 404. Since the library list moved to
+/// server-side paging, nothing refreshes the mirror on its own, so the shelves
+/// (history, favourites, to-read, the home rails) kept offering archives that
+/// were gone — the user found out by clicking one.
+///
+/// Requests run one at a time and only a definite 400/404 counts: a timeout or a
+/// server error must never tombstone an archive that is merely unreachable.
+#[tauri::command]
+pub async fn verify_archives_exist(
+    server_id: String,
+    archive_ids: Vec<String>,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Vec<String>>, String> {
+    if archive_ids.is_empty() {
+        return Ok(CommandResult::success(Vec::new()));
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| server_connection(&connection, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let mut missing = Vec::new();
+    for archive_id in archive_ids.iter().take(VERIFY_ARCHIVE_LIMIT) {
+        let url = format!(
+            "{}/api/archives/{}/metadata",
+            base_url.trim_end_matches('/'),
+            archive_id
+        );
+        let response = match reader_request(reqwest::Method::GET, url, api_key.clone()).await {
+            Ok(response) => response,
+            // Unreachable is not deleted.
+            Err(_) => continue,
+        };
+        let status = response.status();
+        if !matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+            continue;
+        }
+        let tombstoned = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|connection| reconcile_missing_archive_status(&connection, &server_id, archive_id, status));
+        match tombstoned {
+            Ok(_) => missing.push(archive_id.clone()),
+            Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
+        }
+    }
+    Ok(CommandResult::success(missing))
+}
+
 #[tauri::command]
 pub fn save_reading_progress(
     progress: ReadingProgressInput,

@@ -166,6 +166,11 @@ export class NativeLibraryRepository {
   uploadArchive(input: { serverId: string; taskId: string; filePath: string }): Promise<CommandResult<z.infer<typeof UploadArchiveResultSchema>>> {
     return invokeCommand('upload_archive', input, UploadArchiveResultSchema);
   }
+  /** Confirms the ids a shelf is about to show still exist on the server, and
+   * answers with the ones that are gone (now tombstoned locally). */
+  verifyArchivesExist(serverId: string, archiveIds: readonly string[]): Promise<CommandResult<string[]>> {
+    return invokeCommand('verify_archives_exist', { serverId, archiveIds }, z.array(z.string()));
+  }
   /** Hands a URL to LANraragi's own downloader, which picks the plugin. Answers
    * with the Minion job it queued — the download runs on the server. */
   downloadUrl(serverId: string, url: string, categoryId?: string): Promise<CommandResult<z.infer<typeof DownloadUrlResultSchema>>> {

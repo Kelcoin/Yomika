@@ -17,6 +17,7 @@ import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
+import { findMissingArchives } from '../lib/archiveExistence';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -124,6 +125,13 @@ function HomeWorkspace() {
       else setArchives(archiveResult.value);
       setRecentLoading(false);
       await loadRandom(server.id);
+      // The mirror only learns about a deletion when something asks the server,
+      // so confirm the handful of cards the rails are about to show rather than
+      // letting the user discover a gone archive by clicking it.
+      const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
+      if (!active || missing.size === 0) return;
+      setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
+      setRandomArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })();
     return () => { active = false; };
   }, [loadRandom, serverLoadAttempt]);
@@ -256,6 +264,11 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       if (!archiveResult.ok) setError(archiveResult.error.message);
       else setArchives(archiveResult.value);
       setLoading(false);
+      // Same reason as the home rails: the mirror does not hear about deletions,
+      // so a shelf would keep offering archives the server no longer has.
+      const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
+      if (!active || missing.size === 0) return;
+      setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })();
     return () => { active = false; };
   }, [name]);

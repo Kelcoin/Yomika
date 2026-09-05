@@ -288,4 +288,40 @@ describe('archive detail route', () => {
     const thumbnails = screen.getByRole('region', { name: '页面缩略图' });
     expect(creator.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
+
+  it('reuses the recommendations it already searched for on a second visit', async () => {
+    // The rail costs up to a dozen searches on the server, and the answer for one
+    // archive does not change minute to minute.
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'artist:someone, female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_archives_page') {
+        const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
+        return { ok: true, value: {
+          items: [{ serverId: 'scope-a', archiveId: `for-${query}`, title: `命中 ${query}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: [query] }],
+          total: 1,
+          hasMore: false,
+        } };
+      }
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const first = renderDetail();
+    await screen.findByRole('region', { name: '猜你喜欢' });
+    await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length).toBeGreaterThan(0));
+    const searches = adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length;
+    first.unmount();
+
+    const second = renderDetail();
+    const rail = await screen.findByRole('region', { name: '猜你喜欢' });
+    // A cached rail arrives with its cards already in it; one that had to search
+    // again would still be a skeleton at this point.
+    expect(within(rail).getByRole('link', { name: /命中/ })).toBeInTheDocument();
+    expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page')).toHaveLength(searches);
+    second.unmount();
+  });
 });

@@ -12,9 +12,13 @@ vi.mock('../../src/lib/tagTranslationService', async (importOriginal) => ({
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetArchiveExistenceForTests } from '../../src/lib/archiveExistence';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
+  // Confirmed ids are remembered for the session, so one test must not answer
+  // the next test's question.
+  resetArchiveExistenceForTests();
   vi.clearAllMocks();
 });
 
@@ -138,6 +142,42 @@ describe('application shell', () => {
     const menu = await screen.findByRole('menu');
     expect(within(menu).getByRole('menuitem', { name: '阅读' })).toBeInTheDocument();
     expect(within(menu).getByRole('menuitem', { name: '编辑元数据' })).toBeInTheDocument();
+  });
+
+  it('drops a shelf card the server no longer has instead of waiting for a click', async () => {
+    // The local mirror only hears about a deletion when something asks the
+    // server. Nothing refreshes it now that the library pages remotely, so an
+    // archive deleted elsewhere stayed on the rails until the user clicked it and
+    // was told it does not exist.
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') {
+        return { ok: true, value: [
+          { scopeId: 'scope-a', archiveId: 'gone', pageIndex: 1, visitedAt: '2026-08-29T00:00:00Z', deviceId: 'device-a', revision: 1 },
+          { scopeId: 'scope-a', archiveId: 'kept', pageIndex: 2, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 },
+        ] };
+      }
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_archives_by_ids') {
+        return { ok: true, value: [
+          { serverId: 'scope-a', archiveId: 'gone', title: '已删除的档案', pageCount: 3, updatedAt: '2026-08-29T00:00:00Z' },
+          { serverId: 'scope-a', archiveId: 'kept', title: '还在的档案', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z' },
+        ] };
+      }
+      if (command === 'verify_archives_exist') return { ok: true, value: ['gone'] };
+      if (command === 'search_random_archives') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderAt();
+
+    const rail = await screen.findByRole('region', { name: '继续阅读' });
+    expect(within(rail).getByRole('link', { name: /还在的档案/ })).toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('verify_archives_exist', { serverId: 'scope-a', archiveIds: ['gone', 'kept'] });
+    await vi.waitFor(() => expect(screen.queryByRole('link', { name: /已删除的档案/ })).not.toBeInTheDocument());
   });
 
   it('shows the server load error instead of treating it as an empty setup', async () => {
