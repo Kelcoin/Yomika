@@ -509,9 +509,18 @@ async fn reader_request(
     url: String,
     api_key: String,
 ) -> Result<reqwest::Response, String> {
+    reader_request_with_timeout(method, url, api_key, 10).await
+}
+
+async fn reader_request_with_timeout(
+    method: reqwest::Method,
+    url: String,
+    api_key: String,
+    timeout_seconds: u64,
+) -> Result<reqwest::Response, String> {
     Client::builder()
         .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
         .build()
         .map_err(|error| error.to_string())?
         .request(method, url)
@@ -618,6 +627,12 @@ pub async fn list_categories(
     const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
     let mut dynamic_categories = JoinSet::new();
     let mut resolved = Vec::new();
+    /// A whole-library search is not a page request. Ten seconds is enough for
+    /// `/api/categories` and nowhere near enough for `start=-1` on a large
+    /// library — and a timeout here is stored as an empty category, which reads
+    /// as "nothing is in it".
+    const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 45;
+    let mut requested = 0usize;
     for (index, category) in categories.iter().enumerate() {
         if !category.archives.is_empty() {
             continue;
@@ -627,9 +642,10 @@ pub async fn list_categories(
         };
         let base_url = base_url.clone();
         let api_key = api_key.clone();
+        requested += 1;
         dynamic_categories.spawn(async move {
             let url = build_category_search_url(&base_url, &search).ok()?;
-            let response = reader_request(reqwest::Method::GET, url, api_key).await.ok()?;
+            let response = reader_request_with_timeout(reqwest::Method::GET, url, api_key, CATEGORY_SEARCH_TIMEOUT_SECONDS).await.ok()?;
             if !response.status().is_success() {
                 return None;
             }
@@ -648,6 +664,10 @@ pub async fn list_categories(
             resolved.push(entry);
         }
     }
+    // A dynamic category that did not answer keeps an empty membership, which is
+    // the same thing an empty category looks like. Remember that the snapshot is
+    // incomplete so it is retried in minutes rather than in hours.
+    let partial = resolved.len() < requested;
     for (index, archives) in resolved {
         if let Some(category) = categories.get_mut(index) {
             category.archives = archives;
@@ -679,7 +699,7 @@ pub async fn list_categories(
         transaction
             .commit()
             .map_err(|error| format!("提交分类缓存失败：{error}"))?;
-        write_category_cache(&connection, &server_id, &categories)?;
+        write_category_cache(&connection, &server_id, &categories, partial)?;
         Ok(())
     })();
     if let Err(error) = sync_result {
@@ -1768,6 +1788,11 @@ fn build_category_search_url(base_url: &str, filter: &str) -> Result<String, Str
 /// never re-resolves, short enough that a category edited in LANraragi shows up
 /// without a manual refresh.
 const CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
+/// The same, for a snapshot in which at least one dynamic category could not be
+/// resolved. A failed resolution is stored as an empty membership, which is
+/// indistinguishable from "this category is empty" — keeping that for six hours
+/// hides every archive in it, so it is retried sooner instead.
+const PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 10 * 60;
 
 fn category_cache_key(server_id: &str) -> String {
     format!("categories.cache.{server_id}")
@@ -1777,6 +1802,10 @@ fn category_cache_key(server_id: &str) -> String {
 struct CategoryCacheEnvelope {
     synced_at: i64,
     categories: Vec<CategoryRecord>,
+    /// Absent in snapshots written before this field existed; those were only
+    /// written on a complete resolution, so treating them as complete is right.
+    #[serde(default)]
+    partial: bool,
 }
 
 fn read_category_cache(
@@ -1809,8 +1838,13 @@ fn read_category_cache_from(
         // A snapshot written by an older schema is simply refetched.
         Err(_) => return Ok(None),
     };
+    let max_age = if envelope.partial {
+        PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS
+    } else {
+        CATEGORY_CACHE_MAX_AGE_SECONDS
+    };
     let age = now.saturating_sub(envelope.synced_at);
-    if age < 0 || age > CATEGORY_CACHE_MAX_AGE_SECONDS {
+    if age < 0 || age > max_age {
         return Ok(None);
     }
     Ok(Some(envelope.categories))
@@ -1820,10 +1854,12 @@ fn write_category_cache(
     connection: &rusqlite::Connection,
     server_id: &str,
     categories: &[CategoryRecord],
+    partial: bool,
 ) -> Result<(), String> {
     let envelope = CategoryCacheEnvelope {
         synced_at: current_unix_seconds(),
         categories: categories.to_vec(),
+        partial,
     };
     let payload = serde_json::to_string(&envelope).map_err(|error| format!("序列化分类缓存失败：{error}"))?;
     connection
@@ -4673,8 +4709,8 @@ mod tests {
             search: None,
             archives: vec!["archive-a".to_string()],
         }];
-        write_category_cache(&connection, "scope-a", &categories).expect("write a");
-        write_category_cache(&connection, "scope-b", &categories).expect("write b");
+        write_category_cache(&connection, "scope-a", &categories, false).expect("write a");
+        write_category_cache(&connection, "scope-b", &categories, false).expect("write b");
 
         invalidate_category_cache(&connection, "scope-a").expect("invalidate");
         invalidate_category_cache(&connection, "scope-a").expect("invalidate again");
@@ -4699,7 +4735,7 @@ mod tests {
             search: Some("artist:someone$".to_string()),
             archives: vec!["archive-a".to_string()],
         }];
-        write_category_cache(&connection, "scope-a", &categories).expect("write");
+        write_category_cache(&connection, "scope-a", &categories, false).expect("write");
 
         let fresh = read_category_cache_from(&connection, "scope-a", current_unix_seconds())
             .expect("read fresh");
@@ -4716,6 +4752,21 @@ mod tests {
         assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
             .expect("read other scope")
             .is_none());
+
+        // A snapshot in which a dynamic category failed to resolve holds an empty
+        // membership, which looks exactly like an empty category — so it ages out
+        // in minutes rather than hiding those archives for six hours.
+        write_category_cache(&connection, "scope-c", &categories, true).expect("write partial");
+        assert!(read_category_cache_from(&connection, "scope-c", current_unix_seconds())
+            .expect("read partial")
+            .is_some());
+        assert!(read_category_cache_from(
+            &connection,
+            "scope-c",
+            current_unix_seconds() + PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+        )
+        .expect("read aged partial")
+        .is_none(), "a partial snapshot must not last the full window");
     }
 
     #[test]

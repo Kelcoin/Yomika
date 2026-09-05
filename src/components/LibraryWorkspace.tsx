@@ -14,7 +14,7 @@ import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCa
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 
@@ -231,7 +231,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <strong>{archive.title}</strong>
         <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
         <span className="archive-row-footer">
-          <small className="archive-row-category" data-category={archiveCategoryLabel(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
+          <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
           <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
         </span>
       </span>
@@ -369,7 +369,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               <h2 id="archive-detail-title">{selected.title}</h2>
               <div className="archive-detail-meta" aria-label="档案摘要">
                 <span className="metadata-chip metadata-chip-page">{selected.pageCount} 页</span>
-                {cardCategoryLabel(selected) && <span className="metadata-chip" data-category={archiveCategoryLabel(selected)}>{cardCategoryLabel(selected)}</span>}
+                {cardCategoryLabel(selected) && <span className="metadata-chip" data-category={archiveCategoryKey(selected)}>{cardCategoryLabel(selected)}</span>}
                 {archiveLanguageLabel(selected) && <span className="metadata-chip">{archiveLanguageLabel(selected)}</span>}
               </div>
               {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}

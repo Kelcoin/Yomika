@@ -120,9 +120,13 @@ describe('library workspace', () => {
   });
 
   it('surfaces archive classification and reading metadata as compact chips', () => {
-    renderWorkspace({ archives: [{ ...archives[0]!, category: 'Manga', language: '中文' }] });
+    // The category comes from the `category:` tag, not from the local
+    // `archives.category` column — nothing has ever written that column, so
+    // reading it first only made the source order look richer than it was. The
+    // label is translated through the same map the detail pane's tag list uses.
+    renderWorkspace({ archives: [{ ...archives[0]!, tags: ['category:Manga'], language: '中文' }] });
 
-    expect(screen.getAllByText('Manga').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
+    expect(screen.getAllByText('漫画').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
     expect(screen.getAllByText('中文').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
     expect(screen.getAllByText('1 页').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
   });

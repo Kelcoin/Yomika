@@ -1,3 +1,5 @@
+import { categoryTagLabel } from './tags';
+
 export function isWideCoverRatio(ratio: number | null | undefined): boolean {
   return ratio != null && Number.isFinite(ratio) && ratio > 1.0;
 }
@@ -53,9 +55,14 @@ function firstTagValue(tags: readonly string[], namespace: string): string {
   return '';
 }
 
-/** LANraragi's category tag values, in the display form the chip accents key on
- * (`.metadata-chip[data-category='Game CG']`). */
-const CATEGORY_TAG_LABELS: Record<string, string> = {
+/** Canonical English category name for the accent rules.
+ *
+ * Two maps look like duplication and are not: `.metadata-chip[data-category=…]`
+ * in shell.css keys on the English name because that is what E-Hentai itself
+ * sends and what its own chips carry, while the text a card prints is
+ * translated. Deriving the attribute from the translated label would have
+ * dropped every accent colour the moment the label became Chinese. */
+const CATEGORY_ACCENT_KEYS: Record<string, string> = {
   manga: 'Manga',
   doujinshi: 'Doujinshi',
   artistcg: 'Artist CG',
@@ -71,26 +78,30 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   misc: 'Misc',
 };
 
+export function archiveCategoryKey(archive: { tags?: readonly string[] | undefined }): string {
+  const value = firstTagValue(archive.tags ?? [], 'category').trim().toLowerCase();
+  return CATEGORY_ACCENT_KEYS[value] ?? '';
+}
+
 /** The category a card shows.
  *
  * LANraragi's own categories come first, because that is what the user actually
  * organised — the `category:` tag is metadata the uploader happened to set, and
  * showing it while calling it "分类" conflated two different things. Falls back to
- * the tag when the archive is in no category.
+ * the tag when the archive is in no category, translated through the one shared
+ * map so a card and the detail pane cannot disagree about the same value.
  *
- * The local `archives.category` column is checked first for compatibility, but
- * nothing on the sync path ever wrote it.
+ * The local `archives.category` column used to be consulted first "for
+ * compatibility"; nothing has ever written it, so the branch only made the source
+ * order harder to read.
  */
 export function archiveCategoryLabel(
-  archive: { category?: string | null | undefined; tags?: readonly string[] | undefined },
+  archive: { tags?: readonly string[] | undefined },
   lanraragiCategories?: readonly string[] | undefined,
 ): string {
   const own = lanraragiCategories?.[0];
   if (own) return own;
-  const stored = archive.category?.trim();
-  if (stored) return stored;
-  const tagged = firstTagValue(archive.tags ?? [], 'category');
-  return CATEGORY_TAG_LABELS[tagged.toLowerCase()] ?? tagged;
+  return categoryTagLabel(firstTagValue(archive.tags ?? [], 'category'));
 }
 
 /** Same story as the category: `language:chinese` lives in the tags, not in the

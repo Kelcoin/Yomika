@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  archiveCategoryKey,
   archiveCategoryLabel,
   formatArchiveDate,
   formatArchivePageMeta,
@@ -15,10 +16,17 @@ describe('archive card presentation', () => {
     // user organised is the LANraragi category, so that wins when there is one.
     expect(archiveCategoryLabel(archive, ['漫画书架'])).toBe('漫画书架');
     // With no category on the server, the tag is still better than nothing, and
-    // it gets the display casing LANraragi itself uses.
-    expect(archiveCategoryLabel(archive)).toBe('Manga');
-    expect(archiveCategoryLabel(archive, [])).toBe('Manga');
+    // it is translated through the one shared map — the card used to print the
+    // English casing while the detail pane printed Chinese for the same value.
+    expect(archiveCategoryLabel(archive)).toBe('漫画');
+    expect(archiveCategoryLabel(archive, [])).toBe('漫画');
+    expect(archiveCategoryLabel({ tags: ['category:Asian Porn'] })).toBe('亚洲写真');
     expect(archiveCategoryLabel({ tags: [] })).toBe('');
+    // The accent attribute keeps the English name, which is what the stylesheet
+    // and E-Hentai's own chips key on.
+    expect(archiveCategoryKey(archive)).toBe('Manga');
+    expect(archiveCategoryKey({ tags: ['category:gamecg'] })).toBe('Game CG');
+    expect(archiveCategoryKey({ tags: ['category:something-new'] })).toBe('');
   });
 
   it('uses the Readoshi wide-card threshold', () => {

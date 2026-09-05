@@ -5,11 +5,9 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { resetLibrarySyncStateForTests } from '../../src/lib/librarySync';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
-  resetLibrarySyncStateForTests();
   vi.restoreAllMocks();
 });
 

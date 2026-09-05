@@ -19,7 +19,38 @@ export function sortCategoriesForDisplay<T extends { name: string }>(categories:
 export function assignableCategories<T extends { name: string; search?: string | null | undefined }>(categories: T[] = []): T[] {
   return categories.filter((category) => !category.search && category.name !== FAVORITES_CATEGORY_NAME);
 }
-const CATEGORY_TRANSLATIONS: Record<string, string> = { manga: '漫画', doujinshi: '同人志', 'game cg': '游戏 CG', 'image set': '图片集', western: '欧美', artistcg: '作者 CG', cosplay: 'Cosplay', imageset: '图片集' };
+/** The E-Hentai categories, in Chinese, keyed by every spelling they arrive in.
+ *
+ * One map, used by both consumers. There used to be two: this one, reached only
+ * from the detail pane's tag list, and an English display-casing map in
+ * `archiveCardPresentation` that the card footer used — so the same archive read
+ * 漫画 in the panel and Manga on the card, and a neighbour with a category the
+ * server knew about read Chinese while one without read English. This one also
+ * covers the values the old map missed (`artist cg`, `gamecg`, `non-h`,
+ * `asianporn`, `misc`), which is why some of them stayed English everywhere. */
+export const CATEGORY_TRANSLATIONS: Record<string, string> = {
+  manga: '漫画',
+  doujinshi: '同人志',
+  artistcg: '作者 CG',
+  'artist cg': '作者 CG',
+  gamecg: '游戏 CG',
+  'game cg': '游戏 CG',
+  imageset: '图片集',
+  'image set': '图片集',
+  western: '欧美',
+  'non-h': '非 H',
+  nonh: '非 H',
+  cosplay: 'Cosplay',
+  asianporn: '亚洲写真',
+  'asian porn': '亚洲写真',
+  misc: '杂项',
+};
+
+/** A `category:`/`reclass:` tag value in the form a card or a chip shows it. */
+export function categoryTagLabel(value: string): string {
+  const text = value.trim();
+  return text ? CATEGORY_TRANSLATIONS[text.toLowerCase()] ?? text : text;
+}
 export type TranslationMap = Record<string, Record<string, string>>;
 let translations: TranslationMap = {};
 const listeners = new Set<() => void>();

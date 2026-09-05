@@ -7,7 +7,6 @@ import { LibraryWorkspace } from './LibraryWorkspace';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { markCategoriesRefreshed, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -81,6 +80,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [deleteError, setDeleteError] = useState<string>();
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? []);
   const [categoriesLoading, setCategoriesLoading] = useState(!snapshot?.categories?.length);
+  /** The snapshot already carries the categories, so the first mount does not need
+   * to ask for them again: every membership crosses IPC and is re-validated, and
+   * the list they feed is already on screen. */
+  const categoriesFromSnapshot = useRef(Boolean(snapshot?.categories?.length));
   const [categoryError, setCategoryError] = useState<string>();
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
@@ -351,7 +354,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // be brought up to date, plus a re-resolution of the dynamic categories.
     const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
     if (!synced.ok) return synced;
-    markCategoriesRefreshed(currentServerId);
     void repository.listCategories(currentServerId, true).then((categoryResult) => {
       if (categoryResult.ok) setCategories(categoryResult.value);
       else setCategoryError(categoryResult.error.message);
@@ -376,13 +378,23 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   useEffect(() => {
     if (!serverId) return;
     // Categories are only needed for the filter menu and the "add to category"
-    // entries, not for filtering itself — LANraragi resolves that. The native
-    // side serves a persisted snapshot, so a mount costs no HTTP; only a lapsed
-    // TTL pays to re-resolve the dynamic ones.
-    const wantsFreshCategories = shouldRefreshCategories(serverId);
-    if (wantsFreshCategories) markCategoriesRefreshed(serverId);
+    // entries, not for filtering itself — LANraragi resolves that. The native side
+    // serves a persisted snapshot for six hours, and drops it the moment an
+    // assignment, a tag edit or a delete makes it wrong.
+    //
+    // Never forced from here. A five-minute throttle used to decide `force`, and
+    // `force` skips that snapshot outright: the effective interval was therefore
+    // five minutes, not six hours, and every lapse re-ran one unpaged
+    // whole-library search per dynamic category. Reading a chapter takes longer
+    // than five minutes, so coming back from the reader always paid it. The
+    // refresh button still forces, which is the one place a user asks for it.
+    if (categoriesFromSnapshot.current) {
+      categoriesFromSnapshot.current = false;
+      setCategoriesLoading(false);
+      return;
+    }
     setCategoriesLoading(true);
-    void repository.listCategories(serverId, wantsFreshCategories).then((categoryResult) => {
+    void repository.listCategories(serverId).then((categoryResult) => {
       if (categoryResult.ok) setCategories(categoryResult.value);
       else setCategoryError(categoryResult.error.message);
     }).finally(() => setCategoriesLoading(false));
