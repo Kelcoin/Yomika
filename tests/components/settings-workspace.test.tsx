@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -107,7 +107,7 @@ describe('settings workspace', () => {
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -122,10 +122,11 @@ describe('settings workspace', () => {
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
 
+    // No save button: a change is the save. The old form let a toggle look
+    // applied while nothing had been written.
     await user.click(screen.getByRole('radio', { name: '浅色' }));
-    await user.click(screen.getByRole('button', { name: '保存偏好' }));
 
-    expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
+    expect(await screen.findByText('更改已自动保存')).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute('data-theme', 'light');
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
     // Saving one section still writes the whole snapshot.
@@ -135,10 +136,11 @@ describe('settings workspace', () => {
   });
 
   it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -153,9 +155,9 @@ describe('settings workspace', () => {
     expect(screen.queryByRole('radio', { name: '双页' })).not.toBeInTheDocument();
   });
 
-  it('applies a custom accent colour and warns when it fails contrast', async () => {
+  it('themes through custom CSS instead of a separate accent preference', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -167,47 +169,49 @@ describe('settings workspace', () => {
     renderSettings('appearance');
     await screen.findByRole('radio', { name: '浅色' });
 
-    await user.click(screen.getByRole('button', { name: '靛蓝' }));
-    await user.click(screen.getByRole('button', { name: '保存偏好' }));
+    // The accent picker is gone: it set --brand-vermilion as an inline style on
+    // the root, which outranked the same variable in a preset's :root block —
+    // applying a theme then appeared to do nothing.
+    expect(screen.queryByLabelText('自定义强调色')).not.toBeInTheDocument();
+    expect(document.documentElement.style.getPropertyValue('--brand-vermilion')).toBe('');
 
-    expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
-    expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...loaded, accentColor: '#1f6f8b' } });
-    expect(document.documentElement.style.getPropertyValue('--brand-vermilion')).toBe('#1f6f8b');
+    fireEvent.change(screen.getByLabelText('自定义 CSS'), { target: { value: ':root { --brand-vermilion: #1f6f8b; }' } });
 
-    const custom = screen.getByLabelText('自定义强调色');
-    await user.clear(custom);
-    await user.type(custom, '#ffe066');
-    expect(screen.getByRole('alert')).toHaveTextContent('低于 WCAG AA');
+    await vi.waitFor(() => expect(document.getElementById('yomika-custom-css')?.textContent)
+      .toBe(':root { --brand-vermilion: #1f6f8b; }'));
   });
 
   it('exposes reader preload, cover concurrency, and upscale settings', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
+      if (command === 'inference_list_models') return { ok: true, value: [{ id: 'realesr-general', version: '2026.09.2' }] };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
 
     renderSettings('reading');
     const preload = await screen.findByLabelText('预加载页数');
+    // Ten pages, not five: a LAN page is a few hundred KB.
+    expect(preload).toHaveAttribute('max', '10');
     await user.clear(preload);
-    await user.type(preload, '3');
+    await user.type(preload, '8');
     const concurrency = screen.getByLabelText('封面并发请求');
     await user.clear(concurrency);
     await user.type(concurrency, '2');
-    // The model field only matters once a backend is chosen.
+    // The model picker only matters once a backend is chosen.
     expect(screen.queryByLabelText('超分模型')).not.toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: 'CPU' }));
-    await user.type(screen.getByLabelText('超分模型'), 'real-esrgan-anime-x2');
-    await user.click(screen.getByRole('button', { name: '保存偏好' }));
+    // Installed models are offered by name; typing one from memory was a silent
+    // failure at upscale time.
+    await user.click(await screen.findByRole('radio', { name: 'realesr-general · 2026.09.2' }));
 
-    expect(await screen.findByText('偏好已保存')).toBeInTheDocument();
-    expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, prefetchPages: 3, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan-anime-x2' },
-    });
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
+      input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'realesr-general' },
+    }));
   });
 
   it('shows cache usage by rendition and clears unprotected images', async () => {
@@ -361,9 +365,9 @@ describe('settings workspace', () => {
     expect(screen.getByRole('radio', { name: '深色' })).toBeChecked();
   });
 
-  it('seeds custom CSS from a preset and injects it after saving', async () => {
+  it('applies a preset theme as soon as it is picked', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, accentColor: '#b63a2e', prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };
@@ -373,12 +377,14 @@ describe('settings workspace', () => {
     });
     renderSettings();
 
-    // A single accent colour could not express a theme, so presets seed the box.
+    // Each preset card names the theme and what it changes, so it is found by a
+    // prefix rather than an exact label.
     await user.click(await screen.findByRole('link', { name: /样式/ }));
-    await user.click(await screen.findByRole('button', { name: '紧凑' }));
+    await user.click(await screen.findByRole('button', { name: /^紧凑/ }));
     expect((screen.getByLabelText('自定义 CSS') as HTMLTextAreaElement).value).toContain('.archive-row-tags .metadata-chip');
-
-    await user.click(screen.getByRole('button', { name: '保存偏好' }));
+    // The picked card stays marked, and no save step stands between the click
+    // and the stylesheet.
+    expect(screen.getByRole('button', { name: /^紧凑/ })).toHaveAttribute('aria-pressed', 'true');
 
     await vi.waitFor(() => {
       expect(document.getElementById('yomika-custom-css')?.textContent).toContain('.archive-row-tags .metadata-chip');

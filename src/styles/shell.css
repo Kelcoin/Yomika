@@ -491,19 +491,26 @@ body::-webkit-scrollbar,
   border-bottom: 1px solid var(--hairline);
 }
 
-.settings-section {
+/* Every settings section shares one shape: a fixed label column and content that
+   fills what is left. They used to disagree — different label widths, and a
+   680px cap on the content — so the sync page ended up a narrow strip with a
+   third of the window empty beside it. */
+.settings-section,
+.preferences-panel {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
   align-items: start;
-  gap: clamp(var(--space-8), 5vw, 72px);
-  padding: var(--space-10) 0;
+  gap: clamp(var(--space-6), 4vw, var(--space-10));
+  min-width: 0;
+  padding: var(--space-8) 0;
   border-top: 1px solid var(--hairline);
 }
 
-.settings-section > :last-child {
+.settings-section > :last-child,
+.preferences-form {
   width: 100%;
-  max-width: 680px;
-  justify-self: start;
+  min-width: 0;
+  justify-self: stretch;
 }
 
 .settings-section > .primary-action,
@@ -559,17 +566,10 @@ body::-webkit-scrollbar,
   padding-top: var(--space-5);
 }
 
-.preferences-panel {
+.preferences-panel-heading {
   display: grid;
-  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
-  gap: var(--space-8);
-  padding: var(--space-8) 0;
-  border-top: 1px solid var(--hairline);
-}
-
-.preferences-panel,
-.settings-section {
-  min-width: 0;
+  align-content: start;
+  gap: var(--space-2);
 }
 
 .preferences-panel h2 {
@@ -577,11 +577,15 @@ body::-webkit-scrollbar,
   font-size: 20px;
 }
 
+/* Autosave has to be visible, or the missing save button reads as a bug. */
+.preferences-autosave {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
 .preferences-form {
   display: grid;
   gap: var(--space-5);
-  width: 100%;
-  max-width: 680px;
   justify-items: start;
 }
 
@@ -2832,14 +2836,81 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
-/* Tools section is an index of links; the workspaces themselves are routes. */
+/* Tools section is an index; the workspaces themselves are routes. Cards rather
+   than bare buttons: two lone buttons on an empty panel said nothing about what
+   they open. */
 .settings-tools-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.tool-card {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-content: start;
+  gap: 4px var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
+  border-radius: var(--radius-card);
+  background: var(--surface-panel);
+  color: inherit;
+  transition: border-color var(--motion-standard), transform var(--motion-standard);
+}
+
+.tool-card:hover {
+  border-color: color-mix(in srgb, var(--brand-vermilion) 55%, transparent);
+  transform: translateY(-1px);
+}
+
+.tool-card svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
+.tool-card strong { font-size: 14px; font-weight: 680; }
+.tool-card span { grid-column: 2; color: var(--ink-secondary); font-size: 12px; line-height: 1.6; }
+
+.settings-eh-content { min-width: 0; }
+
+/* About is the app's own page, so it introduces itself instead of being three
+   rows of a definition list. */
+.about-hero {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.about-mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-card);
+  background: var(--brand-vermilion);
+  color: var(--ink-on-brand);
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.about-hero h2 { margin: 0 0 4px; }
+
+.about-version {
+  align-self: start;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 24%, transparent);
+  border-radius: var(--radius-pill);
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-links {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
+  padding-top: var(--space-2);
 }
-
-.settings-eh-content { min-width: 0; }
 
 /* Cache breakdown as proportions, with the clear action beside the number. */
 .cache-clear-button { flex: none; width: 32px; height: 32px; min-width: 32px; }
@@ -2938,22 +3009,46 @@ body::-webkit-scrollbar,
 .search-preset-remove:hover { color: var(--state-danger); }
 .search-preset-save { flex: none; }
 
-/* Custom CSS editor: presets, a monospace box, and a length readout. */
+/* Custom CSS editor: preset cards, a monospace box, and a length readout. */
 .custom-css-editor {
   display: grid;
-  gap: var(--space-2);
-  max-width: 680px;
+  gap: var(--space-3);
+  width: 100%;
   padding: 0;
   border: 0;
 }
 
 .custom-css-hint { margin: 0; color: var(--ink-secondary); font-size: 12px; }
 
+/* Preset cards, not a row of identical grey buttons: each one names the theme
+   and says what it changes, and the applied one stays marked. */
 .custom-css-presets {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: var(--space-2);
 }
+
+.css-preset-card {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-standard), background-color var(--motion-standard);
+}
+
+.css-preset-card:hover { border-color: color-mix(in srgb, var(--brand-vermilion) 45%, transparent); }
+.css-preset-card.is-active {
+  border-color: var(--brand-vermilion);
+  background: color-mix(in srgb, var(--brand-vermilion) 8%, var(--surface-panel));
+}
+.css-preset-card strong { font-size: 13px; font-weight: 680; }
+.css-preset-card span { color: var(--ink-secondary); font-size: 11px; line-height: 1.5; }
 
 .custom-css-editor textarea {
   width: 100%;
@@ -3007,28 +3102,4 @@ body::-webkit-scrollbar,
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
-}
-
-.accent-picker {
-  display: grid;
-  gap: var(--space-3);
-}
-
-.accent-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.accent-swatch {
-  width: 32px;
-  height: 32px;
-  border: 2px solid var(--hairline);
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-}
-
-.accent-swatch.is-active {
-  border-color: var(--ink-primary);
-  box-shadow: 0 0 0 2px var(--surface-canvas) inset;
 }

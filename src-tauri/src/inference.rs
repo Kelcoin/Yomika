@@ -315,8 +315,49 @@ pub fn inference_validate_model(input: ModelValidationInput) -> crate::domain::r
 #[serde(rename_all = "camelCase")]
 pub struct ModelInstallInput { pub manifest: ModelManifest, pub archive: Vec<u8> }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
 pub struct InstalledModel { pub id: String, pub version: String }
+
+/// Models on disk, as `models/<id>/<version>/`, newest version of each id first.
+///
+/// A partially-extracted install is a `.<version>.installing` sibling, and those
+/// are skipped: offering one as a choice would name a model that cannot load.
+pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel> {
+    let mut found = Vec::new();
+    let Ok(model_dirs) = std::fs::read_dir(app_data_dir.join("models")) else { return found };
+    for model_dir in model_dirs.flatten() {
+        if !model_dir.file_type().map(|kind| kind.is_dir()).unwrap_or(false) { continue }
+        let id = model_dir.file_name().to_string_lossy().to_string();
+        if !safe_model_identity_segment(&id) || id.starts_with('.') { continue }
+        let Ok(versions) = std::fs::read_dir(model_dir.path()) else { continue };
+        let mut ids: Vec<String> = versions
+            .flatten()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            // `model_install_roots` stages an extraction as `.<version>.installing`,
+            // and that leading dot is the only thing separating a finished install
+            // from a half-written one.
+            .filter(|version| safe_model_identity_segment(version) && !version.starts_with('.'))
+            .collect();
+        ids.sort_by(|left, right| right.cmp(left));
+        for version in ids {
+            found.push(InstalledModel { id: id.clone(), version });
+        }
+    }
+    found.sort_by(|left, right| left.id.cmp(&right.id));
+    found
+}
+
+/// Lets the settings page offer the models that are actually installed instead
+/// of asking the user to type a model name and hope.
+#[tauri::command]
+pub fn inference_list_models(app: tauri::AppHandle) -> crate::domain::result::CommandResult<Vec<InstalledModel>> {
+    use tauri::Manager;
+    match app.path().app_data_dir() {
+        Ok(app_data_dir) => crate::domain::result::CommandResult::success(installed_models_in(&app_data_dir)),
+        Err(error) => crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false),
+    }
+}
 
 #[tauri::command]
 pub fn inference_install_model(
@@ -976,6 +1017,33 @@ mod tests {
             assert!(model_install_roots(&app_data, invalid, "1").is_err(), "accepted id {invalid:?}");
             assert!(model_install_roots(&app_data, "model", invalid).is_err(), "accepted version {invalid:?}");
         }
+    }
+
+    #[test]
+    fn installed_models_skip_partial_installs_and_report_newest_version_first() {
+        let base = std::env::temp_dir().join("yomika-installed-models");
+        let _ = std::fs::remove_dir_all(&base);
+        let models = base.join("models");
+        for path in [
+            models.join("realesr-general").join("2026.08.1"),
+            models.join("realesr-general").join("2026.09.2"),
+            // A half-finished extraction, and a name model_install_roots would
+            // never produce: neither can be selected.
+            models.join("realesr-general").join(".2026.10.0.installing"),
+            models.join("waifu2x").join("1"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        assert_eq!(installed_models_in(&base), vec![
+            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into() },
+            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into() },
+            InstalledModel { id: "waifu2x".into(), version: "1".into() },
+        ]);
+        // No models directory at all is an empty list, not an error: a fresh
+        // install has nowhere to look yet.
+        assert!(installed_models_in(&base.join("elsewhere")).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

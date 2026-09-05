@@ -14,9 +14,10 @@ import { ServerSetupDialog } from './ServerSetupDialog';
 import { SyncWorkspace } from './SyncWorkspace';
 import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
-import { ACCENT_PRESETS, DEFAULT_ACCENT_COLOR, contrastRatio, isAccessibleAccent, normalizeAccentColor } from '../lib/accentColor';
 import { CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
+import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
+import { MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
@@ -26,7 +27,11 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
 const cacheRepository = new NativeCacheRepository();
+const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
+/** Vite inlines this at build time from package.json, so the About page cannot
+ * drift from the shipped version the way a hand-written string would. */
+const APP_VERSION = __APP_VERSION__;
 
 function formatCacheBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -43,7 +48,6 @@ const settingsSections = [
   { id: 'settings-reading', label: '阅读' },
   { id: 'settings-appearance', label: '样式' },
   { id: 'settings-eh', label: 'E-Hentai' },
-  { id: 'settings-downloads', label: '下载' },
   { id: 'settings-sync', label: '同步' },
   { id: 'settings-advanced', label: '高级' },
   { id: 'settings-tools', label: '工具' },
@@ -59,8 +63,8 @@ export function SettingsWorkspace() {
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
-  const accentPreview = normalizeAccentColor(preferenceDraft.accentColor);
   const [preferencePending, setPreferencePending] = useState(false);
+  const [preferenceSavedAt, setPreferenceSavedAt] = useState<number>();
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
   const [migrationText, setMigrationText] = useState('');
@@ -75,10 +79,13 @@ export function SettingsWorkspace() {
   const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-general');
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
+  const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
   const statsRequestedRef = useRef(false);
+  const autosaveTimer = useRef<number>();
+  const pendingPreferences = useRef<PreferenceSnapshot>();
 
-  // Saving preferences, clearing the cache and migrating data all report through
-  // the shared toast now; the inline lines they used to print were easy to miss.
+  // Only failures interrupt: a save the user did not ask for should not announce
+  // itself on every keystroke. The panel says when it last saved instead.
   useEffect(() => {
     if (preferenceMessage) showToast(preferenceMessage, preferenceError ? 'error' : 'success');
   }, [preferenceError, preferenceMessage, showToast]);
@@ -141,18 +148,44 @@ export function SettingsWorkspace() {
     setCacheClearing(false);
   }
 
-  async function savePreferences(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  useEffect(() => {
+    // Only the reading section shows the model picker, and the list comes off
+    // disk, so it is read on demand rather than at mount.
+    if (selectedSettingsSection !== 'settings-reading' || installedModels) return;
+    void inferenceRepository.listModels().then((result) => {
+      setInstalledModels(result.ok ? result.value : []);
+    });
+  }, [installedModels, selectedSettingsSection]);
+
+  /** Saves a change straight away. The old form had a 保存偏好 button, which meant
+   * a toggle could look applied and silently not be. Rapid edits (typing in the
+   * CSS box, holding a number spinner) collapse into one write. */
+  function editPreferences(patch: Partial<PreferenceSnapshot>) {
+    const next = { ...preferenceDraft, ...patch };
+    setPreferenceDraft(next);
+    pendingPreferences.current = next;
+    if (autosaveTimer.current !== undefined) window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(() => void persistPreferences(next), 400);
+  }
+
+  async function persistPreferences(next: PreferenceSnapshot) {
+    if (autosaveTimer.current !== undefined) window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = undefined;
+    pendingPreferences.current = undefined;
+    // Half-typed values are not failures. Clearing a number field to retype it
+    // passes through 0 or NaN, and autosave would report each one as an error.
+    if (!PreferenceSnapshotSchema.safeParse(next).success) return;
     setPreferencePending(true);
     setPreferenceMessage(undefined);
     setPreferenceError(false);
-    const result = await preferenceState.save({
-      ...preferenceDraft,
-      accentColor: normalizeAccentColor(preferenceDraft.accentColor) ?? DEFAULT_ACCENT_COLOR,
-    });
-    if (result.ok) setPreferenceDraft(result.value);
-    else setPreferenceError(true);
-    setPreferenceMessage(result.ok ? '偏好已保存' : result.error.message);
+    const result = await preferenceState.save(next);
+    if (result.ok) {
+      setPreferenceDraft(result.value);
+      setPreferenceSavedAt(Date.now());
+    } else {
+      setPreferenceError(true);
+      setPreferenceMessage(result.error.message);
+    }
     setPreferencePending(false);
   }
 
@@ -265,76 +298,46 @@ export function SettingsWorkspace() {
         <div className="settings-content">
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
       <section className="preferences-panel" id={selectedSettingsSection} aria-labelledby="preferences-title">
-        <div>
+        <div className="preferences-panel-heading">
           <h2 id="preferences-title">{selectedSettingsSection === 'settings-reading' ? '阅读' : selectedSettingsSection === 'settings-appearance' ? '样式' : '高级'}</h2>
+          {/* Autosave has to say so, or a change looks unsaved. */}
+          <span className="preferences-autosave" role="status">
+            {preferencePending ? '正在保存…' : preferenceSavedAt ? '更改已自动保存' : '更改会自动保存'}
+          </span>
         </div>
         {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
-          <form className="preferences-form" onSubmit={savePreferences}>
+          <div className="preferences-form">
             {selectedSettingsSection === 'settings-appearance' && <fieldset>
               <legend>主题</legend>
-              <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, theme: value as PreferenceSnapshot['theme'] })} />
-              <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, theme: value as PreferenceSnapshot['theme'] })} />
+              <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
+              <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>默认布局</legend>
-              <SelectField name="layout" aria-label="默认布局" value={preferenceDraft.defaultLayout} options={[{ value: 'auto', label: '自动' }, { value: 'single', label: '单页' }, { value: 'double', label: '双页' }, { value: 'webtoon', label: '条漫' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
-              <PreferenceRadioFallback name="layout" value={preferenceDraft.defaultLayout} options={[['auto', '自动'], ['single', '单页'], ['double', '双页'], ['webtoon', '条漫']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
+              <SelectField name="layout" aria-label="默认布局" value={preferenceDraft.defaultLayout} options={[{ value: 'auto', label: '自动' }, { value: 'single', label: '单页' }, { value: 'double', label: '双页' }, { value: 'webtoon', label: '条漫' }]} onChange={(value) => editPreferences({ defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
+              <PreferenceRadioFallback name="layout" value={preferenceDraft.defaultLayout} options={[['auto', '自动'], ['single', '单页'], ['double', '双页'], ['webtoon', '条漫']]} onChange={(value) => editPreferences({ defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>默认方向</legend>
-              <SelectField name="direction" aria-label="默认方向" value={preferenceDraft.defaultDirection} options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
-              <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
-            </fieldset>}
-            {selectedSettingsSection === 'settings-appearance' && <fieldset className="accent-picker">
-              <legend>强调色</legend>
-              <div className="accent-swatches">
-                {ACCENT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    className={`accent-swatch${preferenceDraft.accentColor === preset.value ? ' is-active' : ''}`}
-                    style={{ background: preset.value }}
-                    aria-label={preset.label}
-                    aria-pressed={preferenceDraft.accentColor === preset.value}
-                    onClick={() => setPreferenceDraft({ ...preferenceDraft, accentColor: preset.value })}
-                  />
-                ))}
-              </div>
-              <label className="preference-select">自定义色值
-                <input
-                  name="accentColor"
-                  aria-label="自定义强调色"
-                  value={preferenceDraft.accentColor}
-                  spellCheck={false}
-                  // Keep the raw text while typing: expanding #abc mid-word
-                  // would rewrite the field under the cursor. Normalization
-                  // happens on save.
-                  onChange={(event) => setPreferenceDraft({ ...preferenceDraft, accentColor: event.target.value.trim().toLowerCase() })}
-                />
-              </label>
-              {accentPreview
-                ? !isAccessibleAccent(accentPreview) && (
-                  <p className="form-error" role="alert">
-                    与白色文字的对比度为 {contrastRatio(accentPreview, '#ffffff')}:1，低于 WCAG AA 要求的 4.5:1
-                  </p>
-                )
-                : <p className="form-error" role="alert">强调色需要是 #rrggbb 形式的十六进制色值</p>}
+              <SelectField name="direction" aria-label="默认方向" value={preferenceDraft.defaultDirection} options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]} onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
+              <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-appearance' && <fieldset className="custom-css-editor">
               <legend>自定义 CSS</legend>
               <p className="custom-css-hint">
-                在设计令牌之后追加，可覆盖任意变量与样式。保存后立即生效，清空即恢复默认。
+                在设计令牌之后追加，可覆盖任意变量与样式。改动即时生效，清空即恢复默认。
               </p>
-              <div className="custom-css-presets">
+              <div className="custom-css-presets" role="group" aria-label="预设主题">
                 {CSS_THEME_PRESETS.map((preset) => (
                   <button
                     key={preset.id}
                     type="button"
-                    className="secondary-action"
-                    title={preset.description}
-                    onClick={() => setPreferenceDraft({ ...preferenceDraft, customCss: preset.css })}
+                    className={`css-preset-card${preferenceDraft.customCss === preset.css ? ' is-active' : ''}`}
+                    aria-pressed={preferenceDraft.customCss === preset.css}
+                    onClick={() => editPreferences({ customCss: preset.css })}
                   >
-                    {preset.label}
+                    <strong>{preset.label}</strong>
+                    <span>{preset.description}</span>
                   </button>
                 ))}
               </div>
@@ -345,7 +348,7 @@ export function SettingsWorkspace() {
                 spellCheck={false}
                 rows={8}
                 value={preferenceDraft.customCss}
-                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, customCss: event.target.value })}
+                onChange={(event) => editPreferences({ customCss: event.target.value })}
               />
               <p className="custom-css-count">{preferenceDraft.customCss.length} / 20000</p>
             </fieldset>}
@@ -355,10 +358,10 @@ export function SettingsWorkspace() {
                 aria-label="预加载页数"
                 type="number"
                 min={0}
-                max={5}
+                max={MAX_PREFETCH_PAGES}
                 step={1}
                 value={preferenceDraft.prefetchPages}
-                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, prefetchPages: Number(event.target.value) })}
+                onChange={(event) => editPreferences({ prefetchPages: Number(event.target.value) })}
               />
             </label>}
             {selectedSettingsSection === 'settings-reading' && <label className="preference-select">封面并发请求
@@ -370,25 +373,40 @@ export function SettingsWorkspace() {
                 max={8}
                 step={1}
                 value={preferenceDraft.coverConcurrency}
-                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, coverConcurrency: Number(event.target.value) })}
+                onChange={(event) => editPreferences({ coverConcurrency: Number(event.target.value) })}
               />
             </label>}
             {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>超分后端</legend>
-              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'off', label: '关闭' }, { value: 'cpu', label: 'CPU' }, { value: 'auto', label: '自动（优先 GPU）' }]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => setPreferenceDraft({ ...preferenceDraft, upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'off', label: '关闭' }, { value: 'cpu', label: 'CPU' }, { value: 'auto', label: '自动（优先 GPU）' }]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-reading' && preferenceDraft.upscaleBackend !== 'off' && (
-              <label className="preference-select">超分模型
-                <input
-                  name="upscaleModel"
-                  aria-label="超分模型"
-                  value={preferenceDraft.upscaleModel}
-                  spellCheck={false}
-                  placeholder="例如 real-esrgan-anime-x2"
-                  onChange={(event) => setPreferenceDraft({ ...preferenceDraft, upscaleModel: event.target.value })}
-                />
-              </label>
+              /* The models that are actually installed, not a name typed from
+                 memory: a typo here used to fail silently at upscale time. */
+              installedModels?.length
+                ? <fieldset>
+                    <legend>超分模型</legend>
+                    <SelectField
+                      name="upscaleModel"
+                      aria-label="超分模型"
+                      value={preferenceDraft.upscaleModel}
+                      options={[
+                        { value: '', label: '未选择' },
+                        ...installedModels.map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` })),
+                      ]}
+                      onChange={(value) => editPreferences({ upscaleModel: value })}
+                    />
+                    <PreferenceRadioFallback
+                      name="upscaleModel"
+                      value={preferenceDraft.upscaleModel}
+                      options={installedModels.map((model) => [model.id, `${model.id} · ${model.version}`])}
+                      onChange={(value) => editPreferences({ upscaleModel: value })}
+                    />
+                  </fieldset>
+                : <p className="server-list-message" role="status">
+                    {installedModels ? '尚未安装超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
+                  </p>
             )}
             {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）
               <input
@@ -399,7 +417,7 @@ export function SettingsWorkspace() {
                 max={32}
                 step={1}
                 value={preferenceDraft.cacheMaxBytes / GIB}
-                onChange={(event) => setPreferenceDraft({ ...preferenceDraft, cacheMaxBytes: Number(event.target.value) * GIB })}
+                onChange={(event) => editPreferences({ cacheMaxBytes: Number(event.target.value) * GIB })}
               />
             </label>}
             {selectedSettingsSection === 'settings-advanced' && <section className="cache-settings" aria-labelledby="cache-settings-title">
@@ -445,8 +463,7 @@ export function SettingsWorkspace() {
                 </div>
               )}
             </section>}
-            <button className="primary-action" type="submit" disabled={preferencePending} aria-busy={preferencePending}>{preferencePending ? '保存中…' : '保存偏好'}</button>
-          </form>
+          </div>
         )}
       </section>
       )}
@@ -533,40 +550,52 @@ export function SettingsWorkspace() {
         <div className="settings-eh-content"><EhRouteWorkspace /></div>
       </section>
       )}
-      {selectedSettingsSection === 'settings-downloads' && (
-      <section className="settings-section" id="settings-downloads" aria-labelledby="downloads-title">
-        <div>
-          <h2 id="downloads-title">下载</h2>
-          <p>下载与上传任务在独立页面中管理。</p>
-        </div>
-        <div className="settings-tools-links">
-          <Link className="secondary-action" to="/downloads"><RefreshCw aria-hidden="true" />任务列表</Link>
-          <Link className="secondary-action" to="/tools/upload"><Upload aria-hidden="true" />上传档案</Link>
-        </div>
-      </section>
-      )}
       {selectedSettingsSection === 'settings-about' && (
       <section className="settings-section" id="settings-about" aria-labelledby="about-title">
-        <div>
-          <h2 id="about-title">关于</h2>
+        <div className="about-hero">
+          <span className="about-mark" aria-hidden="true">読</span>
+          <div>
+            <h2 id="about-title">Yomika</h2>
+            <p>LANraragi 的桌面客户端。列表与搜索交给服务器，封面与阅读进度留在本机。</p>
+          </div>
+          <span className="about-version">v{APP_VERSION}</span>
         </div>
         <dl className="settings-about-list">
-          <div><dt>应用</dt><dd>Yomika</dd></div>
-          <div><dt>数据目录</dt><dd>由系统的应用数据目录决定（Tauri app_data_dir）</dd></div>
+          <div><dt>运行环境</dt><dd>Tauri 2 · React 18 · SQLite</dd></div>
+          <div><dt>数据目录</dt><dd>系统的应用数据目录（Tauri <code>app_data_dir</code>）</dd></div>
+          <div><dt>服务器凭据</dt><dd>存放在系统密钥库，不进入导出内容</dd></div>
           <div><dt>图片缓存</dt><dd>{cacheStats ? formatCacheBytes(cacheStats.bytes) : '进入「高级」查看'}</dd></div>
         </dl>
+        <div className="about-links">
+          <a className="secondary-action" href="https://sugoi.gitbook.io/lanraragi" target="_blank" rel="noreferrer noopener">LANraragi 文档</a>
+          <Link className="secondary-action" to="/settings?section=advanced">数据与缓存</Link>
+        </div>
       </section>
       )}
       {selectedSettingsSection === 'settings-tools' && (
       <section className="settings-section" id="settings-tools" aria-labelledby="tools-title">
         <div>
           <h2 id="tools-title">工具</h2>
+          <p>每个工具都是独立页面，有自己的滚动区域与状态。</p>
         </div>
-        {/* Index only: the upload and dedup workspaces are full routes, so they
-            get their own scroll area instead of being squeezed in here. */}
+        {/* Cards, not two bare buttons: each one says what it does before you
+            spend a navigation finding out. */}
         <div className="settings-tools-links">
-          <Link className="secondary-action" to="/tools/upload"><Upload aria-hidden="true" />上传档案</Link>
-          <Link className="secondary-action" to="/tools/dedup"><CopyCheck aria-hidden="true" />重复档案查重</Link>
+          <Link className="tool-card" to="/tools/upload">
+            <Upload aria-hidden="true" />
+            <strong>上传档案</strong>
+            <span>把本机压缩包传给 LANraragi，可批量选择。</span>
+          </Link>
+          <Link className="tool-card" to="/tools/dedup">
+            <CopyCheck aria-hidden="true" />
+            <strong>重复档案查重</strong>
+            <span>按内容比对整个库，逐组确认后删除。</span>
+          </Link>
+          <Link className="tool-card" to="/downloads">
+            <RefreshCw aria-hidden="true" />
+            <strong>任务列表</strong>
+            <span>查看下载与上传任务的进度，重试失败项。</span>
+          </Link>
         </div>
       </section>
       )}

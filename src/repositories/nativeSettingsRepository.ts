@@ -2,7 +2,9 @@ import { z } from 'zod';
 
 import { invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
-import { DEFAULT_ACCENT_COLOR } from '../lib/accentColor';
+
+/** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
+export const MAX_PREFETCH_PAGES = 10;
 
 export const PreferenceSnapshotSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
@@ -11,14 +13,16 @@ export const PreferenceSnapshotSchema = z.object({
   cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
   // Defaults keep an older native build (which does not send these yet) from
   // failing the whole snapshot.
-  accentColor: z.string().regex(/^#[0-9a-f]{6}$/).default(DEFAULT_ACCENT_COLOR),
-  prefetchPages: z.number().int().min(0).max(5).default(1),
+  prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).default(1),
   coverConcurrency: z.number().int().min(1).max(8).default(4),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
-  /** Free-form CSS appended after the design tokens. */
+  /** Free-form CSS appended after the design tokens. This is the whole
+   * customisation surface — it replaced a standalone accent-colour preference,
+   * which said less than one line of CSS here and had to be kept in step with
+   * it. */
   customCss: z.string().max(20_000).default(''),
-});
+}).strip();
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
 /** The schema fills in defaults, so its input type is looser than its output.
@@ -38,7 +42,6 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   defaultLayout: 'auto',
   defaultDirection: 'ltr',
   cacheMaxBytes: 2_147_483_648,
-  accentColor: DEFAULT_ACCENT_COLOR,
   prefetchPages: 1,
   coverConcurrency: 4,
   upscaleBackend: 'off',

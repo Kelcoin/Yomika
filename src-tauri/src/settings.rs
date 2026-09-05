@@ -9,16 +9,18 @@ const THEME_KEY: &str = "preferences.theme";
 const LAYOUT_KEY: &str = "preferences.default_layout";
 const DIRECTION_KEY: &str = "preferences.default_direction";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
-const ACCENT_COLOR_KEY: &str = "preferences.accent_color";
 const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
-pub const DEFAULT_ACCENT_COLOR: &str = "#b63a2e";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
+/// Pages either side of the current one the reader may preload. A page is a few
+/// hundred KB from a server on the same LAN, so the old ceiling of 5 was
+/// needlessly cautious.
+pub const MAX_PREFETCH_PAGES: u8 = 10;
 
 pub(crate) fn get_or_create_device_id(
     transaction: &rusqlite::Transaction<'_>,
@@ -55,10 +57,6 @@ pub struct PreferenceSnapshot {
     pub default_layout: String,
     pub default_direction: String,
     pub cache_max_bytes: u64,
-    /// Accent colour as `#rrggbb`; the design system funnels every accent
-    /// through one variable, so a custom theme is this single value.
-    #[serde(default = "default_accent_color")]
-    pub accent_color: String,
     /// How many pages either side of the current one the reader preloads.
     #[serde(default = "default_prefetch_pages")]
     pub prefetch_pages: u8,
@@ -69,14 +67,14 @@ pub struct PreferenceSnapshot {
     pub upscale_backend: String,
     #[serde(default)]
     pub upscale_model: String,
-    /// Free-form CSS appended after the design tokens. A single text blob is the
-    /// whole customisation surface: one accent colour could not express the
-    /// themes people actually want.
+    /// Free-form CSS appended after the design tokens. This is the whole
+    /// customisation surface: it superseded a single accent-colour preference,
+    /// which could not express the themes people actually want and became one
+    /// more thing to keep in step once this existed.
     #[serde(default)]
     pub custom_css: String,
 }
 
-fn default_accent_color() -> String { DEFAULT_ACCENT_COLOR.to_string() }
 fn default_prefetch_pages() -> u8 { 1 }
 fn default_cover_concurrency() -> u8 { 4 }
 fn default_upscale_backend() -> String { "off".to_string() }
@@ -88,7 +86,6 @@ impl Default for PreferenceSnapshot {
             default_layout: "auto".into(),
             default_direction: "ltr".into(),
             cache_max_bytes: 2_147_483_648,
-            accent_color: default_accent_color(),
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
             upscale_backend: default_upscale_backend(),
@@ -111,8 +108,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || !matches!(value.default_direction.as_str(), "ltr" | "rtl")
         || !(MIN_CACHE_BYTES..=MAX_CACHE_BYTES).contains(&value.cache_max_bytes)
         || value.cache_max_bytes % GIB_BYTES != 0
-        || !is_hex_colour(&value.accent_color)
-        || value.prefetch_pages > 5
+        || value.prefetch_pages > MAX_PREFETCH_PAGES
         || !(1..=8).contains(&value.cover_concurrency)
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
@@ -122,12 +118,6 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         return Err("Invalid preference snapshot".into());
     }
     Ok(())
-}
-
-fn is_hex_colour(value: &str) -> bool {
-    value.len() == 7
-        && value.starts_with('#')
-        && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn load_value<T: serde::de::DeserializeOwned>(
@@ -156,7 +146,6 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         default_layout: load_value(connection, LAYOUT_KEY, defaults.default_layout)?,
         default_direction: load_value(connection, DIRECTION_KEY, defaults.default_direction)?,
         cache_max_bytes: load_value(connection, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
-        accent_color: load_value(connection, ACCENT_COLOR_KEY, defaults.accent_color)?,
         prefetch_pages: load_value(connection, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: load_value(connection, COVER_CONCURRENCY_KEY, defaults.cover_concurrency)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
@@ -178,7 +167,6 @@ pub fn save_preferences_to(
         (LAYOUT_KEY, serde_json::to_string(&value.default_layout)),
         (DIRECTION_KEY, serde_json::to_string(&value.default_direction)),
         (CACHE_MAX_BYTES_KEY, serde_json::to_string(&value.cache_max_bytes)),
-        (ACCENT_COLOR_KEY, serde_json::to_string(&value.accent_color)),
         (PREFETCH_PAGES_KEY, serde_json::to_string(&value.prefetch_pages)),
         (COVER_CONCURRENCY_KEY, serde_json::to_string(&value.cover_concurrency)),
         (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
@@ -308,7 +296,7 @@ mod tests {
 
     use super::{
         import_legacy_preferences_from, load_preferences_from, save_preferences_to,
-        PreferenceSnapshot,
+        PreferenceSnapshot, MAX_PREFETCH_PAGES,
     };
 
     fn settings_db() -> Connection {
@@ -336,7 +324,6 @@ mod tests {
             default_layout: "double".into(),
             default_direction: "rtl".into(),
             cache_max_bytes: 4_294_967_296,
-            accent_color: "#1f6f8b".into(),
             prefetch_pages: 3,
             cover_concurrency: 6,
             upscale_backend: "cpu".into(),
@@ -357,8 +344,9 @@ mod tests {
 
     #[test]
     fn custom_css_is_free_form_but_bounded() {
-        // One accent colour could not express a whole theme, so the surface is a
-        // CSS blob; the only rule is that it cannot bloat the settings row.
+        // The CSS blob is the whole customisation surface — it replaced a single
+        // accent-colour preference, which could not express a theme. The only
+        // rule is that it cannot bloat the settings row.
         let mut connection = settings_db();
         let themed = PreferenceSnapshot { custom_css: "body { letter-spacing: 0.01em; }".into(), ..PreferenceSnapshot::default() };
         assert_eq!(save_preferences_to(&mut connection, themed.clone()).expect("save css"), themed);
@@ -372,14 +360,12 @@ mod tests {
     #[test]
     fn preferences_reject_invalid_enum_and_quota_values() {
         let mut connection = settings_db();
+        // Ten pages of prefetch is allowed now; eleven is not.
         assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            accent_color: "#FFFFFF".into(), ..PreferenceSnapshot::default()
-        }).is_err(), "accent colours must be normalized to lowercase hex before saving");
+            prefetch_pages: MAX_PREFETCH_PAGES, ..PreferenceSnapshot::default()
+        }).is_ok());
         assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            accent_color: "red".into(), ..PreferenceSnapshot::default()
-        }).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            prefetch_pages: 9, ..PreferenceSnapshot::default()
+            prefetch_pages: MAX_PREFETCH_PAGES + 1, ..PreferenceSnapshot::default()
         }).is_err());
         assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
             cover_concurrency: 0, ..PreferenceSnapshot::default()

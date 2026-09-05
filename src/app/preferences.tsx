@@ -1,7 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
-import { DEFAULT_ACCENT_COLOR, normalizeAccentColor } from '../lib/accentColor';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import {
   DEFAULT_PREFERENCES,
@@ -35,25 +34,18 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
   themeColor.content = dark ? '#09090b' : '#f3eee4';
 }
 
-/** Every accent in the design system resolves through --brand-vermilion, so a
- * custom accent is one inline override (which also wins over the dark-theme
- * block in tokens.css). */
-function applyAppearance(preferences: PreferenceSnapshot) {
-  const accent = normalizeAccentColor(preferences.accentColor) ?? DEFAULT_ACCENT_COLOR;
-  document.documentElement.style.setProperty('--brand-vermilion', accent);
-  getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
-}
-
 function applyPreferences(preferences: PreferenceSnapshot) {
   applyTheme(preferences.theme);
-  applyAppearance(preferences);
+  getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
   applyCustomCss(preferences.customCss);
 }
 
 const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
 
 /** User CSS goes into one managed <style> at the end of head, so it overrides
- * the design tokens without the app having to know what it contains. */
+ * the design tokens without the app having to know what it contains. It is also
+ * the only theming surface: the accent-colour preference that used to sit beside
+ * it said less than `--brand-vermilion: …` does here. */
 function applyCustomCss(css: string) {
   if (typeof document === 'undefined') return;
   const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);

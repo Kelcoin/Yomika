@@ -10,7 +10,6 @@ const preferences = {
   defaultLayout: 'double' as const,
   defaultDirection: 'rtl' as const,
   cacheMaxBytes: 4_294_967_296,
-  accentColor: '#1f6f8b',
   prefetchPages: 2,
   coverConcurrency: 4,
   upscaleBackend: 'off' as const,
@@ -53,13 +52,25 @@ describe('native settings bridge', () => {
     await expect(repository.save({ ...preferences, cacheMaxBytes: 34_359_738_369 })).resolves.toMatchObject({ ok: false });
   });
 
-  it('rejects an unusable accent colour, preload distance, or upscale backend', async () => {
+  it('rejects an unusable preload distance or upscale backend', async () => {
+    const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => ({ ok: true, value: args?.input }));
+    setInvokeAdapterForTests(adapter);
     const repository = new NativeSettingsRepository();
-    await expect(repository.save({ ...preferences, accentColor: 'red' })).resolves.toMatchObject({ ok: false });
-    await expect(repository.save({ ...preferences, accentColor: '#FFFFFF' })).resolves.toMatchObject({ ok: false });
-    await expect(repository.save({ ...preferences, prefetchPages: 9 })).resolves.toMatchObject({ ok: false });
+    // Ten pages of preload is allowed; eleven is not.
+    await expect(repository.save({ ...preferences, prefetchPages: 10 })).resolves.toMatchObject({ ok: true });
+    await expect(repository.save({ ...preferences, prefetchPages: 11 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, coverConcurrency: 0 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, upscaleBackend: 'gpu' as never })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('drops a stale accent colour instead of failing the whole snapshot', async () => {
+    // The accent preference is gone — custom CSS covers it. A snapshot from an
+    // older native build still carries the field, and rejecting it would leave
+    // the app on defaults after an upgrade.
+    const adapter = vi.fn(async () => ({ ok: true, value: { ...preferences, accentColor: '#1f6f8b' } }));
+    setInvokeAdapterForTests(adapter);
+
+    await expect(new NativeSettingsRepository().load()).resolves.toEqual({ ok: true, value: preferences });
   });
 
   it('imports a validated legacy ordinary-preference result', async () => {

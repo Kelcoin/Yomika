@@ -60,11 +60,15 @@ describe('design system contract', () => {
     expect(buttonRule).toMatch(/align-items:\s*center/);
   });
 
-  it('uses bounded settings columns instead of an intrinsic auto action column', () => {
+  it('gives every settings section the same bounded columns', () => {
     const shell = read('src/styles/shell.css');
-    const settingsRule = shell.match(/\.settings-section\s*\{([\s\S]*?)\}/)?.[1] ?? '';
+    // One rule for both, because they used to disagree: different label widths
+    // and a 680px cap on the content left the sync page a narrow strip with a
+    // third of the window empty beside it.
+    const settingsRule = shell.match(/\.settings-section,\s*\n\.preferences-panel\s*\{([\s\S]*?)\}/)?.[1] ?? '';
     expect(settingsRule).not.toMatch(/grid-template-columns:[^;]*\bauto\b/);
     expect(settingsRule).toMatch(/grid-template-columns:[^;]*minmax\(/);
+    expect(shell).toMatch(/\.settings-section > :last-child,\s*\n\.preferences-form\s*\{[\s\S]*?width:\s*100%/);
     expect(shell).toMatch(/\.legacy-import-form\s*\{[\s\S]*?max-width:\s*680px/);
     expect(shell).toMatch(/\.legacy-import-form textarea\s*\{[\s\S]*?width:\s*100%/);
     expect(shell).toMatch(/\.legacy-import-form > input\s*\{[\s\S]*?width:\s*100%/);

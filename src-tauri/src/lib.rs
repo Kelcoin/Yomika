@@ -27,7 +27,7 @@ use commands::sync::{
     encrypt_sync_manifest, list_sync_journal, list_webdav_accounts, merge_sync_manifests,
     save_webdav_account, set_sync_journal_state, sync_webdav_scope,
 };
-use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_model, inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page, inference_validate_model};
+use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_model, inference_list_models, inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page, inference_validate_model};
 use dedup::{dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact, dedup_import_readoshi, dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan};
 use commands::eh::{check_eh_login_health, list_eh_accounts, login_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
 use commands::legacy::import_legacy_export;
@@ -114,6 +114,7 @@ pub fn run() {
             inference_resume,
             inference_validate_model,
             inference_install_model,
+            inference_list_models,
             inference_clear_cache,
             inference_upscale_page,
             save_eh_account,
