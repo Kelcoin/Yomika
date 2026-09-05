@@ -30,6 +30,11 @@ interface ReaderScreenProps {
 
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
+  // Built once. A different archive arrives as an unmount, not a prop change:
+  // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
+  // branch, which takes this component down with it. That is what keeps the page
+  // index, the zoom and the per-index page shapes from leaking into the next
+  // archive — so if that loading branch is ever removed, this needs a `key`.
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   // `state.layout` is the preference (which may be `auto`); this is what renders.
   const effectiveLayout = effectiveReaderLayout(state);

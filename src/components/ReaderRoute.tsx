@@ -263,8 +263,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       </main>
     );
   }
+  // Not just a placeholder: clearing `pages` above when `archiveId` changes routes
+  // through here, which unmounts ReaderScreen and is what stops one archive's page
+  // index, zoom and per-index page shapes from carrying into the next. React
+  // Router reuses this element across param changes, so nothing else would.
   if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面…</p></main>;
-
   return (
     <ReaderScreen
       archiveId={archiveId}
