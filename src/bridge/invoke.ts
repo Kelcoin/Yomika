@@ -20,6 +20,15 @@ const ResultEnvelopeSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(false), error: DomainErrorSchema }),
 ]);
 
+/** The response schema for a command that answers with nothing.
+ *
+ * Rust's `CommandResult<()>` serialises its value as JSON `null`, so validating
+ * it with `z.undefined()` rejected every real reply as
+ * "Native command returned an invalid response" — while the test adapters, which
+ * answer with a literal `undefined`, passed. Every void command needs the pair,
+ * so it lives here once instead of being remembered per call site. */
+export const VoidResponseSchema = z.union([z.null(), z.undefined()]).transform(() => undefined) as unknown as z.ZodType<void>;
+
 export async function invokeCommand<TRequest extends Record<string, unknown>, TResponse>(
   name: string,
   request: TRequest,

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { invokeCommand } from '../bridge/invoke';
+import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 import { EhAccountSchema, type EhAccount, type SaveEhAccountInput } from '../domain/eh';
 
@@ -30,14 +30,14 @@ export class NativeEhRepository {
   /** Opens E-Hentai's own sign-in page in a window of its own. A Cloudflare
    * challenge is a browser check, so no POST from here can answer it. */
   openLoginWindow(): Promise<CommandResult<void>> {
-    return invokeCommand('open_eh_login_window', {}, z.undefined());
+    return invokeCommand('open_eh_login_window', {}, VoidResponseSchema);
   }
   /** The cookie header once that window has one, `null` while it does not. */
   captureLoginCookies(): Promise<CommandResult<string | null>> {
     return invokeCommand('capture_eh_login_cookies', {}, z.string().min(1).nullable());
   }
   closeLoginWindow(): Promise<CommandResult<void>> {
-    return invokeCommand('close_eh_login_window', {}, z.undefined());
+    return invokeCommand('close_eh_login_window', {}, VoidResponseSchema);
   }
   listAccounts(): Promise<CommandResult<EhAccount[]>> {
     return invokeCommand('list_eh_accounts', {}, z.array(EhAccountSchema));
@@ -46,15 +46,15 @@ export class NativeEhRepository {
     return invokeCommand('search_eh_galleries', { accountId, query, params: params ?? {} }, EhSearchResponseSchema);
   }
   removeFavorite(accountId: string, galleryId: string, token: string): Promise<CommandResult<void>> {
-    return invokeCommand('remove_eh_favorite', { accountId, galleryId, token }, z.undefined());
+    return invokeCommand('remove_eh_favorite', { accountId, galleryId, token }, VoidResponseSchema);
   }
   voteComment(accountId: string, galleryId: string, token: string, commentId: string, vote: number): Promise<CommandResult<void>> {
-    return invokeCommand('vote_eh_comment', { accountId, galleryId, token, commentId, vote }, z.undefined());
+    return invokeCommand('vote_eh_comment', { accountId, galleryId, token, commentId, vote }, VoidResponseSchema);
   }
   checkLoginHealth(accountId: string): Promise<CommandResult<{ loggedIn: boolean }>> {
     return invokeCommand('check_eh_login_health', { accountId }, z.object({ loggedIn: z.boolean() }));
   }
   setActiveAccount(accountId: string): Promise<CommandResult<void>> {
-    return invokeCommand('set_active_eh_account', { accountId }, z.undefined());
+    return invokeCommand('set_active_eh_account', { accountId }, VoidResponseSchema);
   }
 }

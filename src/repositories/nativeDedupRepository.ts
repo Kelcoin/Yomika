@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { invokeCommand } from '../bridge/invoke';
+import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 import { parseReadoshiNonDuplicateExport, type ReadoshiImportReport } from '../lib/readoShiDedupeImport';
 
@@ -89,9 +89,9 @@ export class NativeDedupRepository {
   cancelScan(sessionId: string) { return invokeCommand('dedup_cancel_scan', { sessionId }, DedupScanSessionSchema); }
   resumeScan(sessionId: string) { return invokeCommand('dedup_resume_scan', { sessionId }, DedupScanSessionSchema); }
   loadResult(sessionId: string) { return invokeCommand('dedup_load_result', { sessionId }, DedupLoadResultSchema); }
-  saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, z.null().or(z.undefined())); }
-  removeNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_remove_non_duplicate', { input }, z.null().or(z.undefined())); }
-  importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) { return invokeCommand('dedup_import_readoshi', { input }, z.null().or(z.undefined())); }
+  saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema); }
+  removeNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_remove_non_duplicate', { input }, VoidResponseSchema); }
+  importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) { return invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema); }
   importReadoshiExport(scopeId: string, input: unknown): Promise<CommandResult<ReadoshiImportReport>> {
     let report: ReadoshiImportReport;
     try { report = parseReadoshiNonDuplicateExport(input, scopeId); }
