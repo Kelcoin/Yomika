@@ -5,7 +5,7 @@ import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { LoadingIndicator } from './LoadingIndicator';
-import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
+import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
 import { assignableCategories } from '../lib/tags';
@@ -106,9 +106,34 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
   const [reloadToken, setReloadToken] = useState(0);
-  const [contextTarget, setContextTarget] = useState<ArchiveContextMenuTarget>();
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const navigate = useNavigate();
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
+    inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
+    categories: assignableCategories(categories),
+    onAddCategory: (archive, categoryId) => {
+      if (!serverId) return;
+      void repository.addArchiveToCategory(serverId, categoryId, archive.archiveId).then((result) => {
+        if (!result.ok) { showToast(result.error.message, 'error'); return; }
+        showToast('分类已更新', 'success');
+        // Patch the list in place rather than re-reading it: only static
+        // categories accept an assignment, so the new membership is known
+        // exactly, and a re-read would re-resolve every dynamic category
+        // through an unpaged /api/search.
+        setCategories((current) => current.map((category) => category.id === categoryId && !category.archives.includes(archive.archiveId)
+          ? { ...category, archives: [...category.archives, archive.archiveId] }
+          : category));
+      });
+    },
+    onToggleReadingList: (archive, next) => {
+      if (!scopeId) return;
+      void repository.setReadingList(scopeId, archive.archiveId, next).then((result) => {
+        if (!result.ok) { showToast(result.error.message, 'error'); return; }
+        setReadingList((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
+        showToast(next ? '已加入待看' : '已移出待看', 'success');
+      });
+    },
+  });
   const detailRequest = useRef(0);
   const detailThumbnailHandle = useRef<ImageHandle>();
   const detailThumbnailAbort = useRef<AbortController>();
@@ -477,7 +502,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         if (!serverId || !scopeId) return;
         loadArchiveDetails(serverId, scopeId, archive);
         }}
-      onArchiveContextMenu={(archive, at) => setContextTarget({ archive, ...at })}
+      onArchiveContextMenu={openContextMenu}
       presets={presets}
       onApplyPreset={(preset) => {
         // A preset restores the whole toolbar state, not just the query text.
@@ -495,43 +520,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         });
       }}
       />
-      <ArchiveContextMenu
-        target={contextTarget}
-        onClose={() => setContextTarget(undefined)}
-        onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}`)}
-        onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1`)}
-        onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`)}
-        onCopyId={(archive) => {
-          void navigator.clipboard?.writeText(archive.archiveId).then(
-            () => showToast('档案 ID 已复制', 'success'),
-            () => showToast('复制失败', 'error'),
-          );
-        }}
-        inReadingList={contextTarget ? readingList.some((item) => item.archiveId === contextTarget.archive.archiveId && !item.deleted) : false}
-        categories={assignableCategories(categories)}
-        onAddCategory={(archive, categoryId) => {
-          if (!serverId) return;
-          void repository.addArchiveToCategory(serverId, categoryId, archive.archiveId).then((result) => {
-            if (!result.ok) { showToast(result.error.message, 'error'); return; }
-            showToast('分类已更新', 'success');
-            // Patch the list in place rather than re-reading it: only static
-            // categories accept an assignment, so the new membership is known
-            // exactly, and a re-read would re-resolve every dynamic category
-            // through an unpaged /api/search.
-            setCategories((current) => current.map((category) => category.id === categoryId && !category.archives.includes(archive.archiveId)
-              ? { ...category, archives: [...category.archives, archive.archiveId] }
-              : category));
-          });
-        }}
-        onToggleReadingList={(archive, next) => {
-          if (!scopeId) return;
-          void repository.setReadingList(scopeId, archive.archiveId, next).then((result) => {
-            if (!result.ok) { showToast(result.error.message, 'error'); return; }
-            setReadingList((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
-            showToast(next ? '已加入待看' : '已移出待看', 'success');
-          });
-        }}
-      />
+      {contextMenu}
       {/* Drawn, not `window.prompt`: the native one is unstyled, unpositioned and
           on Windows renders as browser chrome, and it cannot refuse a value. A
           preset with no complete tag is not saveable. */}

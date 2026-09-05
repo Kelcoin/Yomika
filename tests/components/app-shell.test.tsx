@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
@@ -113,6 +113,31 @@ describe('application shell', () => {
     expect(within(rail).getByText('5/12 页')).toBeInTheDocument();
     expect(screen.queryByRole('list', { name: '最近阅读' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '书架还是空的' })).not.toBeInTheDocument();
+  });
+
+  it('answers a right click on a home rail card', async () => {
+    // The library list was the only surface wired to the menu, which read as the
+    // app not having one at all: the rails, the recommendation rail and the
+    // shelves all ignored the click.
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'search_random_archives') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderAt();
+
+    const rail = await screen.findByRole('region', { name: '继续阅读' });
+    fireEvent.contextMenu(within(rail).getByRole('link', { name: /最近阅读档案/ }), { clientX: 40, clientY: 60 });
+
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: '阅读' })).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: '编辑元数据' })).toBeInTheDocument();
   });
 
   it('shows the server load error instead of treating it as an empty setup', async () => {

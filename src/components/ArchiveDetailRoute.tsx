@@ -22,6 +22,7 @@ import {
 import type { ArchiveRecord } from '../domain/library';
 import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
+import { useArchiveContextMenu } from './useArchiveContextMenu';
 
 const repository = new NativeLibraryRepository();
 /** Long enough not to fire on a normal tap, short enough to discover by holding.
@@ -302,6 +303,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
   const [loading, setLoading] = useState(tags.length > 0);
   const [tab, setTab] = useState<'similar' | 'creator'>('similar');
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
   const creator = useMemo(() => sameCreatorTags(tags), [tags]);
 
   useEffect(() => {
@@ -360,13 +362,17 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   if (similar.length === 0 && sameCreator.length === 0) return null;
 
   return (
+    <>
     <ArchiveThumbnailRail
       title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'}
       archives={visible}
       scopeId={scopeId}
       serverId={serverId}
       headingContent={tabs}
+      onArchiveContextMenu={openContextMenu}
     />
+    {contextMenu}
+    </>
   );
 }
 

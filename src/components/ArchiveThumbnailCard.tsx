@@ -9,7 +9,7 @@ import { useHorizontalScroller } from '../lib/horizontalScroller';
 
 const imageCache = getNativeImageCache();
 
-export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; progressPage?: number | null | undefined }) {
+export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
   const [src, setSrc] = useState<string>();
   const [aspectRatio, setAspectRatio] = useState<number>();
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
@@ -28,7 +28,19 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
     }
     return () => { controller.abort(); if (handle) imageCache.release(handle); };
   }, [archive.archiveId, node, scopeId, serverId]);
-  return <Link ref={setNode} className={`archive-thumb-card${isWide ? ' is-wide' : ''}`} to={`/library/${archive.archiveId}`} onClick={onOpen}>
+  return <Link
+    ref={setNode}
+    className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
+    to={`/library/${archive.archiveId}`}
+    onClick={onOpen}
+    // The same menu the library list opens. Without this a right click on a rail
+    // card did nothing, which is what "the app still has no context menu" was.
+    onContextMenu={onContextMenu ? (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onContextMenu(archive, { x: event.clientX, y: event.clientY });
+    } : undefined}
+  >
     <div className="archive-thumb-card-media">{src ? <img src={src} alt="" loading="lazy" onLoad={(event) => {
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) setAspectRatio(image.naturalWidth / image.naturalHeight);
@@ -37,18 +49,18 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingContent, onRefresh, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingContent={headingContent} onRefresh={onRefresh} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
@@ -60,7 +72,7 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       {archives.length === 0 && loading
         ? Array.from({ length: skeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
-        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
+        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
     </div>
   </section>;
 }

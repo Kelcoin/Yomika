@@ -16,6 +16,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
+import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -129,6 +130,7 @@ function HomeWorkspace() {
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
   const recent = useMemo(() => history.slice(0, 6), [history]);
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   const continueReading = useMemo(
@@ -187,9 +189,10 @@ function HomeWorkspace() {
         </section>
       )}
       {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} />
-      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} />
-      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} />
+      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} onArchiveContextMenu={openContextMenu} />
+      {contextMenu}
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
       {!recentLoading && !recentError && connected && continueReading.length === 0 && toRead.length === 0 && (
@@ -221,6 +224,9 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   const [watchlistPending, setWatchlistPending] = useState(false);
   const [watchlistMessage, setWatchlistMessage] = useState<string>();
   const [watchlistError, setWatchlistError] = useState<string>();
+  // The shelves show the same cards as the library, so they answer a right click
+  // the same way. Categories need a server-side list this page does not load.
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -378,6 +384,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
             showSearch={false}
             showDetail={false}
             readingProgressByArchiveId={progressByArchiveId}
+            onArchiveContextMenu={openContextMenu}
             {...(name === 'watchlist' ? {
               selectedArchiveIds: selectedWatchlist,
               onToggleSelected: (archiveId: string, checked: boolean) => setSelectedWatchlist((current) => {
@@ -393,6 +400,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       {!loading && !error && hasServer && name === 'watchlist' && activeWatchlist.length > 0 && visibleWatchlist.length === 0 && (
         <p className="server-list-message" role="status">没有匹配的待看档案。</p>
       )}
+      {contextMenu}
     </div>
   );
 }
