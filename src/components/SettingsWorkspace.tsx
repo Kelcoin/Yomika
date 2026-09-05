@@ -36,6 +36,9 @@ const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 /** Vite inlines this at build time from package.json, so the About page cannot
  * drift from the shipped version the way a hand-written string would. */
 const APP_VERSION = __APP_VERSION__;
+const APP_AUTHOR = __APP_AUTHOR__;
+const APP_LICENSE = __APP_LICENSE__;
+const APP_REPOSITORY = __APP_REPOSITORY__;
 
 function formatCacheBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -103,6 +106,11 @@ export function SettingsWorkspace() {
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
   // de-censoring bundle, which is not an upscaler.
   const runnableModels = installedModels?.filter((model) => model.scale && model.kind === 'upscale');
+  /** One switch each, derived from what is stored rather than stored separately:
+   * a second boolean would be one more thing to keep in step with the model it
+   * points at. Off is the backend being off, and no bundle chosen. */
+  const upscaleOn = preferenceDraft.upscaleBackend !== 'off';
+  const decensorOn = preferenceDraft.decensorModel !== '';
   const decensorBundles = installedModels?.filter((model) => model.kind === 'decensor');
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
@@ -416,61 +424,93 @@ export function SettingsWorkspace() {
                 onChange={(event) => editPreferences({ coverConcurrency: Number(event.target.value) })}
               />
             </label>}
-            {selectedSettingsSection === 'settings-reading' && <fieldset>
-              <legend>超分后端</legend>
-              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'off', label: '关闭' }, { value: 'cpu', label: 'CPU' }, { value: 'auto', label: '自动（优先 GPU）' }]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['off', '关闭'], ['cpu', 'CPU'], ['auto', '自动（优先 GPU）']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-            </fieldset>}
-            {selectedSettingsSection === 'settings-reading' && preferenceDraft.upscaleBackend !== 'off' && (
-              /* The models that are actually installed and runnable, not a name
-                 typed from memory: a typo here used to fail silently at upscale
-                 time. A model whose directory has no manifest has no recorded
-                 scale, so it cannot be run and is not offered. */
-              runnableModels?.length
-                ? <fieldset>
-                    <legend>超分模型</legend>
-                    <SelectField
-                      name="upscaleModel"
-                      aria-label="超分模型"
-                      value={preferenceDraft.upscaleModel}
-                      options={[{ value: '', label: '未选择' }, ...runnableModels.map(modelOption)]}
-                      onChange={(value) => editPreferences({ upscaleModel: value })}
-                    />
-                    <PreferenceRadioFallback
-                      name="upscaleModel"
-                      value={preferenceDraft.upscaleModel}
-                      options={runnableModels.map((model) => [model.id, modelOption(model).label])}
-                      onChange={(value) => editPreferences({ upscaleModel: value })}
-                    />
-                  </fieldset>
-                : <p className="server-list-message" role="status">
+            {selectedSettingsSection === 'settings-reading' && (
+              /* One switch per feature, and the selects below it offer real
+                 choices only. They used to carry the off state themselves — a
+                 backend list whose first entry was 关闭, a model list whose first
+                 entry was 未选择 — so turning upscaling on meant knowing that two
+                 unrelated controls had to stop saying "no". */
+              <fieldset className="preference-switch">
+                <legend>超分</legend>
+                <label className="preference-toggle">
+                  <input
+                    type="checkbox"
+                    name="upscaleEnabled"
+                    checked={upscaleOn}
+                    disabled={!runnableModels?.length}
+                    onChange={(event) => editPreferences(event.target.checked
+                      ? { upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || runnableModels?.[0]?.id || '' }
+                      : { upscaleBackend: 'off' })}
+                  />
+                  <span>放大阅读页面</span>
+                </label>
+                {!runnableModels?.length && (
+                  <p className="server-list-message" role="status">
                     {runnableModels ? '尚未安装可用的超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
                   </p>
+                )}
+              </fieldset>
             )}
+            {selectedSettingsSection === 'settings-reading' && upscaleOn && runnableModels?.length ? <fieldset>
+              <legend>超分模型</legend>
+              {/* The models that are actually installed and runnable, not a name
+                  typed from memory: a typo here used to fail silently at upscale
+                  time. A model whose directory has no manifest has no recorded
+                  scale, so it cannot be run and is not offered. */}
+              <SelectField
+                name="upscaleModel"
+                aria-label="超分模型"
+                value={preferenceDraft.upscaleModel || (runnableModels[0]?.id ?? '')}
+                options={runnableModels.map(modelOption)}
+                onChange={(value) => editPreferences({ upscaleModel: value })}
+              />
+              <PreferenceRadioFallback
+                name="upscaleModel"
+                value={preferenceDraft.upscaleModel || (runnableModels[0]?.id ?? '')}
+                options={runnableModels.map((model) => [model.id, modelOption(model).label])}
+                onChange={(value) => editPreferences({ upscaleModel: value })}
+              />
+            </fieldset> : null}
+            {selectedSettingsSection === 'settings-reading' && upscaleOn && runnableModels?.length ? <fieldset>
+              <legend>超分后端</legend>
+              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'auto', label: '自动（优先 GPU）' }, { value: 'cpu', label: 'CPU' }]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['auto', '自动（优先 GPU）'], ['cpu', 'CPU']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
+            </fieldset> : null}
             {selectedSettingsSection === 'settings-reading' && (
-              /* De-censoring: choosing a bundle is the switch, so there is no
-                 separate toggle to leave inconsistent with it. Only complete
-                 bundles are offered — a partial install cannot run. */
-              decensorBundles?.length
-                ? <fieldset>
-                    <legend>去码模型</legend>
-                    <SelectField
-                      name="decensorModel"
-                      aria-label="去码模型"
-                      value={preferenceDraft.decensorModel}
-                      options={[{ value: '', label: '关闭' }, ...decensorBundles.map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` }))]}
-                      onChange={(value) => editPreferences({ decensorModel: value })}
-                    />
-                    <PreferenceRadioFallback
-                      name="decensorModel"
-                      value={preferenceDraft.decensorModel}
-                      options={[['', '关闭'], ...decensorBundles.map((model) => [model.id, `${model.id} · ${model.version}`] as [string, string])]}
-                      onChange={(value) => editPreferences({ decensorModel: value })}
-                    />
-                    <p className="settings-tool-hint">在阅读页面上运行检测与修补，结果按页缓存。修补模型固定使用 CPU。</p>
-                  </fieldset>
-                : installedModels && <p className="server-list-message" role="status">尚未安装去码模型包，安装后会出现在这里。</p>
+              <fieldset className="preference-switch">
+                <legend>去码</legend>
+                <label className="preference-toggle">
+                  <input
+                    type="checkbox"
+                    name="decensorEnabled"
+                    checked={decensorOn}
+                    disabled={!decensorBundles?.length}
+                    onChange={(event) => editPreferences({ decensorModel: event.target.checked ? decensorBundles?.[0]?.id ?? '' : '' })}
+                  />
+                  <span>修补被审查的区域</span>
+                </label>
+                <p className="settings-tool-hint">在阅读页面上运行检测与修补，结果按页缓存。修补模型固定使用 CPU。</p>
+                {!decensorBundles?.length && installedModels && (
+                  <p className="server-list-message" role="status">尚未安装去码模型包，安装后会出现在这里。</p>
+                )}
+              </fieldset>
             )}
+            {selectedSettingsSection === 'settings-reading' && decensorOn && (decensorBundles?.length ?? 0) > 1 ? <fieldset>
+              <legend>去码模型包</legend>
+              <SelectField
+                name="decensorModel"
+                aria-label="去码模型包"
+                value={preferenceDraft.decensorModel}
+                options={(decensorBundles ?? []).map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` }))}
+                onChange={(value) => editPreferences({ decensorModel: value })}
+              />
+              <PreferenceRadioFallback
+                name="decensorModel"
+                value={preferenceDraft.decensorModel}
+                options={(decensorBundles ?? []).map((model) => [model.id, `${model.id} · ${model.version}`] as [string, string])}
+                onChange={(value) => editPreferences({ decensorModel: value })}
+              />
+            </fieldset> : null}
             {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）
               <input
                 name="cacheMaxBytes"
@@ -548,11 +588,15 @@ export function SettingsWorkspace() {
             onChange={(event) => setMigrationText(event.target.value)}
             rows={6}
           />
-          <div className="settings-actions">
-            <button className="secondary-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+          {/* One row, two controls of the same shape sharing its width. They were a
+              secondary and a primary action, which differ in padding, font size and
+              even in what their disabled cursor is — side by side, doing two halves
+              of one job, that read as an accident. */}
+          <div className="settings-actions" role="group" aria-label="数据迁移操作">
+            <button className="settings-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
               {migrationPending ? '处理中…' : '导出数据'}
             </button>
-            <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
+            <button className="settings-action is-primary" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
               {migrationPending ? '处理中…' : '导入数据'}
             </button>
           </div>
@@ -592,7 +636,9 @@ export function SettingsWorkspace() {
             </article>
           ))}
         </div>
-        <ServerSetupDialog onSave={saveServer} />
+        <div className="settings-actions">
+          <ServerSetupDialog onSave={saveServer} />
+        </div>
       </section>
       )}
       {selectedSettingsSection === 'settings-sync' && (
@@ -608,6 +654,11 @@ export function SettingsWorkspace() {
       </section>
       )}
       {selectedSettingsSection === 'settings-about' && (
+      /* What an About page is for: what this is, who made it, where it lives and
+         under what terms. It used to list the data directory, where server
+         credentials are kept and the current cache size — three answers to
+         questions nobody opens this page to ask, and the last one is in 高级 where
+         it can actually be cleared. */
       <section className="settings-section settings-about" id="settings-about" aria-labelledby="about-title">
         <div className="about-hero">
           {/* The actual app mark, the same file the window icon and the sidebar
@@ -616,19 +667,24 @@ export function SettingsWorkspace() {
           <img className="about-mark" src={markUrl} alt="" width="72" height="72" />
           <div className="about-hero-copy">
             <h2 id="about-title">Yomika</h2>
-            <p>LANraragi 的桌面客户端。列表与搜索交给服务器，封面与阅读进度留在本机。</p>
           </div>
           <span className="about-version">v{APP_VERSION}</span>
         </div>
         <dl className="settings-about-list">
-          <div><dt>运行环境</dt><dd>Tauri 2 · React 18 · SQLite</dd></div>
-          <div><dt>数据目录</dt><dd>系统的应用数据目录（Tauri <code>app_data_dir</code>）</dd></div>
-          <div><dt>服务器凭据</dt><dd>存放在系统密钥库，不进入导出内容</dd></div>
-          <div><dt>图片缓存</dt><dd>{cacheStats ? formatCacheBytes(cacheStats.bytes) : '进入「高级」查看'}</dd></div>
+          {APP_AUTHOR && <div><dt>开发者</dt><dd>{APP_AUTHOR}</dd></div>}
+          {APP_REPOSITORY && (
+            <div><dt>仓库</dt><dd>
+              <a href={APP_REPOSITORY} target="_blank" rel="noreferrer noopener">{APP_REPOSITORY.replace(/^https?:\/\//, '')}</a>
+            </dd></div>
+          )}
+          {/* Absent until the project declares one in package.json. Better a
+              missing row than a licence the app made up on its behalf. */}
+          {APP_LICENSE && <div><dt>开源协议</dt><dd>{APP_LICENSE}</dd></div>}
+          <div><dt>构建于</dt><dd>Tauri 2 · React 18 · SQLite</dd></div>
         </dl>
-        <div className="about-links">
-          <a className="secondary-action" href="https://sugoi.gitbook.io/lanraragi" target="_blank" rel="noreferrer noopener">LANraragi 文档</a>
-          <Link className="secondary-action" to="/settings?section=advanced">数据与缓存</Link>
+        <div className="about-links settings-actions">
+          {APP_REPOSITORY && <a className="settings-action" href={APP_REPOSITORY} target="_blank" rel="noreferrer noopener">项目仓库</a>}
+          <a className="settings-action" href="https://sugoi.gitbook.io/lanraragi" target="_blank" rel="noreferrer noopener">LANraragi 文档</a>
         </div>
       </section>
       )}

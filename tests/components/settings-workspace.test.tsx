@@ -211,15 +211,24 @@ describe('settings workspace', () => {
     const concurrency = screen.getByLabelText('封面并发请求');
     await user.clear(concurrency);
     await user.type(concurrency, '2');
-    // The model picker only matters once a backend is chosen.
+    // One switch for the feature, and nothing that configures it until it is on.
+    // The backend list used to carry 关闭 and the model list 未选择, so turning
+    // upscaling on meant knowing which two unrelated controls to change.
     expect(screen.queryByLabelText('超分模型')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('radio', { name: 'CPU' }));
+    expect(screen.queryByLabelText('超分后端')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: '放大阅读页面' }));
+
     // Installed models are offered by name, with the scale the model itself
     // produces; typing a name from memory was a silent failure at upscale time.
     expect(await screen.findByRole('radio', { name: 'realesr-general · 2026.09.2 · x4' })).toBeInTheDocument();
     expect(screen.queryByRole('radio', { name: /mystery-model/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('radio', { name: 'realesr-general · 2026.09.2 · x4' }));
+    // Turning it on picks a backend and the one runnable model, rather than
+    // leaving two controls still saying "no".
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
+      input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'auto', upscaleModel: 'realesr-general' },
+    }));
 
+    await user.click(screen.getByRole('radio', { name: 'CPU' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'realesr-general' },
     }));

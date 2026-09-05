@@ -565,6 +565,7 @@ body::-webkit-scrollbar,
   max-width: 100%;
 }
 
+/* A lone action still shrink-wraps; a row of them shares the width. */
 .settings-section > .primary-action,
 .settings-section > .secondary-action {
   width: fit-content;
@@ -627,10 +628,14 @@ body::-webkit-scrollbar,
   display: none;
 }
 
+/* Everything in the column is the column's width. It used to be
+   `justify-items: start`, so a fieldset stretched (it sets its own width), a
+   number input stopped at 680px, a select stopped at 320px and a button
+   shrink-wrapped — four widths in one column, none of them chosen. */
 .preferences-form {
   display: grid;
   gap: var(--space-5);
-  justify-items: start;
+  justify-items: stretch;
 }
 
 .cache-settings {
@@ -726,15 +731,6 @@ body::-webkit-scrollbar,
   display: grid;
   gap: var(--space-2);
   width: 100%;
-  max-width: 680px;
-}
-
-.preference-select select {
-  min-width: 200px;
-}
-
-.preference-select .select-field {
-  width: min(100%, 320px);
 }
 
 .legacy-import-form {
@@ -742,8 +738,6 @@ body::-webkit-scrollbar,
   gap: var(--space-3);
   min-width: 0;
   width: 100%;
-  max-width: 680px;
-  justify-items: start;
 }
 
 .legacy-import-form label {
@@ -763,13 +757,18 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
+/* Dialogs and standalone pages keep the reading-width cap; the settings column is
+   already narrow, and a second cap inside it only produced a second width. */
 .server-form,
-.eh-account-form,
-.sync-form,
 .metadata-form,
 .category-controls {
   width: 100%;
   max-width: 680px;
+}
+
+.eh-account-form,
+.sync-form {
+  width: 100%;
 }
 
 .form-success {
@@ -3462,6 +3461,38 @@ body::-webkit-scrollbar,
   font-weight: 700;
 }
 
+/* A feature switch: the legend names the feature, the checkbox turns it on, and
+   whatever configures it appears below only once it is on. */
+.preference-switch {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.preference-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-height);
+  color: var(--ink-primary);
+  font-size: var(--text-sm);
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.preference-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--brand-vermilion);
+  cursor: pointer;
+}
+
+.preference-toggle input:disabled,
+.preference-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .settings-tool-hint {
   margin: 0;
   color: var(--ink-secondary);
@@ -3472,11 +3503,72 @@ body::-webkit-scrollbar,
   justify-self: start;
 }
 
+/* One row of controls sharing its width, each one dynamic — the same shape as the
+   archive detail page's action row. Deliberately a parallel set of declarations
+   rather than a shared class: the detail row's exact CSS is pinned by the design
+   system contract test, and reaching for its class name here would tie a settings
+   layout to an archive card's.
+
+   This is the one button shape the settings page uses. It had a primary action, a
+   secondary action, a 32px icon button and a 44px icon button, all in the same
+   column, sized by whatever each one's own class happened to say. */
 .settings-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
+  align-items: stretch;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
 }
+
+/* Geometry for whatever is in the row, so a group that still needs a
+   `.primary-action` skin is at least the same size and shape as its neighbour. */
+.settings-actions > button,
+.settings-actions > a {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-height);
+  overflow: hidden;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-control);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.settings-action {
+  border: 1px solid var(--control-border);
+  background: var(--surface-elevated);
+  color: var(--ink-secondary);
+  transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
+}
+
+.settings-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
+  background: var(--brand-paper);
+  color: var(--ink-primary);
+}
+
+.settings-action.is-primary {
+  border-color: var(--brand-vermilion);
+  background: var(--brand-vermilion);
+  color: var(--ink-on-brand);
+}
+
+.settings-action.is-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand-vermilion) 88%, #000);
+  color: var(--ink-on-brand);
+}
+
+.settings-action:disabled { opacity: 0.55; cursor: not-allowed; }
+.settings-action svg { flex: none; width: 17px; height: 17px; }
+
 
 /* Archive intake: two ways in, one queue. */
 .upload-panel {

@@ -375,6 +375,21 @@ describe('reader screen', () => {
     expect(onVisiblePages).toHaveBeenLastCalledWith([0]);
   });
 
+  it('renders both halves of a spread in double mode', () => {
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" initialPage={1} />
+      </MemoryRouter>,
+    );
+
+    // The cover opens alone, so page 2 is the start of the first pair. Both halves
+    // have to be in the same element as the two-column grid: with the layout class
+    // on the frame and the slots one level deeper, the columns applied to nothing.
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+    expect(document.querySelector('.reader-spread')?.children).toHaveLength(2);
+  });
+
   it('leaves zoom to the wheel and the double click rather than toolbar buttons', async () => {
     const user = userEvent.setup();
     renderReader();
