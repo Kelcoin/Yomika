@@ -531,6 +531,52 @@ describe('library route workspace', () => {
     expect(pageRequests).toBe(1);
   });
 
+  it('pages by what the server handed over, not by what survived de-duplication', async () => {
+    const offsets: number[] = [];
+    // Page two repeats a row from page one — the server re-sorting between
+    // requests is enough to cause that. The repeat is dropped from the list, so
+    // an offset taken from the rendered length falls one behind the cursor, and
+    // from then on every request asks for a window it has already seen.
+    const pages: Record<number, Array<{ serverId: string; archiveId: string; title: string; pageCount: number; updatedAt: string }>> = {
+      0: [
+        { serverId: 'scope-a', archiveId: 'a1', title: 'One', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'a2', title: 'Two', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+      ],
+      2: [
+        { serverId: 'scope-a', archiveId: 'a2', title: 'Two', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'a3', title: 'Three', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+      ],
+      4: [
+        { serverId: 'scope-a', archiveId: 'a5', title: 'Five', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+        { serverId: 'scope-a', archiveId: 'a6', title: 'Six', pageCount: 1, updatedAt: '2026-08-26T00:00:00Z' },
+      ],
+    };
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
+        offsets.push(start);
+        const items = pages[start] ?? [];
+        return { ok: true, value: { items, total: 6, hasMore: items.length > 0 && start + items.length < 6 } };
+      }
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    renderLibrary();
+
+    await screen.findByRole('button', { name: /^One\b/ });
+    const list = screen.getByRole('list', { name: '档案' });
+    fireEvent.scroll(list, { target: { scrollTop: 10_000 } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Three\b/ })).toBeInTheDocument());
+
+    // Three rows are on screen but four have been handed over, so the next
+    // request has to ask for 4. Asking for 3 lands on a window the server has no
+    // page for and the list stops growing.
+    fireEvent.scroll(list, { target: { scrollTop: 20_000 } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Five\b/ })).toBeInTheDocument());
+    expect(offsets).toEqual([0, 2, 4]);
+  });
+
   it('falls back to the local mirror when the server cannot be reached', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

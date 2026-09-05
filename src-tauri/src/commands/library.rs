@@ -2203,7 +2203,11 @@ pub async fn search_archives_page(
     // search response, and the cards render them.
     match query_archive_records_by_ids(&connection, &input.server_id, &archive_ids) {
         Ok(items) => Ok(CommandResult::success(ArchivePage {
-            has_more: start.saturating_add(items.len() as i64) < filtered,
+            // An empty page is the end, whatever the count claims. Reporting
+            // `has_more` from the count alone let an offset past the end keep
+            // saying "there is more", and the caller kept asking forever.
+            has_more: !archive_ids.is_empty()
+                && start.saturating_add(archive_ids.len() as i64) < filtered,
             total: filtered,
             items,
         })),

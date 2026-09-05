@@ -72,6 +72,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
   const pageRequest = useRef(0);
   const loadingMoreRef = useRef(false);
+  /** Rows the server has handed over, which is the offset the next page asks for.
+   * The rendered list can be shorter once duplicates are dropped. */
+  const fetchedCount = useRef(snapshot?.archives.length ?? 0);
   const initialArchivesLoaded = useRef(Boolean(snapshot));
   const snapshotIsFresh = useRef(
     Boolean(snapshot?.archives.length) && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
@@ -211,8 +214,14 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const result = await fetchArchivePage(serverId, archives.length);
+      // The offset is what the server has handed over, not what survived the
+      // de-duplication below. Using `archives.length` meant that one repeated row
+      // — the server re-sorting between requests is enough — dropped the offset
+      // behind the cursor, so the next page overlapped, deduplicated to nothing,
+      // and the list stopped growing while `hasMore` kept asking for more.
+      const result = await fetchArchivePage(serverId, fetchedCount.current);
       if (result.ok) {
+        fetchedCount.current += result.value.items.length;
         setArchives((current) => {
           const seen = new Set(current.map((item) => item.archiveId));
           return [...current, ...result.value.items.filter((item) => !seen.has(item.archiveId))];
@@ -224,7 +233,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [archives.length, fetchArchivePage, hasMoreArchives, serverId]);
+  }, [fetchArchivePage, hasMoreArchives, serverId]);
 
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!serverId || !scopeId) return undefined;
@@ -263,6 +272,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       return false;
     }
     setArchives(result.value.items);
+    fetchedCount.current = result.value.items.length;
     initialArchivesLoaded.current = true;
     setTotalArchives(result.value.total);
     setHasMoreArchives(result.value.hasMore);
