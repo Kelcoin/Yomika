@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeTags } from '../lib/tags';
 
@@ -65,7 +65,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (effectiveLayout === 'webtoon') {
       for (let index = 0; index < loadedPages.length; index += 1) keep.add(index);
     } else {
-      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout })) {
+      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes })) {
         keep.add(index);
         for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) keep.add(adjacent);
       }
@@ -247,7 +247,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     move(dx < 0 ? 'next' : 'previous');
   }, []);
 
-  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout });
+  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes });
   const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
   const chromeVisible = state.phase === 'chrome-visible';
   // One transform for everything on screen: scaling each image on its own made a
@@ -289,16 +289,26 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       ) : visiblePages[0] ? (
         <section className={effectiveLayout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读" style={zoomStyle}>
           {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
-            // Record what auto resolves to without overwriting the preference,
-            // so the layout control can still say — and keep — 自动.
-            if (state.layout !== 'auto' || state.resolvedLayout) return;
             const image = event.currentTarget;
-            setState((current) => ({ ...current, resolvedLayout: resolveReaderLayout('auto', {
-              viewportWidth: window.innerWidth,
-              viewportHeight: window.innerHeight,
-              pageWidth: image.naturalWidth,
-              pageHeight: image.naturalHeight,
-            }) }));
+            const pageIndex = visibleIndexes[index] ?? state.pageIndex;
+            const shape = classifyPageShape(image.naturalWidth, image.naturalHeight);
+            setState((current) => {
+              // Record what auto resolves to without overwriting the preference,
+              // so the layout control can still say — and keep — 自动.
+              const resolvedLayout = current.layout === 'auto' && !current.resolvedLayout
+                ? resolveReaderLayout('auto', {
+                  viewportWidth: window.innerWidth,
+                  viewportHeight: window.innerHeight,
+                  pageWidth: image.naturalWidth,
+                  pageHeight: image.naturalHeight,
+                })
+                : current.resolvedLayout;
+              // A page turning out to be a spread re-pairs the run it sits in.
+              if (current.shapes?.[pageIndex] === shape && resolvedLayout === current.resolvedLayout) return current;
+              const shapes = [...(current.shapes ?? [])];
+              shapes[pageIndex] = shape;
+              return { ...current, shapes, ...(resolvedLayout ? { resolvedLayout } : {}) };
+            });
           }} /> : null)}
         </section>
       ) : (

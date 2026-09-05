@@ -81,6 +81,66 @@ export function applyZoom(_current: ZoomState, scale: number, panX: number, panY
   return { scale: clampZoom(scale), panX, panY };
 }
 
+/** Whether a page is narrow enough to sit beside another one.
+ *
+ * The threshold is half of a 16:9 viewport (`1920 / 2 / 1080`), taken from
+ * ComicReadScript's `imageType.ts:13-22`: anything wider than the slot it would
+ * occupy in a spread is a full-width page. It draws a further distinction
+ * between `wide` and `long` (past 16:9) that only affects its own scroll
+ * heuristics — for pairing both mean the same thing, so this collapses them.
+ */
+const SPREAD_SLOT_RATIO = 1920 / 2 / 1080;
+
+export type PageShape = 'normal' | 'wide';
+
+export function classifyPageShape(width: number, height: number): PageShape {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 'normal';
+  return width / height > SPREAD_SLOT_RATIO ? 'wide' : 'normal';
+}
+
+/** Groups page indexes into the slots a double-page layout renders.
+ *
+ * Pairing used to be fixed parity — cover alone, then (1,2), (3,4) — which
+ * breaks on any archive containing a double-page scan: that page gets squeezed
+ * into half a slot beside an unrelated one, and every pair after it is off by
+ * one for the rest of the archive.
+ *
+ * Following ComicReadScript's `handleComicData.ts:80-125`, a wide page takes a
+ * slot of its own and delimits the runs around it; each run is then paired from
+ * its own start, so the mistake cannot propagate past the spread that caused it.
+ */
+export function planPageSpreads(shapes: readonly PageShape[], coverAlone = true): number[][] {
+  const slots: number[][] = [];
+  let run: number[] = [];
+  const flush = () => {
+    for (let index = 0; index < run.length; index += 2) {
+      slots.push(run.slice(index, index + 2));
+    }
+    run = [];
+  };
+  for (let index = 0; index < shapes.length; index += 1) {
+    // The cover opens alone, the way a physical book does.
+    if (index === 0 && coverAlone) {
+      slots.push([0]);
+      continue;
+    }
+    if (shapes[index] === 'wide') {
+      flush();
+      slots.push([index]);
+      continue;
+    }
+    run.push(index);
+  }
+  flush();
+  return slots;
+}
+
+/** Index into `planPageSpreads`'s result holding `pageIndex`. */
+function findSlot(slots: number[][], pageIndex: number): number {
+  const found = slots.findIndex((slot) => slot.includes(pageIndex));
+  return found < 0 ? 0 : found;
+}
+
 export interface ReaderState {
   archiveId: string;
   pageCount: number;
@@ -94,6 +154,10 @@ export interface ReaderState {
    * impossible to hold: the first image to load replaced it with `single` or
    * `double`, so selecting it read as an immediate jump to something else. */
   resolvedLayout?: ReaderLayout | undefined;
+  /** Shape per page index, filled in as images load. A page nobody has measured
+   * yet counts as normal: assuming a spread and being wrong splits a page across
+   * two slots, while assuming normal only costs a re-pair once it loads. */
+  shapes?: readonly PageShape[] | undefined;
   phase: ReaderPhase;
 }
 
@@ -104,16 +168,24 @@ export function effectiveReaderLayout(state: Pick<ReaderState, 'layout' | 'resol
   return state.layout === 'auto' ? state.resolvedLayout ?? 'single' : state.layout;
 }
 
+type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes'>;
+
+function spreadsFor(state: SpreadInput): number[][] {
+  const shapes = state.shapes ?? [];
+  const filled: PageShape[] = Array.from({ length: state.pageCount }, (_, index) => shapes[index] ?? 'normal');
+  return planPageSpreads(filled);
+}
+
 /** Returns the page indexes rendered for the current spread.
  * In double-page mode the cover (index 0) is always a standalone page;
  * body pages are paired as (1,2), (3,4), ... .
  */
-export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout'>): number[] {
+export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout' | 'shapes'>): number[] {
   if (state.pageCount <= 0) return [];
   const start = Math.min(Math.max(0, Math.floor(state.pageIndex)), state.pageCount - 1);
-  if (effectiveReaderLayout(state) !== 'double' || start === 0) return [start];
-  const pairStart = start % 2 === 0 ? start - 1 : start;
-  return [pairStart, pairStart + 1].filter((index) => index < state.pageCount);
+  if (effectiveReaderLayout(state) !== 'double') return [start];
+  const slots = spreadsFor(state);
+  return slots[findSlot(slots, start)] ?? [start];
 }
 
 interface LayoutContext {
@@ -171,12 +243,13 @@ export function advanceReader(state: ReaderState, intent: 'next' | 'previous'): 
     return { ...state, pageIndex: clampPage(state.pageIndex + direction, state.pageCount), phase: 'ready' };
   }
 
-  const visible = getVisiblePageIndexes(state);
-  const first = visible[0] ?? 0;
-  const last = visible[visible.length - 1] ?? first;
-  const nextIndex = direction > 0
-    ? (state.pageIndex === 0 ? 1 : last + 1)
-    : (state.pageIndex <= 1 ? 0 : first - 2);
+  // Step by slot, not by a fixed number of pages: a spread that occupies a whole
+  // slot advances by one page, a pair by two, and the arithmetic no longer has to
+  // know which it is looking at.
+  const slots = spreadsFor(state);
+  const current = findSlot(slots, clampPage(state.pageIndex, state.pageCount));
+  const target = slots[Math.min(slots.length - 1, Math.max(0, current + direction))];
+  const nextIndex = target?.[0] ?? state.pageIndex;
   return { ...state, pageIndex: clampPage(nextIndex, state.pageCount), phase: 'ready' };
 }
 

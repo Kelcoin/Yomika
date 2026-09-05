@@ -4,12 +4,14 @@ import {
   advanceReader,
   applyZoom,
   clampZoom,
+  classifyPageShape,
   createReaderState,
   createZoomState,
   effectiveReaderLayout,
   filterArchivesByQuery,
   getPrefetchPages,
   getVisiblePageIndexes,
+  planPageSpreads,
   resolveReaderLayout,
   resetZoom,
   settleZoom,
@@ -38,6 +40,56 @@ describe('reader domain', () => {
 
     // An explicit choice ignores whatever auto had settled on.
     expect(effectiveReaderLayout({ ...resolved, layout: 'single' })).toBe('single');
+  });
+
+  it('classifies a page as wide only when it exceeds a spread slot', () => {
+    // The threshold is half a 16:9 viewport: anything wider than the slot it
+    // would occupy in a spread has to stand alone.
+    expect(classifyPageShape(700, 1000)).toBe('normal');
+    expect(classifyPageShape(1400, 1000)).toBe('wide');
+    // A page exactly as wide as its slot still fits in it.
+    expect(classifyPageShape(960, 1080)).toBe('normal');
+    // Nothing measured yet, or a broken image: assume it pairs. Guessing wide
+    // wastes a slot; guessing normal costs one re-pair when it loads.
+    expect(classifyPageShape(0, 0)).toBe('normal');
+    expect(classifyPageShape(Number.NaN, 100)).toBe('normal');
+  });
+
+  it('gives a wide page its own slot and re-pairs the run after it', () => {
+    const normal = 'normal' as const;
+    const wide = 'wide' as const;
+    // Cover alone, then pairs — the old fixed-parity behaviour, unchanged when
+    // nothing is wide.
+    expect(planPageSpreads([normal, normal, normal, normal, normal]))
+      .toEqual([[0], [1, 2], [3, 4]]);
+
+    // A spread at index 3 takes a slot of its own. What matters is that page 4
+    // starts a fresh pair instead of every later pair being off by one.
+    expect(planPageSpreads([normal, normal, normal, wide, normal, normal, normal]))
+      .toEqual([[0], [1, 2], [3], [4, 5], [6]]);
+
+    // Two spreads in a row, and a trailing odd page.
+    expect(planPageSpreads([normal, wide, wide, normal]))
+      .toEqual([[0], [1], [2], [3]]);
+  });
+
+  it('steps a spread by one page and a pair by two', () => {
+    const shapes = ['normal', 'normal', 'normal', 'wide', 'normal', 'normal'] as const;
+    const base = { ...createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'double' }), shapes };
+    // Slots are [0], [1,2], [3], [4,5].
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 1 })).toEqual([1, 2]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 2 })).toEqual([1, 2]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 3 })).toEqual([3]);
+
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'next').pageIndex).toBe(1);
+    expect(advanceReader({ ...base, pageIndex: 1 }, 'next').pageIndex).toBe(3);
+    // Leaving the spread lands on the start of the next pair, not one page into it.
+    expect(advanceReader({ ...base, pageIndex: 3 }, 'next').pageIndex).toBe(4);
+    expect(advanceReader({ ...base, pageIndex: 4 }, 'previous').pageIndex).toBe(3);
+    expect(advanceReader({ ...base, pageIndex: 3 }, 'previous').pageIndex).toBe(1);
+    // The ends hold instead of running past the archive.
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'previous').pageIndex).toBe(0);
+    expect(advanceReader({ ...base, pageIndex: 4 }, 'next').pageIndex).toBe(4);
   });
 
   it('resolves automatic layout from viewport and page shape', () => {
