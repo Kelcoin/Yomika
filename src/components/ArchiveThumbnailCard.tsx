@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
@@ -37,20 +37,22 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, onRefresh, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; onRefresh?: (() => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingContent, onRefresh, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} onRefresh={onRefresh} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingContent={headingContent} onRefresh={onRefresh} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
- * for callers that already label the rail (the detail page's tab strip). */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, onRefresh, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; onRefresh: (() => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
+ * for callers that already label the rail. `headingContent` replaces the title
+ * with arbitrary controls — the recommendation tabs used to sit in a sibling
+ * above the rail, which put them visually outside the panel they belong to. */
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
-      <h2>{title}</h2>
+      {headingContent ?? <h2>{title}</h2>}
       {onRefresh && <button className="icon-action" type="button" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing} aria-label={`刷新${title}`} title={`刷新${title}`}>
         <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
       </button>}

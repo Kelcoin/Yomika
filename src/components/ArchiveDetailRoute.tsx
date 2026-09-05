@@ -4,12 +4,11 @@ import {
   Bookmark,
   BookmarkX,
   BookOpen,
-  EyeOff,
   Heart,
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { categorizeTags, parseArchiveTagString } from '../lib/tags';
@@ -25,6 +24,9 @@ import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
 
 const repository = new NativeLibraryRepository();
+/** Long enough not to fire on a normal tap, short enough to discover by holding.
+ * Matches the platform convention rather than the drag thresholds. */
+const LONG_PRESS_MS = 500;
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [metadata, setMetadata] = useState<ArchiveMetadata>();
@@ -38,6 +40,28 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [inReadingList, setInReadingList] = useState(false);
   const [message, setMessage] = useState<string>();
   const navigate = useNavigate();
+  /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
+   * also follow the link, so the click is swallowed once. */
+  const [incognitoAsk, setIncognitoAsk] = useState(false);
+  const incognitoTimer = useRef<number>();
+  const incognitoPrompted = useRef(false);
+
+  const startIncognitoPress = useCallback(() => {
+    incognitoPrompted.current = false;
+    if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current);
+    incognitoTimer.current = window.setTimeout(() => {
+      incognitoPrompted.current = true;
+      setIncognitoAsk(true);
+    }, LONG_PRESS_MS);
+  }, []);
+
+  const cancelIncognitoPress = useCallback(() => {
+    if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current);
+    incognitoTimer.current = undefined;
+  }, []);
+
+  useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
+
   /** Back means back. This was a hardcoded link to the library, so arriving from
    * the home shelves and pressing it took you somewhere you had never been.
    * A direct visit has nothing to return to, so that case still falls back. */
@@ -178,8 +202,21 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
 
       <div className="archive-detail-route-actions" role="toolbar" aria-label="档案操作">
-        <Link className="archive-action-button archive-action-primary" to={`/reader/${archiveId}`} aria-label="阅读" title="阅读"><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
-        <Link className="archive-action-button" to={`/reader/${archiveId}?incognito=1`} aria-label="无痕阅读" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" /><span className="archive-action-label">无痕</span></Link>
+        {/* Long-press opens incognito. It used to be a button of its own beside
+            阅读, which spent a permanent toolbar slot on a rare choice and put a
+            second reading entry point next to the real one. */}
+        <Link
+          className="archive-action-button archive-action-primary"
+          to={`/reader/${archiveId}`}
+          aria-label="阅读"
+          title="阅读（长按进入无痕阅读）"
+          onPointerDown={startIncognitoPress}
+          onPointerUp={cancelIncognitoPress}
+          onPointerLeave={cancelIncognitoPress}
+          onPointerCancel={cancelIncognitoPress}
+          onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
+          onContextMenu={(event) => event.preventDefault()}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
         <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
           if (!scopeId) return;
           void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
@@ -222,6 +259,25 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         )}
       </div>
 
+      {/* Confirms the long press. Incognito changes what the app records, so it
+          says what it will not do rather than switching mode silently. */}
+      <Dialog.Root open={incognitoAsk} onOpenChange={setIncognitoAsk}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title>无痕阅读</Dialog.Title>
+            <Dialog.Description>本次阅读不会记录进度，也不会写入历史。</Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
+              <button className="primary-action" type="button" onClick={() => {
+                setIncognitoAsk(false);
+                navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1`);
+              }}>无痕阅读</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
       {/* Recommendations sit above the page thumbnails: they are about what to
           read next, not about this archive's pages. */}
       {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
@@ -244,12 +300,14 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
   const [similar, setSimilar] = useState<ArchiveRecord[]>([]);
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
+  const [loading, setLoading] = useState(tags.length > 0);
   const [tab, setTab] = useState<'similar' | 'creator'>('similar');
   const creator = useMemo(() => sameCreatorTags(tags), [tags]);
 
   useEffect(() => {
     if (tags.length === 0) return undefined;
     let active = true;
+    setLoading(true);
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
       for (const seed of seeds) {
@@ -271,6 +329,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       const creatorMatches = await searchByTags(creator.tags);
       if (!active) return;
       setSameCreator([...creatorMatches.values()].slice(0, 12));
+      setLoading(false);
     })();
     return () => { active = false; };
   }, [creator, currentArchiveId, serverId, tags]);
@@ -280,20 +339,34 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   const creatorLabel = creator.namespace === 'cosplayer' ? '同 Coser' : '同作者';
   const activeTab = tab === 'creator' && sameCreator.length === 0 ? 'similar' : tab;
   const visible = activeTab === 'creator' ? sameCreator : similar;
+  // The rail draws the panel, so the tabs go inside it as its heading. Rendered
+  // as a sibling above, they floated outside the component they belonged to.
+  const tabs = (
+    <div className="archive-recommendations-tabs" role="tablist" aria-label="推荐分组">
+      {similar.length > 0 && (
+        <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
+      )}
+      {sameCreator.length > 0 && (
+        <button type="button" role="tab" aria-selected={activeTab === 'creator'} className={activeTab === 'creator' ? 'is-active' : ''} onClick={() => setTab('creator')}>{creatorLabel}</button>
+      )}
+    </div>
+  );
+
+  // A skeleton while the searches run, rather than nothing at all: the section
+  // used to pop into existence and shove the page thumbnails down.
+  if (loading && similar.length === 0 && sameCreator.length === 0) {
+    return <ArchiveThumbnailRail title="猜你喜欢" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} />;
+  }
   if (similar.length === 0 && sameCreator.length === 0) return null;
 
   return (
-    <section className="archive-recommendations" aria-label="推荐">
-      <div className="archive-recommendations-tabs" role="tablist" aria-label="推荐分组">
-        {similar.length > 0 && (
-          <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
-        )}
-        {sameCreator.length > 0 && (
-          <button type="button" role="tab" aria-selected={activeTab === 'creator'} className={activeTab === 'creator' ? 'is-active' : ''} onClick={() => setTab('creator')}>{creatorLabel}</button>
-        )}
-      </div>
-      <ArchiveThumbnailRail title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'} archives={visible} scopeId={scopeId} serverId={serverId} headingHidden />
-    </section>
+    <ArchiveThumbnailRail
+      title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'}
+      archives={visible}
+      scopeId={scopeId}
+      serverId={serverId}
+      headingContent={tabs}
+    />
   );
 }
 

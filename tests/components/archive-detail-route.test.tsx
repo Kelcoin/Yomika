@@ -212,6 +212,37 @@ describe('archive detail route', () => {
     expect(toolbar).toContainElement(screen.getByRole('button', { name: '删除档案' }));
   });
 
+  it('offers incognito by long-pressing 阅读 rather than a button of its own', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    // The separate 无痕 button spent a permanent toolbar slot on a rare choice and
+    // sat a second reading entry point next to the real one.
+    const read = await screen.findByRole('link', { name: '阅读' });
+    expect(screen.queryByRole('link', { name: '无痕阅读' })).not.toBeInTheDocument();
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(read);
+      vi.advanceTimersByTime(600);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Incognito changes what the app records, so it says what it will not do.
+    expect(await screen.findByRole('dialog', { name: '无痕阅读' })).toBeInTheDocument();
+    expect(screen.getByText('本次阅读不会记录进度，也不会写入历史。')).toBeInTheDocument();
+  });
+
   it('recommends by shared tags and same creator above the page thumbnails', async () => {
     setInvokeAdapterForTests(async (command, args) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

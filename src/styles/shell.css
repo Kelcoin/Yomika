@@ -1097,9 +1097,11 @@ body::-webkit-scrollbar,
   width: min(18vw, 210px);
   aspect-ratio: 3 / 4;
   object-fit: contain;
-  border: 1px solid var(--hairline);
+  /* No frame. A border plus a filled background drew a box around covers whose
+     own aspect ratio differs from 3:4, so the padding read as part of the art.
+     A soft drop shadow lifts the image off the page instead. */
   border-radius: var(--radius-control);
-  background: var(--surface-elevated);
+  box-shadow: 6px 8px 18px -6px rgb(0 0 0 / 0.35);
 }
 
 .archive-detail-cover-placeholder {
@@ -1912,38 +1914,44 @@ body::-webkit-scrollbar,
 .archive-context-menu-item.is-nested { padding-left: calc(var(--space-2) + 22px); }
 
 /* Recommendations: one tabbed rail instead of two stacked ones. */
-.archive-recommendations {
-  display: grid;
-  gap: var(--space-2);
-}
-
+/* Rendered inside the rail's heading row, where the title would otherwise be —
+   as a sibling above the rail these floated outside the panel they belong to.
+   A segmented control rather than loose pills: the two options are one choice. */
 .archive-recommendations-tabs {
-  display: flex;
-  gap: var(--space-2);
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
 }
 
 .archive-recommendations-tabs button {
-  min-height: 32px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-pill);
+  min-height: 28px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: calc(var(--radius-control) - 3px);
   background: transparent;
   color: var(--ink-secondary);
   font-size: var(--text-sm);
   font-weight: 650;
   cursor: pointer;
+  transition: background-color var(--motion-standard), color var(--motion-standard);
+}
+
+.archive-recommendations-tabs button:hover:not(.is-active) {
+  color: var(--ink-primary);
 }
 
 .archive-recommendations-tabs button.is-active {
-  border-color: color-mix(in srgb, var(--brand-vermilion) 50%, var(--hairline));
-  background: color-mix(in srgb, var(--brand-vermilion) 12%, var(--surface-elevated));
-  color: var(--ink-primary);
+  background: var(--brand-vermilion);
+  color: var(--ink-on-brand);
 }
 
 /* One loading treatment across every image slot: the library cover shimmer. */
 .archive-page-thumbnail.is-skeleton,
 .archive-thumb-card-skeleton {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--surface-elevated) 45%, var(--brand-paper)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)));
   background-size: 220% 100%;
   animation: skeleton-shimmer 1.25s ease-in-out infinite;
 }
