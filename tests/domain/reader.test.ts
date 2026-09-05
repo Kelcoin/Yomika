@@ -15,6 +15,7 @@ import {
   resolveReaderLayout,
   resetZoom,
   settleZoom,
+  shouldCommitPageTurn,
   sortArchivesByTitle,
   toggleDoubleTapZoom,
   toggleReaderChrome,
@@ -24,6 +25,27 @@ import {
 } from '../../src/domain/reader';
 
 describe('reader domain', () => {
+  it('commits a page turn on distance or on speed, and ignores twitches', () => {
+    // A third of the viewport is enough on its own.
+    expect(shouldCommitPageTurn(400, 900, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(-400, 900, 1024)).toBe(true);
+    // Short but fast: 200px in 300ms is 0.67 px/ms, past the flick threshold. The
+    // old rule was a flat 50px and ignored speed entirely, so it fired on a
+    // twitch and missed a deliberate short flick.
+    expect(shouldCommitPageTurn(200, 300, 1024)).toBe(true);
+    // Short and slow is a drag the user thought better of.
+    expect(shouldCommitPageTurn(200, 2000, 1024)).toBe(false);
+    // Below the floor nothing commits, however fast: an instantaneous six-pixel
+    // jitter would otherwise read as an infinitely quick flick.
+    expect(shouldCommitPageTurn(6, 0, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(30, 0, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(31, 0, 1024)).toBe(true);
+    // A duration we cannot use is not the same as a fast one, so it asks for half
+    // the viewport rather than guessing.
+    expect(shouldCommitPageTurn(200, Number.NaN, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(600, Number.NaN, 1024)).toBe(true);
+  });
+
   it('keeps the automatic preference separate from what it resolves to', () => {
     // Resolving used to overwrite `layout`, so the first image to load turned
     // 自动 into 单页 or 双页 and the preference could not be held or shown.

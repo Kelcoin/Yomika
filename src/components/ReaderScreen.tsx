@@ -3,9 +3,16 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeTags } from '../lib/tags';
+
+/** Pages kept beyond the fetch window. Three either side covers stepping back
+ * over a spread without a refetch, and costs a handful of blob URLs. */
+const PAGE_RETENTION_MARGIN = 3;
+/** Attempts before a page is left alone. Matches ComicReadScript's ceiling
+ * (imageLoad/reactor.ts:22-29). */
+const MAX_PAGE_LOAD_ATTEMPTS = 8;
 
 interface ReaderScreenProps {
   archiveId: string;
@@ -72,23 +79,36 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
   const loadingPagesRef = useRef(new Set<number>());
+  /** Failed loads, with their attempt count and the earliest time to try again.
+   * A page that simply failed used to be retried on every render — or, once the
+   * window moved past it, never. */
+  const failedPagesRef = useRef(new Map<number, { attempts: number; nextAt: number }>());
+  const [retryTick, setRetryTick] = useState(0);
+  const retryTimerRef = useRef<number>();
+
+  useEffect(() => () => { if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current); }, []);
 
   useEffect(() => {
     if (!releasePage) return;
-    const keep = new Set<number>();
-    if (effectiveLayout === 'webtoon') {
-      for (let index = 0; index < loadedPages.length; index += 1) keep.add(index);
-    } else {
-      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone })) {
-        keep.add(index);
-        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) keep.add(adjacent);
+    const visible = effectiveLayout === 'webtoon'
+      ? Array.from({ length: loadedPages.length }, (_, index) => index)
+      : getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone });
+    const fetch = new Set<number>(visible);
+    // Retention is deliberately wider than fetching. They used to be the same
+    // set, so stepping forward released the page just left and stepping back
+    // re-downloaded it — every single turn cost a fresh request.
+    const retain = new Set<number>(visible);
+    if (effectiveLayout !== 'webtoon') {
+      for (const index of visible) {
+        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) fetch.add(adjacent);
+        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance + PAGE_RETENTION_MARGIN)) retain.add(adjacent);
       }
     }
     setLoadedPages((current) => {
       let changed = false;
       const next = current.slice();
       for (let index = 0; index < next.length; index += 1) {
-        if (!keep.has(index) && next[index]) {
+        if (!retain.has(index) && next[index]) {
           releasePage(index);
           next[index] = '';
           changed = true;
@@ -97,14 +117,39 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       return changed ? next : current;
     });
     if (!loadPage) return;
-    for (const index of keep) {
+    const now = Date.now();
+    let soonest = Infinity;
+    for (const index of fetch) {
       if (loadedPages[index] || loadingPagesRef.current.has(index)) continue;
+      const failure = failedPagesRef.current.get(index);
+      if (failure) {
+        if (failure.attempts >= MAX_PAGE_LOAD_ATTEMPTS) continue;
+        if (failure.nextAt > now) {
+          soonest = Math.min(soonest, failure.nextAt);
+          continue;
+        }
+      }
       loadingPagesRef.current.add(index);
       void loadPage(index).then((page) => {
-        if (page) setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
+        if (page) {
+          failedPagesRef.current.delete(index);
+          setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
+          return;
+        }
+        // Exponential backoff with jitter, as ComicReadScript does
+        // (imageLoad/reactor.ts:22-29): a server that just refused is unlikely to
+        // answer differently a millisecond later, and hammering it makes it worse.
+        const attempts = (failedPagesRef.current.get(index)?.attempts ?? 0) + 1;
+        const delay = (2 ** attempts + Math.random() * 2) * 1000;
+        failedPagesRef.current.set(index, { attempts, nextAt: Date.now() + delay });
+        if (attempts < MAX_PAGE_LOAD_ATTEMPTS) setRetryTick((value) => value + 1);
       }).finally(() => loadingPagesRef.current.delete(index));
     }
-  }, [effectiveLayout, loadPage, loadedPages, prefetchDistance, releasePage, state.layout, state.pageIndex, state.resolvedLayout]);
+    if (soonest !== Infinity) {
+      if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(50, soonest - now));
+    }
+  }, [effectiveLayout, loadPage, loadedPages, prefetchDistance, releasePage, retryTick, state.coverAlone, state.layout, state.pageIndex, state.resolvedLayout, state.shapes]);
 
   // The thumbnail panel used to pin every page of the archive as a full-size
   // image. Load the small page-thumbnail rendition instead, one at a time so a
@@ -167,7 +212,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
   }
 
-  const SWIPE_THRESHOLD = 50;
   /** Past this much travel a gesture is a drag rather than a tap. */
   const TAP_SLOP = 5;
 
@@ -194,14 +238,46 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     event.stopPropagation();
   }
 
+  /** Live horizontal offset while a drag is in progress, so the page follows the
+   * finger. Without it the gesture had no feedback at all until release, which is
+   * why it was impossible to tell whether a turn had been triggered. */
+  const [drag, setDrag] = useState<{ dx: number; commits: boolean } | null>(null);
+
+  const trackDrag = useCallback((dx: number, dy: number, elapsed: number) => {
+    // A vertical drag is a scroll, not a page turn, and zoomed-in drags pan.
+    if (zoomScaleRef.current > 1 || Math.abs(dy) > Math.abs(dx) || Math.abs(dx) <= TAP_SLOP) {
+      setDrag(null);
+      return;
+    }
+    setDrag({ dx, commits: shouldCommitPageTurn(dx, elapsed, window.innerWidth) });
+  }, []);
+
   const handleTouchStart = useCallback((event: TouchEvent) => {
     const touch = event.touches[0];
     if (!touch) return;
+    // Two fingers are a pinch, never a page turn: a zoom gesture used to leave a
+    // drag offset behind and could commit a turn on release.
+    if (event.touches.length > 1) {
+      touchStartRef.current = null;
+      setDrag(null);
+      return;
+    }
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
   }, []);
 
+  const handleTouchMove = useCallback((event: TouchEvent) => {
+    const start = touchStartRef.current;
+    const touch = event.touches[0];
+    if (!start || !touch || event.touches.length > 1) {
+      setDrag(null);
+      return;
+    }
+    trackDrag(touch.clientX - start.x, touch.clientY - start.y, Date.now() - start.time);
+  }, [trackDrag]);
+
   const handleTouchEnd = useCallback((event: TouchEvent) => {
     const start = touchStartRef.current;
+    setDrag(null);
     if (!start) return;
     const touch = event.changedTouches[0];
     if (!touch) return;
@@ -220,12 +296,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
     lastTapRef.current = now;
 
-    if (elapsed > 500) return;
-
-    if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
-      if (dx < 0) move('next');
-      else move('previous');
-    }
+    if (Math.abs(dx) <= Math.abs(dy)) return;
+    // Same rule as the mouse: a third of the viewport, or a fast enough flick.
+    if (!shouldCommitPageTurn(dx, elapsed, window.innerWidth)) return;
+    gestureMovedRef.current = true;
+    move(dx < 0 ? 'next' : 'previous');
   }, []);
 
   function zoomIn() {
@@ -249,9 +324,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     pointerStartRef.current = { x: event.clientX, y: event.clientY, time: Date.now() };
   }, []);
 
+  const handleMouseMove = useCallback((event: MouseEvent<HTMLElement>) => {
+    const start = pointerStartRef.current;
+    if (!start || event.buttons !== 1) return;
+    trackDrag(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
+  }, [trackDrag]);
+
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
+    setDrag(null);
     if (!start || event.button !== 0) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
@@ -260,8 +342,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // The threshold matches ComicReadScript's (helper/useDrag.ts:101-130).
     gestureMovedRef.current = Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP;
     if (zoomScaleRef.current > 1) return;
-    if (Date.now() - start.time > 700) return;
-    if (Math.abs(dx) < SWIPE_THRESHOLD || Math.abs(dx) <= Math.abs(dy)) return;
+    if (Math.abs(dx) <= Math.abs(dy)) return;
+    if (!shouldCommitPageTurn(dx, Date.now() - start.time, window.innerWidth)) return;
     // A drag is a page turn, not a chrome toggle.
     dragPagedRef.current = true;
     move(dx < 0 ? 'next' : 'previous');
@@ -271,11 +353,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
   const chromeVisible = state.phase === 'chrome-visible';
   // One transform for everything on screen: scaling each image on its own made a
-  // double spread overlap, because both grew from their own centre.
+  // double spread overlap, because both grew from their own centre. The drag
+  // offset rides along, and the transition is suppressed while dragging so the
+  // page tracks the pointer instead of easing behind it.
   const zoomStyle = {
-    transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`,
+    transform: `scale(${zoom.scale}) translate(${zoom.panX + (drag?.dx ?? 0)}px, ${zoom.panY}px)`,
     transformOrigin: 'center center',
-    transition: 'transform 140ms ease-out',
+    transition: drag ? 'none' : 'transform 140ms ease-out',
   } as const;
 
   return (
@@ -294,9 +378,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       onDoubleClick={() => setZoom((current) => toggleDoubleTapZoom(current))}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onMouseLeave={() => { pointerStartRef.current = null; setDrag(null); }}
       onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onTouchCancel={() => { touchStartRef.current = null; setDrag(null); }}
       tabIndex={0}
     >
       {effectiveLayout === 'webtoon' ? (
@@ -309,7 +397,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </div>
         </section>
       ) : visiblePages[0] ? (
-        <section className={effectiveLayout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读" style={zoomStyle}>
+        <section className={`${effectiveLayout === 'double' ? 'reader-spread' : 'reader-single'}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`} aria-label="分页阅读" style={zoomStyle}>
           {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
             const image = event.currentTarget;
             const pageIndex = visibleIndexes[index] ?? state.pageIndex;

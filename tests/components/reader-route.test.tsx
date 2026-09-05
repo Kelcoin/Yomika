@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -138,7 +138,10 @@ describe('reader route', () => {
 
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('服务器暂时不可用');
+    // Scoped to the canvas: the same message also reaches the shared toast, which
+    // carries its own alert role, so an unscoped query races the toast mounting.
+    const canvas = await screen.findByRole('main');
+    expect(await within(canvas).findByRole('alert')).toHaveTextContent('服务器暂时不可用');
     // The route is shell-free, so it has to offer its own exit; the message also
     // has to reach the shared toast.
     expect(await screen.findByRole('link', { name: '返回档案库' })).toHaveAttribute('href', '/library');

@@ -96,15 +96,26 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
   });
 
-  it('releases loaded pages outside the visible prefetch window', async () => {
+  it('keeps pages either side loaded and releases only what is far away', async () => {
     const releasePage = vi.fn();
+    // Twelve pages, opening at 0. Retention reaches a few pages past the fetch
+    // window on purpose: with the two sets identical, stepping forward released
+    // the page just left and stepping back re-downloaded it, so every turn cost a
+    // fresh request.
+    const many = Array.from({ length: 12 }, () => pages[0]!);
     render(
       <MemoryRouter>
-        <ReaderScreen archiveId="a1" title="Test archive" pages={[...pages, pages[0]!, pages[1]!]} releasePage={releasePage} />
+        <ReaderScreen archiveId="a1" title="Test archive" pages={many} releasePage={releasePage} />
       </MemoryRouter>,
     );
 
-    await vi.waitFor(() => expect(releasePage.mock.calls.map(([index]) => index)).toEqual([2, 3, 4]));
+    await vi.waitFor(() => expect(releasePage.mock.calls.length).toBeGreaterThan(0));
+    const released = releasePage.mock.calls.map(([index]) => index as number);
+    // Neighbours survive; only pages well past the window go.
+    expect(released).not.toContain(0);
+    expect(released).not.toContain(1);
+    expect(released).not.toContain(4);
+    expect(released).toContain(11);
   });
 
   it('uses the mouse wheel for zoom on paged reading canvas', () => {

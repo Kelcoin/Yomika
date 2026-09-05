@@ -39,6 +39,26 @@
   gap: 8px;
 }
 
+/* Drag feedback. The gesture used to give none until release, so there was no
+   way to tell whether a turn had been triggered: the page now follows the
+   pointer, dims slightly while held, and gains a leading edge once the drag has
+   travelled far enough to commit. */
+.reader-single.is-dragging,
+.reader-spread.is-dragging {
+  cursor: grabbing;
+  opacity: 0.94;
+}
+
+.reader-single.will-turn,
+.reader-spread.will-turn {
+  opacity: 1;
+}
+
+.reader-single.will-turn .reader-page,
+.reader-spread.will-turn .reader-page {
+  box-shadow: 0 0 0 2px var(--brand-cyan);
+}
+
 .reader-webtoon {
   flex-direction: column;
   justify-content: flex-start;

@@ -156,6 +156,31 @@ function findSlot(slots: number[][], pageIndex: number): number {
   return found < 0 ? 0 : found;
 }
 
+/** Whether a horizontal drag has earned a page turn.
+ *
+ * Ported from ComicReadScript's `turnPage.ts:18-41`: a third of the viewport, or
+ * a flick fast enough that distance stops mattering. A fixed pixel threshold —
+ * what this used before — is wrong at both ends: 50px is a twitch on a desktop
+ * monitor and half the screen on a phone, and it ignored speed entirely, so a
+ * fast short flick did nothing.
+ */
+export const PAGE_TURN_FLICK_VELOCITY = 0.4;
+/** Below this a gesture is a twitch, whatever its velocity says. Without a floor
+ * an instantaneous six-pixel jitter reads as an infinitely fast flick. */
+export const MIN_PAGE_TURN_DISTANCE = 30;
+
+export function shouldCommitPageTurn(dx: number, elapsedMs: number, viewportWidth: number): boolean {
+  const distance = Math.abs(dx);
+  if (!Number.isFinite(distance) || distance <= MIN_PAGE_TURN_DISTANCE) return false;
+  const width = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1;
+  // A duration we cannot use is not the same as a fast one: with no way to judge
+  // velocity, ask for more distance instead of guessing.
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return distance > width / 2;
+  // Zero elapsed time is the fastest flick there is, not an unknown one.
+  if (elapsedMs === 0) return true;
+  return distance > width / 3 || distance / elapsedMs > PAGE_TURN_FLICK_VELOCITY;
+}
+
 export interface ReaderState {
   archiveId: string;
   pageCount: number;
