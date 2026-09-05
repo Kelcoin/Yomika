@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -146,6 +146,36 @@ describe('reader route', () => {
 
     await user.click(screen.getByRole('button', { name: '重试加载' }));
     await waitFor(() => expect(attempts).toBe(2));
+  });
+
+  it('applies the default layout and direction, and lets the archive override them', async () => {
+    const preferences = { theme: 'system', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    let stored: unknown = null;
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: preferences };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: stored };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'save_reading_progress') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    // Both settings were read, shown and saved but consumed by nothing: the
+    // reader always started on auto/ltr, so choosing either did nothing at all.
+    const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(await screen.findByRole('button', { name: '阅读布局：双页，点击切换' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
+    view.unmount();
+
+    // The archive's own record is the more specific answer, so it wins. 'paged'
+    // cannot say whether it meant single or double, so only continuous overrides.
+    stored = { scopeId: 'scope-a', archiveId: 'a1', pageIndex: 0, pageCount: 3, layout: 'continuous', direction: 'ltr', updatedAt: '2026-09-05T00:00:00Z', revision: 1 };
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('region', { name: '连续阅读' })).toBeInTheDocument();
   });
 
   it('serves the upscaled page when a model is selected, and falls back when it fails', async () => {

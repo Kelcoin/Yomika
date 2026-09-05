@@ -4,7 +4,7 @@ import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
-import { getPrefetchPages } from '../domain/reader';
+import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
@@ -38,6 +38,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [initialPage, setInitialPage] = useState(0);
   /** Restored pairing start. `undefined` means the archive has no stored choice. */
   const [coverAlone, setCoverAlone] = useState<boolean | undefined>(undefined);
+  /** Reading mode and direction for this archive: its own record if it has one,
+   * otherwise the global preference. Both were previously ignored — the reader
+   * always started on `auto`/`ltr`, which made the two settings do nothing. */
+  const [readingLayout, setReadingLayout] = useState<ReaderLayoutPreference>('auto');
+  const [readingDirection, setReadingDirection] = useState<ReadingDirection>('ltr');
   const [title, setTitle] = useState('阅读器');
   const [pages, setPages] = useState<string[]>([]);
   const [error, setError] = useState<string>();
@@ -222,6 +227,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       // Undecided stays undecided rather than becoming `true`: the reader treats
       // both as "cover alone", but only an explicit choice should be written back.
       setCoverAlone(progress.ok && progress.value ? progress.value.coverAlone ?? undefined : undefined);
+      // Reading mode and direction: the archive's own record wins over the global
+      // default, because it is the more specific answer. The stored layout only
+      // distinguishes paged from continuous — whether paged meant single, double
+      // or auto was never recorded, so that part comes from the preference.
+      const stored = progress.ok ? progress.value : null;
+      setReadingLayout(stored?.layout === 'continuous' ? 'webtoon' : preferences.defaultLayout);
+      setReadingDirection(stored?.direction ?? preferences.defaultDirection);
       const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, prefetchDistance)];
       const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
       if (!mountedRef.current || contextRef.current !== context) return;
@@ -242,7 +254,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (contextRef.current?.generation === generation) contextRef.current = undefined;
       releaseAllPages();
     };
-  }, [archiveId, loadPage, prefetchDistance, releaseAllPages, requestedPage, retryToken]);
+  }, [archiveId, loadPage, prefetchDistance, preferences.defaultDirection, preferences.defaultLayout, releaseAllPages, requestedPage, retryToken]);
 
   // Reader failures used to render as inline text only, on a shell-free route
   // with no way out. Surface them through the shared toast as well.
@@ -280,6 +292,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       pages={pages}
       initialPage={initialPage}
       coverAlone={coverAlone}
+      layout={readingLayout}
+      direction={readingDirection}
       loadPage={loadPage}
       loadPageThumbnail={loadPageThumbnail}
       prefetchDistance={prefetchDistance}
