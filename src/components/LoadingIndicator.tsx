@@ -7,6 +7,10 @@
  *
  * The mark is drawn rather than imported: a spinner made of the project's own
  * three page shapes, which is also what the favicon and the About page use.
+ *
+ * No caption. `label` is the accessible name only: the text under the animation
+ * said what the animation already says, and repeated it in three sizes across
+ * every route that loads anything.
  */
 export function LoadingIndicator({ label = '正在加载', size = 'md' }: { label?: string; size?: 'sm' | 'md' | 'lg' }) {
   return (
@@ -20,7 +24,6 @@ export function LoadingIndicator({ label = '正在加载', size = 'md' }: { labe
           <path className="loading-spine" d="M24 6 L24 42" />
         </g>
       </svg>
-      <span className="loading-indicator-label">{label}</span>
     </div>
   );
 }

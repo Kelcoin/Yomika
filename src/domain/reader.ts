@@ -151,17 +151,25 @@ export const PAGE_TURN_FLICK_VELOCITY = 0.4;
 /** Below this a gesture is a twitch, whatever its velocity says. Without a floor
  * an instantaneous six-pixel jitter reads as an infinitely fast flick. */
 export const MIN_PAGE_TURN_DISTANCE = 30;
+/** Fraction of the viewport a slow drag has to cover to turn the page.
+ *
+ * A third of the viewport — what this was — is over 500px on a desktop window, so
+ * a deliberate drag that was plainly a page turn kept springing back. A sixth is
+ * still far past the tap slop and past what a scroll gesture drifts sideways, and
+ * it is the distance at which the next page is already visibly coming in. */
+const PAGE_TURN_DISTANCE_FRACTION = 1 / 6;
 
 export function shouldCommitPageTurn(dx: number, elapsedMs: number, viewportWidth: number): boolean {
   const distance = Math.abs(dx);
   if (!Number.isFinite(distance) || distance <= MIN_PAGE_TURN_DISTANCE) return false;
   const width = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1;
+  const reach = width * PAGE_TURN_DISTANCE_FRACTION;
   // A duration we cannot use is not the same as a fast one: with no way to judge
   // velocity, ask for more distance instead of guessing.
-  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return distance > width / 2;
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return distance > reach * 2;
   // Zero elapsed time is the fastest flick there is, not an unknown one.
   if (elapsedMs === 0) return true;
-  return distance > width / 3 || distance / elapsedMs > PAGE_TURN_FLICK_VELOCITY;
+  return distance > reach || distance / elapsedMs > PAGE_TURN_FLICK_VELOCITY;
 }
 
 export interface ReaderState {

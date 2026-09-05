@@ -68,6 +68,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
   const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
   const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
+  const derivedHandlesRef = useRef(new Map<number, ImageHandle>());
+  const derivedAttemptedRef = useRef(new Set<number>());
+  const derivedQueueRef = useRef<number[]>([]);
+  const derivedBusyRef = useRef(false);
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -81,6 +85,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const releaseAllPages = useCallback(() => {
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
+    for (const handle of derivedHandlesRef.current.values()) imageCache.release(handle);
+    derivedHandlesRef.current.clear();
+    derivedAttemptedRef.current.clear();
+    derivedQueueRef.current = [];
     for (const handle of thumbnailHandlesRef.current.values()) imageCache.release(handle);
     thumbnailHandlesRef.current.clear();
     if (coverHandleRef.current) imageCache.release(coverHandleRef.current);
@@ -137,42 +145,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         rendition: 'reader-page',
         sourcePath: path,
       }, signal ? { signal } : {});
-      // With either enhancement on, swap the derived rendition in once the plain
-      // page is cached; a failure keeps the plain page rather than blanking the
-      // reader. With both on they chain in this order and only this order: the
-      // detector and the inpainter were trained at page scale, so the regions are
-      // filled first and the finished page is what gets enlarged. Upscaling first
-      // would hand the inpainter interpolated pixels and smeared mosaic blocks.
-      const censoredFilled = decensorEnabled
-        ? await imageCache.load({
-          scopeId: context.scopeId,
-          serverId: context.serverId,
-          archiveId: context.archiveId,
-          pageIndex,
-          rendition: 'decensored',
-          modelId: preferences.decensorModel,
-        }, signal ? { signal } : {}).catch(() => undefined)
-        : undefined;
-      // Upscaling reads the de-censored rendition when there is one, so it has to
-      // wait for that step rather than run beside it.
-      const enhanced = upscaleEnabled && (!decensorEnabled || censoredFilled)
-        ? await imageCache.load({
-          scopeId: context.scopeId,
-          serverId: context.serverId,
-          archiveId: context.archiveId,
-          pageIndex,
-          rendition: 'enhanced',
-          ...(preferences.upscaleModel ? { modelId: preferences.upscaleModel } : {}),
-          ...(censoredFilled ? { decensorModelId: preferences.decensorModel } : {}),
-        }, signal ? { signal } : {}).catch(() => undefined)
-        : undefined;
-      const derived = enhanced ?? censoredFilled;
-      if (derived) {
-        if (enhanced && censoredFilled) imageCache.release(censoredFilled);
-        imageCache.release(handle);
-        pageHandlesRef.current.set(pageIndex, derived);
-        return derived.url;
-      }
       const current = contextRef.current;
       if (!mountedRef.current || !current || current.generation !== context.generation || signal?.aborted) {
         imageCache.release(handle);
@@ -193,7 +165,92 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
     });
     return promise;
-  }, [preferences.decensorModel, preferences.upscaleModel, decensorEnabled, upscaleEnabled]);
+  }, []);
+
+  /** Derived renditions by page index, swapped in when they arrive.
+   *
+   * `loadPage` used to await these before resolving, so a page was not shown
+   * until inference for it had finished — seconds per page, and one run for every
+   * page of the prefetch window at once. That is what made the reader look frozen
+   * with upscaling on. The plain page goes up immediately and the enhanced one
+   * replaces it when it is ready; because that is a `src` swap on a slot whose
+   * transform never changes, the zoom survives it.
+   *
+   * One at a time, and only for pages actually on screen: prefetched neighbours
+   * are not worth an ONNX run each, and running several at once only made every
+   * one of them slower. */
+  const [derivedPages, setDerivedPages] = useState<ReadonlyMap<number, string>>(() => new Map());
+
+  const releaseDerived = useCallback(() => {
+    for (const handle of derivedHandlesRef.current.values()) imageCache.release(handle);
+    derivedHandlesRef.current.clear();
+    derivedAttemptedRef.current.clear();
+    derivedQueueRef.current = [];
+    setDerivedPages((current) => current.size === 0 ? current : new Map());
+  }, []);
+
+  const runDerivedQueue = useCallback(async () => {
+    if (derivedBusyRef.current) return;
+    derivedBusyRef.current = true;
+    try {
+      while (derivedQueueRef.current.length > 0) {
+        const pageIndex = derivedQueueRef.current.shift();
+        if (pageIndex === undefined) break;
+        const context = contextRef.current;
+        if (!context || !mountedRef.current) break;
+        derivedAttemptedRef.current.add(pageIndex);
+        const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
+        // Both on: de-censor first, then enlarge the finished page. The detector
+        // and the inpainter were trained at page scale, so upscaling first would
+        // hand the inpainter interpolated pixels and smeared mosaic blocks.
+        const censored = decensorEnabled
+          ? await imageCache.load({ ...identity, rendition: 'decensored', modelId: preferences.decensorModel }).catch(() => undefined)
+          : undefined;
+        const enhanced = upscaleEnabled && (!decensorEnabled || censored)
+          ? await imageCache.load({
+            ...identity,
+            rendition: 'enhanced',
+            ...(preferences.upscaleModel ? { modelId: preferences.upscaleModel } : {}),
+            ...(censored ? { decensorModelId: preferences.decensorModel } : {}),
+          }).catch(() => undefined)
+          : undefined;
+        const derived = enhanced ?? censored;
+        if (enhanced && censored) imageCache.release(censored);
+        if (!derived) continue;
+        if (!mountedRef.current || contextRef.current?.generation !== context.generation) {
+          imageCache.release(derived);
+          break;
+        }
+        const occupied = derivedHandlesRef.current.get(pageIndex);
+        if (occupied) {
+          imageCache.release(derived);
+          continue;
+        }
+        derivedHandlesRef.current.set(pageIndex, derived);
+        setDerivedPages((current) => new Map(current).set(pageIndex, derived.url));
+      }
+    } finally {
+      derivedBusyRef.current = false;
+    }
+  }, [decensorEnabled, preferences.decensorModel, preferences.upscaleModel, upscaleEnabled]);
+
+  /** Called by the reader with the pages actually on screen. */
+  const requestDerived = useCallback((indexes: readonly number[]) => {
+    if (!decensorEnabled && !upscaleEnabled) return;
+    let queued = false;
+    for (const index of indexes) {
+      if (derivedAttemptedRef.current.has(index) || derivedQueueRef.current.includes(index)) continue;
+      derivedQueueRef.current.push(index);
+      queued = true;
+    }
+    if (queued) void runDerivedQueue();
+  }, [decensorEnabled, runDerivedQueue, upscaleEnabled]);
+
+  // A switch above the canvas changed what the derived renditions would be, so
+  // everything held under the old answer is dropped and re-requested.
+  useEffect(() => {
+    releaseDerived();
+  }, [decensorEnabled, enhancementToken, releaseDerived, upscaleEnabled]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -338,6 +395,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         toggle: () => { setDecensorWanted((value) => !value); setEnhancementToken((value) => value + 1); },
       }}
       reloadToken={enhancementToken}
+      derivedPages={derivedPages}
+      onVisiblePages={requestDerived}
       onProgress={(pageIndex, reading) => {
         if (!scopeId || incognito) return;
         void repository.saveProgress({

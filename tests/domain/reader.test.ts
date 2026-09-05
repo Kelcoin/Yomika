@@ -23,24 +23,25 @@ import {
 
 describe('reader domain', () => {
   it('commits a page turn on distance or on speed, and ignores twitches', () => {
-    // A third of the viewport is enough on its own.
-    expect(shouldCommitPageTurn(400, 900, 1024)).toBe(true);
-    expect(shouldCommitPageTurn(-400, 900, 1024)).toBe(true);
-    // Short but fast: 200px in 300ms is 0.67 px/ms, past the flick threshold. The
+    // A sixth of the viewport is enough on its own, at any speed. A third — what
+    // this asked for — is over 500px on a desktop window, so a slow deliberate
+    // drag that was plainly a page turn kept springing back.
+    expect(shouldCommitPageTurn(200, 4000, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(-200, 4000, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(150, 4000, 1024)).toBe(false);
+    // Short but fast: 100px in 120ms is 0.83 px/ms, past the flick threshold. The
     // old rule was a flat 50px and ignored speed entirely, so it fired on a
     // twitch and missed a deliberate short flick.
-    expect(shouldCommitPageTurn(200, 300, 1024)).toBe(true);
-    // Short and slow is a drag the user thought better of.
-    expect(shouldCommitPageTurn(200, 2000, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(100, 120, 1024)).toBe(true);
     // Below the floor nothing commits, however fast: an instantaneous six-pixel
     // jitter would otherwise read as an infinitely quick flick.
     expect(shouldCommitPageTurn(6, 0, 1024)).toBe(false);
     expect(shouldCommitPageTurn(30, 0, 1024)).toBe(false);
     expect(shouldCommitPageTurn(31, 0, 1024)).toBe(true);
-    // A duration we cannot use is not the same as a fast one, so it asks for half
-    // the viewport rather than guessing.
+    // A duration we cannot use is not the same as a fast one, so it asks for
+    // double the distance rather than guessing.
     expect(shouldCommitPageTurn(200, Number.NaN, 1024)).toBe(false);
-    expect(shouldCommitPageTurn(600, Number.NaN, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(400, Number.NaN, 1024)).toBe(true);
   });
 
   it('keeps the automatic preference separate from what it resolves to', () => {

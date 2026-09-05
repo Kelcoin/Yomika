@@ -367,12 +367,7 @@ body::-webkit-scrollbar,
 .loading-indicator.is-lg svg { width: 72px; height: 72px; }
 .loading-indicator.is-sm { padding: var(--space-4) 0; }
 
-.loading-indicator-label {
-  font-size: var(--text-sm);
-  font-weight: 620;
-}
 
-.loading-indicator.is-sm .loading-indicator-label { font-size: var(--text-xs); }
 
 /* Three leaves of a turning page, each a third of the cycle behind the last, so
    the motion reads as paging rather than as a generic spinner. */

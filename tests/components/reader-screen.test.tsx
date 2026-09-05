@@ -82,12 +82,12 @@ describe('reader screen', () => {
     // a double spread used to overlap because both pages scaled from their own
     // centre. The curve is multiplicative, so 120 units of wheel is
     // exp(-0.18) ≈ 0.835.
-    const track = container.querySelector('.reader-track') as HTMLElement;
-    expect(track.getAttribute('style')).toMatch(/scale\(0\.83/);
+    const zoomed = () => container.querySelector('.reader-single, .reader-spread') as HTMLElement;
+    expect(zoomed().getAttribute('style')).toMatch(/scale\(0\.83/);
     expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
     // Coming back within 5% of 100% snaps exactly onto it.
-    expect(track).toHaveStyle('transform: scale(1) translate(0px, 0px)');
+    expect(zoomed()).toHaveStyle('transform: scale(1) translate(0px, 0px)');
     const horizontalScroller = document.createElement('div');
     horizontalScroller.className = 'horizontal-scroller';
     reader.append(horizontalScroller);
@@ -336,6 +336,45 @@ describe('reader screen', () => {
     expect(await screen.findByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
   });
 
+  it('swaps an enhanced page in without disturbing the zoom', () => {
+    const { container, rerender } = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
+      </MemoryRouter>,
+    );
+    const zoomed = () => container.querySelector('.reader-single') as HTMLElement;
+
+    fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 });
+    expect(zoomed().style.transform).toMatch(/scale\(0\.83/);
+
+    // The enhanced rendition arrives after the plain page and takes its place in
+    // the same slot. It used to be awaited inside the page load instead, so
+    // nothing was on screen until inference finished — and whatever replaced the
+    // page threw the zoom away with it.
+    rerender(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map([[0, 'blob:enhanced-0']])} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
+    expect(zoomed().style.transform).toMatch(/scale\(0\.83/);
+  });
+
+  it('asks for enhancement only for the pages on screen', async () => {
+    const onVisiblePages = vi.fn();
+    const many = Array.from({ length: 12 }, () => pages[0]!);
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={many} prefetchDistance={4} onVisiblePages={onVisiblePages} />
+      </MemoryRouter>,
+    );
+
+    // The prefetch window is wider than the screen on purpose, but an ONNX run per
+    // prefetched neighbour is what made the reader unusable with upscaling on.
+    await vi.waitFor(() => expect(onVisiblePages).toHaveBeenCalled());
+    expect(onVisiblePages).toHaveBeenLastCalledWith([0]);
+  });
+
   it('leaves zoom to the wheel and the double click rather than toolbar buttons', async () => {
     const user = userEvent.setup();
     renderReader();
@@ -351,14 +390,14 @@ describe('reader screen', () => {
   it('sends a double click back to the original scale from wherever the wheel left it', () => {
     const { container } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
-    const track = () => container.querySelector('.reader-track') as HTMLElement;
+    const zoomed = () => container.querySelector('.reader-single, .reader-spread') as HTMLElement;
 
     fireEvent.wheel(reader, { deltaY: -200 });
-    expect(track().style.transform).not.toContain('scale(1)');
+    expect(zoomed().style.transform).not.toContain('scale(1)');
     // It used to reset only once the scale had reached the double-tap target, so
     // anything in between was enlarged further instead.
     fireEvent.doubleClick(reader);
-    expect(track().style.transform).toContain('scale(1)');
+    expect(zoomed().style.transform).toContain('scale(1)');
   });
 
   it('switches the two enhancements from the toolbar and says when one has no model', async () => {
@@ -412,7 +451,8 @@ describe('reader screen', () => {
 
     // The two used to share one branch, so turning to a page that had not come
     // back yet announced 页面加载失败 and then quietly showed the page.
-    expect(await screen.findByRole('status')).toHaveTextContent('正在加载');
+    // One animation, no caption: the accessible name is where the words live now.
+    expect(await screen.findByRole('status', { name: '正在加载' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
     resolvePage?.('blob:page-0');

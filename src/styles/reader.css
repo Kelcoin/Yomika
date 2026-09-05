@@ -38,6 +38,11 @@
   inset: 0;
 }
 
+/* The zoom lives inside the frame being read — it is applied inline to the same
+   element that carries the layout class — so the neighbours stay exactly one
+   viewport away whatever the scale is. On the track it scaled the gaps too, and
+   zooming out brought both neighbours into view beside the page. */
+
 .reader-single,
 .reader-spread,
 .reader-webtoon {
@@ -136,19 +141,10 @@
 .reader-page-status p { margin: 0; }
 .reader-page-status .reader-retry-button { margin: 0; }
 .reader-page-status.is-failed p { color: var(--reader-ink); }
+/* The shared indicator, in the reader's palette. */
+.reader-page-status .loading-indicator { padding: 0; color: var(--reader-muted); }
+.reader-page-status .loading-indicator svg { stroke: var(--reader-ink); }
 
-.reader-page-spinner {
-  border-top-color: var(--brand-cyan);
-  animation: reader-spin 900ms linear infinite;
-}
-
-@keyframes reader-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .reader-page-spinner { animation-duration: 3s; }
-}
 
 /* The loading state keeps the reader's own dark canvas, so the indicator does not
    flash against a light background before the first page arrives. */

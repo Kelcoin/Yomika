@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { Link } from 'react-router-dom';
 
 import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { LoadingIndicator } from './LoadingIndicator';
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeTags } from '../lib/tags';
 
@@ -22,6 +23,11 @@ const CHROME_BAND_HEIGHT = 96;
  * .reader-page` in reader.css — the slot heights are computed from it, so the
  * two have to agree or the scroll arithmetic drifts from what is on screen. */
 const WEBTOON_MAX_WIDTH = 900;
+/** How long the bars stay up once nothing is touching them. They used to stay
+ * until dismissed, sitting over the page for the rest of the session if the
+ * dismissing click was forgotten. Every press inside them starts the count
+ * again. */
+const CHROME_AUTO_HIDE_MS = 4_500;
 
 /** One of the two derived renditions, as the reader sees it. */
 export interface EnhancementSwitch {
@@ -57,30 +63,38 @@ interface ReaderScreenProps {
    * switch above, for instance. Every loaded page is dropped and the window
    * refetched; without it a toggle changed nothing already on screen. */
   reloadToken?: number;
+  /** Enhanced renditions by page index. They arrive after the plain page and take
+   * its place in the same slot, so nothing about the view changes but the `src` —
+   * which is what keeps the zoom from being thrown away mid-read. */
+  derivedPages?: ReadonlyMap<number, string> | undefined;
+  /** The pages actually on screen, so the caller can enhance those and not the
+   * whole prefetch window. */
+  onVisiblePages?: ((indexes: readonly number[]) => void) | undefined;
 }
 
-/** The reader's own loading and failure states: one 56px circle in two moods.
+/** Why a page is not on screen yet: still coming, or given up on.
  *
  * These used to share a branch — anything not yet loaded rendered as "页面加载
  * 失败" — which is why turning a page announced a failure and then quietly
  * showed the page. They are now distinct, and a page is only called failed once
- * its retries are actually spent. */
+ * its retries are actually spent.
+ *
+ * Loading is the app's own indicator rather than a second animation invented for
+ * the reader: two different spinners for the same idea, one of them a bare circle,
+ * only raised the question of what the circle meant. */
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  if (!failed) return <div className="reader-page-status"><LoadingIndicator label="正在加载" /></div>;
   return (
-    <div className={`reader-page-status${failed ? ' is-failed' : ''}`}>
-      {failed ? (
-        <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
-          <RotateCcw aria-hidden="true" />
-        </button>
-      ) : (
-        <span className="reader-retry-button reader-page-spinner" aria-hidden="true" />
-      )}
-      <p role={failed ? 'alert' : 'status'}>{failed ? '加载失败' : '正在加载'}</p>
+    <div className="reader-page-status is-failed">
+      <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
+        <RotateCcw aria-hidden="true" />
+      </button>
+      <p role="alert">加载失败</p>
     </div>
   );
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0 }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, onVisiblePages }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   // Built once. A different archive arrives as an unmount, not a prop change:
   // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
@@ -123,6 +137,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
+  /** Bumped by any press inside the chrome, which restarts its auto-hide. */
+  const [chromeKeepAlive, setChromeKeepAlive] = useState(0);
   const loadingPagesRef = useRef(new Set<number>());
   /** Failed loads, with their attempt count and the earliest time to try again.
    * A page that simply failed used to be retried on every render — or, once the
@@ -170,6 +186,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       next: next.pageIndex === state.pageIndex ? [] : getVisiblePageIndexes(next),
     };
   }, [state]);
+
+  // The caller can learn the layout and direction *after* the first paint — the
+  // preferences load asynchronously, and the archive's own record later still —
+  // and the reader used to notice only by being unmounted, which happened as a
+  // side effect of the route clearing its page list. Whether the right layout was
+  // on screen therefore depended on timing, and that is what made this the
+  // flakiest corner of the suite. A prop change is now enough.
+  useEffect(() => {
+    setState((current) => current.layout === layout && current.direction === direction
+      ? current
+      : { ...current, layout, direction });
+  }, [direction, layout]);
 
   useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
   useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
@@ -240,6 +268,25 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (effectiveLayout !== 'webtoon' || !webtoonScrolledRef.current) return;
     setState((current) => current.pageIndex === webtoonAnchor ? current : { ...current, pageIndex: webtoonAnchor });
   }, [effectiveLayout, webtoonAnchor]);
+
+  // The bars go away on their own. Held open while the overview panel is up,
+  // because that is a deliberate stop rather than a glance, and restarted by any
+  // press inside them so a run of toolbar taps does not fight the timer.
+  useEffect(() => {
+    if (state.phase !== 'chrome-visible' || thumbnailPanelOpen) return undefined;
+    const timer = window.setTimeout(() => {
+      setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current);
+    }, CHROME_AUTO_HIDE_MS);
+    return () => window.clearTimeout(timer);
+  }, [chromeKeepAlive, state.phase, thumbnailPanelOpen]);
+
+  // What is on screen right now, which is a different question from what the
+  // prefetch window holds. Enhancement is expensive enough that it is worth
+  // asking only about the pages someone is actually looking at.
+  useEffect(() => {
+    if (!onVisiblePages) return;
+    onVisiblePages(effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes);
+  }, [effectiveLayout, onVisiblePages, visibleIndexes, webtoonAnchor]);
 
   // A switch above the canvas changed what `loadPage` answers with. Everything
   // already held is now the wrong rendition, so drop it and let the window
@@ -477,6 +524,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   function stopChromeToggle(event: MouseEvent) {
     event.stopPropagation();
+    setChromeKeepAlive((value) => value + 1);
   }
 
   /** Whether a click landed in one of the bands that summon the chrome. */
@@ -611,21 +659,27 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   const chromeVisible = state.phase === 'chrome-visible';
-  // One transform for everything on screen: scaling each image on its own made a
-  // double spread overlap, because both grew from their own centre. The drag
-  // offset rides along, and the transition is suppressed while dragging so the
-  // page tracks the pointer instead of easing behind it.
+  // One transform for the slots on screen: scaling each image on its own made a
+  // double spread overlap, because both grew from their own centre. It sits
+  // *inside* the current frame rather than on the track that carries all three —
+  // on the track, zooming out shrank the distance to the neighbours and brought
+  // them into view beside the page being read.
   const zoomStyle = {
-    transform: `scale(${zoom.scale}) translate(${zoom.panX + (drag?.dx ?? 0)}px, ${zoom.panY}px)`,
+    transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`,
     transformOrigin: 'center center',
-    transition: drag ? 'none' : 'transform 140ms ease-out',
+    transition: 'transform 140ms ease-out',
+  } as const;
+  /** The track follows the finger, and eases back or through on release. */
+  const dragStyle = {
+    transform: `translateX(${drag?.dx ?? 0}px)`,
+    transition: drag ? 'none' : 'transform 200ms cubic-bezier(0.32, 0.72, 0, 1)',
   } as const;
 
   /** One page: the image, or why it is not there yet. Always a slot, even when
    * empty — a spread whose halves appeared one at a time used to re-centre when
    * the second arrived, shifting the page under the reader's eyes. */
   const renderSlot = (index: number) => {
-    const source = loadedPages[index];
+    const source = derivedPages?.get(index) ?? loadedPages[index];
     return (
       <div className="reader-slot" key={index}>
         {source
@@ -685,21 +739,36 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </div>
         </section>
       ) : (
-        <div className="reader-track" style={zoomStyle}>
+        <div className="reader-track" style={dragStyle}>
           {([
             { key: 'previous', offset: -1, indexes: neighbourIndexes.previous },
             { key: 'current', offset: 0, indexes: visibleIndexes },
             { key: 'next', offset: 1, indexes: neighbourIndexes.next },
-          ] as const).map(({ key, offset, indexes }) => indexes.length === 0 ? null : (
-            <section
-              key={key}
-              className={`reader-frame ${spreadClass(indexes)}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`}
-              style={{ transform: `translateX(${offset * 100}%)` }}
-              {...(offset === 0 ? { 'aria-label': '分页阅读' } : { 'aria-hidden': true })}
-            >
-              {indexes.map((index) => renderSlot(index))}
-            </section>
-          ))}
+          ] as const).map(({ key, offset, indexes }) => {
+            // The neighbours exist for the gesture: they are what a swipe reveals.
+            // Mounted only while one is in progress, so they cannot appear beside
+            // the page at low zoom and cost nothing to decode the rest of the time.
+            if (indexes.length === 0 || (offset !== 0 && !drag)) return null;
+            return (
+              <section
+                key={key}
+                className="reader-frame"
+                style={{ transform: `translateX(${offset * 100}%)` }}
+                {...(offset === 0 ? { 'aria-label': '分页阅读' } : { 'aria-hidden': true })}
+              >
+                {/* The layout class has to sit on the same element as the slots,
+                    or the spread's two columns are declared on a parent the
+                    halves are no longer children of. The zoom rides along here so
+                    it scales the page and not the distance to the neighbours. */}
+                <div
+                  className={`${spreadClass(indexes)}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`}
+                  {...(offset === 0 ? { style: zoomStyle } : {})}
+                >
+                  {indexes.map((index) => renderSlot(index))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 
