@@ -18,6 +18,7 @@ import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration
 import { CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
+import { pickDirectory } from '../bridge/filePicker';
 import { MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -112,6 +113,7 @@ export function SettingsWorkspace() {
   const upscaleOn = preferenceDraft.upscaleBackend !== 'off';
   const decensorOn = preferenceDraft.decensorModel !== '';
   const decensorBundles = installedModels?.filter((model) => model.kind === 'decensor');
+  const [installingBundle, setInstallingBundle] = useState(false);
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -218,6 +220,23 @@ export function SettingsWorkspace() {
       setPreferenceError(true);
       setPreferenceMessage(result.error.message);
     }
+  }
+
+  /** Installs a de-censoring bundle from a directory the user picks. Nothing is
+   * downloaded and nothing is shipped: the files are copied out of an existing
+   * Aletheia-Lens install, because 337 MB neither fits through IPC nor belongs in
+   * the repository. */
+  async function installDecensorBundle() {
+    const directory = await pickDirectory();
+    if (!directory) return;
+    setInstallingBundle(true);
+    const result = await inferenceRepository.installDecensorBundle(directory);
+    setInstallingBundle(false);
+    if (!result.ok) { showToast(result.error.message, 'error'); return; }
+    showToast(`去码模型包已安装：${result.value.id} · ${result.value.version}`, 'success');
+    const models = await inferenceRepository.listModels();
+    if (models.ok) setInstalledModels(models.value);
+    editPreferences({ decensorModel: result.value.id });
   }
 
   /** One control pair for both payload shapes: a unified export (Readoshi's
@@ -491,7 +510,18 @@ export function SettingsWorkspace() {
                 </label>
                 <p className="settings-tool-hint">在阅读页面上运行检测与修补，结果按页缓存。修补模型固定使用 CPU。</p>
                 {!decensorBundles?.length && installedModels && (
-                  <p className="server-list-message" role="status">尚未安装去码模型包，安装后会出现在这里。</p>
+                  <>
+                    {/* The bundle is 337 MB, a quarter of a gigabyte of it the
+                        detector alone, so it does not travel as bytes and it is not
+                        in the repository. Pointing at a directory that already has
+                        it costs a copy and nothing else. */}
+                    <p className="server-list-message" role="status">尚未安装去码模型包。选择 Aletheia-Lens 的 <code>_internal/models</code> 目录即可安装（约 337 MB，会复制到本机）。</p>
+                    <div className="settings-actions">
+                      <button className="settings-action" type="button" disabled={installingBundle} aria-busy={installingBundle} onClick={() => void installDecensorBundle()}>
+                        {installingBundle ? '安装中…' : '选择目录安装'}
+                      </button>
+                    </div>
+                  </>
                 )}
               </fieldset>
             )}

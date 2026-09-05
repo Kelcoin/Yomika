@@ -5,9 +5,13 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetFilePickerForTests, setDirectoryPickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 
-afterEach(resetInvokeAdapterForTests);
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  resetFilePickerForTests();
+});
 
 /** Sections are grouped by topic, and `?section=` opens one directly, which is
  * how a test reaches the controls it asserts on without clicking through. */
@@ -231,6 +235,35 @@ describe('settings workspace', () => {
     await user.click(screen.getByRole('radio', { name: 'CPU' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'realesr-general' },
+    }));
+  });
+
+  it('installs a de-censoring bundle by copying a directory the user already has', async () => {
+    const user = userEvent.setup();
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    let installed: unknown[] = [];
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      if (command === 'inference_list_models') return { ok: true, value: installed };
+      if (command === 'inference_install_decensor_bundle') {
+        installed = [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor' }];
+        return { ok: true, value: installed[0] };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    setDirectoryPickerForTests(async () => 'E:/Aletheia-Lens/_internal/models');
+    renderSettings('reading');
+
+    // 337 MB does not travel as bytes and is not in the repository, so the install
+    // is a copy out of a directory the user points at.
+    await user.click(await screen.findByRole('button', { name: '选择目录安装' }));
+    expect(adapter).toHaveBeenCalledWith('inference_install_decensor_bundle', { sourceDir: 'E:/Aletheia-Lens/_internal/models' });
+    // Installing it is also choosing it: a bundle nobody selected does nothing.
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
+      input: { ...loaded, decensorModel: 'aletheia-lens' },
     }));
   });
 

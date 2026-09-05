@@ -442,6 +442,40 @@ pub fn inference_list_models(app: tauri::AppHandle) -> crate::domain::result::Co
     }
 }
 
+/// Installs a de-censoring bundle by copying one out of an existing Aletheia-Lens
+/// directory, since it is far too large to hand over as bytes. See
+/// `decensor::install_bundle_from` for why.
+#[tauri::command]
+pub fn inference_install_decensor_bundle(
+    app: tauri::AppHandle,
+    source_dir: String,
+    version: Option<String>,
+) -> crate::domain::result::CommandResult<InstalledModel> {
+    use tauri::Manager;
+    const BUNDLE_ID: &str = "aletheia-lens";
+    let version = version.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "1".to_string());
+    let result = app.path().app_data_dir()
+        .map_err(|error| InferenceError::InvalidInput(error.to_string()))
+        .and_then(|app_data_dir| {
+            let (staging, install) = model_install_roots(&app_data_dir, BUNDLE_ID, &version)?;
+            decensor::install_bundle_from(std::path::Path::new(&source_dir), &staging, &install)?;
+            Ok(install)
+        });
+    match result {
+        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
+            id: BUNDLE_ID.to_string(),
+            version,
+            // A bundle has four ONNX files and no single scale of its own.
+            scale: None,
+            kind: if decensor::bundle_in(&install).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE }.to_string(),
+        }),
+        Err(InferenceError::InvalidInput(message)) | Err(InferenceError::InvalidManifest(message)) => {
+            crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
+        }
+        Err(error) => crate::domain::result::CommandResult::failure("UNKNOWN", format!("{error:?}"), true),
+    }
+}
+
 #[tauri::command]
 pub fn inference_install_model(
     app: tauri::AppHandle,

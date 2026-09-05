@@ -80,6 +80,10 @@ export class NativeInferenceRepository {
   installModel(manifest: ModelManifest, archive: number[]): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_model', { input: { manifest, archive } }, InstalledModelResponse); }
   /** The models actually on disk, so the settings page can offer a choice
    * instead of asking for a model name to be typed from memory. */
+  /** Installs a de-censoring bundle by copying it out of a directory the user
+   * already has. The bundle is 337 MB, so it cannot be handed over as bytes the
+   * way an upscaling model is. */
+  installDecensorBundle(sourceDir: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_decensor_bundle', { sourceDir }, InstalledModelResponse); }
   listModels(): Promise<CommandResult<InstalledModel[]>> { return invokeCommand('inference_list_models', {}, z.array(InstalledModelResponse)); }
   clearCache(): Promise<CommandResult<InferenceCacheClearResult>> { return invokeCommand('inference_clear_cache', {}, InferenceCacheClearResultSchema); }
 }

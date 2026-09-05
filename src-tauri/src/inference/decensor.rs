@@ -49,6 +49,73 @@ pub fn bundle_in(install_root: &std::path::Path) -> Option<DecensorBundle> {
     })
 }
 
+/// Copies a de-censoring bundle out of an existing Aletheia-Lens install.
+///
+/// The bundle is 337 MB — a quarter of a gigabyte of it is the detector alone —
+/// so it cannot travel the way an upscaling model does. `install_model_archive`
+/// takes a ZIP in memory, which would mean pushing all of it through IPC; and
+/// putting it in the repository would put it in every clone, for ever. Copying
+/// from a directory the user already has is the one route that costs nothing but
+/// disk.
+///
+/// The source is recognised by its shape, through `bundle_in`: four files in the
+/// layout Aletheia-Lens ships. A directory that does not have all four is not a
+/// bundle, whatever it is named — the same all-or-nothing rule as everywhere else
+/// here, because a partial bundle fails part-way through a page.
+pub fn install_bundle_from(
+    source: &std::path::Path,
+    staging: &std::path::Path,
+    install: &std::path::Path,
+) -> Result<(), InferenceError> {
+    let Some(bundle) = bundle_in(source) else {
+        return Err(InferenceError::InvalidInput(
+            "该目录不是完整的去码模型包：需要 mrcnn/weights.onnx、deepcreampy/bar.onnx、deepcreampy/mosaic.onnx 与 esrgan/4x-Fatal-Pixels.onnx".into(),
+        ));
+    };
+    if install.exists() {
+        return Err(InferenceError::InvalidInput("该版本的去码模型包已安装".into()));
+    }
+    let _ = std::fs::remove_dir_all(staging);
+    let files: [(&std::path::Path, [&str; 2]); 4] = [
+        (bundle.detector.as_path(), DETECTOR_RELATIVE),
+        (bundle.bar.as_path(), BAR_RELATIVE),
+        (bundle.mosaic.as_path(), MOSAIC_RELATIVE),
+        (bundle.esrgan.as_path(), ESRGAN_RELATIVE),
+    ];
+    let copy = || -> Result<(), InferenceError> {
+        for (from, parts) in files {
+            let target = staging.join(parts[0]).join(parts[1]);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| InferenceError::InvalidInput(format!("创建目录失败：{error}")))?;
+            }
+            std::fs::copy(from, &target)
+                .map_err(|error| InferenceError::InvalidInput(format!("复制 {} 失败：{error}", parts[1])))?;
+            // ESRGAN keeps its weights in a sibling `.onnx.data`, and the two have
+            // to stay in the same directory or the session cannot open.
+            let sidecar = from.with_extension("onnx.data");
+            if sidecar.is_file() {
+                std::fs::copy(&sidecar, target.with_extension("onnx.data"))
+                    .map_err(|error| InferenceError::InvalidInput(format!("复制外置权重失败：{error}")))?;
+            }
+        }
+        Ok(())
+    };
+    if let Err(error) = copy() {
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(error);
+    }
+    if let Some(parent) = install.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| InferenceError::InvalidInput(format!("创建目录失败：{error}")))?;
+    }
+    // The staged copy only becomes an install once every file is there, so a
+    // half-copied bundle is never offered as a choice.
+    std::fs::rename(staging, install)
+        .map_err(|error| InferenceError::InvalidInput(format!("安装去码模型包失败：{error}")))?;
+    Ok(())
+}
+
 /// What kind of censoring a detection is. The two inpainting models are trained
 /// on different damage, so the kind decides which one runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +311,44 @@ pub fn decensor_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installing_a_bundle_copies_all_four_files_and_the_external_weights() {
+        // 337 MB cannot travel as bytes through IPC, and putting it in the
+        // repository would put it in every clone for ever, so the install is a
+        // copy out of a directory the user already has.
+        let base = std::env::temp_dir().join("yomika-decensor-install");
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join("source");
+        for part in ["mrcnn", "deepcreampy", "esrgan"] {
+            std::fs::create_dir_all(source.join(part)).unwrap();
+        }
+        std::fs::write(source.join("mrcnn").join("weights.onnx"), b"detector").unwrap();
+        std::fs::write(source.join("deepcreampy").join("bar.onnx"), b"bar").unwrap();
+        std::fs::write(source.join("deepcreampy").join("mosaic.onnx"), b"mosaic").unwrap();
+        std::fs::write(source.join("esrgan").join("4x-Fatal-Pixels.onnx"), b"esrgan").unwrap();
+        // ESRGAN keeps its weights beside the graph; a session cannot open without.
+        std::fs::write(source.join("esrgan").join("4x-Fatal-Pixels.onnx.data"), b"weights").unwrap();
+
+        let staging = base.join(".1.installing");
+        let install = base.join("1");
+        install_bundle_from(&source, &staging, &install).expect("install");
+
+        assert!(bundle_in(&install).is_some(), "the copy has to be a bundle in its own right");
+        assert_eq!(std::fs::read(install.join("esrgan").join("4x-Fatal-Pixels.onnx.data")).unwrap(), b"weights");
+        assert!(!staging.exists(), "the staging directory is renamed, not left behind");
+
+        // Installing twice is refused rather than half-overwriting a live bundle.
+        assert!(install_bundle_from(&source, &staging, &install).is_err());
+
+        // A directory missing one of the four is not a bundle, whatever it is named.
+        let partial = base.join("partial");
+        std::fs::create_dir_all(partial.join("mrcnn")).unwrap();
+        std::fs::write(partial.join("mrcnn").join("weights.onnx"), b"detector").unwrap();
+        assert!(install_bundle_from(&partial, &base.join(".2.installing"), &base.join("2")).is_err());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn a_bundle_is_all_four_files_or_nothing() {
