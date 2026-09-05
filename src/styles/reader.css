@@ -361,12 +361,11 @@
   text-align: center;
 }
 
-@media (max-width: 767px) {
+/* Compact layout, matching COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and the
+   shell's own media query. */
+@media (max-width: 900px) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover { width: 88px; }
-}
-
-@media (max-width: 767px) {
   .reader-toolbar {
     justify-content: flex-start;
   }

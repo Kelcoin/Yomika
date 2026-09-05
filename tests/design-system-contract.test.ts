@@ -16,6 +16,22 @@ function cssVariables(block: string): Map<string, string> {
   return variables;
 }
 
+/** The token file is wrapped in `@layer tokens`, so a rule body cannot be found
+ * by scanning to the next line-initial `}` — that would swallow the rest of the
+ * layer and merge the dark overrides into the light theme. Count braces. */
+function ruleBody(css: string, selector: string): string {
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const at = source.indexOf(selector);
+  const open = at < 0 ? -1 : source.indexOf('{', at);
+  if (open < 0) throw new Error(`Rule not found: ${selector}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}' && (depth -= 1) === 0) return source.slice(open + 1, index);
+  }
+  throw new Error(`Unbalanced rule: ${selector}`);
+}
+
 function rgb(value: string, backdrop?: Rgb): Rgb {
   const hex = value.match(/^#([0-9a-f]{6})$/i)?.[1];
   if (hex) return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)) as Rgb;
@@ -60,15 +76,16 @@ describe('design system contract', () => {
     expect(buttonRule).toMatch(/align-items:\s*center/);
   });
 
-  it('gives every settings section the same bounded columns', () => {
+  it('gives every settings section one full-width column', () => {
     const shell = read('src/styles/shell.css');
-    // One rule for both, because they used to disagree: different label widths
-    // and a 680px cap on the content left the sync page a narrow strip with a
-    // third of the window empty beside it.
+    // One rule for both, and one column. A fixed label column used to hold the
+    // section title the sidebar already shows: it left a blank strip beside
+    // every control, and a section whose content was its own first child (sync,
+    // about) was laid out *inside* that strip at a fraction of the width.
     const settingsRule = shell.match(/\.settings-section,\s*\n\.preferences-panel\s*\{([\s\S]*?)\}/)?.[1] ?? '';
-    expect(settingsRule).not.toMatch(/grid-template-columns:[^;]*\bauto\b/);
-    expect(settingsRule).toMatch(/grid-template-columns:[^;]*minmax\(/);
-    expect(shell).toMatch(/\.settings-section > :last-child,\s*\n\.preferences-form\s*\{[\s\S]*?width:\s*100%/);
+    expect(settingsRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(settingsRule).not.toMatch(/grid-template-columns:[^;]*\d+px/);
+    expect(shell).toMatch(/\.settings-section > \*,\s*\n\.preferences-form\s*\{[\s\S]*?min-width:\s*0/);
     expect(shell).toMatch(/\.legacy-import-form\s*\{[\s\S]*?max-width:\s*680px/);
     expect(shell).toMatch(/\.legacy-import-form textarea\s*\{[\s\S]*?width:\s*100%/);
     expect(shell).toMatch(/\.legacy-import-form > input\s*\{[\s\S]*?width:\s*100%/);
@@ -91,13 +108,36 @@ describe('design system contract', () => {
   it('uses a JHenTai-style two-level settings layout with stable rail targets', () => {
     const shell = read('src/styles/shell.css');
     const settings = read('src/components/SettingsWorkspace.tsx');
-    expect(settings).toMatch(/className="settings-layout"/);
+    expect(settings).toMatch(/className=\{`settings-layout/);
     expect(settings).toMatch(/className="settings-sidebar"/);
     expect(settings).toMatch(/className="settings-nav"/);
     expect(shell).toMatch(/\.settings-layout\s*\{[\s\S]*grid-template-columns:\s*minmax\(164px,\s*208px\)/);
     expect(shell).toMatch(/\.settings-nav a\s*\{[\s\S]*min-height:\s*40px/);
     expect(shell).toMatch(/\.sidebar-toggle\s*\{[\s\S]*flex:\s*0 0 44px/);
     expect(shell).toMatch(/\.segmented-control\s*\{[\s\S]*width:\s*fit-content/);
+  });
+
+  it('keeps design tokens in a cascade layer so user CSS can override them', () => {
+    // The reason presets appeared to do nothing twice over: a preset's
+    // `:root { --brand-vermilion: … }` is (0,1,0) and loses on specificity to
+    // `:root[data-theme='dark']` and `:root:not([data-theme])`. Injected user CSS
+    // is unlayered, and unlayered rules beat every layered rule regardless of
+    // specificity — so the token file must stay wrapped, and no other stylesheet
+    // may declare tokens on :root outside a layer.
+    const tokens = read('src/styles/tokens.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(tokens).toMatch(/@layer tokens\s*\{/);
+    const themeBlocks = [/:root\[data-theme='dark'\]/, /:root:not\(\[data-theme\]\)/];
+    const layerStart = tokens.indexOf('@layer tokens {');
+    for (const block of themeBlocks) {
+      const at = tokens.search(block);
+      expect(at).toBeGreaterThan(layerStart);
+    }
+    for (const path of ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css']) {
+      const sheet = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const [, body] of sheet.matchAll(/:root[^{]*\{([^}]*)\}/g)) {
+        expect(body).not.toMatch(/--[\w-]+\s*:/);
+      }
+    }
   });
 
   it('keeps archive toolbar icon actions compact and select fields flexible', () => {
@@ -151,11 +191,13 @@ describe('design system contract', () => {
   it('keeps toast text at WCAG AA contrast in light and dark themes', () => {
     const tokens = read('src/styles/tokens.css');
     const shell = read('src/styles/shell.css');
-    const light = cssVariables(tokens.match(/:root\s*\{([\s\S]*?)\n\}/)?.[1] ?? '');
+    const light = cssVariables(ruleBody(tokens, ':root'));
     const dark = new Map([
       ...light,
-      ...cssVariables(tokens.match(/:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''),
+      ...cssVariables(ruleBody(tokens, ":root[data-theme='dark']")),
     ]);
+    // A failed capture must not pass by checking the dark theme twice.
+    expect(light.get('--surface-canvas')).not.toBe(dark.get('--surface-canvas'));
     const toast = shell.match(/\.toast-card\s*\{([\s\S]*?)\}/)?.[1] ?? '';
     const backgroundToken = toast.match(/background:\s*var\((--[\w-]+)\)/)?.[1] ?? '';
     const foregroundToken = toast.match(/color:\s*var\((--[\w-]+)\)/)?.[1] ?? '';

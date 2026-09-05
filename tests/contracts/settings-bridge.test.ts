@@ -12,6 +12,7 @@ const preferences = {
   cacheMaxBytes: 4_294_967_296,
   prefetchPages: 2,
   coverConcurrency: 4,
+  startupRoute: 'home' as const,
   upscaleBackend: 'off' as const,
   upscaleModel: '',
   customCss: '',
@@ -61,6 +62,19 @@ describe('native settings bridge', () => {
     await expect(repository.save({ ...preferences, prefetchPages: 11 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, coverConcurrency: 0 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, upscaleBackend: 'gpu' as never })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, startupRoute: 'reader' as never })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('fills in the startup page a native build predating it does not send', async () => {
+    // Same contract as every other added field: a snapshot from an older build
+    // must not fail validation and drop the user back to defaults wholesale.
+    const { startupRoute: _added, ...older } = preferences;
+    setInvokeAdapterForTests(async () => ({ ok: true, value: older }));
+
+    await expect(new NativeSettingsRepository().load()).resolves.toEqual({
+      ok: true,
+      value: { ...older, startupRoute: 'home' },
+    });
   });
 
   it('drops a stale accent colour instead of failing the whole snapshot', async () => {

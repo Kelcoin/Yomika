@@ -12,6 +12,7 @@ const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
 const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
+const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
 pub const GIB_BYTES: u64 = 1_073_741_824;
@@ -63,6 +64,9 @@ pub struct PreferenceSnapshot {
     /// Concurrent cover requests; LANraragi queues thumbnail extraction.
     #[serde(default = "default_cover_concurrency")]
     pub cover_concurrency: u8,
+    /// Which page the app opens at launch: "home" or "library".
+    #[serde(default = "default_startup_route")]
+    pub startup_route: String,
     #[serde(default = "default_upscale_backend")]
     pub upscale_backend: String,
     #[serde(default)]
@@ -77,6 +81,7 @@ pub struct PreferenceSnapshot {
 
 fn default_prefetch_pages() -> u8 { 1 }
 fn default_cover_concurrency() -> u8 { 4 }
+fn default_startup_route() -> String { "home".to_string() }
 fn default_upscale_backend() -> String { "off".to_string() }
 
 impl Default for PreferenceSnapshot {
@@ -88,6 +93,7 @@ impl Default for PreferenceSnapshot {
             cache_max_bytes: 2_147_483_648,
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
+            startup_route: default_startup_route(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
             custom_css: String::new(),
@@ -110,6 +116,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || value.cache_max_bytes % GIB_BYTES != 0
         || value.prefetch_pages > MAX_PREFETCH_PAGES
         || !(1..=8).contains(&value.cover_concurrency)
+        || !matches!(value.startup_route.as_str(), "home" | "library")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
@@ -148,6 +155,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         cache_max_bytes: load_value(connection, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
         prefetch_pages: load_value(connection, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: load_value(connection, COVER_CONCURRENCY_KEY, defaults.cover_concurrency)?,
+        startup_route: load_value(connection, STARTUP_ROUTE_KEY, defaults.startup_route)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
@@ -169,6 +177,7 @@ pub fn save_preferences_to(
         (CACHE_MAX_BYTES_KEY, serde_json::to_string(&value.cache_max_bytes)),
         (PREFETCH_PAGES_KEY, serde_json::to_string(&value.prefetch_pages)),
         (COVER_CONCURRENCY_KEY, serde_json::to_string(&value.cover_concurrency)),
+        (STARTUP_ROUTE_KEY, serde_json::to_string(&value.startup_route)),
         (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
         (UPSCALE_MODEL_KEY, serde_json::to_string(&value.upscale_model)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
@@ -326,6 +335,7 @@ mod tests {
             cache_max_bytes: 4_294_967_296,
             prefetch_pages: 3,
             cover_concurrency: 6,
+            startup_route: "library".into(),
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
@@ -372,6 +382,9 @@ mod tests {
         }).is_err());
         assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
             upscale_backend: "gpu".into(), ..PreferenceSnapshot::default()
+        }).is_err());
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            startup_route: "reader".into(), ..PreferenceSnapshot::default()
         }).is_err());
 
         let invalid_theme = PreferenceSnapshot {

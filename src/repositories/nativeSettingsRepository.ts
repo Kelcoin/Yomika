@@ -15,6 +15,9 @@ export const PreferenceSnapshotSchema = z.object({
   // failing the whole snapshot.
   prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).default(1),
   coverConcurrency: z.number().int().min(1).max(8).default(4),
+  /** Which page opens at launch. Someone who lives in the library should not
+   * have to step through the home page every time. */
+  startupRoute: z.enum(['home', 'library']).default('home'),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
   /** Free-form CSS appended after the design tokens. This is the whole
@@ -44,6 +47,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   cacheMaxBytes: 2_147_483_648,
   prefetchPages: 1,
   coverConcurrency: 4,
+  startupRoute: 'home',
   upscaleBackend: 'off',
   upscaleModel: '',
   customCss: '',

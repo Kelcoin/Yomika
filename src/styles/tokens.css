@@ -4,123 +4,158 @@
  * Light values are the :root default; dark blocks below only override
  * tokens whose value actually changes. Never hard-code a color, shadow,
  * duration, or z-index in component styles — extend this file instead.
+ *
+ * The whole file sits in a cascade layer, and that is load-bearing: user CSS
+ * (the custom-CSS box and its presets) is injected unlayered, and unlayered
+ * rules beat every layered rule no matter their specificity. Without the layer,
+ * a preset's `:root { --brand-vermilion: … }` (0,1,0) loses to
+ * `:root[data-theme='dark']` (0,1,1) and to `:root:not([data-theme])` (0,2,0)
+ * below, so presets did nothing unless the theme happened to be explicit light.
+ * Do not unwrap this, and do not put app styles in the layer — they are meant
+ * to outrank tokens and to lose to the user.
  */
 
-:root {
-  color-scheme: light;
+@layer tokens {
+  :root {
+    color-scheme: light;
 
-  /* Surfaces */
-  --surface-canvas: #f6f4f8;
-  --surface-panel: #fffdff;
-  --surface-elevated: #ffffff;
-  --surface-overlay: rgb(30 27 36 / 0.84);
+    /* Surfaces */
+    --surface-canvas: #f6f4f8;
+    --surface-panel: #fffdff;
+    --surface-elevated: #ffffff;
+    --surface-overlay: rgb(30 27 36 / 0.84);
 
-  /* Ink. Both secondary tiers clear 4.5:1 against --surface-panel: the previous
-     --ink-faint sat at 2.8:1, which is what made tags, dates and page counts
-     hard to read rather than merely quiet. */
-  --ink-primary: #1e1b24;
-  --ink-secondary: #5a5464;
-  --ink-faint: #6f6a7b;
-  --ink-on-brand: #ffffff;
-  --ink-on-overlay: #ffffff;
+    /* Ink. Both secondary tiers clear 4.5:1 against --surface-panel: the previous
+       --ink-faint sat at 2.8:1, which is what made tags, dates and page counts
+       hard to read rather than merely quiet. */
+    --ink-primary: #1e1b24;
+    --ink-secondary: #5a5464;
+    --ink-faint: #6f6a7b;
+    --ink-on-brand: #ffffff;
+    --ink-on-overlay: #ffffff;
 
-  /* Brand (hanko identity: ink / vermilion / paper) */
-  --brand-ink: #171717;
-  --brand-vermilion: #b63a2e;
-  --brand-paper: #f3eee4;
-  --brand-violet: #665b57;
-  --brand-cyan: #8c817b;
+    /* Brand (hanko identity: ink / vermilion / paper) */
+    --brand-ink: #171717;
+    --brand-vermilion: #b63a2e;
+    --brand-paper: #f3eee4;
+    --brand-violet: #665b57;
+    --brand-cyan: #8c817b;
 
-  /* State */
-  --state-success: #3c9d77;
-  --state-warning: #c67a33;
-  --state-danger: #c64b67;
+    /* State */
+    --state-success: #3c9d77;
+    --state-warning: #c67a33;
+    --state-danger: #c64b67;
 
-  /* Archive category accents */
-  --category-manga: #fcb417;
-  --category-doujinshi: #fc4e4e;
-  --category-game-cg: #05bf0b;
-  --category-image-set: #5050d7;
-  --category-default: #9e9e9e;
+    /* Archive category accents */
+    --category-manga: #fcb417;
+    --category-doujinshi: #fc4e4e;
+    --category-game-cg: #05bf0b;
+    --category-image-set: #5050d7;
+    --category-default: #9e9e9e;
 
-  /* Lines, focus, selection */
-  --hairline: rgb(30 27 36 / 0.1);
-  --focus-ring: var(--brand-vermilion);
-  --selection-background: color-mix(in srgb, var(--brand-vermilion) 24%, transparent);
-  --selection-ink: var(--ink-primary);
+    /* Lines, focus, selection */
+    --hairline: rgb(30 27 36 / 0.1);
+    --focus-ring: var(--brand-vermilion);
+    --selection-background: color-mix(in srgb, var(--brand-vermilion) 24%, transparent);
+    --selection-ink: var(--ink-primary);
 
-  /* Reader chrome is theme-independent black */
-  --reader-canvas: #050506;
-  --reader-ink: #f4f1f8;
-  --reader-muted: #aaa5b1;
-  --reader-chrome: rgb(5 5 7 / 0.82);
+    /* Reader chrome is theme-independent black */
+    --reader-canvas: #050506;
+    --reader-ink: #f4f1f8;
+    --reader-muted: #aaa5b1;
+    --reader-chrome: rgb(5 5 7 / 0.82);
 
-  /* Elevation: low, diffuse, never harsh */
-  --shadow-menu: 0 12px 30px rgb(30 27 36 / 0.18);
-  --shadow-overlay: 0 24px 80px rgb(30 27 36 / 0.28);
-  --shadow-tooltip: 0 8px 24px rgb(30 27 36 / 0.16);
+    /* Elevation: low, diffuse, never harsh */
+    --shadow-menu: 0 12px 30px rgb(30 27 36 / 0.18);
+    --shadow-overlay: 0 24px 80px rgb(30 27 36 / 0.28);
+    --shadow-tooltip: 0 8px 24px rgb(30 27 36 / 0.16);
 
-  /* Controls */
-  --control-background: var(--surface-elevated);
-  --control-background-hover: var(--brand-paper);
-  --control-border: var(--hairline);
-  --control-text: var(--ink-primary);
-  --control-placeholder: var(--ink-faint);
-  --control-height: 44px;
-  --icon-button-size: 44px;
-  --control-selected-background: var(--brand-ink);
-  --control-selected-text: var(--ink-on-brand);
+    /* Controls */
+    --control-background: var(--surface-elevated);
+    --control-background-hover: var(--brand-paper);
+    --control-border: var(--hairline);
+    --control-text: var(--ink-primary);
+    --control-placeholder: var(--ink-faint);
+    --control-height: 44px;
+    --icon-button-size: 44px;
+    --control-selected-background: var(--brand-ink);
+    --control-selected-text: var(--ink-on-brand);
 
-  /* Typography */
-  --font-body: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-utility: ui-monospace, "Cascadia Code", monospace;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 20px;
-  --text-title: 32px;
-  --text-page-title: 40px;
+    /* Typography */
+    --font-body: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
+    --font-display: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
+    --font-utility: ui-monospace, "Cascadia Code", monospace;
+    --text-xs: 11px;
+    --text-sm: 13px;
+    --text-md: 14px;
+    --text-lg: 20px;
+    --text-title: 32px;
+    --text-page-title: 40px;
 
-  /* Spacing (4px base) */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --space-10: 40px;
-  --space-12: 48px;
+    /* Spacing (4px base) */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+    --space-12: 48px;
 
-  /* Radius scale */
-  --radius-control: 8px;
-  --radius-card: 16px;
-  --radius-overlay: 24px;
-  --radius-pill: 999px;
+    /* Radius scale */
+    --radius-control: 8px;
+    --radius-card: 16px;
+    --radius-overlay: 24px;
+    --radius-pill: 999px;
 
-  /* Motion: spring-like curve only; never linear / ease-in-out */
-  --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
-  --motion-fast: 140ms var(--ease-standard);
-  --motion-standard: 220ms var(--ease-standard);
-  --motion-slow: 480ms var(--ease-standard);
+    /* Motion: spring-like curve only; never linear / ease-in-out */
+    --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
+    --motion-fast: 140ms var(--ease-standard);
+    --motion-standard: 220ms var(--ease-standard);
+    --motion-slow: 480ms var(--ease-standard);
 
-  /* Systemic z-index layers — arbitrary values are banned */
-  --z-sticky: 10;
-  --z-compact-nav: 20;
-  --z-menu: 30;
-  --z-tooltip: 40;
-  --z-overlay: 50;
-  --z-modal: 51;
-  --z-skip-link: 60;
-}
+    /* Systemic z-index layers — arbitrary values are banned */
+    --z-sticky: 10;
+    --z-compact-nav: 20;
+    --z-menu: 30;
+    --z-tooltip: 40;
+    --z-overlay: 50;
+    --z-modal: 51;
+    --z-skip-link: 60;
+  }
 
-:root[data-theme='light'] {
-  color-scheme: light;
-}
+  :root[data-theme='light'] {
+    color-scheme: light;
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      color-scheme: dark;
+      --surface-canvas: #0b0b0f;
+      --surface-panel: #15151c;
+      --surface-elevated: #1c1c25;
+      --surface-overlay: rgb(5 5 6 / 0.88);
+      --ink-primary: #f4f1f8;
+      --ink-secondary: #b4adc0;
+      --ink-faint: #948da2;
+      --ink-on-brand: #0b0b0f;
+      --brand-ink: #f4f1f8;
+      --brand-vermilion: #e36a5c;
+      --brand-paper: #272229;
+      --brand-violet: #a99b95;
+      --brand-cyan: #b8aaa2;
+      --state-success: #66d0a5;
+      --state-warning: #f1b36c;
+      --state-danger: #f17b91;
+      --hairline: rgb(244 241 248 / 0.12);
+      --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
+      --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
+      --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
+    }
+  }
+
+  :root[data-theme='dark'] {
     color-scheme: dark;
     --surface-canvas: #0b0b0f;
     --surface-panel: #15151c;
@@ -143,28 +178,4 @@
     --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
     --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
   }
-}
-
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --surface-canvas: #0b0b0f;
-  --surface-panel: #15151c;
-  --surface-elevated: #1c1c25;
-  --surface-overlay: rgb(5 5 6 / 0.88);
-  --ink-primary: #f4f1f8;
-  --ink-secondary: #b4adc0;
-  --ink-faint: #948da2;
-  --ink-on-brand: #0b0b0f;
-  --brand-ink: #f4f1f8;
-  --brand-vermilion: #e36a5c;
-  --brand-paper: #272229;
-  --brand-violet: #a99b95;
-  --brand-cyan: #b8aaa2;
-  --state-success: #66d0a5;
-  --state-warning: #f1b36c;
-  --state-danger: #f17b91;
-  --hairline: rgb(244 241 248 / 0.12);
-  --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
-  --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
-  --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
 }

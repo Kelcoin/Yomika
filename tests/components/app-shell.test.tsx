@@ -160,6 +160,38 @@ describe('application shell', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('opens the page named by the startup preference, and only at launch', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, startupRoute: 'library' } };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+
+    renderAt();
+
+    // Awaited rather than asserted in place: the library route swaps its loading
+    // heading for the workspace's own, so the first node found gets replaced.
+    await screen.findByRole('heading', { name: '档案库' });
+    // Going home afterwards is the user's own navigation and must stay there.
+    await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('link', { name: '首页' }));
+    await screen.findByRole('heading', { name: '添加你的 LANraragi' });
+    expect(screen.queryByRole('heading', { name: '档案库' })).not.toBeInTheDocument();
+  });
+
+  it('stays on home when that is the startup preference', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, startupRoute: 'home' } };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+
+    renderAt();
+
+    expect(await screen.findByRole('heading', { name: '添加你的 LANraragi' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '档案库' })).not.toBeInTheDocument();
+  });
+
   it('announces connection, sync, task, and cache status', () => {
     renderAt();
 

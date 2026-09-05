@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { RefreshCw, Upload, CopyCheck, Eraser } from 'lucide-react';
+import { ArrowLeft, ChevronRight, RefreshCw, Upload, CopyCheck, Eraser } from 'lucide-react';
 import { SelectField } from './SelectField';
 import { EhRouteWorkspace } from './EhRouteWorkspace';
 import { useToast } from './Toast';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -29,6 +30,9 @@ const legacyRepository = new NativeLegacyRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
+/** The same file the window icon and the sidebar brand use, so the About page
+ * cannot show a stand-in that drifts from the real mark. */
+const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 /** Vite inlines this at build time from package.json, so the About page cannot
  * drift from the shipped version the way a hand-written string would. */
 const APP_VERSION = __APP_VERSION__;
@@ -60,7 +64,13 @@ function modelOption(model: InstalledModel): { value: string; label: string } {
 ] as const;
 
 /** Sections whose content lives inside the single preferences form. */
-const PREFERENCE_SECTIONS = ['settings-reading', 'settings-appearance', 'settings-advanced'] as const;
+const PREFERENCE_SECTIONS = ['settings-general', 'settings-reading', 'settings-appearance', 'settings-advanced'] as const;
+
+/** The sections no longer print their own title, so the accessible name for a
+ * panel comes from the same list the sidebar is built from. */
+function sectionLabel(id: string): string {
+  return settingsSections.find((section) => section.id === id)?.label ?? '设置';
+}
 
 export function SettingsWorkspace() {
   const location = useLocation();
@@ -82,6 +92,13 @@ export function SettingsWorkspace() {
   const [loadRetryable, setLoadRetryable] = useState(false);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
   const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-general');
+  /** In the compact layout the sections are a list that drills into one section
+   * at a time, so a phone shows either the list or one section — never a strip
+   * of eight tabs above squeezed content. Ignored in the wide layout. */
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const [compactDrilled, setCompactDrilled] = useState(false);
+  const showSectionList = !compact || !compactDrilled;
+  const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
@@ -107,6 +124,8 @@ export function SettingsWorkspace() {
     const requested = new URLSearchParams(location.search).get('section');
     if (requested && settingsSections.some((section) => section.id === `settings-${requested}`)) {
       setSelectedSettingsSection(`settings-${requested}` as (typeof settingsSections)[number]['id']);
+      // A link that names a section means to show it, not to land on the list.
+      setCompactDrilled(true);
     }
   }, [location.search]);
 
@@ -285,36 +304,53 @@ export function SettingsWorkspace() {
       <header className="workspace-heading">
         <h1>设置</h1>
       </header>
-      <div className="settings-layout">
+      <div className={`settings-layout${compact ? ' is-compact' : ''}`}>
+        {showSectionList && (
         <aside className="settings-sidebar" aria-label="设置分类">
           <nav className="settings-nav">
-            {settingsSections.map((section, index) => (
+            {settingsSections.map((section) => (
               <a
-                className={selectedSettingsSection === section.id ? 'is-active' : undefined}
+                className={!compact && selectedSettingsSection === section.id ? 'is-active' : undefined}
                 href={`#${section.id}`}
                 key={section.id}
-                aria-current={selectedSettingsSection === section.id ? 'page' : undefined}
-                onClick={(event) => { event.preventDefault(); setSelectedSettingsSection(section.id); }}
+                aria-current={!compact && selectedSettingsSection === section.id ? 'page' : undefined}
+                onClick={(event) => { event.preventDefault(); setSelectedSettingsSection(section.id); setCompactDrilled(true); }}
               >
-                <span className="settings-nav-index">{String(index + 1).padStart(2, '0')}</span>
                 <span>{section.label}</span>
+                {compact && <ChevronRight aria-hidden="true" />}
               </a>
             ))}
           </nav>
         </aside>
+        )}
+        {showSectionContent && (
         <div className="settings-content">
+      {compact && (
+        <header className="settings-compact-heading">
+          <button className="reader-icon-button" type="button" aria-label="返回设置分类" onClick={() => setCompactDrilled(false)}>
+            <ArrowLeft aria-hidden="true" />
+          </button>
+          <h2>{sectionLabel(selectedSettingsSection)}</h2>
+        </header>
+      )}
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
-      <section className="preferences-panel" id={selectedSettingsSection} aria-labelledby="preferences-title">
-        <div className="preferences-panel-heading">
-          <h2 id="preferences-title">{selectedSettingsSection === 'settings-reading' ? '阅读' : selectedSettingsSection === 'settings-appearance' ? '样式' : '高级'}</h2>
-          {/* Autosave has to say so, or a change looks unsaved. */}
-          <span className="preferences-autosave" role="status">
-            {preferencePending ? '正在保存…' : preferenceSavedAt ? '更改已自动保存' : '更改会自动保存'}
-          </span>
-        </div>
+      <section className="preferences-panel" id={selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
+        {/* No section title here: the sidebar already names the section, and one
+            visible section at a time meant the heading only reserved a column of
+            empty space beside every control. */}
+        <span className="preferences-autosave" role="status">
+          {preferencePending ? '正在保存…' : preferenceSavedAt ? '更改已自动保存' : '更改会自动保存'}
+        </span>
         {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
           <div className="preferences-form">
-            {selectedSettingsSection === 'settings-appearance' && <fieldset>
+            {selectedSettingsSection === 'settings-general' && <fieldset>
+              <legend>启动时打开</legend>
+              <SelectField name="startupRoute" aria-label="启动时打开" value={preferenceDraft.startupRoute} options={[{ value: 'home', label: '首页' }, { value: 'library', label: '档案库' }]} onChange={(value) => editPreferences({ startupRoute: value as PreferenceSnapshot['startupRoute'] })} />
+              <PreferenceRadioFallback name="startupRoute" value={preferenceDraft.startupRoute} options={[['home', '首页'], ['library', '档案库']]} onChange={(value) => editPreferences({ startupRoute: value as PreferenceSnapshot['startupRoute'] })} />
+            </fieldset>}
+            {/* Theme belongs with the app-wide basics. 样式 is the custom-CSS
+                surface, and 通用 used to hold nothing but the server list. */}
+            {selectedSettingsSection === 'settings-general' && <fieldset>
               <legend>主题</legend>
               <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
               <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
@@ -426,9 +462,11 @@ export function SettingsWorkspace() {
                 onChange={(event) => editPreferences({ cacheMaxBytes: Number(event.target.value) * GIB })}
               />
             </label>}
-            {selectedSettingsSection === 'settings-advanced' && <section className="cache-settings" aria-labelledby="cache-settings-title">
+            {selectedSettingsSection === 'settings-advanced' && <section className="cache-settings" aria-label="图片缓存">
+              {/* Clearing sits immediately left of the number it changes, and in
+                  that order on purpose: the button is anchored to the start of
+                  the row, so a smaller total after clearing cannot shift it. */}
               <div className="cache-settings-heading">
-                {/* Clearing sits next to the number it changes. */}
                 <button
                   className="icon-button cache-clear-button"
                   type="button"
@@ -440,7 +478,6 @@ export function SettingsWorkspace() {
                 >
                   <Eraser aria-hidden="true" />
                 </button>
-                <span id="cache-settings-title">图片缓存</span>
                 <strong>{cacheStats ? formatCacheBytes(cacheStats.bytes) : '正在统计…'}</strong>
               </div>
               {cacheStats && cacheStats.bytes > 0 && (
@@ -503,7 +540,9 @@ export function SettingsWorkspace() {
       )}
       {selectedSettingsSection === 'settings-general' && (
       <>
-      <section className="settings-section" id="settings-server" aria-labelledby="servers-title">
+      {/* A row, not a two-column grid: the add button sits opposite the copy and
+          is centred against it instead of clinging to the first line. */}
+      <section className="settings-section settings-section-row" id="settings-server" aria-labelledby="servers-title">
         <div>
           <h2 id="servers-title">服务器</h2>
           <p>LANraragi 连接信息保存在本机，凭据进入系统安全存储。若凭据失效，使用同一地址再次保存即可更新 API Key。</p>
@@ -549,18 +588,18 @@ export function SettingsWorkspace() {
       {selectedSettingsSection === 'settings-eh' && (
       /* The sidebar no longer carries an E-Hentai entry; the account form and the
          browse workspace live here. */
-      <section className="settings-section" id="settings-eh" aria-labelledby="eh-settings-title">
-        <div>
-          <h2 id="eh-settings-title">E-Hentai</h2>
-        </div>
+      <section className="settings-section" id="settings-eh" aria-label="E-Hentai">
         <div className="settings-eh-content"><EhRouteWorkspace /></div>
       </section>
       )}
       {selectedSettingsSection === 'settings-about' && (
-      <section className="settings-section" id="settings-about" aria-labelledby="about-title">
+      <section className="settings-section settings-about" id="settings-about" aria-labelledby="about-title">
         <div className="about-hero">
-          <span className="about-mark" aria-hidden="true">読</span>
-          <div>
+          {/* The actual app mark, the same file the window icon and the sidebar
+              use — the page used to draw a 読 glyph on a vermilion square, which
+              is not the project's logo. */}
+          <img className="about-mark" src={markUrl} alt="" width="72" height="72" />
+          <div className="about-hero-copy">
             <h2 id="about-title">Yomika</h2>
             <p>LANraragi 的桌面客户端。列表与搜索交给服务器，封面与阅读进度留在本机。</p>
           </div>
@@ -579,11 +618,7 @@ export function SettingsWorkspace() {
       </section>
       )}
       {selectedSettingsSection === 'settings-tools' && (
-      <section className="settings-section" id="settings-tools" aria-labelledby="tools-title">
-        <div>
-          <h2 id="tools-title">工具</h2>
-          <p>每个工具都是独立页面，有自己的滚动区域与状态。</p>
-        </div>
+      <section className="settings-section" id="settings-tools" aria-label="工具">
         {/* Cards, not two bare buttons: each one says what it does before you
             spend a navigation finding out. */}
         <div className="settings-tools-links">
@@ -606,6 +641,7 @@ export function SettingsWorkspace() {
       </section>
       )}
         </div>
+        )}
       </div>
     </div>
   );

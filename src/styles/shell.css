@@ -446,8 +446,7 @@ body::-webkit-scrollbar,
 }
 
 .settings-nav a {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  display: flex;
   align-items: center;
   gap: var(--space-2);
   min-height: 40px;
@@ -471,8 +470,7 @@ body::-webkit-scrollbar,
 }
 
 .settings-nav button {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -490,13 +488,6 @@ body::-webkit-scrollbar,
 }
 .settings-nav button:hover { background: var(--surface-elevated); color: var(--ink-primary); }
 .settings-nav button.is-active { border-left-color: var(--brand-vermilion); background: color-mix(in srgb, var(--brand-paper) 60%, transparent); color: var(--brand-ink); }
-
-.settings-nav-index {
-  color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
 
 .settings-content {
   min-width: 0;
@@ -548,26 +539,35 @@ body::-webkit-scrollbar,
   border-bottom: 1px solid var(--hairline);
 }
 
-/* Every settings section shares one shape: a fixed label column and content that
-   fills what is left. They used to disagree — different label widths, and a
-   680px cap on the content — so the sync page ended up a narrow strip with a
-   third of the window empty beside it. */
+/* One column, full width. This used to reserve a 240px label column for the
+   section title, which the sidebar already shows: it left a blank strip beside
+   every control, and any section whose content was its own first child — sync,
+   about — was laid out *inside* that strip at a fraction of the window width. */
 .settings-section,
 .preferences-panel {
   display: grid;
-  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
-  align-items: start;
-  gap: clamp(var(--space-6), 4vw, var(--space-10));
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: var(--space-5);
   min-width: 0;
   padding: var(--space-8) 0;
   border-top: 1px solid var(--hairline);
 }
 
-.settings-section > :last-child,
+/* The 服务器 header: copy on the left, the add action opposite it and centred
+   against the whole block instead of pinned to its first line. */
+.settings-section-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.settings-section > *,
 .preferences-form {
-  width: 100%;
   min-width: 0;
-  justify-self: stretch;
+  max-width: 100%;
 }
 
 .settings-section > .primary-action,
@@ -623,20 +623,11 @@ body::-webkit-scrollbar,
   padding-top: var(--space-5);
 }
 
-.preferences-panel-heading {
-  display: grid;
-  align-content: start;
-  gap: var(--space-2);
-}
-
-.preferences-panel h2 {
-  margin: 0;
-  font-size: 20px;
-}
-
-/* Autosave has to be visible, or the missing save button reads as a bug. */
+/* Autosave has to be visible, or the missing save button reads as a bug. It sits
+   at the end of the row where a heading used to be. */
 .preferences-autosave {
-  color: var(--ink-secondary);
+  justify-self: end;
+  color: var(--ink-faint);
   font-size: 12px;
 }
 
@@ -654,29 +645,29 @@ body::-webkit-scrollbar,
   border-top: 1px solid var(--hairline);
 }
 
-.cache-settings-heading,
-.cache-breakdown {
+/* The clear button is the first item in a start-aligned row, so the total that
+   follows it can shrink after a clear without moving the button. */
+.cache-settings-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: var(--space-3);
   flex-wrap: wrap;
 }
 
-.cache-settings-heading > span {
+.cache-breakdown {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  flex-wrap: wrap;
   color: var(--ink-secondary);
   font-size: 13px;
-  font-weight: 650;
 }
 
 .cache-settings-heading strong {
   font-size: 18px;
-}
-
-.cache-breakdown {
-  justify-content: flex-start;
-  color: var(--ink-secondary);
-  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 
 .preferences-form fieldset {
@@ -2745,7 +2736,11 @@ body::-webkit-scrollbar,
   display: none;
 }
 
-@media (max-width: 767px) {
+/* Compact layout. 900px, not a phone width: the wide shell needs 248px of
+   sidebar plus two library panes, so between 768px and 900px the content used to
+   be squeezed narrower than this layout makes it. Keep in step with
+   COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and with reader.css. */
+@media (max-width: 900px) {
   .workspace.is-library-workspace {
     overflow-x: hidden;
     overflow-y: auto;
@@ -2821,31 +2816,57 @@ body::-webkit-scrollbar,
 
   .settings-sidebar {
     position: static;
-    margin-bottom: var(--space-4);
+    margin-bottom: 0;
     padding: 0;
-    overflow-x: auto;
   }
 
   .settings-sidebar-title {
     display: none;
   }
 
+  /* A list that drills into one section, not a scrolling strip of eight tabs
+     above squeezed content. */
   .settings-nav {
-    display: flex;
-    gap: 6px;
-    min-width: max-content;
-    padding-bottom: var(--space-2);
-    border-bottom: 1px solid var(--hairline);
+    display: grid;
+    gap: 0;
+    border-top: 1px solid var(--hairline);
   }
 
   .settings-nav a {
-    display: inline-flex;
-    min-height: 40px;
-    padding: 0 var(--space-3);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-control);
-    background: var(--surface-panel);
+    min-height: 52px;
+    padding: 0 var(--space-2);
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    border-radius: 0;
+    color: var(--ink-primary);
+    font-size: 15px;
   }
+
+  .settings-nav a svg {
+    width: 18px;
+    height: 18px;
+    margin-left: auto;
+    color: var(--ink-faint);
+  }
+
+  .settings-nav a.is-active {
+    background: transparent;
+  }
+
+  /* The section's own title, since the sidebar that named it is off screen. */
+  .settings-compact-heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+
+  .settings-compact-heading h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 680;
+  }
+
   .settings-nav button {
     display: inline-flex;
     min-height: 40px;
@@ -2866,8 +2887,28 @@ body::-webkit-scrollbar,
   .preferences-panel {
     grid-template-columns: 1fr;
     align-items: start;
-    gap: var(--space-6);
+    gap: var(--space-5);
     padding: var(--space-6) 0;
+  }
+
+  /* The 服务器 row: the add action goes under the copy rather than beside it. */
+  .settings-section-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .about-hero {
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+
+  .about-mark { width: 56px; height: 56px; border-radius: 14px; }
+  .about-hero h2 { font-size: 20px; }
+  .about-version { grid-column: 2; justify-self: start; }
+
+  .settings-about-list > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 
   .first-run-copy {
@@ -3080,29 +3121,65 @@ body::-webkit-scrollbar,
    rows of a definition list. */
 .about-hero {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) auto;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-4);
   padding-bottom: var(--space-5);
   border-bottom: 1px solid var(--hairline);
 }
 
+/* The mark is artwork with its own rounded-square ground, so it is shown as-is
+   rather than set as a glyph on a coloured tile. */
 .about-mark {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: var(--radius-card);
-  background: var(--brand-vermilion);
-  color: var(--ink-on-brand);
-  font-size: 28px;
-  font-weight: 700;
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  box-shadow: var(--shadow-tooltip);
 }
 
-.about-hero h2 { margin: 0 0 4px; }
+.about-hero-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.about-hero h2 { margin: 0; font-size: 24px; font-weight: 700; }
+
+/* Rows the same shape as the rest of the page: a quiet label, a secondary-ink
+   value. Unstyled, this list inherited the browser's dd indent and printed
+   every value in primary ink beside secondary-ink copy, which is what made the
+   page look like three different pages. */
+.settings-about-list {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.settings-about-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 132px) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+.settings-about-list dt {
+  color: var(--ink-faint);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settings-about-list dd {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.settings-about-list code {
+  font-family: var(--font-utility);
+  font-size: 12px;
+}
 
 .about-version {
-  align-self: start;
   padding: 3px 9px;
   border: 1px solid color-mix(in srgb, var(--ink-secondary) 24%, transparent);
   border-radius: var(--radius-pill);

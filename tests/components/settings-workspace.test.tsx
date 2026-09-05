@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -107,7 +108,7 @@ describe('settings workspace', () => {
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -116,7 +117,9 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings('appearance');
+    // The theme sits in 通用 with the other app-wide basics; 样式 is the
+    // custom-CSS surface.
+    renderSettings('general');
 
     expect(await screen.findByRole('radio', { name: '深色' })).toBeChecked();
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
@@ -136,7 +139,7 @@ describe('settings workspace', () => {
   });
 
   it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -156,8 +159,7 @@ describe('settings workspace', () => {
   });
 
   it('themes through custom CSS instead of a separate accent preference', async () => {
-    const user = userEvent.setup();
-    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -167,7 +169,7 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
 
     renderSettings('appearance');
-    await screen.findByRole('radio', { name: '浅色' });
+    await screen.findByLabelText('自定义 CSS');
 
     // The accent picker is gone: it set --brand-vermilion as an inline style on
     // the root, which outranked the same variable in a preset's :root block —
@@ -183,7 +185,7 @@ describe('settings workspace', () => {
 
   it('exposes reader preload, cover concurrency, and upscale settings', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -323,9 +325,9 @@ describe('settings workspace', () => {
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
     expect(await screen.findByText('已导入 3 项偏好设置')).toBeInTheDocument();
-    // The imported snapshot lands across sections: theme in 样式, reader
+    // The imported snapshot lands across sections: theme in 通用, reader
     // defaults in 阅读.
-    await user.click(screen.getByRole('link', { name: /样式/ }));
+    await user.click(screen.getByRole('link', { name: /通用/ }));
     expect(screen.getByRole('radio', { name: '浅色' })).toBeChecked();
     await user.click(screen.getByRole('link', { name: /阅读/ }));
     expect(screen.getByRole('radio', { name: '条漫' })).toBeChecked();
@@ -368,13 +370,55 @@ describe('settings workspace', () => {
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('旧配置无有效普通偏好');
-    await user.click(screen.getByRole('link', { name: /样式/ }));
+    await user.click(screen.getByRole('link', { name: /通用/ }));
     expect(screen.getByRole('radio', { name: '深色' })).toBeChecked();
+  });
+
+  it('drills into one section at a time in the compact layout', async () => {
+    const user = userEvent.setup();
+    // jsdom never matches a width query, so the compact layout has to be asked
+    // for explicitly. Everything else (the theme's prefers-color-scheme probe)
+    // keeps reporting no match.
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === COMPACT_WIDTH_QUERY,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      setInvokeAdapterForTests(async (command) => {
+        if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+        if (command === 'list_servers') return { ok: true, value: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      renderSettings();
+
+      // The list first: no section content, and every section reachable.
+      expect(await screen.findByRole('link', { name: /关于/ })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole('link', { name: /通用/ }));
+      expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '服务器' })).toBeInTheDocument();
+      // One section at a time: the list is gone rather than sitting above it.
+      expect(screen.queryByRole('link', { name: /关于/ })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: '返回设置分类' }));
+      expect(await screen.findByRole('link', { name: /关于/ })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
+    } finally {
+      window.matchMedia = original;
+    }
   });
 
   it('applies a preset theme as soon as it is picked', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };
