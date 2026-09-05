@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { EhWorkspace } from './EhWorkspace';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { presentEhError, type EhSearchResult } from '../services/ehClient';
+import { presentEhError, presentEhLoginError, type EhSearchResult } from '../services/ehClient';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
 const ehRepository = new NativeEhRepository();
@@ -85,12 +85,19 @@ export function EhRouteWorkspace() {
         setSavingAccount(false);
         if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
         setAccounts((current) => [...current.filter((account) => account.id !== result.value.id), result.value]);
+        // Verify immediately. A freshly saved account sitting at 未验证 says
+        // nothing about whether the credentials work, which is the only thing
+        // the user wants to know after signing in.
+        const health = await ehRepository.checkLoginHealth(result.value.id);
+        setAccounts((current) => current.map((account) => account.id === result.value.id
+          ? { ...account, status: health.ok && health.value.loggedIn ? 'verified' : 'error' }
+          : account));
       }}
       onPasswordLogin={async (username: string, password: string) => {
         setSavingAccount(true);
         const result = await ehRepository.loginWithPassword(username, password);
         setSavingAccount(false);
-        if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
+        if (!result.ok) throw new Error(presentEhLoginError(result.error.code, result.error.message));
         return result.value;
       }}
     />

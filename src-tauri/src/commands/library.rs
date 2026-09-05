@@ -3616,6 +3616,96 @@ fn mark_task_failed(database: &Database, task_id: &str, message: &str) {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DownloadUrlWire {
+    #[serde(default)]
+    job: i64,
+    #[serde(default)]
+    success: i64,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadUrlResult {
+    /// The Minion job LANraragi queued. Shown so the download can be followed on
+    /// the server, which is where the work actually happens.
+    pub job: i64,
+    pub url: String,
+}
+
+/// Hands a URL to LANraragi's own downloader.
+///
+/// The server resolves which downloader plugin applies, so the client does not
+/// have to fetch the plugin list and match URLs against each plugin's regex the
+/// way a browser client must.
+#[tauri::command]
+pub async fn download_url(
+    server_id: String,
+    url: String,
+    category_id: Option<String>,
+    database: State<'_, Database>,
+) -> Result<CommandResult<DownloadUrlResult>, String> {
+    let target = match Url::parse(url.trim()) {
+        Ok(value) if matches!(value.scheme(), "http" | "https") => value,
+        _ => return Ok(CommandResult::failure("INVALID_RESPONSE", "只支持 http/https 链接", false)),
+    };
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| server_connection(&connection, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let mut request_url = match Url::parse(&format!("{}/api/download_url", base_url.trim_end_matches('/'))) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+    };
+    {
+        let mut pairs = request_url.query_pairs_mut();
+        pairs.append_pair("url", target.as_str());
+        if let Some(category) = category_id.as_deref().filter(|value| !value.is_empty()) {
+            pairs.append_pair("catid", category);
+        }
+    }
+    let response = match reader_request(reqwest::Method::POST, request_url.to_string(), api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    let status = response.status();
+    let wire: DownloadUrlWire = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                if status.is_success() { "INVALID_RESPONSE" } else { "REMOTE_UNAVAILABLE" },
+                error.to_string(),
+                !status.is_success() && status.is_server_error(),
+            ))
+        }
+    };
+    // LANraragi answers 400 with the same envelope, and its `error` says why the
+    // URL was refused — worth more than the status code alone.
+    if !status.is_success() || wire.success != 1 || wire.job <= 0 {
+        let message = wire.error.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+            format!("LANraragi 拒绝了下载请求（{status}）")
+        });
+        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", message, status.is_server_error()));
+    }
+    Ok(CommandResult::success(DownloadUrlResult {
+        job: wire.job,
+        url: if wire.url.is_empty() { target.to_string() } else { wire.url },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;

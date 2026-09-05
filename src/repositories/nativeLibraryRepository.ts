@@ -48,6 +48,10 @@ const UploadArchiveResultSchema = z.object({
   success: z.literal(1),
   id: z.string().min(1),
 });
+const DownloadUrlResultSchema = z.object({
+  job: z.number().int().positive(),
+  url: z.string().min(1),
+});
 const CategorySchema = z.object({
   id: z.string().length(14),
   name: z.string(),
@@ -161,6 +165,11 @@ export class NativeLibraryRepository {
   }
   uploadArchive(input: { serverId: string; taskId: string; filePath: string }): Promise<CommandResult<z.infer<typeof UploadArchiveResultSchema>>> {
     return invokeCommand('upload_archive', input, UploadArchiveResultSchema);
+  }
+  /** Hands a URL to LANraragi's own downloader, which picks the plugin. Answers
+   * with the Minion job it queued — the download runs on the server. */
+  downloadUrl(serverId: string, url: string, categoryId?: string): Promise<CommandResult<z.infer<typeof DownloadUrlResultSchema>>> {
+    return invokeCommand('download_url', { serverId, url, categoryId: categoryId ?? null }, DownloadUrlResultSchema);
   }
   /** `force` re-resolves dynamic categories on the server (one unpaged
    * `/api/search` each). Leave it off for navigation: the native side serves a

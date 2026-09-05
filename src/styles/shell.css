@@ -3401,3 +3401,137 @@ body::-webkit-scrollbar,
   flex-wrap: wrap;
   gap: var(--space-3);
 }
+
+/* Archive intake: two ways in, one queue. */
+.upload-panel {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.upload-mode-tabs {
+  justify-self: start;
+}
+
+.upload-mode-tabs button {
+  gap: 6px;
+  padding: 0 var(--space-4);
+}
+
+.upload-mode-tabs button svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Drops are handled by the webview, so the whole window is the target; this is
+   the affordance for it rather than a hit area of its own. */
+.upload-dropzone {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-10) var(--space-6);
+  border: 2px dashed color-mix(in srgb, var(--ink-secondary) 28%, transparent);
+  border-radius: var(--radius-card);
+  background: var(--surface-panel);
+  text-align: center;
+  transition: border-color var(--motion-standard), background-color var(--motion-standard);
+}
+
+.upload-dropzone.is-dragging {
+  border-color: var(--brand-vermilion);
+  background: color-mix(in srgb, var(--brand-vermilion) 8%, var(--surface-panel));
+}
+
+.upload-dropzone > svg {
+  width: 30px;
+  height: 30px;
+  color: var(--brand-vermilion);
+  stroke-width: 1.5;
+}
+
+.upload-dropzone strong { font-size: var(--text-md); font-weight: 680; }
+.upload-dropzone span { color: var(--ink-faint); font-size: var(--text-xs); }
+.upload-dropzone .secondary-action { margin-top: var(--space-2); }
+
+.upload-url-form {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.upload-url-label {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.upload-url-form textarea {
+  width: 100%;
+  font-family: var(--font-utility);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.upload-url-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.upload-url-summary .is-error { color: var(--state-danger); }
+.upload-url-summary .secondary-action { margin-left: auto; }
+.upload-hint { margin: 0; color: var(--ink-faint); font-size: var(--text-xs); }
+
+.upload-queue {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--hairline);
+}
+
+.upload-queue-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.upload-queue-heading h3 { margin: 0; font-size: var(--text-md); font-weight: 700; }
+.upload-queue-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+.upload-queue-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.upload-queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 42px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  font-size: var(--text-sm);
+}
+
+.upload-queue-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-queue-status { flex: none; color: var(--ink-faint); font-size: var(--text-xs); }
+.upload-queue-row.is-running { border-color: color-mix(in srgb, var(--brand-cyan) 55%, transparent); }
+.upload-queue-row.is-done .upload-queue-status { color: var(--state-success); }
+.upload-queue-row.is-failed { border-color: color-mix(in srgb, var(--state-danger) 55%, transparent); }
+.upload-queue-row.is-failed .upload-queue-status { color: var(--state-danger); }

@@ -13,6 +13,10 @@ export const DomainErrorCodeSchema = z.enum([
   'INFERENCE_UNAVAILABLE',
   'CACHE_QUOTA_EXCEEDED',
   'EH_UNAUTHORIZED',
+  /** A sign-in attempt was refused. Distinct from EH_REAUTH_REQUIRED, which
+   * means a stored session stopped working: telling someone their login had
+   * expired on their first attempt is a contradiction. */
+  'EH_LOGIN_REJECTED',
   'EH_REAUTH_REQUIRED',
   'EH_RATE_LIMIT',
   'EH_CLOUDFLARE',

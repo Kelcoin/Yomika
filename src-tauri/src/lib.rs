@@ -19,6 +19,7 @@ use commands::library::{
     delete_search_preset, list_search_presets, save_search_preset,
     search_random_archives, search_archives_page,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
+    download_url,
 };
 use cache::{cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats, cache_store_image};
 use commands::platform::platform_capabilities;
@@ -77,6 +78,7 @@ pub fn run() {
             update_task,
             retry_task,
             upload_archive,
+            download_url,
             list_categories,
             add_archive_to_category,
             update_archive_metadata,

@@ -263,6 +263,37 @@ fn extract_login_cookie(set_cookie_values: &[String]) -> Option<String> {
     Some(cookie)
 }
 
+/// Why a sign-in POST came back without the authentication cookies.
+///
+/// Every one of these used to be reported as `EH_REAUTH_REQUIRED`, which the UI
+/// presents as "your E-Hentai login has expired, reconfigure the cookie" — twice
+/// wrong on a first sign-in, since nothing was configured and nothing expired.
+/// The login form page itself matches the generic classifier's login patterns,
+/// so this cannot delegate to `classify_eh_status`.
+fn classify_eh_login_failure(status: u16, body: &str) -> (&'static str, String, bool) {
+    let lower = body.to_lowercase();
+    if lower.contains("cf-browser-verification")
+        || lower.contains("_cf_chl_opt")
+        || lower.contains("cf-challenge")
+        || lower.contains("just a moment")
+        || lower.contains("checking your browser")
+    {
+        return ("EH_CLOUDFLARE", "Cloudflare 验证拦截了登录请求，请稍后再试或改用 Cookie 导入".into(), false);
+    }
+    if lower.contains("ip address has been temporarily banned")
+        || lower.contains("ip address has been banned")
+    {
+        return ("EH_ACCESS_BLOCKED", "E-Hentai 暂时封禁了当前 IP，请稍后再试".into(), false);
+    }
+    if status == 429 || lower.contains("too many login attempts") || lower.contains("rate limit") {
+        return ("EH_RATE_LIMIT", "登录尝试过于频繁，请稍后再试".into(), true);
+    }
+    if status >= 500 {
+        return ("EH_UNAVAILABLE", "E-Hentai 论坛暂时不可用，请稍后再试".into(), true);
+    }
+    ("EH_LOGIN_REJECTED", "用户名或密码不正确".into(), false)
+}
+
 /// Signs in on the E-Hentai forums and returns the cookie string the app stores.
 /// Users should not have to copy cookies out of a browser by hand.
 #[tauri::command]
@@ -270,9 +301,18 @@ pub async fn login_eh_account(username: String, password: String) -> Result<Comm
     if username.trim().is_empty() || password.is_empty() {
         return Ok(CommandResult::failure("INVALID_RESPONSE", "用户名与密码不能为空", false));
     }
-    let client = match eh_http_client() {
+    // No redirect following here, unlike every other request: the forums answer a
+    // successful sign-in with a redirect, and the authentication cookies are set
+    // on *that* response. Following it leaves only the destination's headers,
+    // which carry no cookies — a successful login then looks like a rejected one.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
+    {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", format!("无法创建登录请求：{error}"), true)),
     };
     let response = client
         .post("https://forums.e-hentai.org/index.php?act=Login&CODE=01")
@@ -288,8 +328,9 @@ pub async fn login_eh_account(username: String, password: String) -> Result<Comm
         .await;
     let response = match response {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error.to_string(), true)),
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", format!("无法连接 E-Hentai 论坛：{error}"), true)),
     };
+    let status = response.status().as_u16();
     let cookies = response
         .headers()
         .get_all(reqwest::header::SET_COOKIE)
@@ -298,7 +339,11 @@ pub async fn login_eh_account(username: String, password: String) -> Result<Comm
         .collect::<Vec<_>>();
     match extract_login_cookie(&cookies) {
         Some(cookie) => Ok(CommandResult::success(cookie)),
-        None => Ok(CommandResult::failure("EH_REAUTH_REQUIRED", "登录失败：请检查用户名与密码".to_string(), false)),
+        None => {
+            let body = response.text().await.unwrap_or_default();
+            let (code, message, retryable) = classify_eh_login_failure(status, &body);
+            Ok(CommandResult::failure(code, message, retryable))
+        }
     }
 }
 
@@ -616,6 +661,26 @@ mod tests {
             extract_login_cookie(&headers).as_deref(),
             Some("ipb_member_id=7; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90"),
         );
+    }
+
+    #[test]
+    fn a_refused_sign_in_never_reports_an_expired_session() {
+        // The whole point of the separate code: a first sign-in has no session to
+        // expire and no cookie to reconfigure, which is what EH_REAUTH_REQUIRED
+        // tells the user to do.
+        let cases = [
+            (200, "<title>Login</title>The username or password you entered is incorrect", "EH_LOGIN_REJECTED"),
+            (200, "<div id=\"cf-browser-verification\">Just a moment...</div>", "EH_CLOUDFLARE"),
+            (200, "Your IP address has been temporarily banned for excessive requests", "EH_ACCESS_BLOCKED"),
+            (429, "slow down", "EH_RATE_LIMIT"),
+            (503, "maintenance", "EH_UNAVAILABLE"),
+        ];
+        for (status, body, expected) in cases {
+            let (code, message, _) = classify_eh_login_failure(status, body);
+            assert_eq!(code, expected, "body: {body}");
+            assert_ne!(code, "EH_REAUTH_REQUIRED");
+            assert!(!message.is_empty());
+        }
     }
 
     struct MemoryStore { writes: Mutex<Vec<(String, String)>>, deletes: Mutex<Vec<String>> }

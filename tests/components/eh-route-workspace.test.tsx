@@ -28,6 +28,7 @@ describe('EH route workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'save_eh_account') return { ok: true, value: saved };
+      if (command === 'check_eh_login_health') return { ok: true, value: { loggedIn: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -45,6 +46,9 @@ describe('EH route workspace', () => {
     } });
     expect(await screen.findByText('E-Hentai 1234')).toBeInTheDocument();
     expect(screen.queryByText(hash)).not.toBeInTheDocument();
+    // Saving verifies straight away, so the row does not sit at 未验证 leaving
+    // the user to guess whether the credentials work.
+    expect(await screen.findByText('已验证')).toBeInTheDocument();
   });
 
   it('signs in with a username and password and stores the returned cookie', async () => {
@@ -54,6 +58,7 @@ describe('EH route workspace', () => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'login_eh_account') return { ok: true, value: `ipb_member_id=77; ipb_pass_hash=${hash}` };
       if (command === 'save_eh_account') return { ok: true, value: saved };
+      if (command === 'check_eh_login_health') return { ok: true, value: { loggedIn: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -67,6 +72,29 @@ describe('EH route workspace', () => {
     expect(adapter).toHaveBeenCalledWith('login_eh_account', { username: 'reader', password: 'secret-password' });
     expect(await screen.findByText('E-Hentai 77')).toBeInTheDocument();
     expect(screen.queryByText('secret-password')).not.toBeInTheDocument();
+  });
+
+  it('reports a rejected sign-in as rejected, not as an expired session', async () => {
+    // A first sign-in cannot have an expired session and has no cookie to
+    // reconfigure. The native side answers with the reason, and the sign-in form
+    // shows it instead of running it through the generic code map.
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'login_eh_account') {
+        return { ok: false, error: { code: 'EH_LOGIN_REJECTED', message: '用户名或密码不正确', retryable: false } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const user = userEvent.setup();
+    renderEhRoute();
+
+    await user.type(await screen.findByLabelText('用户名'), 'reader');
+    await user.type(screen.getByLabelText('密码'), 'wrong-password');
+    await user.click(screen.getByRole('button', { name: '登录 E-Hentai' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('用户名或密码不正确');
+    expect(screen.queryByText(/登录已失效/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重新配置 Cookie/)).not.toBeInTheDocument();
   });
 
   it('scopes searches to the active account', async () => {
