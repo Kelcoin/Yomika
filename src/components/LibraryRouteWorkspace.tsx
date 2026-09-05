@@ -7,7 +7,7 @@ import { LibraryWorkspace } from './LibraryWorkspace';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { assignableCategories } from '../lib/tags';
+import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
@@ -252,7 +252,17 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   // asking it first is what left the list stuck on whatever the last successful
   // whole-library pull happened to store.
   const fetchArchivePage = useCallback(async (currentServerId: string, start: number) => {
-    const query = { query: searchQuery, sortBy: sortMode, order: sortOrder, categoryId: categoryFilter || null };
+    // "No tags" arrives through the category menu but is not a category: an
+    // untagged archive is in no category, so it goes to LANraragi's own
+    // `untaggedonly` switch instead of being resolved as one.
+    const untaggedOnly = categoryFilter === UNTAGGED_FILTER_ID;
+    const query = {
+      query: searchQuery,
+      sortBy: sortMode,
+      order: sortOrder,
+      categoryId: untaggedOnly ? null : categoryFilter || null,
+      untaggedOnly,
+    };
     const remote = await repository.searchArchivesPage(currentServerId, start, query);
     if (remote.ok) {
       setOffline(false);

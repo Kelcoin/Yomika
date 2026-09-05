@@ -8,6 +8,13 @@ export const TAG_NAMESPACE_LABELS: Record<string, string> = {
 export const TAG_NAMESPACE_ORDER = ['artist', 'parody', 'category', 'reclass', 'character', 'female', 'male', 'mixed', 'other', 'group', 'series', 'language', 'location', 'cosplayer', 'general'];
 export const TAG_BOTTOM_NAMESPACES = ['uploader', 'date_added', 'timestamp', 'source'];
 export const FAVORITES_CATEGORY_NAME = '\u{1f516} Favorites';
+/** Filter value for LANraragi's own "untagged only" switch, offered in the
+ * category menu because that is where someone goes looking for it.
+ *
+ * Not a category id: an archive with no tags is in no category either, so
+ * resolving this as one would always return nothing. LANraragi's own ids are
+ * `SET_<digits>`, so the prefix cannot collide with a real one. */
+export const UNTAGGED_FILTER_ID = 'yomika:untagged';
 export function getCategoryDisplayName(name: string): string { return name === FAVORITES_CATEGORY_NAME ? '收藏夹' : name; }
 export function sortCategoriesForDisplay<T extends { name: string }>(categories: T[] = []): T[] {
   return [...categories].sort((left, right) => Number(right.name === FAVORITES_CATEGORY_NAME) - Number(left.name === FAVORITES_CATEGORY_NAME));

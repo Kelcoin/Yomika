@@ -10,7 +10,7 @@ import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/na
 import { EmptyState } from './EmptyState';
 import { LoadingIndicator } from './LoadingIndicator';
 import { SelectField } from './SelectField';
-import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
+import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
@@ -304,7 +304,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           {sortOrder === 'asc' ? <ArrowDown aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
         </button>
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
-        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
+        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
         {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>}
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
         <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">

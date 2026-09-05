@@ -161,6 +161,10 @@ pub struct ArchiveQueryInput {
     sort_by: String,
     order: String,
     category_id: Option<String>,
+    /// The offline half of LANraragi's `untaggedonly`. `tags_json` is the mirror's
+    /// copy of the tag list, so "no tags" is answerable locally.
+    #[serde(default)]
+    untagged_only: Option<bool>,
     offset: i64,
     limit: i64,
 }
@@ -1613,6 +1617,12 @@ fn query_archive_page(
         );
         values.push(category_id.to_string());
     }
+    if input.untagged_only.unwrap_or(false) {
+        // The column is NOT NULL and CHECK-constrained to valid JSON, so an
+        // untagged archive is one whose array is empty — which is a length test,
+        // not a string comparison against every way `[]` could be spelled.
+        clauses.push("json_array_length(a.tags_json) = 0".to_string());
+    }
     for token in input.query.split(',').map(archive_search_token).filter(|token| !token.is_empty()) {
         let pattern = format!("%{token}%");
         if token.contains(':') {
@@ -2162,6 +2172,12 @@ pub struct RemoteSearchInput {
     order: String,
     #[serde(default)]
     category_id: Option<String>,
+    /// LANraragi's own "untagged only" switch. The library offers it as a
+    /// synthetic category, because that is where a user looks for it, but it is
+    /// not a category — an archive with no tags is in no category either, so
+    /// resolving it as one would return nothing.
+    #[serde(default)]
+    untagged_only: Option<bool>,
     start: i64,
 }
 
@@ -2222,7 +2238,7 @@ pub async fn search_archives_page(
         sortby: Some(sortby.to_string()),
         order: Some(input.order.clone()),
         newonly: None,
-        untaggedonly: None,
+        untaggedonly: input.untagged_only.filter(|value| *value),
         hidecompleted: None,
         category: input.category_id.clone().filter(|value| !value.is_empty()),
         groupby_tanks: None,
@@ -4242,6 +4258,7 @@ mod tests {
             sort_by: "title".to_string(),
             order: "asc".to_string(),
             category_id: None,
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("full-library search");
@@ -4268,6 +4285,7 @@ mod tests {
             sort_by: "title".to_string(),
             order: "asc".to_string(),
             category_id: None,
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("accented search");
@@ -4293,12 +4311,45 @@ mod tests {
             sort_by: "title".to_string(),
             order: "asc".to_string(),
             category_id: Some("SET_1613080290".to_string()),
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("category query");
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "inside");
+    }
+
+    #[test]
+    fn archive_query_can_ask_for_untagged_archives_only() {
+        // The library offers this as a synthetic category because that is where a
+        // user looks for it, but it cannot be resolved as one: an archive with no
+        // tags is in no category either, so a category filter would return
+        // nothing. LANraragi has its own `untaggedonly` switch; this is the
+        // offline half of it.
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'bare', 'Bare', 'bare', '[]', 1),
+               ('scope-a', 'spaced', 'Spaced', 'spaced', '[ ]', 1),
+               ('scope-a', 'tagged', 'Tagged', 'tagged', '[\"artist:alpha\"]', 1);",
+        ).unwrap();
+
+        let page = query_archive_page(&connection, &ArchiveQueryInput {
+            server_id: "scope-a".to_string(),
+            query: String::new(),
+            sort_by: "title".to_string(),
+            order: "asc".to_string(),
+            category_id: None,
+            untagged_only: Some(true),
+            offset: 0,
+            limit: 100,
+        }).expect("untagged query");
+
+        assert_eq!(page.total, 2);
+        let ids: Vec<&str> = page.items.iter().map(|item| item.archive_id.as_str()).collect();
+        assert_eq!(ids, vec!["bare", "spaced"], "an empty array is untagged however it was written");
     }
 
     #[test]
@@ -4319,6 +4370,7 @@ mod tests {
             sort_by: "added".to_string(),
             order: "desc".to_string(),
             category_id: None,
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("date-added query");

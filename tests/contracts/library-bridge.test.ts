@@ -273,7 +273,7 @@ describe('native library repository bridge', () => {
     const result = await new NativeLibraryRepository().listArchivesPage('s1', 100, 100);
 
     expect(adapter).toHaveBeenCalledWith('list_archives_page', {
-      input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, offset: 100, limit: 100 },
+      input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, offset: 100, limit: 100 },
     });
     expect(result).toEqual({ ok: true, value });
   });
@@ -291,7 +291,7 @@ describe('native library repository bridge', () => {
     // resolving them locally is what made an archive added on the server
     // invisible until a whole-library pull happened to succeed.
     expect(adapter).toHaveBeenCalledWith('search_archives_page', {
-      input: { serverId: 's1', query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290', start: 240 },
+      input: { serverId: 's1', query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290', untaggedOnly: false, start: 240 },
     });
     expect(result).toEqual({ ok: true, value });
   });

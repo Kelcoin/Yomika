@@ -136,6 +136,29 @@ describe('library route workspace', () => {
     expect(await screen.findByText('已保存在本机，等待同步')).toBeInTheDocument();
   });
 
+  it('asks LANraragi for untagged archives when that filter is picked', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [{ id: 'SET_1613080290', name: 'Reading', pinned: false, search: null, archives: [] }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Untagged Archive', pageCount: 1, updatedAt: '2026-08-28T00:00:00Z' }]);
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    await screen.findByRole('button', { name: /^Untagged Archive\b/ });
+    // Offered in the category menu because that is where someone looks for it,
+    // but sent as LANraragi's own switch: an archive with no tags is in no
+    // category, so resolving it as one would always come back empty.
+    await user.selectOptions(screen.getByRole('combobox', { name: '分类筛选' }), 'yomika:untagged');
+
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: true, start: 0 },
+    }));
+  });
+
   it('shows an actionable empty state when WebDAV is not configured', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -166,7 +189,7 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('button', { name: /^Loaded Archive\b/ })).toBeInTheDocument();
     expect(adapter).toHaveBeenCalledWith('search_archives_page', {
-      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, start: 0 },
+      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, start: 0 },
     });
   });
 
@@ -457,7 +480,7 @@ describe('library route workspace', () => {
     expect(refreshCount).toBe(0);
     // The offset is an item offset, and LANraragi decides the page size.
     expect(adapter).toHaveBeenCalledWith('search_archives_page', {
-      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, start: 0 },
+      input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, start: 0 },
     });
 
     await user.click(screen.getByRole('button', { name: '刷新档案库' }));

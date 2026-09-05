@@ -290,7 +290,7 @@ export class NativeLibraryRepository {
   searchArchivesPage(
     serverId: string,
     start = 0,
-    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null } = {},
+    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null; untaggedOnly?: boolean } = {},
   ): Promise<CommandResult<ArchivePage>> {
     return invokeCommand('search_archives_page', {
       input: {
@@ -299,6 +299,7 @@ export class NativeLibraryRepository {
         sortBy: query.sortBy ?? 'added',
         order: query.order ?? 'desc',
         categoryId: query.categoryId ?? null,
+        untaggedOnly: query.untaggedOnly ?? false,
         start,
       },
     }, ArchivePageSchema);
@@ -308,7 +309,7 @@ export class NativeLibraryRepository {
     serverId: string,
     offset = 0,
     limit = 100,
-    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null } = {},
+    query: { query?: string; sortBy?: 'title' | 'added'; order?: 'asc' | 'desc'; categoryId?: string | null; untaggedOnly?: boolean } = {},
   ): Promise<CommandResult<ArchivePage>> {
     const result = await invokeCommand('list_archives_page', {
       input: {
@@ -317,6 +318,7 @@ export class NativeLibraryRepository {
         sortBy: query.sortBy ?? 'added',
         order: query.order ?? 'desc',
         categoryId: query.categoryId ?? null,
+        untaggedOnly: query.untaggedOnly ?? false,
         offset,
         limit,
       },
