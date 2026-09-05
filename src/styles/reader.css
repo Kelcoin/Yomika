@@ -24,6 +24,20 @@
   user-select: none;
 }
 
+/* Three frames on one track: the slot being read, and the two a swipe reveals.
+   The track carries the drag offset, so a neighbour slides in from exactly where
+   it will land — the gesture used to drag the page off an empty background. */
+.reader-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.reader-frame {
+  position: absolute;
+  inset: 0;
+}
+
 .reader-single,
 .reader-spread,
 .reader-webtoon {
@@ -34,8 +48,28 @@
   height: 100%;
 }
 
+/* Two halves, each anchored to the middle of the viewport. As a centred flex row
+   the first page sat in the middle alone and jumped left when the second one
+   arrived, so the pair is a fixed grid and an unloaded page still holds its
+   slot. */
 .reader-spread {
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+}
+
+.reader-spread .reader-slot:first-child { justify-self: end; }
+.reader-spread .reader-slot:last-child { justify-self: start; }
+/* Right to left: the lower page number is the right-hand half. */
+.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
+.reader-spread.is-rtl .reader-slot:last-child { grid-column: 1; justify-self: end; }
+
+.reader-slot {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 /* Drag feedback. The gesture used to give none until release, so there was no
@@ -67,6 +101,53 @@
 .reader-webtoon .reader-page {
   max-width: min(100%, 900px);
   max-height: none;
+}
+
+/* One slot per page, of a height the renderer and the windowing arithmetic both
+   know. Only the slots inside the window hold anything: continuous mode used to
+   mount the entire archive at once, which is what froze the app. */
+.reader-webtoon-slot {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+}
+
+.reader-webtoon-slot .reader-slot {
+  width: 100%;
+  height: 100%;
+}
+
+/* Loading and failure are one shape in two moods, so a page still on its way and
+   a page that gave up read as the same object rather than as two unrelated
+   screens — they used to share a branch, and every unloaded page was announced
+   as a failure. */
+.reader-page-status {
+  display: grid;
+  place-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  color: var(--reader-muted);
+  font-family: var(--font-utility);
+  font-size: 12px;
+}
+
+.reader-page-status p { margin: 0; }
+.reader-page-status .reader-retry-button { margin: 0; }
+.reader-page-status.is-failed p { color: var(--reader-ink); }
+
+.reader-page-spinner {
+  border-top-color: var(--brand-cyan);
+  animation: reader-spin 900ms linear infinite;
+}
+
+@keyframes reader-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-page-spinner { animation-duration: 3s; }
 }
 
 /* The loading state keeps the reader's own dark canvas, so the indicator does not
@@ -144,16 +225,21 @@
   height: 20px;
 }
 
+/* The two bars are positioned, not laid out in a grid, because they animate
+   separately: as one grid with one transform the bottom bar slid in from the top
+   of the screen, which is not where it lives. */
 .reader-chrome {
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
   pointer-events: none;
 }
 
-.reader-chrome header {
+.reader-chrome-top {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -164,11 +250,15 @@
   pointer-events: auto;
 }
 
-.reader-chrome header strong {
+.reader-chrome-top strong {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.reader-chrome-settings { flex: none; }
 
 .reader-incognito-badge {
   display: inline-flex;
@@ -208,7 +298,10 @@
 }
 
 .reader-toolbar {
-  grid-row: 3;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -221,6 +314,13 @@
   backdrop-filter: blur(14px);
   pointer-events: auto;
 }
+
+.reader-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.reader-toolbar button:disabled:hover { background: transparent; }
 
 .reader-toolbar span {
   flex: 0 0 auto;
@@ -279,8 +379,10 @@
   padding: var(--space-4);
   border: 1px solid rgb(255 255 255 / 0.16);
   border-radius: var(--radius-panel, 12px);
-  background: var(--reader-chrome);
-  backdrop-filter: blur(18px);
+  /* Opaque on purpose — see --reader-panel. The backdrop behind it is already
+     blurred, and this panel's own blur made its thumbnail scroller leave stale
+     tiles that looked like overlapping rows. */
+  background: var(--reader-panel);
 }
 
 .reader-overview-heading {
@@ -301,6 +403,15 @@
   display: grid;
   grid-template-columns: 120px minmax(0, 1fr);
   gap: var(--space-3);
+}
+
+/* Cover with its own facts underneath: page count and byte size describe the
+   archive, not its tags, and in the wide column they pushed every tag group down
+   a line. */
+.reader-overview-identity {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
 }
 
 .reader-overview-cover {

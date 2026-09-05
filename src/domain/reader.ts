@@ -61,24 +61,15 @@ export function settleZoom(zoom: ZoomState): ZoomState {
   return scale <= 1 ? { scale, panX: 0, panY: 0 } : { ...zoom, scale };
 }
 
-/** Button and double-click zoom share one ratio so repeated presses feel even. */
-export function zoomByStep(zoom: ZoomState, direction: 1 | -1): ZoomState {
-  const scale = clampZoom(zoom.scale * (direction > 0 ? 1.25 : 1 / 1.25));
-  const snapped = Math.abs(scale - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scale;
-  return snapped <= 1 ? { scale: snapped, panX: 0, panY: 0 } : { ...zoom, scale: snapped };
-}
-
+/** Double click/tap: enlarge from 1, otherwise go back to 1.
+ *
+ * The old rule only reset once the scale had reached the double-tap target, so
+ * anything the wheel had left in between — 1.4, say — was enlarged further and
+ * getting back to 100% took two more gestures. Resetting from *any* scale other
+ * than 1 makes the gesture a reliable escape hatch, which is what it is for. */
 export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {
-  const target = zoom.scale >= DOUBLE_TAP_ZOOM ? 1 : DOUBLE_TAP_ZOOM;
+  const target = zoom.scale === 1 ? DOUBLE_TAP_ZOOM : 1;
   return { scale: target, panX: 0, panY: 0 };
-}
-
-export function resetZoom(_zoom: ZoomState): ZoomState {
-  return { scale: 1, panX: 0, panY: 0 };
-}
-
-export function applyZoom(_current: ZoomState, scale: number, panX: number, panY: number): ZoomState {
-  return { scale: clampZoom(scale), panX, panY };
 }
 
 /** Whether a page is narrow enough to sit beside another one.
@@ -107,40 +98,32 @@ export function classifyPageShape(width: number, height: number): PageShape {
  *
  * Following ComicReadScript's `handleComicData.ts:80-125`, a wide page takes a
  * slot of its own and delimits the runs around it, so a mistake cannot propagate
- * past the spread that caused it.
+ * past the spread that caused it. That is the whole rule now: a wide page falls
+ * back to a single page and the pairing resumes after it.
  *
- * A spread is also evidence about the pages *before* it. In a printed book a
- * double page occupies a left and a right half, so it can only begin where a
- * pair would — if the run leading up to it has an odd length, that run started
- * on the wrong foot and its odd page out belongs at the front rather than the
- * back (`handleComicData.ts:104-113`). A wide page in the last two positions is
- * exempt: that is usually a scanlation credits page, and letting it re-pair the
- * whole chapter behind it would be worse than leaving it alone.
+ * The cover always opens alone, the way a physical book does. This used to be a
+ * toggle (a "pairing start"), together with a rule that re-aligned the run in
+ * front of a spread on the theory that a spread can only begin where a pair
+ * would. Both are gone: they existed to repair a pairing whose origin might be
+ * wrong, and with the origin fixed the re-alignment had nothing to key off
+ * except a guess that could shuffle an entire chapter.
  */
-export function planPageSpreads(shapes: readonly PageShape[], coverAlone = true): number[][] {
+export function planPageSpreads(shapes: readonly PageShape[]): number[][] {
   const slots: number[][] = [];
   let run: number[] = [];
-  /** `alignToEnd` puts the odd page out at the front of the run instead of the
-   * back, which is what a spread landing on an odd offset implies. */
-  const flush = (alignToEnd = false) => {
-    let start = 0;
-    if (alignToEnd && run.length % 2 === 1) {
-      slots.push([run[0]!]);
-      start = 1;
-    }
-    for (let index = start; index < run.length; index += 2) {
+  const flush = () => {
+    for (let index = 0; index < run.length; index += 2) {
       slots.push(run.slice(index, index + 2));
     }
     run = [];
   };
   for (let index = 0; index < shapes.length; index += 1) {
-    // The cover opens alone, the way a physical book does.
-    if (index === 0 && coverAlone) {
+    if (index === 0) {
       slots.push([0]);
       continue;
     }
     if (shapes[index] === 'wide') {
-      flush(index < shapes.length - 2);
+      flush();
       slots.push([index]);
       continue;
     }
@@ -198,16 +181,6 @@ export interface ReaderState {
    * yet counts as normal: assuming a spread and being wrong splits a page across
    * two slots, while assuming normal only costs a re-pair once it loads. */
   shapes?: readonly PageShape[] | undefined;
-  /** Whether page 0 opens on its own.
-   *
-   * A scan that includes both inside-cover pages pairs off by one all the way
-   * through, and with no spread anywhere in the archive there is nothing for the
-   * wide-page rule to key off. ComicReadScript infers this from per-edge blank
-   * margins measured in a worker and *also* offers a manual override
-   * (`switch.ts:11-21`), because the inference can be wrong. The override is the
-   * half worth having: it costs nothing per page and the person looking at the
-   * screen already knows the answer. */
-  coverAlone?: boolean | undefined;
   phase: ReaderPhase;
 }
 
@@ -218,17 +191,17 @@ export function effectiveReaderLayout(state: Pick<ReaderState, 'layout' | 'resol
   return state.layout === 'auto' ? state.resolvedLayout ?? 'single' : state.layout;
 }
 
-type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes' | 'coverAlone'>;
+type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes'>;
 
 function spreadsFor(state: SpreadInput): number[][] {
   const shapes = state.shapes ?? [];
   const filled: PageShape[] = Array.from({ length: state.pageCount }, (_, index) => shapes[index] ?? 'normal');
-  return planPageSpreads(filled, state.coverAlone ?? true);
+  return planPageSpreads(filled);
 }
 
 /** Returns the page indexes rendered for the current spread: a wide page alone,
  * otherwise the pair it belongs to. */
-export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout' | 'shapes' | 'coverAlone'>): number[] {
+export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout' | 'shapes'>): number[] {
   if (state.pageCount <= 0) return [];
   const start = Math.min(Math.max(0, Math.floor(state.pageIndex)), state.pageCount - 1);
   if (effectiveReaderLayout(state) !== 'double') return [start];
@@ -272,7 +245,6 @@ export function createReaderState(input: {
   pageIndex?: number;
   direction?: ReadingDirection;
   layout?: ReaderLayoutPreference;
-  coverAlone?: boolean | undefined;
 }): ReaderState {
   const pageCount = Math.max(0, Math.floor(input.pageCount));
   return {
@@ -281,7 +253,6 @@ export function createReaderState(input: {
     pageIndex: clampPage(input.pageIndex ?? 0, pageCount),
     direction: input.direction ?? 'ltr',
     layout: input.layout ?? 'auto',
-    coverAlone: input.coverAlone,
     phase: 'ready',
   };
 }
@@ -305,6 +276,64 @@ export function advanceReader(state: ReaderState, intent: 'next' | 'previous'): 
 
 export function toggleReaderChrome(state: ReaderState): ReaderState {
   return { ...state, phase: state.phase === 'chrome-visible' ? 'ready' : 'chrome-visible' };
+}
+
+/** Height assumed for a page nobody has measured yet, as a multiple of the
+ * viewport height. Manga pages are portrait, so a full viewport height plus a
+ * bit is closer than a square guess; being wrong only costs a stale scrollbar
+ * length, because a measured height replaces it and is never given up again. */
+export const WEBTOON_ESTIMATED_PAGE_RATIO = 1.4;
+
+/** Which pages a continuous scroll actually needs mounted.
+ *
+ * Continuous mode used to treat *every* page of the archive as visible, so
+ * opening it fired one decode per page at once — the whole archive, at full
+ * size, and with an enhancement enabled one ONNX run each. That is the freeze.
+ *
+ * The window is computed from the scroll offset and a height per page rather
+ * than from the DOM: the renderer gives every page a slot of exactly
+ * `heights[index]`, so the arithmetic here and the geometry on screen are the
+ * same numbers and neither has to measure the other. `overscan` is how many
+ * pages beyond the viewport stay mounted, which is what keeps a fast scroll from
+ * showing holes.
+ */
+export function webtoonWindow(input: {
+  scrollTop: number;
+  viewportHeight: number;
+  heights: readonly number[];
+  overscan?: number;
+}): { first: number; last: number } {
+  const count = input.heights.length;
+  if (count <= 0) return { first: 0, last: -1 };
+  const overscan = Math.max(0, Math.floor(input.overscan ?? 1));
+  const scrollTop = Number.isFinite(input.scrollTop) ? Math.max(0, input.scrollTop) : 0;
+  const viewportHeight = Number.isFinite(input.viewportHeight) && input.viewportHeight > 0 ? input.viewportHeight : 1;
+  const viewportBottom = scrollTop + viewportHeight;
+
+  let firstVisible = -1;
+  let lastVisible = -1;
+  let offset = 0;
+  for (let index = 0; index < count; index += 1) {
+    const height = Math.max(1, Number.isFinite(input.heights[index]) ? (input.heights[index] as number) : 1);
+    const pageBottom = offset + height;
+    if (pageBottom > scrollTop && offset < viewportBottom) {
+      if (firstVisible < 0) firstVisible = index;
+      lastVisible = index;
+    }
+    offset = pageBottom;
+  }
+  // Scrolled past the end — which happens when measured heights turn out shorter
+  // than the estimates that sized the scroller. Hold the last page rather than
+  // reporting an empty window, or the reader would unmount everything and lose
+  // the measurements that would have corrected it.
+  if (firstVisible < 0) {
+    firstVisible = count - 1;
+    lastVisible = count - 1;
+  }
+  return {
+    first: Math.max(0, firstVisible - overscan),
+    last: Math.min(count - 1, lastVisible + overscan),
+  };
 }
 
 /** Pages to warm around the current one.

@@ -64,6 +64,10 @@
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
     --reader-chrome: rgb(5 5 7 / 0.82);
+    /* Opaque, unlike the chrome: the overview panel holds a scroller, and a
+       scroller inside a backdrop-filter layer is a known source of stale tiles —
+       which is what made its thumbnails appear to overlap. */
+    --reader-panel: #131318;
 
     /* Elevation: low, diffuse, never harsh */
     --shadow-menu: 0 12px 30px rgb(30 27 36 / 0.18);

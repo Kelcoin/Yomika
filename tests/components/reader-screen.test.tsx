@@ -24,54 +24,6 @@ function renderReader() {
 }
 
 describe('reader screen', () => {
-  it('remembers the pairing start for the archive', async () => {
-    const user = userEvent.setup();
-    const onProgress = vi.fn();
-    const view = render(
-      <MemoryRouter>
-        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" onProgress={onProgress} />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    await user.click(screen.getByRole('button', { name: '封面单独一页，点击与第二页并排' }));
-
-    // The toggle does not move the page, so without its own watch the choice
-    // would never be written and would reset the next time the archive opened.
-    expect(onProgress).toHaveBeenCalledWith(0, { layout: 'double', direction: 'ltr', coverAlone: false });
-    view.unmount();
-
-    // Reopening with the stored value restores the pairing rather than the cover.
-    render(
-      <MemoryRouter>
-        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" coverAlone={false} />
-      </MemoryRouter>,
-    );
-    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
-  });
-
-  it('lets the pairing start move off the cover', async () => {
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter>
-        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="double" />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    // The cover opens alone by default, as a printed book does.
-    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
-
-    // A scan carrying both inside-cover pages is off by one throughout, and with
-    // no spread anywhere there is nothing to detect it from.
-    await user.click(screen.getByRole('button', { name: '封面单独一页，点击与第二页并排' }));
-    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '封面与第二页并排，点击让封面单独一页' })).toHaveAttribute('aria-pressed', 'false');
-  });
-
   it('shows a page immediately and toggles one unified chrome', async () => {
     const user = userEvent.setup();
     renderReader();
@@ -119,22 +71,23 @@ describe('reader screen', () => {
   });
 
   it('uses the mouse wheel for zoom on paged reading canvas', () => {
-    const { unmount } = renderReader();
+    const { unmount, container } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
 
     // A cancelled event is the proof that the page itself will not scroll:
     // React registers wheel listeners as passive, so this only holds while the
     // component binds its own non-passive listener.
     expect(fireEvent.wheel(reader, { deltaY: 120 })).toBe(false);
-    // One transform on the spread, not one per image: a double spread used to
-    // overlap because both pages scaled from their own centre. The curve is
-    // multiplicative, so 120 units of wheel is exp(-0.18) ≈ 0.835.
-    const spread = screen.getByRole('region', { name: '分页阅读' });
-    expect(spread.getAttribute('style')).toMatch(/scale\(0\.83/);
+    // One transform on the track that carries all three slots, not one per image:
+    // a double spread used to overlap because both pages scaled from their own
+    // centre. The curve is multiplicative, so 120 units of wheel is
+    // exp(-0.18) ≈ 0.835.
+    const track = container.querySelector('.reader-track') as HTMLElement;
+    expect(track.getAttribute('style')).toMatch(/scale\(0\.83/);
     expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
     // Coming back within 5% of 100% snaps exactly onto it.
-    expect(spread).toHaveStyle('transform: scale(1) translate(0px, 0px)');
+    expect(track).toHaveStyle('transform: scale(1) translate(0px, 0px)');
     const horizontalScroller = document.createElement('div');
     horizontalScroller.className = 'horizontal-scroller';
     reader.append(horizontalScroller);
@@ -205,7 +158,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '从左到右' }));
     await user.click(screen.getByRole('button', { name: '上一页' }));
 
-    expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl', coverAlone: true });
+    expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl' });
   });
 
   it('records progress and keeps the chrome open when jumping from the thumbnail panel', async () => {
@@ -221,7 +174,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('button', { name: '缩略面板' }));
     await user.click(screen.getByRole('button', { name: '跳转到第 3 页' }));
 
-    expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr', coverAlone: true });
+    expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr' });
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
   });
 
@@ -345,10 +298,11 @@ describe('reader screen', () => {
     await user.click(layoutButton());
     expect(layoutButton()).toHaveAccessibleName('阅读布局：自动，点击切换');
 
-    // Right-to-left is the toggled-on state; the button used to always claim pressed.
-    expect(screen.getByRole('button', { name: '从左到右' })).toHaveAttribute('aria-pressed', 'false');
+    // Direction is a choice between two, not a switch that is on: the pressed
+    // styling made the button look permanently hovered in right-to-left.
+    expect(screen.getByRole('button', { name: '从左到右' })).not.toHaveAttribute('aria-pressed');
     await user.click(screen.getByRole('button', { name: '从左到右' }));
-    expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '从右到左' })).toBeInTheDocument();
   });
 
   it('resolves auto layout to a double spread on wide portrait pages', () => {
@@ -382,73 +336,87 @@ describe('reader screen', () => {
     expect(await screen.findByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
   });
 
-  it('shows zoom controls in the toolbar and resets zoom', async () => {
+  it('leaves zoom to the wheel and the double click rather than toolbar buttons', async () => {
     const user = userEvent.setup();
     renderReader();
 
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    expect(screen.getByRole('button', { name: '放大' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '缩小' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '放大' }));
-    expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '重置缩放' }));
+    // Four toolbar slots for what two gestures already do, on a bar that has to
+    // hold the layout, direction and enhancement controls as well.
+    expect(screen.queryByRole('button', { name: '放大' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '缩小' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
   });
 
-  it('toggles zoom via toolbar buttons and shows zoom percentage', async () => {
-    const user = userEvent.setup();
-    renderReader();
+  it('sends a double click back to the original scale from wherever the wheel left it', () => {
+    const { container } = renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = () => container.querySelector('.reader-track') as HTMLElement;
 
-    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
-
-    // Steps are multiplicative (x1.25), so repeated presses feel even instead of
-    // jumping in fixed 50% increments.
-    await user.click(screen.getByRole('button', { name: '放大' }));
-    expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-    expect(screen.getByText('125%')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '放大' }));
-    expect(screen.getByText('156%')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '重置缩放' }));
-    expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
-    expect(screen.queryByText('125%')).not.toBeInTheDocument();
+    fireEvent.wheel(reader, { deltaY: -200 });
+    expect(track().style.transform).not.toContain('scale(1)');
+    // It used to reset only once the scale had reached the double-tap target, so
+    // anything in between was enlarged further instead.
+    fireEvent.doubleClick(reader);
+    expect(track().style.transform).toContain('scale(1)');
   });
 
-  it('clamps zoom to maximum and minimum via buttons', async () => {
+  it('switches the two enhancements from the toolbar and says when one has no model', async () => {
     const user = userEvent.setup();
-    renderReader();
+    const toggleUpscale = vi.fn();
+    render(
+      <MemoryRouter>
+        <ReaderScreen
+          archiveId="a1"
+          title="Test archive"
+          pages={pages}
+          upscale={{ configured: true, active: true, toggle: toggleUpscale }}
+          decensor={{ configured: false, active: false, toggle: () => undefined }}
+        />
+      </MemoryRouter>,
+    );
 
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    const zoomIn = screen.getByRole('button', { name: '放大' });
+    await user.click(screen.getByRole('button', { name: '关闭超分' }));
+    expect(toggleUpscale).toHaveBeenCalledTimes(1);
+    // With nothing installed the button says so instead of silently doing
+    // nothing, which is how these went unverifiable from inside the reader.
+    expect(screen.getByRole('button', { name: '去码：未选择模型包' })).toBeDisabled();
+  });
 
-    for (let i = 0; i < 10; i++) {
-      await user.click(zoomIn);
-    }
+  it('loads only a window of pages in continuous mode', async () => {
+    const loadPage = vi.fn(async (index: number) => `blob:page-${index}`);
+    const many = Array.from({ length: 60 }, () => '');
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={many} layout="webtoon" loadPage={loadPage} prefetchDistance={1} />
+      </MemoryRouter>,
+    );
 
-    expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-    expect(screen.getByText('300%')).toBeInTheDocument();
+    await vi.waitFor(() => expect(loadPage).toHaveBeenCalled());
+    // Continuous mode used to call every page visible, so it asked for all sixty
+    // at once — with an enhancement enabled, sixty ONNX runs. That is the freeze.
+    expect(loadPage.mock.calls.length).toBeLessThan(10);
+    expect(loadPage).toHaveBeenCalledWith(0);
+    expect(loadPage).not.toHaveBeenCalledWith(59);
+  });
 
-    const zoomOut = screen.getByRole('button', { name: '缩小' });
-    for (let i = 0; i < 20; i++) {
-      await user.click(zoomOut);
-    }
+  it('shows a page that has not arrived as loading rather than as a failure', async () => {
+    let resolvePage: ((value: string | undefined) => void) | undefined;
+    const loadPage = vi.fn(() => new Promise<string | undefined>((resolve) => { resolvePage = resolve; }));
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={['']} loadPage={loadPage} />
+      </MemoryRouter>,
+    );
 
-    expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
+    // The two used to share one branch, so turning to a page that had not come
+    // back yet announced 页面加载失败 and then quietly showed the page.
+    expect(await screen.findByRole('status')).toHaveTextContent('正在加载');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
-    // Back above 100% the readout returns; the exact stop depends on the ratio,
-    // so assert the invariant rather than a magic number.
-    for (let i = 0; i < 4; i++) {
-      await user.click(zoomIn);
-    }
-    expect(screen.getByRole('button', { name: '重置缩放' })).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '重置缩放' }));
-    expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
+    resolvePage?.('blob:page-0');
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
   });
 
   it('navigates pages via horizontal swipe gestures', () => {

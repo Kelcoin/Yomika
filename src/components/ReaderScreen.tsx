@@ -1,9 +1,9 @@
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, BookOpenCheck, ChevronLeft, ChevronRight, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, RectangleVertical, RotateCcw, Wand2, X, ZoomIn, ZoomOut, Play, Pause } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2, X } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeTags } from '../lib/tags';
 
@@ -13,6 +13,24 @@ const PAGE_RETENTION_MARGIN = 3;
 /** Attempts before a page is left alone. Matches ComicReadScript's ceiling
  * (imageLoad/reactor.ts:22-29). */
 const MAX_PAGE_LOAD_ATTEMPTS = 8;
+/** Height of the bands at the top and bottom of the canvas that summon the
+ * chrome. A tap anywhere used to raise the bars over what was being read; the
+ * bands sit where the bars themselves appear, so the target is where the result
+ * will be. */
+const CHROME_BAND_HEIGHT = 96;
+/** Widest a continuous-scroll page is drawn. Matches `.reader-webtoon
+ * .reader-page` in reader.css — the slot heights are computed from it, so the
+ * two have to agree or the scroll arithmetic drifts from what is on screen. */
+const WEBTOON_MAX_WIDTH = 900;
+
+/** One of the two derived renditions, as the reader sees it. */
+export interface EnhancementSwitch {
+  /** False when no model is installed for it. The button then says so rather
+   * than silently doing nothing, which is how this went unverifiable. */
+  configured: boolean;
+  active: boolean;
+  toggle: () => void;
+}
 
 interface ReaderScreenProps {
   archiveId: string;
@@ -26,55 +44,82 @@ interface ReaderScreenProps {
   /** How many pages either side to keep loaded (preference-driven). */
   prefetchDistance?: number;
   releasePage?: (pageIndex: number) => void;
-  onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection; coverAlone: boolean }) => void;
-  /** Restored pairing start; `undefined` means undecided, i.e. the cover alone. */
-  coverAlone?: boolean | undefined;
-  /** Retry hook for the failure state; the reader itself cannot refetch pages. */
-  onRetry?: () => void;
+  onProgress?: (pageIndex: number, reading: { layout: ReaderLayoutPreference; direction: ReadingDirection }) => void;
   /** Archive facts for the overview panel (cover, tags, byte size). */
   info?: { cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined } | undefined;
   /** Marks the session as unrecorded; the caller skips progress writes. */
   incognito?: boolean;
+  /** Reader-side switches for the two derived renditions, so their effect can be
+   * seen on the page in front of you instead of only in settings. */
+  upscale?: EnhancementSwitch | undefined;
+  decensor?: EnhancementSwitch | undefined;
+  /** Bumped by the caller when what `loadPage` would return has changed — a
+   * switch above, for instance. Every loaded page is dropped and the window
+   * refetched; without it a toggle changed nothing already on screen. */
+  reloadToken?: number;
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', coverAlone, loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
+/** The reader's own loading and failure states: one 56px circle in two moods.
+ *
+ * These used to share a branch — anything not yet loaded rendered as "页面加载
+ * 失败" — which is why turning a page announced a failure and then quietly
+ * showed the page. They are now distinct, and a page is only called failed once
+ * its retries are actually spent. */
+function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  return (
+    <div className={`reader-page-status${failed ? ' is-failed' : ''}`}>
+      {failed ? (
+        <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
+          <RotateCcw aria-hidden="true" />
+        </button>
+      ) : (
+        <span className="reader-retry-button reader-page-spinner" aria-hidden="true" />
+      )}
+      <p role={failed ? 'alert' : 'status'}>{failed ? '加载失败' : '正在加载'}</p>
+    </div>
+  );
+}
+
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   // Built once. A different archive arrives as an unmount, not a prop change:
   // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
   // branch, which takes this component down with it. That is what keeps the page
   // index, the zoom and the per-index page shapes from leaking into the next
   // archive — so if that loading branch is ever removed, this needs a `key`.
-  const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout, coverAlone }));
+  const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
   // `state.layout` is the preference (which may be `auto`); this is what renders.
   const effectiveLayout = effectiveReaderLayout(state);
   const [loadedPages, setLoadedPages] = useState(pages);
   const [zoom, setZoom] = useState<ZoomState>(createZoomState);
   const [thumbnails, setThumbnails] = useState<ReadonlyMap<number, string>>(() => new Map());
+  /** Natural size per page index, recorded as images load. Feeds both the `auto`
+   * layout decision and the continuous-scroll slot heights. */
+  const [pageSizes, setPageSizes] = useState<ReadonlyMap<number, { width: number; height: number }>>(() => new Map());
+  /** Pages whose retries are spent, as state rather than a ref so the slot can
+   * actually re-render into its failure state. */
+  const [exhaustedPages, setExhaustedPages] = useState<ReadonlySet<number>>(() => new Set());
+  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const [webtoonWidth, setWebtoonWidth] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
   const rootRef = useRef<HTMLElement>(null);
+  const webtoonRef = useRef<HTMLElement>(null);
   const zoomScaleRef = useRef(1);
   const layoutRef = useRef(effectiveLayout);
+  const heightsRef = useRef<readonly number[]>([]);
+  const anchorRef = useRef(0);
+  /** Whether the scroller has been positioned for the page being read. Until a
+   * real scroll has happened the anchor must not write progress, or entering
+   * continuous mode at page 40 would immediately save page 1. */
+  const webtoonScrolledRef = useRef(false);
+  const webtoonEnteredRef = useRef(false);
   const reportedPageRef = useRef(state.pageIndex);
-  const reportedPairingRef = useRef(state.coverAlone !== false);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
   const dragPagedRef = useRef(false);
   /** Set on release when the pointer travelled far enough to be a drag, so the
    * click that follows can be ignored. */
   const gestureMovedRef = useRef(false);
-
-  useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
-  useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
-  // Report from an effect rather than from inside a state updater: every page
-  // change is covered (toolbar, keyboard, swipe, thumbnail jump) and StrictMode
-  // cannot double-fire a save. The pairing start is watched too — it does not move
-  // the page, so it would otherwise never be written and would reset on reopen.
-  useEffect(() => {
-    const pairing = state.coverAlone !== false;
-    if (reportedPageRef.current === state.pageIndex && reportedPairingRef.current === pairing) return;
-    reportedPageRef.current = state.pageIndex;
-    reportedPairingRef.current = pairing;
-    onProgress?.(state.pageIndex, { layout: state.layout, direction: state.direction, coverAlone: pairing });
-  }, [onProgress, state.coverAlone, state.direction, state.layout, state.pageIndex]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
@@ -86,40 +131,190 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [retryTick, setRetryTick] = useState(0);
   const retryTimerRef = useRef<number>();
 
+  /** Slot height for one continuous-scroll page. Unmeasured pages get an estimate
+   * so the scroller has a length from the start; a measured height replaces it
+   * and is never given up again, which is what keeps the geometry stable. */
+  const webtoonSlotWidth = Math.min(webtoonWidth || viewport.width, WEBTOON_MAX_WIDTH);
+  const estimatedPageHeight = Math.max(240, Math.round(viewport.height * WEBTOON_ESTIMATED_PAGE_RATIO));
+  const slotHeightFor = useCallback((size: { width: number; height: number } | undefined) => (
+    size && size.width > 0 ? Math.max(1, Math.round((webtoonSlotWidth * size.height) / size.width)) : estimatedPageHeight
+  ), [estimatedPageHeight, webtoonSlotWidth]);
+  const heights = useMemo(
+    () => Array.from({ length: pages.length }, (_, index) => slotHeightFor(pageSizes.get(index))),
+    [pageSizes, pages.length, slotHeightFor],
+  );
+  /** What continuous scroll keeps mounted. Held as two numbers rather than an
+   * object so that scrolling within the same window does not re-run the fetch
+   * effect on every scroll event. */
+  const { first: webtoonFirst, last: webtoonLast } = useMemo(
+    () => webtoonWindow({ scrollTop, viewportHeight: viewport.height, heights, overscan: Math.max(1, prefetchDistance) }),
+    [heights, prefetchDistance, scrollTop, viewport.height],
+  );
+  const webtoonAnchor = useMemo(
+    () => webtoonWindow({ scrollTop, viewportHeight: viewport.height, heights, overscan: 0 }).first,
+    [heights, scrollTop, viewport.height],
+  );
+  const visibleIndexes = useMemo(
+    () => getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: pages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes }),
+    [pages.length, state.layout, state.pageIndex, state.resolvedLayout, state.shapes],
+  );
+  /** The slots a swipe reveals. Rendering only the current one left the gesture
+   * with nothing to slide in from either side, so a drag looked like the page was
+   * being dragged off a blank background. Sides are by *intent*, not by page
+   * number: dragging left always uncovers the "next" slot, in both directions. */
+  const neighbourIndexes = useMemo(() => {
+    const previous = advanceReader(state, 'previous');
+    const next = advanceReader(state, 'next');
+    return {
+      previous: previous.pageIndex === state.pageIndex ? [] : getVisiblePageIndexes(previous),
+      next: next.pageIndex === state.pageIndex ? [] : getVisiblePageIndexes(next),
+    };
+  }, [state]);
+
+  useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
+  useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
+  useEffect(() => { heightsRef.current = heights; }, [heights]);
+  useEffect(() => { anchorRef.current = webtoonAnchor; }, [webtoonAnchor]);
   useEffect(() => () => { if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current); }, []);
 
+  // Report from an effect rather than from inside a state updater: every page
+  // change is covered (toolbar, keyboard, swipe, thumbnail jump, continuous
+  // scroll) and StrictMode cannot double-fire a save.
   useEffect(() => {
-    if (!releasePage) return;
-    const visible = effectiveLayout === 'webtoon'
-      ? Array.from({ length: loadedPages.length }, (_, index) => index)
-      : getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone });
-    const fetch = new Set<number>(visible);
-    // Retention is deliberately wider than fetching. They used to be the same
-    // set, so stepping forward released the page just left and stepping back
-    // re-downloaded it — every single turn cost a fresh request.
-    const retain = new Set<number>(visible);
+    if (reportedPageRef.current === state.pageIndex) return;
+    reportedPageRef.current = state.pageIndex;
+    onProgress?.(state.pageIndex, { layout: state.layout, direction: state.direction });
+  }, [onProgress, state.direction, state.layout, state.pageIndex]);
+
+  // The viewport is a live input, not a startup fact: `auto` reads it, and so do
+  // the continuous-scroll slot heights.
+  useEffect(() => {
+    const measure = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+      setWebtoonWidth(webtoonRef.current?.clientWidth ?? 0);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [effectiveLayout]);
+
+  // `auto` used to be decided once, by the first page to load, and then never
+  // revisited — so narrowing the window kept the spread it had chosen and
+  // squeezed two pages into half the width each. Re-decide from the page on
+  // screen whenever the viewport changes.
+  useEffect(() => {
+    if (state.layout !== 'auto') return;
+    const sample = pageSizes.get(state.pageIndex) ?? [...pageSizes.values()][0];
+    if (!sample) return;
+    const resolved = resolveReaderLayout('auto', {
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      pageWidth: sample.width,
+      pageHeight: sample.height,
+    });
+    setState((current) => current.resolvedLayout === resolved ? current : { ...current, resolvedLayout: resolved });
+  }, [pageSizes, state.layout, state.pageIndex, viewport.height, viewport.width]);
+
+  // Entering continuous mode lands on the page being read, once per entry. The
+  // offsets are estimates at that moment, so this is approximate — `measurePage`
+  // corrects the error afterwards without moving what is on screen.
+  useEffect(() => {
     if (effectiveLayout !== 'webtoon') {
-      for (const index of visible) {
-        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) fetch.add(adjacent);
-        for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance + PAGE_RETENTION_MARGIN)) retain.add(adjacent);
-      }
+      webtoonEnteredRef.current = false;
+      webtoonScrolledRef.current = false;
+      return;
     }
+    if (webtoonEnteredRef.current) return;
+    webtoonEnteredRef.current = true;
+    const container = webtoonRef.current;
+    if (!container) return;
+    let offset = 0;
+    for (let index = 0; index < state.pageIndex; index += 1) offset += heightsRef.current[index] ?? 0;
+    container.scrollTop = offset;
+    setScrollTop(offset);
+  }, [effectiveLayout, state.pageIndex]);
+
+  // Continuous scroll owns the page index while it is on screen; without this it
+  // never recorded progress at all.
+  useEffect(() => {
+    if (effectiveLayout !== 'webtoon' || !webtoonScrolledRef.current) return;
+    setState((current) => current.pageIndex === webtoonAnchor ? current : { ...current, pageIndex: webtoonAnchor });
+  }, [effectiveLayout, webtoonAnchor]);
+
+  // A switch above the canvas changed what `loadPage` answers with. Everything
+  // already held is now the wrong rendition, so drop it and let the window
+  // refill: without this, flipping upscaling changed nothing you could see.
+  const reloadedRef = useRef(reloadToken);
+  useEffect(() => {
+    if (reloadedRef.current === reloadToken) return;
+    reloadedRef.current = reloadToken;
+    failedPagesRef.current.clear();
+    setExhaustedPages((current) => current.size === 0 ? current : new Set());
     setLoadedPages((current) => {
-      let changed = false;
       const next = current.slice();
+      let changed = false;
       for (let index = 0; index < next.length; index += 1) {
-        if (!retain.has(index) && next[index]) {
-          releasePage(index);
-          next[index] = '';
-          changed = true;
-        }
+        if (!next[index]) continue;
+        releasePage?.(index);
+        next[index] = '';
+        changed = true;
       }
       return changed ? next : current;
     });
+  }, [releasePage, reloadToken]);
+
+  useEffect(() => {
+    const pageCount = loadedPages.length;
+    const fetchSet = new Set<number>();
+    const retainSet = new Set<number>();
+    const add = (set: Set<number>, index: number) => { if (index >= 0 && index < pageCount) set.add(index); };
+    if (effectiveLayout === 'webtoon') {
+      // Continuous mode used to call every page of the archive visible, so opening
+      // it fired one decode per page at once — and released none of them. The
+      // window is what is on screen plus overscan, and nothing else.
+      for (let index = webtoonFirst; index <= webtoonLast; index += 1) {
+        add(fetchSet, index);
+        add(retainSet, index);
+      }
+      for (let margin = 1; margin <= PAGE_RETENTION_MARGIN; margin += 1) {
+        add(retainSet, webtoonFirst - margin);
+        add(retainSet, webtoonLast + margin);
+      }
+    } else {
+      // The slots either side are rendered for the swipe, so they have to be
+      // fetched as slots — a spread advances by two pages, which a symmetric
+      // distance of one would miss.
+      for (const index of [...visibleIndexes, ...neighbourIndexes.previous, ...neighbourIndexes.next]) {
+        add(fetchSet, index);
+        add(retainSet, index);
+      }
+      // Retention is deliberately wider than fetching. They used to be the same
+      // set, so stepping forward released the page just left and stepping back
+      // re-downloaded it — every single turn cost a fresh request.
+      for (const index of visibleIndexes) {
+        for (const adjacent of getPrefetchPages(index, pageCount, prefetchDistance)) add(fetchSet, adjacent);
+        for (const adjacent of getPrefetchPages(index, pageCount, prefetchDistance + PAGE_RETENTION_MARGIN)) add(retainSet, adjacent);
+      }
+    }
+
+    if (releasePage) {
+      setLoadedPages((current) => {
+        let changed = false;
+        const next = current.slice();
+        for (let index = 0; index < next.length; index += 1) {
+          if (!retainSet.has(index) && next[index]) {
+            releasePage(index);
+            next[index] = '';
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+    }
     if (!loadPage) return;
     const now = Date.now();
     let soonest = Infinity;
-    for (const index of fetch) {
+    for (const index of fetchSet) {
       if (loadedPages[index] || loadingPagesRef.current.has(index)) continue;
       const failure = failedPagesRef.current.get(index);
       if (failure) {
@@ -143,13 +338,59 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         const delay = (2 ** attempts + Math.random() * 2) * 1000;
         failedPagesRef.current.set(index, { attempts, nextAt: Date.now() + delay });
         if (attempts < MAX_PAGE_LOAD_ATTEMPTS) setRetryTick((value) => value + 1);
+        // Only now is the page a failure rather than a page still on its way.
+        else setExhaustedPages((current) => current.has(index) ? current : new Set(current).add(index));
       }).finally(() => loadingPagesRef.current.delete(index));
     }
     if (soonest !== Infinity) {
       if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(50, soonest - now));
     }
-  }, [effectiveLayout, loadPage, loadedPages, prefetchDistance, releasePage, retryTick, state.coverAlone, state.layout, state.pageIndex, state.resolvedLayout, state.shapes]);
+  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast]);
+
+  const retryPage = useCallback((index: number) => {
+    failedPagesRef.current.delete(index);
+    setExhaustedPages((current) => {
+      if (!current.has(index)) return current;
+      const next = new Set(current);
+      next.delete(index);
+      return next;
+    });
+    setRetryTick((value) => value + 1);
+  }, []);
+
+  /** Records what a page actually is, once the browser knows.
+   *
+   * Two consumers: the `auto` layout decision and the continuous-scroll slot
+   * height. In continuous mode a page *above* the viewport turning out taller
+   * than its estimate would push everything below it down — i.e. move the page
+   * being read — so the scroller is compensated by the same delta.
+   */
+  const measurePage = useCallback((index: number, image: HTMLImageElement) => {
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    if (!width || !height) return;
+    const shape = classifyPageShape(width, height);
+    setState((current) => {
+      if (current.shapes?.[index] === shape) return current;
+      const shapes = [...(current.shapes ?? [])];
+      shapes[index] = shape;
+      return { ...current, shapes };
+    });
+    setPageSizes((current) => {
+      const existing = current.get(index);
+      if (existing && existing.width === width && existing.height === height) return current;
+      const next = new Map(current);
+      next.set(index, { width, height });
+      return next;
+    });
+    const container = webtoonRef.current;
+    if (layoutRef.current !== 'webtoon' || !container || index >= anchorRef.current) return;
+    const delta = slotHeightFor({ width, height }) - (heightsRef.current[index] ?? 0);
+    if (!delta) return;
+    container.scrollTop += delta;
+    setScrollTop(container.scrollTop);
+  }, [slotHeightFor]);
 
   // The thumbnail panel used to pin every page of the archive as a full-size
   // image. Load the small page-thumbnail rendition instead, one at a time so a
@@ -238,6 +479,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     event.stopPropagation();
   }
 
+  /** Whether a click landed in one of the bands that summon the chrome. */
+  function isInChromeBand(event: MouseEvent<HTMLElement>): boolean {
+    const element = rootRef.current;
+    const rect = element?.getBoundingClientRect();
+    const height = rect?.height || window.innerHeight;
+    const offset = event.clientY - (rect?.top ?? 0);
+    const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
+    return offset <= band || offset >= height - band;
+  }
+
   /** Live horizontal offset while a drag is in progress, so the page follows the
    * finger. Without it the gesture had no feedback at all until release, which is
    * why it was impossible to tell whether a turn had been triggered. */
@@ -245,7 +496,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   const trackDrag = useCallback((dx: number, dy: number, elapsed: number) => {
     // A vertical drag is a scroll, not a page turn, and zoomed-in drags pan.
-    if (zoomScaleRef.current > 1 || Math.abs(dy) > Math.abs(dx) || Math.abs(dx) <= TAP_SLOP) {
+    if (zoomScaleRef.current > 1 || layoutRef.current === 'webtoon' || Math.abs(dy) > Math.abs(dx) || Math.abs(dx) <= TAP_SLOP) {
       setDrag(null);
       return;
     }
@@ -291,29 +542,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const now = Date.now();
     if (now - lastTapRef.current < 300 && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       lastTapRef.current = 0;
-      setZoom((current) => toggleDoubleTapZoom(current));
+      if (layoutRef.current !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current));
       return;
     }
     lastTapRef.current = now;
 
+    // Continuous scroll pages by scrolling; a horizontal flick there used to move
+    // the page index behind the scroller's back.
+    if (layoutRef.current === 'webtoon') return;
     if (Math.abs(dx) <= Math.abs(dy)) return;
     // Same rule as the mouse: a third of the viewport, or a fast enough flick.
     if (!shouldCommitPageTurn(dx, elapsed, window.innerWidth)) return;
     gestureMovedRef.current = true;
     move(dx < 0 ? 'next' : 'previous');
   }, []);
-
-  function zoomIn() {
-    setZoom((current) => zoomByStep(current, 1));
-  }
-
-  function zoomOut() {
-    setZoom((current) => zoomByStep(current, -1));
-  }
-
-  function zoomReset() {
-    setZoom(resetZoom);
-  }
 
   /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
    * press-drag-release gesture here; touch keeps its own swipe handler. */
@@ -341,7 +583,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // — drag-scrolling in continuous mode used to toggle the chrome on release.
     // The threshold matches ComicReadScript's (helper/useDrag.ts:101-130).
     gestureMovedRef.current = Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP;
-    if (zoomScaleRef.current > 1) return;
+    if (zoomScaleRef.current > 1 || layoutRef.current === 'webtoon') return;
     if (Math.abs(dx) <= Math.abs(dy)) return;
     if (!shouldCommitPageTurn(dx, Date.now() - start.time, window.innerWidth)) return;
     // A drag is a page turn, not a chrome toggle.
@@ -349,8 +591,25 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     move(dx < 0 ? 'next' : 'previous');
   }, []);
 
-  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes, coverAlone: state.coverAlone });
-  const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
+  const handleWebtoonScroll = useCallback((event: UIEvent<HTMLElement>) => {
+    webtoonScrolledRef.current = true;
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  /** Jump to a page from the overview grid. Continuous mode has to be scrolled as
+   * well as told, or the index and the scroller disagree and the anchor drags it
+   * straight back. */
+  const jumpToPage = useCallback((index: number) => {
+    setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
+    if (layoutRef.current !== 'webtoon') return;
+    const container = webtoonRef.current;
+    if (!container) return;
+    let offset = 0;
+    for (let before = 0; before < index; before += 1) offset += heightsRef.current[before] ?? 0;
+    container.scrollTop = offset;
+    setScrollTop(offset);
+  }, []);
+
   const chromeVisible = state.phase === 'chrome-visible';
   // One transform for everything on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. The drag
@@ -361,6 +620,24 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     transformOrigin: 'center center',
     transition: drag ? 'none' : 'transform 140ms ease-out',
   } as const;
+
+  /** One page: the image, or why it is not there yet. Always a slot, even when
+   * empty — a spread whose halves appeared one at a time used to re-centre when
+   * the second arrived, shifting the page under the reader's eyes. */
+  const renderSlot = (index: number) => {
+    const source = loadedPages[index];
+    return (
+      <div className="reader-slot" key={index}>
+        {source
+          ? <img className="reader-page" alt={`第 ${index + 1} 页`} src={source} onLoad={(event) => measurePage(index, event.currentTarget)} />
+          : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
+      </div>
+    );
+  };
+
+  const spreadClass = (indexes: readonly number[]) => (
+    indexes.length > 1 ? `reader-spread${state.direction === 'rtl' ? ' is-rtl' : ''}` : 'reader-single'
+  );
 
   return (
     <main
@@ -373,9 +650,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (dragPagedRef.current) { dragPagedRef.current = false; return; }
         if (gestureMovedRef.current) { gestureMovedRef.current = false; return; }
         if (event.detail > 1) return;
-        setState(toggleReaderChrome);
+        // Showing is restricted to the top and bottom bands, so a tap in the
+        // middle of a page cannot flash the bars over what is being read. Hiding
+        // is not: the bars swallow their own clicks, so if only the bands
+        // dismissed there would be nowhere left to press.
+        if (chromeVisible || isInChromeBand(event)) setState(toggleReaderChrome);
       }}
-      onDoubleClick={() => setZoom((current) => toggleDoubleTapZoom(current))}
+      onDoubleClick={() => { if (effectiveLayout !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current)); }}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
@@ -391,63 +672,70 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         // No click handler of its own: this bubbles to the canvas, and having
         // both toggle meant two flips per click that cancelled out, so the
         // chrome could not be summoned in this mode at all.
-        <section className="reader-webtoon" aria-label="连续阅读">
-          <div className="reader-webtoon-inner" style={zoomStyle}>
-            {loadedPages.map((page, index) => page ? <img key={`${page}-${index}`} className="reader-page" src={page} alt={`第 ${index + 1} 页`} /> : null)}
+        <section className="reader-webtoon" aria-label="连续阅读" ref={webtoonRef} onScroll={handleWebtoonScroll}>
+          <div className="reader-webtoon-inner">
+            {/* Every page gets a slot of a known height, mounted only inside the
+                window. The slot is what keeps the scroller's length honest while
+                most of the archive is not loaded. */}
+            {heights.map((height, index) => (
+              <div className="reader-webtoon-slot" key={index} style={{ height: `${height}px` }}>
+                {index >= webtoonFirst && index <= webtoonLast ? renderSlot(index) : null}
+              </div>
+            ))}
           </div>
         </section>
-      ) : visiblePages[0] ? (
-        <section className={`${effectiveLayout === 'double' ? 'reader-spread' : 'reader-single'}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`} aria-label="分页阅读" style={zoomStyle}>
-          {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
-            const image = event.currentTarget;
-            const pageIndex = visibleIndexes[index] ?? state.pageIndex;
-            const shape = classifyPageShape(image.naturalWidth, image.naturalHeight);
-            setState((current) => {
-              // Record what auto resolves to without overwriting the preference,
-              // so the layout control can still say — and keep — 自动.
-              const resolvedLayout = current.layout === 'auto' && !current.resolvedLayout
-                ? resolveReaderLayout('auto', {
-                  viewportWidth: window.innerWidth,
-                  viewportHeight: window.innerHeight,
-                  pageWidth: image.naturalWidth,
-                  pageHeight: image.naturalHeight,
-                })
-                : current.resolvedLayout;
-              // A page turning out to be a spread re-pairs the run it sits in.
-              if (current.shapes?.[pageIndex] === shape && resolvedLayout === current.resolvedLayout) return current;
-              const shapes = [...(current.shapes ?? [])];
-              shapes[pageIndex] = shape;
-              return { ...current, shapes, ...(resolvedLayout ? { resolvedLayout } : {}) };
-            });
-          }} /> : null)}
-        </section>
       ) : (
-        /* JHenTai-style failure state: the message and a retry icon, nothing
-           else. Leaving is the top bar's job. */
-        <section className="reader-error" onClick={stopChromeToggle}>
-          <p role="alert">页面加载失败</p>
-          <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={() => onRetry?.()}>
-            <RotateCcw aria-hidden="true" />
-          </button>
-        </section>
+        <div className="reader-track" style={zoomStyle}>
+          {([
+            { key: 'previous', offset: -1, indexes: neighbourIndexes.previous },
+            { key: 'current', offset: 0, indexes: visibleIndexes },
+            { key: 'next', offset: 1, indexes: neighbourIndexes.next },
+          ] as const).map(({ key, offset, indexes }) => indexes.length === 0 ? null : (
+            <section
+              key={key}
+              className={`reader-frame ${spreadClass(indexes)}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`}
+              style={{ transform: `translateX(${offset * 100}%)` }}
+              {...(offset === 0 ? { 'aria-label': '分页阅读' } : { 'aria-hidden': true })}
+            >
+              {indexes.map((index) => renderSlot(index))}
+            </section>
+          ))}
+        </div>
       )}
 
-      <AnimatePresence>
-        {chromeVisible && (
-          <motion.div
-            className="reader-chrome"
-            initial={reduceMotion ? false : { opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
-            transition={{ duration: reduceMotion ? 0 : 0.22 }}
-            onClick={stopChromeToggle}
-          >
-            <header>
+      {/* Two bars, two directions. They used to be one animated element, so the
+          bottom bar slid in from the top of the screen — which is where it does
+          not live. */}
+      <div className="reader-chrome">
+        <AnimatePresence>
+          {chromeVisible && (
+            <motion.header
+              key="reader-chrome-top"
+              className="reader-chrome-top"
+              initial={reduceMotion ? false : { opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+              transition={{ duration: reduceMotion ? 0 : 0.22 }}
+              onClick={stopChromeToggle}
+            >
               <Link className="reader-icon-button" to="/library" aria-label="返回档案库"><ArrowLeft aria-hidden="true" /></Link>
               <strong>{title}</strong>
               {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
-            </header>
-            <div className="reader-toolbar" role="toolbar" aria-label="阅读控制">
+              <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
+            </motion.header>
+          )}
+          {chromeVisible && (
+            <motion.div
+              key="reader-chrome-bottom"
+              className="reader-toolbar"
+              role="toolbar"
+              aria-label="阅读控制"
+              initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+              transition={{ duration: reduceMotion ? 0 : 0.22 }}
+              onClick={stopChromeToggle}
+            >
               <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
               <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
               <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
@@ -458,34 +746,41 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                 {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
               </button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
-              {/* Shifts the whole pairing by one. A scan that includes both
-                  inside-cover pages is off by one throughout, and with no spread
-                  anywhere there is nothing for the wide-page rule to key off —
-                  but the person looking at the screen can see it at a glance. */}
-              {effectiveLayout === 'double' && (
+              {/* The two derived renditions, switchable from here. Both were
+                  settings-only, so there was no way to see what either one did to
+                  the page you were looking at. */}
+              {upscale && (
                 <button
                   type="button"
-                  aria-label={state.coverAlone === false ? '封面与第二页并排，点击让封面单独一页' : '封面单独一页，点击与第二页并排'}
-                  title="对页起点"
-                  aria-pressed={state.coverAlone !== false}
-                  onClick={() => setState((current) => ({ ...current, coverAlone: current.coverAlone === false }))}
-                >
-                  <BookOpenCheck aria-hidden="true" />
-                </button>
+                  disabled={!upscale.configured}
+                  aria-pressed={upscale.configured && upscale.active}
+                  aria-label={upscale.configured ? (upscale.active ? '关闭超分' : '开启超分') : '超分：未选择模型'}
+                  title={upscale.configured ? '超分' : '超分：先在阅读设置里选择模型'}
+                  onClick={upscale.toggle}
+                ><Sparkles aria-hidden="true" /></button>
+              )}
+              {decensor && (
+                <button
+                  type="button"
+                  disabled={!decensor.configured}
+                  aria-pressed={decensor.configured && decensor.active}
+                  aria-label={decensor.configured ? (decensor.active ? '关闭去码' : '开启去码') : '去码：未选择模型包'}
+                  title={decensor.configured ? '去码' : '去码：先在阅读设置里选择模型包'}
+                  onClick={decensor.toggle}
+                ><Eraser aria-hidden="true" /></button>
               )}
               <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
-              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} aria-pressed={state.direction === 'rtl'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
-              <button type="button" aria-label="放大" onClick={zoomIn}><ZoomIn aria-hidden="true" /></button>
-              <button type="button" aria-label="缩小" onClick={zoomOut}><ZoomOut aria-hidden="true" /></button>
-              {zoom.scale > 1 && <button type="button" aria-label="重置缩放" onClick={zoomReset}><RotateCcw aria-hidden="true" /></button>}
-              {zoom.scale > 1 && <span>{Math.round(zoom.scale * 100)}%</span>}
+              {/* No `aria-pressed`: direction is a choice between two, not a
+                  switch that is on, and the pressed styling made the button look
+                  permanently hovered whenever the answer was right-to-left. */}
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
               <button type="button" aria-label={isFullscreen ? '退出全屏' : '全屏'} onClick={toggleFullscreen}>
                 {isFullscreen ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
               </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
       {thumbnailPanelOpen && (
         /* Centred overlay rather than a side drawer: it doubles as the archive
            overview (cover, size, tags) plus the page grid. */
@@ -496,9 +791,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button type="button" className="reader-icon-button" aria-label="关闭概览" onClick={() => setThumbnailPanelOpen(false)}><X aria-hidden="true" /></button>
             </header>
             <div className="reader-overview-summary">
-              {info?.cover && <img className="reader-overview-cover" src={info.cover} alt="" />}
-              <div className="reader-overview-facts">
+              {/* Page count and size sit under the cover rather than beside it:
+                  they belong to the cover, and putting them in the wide column
+                  pushed the tag groups down by a line for no reason. */}
+              <div className="reader-overview-identity">
+                {info?.cover && <img className="reader-overview-cover" src={info.cover} alt="" />}
                 <p className="reader-overview-stats">{[`${pages.length} 页`, info?.sizeBytes ? formatByteSize(info.sizeBytes) : ''].filter(Boolean).join(' · ')}</p>
+              </div>
+              <div className="reader-overview-facts">
                 {(info?.tags?.length ?? 0) > 0 && (
                   /* Grouped by namespace, the way the detail page shows them: a
                      flat run of chips gave no clue which were artists and which
@@ -515,12 +815,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               </div>
             </div>
             <div className="reader-overview-thumbnails">
-              {loadedPages.map((page, index) => {
-                const preview = thumbnails.get(index) ?? page;
+              {pages.map((_, index) => {
+                const preview = thumbnails.get(index) ?? loadedPages[index];
                 return (
                   <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={(event) => {
                     stopChromeToggle(event);
-                    setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
+                    jumpToPage(index);
                     setThumbnailPanelOpen(false);
                   }}>
                     {preview ? <img src={preview} alt="" loading="lazy" /> : <span aria-hidden="true">{index + 1}</span>}

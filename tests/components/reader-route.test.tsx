@@ -80,7 +80,7 @@ describe('reader route', () => {
     expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
-  it('loads the restored page first and preloads ahead of it, not behind', async () => {
+  it('loads the restored page, one slot either side, and then ahead of it', async () => {
     const loadedPaths: string[] = [];
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -98,9 +98,11 @@ describe('reader route', () => {
 
     expect(await screen.findByRole('img', { name: '第 4 页' })).toBeInTheDocument();
     expect(loadedPaths[0]).toBe('3.jpg');
-    // The default budget is one page, and reading runs forward, so it goes
-    // ahead: 2.jpg has already been passed.
-    expect(new Set(loadedPaths)).toEqual(new Set(['3.jpg', '4.jpg']));
+    // The prefetch budget still runs forward — reading does — but the slots
+    // either side are rendered for the swipe now, so both have to exist: a drag
+    // used to pull the page off an empty background. That is one slot back, not a
+    // window behind.
+    expect(new Set(loadedPaths)).toEqual(new Set(['2.jpg', '3.jpg', '4.jpg']));
   });
 
   it('opens the restored page even when a neighbour prefetch fails', async () => {
@@ -191,7 +193,7 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' }, { timeout: 5_000 });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     expect(await screen.findByRole('button', { name: '阅读布局：双页，点击切换' }, { timeout: 5_000 })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '从右到左' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '从右到左' })).toBeInTheDocument();
     view.unmount();
 
     // The archive's own record is the more specific answer, so it wins. 'paged'

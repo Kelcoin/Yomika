@@ -30,17 +30,27 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // A backend with no model runs the nearest-neighbour fallback, which returns
   // the same pixels at four times the bytes — strictly worse than the plain
   // page. Upscaling therefore needs a model, not just a backend.
-  const upscaleEnabled = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
-  /** De-censoring has no separate switch: choosing a bundle is what turns it on. */
-  const decensorEnabled = preferences.decensorModel !== '';
+  const upscaleConfigured = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+  /** De-censoring has no separate switch in settings: choosing a bundle is what
+   * turns it on. */
+  const decensorConfigured = preferences.decensorModel !== '';
+  /** Per-session overrides for the two enhancements, driven from the reader's own
+   * toolbar. Settings decide whether a model exists; these decide whether this
+   * sitting uses it, which is the only way to see what either one does to the
+   * page in front of you. */
+  const [upscaleWanted, setUpscaleWanted] = useState(true);
+  const [decensorWanted, setDecensorWanted] = useState(true);
+  const upscaleEnabled = upscaleConfigured && upscaleWanted;
+  const decensorEnabled = decensorConfigured && decensorWanted;
+  /** Bumped whenever a switch flips, so the reader drops the renditions it is
+   * holding instead of showing the previous answer until the next page turn. */
+  const [enhancementToken, setEnhancementToken] = useState(0);
   const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
   /** Incognito reading: no progress, no history. The reader shows a marker so it
    * is obvious the session is not being recorded. */
   const incognito = searchParams.get('incognito') === '1';
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
-  /** Restored pairing start. `undefined` means the archive has no stored choice. */
-  const [coverAlone, setCoverAlone] = useState<boolean | undefined>(undefined);
   /** Reading mode and direction for this archive: its own record if it has one,
    * otherwise the global preference. Both were previously ignored — the reader
    * always started on `auto`/`ltr`, which made the two settings do nothing. */
@@ -246,9 +256,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
         : 0;
       setInitialPage(firstPage);
-      // Undecided stays undecided rather than becoming `true`: the reader treats
-      // both as "cover alone", but only an explicit choice should be written back.
-      setCoverAlone(progress.ok && progress.value ? progress.value.coverAlone ?? undefined : undefined);
       // Reading mode and direction: the archive's own record wins over the global
       // default, because it is the more specific answer. The stored layout only
       // distinguishes paged from continuous — whether paged meant single, double
@@ -313,15 +320,24 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       title={title}
       pages={pages}
       initialPage={initialPage}
-      coverAlone={coverAlone}
       layout={readingLayout}
       direction={readingDirection}
       loadPage={loadPage}
       loadPageThumbnail={loadPageThumbnail}
       prefetchDistance={prefetchDistance}
       releasePage={releasePage}
-      onRetry={() => setRetryToken((value) => value + 1)}
       info={info}
+      upscale={{
+        configured: upscaleConfigured,
+        active: upscaleEnabled,
+        toggle: () => { setUpscaleWanted((value) => !value); setEnhancementToken((value) => value + 1); },
+      }}
+      decensor={{
+        configured: decensorConfigured,
+        active: decensorEnabled,
+        toggle: () => { setDecensorWanted((value) => !value); setEnhancementToken((value) => value + 1); },
+      }}
+      reloadToken={enhancementToken}
       onProgress={(pageIndex, reading) => {
         if (!scopeId || incognito) return;
         void repository.saveProgress({
@@ -331,7 +347,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           pageCount: pages.length,
           layout: reading.layout === 'webtoon' ? 'continuous' : 'paged',
           direction: reading.direction,
-          coverAlone: reading.coverAlone,
         });
       }}
       incognito={incognito}
