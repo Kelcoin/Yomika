@@ -86,18 +86,32 @@ export interface ReaderState {
   pageCount: number;
   pageIndex: number;
   direction: ReadingDirection;
+  /** What the reader was *asked* for, including `auto`. */
   layout: ReaderLayoutPreference;
+  /** What `auto` resolved to once a page's dimensions were known.
+   *
+   * Kept apart from `layout` because overwriting the preference made `auto`
+   * impossible to hold: the first image to load replaced it with `single` or
+   * `double`, so selecting it read as an immediate jump to something else. */
+  resolvedLayout?: ReaderLayout | undefined;
   phase: ReaderPhase;
+}
+
+/** The layout to actually render. `auto` before any page has loaded reads as
+ * single: one page is never the wrong answer, whereas guessing a spread and
+ * being wrong shows two half-width pages. */
+export function effectiveReaderLayout(state: Pick<ReaderState, 'layout' | 'resolvedLayout'>): ReaderLayout {
+  return state.layout === 'auto' ? state.resolvedLayout ?? 'single' : state.layout;
 }
 
 /** Returns the page indexes rendered for the current spread.
  * In double-page mode the cover (index 0) is always a standalone page;
  * body pages are paired as (1,2), (3,4), ... .
  */
-export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout'>): number[] {
+export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pageCount' | 'layout' | 'resolvedLayout'>): number[] {
   if (state.pageCount <= 0) return [];
   const start = Math.min(Math.max(0, Math.floor(state.pageIndex)), state.pageCount - 1);
-  if (state.layout !== 'double' || start === 0) return [start];
+  if (effectiveReaderLayout(state) !== 'double' || start === 0) return [start];
   const pairStart = start % 2 === 0 ? start - 1 : start;
   return [pairStart, pairStart + 1].filter((index) => index < state.pageCount);
 }
@@ -153,7 +167,7 @@ export function createReaderState(input: {
 export function advanceReader(state: ReaderState, intent: 'next' | 'previous'): ReaderState {
   const forward = intent === 'next' ? 1 : -1;
   const direction = state.direction === 'rtl' ? -forward : forward;
-  if (state.layout !== 'double') {
+  if (effectiveReaderLayout(state) !== 'double') {
     return { ...state, pageIndex: clampPage(state.pageIndex + direction, state.pageCount), phase: 'ready' };
   }
 

@@ -6,6 +6,7 @@ import {
   clampZoom,
   createReaderState,
   createZoomState,
+  effectiveReaderLayout,
   filterArchivesByQuery,
   getPrefetchPages,
   getVisiblePageIndexes,
@@ -21,6 +22,24 @@ import {
 } from '../../src/domain/reader';
 
 describe('reader domain', () => {
+  it('keeps the automatic preference separate from what it resolves to', () => {
+    // Resolving used to overwrite `layout`, so the first image to load turned
+    // 自动 into 单页 or 双页 and the preference could not be held or shown.
+    const auto = createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'auto' });
+    expect(auto.layout).toBe('auto');
+    expect(effectiveReaderLayout(auto)).toBe('single');
+
+    const resolved = { ...auto, resolvedLayout: 'double' as const };
+    expect(resolved.layout).toBe('auto');
+    expect(effectiveReaderLayout(resolved)).toBe('double');
+    // Pairing and paging follow the resolved layout, not the literal preference.
+    expect(getVisiblePageIndexes({ ...resolved, pageIndex: 1 })).toEqual([1, 2]);
+    expect(advanceReader({ ...resolved, pageIndex: 1 }, 'next').pageIndex).toBe(3);
+
+    // An explicit choice ignores whatever auto had settled on.
+    expect(effectiveReaderLayout({ ...resolved, layout: 'single' })).toBe('single');
+  });
+
   it('resolves automatic layout from viewport and page shape', () => {
     expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900, pageWidth: 700, pageHeight: 1000 })).toBe('double');
     expect(resolveReaderLayout('auto', { viewportWidth: 390, viewportHeight: 844, pageWidth: 700, pageHeight: 1000 })).toBe('single');

@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent } from 'react';
 import { Link } from 'react-router-dom';
 
-import { advanceReader, createReaderState, createZoomState, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, resetZoom, settleZoom, toggleDoubleTapZoom, toggleReaderChrome, zoomByStep, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeTags } from '../lib/tags';
 
@@ -31,19 +31,21 @@ interface ReaderScreenProps {
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, onRetry, info, incognito = false, prefetchDistance = 1 }: ReaderScreenProps) {
   const reduceMotion = useReducedMotion();
   const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
+  // `state.layout` is the preference (which may be `auto`); this is what renders.
+  const effectiveLayout = effectiveReaderLayout(state);
   const [loadedPages, setLoadedPages] = useState(pages);
   const [zoom, setZoom] = useState<ZoomState>(createZoomState);
   const [thumbnails, setThumbnails] = useState<ReadonlyMap<number, string>>(() => new Map());
   const rootRef = useRef<HTMLElement>(null);
   const zoomScaleRef = useRef(1);
-  const layoutRef = useRef(state.layout);
+  const layoutRef = useRef(effectiveLayout);
   const reportedPageRef = useRef(state.pageIndex);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
   const dragPagedRef = useRef(false);
 
   useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
-  useEffect(() => { layoutRef.current = state.layout; }, [state.layout]);
+  useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
   // Report from an effect rather than from inside a state updater: every page
   // change is covered (toolbar, keyboard, swipe, thumbnail jump) and StrictMode
   // cannot double-fire a save.
@@ -60,10 +62,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => {
     if (!releasePage) return;
     const keep = new Set<number>();
-    if (state.layout === 'webtoon') {
+    if (effectiveLayout === 'webtoon') {
       for (let index = 0; index < loadedPages.length; index += 1) keep.add(index);
     } else {
-      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout })) {
+      for (const index of getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout })) {
         keep.add(index);
         for (const adjacent of getPrefetchPages(index, loadedPages.length, prefetchDistance)) keep.add(adjacent);
       }
@@ -88,7 +90,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (page) setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
       }).finally(() => loadingPagesRef.current.delete(index));
     }
-  }, [loadPage, loadedPages, prefetchDistance, releasePage, state.layout, state.pageIndex]);
+  }, [effectiveLayout, loadPage, loadedPages, prefetchDistance, releasePage, state.layout, state.pageIndex, state.resolvedLayout]);
 
   // The thumbnail panel used to pin every page of the archive as a full-size
   // image. Load the small page-thumbnail rendition instead, one at a time so a
@@ -139,7 +141,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (!autoPlay) return undefined;
     const timer = window.setInterval(() => move('next'), 5000);
     return () => window.clearInterval(timer);
-  }, [autoPlay, state.direction, state.layout]);
+  }, [autoPlay, effectiveLayout, state.direction, state.layout]);
 
   function toggleFullscreen() {
     if (document.fullscreenElement) {
@@ -245,7 +247,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     move(dx < 0 ? 'next' : 'previous');
   }, []);
 
-  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout });
+  const visibleIndexes = getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: loadedPages.length, layout: state.layout, resolvedLayout: state.resolvedLayout });
   const visiblePages = visibleIndexes.map((index) => loadedPages[index]);
   const chromeVisible = state.phase === 'chrome-visible';
   // One transform for everything on screen: scaling each image on its own made a
@@ -276,7 +278,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       onTouchEnd={handleTouchEnd}
       tabIndex={0}
     >
-      {state.layout === 'webtoon' ? (
+      {effectiveLayout === 'webtoon' ? (
         // Explicit toggle: relying on the bubble from a scrolling container left
         // the chrome unreachable in this mode.
         <section className="reader-webtoon" aria-label="连续阅读" onClick={() => setState(toggleReaderChrome)}>
@@ -285,17 +287,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </div>
         </section>
       ) : visiblePages[0] ? (
-        <section className={state.layout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读" style={zoomStyle}>
+        <section className={effectiveLayout === 'double' ? 'reader-spread' : 'reader-single'} aria-label="分页阅读" style={zoomStyle}>
           {visiblePages.map((page, index) => page ? <img key={`${page}-${visibleIndexes[index]}`} className="reader-page" alt={`第 ${(visibleIndexes[index] ?? state.pageIndex) + 1} 页`} src={page} onLoad={(event) => {
-            if (state.layout === 'auto') {
-              const image = event.currentTarget;
-              setState((current) => ({ ...current, layout: resolveReaderLayout('auto', {
-                viewportWidth: window.innerWidth,
-                viewportHeight: window.innerHeight,
-                pageWidth: image.naturalWidth,
-                pageHeight: image.naturalHeight,
-              }) }));
-            }
+            // Record what auto resolves to without overwriting the preference,
+            // so the layout control can still say — and keep — 自动.
+            if (state.layout !== 'auto' || state.resolvedLayout) return;
+            const image = event.currentTarget;
+            setState((current) => ({ ...current, resolvedLayout: resolveReaderLayout('auto', {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              pageWidth: image.naturalWidth,
+              pageHeight: image.naturalHeight,
+            }) }));
           }} /> : null)}
         </section>
       ) : (
