@@ -43,6 +43,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
   const dragPagedRef = useRef(false);
+  /** Set on release when the pointer travelled far enough to be a drag, so the
+   * click that follows can be ignored. */
+  const gestureMovedRef = useRef(false);
 
   useEffect(() => { zoomScaleRef.current = zoom.scale; }, [zoom.scale]);
   useEffect(() => { layoutRef.current = effectiveLayout; }, [effectiveLayout]);
@@ -154,6 +157,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }
 
   const SWIPE_THRESHOLD = 50;
+  /** Past this much travel a gesture is a drag rather than a tap. */
+  const TAP_SLOP = 5;
 
   function move(intent: 'next' | 'previous') {
     setState((current) => {
@@ -237,9 +242,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!start || event.button !== 0) return;
-    if (zoomScaleRef.current > 1) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
+    // Anything past a few pixels was a drag, and a drag is not a tap on the page
+    // — drag-scrolling in continuous mode used to toggle the chrome on release.
+    // The threshold matches ComicReadScript's (helper/useDrag.ts:101-130).
+    gestureMovedRef.current = Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP;
+    if (zoomScaleRef.current > 1) return;
     if (Date.now() - start.time > 700) return;
     if (Math.abs(dx) < SWIPE_THRESHOLD || Math.abs(dx) <= Math.abs(dy)) return;
     // A drag is a page turn, not a chrome toggle.
@@ -264,9 +273,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       className="reader-screen"
       ref={rootRef}
       onClick={(event) => {
-        // A drag that turned the page, and the second click of a double click,
-        // must not also toggle the chrome.
+        // A drag that turned the page, the second click of a double click, and a
+        // drag that merely scrolled must none of them toggle the chrome.
         if (dragPagedRef.current) { dragPagedRef.current = false; return; }
+        if (gestureMovedRef.current) { gestureMovedRef.current = false; return; }
         if (event.detail > 1) return;
         setState(toggleReaderChrome);
       }}
@@ -279,9 +289,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       tabIndex={0}
     >
       {effectiveLayout === 'webtoon' ? (
-        // Explicit toggle: relying on the bubble from a scrolling container left
-        // the chrome unreachable in this mode.
-        <section className="reader-webtoon" aria-label="连续阅读" onClick={() => setState(toggleReaderChrome)}>
+        // No click handler of its own: this bubbles to the canvas, and having
+        // both toggle meant two flips per click that cancelled out, so the
+        // chrome could not be summoned in this mode at all.
+        <section className="reader-webtoon" aria-label="连续阅读">
           <div className="reader-webtoon-inner" style={zoomStyle}>
             {loadedPages.map((page, index) => page ? <img key={`${page}-${index}`} className="reader-page" src={page} alt={`第 ${index + 1} 页`} /> : null)}
           </div>

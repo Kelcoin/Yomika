@@ -93,6 +93,39 @@ describe('reader screen', () => {
     expect(screen.getByRole('region', { name: '连续阅读' })).toBeInTheDocument();
   });
 
+  it('toggles the chrome from a tap in continuous mode, but not from a drag', () => {
+    // `detail: 1` on purpose: two clicks in quick succession are a double click,
+    // which zooms instead, and that path is asserted elsewhere.
+    const tap = (from: [number, number], to = from) => {
+      const main = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.mouseDown(main, { button: 0, clientX: from[0], clientY: from[1] });
+      fireEvent.mouseUp(main, { button: 0, clientX: to[0], clientY: to[1] });
+      fireEvent.click(screen.getByRole('region', { name: '连续阅读' }), { detail: 1 });
+    };
+
+    const view = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="webtoon" />
+      </MemoryRouter>,
+    );
+    // The section used to carry its own toggle as well as bubbling to the canvas,
+    // so every click flipped twice and cancelled out — the chrome could not be
+    // summoned in this mode at all.
+    tap([200, 400]);
+    expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+    view.unmount();
+
+    // Drag-scrolling with a mouse ends in a click. Travel past a few pixels means
+    // it was a scroll, not a tap on the page.
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="webtoon" />
+      </MemoryRouter>,
+    );
+    tap([200, 400], [205, 250]);
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+  });
+
   it('owns focus on mount so arrow keys page without a chrome-toggling click', () => {
     renderReader();
 
