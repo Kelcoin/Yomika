@@ -378,6 +378,38 @@ pub struct InstalledModel {
     pub kind: String,
 }
 
+/// How much larger than the page an enhanced rendition is served.
+///
+/// The models available are x4, and x4 is not what a reader needs: it is sixteen
+/// times the pixels, which has to be encoded, cached, decoded and then drawn into
+/// a slot at most a couple of times the page's size. Downsampling the model's
+/// output to x2 keeps the detail the model recovered and drops three quarters of
+/// the bytes — which is also most of the reason enhanced pages felt slow.
+pub const ENHANCED_OUTPUT_SCALE: u32 = 2;
+
+/// Resamples a model's output down to `ENHANCED_OUTPUT_SCALE` times the source.
+/// Anything already at or below that is returned untouched.
+pub fn fit_enhanced_output(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> (std::borrow::Cow<'_, [u8]>, u32, u32) {
+    let target_width = source_width.saturating_mul(ENHANCED_OUTPUT_SCALE);
+    let target_height = source_height.saturating_mul(ENHANCED_OUTPUT_SCALE);
+    if width <= target_width || height <= target_height || target_width == 0 || target_height == 0 {
+        return (std::borrow::Cow::Borrowed(rgba), width, height);
+    }
+    let Some(image) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) else {
+        return (std::borrow::Cow::Borrowed(rgba), width, height);
+    };
+    // Lanczos3 on the way down: the model spent its time recovering edges, and a
+    // box filter would give them straight back.
+    let resized = image::imageops::resize(&image, target_width, target_height, image::imageops::FilterType::Lanczos3);
+    (std::borrow::Cow::Owned(resized.into_raw()), target_width, target_height)
+}
+
 pub const MODEL_KIND_UPSCALE: &str = "upscale";
 pub const MODEL_KIND_DECENSOR: &str = "decensor";
 
@@ -784,11 +816,24 @@ fn upscale_cached_page(
         Err(error) => return CommandResult::failure("INVALID_RESPONSE", format!("{error:?}"), false),
     };
 
+    // Served at twice the page, whatever the model's own factor is. A x4 model
+    // produces sixteen times the pixels of the page — a 1400x2000 scan becomes
+    // 5600x8000, which is 45 MB of RGBA to encode, cache, decode and then draw
+    // into a slot a fraction of that size. Two is the point where the detail is
+    // visible and the cost is not.
+    let (final_rgba, final_width, final_height) = fit_enhanced_output(
+        &upscaled.rgba,
+        upscaled.width,
+        upscaled.height,
+        width,
+        height,
+    );
+
     let mut encoded = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
     {
         use image::ImageEncoder;
-        if let Err(error) = encoder.write_image(&upscaled.rgba, upscaled.width, upscaled.height, image::ExtendedColorType::Rgba8) {
+        if let Err(error) = encoder.write_image(&final_rgba, final_width, final_height, image::ExtendedColorType::Rgba8) {
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     }
@@ -1042,6 +1087,26 @@ pub fn cpu_scale_rgba(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_enhanced_page_is_served_at_twice_the_source() {
+        // The installed models are x4, which is sixteen times the pixels of the
+        // page: a 1400x2000 scan would be encoded, cached and decoded at
+        // 5600x8000 to be drawn into a slot a fraction of that. Two keeps the
+        // detail and drops three quarters of the bytes.
+        let source = (10_u32, 8_u32);
+        let quadrupled = vec![0_u8; (source.0 * 4) as usize * (source.1 * 4) as usize * 4];
+        let (rgba, width, height) = fit_enhanced_output(&quadrupled, source.0 * 4, source.1 * 4, source.0, source.1);
+        assert_eq!((width, height), (source.0 * 2, source.1 * 2));
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+
+        // Already at or below the target: handed back untouched rather than
+        // resampled for nothing.
+        let doubled = vec![7_u8; (source.0 * 2) as usize * (source.1 * 2) as usize * 4];
+        let (same, w, h) = fit_enhanced_output(&doubled, source.0 * 2, source.1 * 2, source.0, source.1);
+        assert_eq!((w, h), (source.0 * 2, source.1 * 2));
+        assert!(matches!(same, std::borrow::Cow::Borrowed(_)));
+    }
     use super::*;
 
     #[test]
