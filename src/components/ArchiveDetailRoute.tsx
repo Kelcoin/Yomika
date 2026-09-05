@@ -9,7 +9,7 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { categorizeTags, parseArchiveTagString } from '../lib/tags';
@@ -38,6 +38,13 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [inReadingList, setInReadingList] = useState(false);
   const [message, setMessage] = useState<string>();
   const navigate = useNavigate();
+  /** Back means back. This was a hardcoded link to the library, so arriving from
+   * the home shelves and pressing it took you somewhere you had never been.
+   * A direct visit has nothing to return to, so that case still falls back. */
+  const goBack = useCallback(() => {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/library');
+  }, [navigate]);
   const { showToast } = useToast();
   useTagTranslations();
 
@@ -116,7 +123,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   if (error && !metadata && !serverId) {
     return (
       <main className="archive-detail-route">
-        <Link className="secondary-action" to="/library"><ArrowLeft aria-hidden="true" />返回档案库</Link>
+        <button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button>
         <p className="form-error" role="alert">{error}</p>
       </main>
     );
@@ -138,7 +145,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
-        <Link className="reader-icon-button" to="/library" aria-label="关闭详情"><ArrowLeft aria-hidden="true" /></Link>
+        <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
         <div><h1 id="archive-detail-route-title">{title}</h1></div>
       </header>
 
@@ -157,7 +164,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
                   <h2>{group.label}</h2>
                   <div className={`archive-detail-tag-row${groupIndex === tagGroups.length - 1 && metadata ? ' has-meta' : ''}`}>
                     <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`}>{tag}</span>)}
+                      {group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`} title={tag}>{tag}</span>)}
                     </span>
                     {groupIndex === tagGroups.length - 1 && metadata && <span className="archive-detail-meta archive-detail-meta-inline"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></span>}
                   </div>

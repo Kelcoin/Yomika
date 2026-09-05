@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-
 import {
+  archiveCategoryLabel,
   formatArchiveDate,
   formatArchivePageMeta,
   isWideCoverRatio,
@@ -9,6 +9,18 @@ import {
 } from '../../src/lib/archiveCardPresentation';
 
 describe('archive card presentation', () => {
+  it('prefers the archive’s own LANraragi categories over the category tag', () => {
+    const archive = { tags: ['category:Manga', 'artist:someone'] };
+    // The card called this 分类 while showing the uploader's metadata. What the
+    // user organised is the LANraragi category, so that wins when there is one.
+    expect(archiveCategoryLabel(archive, ['漫画书架'])).toBe('漫画书架');
+    // With no category on the server, the tag is still better than nothing, and
+    // it gets the display casing LANraragi itself uses.
+    expect(archiveCategoryLabel(archive)).toBe('Manga');
+    expect(archiveCategoryLabel(archive, [])).toBe('Manga');
+    expect(archiveCategoryLabel({ tags: [] })).toBe('');
+  });
+
   it('uses the Readoshi wide-card threshold', () => {
     expect(isWideCoverRatio(1)).toBe(false);
     expect(isWideCoverRatio(1.01)).toBe(true);

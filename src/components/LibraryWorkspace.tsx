@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 
@@ -16,6 +16,13 @@ import type { ImageHandle } from '../lib/unifiedImageCache';
 import { archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
+
+/** Chips a card offers. These were 8 and 12, low enough that the cap — not the
+ * space — was what limited the list: the CSS slot clips the overflow anyway, so a
+ * generous number costs a few unrendered nodes and lets a wide card fill its
+ * rows. */
+const CARD_TAG_LIMIT_THUMBNAIL = 14;
+const CARD_TAG_LIMIT_WIDE = 24;
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -104,11 +111,21 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const result = new Map<string, string[]>();
     for (const category of categories ?? []) {
       for (const archiveId of category.archives) {
-        result.set(archiveId, [...(result.get(archiveId) ?? []), category.name]);
+        // Display names: 🔖 Favorites reads as 收藏夹, and the rest are whatever
+        // the user named them on the server.
+        result.set(archiveId, [...(result.get(archiveId) ?? []), getCategoryDisplayName(category.name)]);
       }
     }
     return result;
   }, [categories]);
+
+  /** LANraragi's own categories win over the `category:` tag. The card used to
+   * show the tag and call it 分类, which conflated the uploader's metadata with
+   * the shelves the user actually made. */
+  const cardCategoryLabel = useCallback(
+    (archive: ArchiveRecord) => archiveCategoryLabel(archive, archiveCategories.get(archive.archiveId)),
+    [archiveCategories],
+  );
 
   const selected = filteredArchives.find((archive) => archive.archiveId === selectedId) ?? filteredArchives[0];
   const rows = useVirtualizer({
@@ -189,9 +206,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       })} eager={eager} />}
       <span className="archive-row-copy">
         <strong>{archive.title}</strong>
-        <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? 8 : 12).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
+        <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
         <span className="archive-row-footer">
-          <small className="archive-row-category" data-category={archiveCategoryLabel(archive)}>{archiveCategoryLabel(archive) || archiveCategories.get(archive.archiveId)?.[0] || archiveLanguageLabel(archive)}</small>
+          <small className="archive-row-category" data-category={archiveCategoryLabel(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
           <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
         </span>
       </span>
@@ -298,6 +315,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
                     key={archive.archiveId}
                     role="listitem"
+                    // Rows are absolutely positioned, so CSS cannot tell which is
+                    // first or last; only the ends of the run get rounded corners.
+                    data-first={row.index === 0}
+                    data-last={row.index === filteredArchives.length - 1}
                     style={{ height: row.size, transform: `translateY(${row.start}px)` }}
                   >
                     {renderArchiveButton(archive, row.index < 8)}
@@ -315,7 +336,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               <h2 id="archive-detail-title">{selected.title}</h2>
               <div className="archive-detail-meta" aria-label="档案摘要">
                 <span className="metadata-chip metadata-chip-page">{selected.pageCount} 页</span>
-                {(archiveCategoryLabel(selected) || archiveCategories.get(selected.archiveId)?.[0]) && <span className="metadata-chip" data-category={archiveCategoryLabel(selected)}>{archiveCategoryLabel(selected) || archiveCategories.get(selected.archiveId)?.[0]}</span>}
+                {cardCategoryLabel(selected) && <span className="metadata-chip" data-category={archiveCategoryLabel(selected)}>{cardCategoryLabel(selected)}</span>}
                 {archiveLanguageLabel(selected) && <span className="metadata-chip">{archiveLanguageLabel(selected)}</span>}
               </div>
               {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}

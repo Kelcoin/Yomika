@@ -73,11 +73,20 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
 
 /** The category a card shows.
  *
- * The local `archives` table has a `category` column, but nothing on the sync
- * path ever wrote it — LANraragi keeps the category in the tags, as
- * `category:Manga`. Cards read the empty column, fell through to a category
- * membership lookup that only covers static categories, and ended up blank. */
-export function archiveCategoryLabel(archive: { category?: string | null | undefined; tags?: readonly string[] | undefined }): string {
+ * LANraragi's own categories come first, because that is what the user actually
+ * organised — the `category:` tag is metadata the uploader happened to set, and
+ * showing it while calling it "分类" conflated two different things. Falls back to
+ * the tag when the archive is in no category.
+ *
+ * The local `archives.category` column is checked first for compatibility, but
+ * nothing on the sync path ever wrote it.
+ */
+export function archiveCategoryLabel(
+  archive: { category?: string | null | undefined; tags?: readonly string[] | undefined },
+  lanraragiCategories?: readonly string[] | undefined,
+): string {
+  const own = lanraragiCategories?.[0];
+  if (own) return own;
   const stored = archive.category?.trim();
   if (stored) return stored;
   const tagged = firstTagValue(archive.tags ?? [], 'category');
