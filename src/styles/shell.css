@@ -616,19 +616,20 @@ body::-webkit-scrollbar,
   line-height: 1.7;
 }
 
+/* One list of servers, then the button that adds another. No heading row above
+   it, so no divider either — the section's own top border is the separation. */
+.server-settings {
+  justify-items: start;
+}
+
 .server-list {
   display: grid;
   gap: var(--space-3);
-  border-top: 1px solid var(--hairline);
-  padding-top: var(--space-5);
+  width: 100%;
 }
 
-/* Autosave has to be visible, or the missing save button reads as a bug. It sits
-   at the end of the row where a heading used to be. */
-.preferences-autosave {
-  justify-self: end;
-  color: var(--ink-faint);
-  font-size: 12px;
+.server-list:empty {
+  display: none;
 }
 
 .preferences-form {
@@ -1083,9 +1084,13 @@ body::-webkit-scrollbar,
   justify-content: flex-start;
 }
 
+/* A fixed width, not `min(18vw, …)`. Viewport units meant the cover resized
+   continuously while the window was dragged — and 18vw does not describe this
+   column anyway, since the sidebar and the detail pane both sit between the
+   cover and the viewport edge. */
 .archive-detail-route-cover img {
   display: block;
-  width: min(18vw, 210px);
+  width: 210px;
   aspect-ratio: 3 / 4;
   object-fit: contain;
   /* No frame. A border plus a filled background drew a box around covers whose
@@ -1098,7 +1103,7 @@ body::-webkit-scrollbar,
 .archive-detail-cover-placeholder {
   display: grid;
   place-items: center;
-  width: min(18vw, 210px);
+  width: 210px;
   aspect-ratio: 3 / 4;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
@@ -1110,7 +1115,7 @@ body::-webkit-scrollbar,
 
 .archive-detail-overview {
   display: grid;
-  grid-template-columns: minmax(140px, 210px) minmax(0, 1fr);
+  grid-template-columns: 210px minmax(0, 1fr);
   align-items: start;
   gap: var(--space-6);
 }
@@ -2761,7 +2766,9 @@ body::-webkit-scrollbar,
   .library-toolbar > .select-field { min-width: 140px; }
   .archive-detail-overview { grid-template-columns: 1fr; }
   .archive-detail-route-cover { justify-content: center; }
-  .archive-detail-route-cover img { width: min(70vw, 280px); }
+  /* Fixed here too — see the desktop rule. */
+  .archive-detail-route-cover img,
+  .archive-detail-cover-placeholder { width: 240px; }
   /* The toolbar is already a single non-wrapping flex row; on a phone the six
      icon buttons only need a floor so they stay tappable. */
   .archive-detail-route-actions > .archive-action-button,
@@ -3318,35 +3325,53 @@ body::-webkit-scrollbar,
 
 .custom-css-hint { margin: 0; color: var(--ink-secondary); font-size: 12px; }
 
-/* Preset cards, not a row of identical grey buttons: each one names the theme
-   and says what it changes, and the applied one stays marked. */
+/* One row of controls sharing the width, the same shape as the archive detail
+   page's action row. As two-line cards they each carried a description, which
+   said less than the preview the button itself gives when pressed — and made the
+   row three times taller than the control it sits above. The description is the
+   tooltip now. */
 .custom-css-presets {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  display: flex;
+  align-items: stretch;
   gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
 }
 
 .css-preset-card {
-  display: grid;
-  align-content: start;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: var(--control-height);
+  overflow: hidden;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
-  background: var(--surface-panel);
-  color: inherit;
-  text-align: left;
+  background: var(--surface-elevated);
+  color: var(--ink-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   cursor: pointer;
-  transition: border-color var(--motion-standard), background-color var(--motion-standard);
+  transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
 }
 
-.css-preset-card:hover { border-color: color-mix(in srgb, var(--brand-vermilion) 45%, transparent); }
+.css-preset-card:hover {
+  border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
+  background: var(--brand-paper);
+  color: var(--ink-primary);
+}
+
 .css-preset-card.is-active {
   border-color: var(--brand-vermilion);
-  background: color-mix(in srgb, var(--brand-vermilion) 8%, var(--surface-panel));
+  background: var(--brand-vermilion);
+  color: var(--ink-on-brand);
 }
-.css-preset-card strong { font-size: 13px; font-weight: 680; }
-.css-preset-card span { color: var(--ink-secondary); font-size: 11px; line-height: 1.5; }
 
 .custom-css-editor textarea {
   width: 100%;

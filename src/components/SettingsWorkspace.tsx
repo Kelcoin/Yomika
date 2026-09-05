@@ -78,8 +78,6 @@ export function SettingsWorkspace() {
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
-  const [preferencePending, setPreferencePending] = useState(false);
-  const [preferenceSavedAt, setPreferenceSavedAt] = useState<number>();
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
   const [migrationText, setMigrationText] = useState('');
@@ -203,18 +201,15 @@ export function SettingsWorkspace() {
     // Half-typed values are not failures. Clearing a number field to retype it
     // passes through 0 or NaN, and autosave would report each one as an error.
     if (!PreferenceSnapshotSchema.safeParse(next).success) return;
-    setPreferencePending(true);
     setPreferenceMessage(undefined);
     setPreferenceError(false);
     const result = await preferenceState.save(next);
     if (result.ok) {
       setPreferenceDraft(result.value);
-      setPreferenceSavedAt(Date.now());
     } else {
       setPreferenceError(true);
       setPreferenceMessage(result.error.message);
     }
-    setPreferencePending(false);
   }
 
   /** One control pair for both payload shapes: a unified export (Readoshi's
@@ -339,10 +334,10 @@ export function SettingsWorkspace() {
       <section className="preferences-panel" id={selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
         {/* No section title here: the sidebar already names the section, and one
             visible section at a time meant the heading only reserved a column of
-            empty space beside every control. */}
-        <span className="preferences-autosave" role="status">
-          {preferencePending ? '正在保存…' : preferenceSavedAt ? '更改已自动保存' : '更改会自动保存'}
-        </span>
+            empty space beside every control. No autosave notice either — every
+            control in this panel saves itself, so a line saying so on every
+            section was chrome that never told anyone anything they could act on.
+            A failed save still interrupts, through the toast. */}
         {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
           <div className="preferences-form">
             {selectedSettingsSection === 'settings-general' && <fieldset>
@@ -379,10 +374,10 @@ export function SettingsWorkspace() {
                     type="button"
                     className={`css-preset-card${preferenceDraft.customCss === preset.css ? ' is-active' : ''}`}
                     aria-pressed={preferenceDraft.customCss === preset.css}
+                    title={preset.description}
                     onClick={() => editPreferences({ customCss: preset.css })}
                   >
-                    <strong>{preset.label}</strong>
-                    <span>{preset.description}</span>
+                    {preset.label}
                   </button>
                 ))}
               </div>
@@ -565,46 +560,40 @@ export function SettingsWorkspace() {
       </section>
       )}
       {selectedSettingsSection === 'settings-general' && (
-      <>
-      {/* A row, not a two-column grid: the add button sits opposite the copy and
-          is centred against it instead of clinging to the first line. */}
-      <section className="settings-section settings-section-row" id="settings-server" aria-labelledby="servers-title">
-        <div>
-          <h2 id="servers-title">服务器</h2>
-          <p>LANraragi 连接信息保存在本机，凭据进入系统安全存储。若凭据失效，使用同一地址再次保存即可更新 API Key。</p>
+      /* No heading and no explanatory paragraph: the section is one list of
+         servers, and the sidebar already says 通用. The add button follows the
+         list rather than heading it, so it reads as "and one more" — with nothing
+         configured yet the list is empty and the button is the first thing on the
+         page anyway. */
+      <section className="settings-section server-settings" id="settings-server" aria-label="服务器">
+        <div className="server-list" aria-live="polite">
+          {loading && <p className="server-list-message" role="status">正在读取服务器…</p>}
+          {!loading && loadError && (
+            <div className="server-list-error">
+              <p className="form-error" role="alert">{loadError}</p>
+              {loadRetryable && (
+                <button className="secondary-action" type="button" onClick={() => setServerLoadAttempt((attempt) => attempt + 1)}>
+                  <RefreshCw aria-hidden="true" />
+                  重试读取服务器
+                </button>
+              )}
+            </div>
+          )}
+          {servers.map((server) => (
+            <article className="server-row" key={server.id}>
+              <div>
+                <h3>{server.name}</h3>
+                <p>{server.baseUrl}</p>
+              </div>
+              <div className="server-row-actions">
+                <span className="server-state">已配置</span>
+                <ServerSetupDialog onSave={saveServer} server={server} />
+              </div>
+            </article>
+          ))}
         </div>
         <ServerSetupDialog onSave={saveServer} />
       </section>
-      <div className="server-list" aria-live="polite">
-        {loading && <p className="server-list-message" role="status">正在读取服务器…</p>}
-        {!loading && loadError && (
-          <div className="server-list-error">
-            <p className="form-error" role="alert">{loadError}</p>
-            {loadRetryable && (
-              <button className="secondary-action" type="button" onClick={() => setServerLoadAttempt((attempt) => attempt + 1)}>
-                <RefreshCw aria-hidden="true" />
-                重试读取服务器
-              </button>
-            )}
-          </div>
-        )}
-        {!loading && !loadError && servers.length === 0 && (
-          <p className="server-list-message">尚未添加 LANraragi 服务器。</p>
-        )}
-        {servers.map((server) => (
-          <article className="server-row" key={server.id}>
-            <div>
-              <h3>{server.name}</h3>
-              <p>{server.baseUrl}</p>
-            </div>
-            <div className="server-row-actions">
-              <span className="server-state">已配置</span>
-              <ServerSetupDialog onSave={saveServer} server={server} />
-            </div>
-          </article>
-        ))}
-      </div>
-      </>
       )}
       {selectedSettingsSection === 'settings-sync' && (
       <section className="settings-section" id="settings-sync" aria-labelledby="sync-settings-title">

@@ -52,8 +52,9 @@ describe('settings workspace', () => {
     renderSettings();
 
     await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
-    await screen.findByText('尚未添加 LANraragi 服务器。');
-    await user.click(screen.getByRole('button', { name: '添加服务器' }));
+    // The section is one list of servers plus the button that adds another; with
+    // none configured the list is empty and the button is all there is.
+    await user.click(await screen.findByRole('button', { name: '添加服务器' }));
     await user.type(screen.getByLabelText('名称'), 'Home');
     await user.type(screen.getByLabelText('服务器地址'), 'https://example.com');
     await user.type(screen.getByLabelText('API Key'), 'secret');
@@ -99,11 +100,11 @@ describe('settings workspace', () => {
     });
     renderSettings();
 
-    expect(await screen.findByRole('heading', { name: '服务器' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: '服务器' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '数据迁移' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: /高级/ }));
     expect(screen.getByRole('heading', { name: '数据迁移' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
   });
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
@@ -126,11 +127,12 @@ describe('settings workspace', () => {
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
 
     // No save button: a change is the save. The old form let a toggle look
-    // applied while nothing had been written.
+    // applied while nothing had been written. There is no autosave caption
+    // either — the applied theme is the confirmation.
     await user.click(screen.getByRole('radio', { name: '浅色' }));
 
-    expect(await screen.findByText('更改已自动保存')).toBeInTheDocument();
-    expect(document.documentElement).toHaveAttribute('data-theme', 'light');
+    await vi.waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'light'));
+    expect(screen.queryByText(/自动保存/)).not.toBeInTheDocument();
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
     // Saving one section still writes the whole snapshot.
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
@@ -400,17 +402,17 @@ describe('settings workspace', () => {
 
       // The list first: no section content, and every section reachable.
       expect(await screen.findByRole('link', { name: /关于/ })).toBeInTheDocument();
-      expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('link', { name: /通用/ }));
       expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: '服务器' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: '服务器' })).toBeInTheDocument();
       // One section at a time: the list is gone rather than sitting above it.
       expect(screen.queryByRole('link', { name: /关于/ })).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: '返回设置分类' }));
       expect(await screen.findByRole('link', { name: /关于/ })).toBeInTheDocument();
-      expect(screen.queryByRole('heading', { name: '服务器' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
     } finally {
       window.matchMedia = original;
     }
