@@ -260,6 +260,7 @@ pub fn install_model_archive(
 }
 
 pub mod decensor;
+pub mod inpaint;
 pub mod onnx;
 pub mod upscale;
 
