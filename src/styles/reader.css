@@ -6,8 +6,7 @@
   min-width: 320px;
   min-height: 100vh;
   min-height: 100dvh;
-  overflow: hidden;
-  background: var(--reader-canvas);
+  overflow: hidden;  background: var(--reader-canvas);
   color: var(--reader-ink);
   outline: none;
   touch-action: pan-y;
@@ -69,6 +68,11 @@
   max-width: min(100%, 900px);
   max-height: none;
 }
+
+/* The loading state keeps the reader's own dark canvas, so the indicator does not
+   flash against a light background before the first page arrives. */
+.reader-screen-loading .loading-indicator { color: var(--reader-muted); }
+.reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
 .reader-error {
   width: min(100% - 32px, 480px);

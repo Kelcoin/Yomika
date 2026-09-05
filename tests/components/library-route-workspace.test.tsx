@@ -621,6 +621,25 @@ describe('library route workspace', () => {
     expect(offsets).toEqual([0, 2]);
   });
 
+  it('shows the loading indicator instead of claiming the library is empty', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      // Never resolves: the first page is still in flight.
+      if (command === 'search_archives_page') return new Promise(() => undefined);
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    renderLibrary();
+
+    // An in-flight request is not an empty library. These shared one branch, so
+    // arriving at the library flashed 暂无档案库 before the first page landed.
+    // Re-queried rather than held: the route swaps its own loading branch for the
+    // workspace's as the server list resolves, so a captured node goes stale.
+    await waitFor(() => expect(screen.getByRole('status', { name: '正在读取档案' })).toBeInTheDocument());
+    expect(screen.queryByText('暂无档案库')).not.toBeInTheDocument();
+    expect(screen.queryByText('正在读取档案…')).not.toBeInTheDocument();
+  });
+
   it('falls back to the local mirror when the server cannot be reached', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

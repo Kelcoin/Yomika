@@ -151,6 +151,22 @@ describe('reader route', () => {
     await waitFor(() => expect(attempts).toBe(2));
   });
 
+  it('shows the drawn loading indicator rather than a bare line or an empty state', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      // Never resolves: the reader stays in its loading state.
+      if (command === 'load_reader_manifest') return new Promise(() => undefined);
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    // One indicator with an accessible name, not "正在加载页面…" as body text.
+    expect(await screen.findByRole('status', { name: '正在加载页面' })).toBeInTheDocument();
+    expect(screen.queryByText('正在加载页面…')).not.toBeInTheDocument();
+  });
+
   it('applies the default layout and direction, and lets the archive override them', async () => {
     const preferences = { theme: 'system', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     let stored: unknown = null;

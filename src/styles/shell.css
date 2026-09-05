@@ -322,7 +322,15 @@ body::-webkit-scrollbar,
 
 .skeleton-block,
 .skeleton-line {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--surface-elevated) 45%, var(--brand-paper)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)));
+  /* The middle stop used to sit at 45% of the elevated surface, which in dark
+     mode was barely a shade off the resting colour — the sweep was invisible.
+     Widened so the pass reads as motion without turning into a flash. */
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)),
+    color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)),
+    color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))
+  );
   background-size: 220% 100%;
   animation: skeleton-shimmer 1.25s ease-in-out infinite;
 }
@@ -337,6 +345,56 @@ body::-webkit-scrollbar,
    reflow when they arrive. */
 .select-placeholder { width: 132px; height: var(--control-height); border-radius: var(--radius-control); }
 @keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+/* The app's one loading indicator. Routes used to invent their own — a bare
+   "正在加载…" line in one place, an empty state claiming 没有档案 in another —
+   and the second is a lie while a request is still in flight. */
+.loading-indicator {
+  display: grid;
+  place-items: center;
+  gap: var(--space-3);
+  padding: var(--space-8) 0;
+  color: var(--ink-secondary);
+}
+
+.loading-indicator svg {
+  width: 48px;
+  height: 48px;
+  stroke: var(--brand-vermilion);
+}
+
+.loading-indicator.is-sm svg { width: 28px; height: 28px; }
+.loading-indicator.is-lg svg { width: 72px; height: 72px; }
+.loading-indicator.is-sm { padding: var(--space-4) 0; }
+
+.loading-indicator-label {
+  font-size: var(--text-sm);
+  font-weight: 620;
+}
+
+.loading-indicator.is-sm .loading-indicator-label { font-size: var(--text-xs); }
+
+/* Three leaves of a turning page, each a third of the cycle behind the last, so
+   the motion reads as paging rather than as a generic spinner. */
+.loading-leaf {
+  transform-box: fill-box;
+  transform-origin: right center;
+  animation: page-leaf 1.4s ease-in-out infinite;
+}
+
+.loading-leaf:nth-of-type(2) {
+  transform-origin: left center;
+  animation-delay: 0.47s;
+}
+
+.loading-spine {
+  opacity: 0.45;
+}
+
+@keyframes page-leaf {
+  0%, 100% { transform: scaleX(1); opacity: 0.35; }
+  50% { transform: scaleX(0.1); opacity: 1; }
+}
 
 .toast-stack { position: fixed; z-index: var(--z-overlay); right: var(--space-5); bottom: calc(28px + var(--space-6)); display: grid; gap: var(--space-2); width: min(420px, calc(100vw - 32px)); pointer-events: none; }
 .toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: 12px 14px; border: 1px solid var(--hairline); border-left: 3px solid var(--brand-cyan); border-radius: var(--radius-control); background: var(--surface-overlay); color: var(--ink-on-overlay); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter 220ms var(--ease-standard) both; }
@@ -1055,7 +1113,7 @@ body::-webkit-scrollbar,
   color: var(--ink-faint);
 }
 .archive-detail-cover-placeholder.is-skeleton,
-.archive-row-thumb.is-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--surface-elevated) 45%, var(--brand-paper)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 220% 100%; animation: skeleton-shimmer 1.25s ease-in-out infinite; }
+.archive-row-thumb.is-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 220% 100%; animation: skeleton-shimmer 1.25s ease-in-out infinite; }
 
 .archive-detail-overview {
   display: grid;
@@ -1343,6 +1401,15 @@ body::-webkit-scrollbar,
 
 .library-toolbar > * {
   min-width: 0;
+}
+
+/* Matches `.library-toolbar .select-field` exactly. The placeholder used a fixed
+   132px while the real control flexes from a 160px floor, so the toolbar jumped
+   sideways the moment the categories arrived. */
+.library-toolbar .select-placeholder {
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 160px;
 }
 
 .library-toolbar .select-field {

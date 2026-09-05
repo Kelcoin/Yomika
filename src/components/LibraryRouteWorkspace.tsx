@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
+import { LoadingIndicator } from './LoadingIndicator';
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { markCategoriesRefreshed, markLibrarySynced, shouldRefreshCategories } from '../lib/librarySync';
@@ -380,7 +381,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     return (
       <div>
         <header className="workspace-heading"><h1>档案库</h1></header>
-        <p className="server-list-message" role="status">正在读取档案…</p>
+        <LoadingIndicator label="正在读取档案" size="lg" />
       </div>
     );
   }
@@ -422,6 +423,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         totalCount={totalArchives}
         hasMore={hasMoreArchives}
         loadingMore={loadingMore}
+        listLoading={loading || (archives.length === 0 && !error && !initialArchivesLoaded.current)}
         onLoadMore={loadMoreArchives}
         searchQuery={searchQuery}
         onSearchQueryChange={setSearchQuery}

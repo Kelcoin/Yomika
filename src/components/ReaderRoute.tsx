@@ -4,6 +4,7 @@ import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
+import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
@@ -284,7 +285,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // through here, which unmounts ReaderScreen and is what stops one archive's page
   // index, zoom and per-index page shapes from carrying into the next. React
   // Router reuses this element across param changes, so nothing else would.
-  if (pages.length === 0) return <main className="reader-screen"><p role="status">正在加载页面…</p></main>;
+  if (pages.length === 0) return <main className="reader-screen reader-screen-loading"><LoadingIndicator label="正在加载页面" size="lg" /></main>;
   return (
     <ReaderScreen
       archiveId={archiveId}

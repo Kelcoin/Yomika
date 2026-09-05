@@ -8,6 +8,7 @@ import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
 import { EmptyState } from './EmptyState';
+import { LoadingIndicator } from './LoadingIndicator';
 import { SelectField } from './SelectField';
 import { FAVORITES_CATEGORY_NAME, categorizeTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
@@ -43,6 +44,9 @@ interface LibraryWorkspaceProps {
   totalCount?: number | undefined;
   hasMore?: boolean | undefined;
   loadingMore?: boolean | undefined;
+  /** True while the first page is still in flight. Without it an empty list is
+   * indistinguishable from a library that genuinely has nothing in it. */
+  listLoading?: boolean | undefined;
   onLoadMore?: (() => void) | undefined;
   isFavorite?: boolean | undefined;
   onToggleFavorite?: (() => Promise<void>) | undefined;
@@ -73,7 +77,7 @@ interface LibraryWorkspaceProps {
   onDeletePreset?: ((preset: SearchPreset) => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -276,15 +280,19 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         </button>
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
         {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) }))]} onChange={updateCategoryFilter} />}
-        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}
-      </div>
+        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
         <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">
           <div className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''}`} data-scroll-region ref={scrollRef} role="list" aria-label="档案" onScroll={(event) => {
             const target = event.currentTarget;
             if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
           }}>
-            {filteredArchives.length === 0 && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
+            {/* An in-flight request is not an empty library. These shared one
+                branch, so arriving at the library flashed 暂无档案库 before the
+                first page landed. */}
+            {filteredArchives.length === 0 && (listLoading
+              ? <LoadingIndicator label="正在读取档案" size="lg" />
+              : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
             {displayMode === 'thumbnail' ? (
               <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
                 {thumbnailRows.getVirtualItems().map((virtualRow) => (
@@ -407,7 +415,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           )}
         </Panel></>}
       </Group>
-      {hasMore && loadingMore && <p className="server-list-message" role="status">正在加载更多档案…</p>}
+      {hasMore && loadingMore && <LoadingIndicator label="正在加载更多档案" size="sm" />}
     </div>
   );
 }
