@@ -1003,7 +1003,7 @@ body::-webkit-scrollbar,
 .library-shell-detail {
   min-width: 0;
   min-height: 0;
-  padding: var(--space-4) var(--space-4) var(--space-6);
+  padding: var(--space-4) var(--space-4) 0;
 }
 
 /* The loading state keeps the route's own heading — it is the same 32px 档案库
@@ -1513,7 +1513,6 @@ body::-webkit-scrollbar,
   height: auto;
   min-height: 0;
   border-top: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
 }
 
 .archive-list {
@@ -1521,8 +1520,12 @@ body::-webkit-scrollbar,
   overflow: auto;
   /* The global :focus-visible ring is drawn outside the element, and a scroll
      container clips whatever leaves its padding box — without this, a
-     keyboard-focused card's ring is cut off against the edges. */
-  padding: 4px;
+     keyboard-focused card's ring is cut off against the edges.
+     The trailing space is *inside* the scroller on purpose: as padding on the
+     panel around it, it was a strip of bare canvas between the last card and the
+     status bar — which is the dark band that kept getting reported. Here it
+     scrolls away with the content and the list reaches the panel's edge. */
+  padding: 4px 4px var(--space-6);
   scrollbar-width: none;
 }
 
@@ -1704,12 +1707,18 @@ body::-webkit-scrollbar,
   border-bottom-right-radius: var(--radius-control);
 }
 
-/* One shared edge between neighbours instead of two stacked ones. */
+/* One shared edge between neighbours instead of two stacked ones. Overlapping the
+   rows by a pixel rather than hiding the top border: a transparent top needed a
+   more specific selector than the hover rule, so it won, and a hovered or
+   selected row came out with three highlighted sides and a gap along the top. */
 .archive-list.is-wide .archive-row-wrap:not([data-first='true']) .archive-row {
-  border-top-color: transparent;
+  margin-top: -1px;
 }
 .archive-list.is-wide .archive-row:hover,
 .archive-list.is-wide .archive-row[aria-pressed='true'] {
+  position: relative;
+  /* Above the neighbour, so the highlighted edge is the one that draws. */
+  z-index: 1;
   border-color: color-mix(in srgb, var(--brand-vermilion) 55%, var(--hairline));
 }
 .archive-list.is-wide .archive-row-thumb { width: 100px; height: 142px; }
@@ -3118,10 +3127,14 @@ body::-webkit-scrollbar,
   }
 
   /* The nav is fixed, so the library needs room behind it. Every other route
-     reserves it through `.workspace` padding, but the library zeroes that
-     padding to run edge to edge — leaving the bar sitting on top of the last
-     cards, which reads as a dark strip covering the bottom of the list. */
-  .workspace.is-library-workspace .library-shell-list,
+     reserves it through `.workspace` padding, but the library zeroes that padding
+     to run edge to edge. Inside the scroller, like the desktop trailing space:
+     as padding on the panel it was a dead strip instead of somewhere the last
+     card could scroll to. */
+  .workspace.is-library-workspace .archive-list {
+    padding-bottom: calc(80px + env(safe-area-inset-bottom));
+  }
+
   .workspace.is-library-workspace .library-shell-detail {
     padding-bottom: calc(80px + env(safe-area-inset-bottom));
   }

@@ -73,6 +73,21 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: /显示模式：缩略图列表/ })).toBeInTheDocument();
   });
 
+  it('marks a row as selected only once one has been chosen', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // The first row used to render pressed on every visit, because the selection
+    // was seeded with `archives[0]` — so the list always looked like something
+    // had been clicked, including on the shelves, which show no detail pane.
+    const rows = screen.getAllByRole('button', { name: /^Archive \d/ });
+    expect(rows.every((row) => row.getAttribute('aria-pressed') === 'false')).toBe(true);
+
+    await user.click(rows[1]!);
+    expect(screen.getByRole('button', { name: /^Archive 1\b/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('renders search input and sort controls', () => {
     renderWorkspace({ archives });
 

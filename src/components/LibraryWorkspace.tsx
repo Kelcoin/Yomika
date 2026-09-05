@@ -102,7 +102,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [selectedId, setSelectedId] = useState(archives[0]?.archiveId);
+  /** Undefined until something is actually chosen. Seeding it with the first
+   * archive made the top row render as pressed on every visit — including on the
+   * shelves, which show no detail pane for it to be the subject of. */
+  const [selectedId, setSelectedId] = useState<string>();
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
@@ -150,6 +153,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     [archiveCategories],
   );
 
+  // The detail pane still needs a subject, and the first archive is the sensible
+  // one; the *row* is only marked pressed when the choice was made.
   const selected = filteredArchives.find((archive) => archive.archiveId === selectedId) ?? filteredArchives[0];
   const rows = useVirtualizer({
     count: filteredArchives.length,
@@ -202,7 +207,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       />
     )}
     <button
-      aria-pressed={archive.archiveId === selected?.archiveId}
+      aria-pressed={selectedId !== undefined && archive.archiveId === selectedId}
       className="archive-row"
       onClick={() => {
         setSelectedId(archive.archiveId);
