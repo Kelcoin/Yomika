@@ -69,6 +69,20 @@ pub fn download_asset(url: &str, asset: &ReleaseAsset, destination: &std::path::
     result
 }
 
+pub fn validate_import_directory(root: &std::path::Path, manifest: &ModelReleaseManifest) -> Result<(), String> {
+    validate_manifest(manifest)?;
+    for asset in &manifest.assets {
+        let path = root.join(asset.path.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+        if !path.is_file() { return Err(format!("missing asset {}", asset.path)); }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        verify_bytes(asset, &bytes)?;
+        for companion in &asset.companions {
+            if !root.join(companion.replace('/', &std::path::MAIN_SEPARATOR.to_string())).is_file() { return Err(format!("missing companion {companion}")); }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> String {
     asset_url(&prefix, &owner_repo, &tag, &path)
@@ -96,6 +110,18 @@ pub fn model_release_download(input: ModelDownloadInput) -> crate::domain::resul
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImportInput { pub root: String, pub manifest: ModelReleaseManifest }
+
+#[tauri::command]
+pub fn model_release_validate_import(input: ModelImportInput) -> crate::domain::result::CommandResult<()> {
+    match validate_import_directory(std::path::Path::new(&input.root), &input.manifest) {
+        Ok(()) => crate::domain::result::CommandResult::success(()),
+        Err(error) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", error, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,4 +130,5 @@ mod tests {
     #[test] fn builds_mirror_url_without_double_slash() { assert_eq!(asset_url("https://gh-proxy.com/", "o/r", "v1", "m.onnx"), "https://gh-proxy.com/https://github.com/o/r/releases/download/v1/m.onnx"); }
     #[test] fn verifies_size_and_digest() { assert!(verify_bytes(&asset(), b"test").is_ok()); assert!(verify_bytes(&asset(), b"bad").is_err()); }
     #[test] fn rejects_duplicate_or_unsafe_paths() { let mut a=asset(); a.path="../x".into(); assert!(validate_manifest(&ModelReleaseManifest{tag:"v1".into(),assets:vec![a]}).is_err()); }
+    #[test] fn validates_import_directory() { let root=std::env::temp_dir().join("yomika-release-import"); let _=std::fs::create_dir_all(&root); std::fs::write(root.join("m.onnx"), b"test").unwrap(); let mut a=asset(); a.path="m.onnx".into(); assert!(validate_import_directory(&root,&ModelReleaseManifest{tag:"v1".into(),assets:vec![a]}).is_ok()); let _=std::fs::remove_dir_all(root); }
 }
