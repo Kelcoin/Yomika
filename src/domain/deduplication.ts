@@ -46,6 +46,12 @@ function dateToDayString(date: Date): string {
   return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
 }
 
+/** Local calendar day, the same basis `normalizeDedupeDateRange` uses for its
+ * default upper bound. Using a UTC day here would drop archives added today. */
+export function toDedupeDayString(date: Date = new Date()): string {
+  return dateToDayString(date);
+}
+
 function parseArchiveDateValue(value: unknown): string {
   if (value === undefined || value === null || value === '') return '';
   if (typeof value === 'number') return dateToDayString(new Date((value > 1e12 ? value : value * 1000)));
@@ -319,9 +325,16 @@ export interface SignatureComparisonOptions {
   pixelThreshold?: number; percentDifference?: number; aspectRatioLimit?: number; outlierPercent?: number; lowTextureStdDev?: number; highTextureStdDev?: number; dominantColorFraction?: number; dominantLayoutDistance?: number; uniformColorFraction?: number; uniformLayoutDistance?: number; uniformStdDev?: number; pageCountRatioLimit?: number; minimumPageCountDelta?: number; allowLowInformationMatch?: boolean;
 }
 
+/** A truncated pixel buffer used to read as `undefined` per channel, which made
+ * every difference `NaN`; `NaN > threshold` is false, so the comparison reported
+ * "identical" and the pair became a deletion candidate. Fail closed instead. */
+function hasCompletePixels(signature: DedupeSignature): boolean {
+  return signature.width > 0 && signature.height > 0 && signature.pixels.length >= signature.width * signature.height * 4;
+}
+
 export function areSignaturesDuplicate(left: DedupeSignature | undefined, right: DedupeSignature | undefined, options: SignatureComparisonOptions = {}): boolean {
   const { pixelThreshold = 30, percentDifference = 0.2, aspectRatioLimit = 0.1, outlierPercent = 0.15, lowTextureStdDev = 12, highTextureStdDev = 32, dominantColorFraction = 0.75, dominantLayoutDistance = 0.08, uniformColorFraction = 0.98, uniformLayoutDistance = 0.03, uniformStdDev = 4, pageCountRatioLimit = 1.65, minimumPageCountDelta = 8, allowLowInformationMatch = false } = options;
-  if (!left || !right || Math.abs(left.ratio - right.ratio) > aspectRatioLimit || shapeMismatch(left, right, pageCountRatioLimit, minimumPageCountDelta)) return false;
+  if (!left || !right || !hasCompletePixels(left) || !hasCompletePixels(right) || Math.abs(left.ratio - right.ratio) > aspectRatioLimit || shapeMismatch(left, right, pageCountRatioLimit, minimumPageCountDelta)) return false;
   const leftTexture = signatureTexture(left); const rightTexture = signatureTexture(right);
   if ((leftTexture.standardDeviation <= lowTextureStdDev && rightTexture.standardDeviation >= highTextureStdDev) || (rightTexture.standardDeviation <= lowTextureStdDev && leftTexture.standardDeviation >= highTextureStdDev) || (!allowLowInformationMatch && leftTexture.dominantFraction >= dominantColorFraction && rightTexture.dominantFraction >= dominantColorFraction) || lowInformationPair(leftTexture, rightTexture, dominantColorFraction, dominantLayoutDistance, uniformColorFraction, uniformLayoutDistance, uniformStdDev)) return false;
   const width = Math.min(left.width, right.width); const height = Math.min(left.height, right.height);
@@ -342,6 +355,9 @@ export interface FindDuplicatePairOptions extends SignatureComparisonOptions { o
 
 export function findDuplicatePairs(signatures: ReadonlyMap<string, DedupeSignature> | Iterable<readonly [string, DedupeSignature]>, ignoredPairKeys: ReadonlySet<string> = new Set(), options: FindDuplicatePairOptions = {}): DuplicatePair[] {
   const entries = [...signatures].filter((entry): entry is [string, DedupeSignature] => Boolean(entry[0]) && Boolean(entry[1]));
+  // One texture pass per signature. Recomputing inside the O(n²) pair loop meant
+  // up to five full-pixel scans per pair.
+  const textures = entries.map(([, signature]) => signatureTexture(signature));
   const names = entries.map(([, signature]) => normalizeDedupeFilename(signature.filename ?? signature.title));
   const nameCounts = new Map<string, number>();
   for (const name of names) if (name) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
@@ -356,9 +372,10 @@ export function findDuplicatePairs(signatures: ReadonlyMap<string, DedupeSignatu
   for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
     const [leftId, left] = entries[leftIndex]!; const [rightId, right] = entries[rightIndex]!; const key = toPairKey(leftId, rightId);
     if (!key || ignoredPairKeys.has(key)) continue;
+    const leftTexture = textures[leftIndex]!; const rightTexture = textures[rightIndex]!;
     const evidence = filenameEvidence(left, right);
-    if (signatureTexture(left).isUniform || signatureTexture(right).isUniform) continue;
-    if (!evidence.exact && !evidence.similar && (shapeMismatch(left, right, 1.15, 2) || Math.abs(signatureTexture(left).mean - signatureTexture(right).mean) > 96 || lowInformationPair(signatureTexture(left), signatureTexture(right)))) continue;
+    if (leftTexture.isUniform || rightTexture.isUniform) continue;
+    if (!evidence.exact && !evidence.similar && (shapeMismatch(left, right, 1.15, 2) || Math.abs(leftTexture.mean - rightTexture.mean) > 96 || lowInformationPair(leftTexture, rightTexture))) continue;
     const imageOptions = evidence.exact && nameCounts.get(evidence.leftName)! <= 2
       ? { ...options, allowLowInformationMatch: true, outlierPercent: Math.max(options.outlierPercent ?? 0.15, 0.35) }
       : evidence.similar

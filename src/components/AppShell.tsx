@@ -1,20 +1,16 @@
 import {
   Archive,
+  Bookmark,
   Download,
-  Globe,
   History,
   Home,
-  ListTodo,
   PanelLeftClose,
   PanelLeftOpen,
-  Search,
   Settings,
   Star,
   ArrowUp,
-  CopyCheck,
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
-import * as Tooltip from '@radix-ui/react-tooltip';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
@@ -25,14 +21,12 @@ const navigation = [
   { to: '/library', label: '档案库', icon: Archive, mobile: true },
   { to: '/history', label: '历史', icon: History, mobile: true },
   { to: '/watchlist', label: '收藏夹', icon: Star, mobile: true },
-  { to: '/eh', label: 'E-Hentai', icon: Globe, mobile: false },
+  { to: '/to-read', label: '待看', icon: Bookmark, mobile: false },
   { to: '/downloads', label: '下载', icon: Download, mobile: false },
-  { to: '/dedup', label: '查重', icon: CopyCheck, mobile: false },
   { to: '/settings', label: '设置', icon: Settings, mobile: true },
 ] as const;
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
-routeTitles['/dedup'] = '查重';
 const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 
 interface AppShellProps {
@@ -69,7 +63,6 @@ export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
   const reduceMotion = useReducedMotion();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const title = pathname.startsWith('/library/') ? '档案详情' : routeTitles[pathname] ?? 'Yomika';
   const workspaceRef = useRef<HTMLElement>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
 
@@ -123,24 +116,6 @@ export function AppShell({ children }: AppShellProps) {
       </aside>
 
       <div className="app-main">
-        <header className="context-bar">
-          <div>
-            <strong>{title}</strong>
-          </div>
-          <div className="context-actions">
-            <Tooltip.Provider delayDuration={450}>
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild><Link className="icon-button" to="/library" aria-label="搜索"><Search aria-hidden="true" /></Link></Tooltip.Trigger>
-                <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>搜索<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
-              </Tooltip.Root>
-              <Tooltip.Root>
-                <Tooltip.Trigger asChild><Link className="icon-button" to="/downloads" aria-label="任务中心"><ListTodo aria-hidden="true" /></Link></Tooltip.Trigger>
-                <Tooltip.Portal><Tooltip.Content className="tooltip-content" sideOffset={6}>任务中心<Tooltip.Arrow className="tooltip-arrow" /></Tooltip.Content></Tooltip.Portal>
-              </Tooltip.Root>
-            </Tooltip.Provider>
-          </div>
-        </header>
-
         <motion.main
           id="main-content"
           className={`workspace${/^\/library(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}

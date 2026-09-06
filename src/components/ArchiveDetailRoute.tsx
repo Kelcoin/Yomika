@@ -1,18 +1,21 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
+  Bookmark,
+  BookmarkX,
   BookOpen,
   Heart,
-  LoaderCircle,
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { categorizeTags, parseArchiveTagString } from '../lib/tags';
+import { pickSeedTags, rankRecommendations, sameCreatorTags } from '../lib/recommendation';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
   NativeLibraryRepository,
   type ArchiveMetadata,
@@ -20,8 +23,17 @@ import {
 import type { ArchiveRecord } from '../domain/library';
 import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
+import { useArchiveContextMenu } from './useArchiveContextMenu';
 
 const repository = new NativeLibraryRepository();
+/** Long enough not to fire on a normal tap, short enough to discover by holding.
+ * Matches the platform convention rather than the drag thresholds. */
+const LONG_PRESS_MS = 500;
+
+/** How long a detail page may paint from the previous visit before it insists on
+ * fresh metadata. It revalidates either way; this only decides whether the page
+ * shows a loading state first. */
+const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [metadata, setMetadata] = useState<ArchiveMetadata>();
@@ -32,8 +44,38 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [serverId, setServerId] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const [favorite, setFavorite] = useState(false);
+  const [inReadingList, setInReadingList] = useState(false);
   const [message, setMessage] = useState<string>();
   const navigate = useNavigate();
+  /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
+   * also follow the link, so the click is swallowed once. */
+  const [incognitoAsk, setIncognitoAsk] = useState(false);
+  const incognitoTimer = useRef<number>();
+  const incognitoPrompted = useRef(false);
+
+  const startIncognitoPress = useCallback(() => {
+    incognitoPrompted.current = false;
+    if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current);
+    incognitoTimer.current = window.setTimeout(() => {
+      incognitoPrompted.current = true;
+      setIncognitoAsk(true);
+    }, LONG_PRESS_MS);
+  }, []);
+
+  const cancelIncognitoPress = useCallback(() => {
+    if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current);
+    incognitoTimer.current = undefined;
+  }, []);
+
+  useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
+
+  /** Back means back. This was a hardcoded link to the library, so arriving from
+   * the home shelves and pressing it took you somewhere you had never been.
+   * A direct visit has nothing to return to, so that case still falls back. */
+  const goBack = useCallback(() => {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/library');
+  }, [navigate]);
   const { showToast } = useToast();
   useTagTranslations();
 
@@ -70,13 +112,23 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       setServerId(server.id);
       setScopeId(server.scopeId);
 
+      // Stale while revalidating: the page paints from the last visit's metadata
+      // and corrects itself a beat later. Skipping the request instead would show
+      // a stale title after the metadata editor wrote a new one.
+      const cached = readRouteCache<ArchiveMetadata>(`archive-detail:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+      if (cached) {
+        setMetadata(cached);
+        setMetadataLoading(false);
+      }
       void repository.loadArchiveMetadata(server.id, archiveId).then((result) => {
         if (!active) return;
-        if (result.ok) setMetadata(result.value);
-        else if (result.error.code === 'LRR_NOT_FOUND') {
+        if (result.ok) {
+          setMetadata(result.value);
+          writeRouteCache(`archive-detail:${server.id}:${archiveId}`, result.value);
+        } else if (result.error.code === 'LRR_NOT_FOUND') {
           showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
           navigate('/library', { replace: true });
-        } else setError(result.error.message);
+        } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
       void getNativeImageCache().load({
@@ -96,6 +148,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         if (!active || !result.ok) return;
         setFavorite(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
       });
+      void repository.listReadingList(server.scopeId).then((result) => {
+        if (!active || !result.ok) return;
+        setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
+      });
     });
 
     return () => {
@@ -108,7 +164,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   if (error && !metadata && !serverId) {
     return (
       <main className="archive-detail-route">
-        <Link className="secondary-action" to="/library"><ArrowLeft aria-hidden="true" />返回档案库</Link>
+        <button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button>
         <p className="form-error" role="alert">{error}</p>
       </main>
     );
@@ -130,7 +186,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
-        <Link className="reader-icon-button" to="/library" aria-label="关闭详情"><ArrowLeft aria-hidden="true" /></Link>
+        <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
         <div><h1 id="archive-detail-route-title">{title}</h1></div>
       </header>
 
@@ -138,7 +194,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         <div className="archive-detail-route-cover">
           {cover
             ? <img src={cover} alt={`${title} 封面`} />
-            : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'}>{coverLoading && <LoaderCircle className="spin" aria-hidden="true" />}</div>}
+            : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
           {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-title" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /></div>}
@@ -149,7 +205,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
                   <h2>{group.label}</h2>
                   <div className={`archive-detail-tag-row${groupIndex === tagGroups.length - 1 && metadata ? ' has-meta' : ''}`}>
                     <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`}>{tag}</span>)}
+                      {group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`} title={tag}>{tag}</span>)}
                     </span>
                     {groupIndex === tagGroups.length - 1 && metadata && <span className="archive-detail-meta archive-detail-meta-inline"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></span>}
                   </div>
@@ -157,13 +213,37 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
               ))}
             </div>
           )}
-          {tags.length === 0 && <div className="archive-detail-meta archive-detail-meta-footer">{metadata ? <><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></> : <span className="archive-detail-inline-loading" role="status"><LoaderCircle className="spin" aria-hidden="true" />正在加载档案详情…</span>}</div>}
+          {tags.length === 0 && <div className="archive-detail-meta archive-detail-meta-footer">{metadata ? <><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></> : <span className="metadata-chip skeleton-line skeleton-line-short" role="status" aria-label="正在加载档案详情" />}</div>}
         </div>
       </div>
 
 
       <div className="archive-detail-route-actions" role="toolbar" aria-label="档案操作">
-        <Link className="archive-action-button archive-action-primary" to={`/reader/${archiveId}`} aria-label="阅读" title="阅读"><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
+        {/* Long-press opens incognito. It used to be a button of its own beside
+            阅读, which spent a permanent toolbar slot on a rare choice and put a
+            second reading entry point next to the real one. */}
+        <Link
+          className="archive-action-button archive-action-primary"
+          to={`/reader/${archiveId}`}
+          aria-label="阅读"
+          title="阅读（长按进入无痕阅读）"
+          onPointerDown={startIncognitoPress}
+          onPointerUp={cancelIncognitoPress}
+          onPointerLeave={cancelIncognitoPress}
+          onPointerCancel={cancelIncognitoPress}
+          onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
+          onContextMenu={(event) => event.preventDefault()}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
+        <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
+          if (!scopeId) return;
+          void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
+            if (result.ok) setInReadingList(!result.value.deleted);
+            else setMessage(result.error.message);
+          });
+        }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
+          {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
+          <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
+        </button>
         <button className="archive-action-button" type="button" aria-pressed={favorite} onClick={() => {
           if (!scopeId) return;
           void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {
@@ -196,6 +276,29 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         )}
       </div>
 
+      {/* Confirms the long press. Incognito changes what the app records, so it
+          says what it will not do rather than switching mode silently. */}
+      <Dialog.Root open={incognitoAsk} onOpenChange={setIncognitoAsk}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title>无痕阅读</Dialog.Title>
+            <Dialog.Description>本次阅读不会记录进度，也不会写入历史。</Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
+              <button className="primary-action" type="button" onClick={() => {
+                setIncognitoAsk(false);
+                navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1`);
+              }}>无痕阅读</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      {/* Recommendations sit above the page thumbnails: they are about what to
+          read next, not about this archive's pages. */}
+      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
           <div className="archive-page-thumbnails-grid">
@@ -207,15 +310,108 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
-      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} />}
     </main>
   );
 }
 
-function Recommendations({ scopeId, serverId, currentArchiveId }: { scopeId: string; serverId: string; currentArchiveId: string }) {
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  useEffect(() => { void repository.listArchives(serverId).then((result) => { if (result.ok) setArchives(result.value.filter((item) => item.archiveId !== currentArchiveId).slice(0, 8)); }); }, [currentArchiveId, serverId]);
-  return <ArchiveThumbnailRail title="推荐档案" archives={archives} scopeId={scopeId} serverId={serverId} />;
+interface RecommendationSnapshot {
+  similar: ArchiveRecord[];
+  sameCreator: ArchiveRecord[];
+}
+
+/** Recommendations cost up to a dozen searches on the server, and the answer for
+ * one archive does not change minute to minute. Stepping back into a detail page
+ * should not pay for them again. */
+const RECOMMENDATION_SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
+
+function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
+  const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
+  const snapshot = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+  const [similar, setSimilar] = useState<ArchiveRecord[]>(snapshot?.similar ?? []);
+  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
+  const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
+  const [tab, setTab] = useState<'similar' | 'creator'>('similar');
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
+  const creator = useMemo(() => sameCreatorTags(tags), [tags]);
+
+  useEffect(() => {
+    if (tags.length === 0) return undefined;
+    const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+    if (cached) {
+      setSimilar(cached.similar);
+      setSameCreator(cached.sameCreator);
+      setLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setLoading(true);
+    const searchByTags = async (seeds: readonly string[]) => {
+      const found = new Map<string, ArchiveRecord>();
+      for (const seed of seeds) {
+        const result = await repository.listArchivesPage(serverId, 0, 100, { query: seed });
+        if (!active) return found;
+        if (!result.ok) continue;
+        for (const archive of result.value.items) {
+          if (archive.archiveId !== currentArchiveId) found.set(archive.archiveId, archive);
+        }
+      }
+      return found;
+    };
+
+    void (async () => {
+      const seeds = pickSeedTags(tags);
+      const candidates = await searchByTags(seeds);
+      if (!active) return;
+      const ranked = rankRecommendations(tags, [...candidates.values()]).slice(0, 12);
+      setSimilar(ranked);
+      const creatorMatches = await searchByTags(creator.tags);
+      if (!active) return;
+      const byCreator = [...creatorMatches.values()].slice(0, 12);
+      setSameCreator(byCreator);
+      setLoading(false);
+      writeRouteCache(snapshotKey, { similar: ranked, sameCreator: byCreator } satisfies RecommendationSnapshot);
+    })();
+    return () => { active = false; };
+  }, [creator, currentArchiveId, serverId, snapshotKey, tags]);
+
+  // One rail with tabs instead of two stacked rails: the section used to take
+  // two full card rows before the page thumbnails were even reachable.
+  const creatorLabel = creator.namespace === 'cosplayer' ? '同 Coser' : '同作者';
+  const activeTab = tab === 'creator' && sameCreator.length === 0 ? 'similar' : tab;
+  const visible = activeTab === 'creator' ? sameCreator : similar;
+  // The rail draws the panel, so the tabs go inside it as its heading. Rendered
+  // as a sibling above, they floated outside the component they belonged to.
+  const tabs = (
+    <div className="archive-recommendations-tabs" role="tablist" aria-label="推荐分组">
+      {similar.length > 0 && (
+        <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
+      )}
+      {sameCreator.length > 0 && (
+        <button type="button" role="tab" aria-selected={activeTab === 'creator'} className={activeTab === 'creator' ? 'is-active' : ''} onClick={() => setTab('creator')}>{creatorLabel}</button>
+      )}
+    </div>
+  );
+
+  // A skeleton while the searches run, rather than nothing at all: the section
+  // used to pop into existence and shove the page thumbnails down.
+  if (loading && similar.length === 0 && sameCreator.length === 0) {
+    return <ArchiveThumbnailRail title="猜你喜欢" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} />;
+  }
+  if (similar.length === 0 && sameCreator.length === 0) return null;
+
+  return (
+    <>
+    <ArchiveThumbnailRail
+      title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'}
+      archives={visible}
+      scopeId={scopeId}
+      serverId={serverId}
+      headingContent={tabs}
+      onArchiveContextMenu={openContextMenu}
+    />
+    {contextMenu}
+    </>
+  );
 }
 
 function ArchivePageThumbnail({
@@ -277,8 +473,11 @@ function ArchivePageThumbnail({
     };
   }, [archiveId, node, page, retry, scopeId, serverId]);
   return (
-    <button ref={setNode} className="archive-page-thumbnail" type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
-      {src ? <img src={src} alt={`第 ${page} 页`} loading="lazy" /> : <span>{state === 'loading' ? '加载中…' : state === 'error' ? '重试中…' : `P. ${page}`}</span>}
+    <button ref={setNode} className={`archive-page-thumbnail${src ? '' : ' is-skeleton'}`} type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
+      {/* Loading is conveyed by the shimmer, the same as library covers; no
+          "加载中" text on top of the image slot. */}
+      {src ? <img src={src} alt="" loading="lazy" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true">{state === 'idle' ? page : ''}</span>}
+      <span className="archive-page-thumbnail-number" aria-hidden="true">{page}</span>
     </button>
   );
 }

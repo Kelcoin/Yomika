@@ -1,28 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, BookOpen, Heart } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { translateRawTag } from '../lib/tags';
-import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { useHorizontalScroller } from '../lib/horizontalScroller';
 
 const imageCache = getNativeImageCache();
-const importantNamespaces = ['language', 'artist', 'group', 'parody', 'character', 'female', 'male'];
 
-function importantTags(tags: string[] = []): string[] {
-  return [...tags].sort((left, right) => {
-    const leftNs = left.split(':', 1)[0]!.toLowerCase();
-    const rightNs = right.split(':', 1)[0]!.toLowerCase();
-    return (importantNamespaces.indexOf(leftNs) < 0 ? 99 : importantNamespaces.indexOf(leftNs))
-      - (importantNamespaces.indexOf(rightNs) < 0 ? 99 : importantNamespaces.indexOf(rightNs));
-  }).slice(0, 5);
-}
-
-export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; progressPage?: number | null | undefined }) {
+export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
   const [src, setSrc] = useState<string>();
   const [aspectRatio, setAspectRatio] = useState<number>();
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
-  const tags = useMemo(() => importantTags(archive.tags), [archive.tags]);
+  const tags = useMemo(() => pickCardTags(archive.tags, 6), [archive.tags]);
   const isWide = isWideCoverRatio(aspectRatio);
   useEffect(() => {
     if (!node) return undefined;
@@ -37,16 +28,64 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
     }
     return () => { controller.abort(); if (handle) imageCache.release(handle); };
   }, [archive.archiveId, node, scopeId, serverId]);
-  return <Link ref={setNode} className={`archive-thumb-card${isWide ? ' is-wide' : ''}`} to={`/library/${archive.archiveId}`} onClick={onOpen}>
+  return <Link
+    ref={setNode}
+    className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
+    to={`/library/${archive.archiveId}`}
+    onClick={onOpen}
+    // The same menu the library list opens. Without this a right click on a rail
+    // card did nothing, which is what "the app still has no context menu" was.
+    onContextMenu={onContextMenu ? (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onContextMenu(archive, { x: event.clientX, y: event.clientY });
+    } : undefined}
+  >
     <div className="archive-thumb-card-media">{src ? <img src={src} alt="" loading="lazy" onLoad={(event) => {
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) setAspectRatio(image.naturalWidth / image.naturalHeight);
     }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}</div>
-    <div className="archive-thumb-card-body"><div className="archive-thumb-card-title"><strong>{archive.title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>{tags.length > 0 && <div className="archive-thumb-card-tags">{tags.map((tag) => <span className="metadata-chip" key={tag}>{translateRawTag(tag)}</span>)}</div>}<div className="archive-thumb-card-meta"><span>{formatArchiveDate(archive.addedAt)}</span><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span></div><ArrowRight aria-hidden="true" /></div>
+    <div className="archive-thumb-card-body"><div className="archive-thumb-card-title"><strong>{archive.title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div><div className="archive-thumb-card-tags">{tags.map((tag) => <span className="metadata-chip" key={tag}>{translateRawTag(tag)}</span>)}</div><div className="archive-thumb-card-meta"><span>{formatArchiveDate(archive.addedAt)}</span><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span></div></div>
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> }) {
-  if (!archives.length) return null;
-  return <section className="archive-rail" aria-label={title}><div className="archive-rail-heading"><h2>{title}</h2><BookOpen aria-hidden="true" /></div><div className="archive-rail-grid">{archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}</div></section>;
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+  // A rail that will have content shows its shape while loading. One that has
+  // finished with nothing to show is not a rail at all.
+  if (!archives.length && !loading) return null;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
+}
+
+/** `headingHidden` keeps the accessible name but drops the visible heading row,
+ * for callers that already label the rail. `headingContent` replaces the title
+ * with arbitrary controls — the recommendation tabs used to sit in a sibling
+ * above the rail, which put them visually outside the panel they belong to. */
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
+  const scroller = useHorizontalScroller();
+  return <section className="archive-rail" aria-label={title}>
+    {!headingHidden && <div className="archive-rail-heading">
+      {headingContent ?? <h2>{title}</h2>}
+      {onRefresh && <button className="icon-action" type="button" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing} aria-label={`刷新${title}`} title={`刷新${title}`}>
+        <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
+      </button>}
+    </div>}
+    <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
+      {archives.length === 0 && loading
+        ? Array.from({ length: skeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
+    </div>
+  </section>;
+}
+
+/** The card's own shape while the rail waits on data, so the page does not jump
+ * once the archives land. */
+function ArchiveThumbnailCardSkeleton() {
+  return <div className="archive-thumb-card is-skeleton" aria-hidden="true">
+    <div className="archive-thumb-card-media"><span className="archive-thumb-card-skeleton" /></div>
+    <div className="archive-thumb-card-body">
+      <div className="archive-thumb-card-title"><span className="skeleton-line" /></div>
+      <div className="archive-thumb-card-tags"><span className="skeleton-line is-chip" /><span className="skeleton-line is-chip" /></div>
+      <div className="archive-thumb-card-meta"><span className="skeleton-line" /></div>
+    </div>
+  </div>;
 }

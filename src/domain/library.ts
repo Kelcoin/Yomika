@@ -40,6 +40,9 @@ export const ReadingProgressSchema = z.object({
   pageCount: z.number().int().nonnegative(),
   layout: z.enum(['paged', 'continuous']),
   direction: z.enum(['ltr', 'rtl']),
+  /** Whether page 0 opens alone in double-page mode. Null means undecided, which
+   * reads as the default; a row written by an older build has no value at all. */
+  coverAlone: z.boolean().nullable().optional(),
   updatedAt: z.string().min(1),
   revision: z.number().int().positive(),
 });

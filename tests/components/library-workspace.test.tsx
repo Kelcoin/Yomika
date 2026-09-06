@@ -34,6 +34,60 @@ describe('library workspace', () => {
     expect(screen.getByRole('separator')).toHaveAttribute('aria-orientation', 'vertical');
   });
 
+  it('submits the search on Enter or a finished tag, not on every keystroke', async () => {
+    const user = userEvent.setup();
+    const onSearchQueryChange = vi.fn();
+    renderWorkspace({ archives, searchQuery: '', onSearchQueryChange });
+    const input = screen.getByLabelText('搜索档案');
+    // Focus directly: in jsdom a pointer click inside the panel group lands on
+    // the resizable separator (tabIndex=0) instead of the input.
+    input.focus();
+
+    await user.keyboard('artist');
+    expect(input).toHaveValue('artist');
+    expect(onSearchQueryChange).not.toHaveBeenCalled();
+
+    await user.keyboard('{Enter}');
+    expect(onSearchQueryChange).toHaveBeenCalledWith('artist');
+
+    onSearchQueryChange.mockClear();
+    await user.clear(input);
+    expect(onSearchQueryChange).toHaveBeenCalledWith('');
+
+    onSearchQueryChange.mockClear();
+    await user.keyboard('female:glasses');
+    expect(onSearchQueryChange).not.toHaveBeenCalled();
+    await user.keyboard('$');
+    expect(onSearchQueryChange).toHaveBeenCalledWith('female:glasses$');
+  });
+
+  it('cycles between the two cover-bearing display modes only', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // The no-cover "compact" mode is gone: wide ⇄ thumbnail.
+    const cycle = screen.getByRole('button', { name: /显示模式：缩略图列表/ });
+    await user.click(cycle);
+    expect(screen.getByRole('button', { name: /显示模式：缩略图卡片/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /显示模式：缩略图卡片/ }));
+    expect(screen.getByRole('button', { name: /显示模式：缩略图列表/ })).toBeInTheDocument();
+  });
+
+  it('marks a row as selected only once one has been chosen', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // The first row used to render pressed on every visit, because the selection
+    // was seeded with `archives[0]` — so the list always looked like something
+    // had been clicked, including on the shelves, which show no detail pane.
+    const rows = screen.getAllByRole('button', { name: /^Archive \d/ });
+    expect(rows.every((row) => row.getAttribute('aria-pressed') === 'false')).toBe(true);
+
+    await user.click(rows[1]!);
+    expect(screen.getByRole('button', { name: /^Archive 1\b/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('renders search input and sort controls', () => {
     renderWorkspace({ archives });
 
@@ -41,10 +95,53 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: '按标题降序' })).toBeInTheDocument();
   });
 
-  it('surfaces archive classification and reading metadata as compact chips', () => {
-    renderWorkspace({ archives: [{ ...archives[0]!, category: 'Manga', language: '中文' }] });
+  it('applies and saves search presets from the toolbar', async () => {
+    const user = userEvent.setup();
+    const preset = {
+      scopeId: 'scope-a', presetId: 'p1', name: '中文汉化', query: 'language:chinese$',
+      sortBy: 'title' as const, sortOrder: 'asc' as const, categoryId: null,
+      createdAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z',
+      deviceId: 'device-a', revision: 1, deleted: false,
+    };
+    const onApplyPreset = vi.fn();
+    const onSavePreset = vi.fn();
+    const onDeletePreset = vi.fn();
+    renderWorkspace({ archives, presets: [preset], onApplyPreset, onSavePreset, onDeletePreset });
 
-    expect(screen.getAllByText('Manga').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
+    // A preset carries the whole toolbar state, so applying is one click.
+    await user.click(screen.getByRole('button', { name: '中文汉化' }));
+    expect(onApplyPreset).toHaveBeenCalledWith(preset);
+
+    await user.click(screen.getByRole('button', { name: '存为预设' }));
+    expect(onSavePreset).toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '删除预设 中文汉化' }));
+    expect(onDeletePreset).toHaveBeenCalledWith(preset);
+  });
+
+  it('virtualizes the thumbnail grid instead of mounting every archive', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({ archives });
+
+    // wide (default) → thumbnail; the no-cover compact mode is gone
+    await user.click(screen.getByRole('button', { name: /显示模式：缩略图列表/ }));
+
+    const items = screen.getAllByRole('listitem');
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.length).toBeLessThan(archives.length / 2);
+    // The last archive of the page must stay unmounted until it scrolls in.
+    expect(screen.queryByRole('button', { name: /^Archive 99\b/ })).not.toBeInTheDocument();
+    expect(document.querySelectorAll('.archive-thumb-grid-row').length).toBeGreaterThan(0);
+  });
+
+  it('surfaces archive classification and reading metadata as compact chips', () => {
+    // The category comes from the `category:` tag, not from the local
+    // `archives.category` column — nothing has ever written that column, so
+    // reading it first only made the source order look richer than it was. The
+    // label is translated through the same map the detail pane's tag list uses.
+    renderWorkspace({ archives: [{ ...archives[0]!, tags: ['category:Manga'], language: '中文' }] });
+
+    expect(screen.getAllByText('漫画').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
     expect(screen.getAllByText('中文').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
     expect(screen.getAllByText('1 页').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
   });

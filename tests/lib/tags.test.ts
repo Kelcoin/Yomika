@@ -1,4 +1,5 @@
-import { categorizeTags, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags } from '../../src/lib/tags';
+import { categorizeTags, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
+import { formatArchiveDate } from '../../src/lib/archiveCardPresentation';
 
 describe('tag translations', () => {
   it('replaces raw EH tags with the installed Chinese translation', () => {
@@ -27,6 +28,21 @@ describe('tag translations', () => {
     expect(normalized.parody?.sample).toBe('骑士&魔法');
   });
 
+  it('normalizes the upstream database without one DOM parse per entry', () => {
+    // The real db.html.json holds 50k+ entries; a DOMParser document each froze
+    // the main thread for seconds.
+    const parseFromString = vi.spyOn(DOMParser.prototype, 'parseFromString');
+    const entries = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [`tag-${index}`, { name: `<p>标签&amp;${index}</p>` }]),
+    );
+
+    const normalized = normalizeTranslationDb({ data: [{ namespace: 'female', data: entries }] });
+
+    expect(normalized.female?.['tag-7']).toBe('标签&7');
+    expect(parseFromString).not.toHaveBeenCalled();
+    parseFromString.mockRestore();
+  });
+
   it('splits LANraragi metadata tags only at commas', () => {
     expect(parseArchiveTagString('female:big breasts, artist:sample artist')).toEqual([
       'female:big breasts',
@@ -38,5 +54,25 @@ describe('tag translations', () => {
     installTagTranslations({ female: { 'big breasts': '巨乳' }, artist: { sample: '示例作者' } });
     expect(searchTags('female:big').map((item) => item.namespace + ':' + item.key)).toContain('female:big breasts');
     expect(searchTags('示例').map((item) => item.namespace)).toContain('artist');
+  });
+
+  it('renders date namespaces on the same calendar basis as card metadata', () => {
+    // Both renderers must agree; the tag path used to format in UTC while the
+    // card corner formatted locally, so the same archive showed two days.
+    expect(translateTag('date_added', '1760742000')).toBe(formatArchiveDate(1_760_742_000));
+    expect(translateTag('timestamp', '1760742000000')).toBe(formatArchiveDate(1_760_742_000));
+    expect(translateTag('date_added', 'not-a-date')).toBe('not-a-date');
+  });
+
+  it('finds a Chinese label by full pinyin and by initials', () => {
+    // A latin keyboard cannot reach 眼镜 otherwise: this is what "typing
+    // yanjing suggests female:glasses$" means.
+    installTagTranslations({ female: { glasses: '眼镜', 'big breasts': '巨乳' }, artist: { sample: '示例作者' } });
+
+    expect(searchTags('yanjing').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('yanj').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('yj').map((item) => `${item.namespace}:${item.key}`)).toContain('female:glasses');
+    expect(searchTags('juru').map((item) => `${item.namespace}:${item.key}`)).toContain('female:big breasts');
+    expect(searchTags('zzzz')).toEqual([]);
   });
 });

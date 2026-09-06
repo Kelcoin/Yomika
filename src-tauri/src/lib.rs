@@ -10,11 +10,18 @@ mod network;
 mod settings;
 
 use commands::library::{
-    add_archive_to_category, check_server_status, create_task, delete_archive, list_archives, list_archives_page,
+    add_archive_to_category, check_server_status, create_task, delete_archive, list_archives, list_archives_by_ids,
+    list_archives_page,
     list_categories, list_reading_history, list_servers, list_tasks, list_watchlist, load_archive_metadata,
     load_archive_thumbnail, load_archive_page_thumbnail, load_reader_manifest, load_reader_page, load_reading_progress,
+    probe_new_archives,
     refresh_archives, replace_archives, retry_task, save_reading_progress, save_server, set_watchlist,
+    list_reading_list, set_reading_list,
+    delete_search_preset, list_search_presets, save_search_preset,
+    search_random_archives, search_archives_page,
     update_archive_metadata, list_metadata_plugins, use_metadata_plugin, update_task, upload_archive,
+    download_url,
+    verify_archives_exist,
 };
 use cache::{cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats, cache_store_image};
 use commands::platform::platform_capabilities;
@@ -23,9 +30,9 @@ use commands::sync::{
     encrypt_sync_manifest, list_sync_journal, list_webdav_accounts, merge_sync_manifests,
     save_webdav_account, set_sync_journal_state, sync_webdav_scope,
 };
-use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_model, inference_pause, inference_probe, inference_resume, inference_start, inference_validate_model};
+use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_decensor_bundle, inference_install_model, inference_list_models, inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page, inference_validate_model, inference_decensor_page};
 use dedup::{dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact, dedup_import_readoshi, dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan};
-use commands::eh::{check_eh_login_health, list_eh_accounts, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
+use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, list_eh_accounts, login_eh_account, open_eh_login_window, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
 use commands::legacy::import_legacy_export;
 use db::Database;
 use tauri::Manager;
@@ -57,10 +64,15 @@ pub fn run() {
             save_server,
             replace_archives,
             refresh_archives,
+            probe_new_archives,
+            search_random_archives,
             load_reader_manifest,
             load_reader_page,
             list_archives,
+            list_archives_by_ids,
+            verify_archives_exist,
             list_archives_page,
+            search_archives_page,
             load_archive_metadata,
             load_archive_thumbnail,
             load_archive_page_thumbnail,
@@ -70,6 +82,7 @@ pub fn run() {
             update_task,
             retry_task,
             upload_archive,
+            download_url,
             list_categories,
             add_archive_to_category,
             update_archive_metadata,
@@ -80,6 +93,11 @@ pub fn run() {
             set_watchlist,
             list_watchlist,
             list_reading_history,
+            set_reading_list,
+            list_reading_list,
+            save_search_preset,
+            list_search_presets,
+            delete_search_preset,
             append_sync_journal,
             claim_sync_journal,
             list_sync_journal,
@@ -102,6 +120,8 @@ pub fn run() {
             inference_resume,
             inference_validate_model,
             inference_install_model,
+            inference_install_decensor_bundle,
+            inference_list_models,
             inference_clear_cache,
             model_release_url,
             model_release_fetch_manifest,
@@ -113,7 +133,13 @@ pub fn run() {
             model_release_validate_archive,
             model_release_activate,
             model_release_validate_local,
+            inference_upscale_page,
+            inference_decensor_page,
             save_eh_account,
+            login_eh_account,
+            open_eh_login_window,
+            capture_eh_login_cookies,
+            close_eh_login_window,
             list_eh_accounts,
             search_eh_galleries,
             remove_eh_favorite,

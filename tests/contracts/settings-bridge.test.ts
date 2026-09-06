@@ -10,6 +10,13 @@ const preferences = {
   defaultLayout: 'double' as const,
   defaultDirection: 'rtl' as const,
   cacheMaxBytes: 4_294_967_296,
+  prefetchPages: 2,
+  coverConcurrency: 4,
+  startupRoute: 'home' as const,
+  cardStyle: 'wide' as const,
+  upscaleBackend: 'off' as const,
+  upscaleModel: '', decensorModel: '',
+  customCss: '',
 };
 
 describe('native settings bridge', () => {
@@ -45,6 +52,40 @@ describe('native settings bridge', () => {
     const repository = new NativeSettingsRepository();
     await expect(repository.save({ ...preferences, cacheMaxBytes: 1_073_741_823 })).resolves.toMatchObject({ ok: false });
     await expect(repository.save({ ...preferences, cacheMaxBytes: 34_359_738_369 })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('rejects an unusable preload distance or upscale backend', async () => {
+    const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => ({ ok: true, value: args?.input }));
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeSettingsRepository();
+    // Ten pages of preload is allowed; eleven is not.
+    await expect(repository.save({ ...preferences, prefetchPages: 10 })).resolves.toMatchObject({ ok: true });
+    await expect(repository.save({ ...preferences, prefetchPages: 11 })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, coverConcurrency: 0 })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, upscaleBackend: 'gpu' as never })).resolves.toMatchObject({ ok: false });
+    await expect(repository.save({ ...preferences, startupRoute: 'reader' as never })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('fills in the startup page a native build predating it does not send', async () => {
+    // Same contract as every other added field: a snapshot from an older build
+    // must not fail validation and drop the user back to defaults wholesale.
+    const { startupRoute: _added, ...older } = preferences;
+    setInvokeAdapterForTests(async () => ({ ok: true, value: older }));
+
+    await expect(new NativeSettingsRepository().load()).resolves.toEqual({
+      ok: true,
+      value: { ...older, startupRoute: 'home' },
+    });
+  });
+
+  it('drops a stale accent colour instead of failing the whole snapshot', async () => {
+    // The accent preference is gone — custom CSS covers it. A snapshot from an
+    // older native build still carries the field, and rejecting it would leave
+    // the app on defaults after an upgrade.
+    const adapter = vi.fn(async () => ({ ok: true, value: { ...preferences, accentColor: '#1f6f8b' } }));
+    setInvokeAdapterForTests(adapter);
+
+    await expect(new NativeSettingsRepository().load()).resolves.toEqual({ ok: true, value: preferences });
   });
 
   it('imports a validated legacy ordinary-preference result', async () => {

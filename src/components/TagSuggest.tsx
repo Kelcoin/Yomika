@@ -8,6 +8,9 @@ interface TagSuggestProps {
   onSelect: (tag: string) => void;
 }
 
+const PANEL_ID = 'tag-suggest-panel';
+const optionId = (index: number) => `${PANEL_ID}-option-${index}`;
+
 export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps) {
   const [active, setActive] = useState(0);
   const [position, setPosition] = useState<{ left: number; top: number; width: number }>();
@@ -39,12 +42,30 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
     input.addEventListener('keydown', onKeyDown);
     return () => input.removeEventListener('keydown', onKeyDown);
   }, [active, anchorRef, onSelect, suggestions]);
+  // The anchor input belongs to the caller, so wire the combobox relationship
+  // onto it here: without this a screen reader never hears the candidate list.
+  useEffect(() => {
+    const input = anchorRef.current;
+    if (!input) return undefined;
+    const open = Boolean(position) && suggestions.length > 0;
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-controls', PANEL_ID);
+    input.setAttribute('aria-expanded', String(open));
+    if (open) input.setAttribute('aria-activedescendant', optionId(active));
+    else input.removeAttribute('aria-activedescendant');
+    return () => {
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+    };
+  }, [active, anchorRef, position, suggestions.length]);
   if (!position || !suggestions.length || typeof document === 'undefined') return null;
   return createPortal(
-    <div className="tag-suggest-panel" role="listbox" style={{ position: 'fixed', left: position.left, top: position.top, width: position.width }}>
+    <div className="tag-suggest-panel" id={PANEL_ID} role="listbox" style={{ position: 'fixed', left: position.left, top: position.top, width: position.width }}>
       {suggestions.map((suggestion, index) => (
         <button
           key={`${suggestion.namespace}:${suggestion.key}`}
+          id={optionId(index)}
           type="button"
           role="option"
           aria-selected={index === active}

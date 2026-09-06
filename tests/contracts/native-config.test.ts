@@ -10,6 +10,14 @@ function readJson(path: string): Record<string, unknown> {
 }
 
 describe('native shell configuration', () => {
+  it('registers both model release and reader inference commands', () => {
+    const lib = read('../../src-tauri/src/lib.rs');
+    const handlers = lib.split('tauri::generate_handler![')[1]?.split(']')[0] ?? '';
+    for (const command of ['inference_install_decensor_bundle', 'inference_upscale_page', 'inference_decensor_page', 'model_release_download_bundle']) {
+      expect(handlers.split(',').map((item) => item.trim())).toContain(command);
+    }
+  });
+
   it('uses the approved product identity and a restrictive CSP', () => {
     const config = readJson('../../src-tauri/tauri.conf.json');
 
@@ -64,6 +72,8 @@ describe('native shell configuration', () => {
 
     expect(lib).toContain('Database::open');
     expect(lib).toContain('list_archives');
+    expect(lib).toContain('list_archives_by_ids');
+    expect(lib).toContain('search_archives_page');
     expect(lib).toContain('save_reading_progress');
     expect(database).toContain('0001_initial.sql');
     expect(database).toContain('0002_local_library.sql');

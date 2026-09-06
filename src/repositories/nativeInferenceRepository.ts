@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { invokeCommand } from '../bridge/invoke';
+import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 import { buildModelAssetUrl, mirrorPrefix, type ModelMirrorId } from '../domain/modelRelease';
 
@@ -12,14 +12,27 @@ const InferenceCapabilitiesSchema = z.object({
   backends: z.array(z.string().min(1)), maxPixels: z.number().int().positive(), hardwareAcceleration: z.boolean(),
 });
 const InferenceJobSchema = z.object({ id: z.string().min(1), status: z.string().min(1), itemCount: z.number().int().nonnegative(), completedCount: z.number().int().nonnegative() });
-const InstalledModelSchema = z.object({ id: z.string().min(1), version: z.string().min(1) });
+const InstalledModelSchema = z.object({
+  id: z.string().min(1),
+  version: z.string().min(1),
+  /** From the installed manifest. Null means the directory has no manifest, so
+   * the model is listed but cannot be run — nothing records its scale. */
+  scale: z.number().int().positive().nullable().default(null),
+  /** What the model does. Read from the shape of the install on the native side,
+   * so a de-censoring bundle cannot be offered as an upscaler — picking one there
+   * silently produced plain nearest-neighbour output. */
+  kind: z.enum(['upscale', 'decensor']).default('upscale'),
+});
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
 export type InferenceJob = z.infer<typeof InferenceJobSchema>;
 export interface InferenceStartInput { id: string; sourceScope: string; sourceId: string; modelId: string; modelVersion: string; inputHashes: string[]; }
 export interface InferenceCheckpointInput { jobId: string; itemIndex: number; completedTile: number; status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'; outputPath?: string; }
 export interface ModelManifest { id: string; version: string; format: 'onnx'; scale: number; maxPixels: number; sha256: string; supportedBackends: string[]; }
 export type InferenceCapabilities = z.infer<typeof InferenceCapabilitiesSchema>;
-export type InstalledModel = z.infer<typeof InstalledModelSchema>;
+/** `z.infer` gives the input type, where a defaulted field is optional; commands
+ * answer with the filled-in shape. */
+export type InstalledModel = z.output<typeof InstalledModelSchema>;
+const InstalledModelResponse = InstalledModelSchema as unknown as z.ZodType<InstalledModel>;
 export type InferenceCacheClearResult = z.infer<typeof InferenceCacheClearResultSchema>;
 
 export interface CpuScaleInput {
@@ -34,35 +47,35 @@ export type CpuRgbaOutput = z.infer<typeof CpuRgbaOutputSchema>;
 
 export class NativeInferenceRepository {
   validateReleaseManifest(manifest: unknown): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_validate', { manifest }, z.undefined());
+    return invokeCommand('model_release_validate', { manifest }, VoidResponseSchema);
   }
 
   downloadReleaseAsset(input: { url: string; asset: unknown; destination: string }): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_download', { input }, z.undefined());
+    return invokeCommand('model_release_download', { input }, VoidResponseSchema);
   }
 
   downloadModelBundle(input: { prefix: string; ownerRepo: string; manifest: unknown; destination: string }): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_download_bundle', { input }, z.undefined());
+    return invokeCommand('model_release_download_bundle', { input }, VoidResponseSchema);
   }
 
   validateModelImport(root: string, manifest: unknown): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_validate_import', { input: { root, manifest } }, z.undefined());
+    return invokeCommand('model_release_validate_import', { input: { root, manifest } }, VoidResponseSchema);
   }
 
   cancelReleaseDownload(destination: string): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_cancel', { destination }, z.undefined());
+    return invokeCommand('model_release_cancel', { destination }, VoidResponseSchema);
   }
 
   validateModelArchive(archive: number[], manifest: unknown): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_validate_archive', { input: { archive, manifest } }, z.undefined());
+    return invokeCommand('model_release_validate_archive', { input: { archive, manifest } }, VoidResponseSchema);
   }
 
   activateModelDirectory(staging: string, install: string): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_activate', { input: { staging, install } }, z.undefined());
+    return invokeCommand('model_release_activate', { input: { staging, install } }, VoidResponseSchema);
   }
 
   validateLocalModel(path: string, manifest: unknown): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_validate_local', { input: { path, manifest } }, z.undefined());
+    return invokeCommand('model_release_validate_local', { input: { path, manifest } }, VoidResponseSchema);
   }
 
   releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
@@ -75,6 +88,23 @@ export class NativeInferenceRepository {
   static modelAssetUrl(mirror: ModelMirrorId, ownerRepo: string, tag: string, path: string, customPrefix = ''): string {
     return buildModelAssetUrl(mirrorPrefix(mirror, customPrefix), ownerRepo, tag, path);
   }
+  /** Upscales one cached reader page; the result is stored as the `enhanced`
+   * rendition, keyed by scale and model version. */
+  /** `modelId` names an installed model; the native side resolves its newest
+   * version and reads the scale from that model's manifest, so the caller does
+   * not get to ask for a scale the model cannot produce. */
+  /** `decensorModel` chains the two pipelines: the upscaler then reads this
+   * page's de-censored rendition instead of the plain one. */
+  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; decensorModel?: string; tileSize?: number; tileSleepMs?: number }): Promise<CommandResult<ArrayBuffer>> {
+    return invokeBinaryCommand('inference_upscale_page', { input });
+  }
+
+  /** Runs the de-censoring bundle over one cached reader page; the result is
+   * stored as the `decensored` rendition, keyed by bundle version. */
+  decensorPage(input: { scopeId: string; archiveId: string; pageIndex: number; modelId: string }): Promise<CommandResult<ArrayBuffer>> {
+    return invokeBinaryCommand('inference_decensor_page', { input });
+  }
+
   probe(): Promise<CommandResult<InferenceCapabilities>> {
     return invokeCommand('inference_probe', {}, InferenceCapabilitiesSchema);
   }
@@ -86,10 +116,17 @@ export class NativeInferenceRepository {
   start(input: InferenceStartInput): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_start', { input }, InferenceJobSchema); }
   getJob(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_get_job', { id }, InferenceJobSchema); }
   cancel(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_cancel', { id }, InferenceJobSchema); }
-  checkpoint(input: InferenceCheckpointInput): Promise<CommandResult<void>> { return invokeCommand('inference_checkpoint', { input }, z.undefined()); }
+  checkpoint(input: InferenceCheckpointInput): Promise<CommandResult<void>> { return invokeCommand('inference_checkpoint', { input }, VoidResponseSchema); }
   pause(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_pause', { id }, InferenceJobSchema); }
   resume(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_resume', { id }, InferenceJobSchema); }
-  validateModel(manifest: ModelManifest, model: number[]): Promise<CommandResult<void>> { return invokeCommand('inference_validate_model', { input: { manifest, model } }, z.undefined()); }
-  installModel(manifest: ModelManifest, archive: number[]): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_model', { input: { manifest, archive } }, InstalledModelSchema); }
+  validateModel(manifest: ModelManifest, model: number[]): Promise<CommandResult<void>> { return invokeCommand('inference_validate_model', { input: { manifest, model } }, VoidResponseSchema); }
+  installModel(manifest: ModelManifest, archive: number[]): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_model', { input: { manifest, archive } }, InstalledModelResponse); }
+  /** The models actually on disk, so the settings page can offer a choice
+   * instead of asking for a model name to be typed from memory. */
+  /** Installs a de-censoring bundle by copying it out of a directory the user
+   * already has. The bundle is 337 MB, so it cannot be handed over as bytes the
+   * way an upscaling model is. */
+  installDecensorBundle(sourceDir: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_decensor_bundle', { sourceDir }, InstalledModelResponse); }
+  listModels(): Promise<CommandResult<InstalledModel[]>> { return invokeCommand('inference_list_models', {}, z.array(InstalledModelResponse)); }
   clearCache(): Promise<CommandResult<InferenceCacheClearResult>> { return invokeCommand('inference_clear_cache', {}, InferenceCacheClearResultSchema); }
 }

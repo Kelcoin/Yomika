@@ -141,6 +141,29 @@ a {
   color: var(--selection-ink);
 }
 
+/* Desktop-app feel: nothing is selectable or draggable by default, so a stray
+   drag cannot rip a cover out of the window or leave text highlighted. Inputs
+   and anything explicitly marked selectable keep normal behaviour. */
+:root {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+select,
+[contenteditable="true"],
+.is-selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
 button {
   display: inline-flex;
   align-items: center;

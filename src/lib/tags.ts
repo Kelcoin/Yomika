@@ -1,14 +1,63 @@
+import pinyin from 'tiny-pinyin';
+
+import { formatArchiveDate } from './archiveCardPresentation';
+
 export const TAG_NAMESPACE_LABELS: Record<string, string> = {
   artist: '作者', parody: '原作', category: '分类', reclass: '重分类', character: '角色', female: '女性', male: '男性', mixed: '混合', other: '其他', group: '社团', series: '系列', language: '语言', general: '通用', location: '地点', cosplayer: 'Cosplayer', uploader: '发布者', date_added: '添加日期', timestamp: '发布日期', source: '来源',
 };
 export const TAG_NAMESPACE_ORDER = ['artist', 'parody', 'category', 'reclass', 'character', 'female', 'male', 'mixed', 'other', 'group', 'series', 'language', 'location', 'cosplayer', 'general'];
 export const TAG_BOTTOM_NAMESPACES = ['uploader', 'date_added', 'timestamp', 'source'];
 export const FAVORITES_CATEGORY_NAME = '\u{1f516} Favorites';
+/** Filter value for LANraragi's own "untagged only" switch, offered in the
+ * category menu because that is where someone goes looking for it.
+ *
+ * Not a category id: an archive with no tags is in no category either, so
+ * resolving this as one would always return nothing. LANraragi's own ids are
+ * `SET_<digits>`, so the prefix cannot collide with a real one. */
+export const UNTAGGED_FILTER_ID = 'yomika:untagged';
 export function getCategoryDisplayName(name: string): string { return name === FAVORITES_CATEGORY_NAME ? '收藏夹' : name; }
 export function sortCategoriesForDisplay<T extends { name: string }>(categories: T[] = []): T[] {
   return [...categories].sort((left, right) => Number(right.name === FAVORITES_CATEGORY_NAME) - Number(left.name === FAVORITES_CATEGORY_NAME));
 }
-const CATEGORY_TRANSLATIONS: Record<string, string> = { manga: '漫画', doujinshi: '同人志', 'game cg': '游戏 CG', 'image set': '图片集', western: '欧美', artistcg: '作者 CG', cosplay: 'Cosplay', imageset: '图片集' };
+/** Categories an archive can be put into by hand. A dynamic category's contents
+ * come from its search expression — LANraragi's own schema treats `archives` and
+ * `search` as either/or — so offering one as a target would be a no-op. The
+ * favourites category has its own toggle. */
+export function assignableCategories<T extends { name: string; search?: string | null | undefined }>(categories: T[] = []): T[] {
+  return categories.filter((category) => !category.search && category.name !== FAVORITES_CATEGORY_NAME);
+}
+/** The E-Hentai categories, in Chinese, keyed by every spelling they arrive in.
+ *
+ * One map, used by both consumers. There used to be two: this one, reached only
+ * from the detail pane's tag list, and an English display-casing map in
+ * `archiveCardPresentation` that the card footer used — so the same archive read
+ * 漫画 in the panel and Manga on the card, and a neighbour with a category the
+ * server knew about read Chinese while one without read English. This one also
+ * covers the values the old map missed (`artist cg`, `gamecg`, `non-h`,
+ * `asianporn`, `misc`), which is why some of them stayed English everywhere. */
+export const CATEGORY_TRANSLATIONS: Record<string, string> = {
+  manga: '漫画',
+  doujinshi: '同人志',
+  artistcg: '作者 CG',
+  'artist cg': '作者 CG',
+  gamecg: '游戏 CG',
+  'game cg': '游戏 CG',
+  imageset: '图片集',
+  'image set': '图片集',
+  western: '欧美',
+  'non-h': '非 H',
+  nonh: '非 H',
+  cosplay: 'Cosplay',
+  asianporn: '亚洲写真',
+  'asian porn': '亚洲写真',
+  misc: '杂项',
+};
+
+/** A `category:`/`reclass:` tag value in the form a card or a chip shows it. */
+export function categoryTagLabel(value: string): string {
+  const text = value.trim();
+  return text ? CATEGORY_TRANSLATIONS[text.toLowerCase()] ?? text : text;
+}
 export type TranslationMap = Record<string, Record<string, string>>;
 let translations: TranslationMap = {};
 const listeners = new Set<() => void>();
@@ -19,9 +68,18 @@ export function subscribeTagTranslations(listener: () => void): () => void {
   return () => { listeners.delete(listener); };
 }
 
+const HTML_TAG = /<[^>]*>/g;
+let entityDecoder: HTMLTextAreaElement | undefined;
+
+// The upstream database holds 50k+ entries. A DOMParser document per entry
+// froze the main thread for seconds, so strip markup textually and only touch
+// the DOM for the minority of names that actually carry an entity.
 function readableTranslationName(value: string): string {
-  const parsed = new DOMParser().parseFromString(value, 'text/html');
-  return (parsed.body.textContent ?? '').trim();
+  const stripped = value.includes('<') ? value.replace(HTML_TAG, '') : value;
+  if (!stripped.includes('&') || typeof document === 'undefined') return stripped.trim();
+  entityDecoder ??= document.createElement('textarea');
+  entityDecoder.innerHTML = stripped;
+  return (entityDecoder.value ?? stripped).trim();
 }
 
 export function normalizeTranslationDb(raw: unknown): TranslationMap {
@@ -58,10 +116,44 @@ export function normalizeTranslationDb(raw: unknown): TranslationMap {
 }
 
 export const NS_CN_LABELS: Record<string, string> = TAG_NAMESPACE_LABELS;
-let searchIndex: Array<{ namespace: string; key: string; label: string }> = [];
+interface SearchIndexEntry {
+  namespace: string;
+  key: string;
+  label: string;
+  keyLower: string;
+  labelLower: string;
+  /** Full pinyin of the Chinese label, e.g. `yanjing` for 眼镜. */
+  pinyin: string;
+  /** First letter of each syllable, e.g. `yj`. */
+  pinyinInitials: string;
+}
+let searchIndex: SearchIndexEntry[] = [];
+
+/** Latin queries cannot reach a Chinese label: typing `yanjing` has to find
+ * 眼镜 (female:glasses). Both the full pinyin and the initials are precomputed
+ * with the label's lower case, because the suggest box searches per keystroke. */
+function toPinyinForms(label: string): { pinyin: string; pinyinInitials: string } {
+  if (!/[㐀-鿿]/.test(label)) return { pinyin: '', pinyinInitials: '' };
+  try {
+    const syllables = pinyin.convertToPinyin(label, ' ', true).split(/\s+/).filter(Boolean);
+    if (syllables.length === 0) return { pinyin: '', pinyinInitials: '' };
+    return {
+      pinyin: syllables.join(''),
+      pinyinInitials: syllables.map((syllable) => syllable[0] ?? '').join(''),
+    };
+  } catch {
+    // A label outside the bundled character table simply has no pinyin form.
+    return { pinyin: '', pinyinInitials: '' };
+  }
+}
 
 function rebuildSearchIndex(): void {
-  searchIndex = Object.entries(translations).flatMap(([namespace, entries]) => Object.entries(entries).map(([key, label]) => ({ namespace, key, label })));
+  // Lower-casing here instead of per keystroke: the installed database holds
+  // tens of thousands of entries and the suggest box searches on every input.
+  searchIndex = Object.entries(translations).flatMap(([namespace, entries]) => Object.entries(entries).map(([key, label]) => ({
+    namespace, key, label, keyLower: key.toLowerCase(), labelLower: label.toLowerCase(),
+    ...toPinyinForms(label),
+  })));
 }
 
 export function installTagTranslations(value: TranslationMap): void {
@@ -77,24 +169,31 @@ export function searchTags(query: string, limit = 30): TagSuggestion[] {
   if (!raw || searchIndex.length === 0) return [];
   const namespaceQuery = raw.includes(':') ? raw.slice(0, raw.indexOf(':')).trim() : '';
   const valueQuery = namespaceQuery ? raw.slice(raw.indexOf(':') + 1).trim() : raw;
-  return searchIndex.map((item) => {
-    if (namespaceQuery && item.namespace !== namespaceQuery) return undefined;
-    const key = item.key.toLowerCase();
-    const label = item.label.toLowerCase();
-    let score = 0;
-    if (key === valueQuery) score = 100;
-    else if (key.startsWith(valueQuery)) score = 80;
-    else if (label === valueQuery) score = 70;
-    else if (label.startsWith(valueQuery)) score = 60;
-    else if (key.includes(valueQuery) || label.includes(valueQuery)) score = 30;
-    return score ? { namespace: item.namespace, key: item.key, label: item.label, score } : undefined;
-  }).filter((item): item is TagSuggestion => !!item).sort((a, b) => b.score - a.score || a.label.localeCompare(b.label)).slice(0, limit);
+  const matches: TagSuggestion[] = [];
+  for (const item of searchIndex) {
+    if (namespaceQuery && item.namespace !== namespaceQuery) continue;
+    const score = item.keyLower === valueQuery ? 100
+      : item.keyLower.startsWith(valueQuery) ? 80
+        : item.labelLower === valueQuery ? 70
+          : item.labelLower.startsWith(valueQuery) ? 60
+            // Pinyin ranks below the literal forms: an exact `yanjing` should
+            // still lose to a tag literally named that.
+            : item.pinyin === valueQuery ? 55
+              : item.pinyin.startsWith(valueQuery) ? 45
+                : item.pinyinInitials === valueQuery ? 40
+                  : item.keyLower.includes(valueQuery) || item.labelLower.includes(valueQuery) ? 30
+                    : item.pinyin.includes(valueQuery) ? 20
+                      : 0;
+    if (score) matches.push({ namespace: item.namespace, key: item.key, label: item.label, score });
+  }
+  return matches.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label)).slice(0, limit);
 }
 
 export function translateTag(namespace: string, value: string): string {
   const text = value.trim(); const key = namespace.toLowerCase(); if (!text) return text;
   if (key === 'category' || key === 'reclass') return CATEGORY_TRANSLATIONS[text.toLowerCase()] ?? text;
-  if (key === 'date_added' || key === 'timestamp') { const number = Number(text); if (Number.isFinite(number) && number > 0) { const date = new Date(number > 1e12 ? number : number * 1000); if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10); } }
+  // Local calendar day, matching how card metadata renders the same timestamp.
+  if (key === 'date_added' || key === 'timestamp') { const number = Number(text); if (Number.isFinite(number) && number > 0) { const formatted = formatArchiveDate(number > 1e12 ? number / 1000 : number); if (formatted) return formatted; } }
   return translations[key]?.[text.toLowerCase()] ?? text;
 }
 export function translateRawTag(raw: string): string {

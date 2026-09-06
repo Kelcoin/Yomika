@@ -2,22 +2,171 @@ import { describe, expect, it } from 'vitest';
 
 import {
   advanceReader,
-  applyZoom,
   clampZoom,
+  classifyPageShape,
   createReaderState,
   createZoomState,
+  effectiveReaderLayout,
   filterArchivesByQuery,
   getPrefetchPages,
   getVisiblePageIndexes,
+  planPageSpreads,
   resolveReaderLayout,
-  resetZoom,
+  settleZoom,
+  shouldCommitPageTurn,
   sortArchivesByTitle,
   toggleDoubleTapZoom,
   toggleReaderChrome,
-  type ZoomState,
+  webtoonWindow,
+  zoomByWheel,
 } from '../../src/domain/reader';
 
 describe('reader domain', () => {
+  it('commits a page turn on distance or on speed, and ignores twitches', () => {
+    // A sixth of the viewport is enough on its own, at any speed. A third — what
+    // this asked for — is over 500px on a desktop window, so a slow deliberate
+    // drag that was plainly a page turn kept springing back.
+    expect(shouldCommitPageTurn(200, 4000, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(-200, 4000, 1024)).toBe(true);
+    expect(shouldCommitPageTurn(150, 4000, 1024)).toBe(false);
+    // Short but fast: 100px in 120ms is 0.83 px/ms, past the flick threshold. The
+    // old rule was a flat 50px and ignored speed entirely, so it fired on a
+    // twitch and missed a deliberate short flick.
+    expect(shouldCommitPageTurn(100, 120, 1024)).toBe(true);
+    // Below the floor nothing commits, however fast: an instantaneous six-pixel
+    // jitter would otherwise read as an infinitely quick flick.
+    expect(shouldCommitPageTurn(6, 0, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(30, 0, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(31, 0, 1024)).toBe(true);
+    // A duration we cannot use is not the same as a fast one, so it asks for
+    // double the distance rather than guessing.
+    expect(shouldCommitPageTurn(200, Number.NaN, 1024)).toBe(false);
+    expect(shouldCommitPageTurn(400, Number.NaN, 1024)).toBe(true);
+  });
+
+  it('keeps the automatic preference separate from what it resolves to', () => {
+    // Resolving used to overwrite `layout`, so the first image to load turned
+    // 自动 into 单页 or 双页 and the preference could not be held or shown.
+    const auto = createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'auto' });
+    expect(auto.layout).toBe('auto');
+    expect(effectiveReaderLayout(auto)).toBe('single');
+
+    const resolved = { ...auto, resolvedLayout: 'double' as const };
+    expect(resolved.layout).toBe('auto');
+    expect(effectiveReaderLayout(resolved)).toBe('double');
+    // Pairing and paging follow the resolved layout, not the literal preference.
+    expect(getVisiblePageIndexes({ ...resolved, pageIndex: 1 })).toEqual([1, 2]);
+    expect(advanceReader({ ...resolved, pageIndex: 1 }, 'next').pageIndex).toBe(3);
+
+    // An explicit choice ignores whatever auto had settled on.
+    expect(effectiveReaderLayout({ ...resolved, layout: 'single' })).toBe('single');
+  });
+
+  it('classifies a page as wide only when it exceeds a spread slot', () => {
+    // The threshold is half a 16:9 viewport: anything wider than the slot it
+    // would occupy in a spread has to stand alone.
+    expect(classifyPageShape(700, 1000)).toBe('normal');
+    expect(classifyPageShape(1400, 1000)).toBe('wide');
+    // A page exactly as wide as its slot still fits in it.
+    expect(classifyPageShape(960, 1080)).toBe('normal');
+    // Nothing measured yet, or a broken image: assume it pairs. Guessing wide
+    // wastes a slot; guessing normal costs one re-pair when it loads.
+    expect(classifyPageShape(0, 0)).toBe('normal');
+    expect(classifyPageShape(Number.NaN, 100)).toBe('normal');
+  });
+
+  it('gives a wide page its own slot and re-pairs the run after it', () => {
+    const normal = 'normal' as const;
+    const wide = 'wide' as const;
+    // Cover alone, then pairs — the old fixed-parity behaviour, unchanged when
+    // nothing is wide.
+    expect(planPageSpreads([normal, normal, normal, normal, normal]))
+      .toEqual([[0], [1, 2], [3, 4]]);
+
+    // A spread at index 3 takes a slot of its own, and the run before it has an
+    // even length, so nothing upstream needs moving.
+    expect(planPageSpreads([normal, normal, normal, wide, normal, normal, normal]))
+      .toEqual([[0], [1, 2], [3], [4, 5], [6]]);
+
+    // Two spreads in a row, and a trailing odd page.
+    expect(planPageSpreads([normal, wide, wide, normal]))
+      .toEqual([[0], [1], [2], [3]]);
+  });
+
+  it('lets a wide page fall back to a single page without re-pairing what came before it', () => {
+    const normal = 'normal' as const;
+    const wide = 'wide' as const;
+    // A spread used to be read as evidence that the run in front of it started on
+    // the wrong foot, and the run was re-paired to suit. That inference could
+    // reshuffle a whole chapter off one wide page, and it only existed to repair a
+    // pairing start that is now fixed. The run keeps its own pairing and the wide
+    // page simply takes a slot.
+    expect(planPageSpreads([normal, normal, normal, normal, wide, normal, normal]))
+      .toEqual([[0], [1, 2], [3], [4], [5, 6]]);
+
+    expect(planPageSpreads([normal, normal, normal, normal, wide]))
+      .toEqual([[0], [1, 2], [3], [4]]);
+  });
+
+  it('always opens the cover alone', () => {
+    const base = createReaderState({ archiveId: 'a1', pageCount: 4, layout: 'double' });
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 0 })).toEqual([0]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 1 })).toEqual([1, 2]);
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'next').pageIndex).toBe(1);
+  });
+
+  it('windows continuous scroll instead of mounting the whole archive', () => {
+    // 200 pages of 1000px in a 800px viewport. Continuous mode used to call every
+    // one of them visible, which is one decode per page of the archive at once —
+    // with an enhancement enabled, one ONNX run each. That is the freeze.
+    const heights = Array.from({ length: 200 }, () => 1000);
+
+    const top = webtoonWindow({ scrollTop: 0, viewportHeight: 800, heights, overscan: 1 });
+    expect(top).toEqual({ first: 0, last: 1 });
+
+    // Page 40 spans 40000..41000 and is the only one the viewport touches.
+    const middle = webtoonWindow({ scrollTop: 40200, viewportHeight: 800, heights, overscan: 2 });
+    expect(middle).toEqual({ first: 38, last: 42 });
+
+    // Overscan cannot run off either end.
+    expect(webtoonWindow({ scrollTop: 199_500, viewportHeight: 800, heights, overscan: 3 }))
+      .toEqual({ first: 196, last: 199 });
+  });
+
+  it('holds the last page when the scroller is past the end, rather than reporting nothing', () => {
+    // Measured heights come in shorter than the estimates that sized the
+    // scroller, so the offset can briefly exceed the content. Unmounting
+    // everything there would throw away the measurements that fix it.
+    const heights = [100, 100];
+    expect(webtoonWindow({ scrollTop: 9000, viewportHeight: 800, heights, overscan: 0 }))
+      .toEqual({ first: 1, last: 1 });
+    expect(webtoonWindow({ scrollTop: 0, viewportHeight: 800, heights: [], overscan: 1 }))
+      .toEqual({ first: 0, last: -1 });
+    // A page of unknown height still occupies a row rather than collapsing the
+    // whole window onto index 0.
+    expect(webtoonWindow({ scrollTop: -50, viewportHeight: Number.NaN, heights: [0, 0, 0], overscan: 0 }))
+      .toEqual({ first: 0, last: 0 });
+  });
+
+  it('steps a spread by one page and a pair by two', () => {
+    const shapes = ['normal', 'normal', 'normal', 'wide', 'normal', 'normal'] as const;
+    const base = { ...createReaderState({ archiveId: 'a1', pageCount: 6, layout: 'double' }), shapes };
+    // Slots are [0], [1,2], [3], [4,5].
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 1 })).toEqual([1, 2]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 2 })).toEqual([1, 2]);
+    expect(getVisiblePageIndexes({ ...base, pageIndex: 3 })).toEqual([3]);
+
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'next').pageIndex).toBe(1);
+    expect(advanceReader({ ...base, pageIndex: 1 }, 'next').pageIndex).toBe(3);
+    // Leaving the spread lands on the start of the next pair, not one page into it.
+    expect(advanceReader({ ...base, pageIndex: 3 }, 'next').pageIndex).toBe(4);
+    expect(advanceReader({ ...base, pageIndex: 4 }, 'previous').pageIndex).toBe(3);
+    expect(advanceReader({ ...base, pageIndex: 3 }, 'previous').pageIndex).toBe(1);
+    // The ends hold instead of running past the archive.
+    expect(advanceReader({ ...base, pageIndex: 0 }, 'previous').pageIndex).toBe(0);
+    expect(advanceReader({ ...base, pageIndex: 4 }, 'next').pageIndex).toBe(4);
+  });
+
   it('resolves automatic layout from viewport and page shape', () => {
     expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900, pageWidth: 700, pageHeight: 1000 })).toBe('double');
     expect(resolveReaderLayout('auto', { viewportWidth: 390, viewportHeight: 844, pageWidth: 700, pageHeight: 1000 })).toBe('single');
@@ -42,9 +191,17 @@ describe('reader domain', () => {
     expect(toggleReaderChrome(toggleReaderChrome(state)).phase).toBe('ready');
   });
 
-  it('prefetches adjacent pages without crossing archive bounds', () => {
+  it('spends the prefetch budget ahead of the reader, not behind', () => {
+    // Reading runs forward, so pages already passed get half as many slots as
+    // pages coming up. A symmetric window spent half the budget behind.
     expect(getPrefetchPages(0, 5, 2)).toEqual([1, 2]);
-    expect(getPrefetchPages(3, 5, 2)).toEqual([1, 2, 4]);
+    expect(getPrefetchPages(3, 8, 2)).toEqual([2, 4, 5]);
+    expect(getPrefetchPages(5, 20, 4)).toEqual([3, 4, 6, 7, 8, 9]);
+    // A distance of one has nothing to spare for looking back.
+    expect(getPrefetchPages(3, 8, 1)).toEqual([4]);
+    expect(getPrefetchPages(3, 8, 0)).toEqual([]);
+    // Bounds still hold at both ends.
+    expect(getPrefetchPages(7, 8, 4)).toEqual([5, 6]);
   });
 
   it('keeps the cover standalone and pairs all subsequent pages', () => {
@@ -76,7 +233,7 @@ describe('reader domain', () => {
       expect(clampZoom(-1)).toBe(0.5);
     });
 
-    it('toggles double-tap zoom between 1x and 2x', () => {
+    it('sends a double tap back to 1x from any scale, not only from the target', () => {
       const initial = createZoomState();
       const zoomed = toggleDoubleTapZoom(initial);
       expect(zoomed.scale).toBe(2);
@@ -87,27 +244,11 @@ describe('reader domain', () => {
       expect(back.scale).toBe(1);
       expect(back.panX).toBe(0);
       expect(back.panY).toBe(0);
-    });
 
-    it('resets zoom to 1x and clears pan', () => {
-      const state: ZoomState = { scale: 2.5, panX: 50, panY: -30 };
-      const reset = resetZoom(state);
-      expect(reset.scale).toBe(1);
-      expect(reset.panX).toBe(0);
-      expect(reset.panY).toBe(0);
-    });
-
-    it('applies zoom with pan offset and clamps the result', () => {
-      const zoomed = applyZoom(createZoomState(), 1.5, 10, -5);
-      expect(zoomed.scale).toBe(1.5);
-      expect(zoomed.panX).toBe(10);
-      expect(zoomed.panY).toBe(-5);
-
-      const clamped = applyZoom(createZoomState(), 5, 0, 0);
-      expect(clamped.scale).toBe(3);
-
-      const negative = applyZoom(createZoomState(), -0.1, 0, 0);
-      expect(negative.scale).toBe(0.5);
+      // Anything the wheel left in between used to be enlarged further, so
+      // getting back to 100% took two more gestures.
+      expect(toggleDoubleTapZoom({ scale: 1.4, panX: 20, panY: 8 })).toEqual({ scale: 1, panX: 0, panY: 0 });
+      expect(toggleDoubleTapZoom({ scale: 0.7, panX: 0, panY: 0 }).scale).toBe(1);
     });
   });
 
@@ -133,6 +274,32 @@ describe('reader domain', () => {
 
       const desc = sortArchivesByTitle(items, 'desc');
       expect(desc.map((i) => i.title)).toEqual(['Gamma', 'Beta', 'Alpha Beta', 'Alpha']);
+    });
+  });
+
+  describe('zoom curve', () => {
+    it('zooms multiplicatively, snaps onto 100%, and springs back after a gesture', () => {
+      const start = createZoomState();
+
+      // A wheel notch scales by exp(-delta * 0.0015) rather than a fixed step, so
+      // the curve feels the same at 50% and at 300%.
+      const zoomedOut = zoomByWheel(start, 120);
+      expect(zoomedOut.scale).toBeCloseTo(Math.exp(-0.18), 5);
+      expect(zoomByWheel(zoomedOut, -120).scale).toBe(1);
+
+      // Coming back within the snap tolerance lands exactly on 100%, pan cleared.
+      expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, -1)).toEqual({ scale: 1, panX: 0, panY: 0 });
+
+      // Gestures may overshoot the hard limits...
+      const overshot = zoomByWheel({ scale: 2.9, panX: 0, panY: 0 }, -600);
+      expect(overshot.scale).toBeGreaterThan(3);
+      expect(overshot.scale).toBeLessThanOrEqual(4);
+      // ...and settling pulls them back in.
+      expect(settleZoom(overshot).scale).toBe(3);
+      expect(settleZoom({ scale: 0.36, panX: 5, panY: 5 })).toEqual({ scale: 0.5, panX: 0, panY: 0 });
+      expect(settleZoom({ scale: 2, panX: 5, panY: 5 })).toEqual({ scale: 2, panX: 5, panY: 5 });
+
+      expect(zoomByWheel(start, 0)).toBe(start);
     });
   });
 });

@@ -389,10 +389,26 @@ export function presentEhError(code: string, fallback: string): string {
     EH_CONTENT_WARNING: 'E-Hentai 内容警告页面需要登录或确认。',
     EH_ACCESS_BLOCKED: 'E-Hentai 拒绝了当前请求，可能是 Cookie、IP 或访问权限问题。',
     EH_CLOUDFLARE: 'E-Hentai 的 Cloudflare 验证拦截了请求。',
+    // A rejected sign-in is not an expired session: it used to share
+    // EH_REAUTH_REQUIRED, so a first login attempt told the user their login had
+    // expired and to reconfigure a cookie they had never set.
+    EH_LOGIN_REJECTED: 'E-Hentai 拒绝了这次登录，请检查用户名与密码。',
     EH_REAUTH_REQUIRED: 'E-Hentai 登录已失效，请重新配置 Cookie。',
     EH_RATE_LIMIT: 'E-Hentai 请求过于频繁，请稍后重试。',
     EH_EMPTY_RESPONSE: 'E-Hentai 返回了空响应。',
     EH_UNEXPECTED_PAGE: 'E-Hentai 返回了无法识别的页面。',
   };
   return messages[code] ?? fallback;
+}
+
+/** The sign-in form's own presenter.
+ *
+ * A sign-in answers with a reason the user can act on — a rejected password, a
+ * Cloudflare challenge, a temporary IP ban — so that reason is shown as-is. The
+ * generic map must not get a say here: it would turn any of them into "your
+ * login has expired, reconfigure the cookie", which is what a first sign-in
+ * attempt used to report.
+ */
+export function presentEhLoginError(code: string, message: string): string {
+  return message.trim() || presentEhError(code, 'E-Hentai 登录失败。');
 }

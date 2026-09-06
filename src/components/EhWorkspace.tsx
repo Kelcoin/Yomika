@@ -17,10 +17,14 @@ interface EhWorkspaceProps {
   searchError?: string | undefined;
   accountsLoading?: boolean | undefined;
   onSaveAccount?: ((input: SaveEhAccountInput) => Promise<void>) | undefined;
+  onPasswordLogin?: ((username: string, password: string) => Promise<string>) | undefined;
+  /** Resolves with the cookie header once the user has signed in through the
+   * page E-Hentai serves; the only route through a Cloudflare challenge. */
+  onBrowserLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
   savingAccount?: boolean | undefined;
 }
 
-export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCheckHealth, searching, searched, searchError, accountsLoading, onSaveAccount, savingAccount }: EhWorkspaceProps) {
+export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCheckHealth, searching, searched, searchError, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, savingAccount }: EhWorkspaceProps) {
   const [query, setQuery] = useState('');
   const hasActiveAccount = accounts.some((account) => account.isActive);
 
@@ -34,8 +38,9 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
       <header className="workspace-heading">
         <h1>账户与搜索</h1>
       </header>
-      <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} saving={savingAccount} />
-      <section className="eh-search-section" aria-label="搜索">
+      <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} saving={savingAccount} />
+      {/* Search only exists once an account is active; no nagging placeholder. */}
+      {hasActiveAccount && <section className="eh-search-section" aria-label="搜索">
         <form className="eh-search-form" onSubmit={handleSubmit}>
           <label className="eh-search-input">
             <Search aria-hidden="true" />
@@ -54,7 +59,6 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
             {searching ? '搜索中…' : '搜索'}
           </button>
         </form>
-        {!accountsLoading && !hasActiveAccount && <p role="status">请先添加并激活一个 E-Hentai 账户</p>}
         {searchError && <p className="form-error" role="alert">{searchError}</p>}
         {searching && <p role="status">正在搜索…</p>}
         {!searching && searched && results && results.length === 0 && <p>未找到匹配的画廊</p>}
@@ -70,7 +74,7 @@ export function EhWorkspace({ accounts, results, onSearch, onSwitchAccount, onCh
             ))}
           </ul>
         )}
-      </section>
+      </section>}
     </div>
   );
 }

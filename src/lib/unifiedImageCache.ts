@@ -1,4 +1,5 @@
 import { createImageCacheKey, type ImageCacheIdentity } from '../domain/cache';
+import { createSemaphore, type Semaphore } from './concurrency';
 
 export interface CachedImageData {
   bytes: Uint8Array;
@@ -22,6 +23,8 @@ export interface UnifiedImageCacheOptions {
   revokeObjectURL(url: string): void;
   maxBytes: number;
   maxEntries?: number;
+  /** How many repository fetches may be in flight at once. */
+  maxConcurrentFetches?: number;
 }
 
 interface MemoryEntry extends ImageHandle {
@@ -38,10 +41,19 @@ interface PendingEntry {
 }
 
 export class UnifiedImageCache {
+  private fetchGate: Semaphore;
+
   constructor(
     private readonly repository: ImageCacheRepository,
     private readonly options: UnifiedImageCacheOptions,
-  ) {}
+  ) {
+    this.fetchGate = createSemaphore(options.maxConcurrentFetches ?? 4);
+  }
+
+  /** Applied from preferences once they load. */
+  setMaxConcurrentFetches(limit: number): void {
+    this.fetchGate = createSemaphore(limit);
+  }
 
   private readonly memory = new Map<string, MemoryEntry>();
   private readonly pending = new Map<string, PendingEntry>();
@@ -49,6 +61,10 @@ export class UnifiedImageCache {
 
   async load(identity: ImageCacheIdentity, options: { signal?: AbortSignal } = {}): Promise<ImageHandle> {
     const key = createImageCacheKey(identity);
+    // Check the signal before the memory fast path: a consumer that already
+    // aborted never receives the handle, so it can never release the extra
+    // reference and the entry would be pinned in memory for good.
+    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const existing = this.memory.get(key);
     if (existing) {
       existing.refs += 1;
@@ -56,7 +72,6 @@ export class UnifiedImageCache {
       return { key, url: existing.url, bytes: existing.bytes };
     }
 
-    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     let pending = this.pending.get(key);
     if (!pending) {
       const controller = new AbortController();
@@ -113,7 +128,7 @@ export class UnifiedImageCache {
     const cached = await this.repository.read(identity);
     if (cached && cached.bytes.byteLength > 0) return cached;
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const fetched = await this.repository.fetch(identity, signal);
+    const fetched = await this.fetchGate.run(() => this.repository.fetch(identity, signal));
     if (fetched.bytes.byteLength === 0) throw new Error('Image response was empty');
     await this.repository.store(identity, fetched);
     return fetched;

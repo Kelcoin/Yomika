@@ -2276,7 +2276,7 @@ async fn dedup_scan_impl(
                             archive.archive_id
                         ));
                     }
-                    match crate::commands::library::load_archive_thumbnail(
+                    match crate::commands::library::load_archive_thumbnail_bytes(
                         server_id.clone(),
                         archive.archive_id.clone(),
                         database.clone(),

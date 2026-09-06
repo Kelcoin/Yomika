@@ -23,7 +23,7 @@ export async function createServerIdentity(input: ServerIdentityInput): Promise<
   const name = input.name.trim();
   const baseUrl = normalizeServerUrl(input.baseUrl);
   const origin = new URL(baseUrl).origin;
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${origin}\n${name.toLocaleLowerCase()}`));
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${origin}\n${name.toLowerCase()}`));
   const scopeId = `scope_${[...new Uint8Array(digest)].slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
   return { name, baseUrl, scopeId };
 }

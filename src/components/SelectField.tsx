@@ -15,6 +15,7 @@ export function SelectField({ id, name, value, options, onChange, 'aria-label': 
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = options.find((option) => option.value === value) ?? options[0];
+  const listId = `${id ?? name}-options`;
   useEffect(() => {
     const close = (event: PointerEvent) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false); };
     document.addEventListener('pointerdown', close);
@@ -31,7 +32,7 @@ export function SelectField({ id, name, value, options, onChange, 'aria-label': 
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-controls={`${id ?? name}-options`}
+        {...(open ? { 'aria-controls': listId } : {})}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') setOpen(false);
@@ -43,7 +44,7 @@ export function SelectField({ id, name, value, options, onChange, 'aria-label': 
       >
         <span>{selected?.label}</span><ChevronDown aria-hidden="true" />
       </button>
-      {open && <div className="select-menu" id={`${id ?? name}-options`} role="listbox" aria-label={ariaLabel}>
+      {open && <div className="select-menu" id={listId} role="listbox" aria-label={ariaLabel}>
         {options.map((option) => <button className="select-option" type="button" role="option" aria-selected={option.value === value} key={option.value} onClick={() => { onChange(option.value); setOpen(false); }}>
           <span>{option.label}</span>{option.value === value && <Check aria-hidden="true" />}
         </button>)}

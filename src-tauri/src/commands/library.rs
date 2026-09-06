@@ -90,14 +90,26 @@ pub struct RemoteArchive {
 struct SearchArchiveWire {
     arcid: String,
     title: String,
+    // Only arcid/title/tags/summary/pagecount/size are consumed. The rest is
+    // optional on purpose: `progress` and `lastreadtime` only appear when the
+    // server tracks progress, and a missing field used to fail the entire sync.
+    #[serde(default)]
     filename: String,
+    #[serde(default)]
     tags: String,
+    #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
     isnew: serde_json::Value,
+    #[serde(default)]
     extension: String,
+    #[serde(default)]
     progress: i64,
+    #[serde(default)]
     pagecount: i64,
+    #[serde(default)]
     lastreadtime: i64,
+    #[serde(default)]
     size: i64,
 }
 
@@ -108,6 +120,12 @@ struct SearchResponseWire {
     data: Vec<SearchArchiveWire>,
     records_filtered: i64,
     records_total: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomResponseWire {
+    #[serde(default)]
+    data: Vec<SearchArchiveWire>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +161,10 @@ pub struct ArchiveQueryInput {
     sort_by: String,
     order: String,
     category_id: Option<String>,
+    /// The offline half of LANraragi's `untaggedonly`. `tags_json` is the mirror's
+    /// copy of the tag list, so "no tags" is answerable locally.
+    #[serde(default)]
+    untagged_only: Option<bool>,
     offset: i64,
     limit: i64,
 }
@@ -156,6 +178,10 @@ pub struct ReadingProgressInput {
     page_count: i64,
     layout: String,
     direction: String,
+    /// Whether page 0 opens alone in double-page mode. `None` leaves whatever was
+    /// stored alone, so a caller that does not care cannot erase the setting.
+    #[serde(default)]
+    cover_alone: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,8 +193,40 @@ pub struct ReadingProgressRecord {
     page_count: i64,
     layout: String,
     direction: String,
+    cover_alone: Option<bool>,
     updated_at: String,
     revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPresetRecord {
+    pub scope_id: String,
+    pub preset_id: String,
+    pub name: String,
+    pub query: String,
+    pub sort_by: String,
+    pub sort_order: String,
+    pub category_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub device_id: String,
+    pub revision: i64,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPresetInput {
+    pub scope_id: String,
+    pub preset_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub query: String,
+    pub sort_by: String,
+    pub sort_order: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -455,9 +513,18 @@ async fn reader_request(
     url: String,
     api_key: String,
 ) -> Result<reqwest::Response, String> {
+    reader_request_with_timeout(method, url, api_key, 10).await
+}
+
+async fn reader_request_with_timeout(
+    method: reqwest::Method,
+    url: String,
+    api_key: String,
+    timeout_seconds: u64,
+) -> Result<reqwest::Response, String> {
     Client::builder()
         .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
         .build()
         .map_err(|error| error.to_string())?
         .request(method, url)
@@ -473,8 +540,19 @@ async fn reader_request(
 #[tauri::command]
 pub async fn list_categories(
     server_id: String,
+    force: Option<bool>,
     database: State<'_, Database>,
 ) -> Result<CommandResult<Vec<CategoryRecord>>, String> {
+    // Resolving dynamic categories costs one unpaged /api/search per category,
+    // so a plain navigation must not trigger it. Serve the persisted snapshot
+    // until it ages out, and only refetch when the caller asks for it.
+    if !force.unwrap_or(false) {
+        match read_category_cache(&database, &server_id) {
+            Ok(Some(categories)) => return Ok(CommandResult::success(categories)),
+            Ok(None) => {}
+            Err(error) => return Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+        }
+    }
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -548,7 +626,17 @@ pub async fn list_categories(
     // LANraragi leaves `archives` empty for dynamic categories. Resolve those
     // categories concurrently through their documented search expression so
     // one slow category cannot serialize the entire detail page.
+    // Two at a time: each resolution is an unpaged full-library search, and a
+    // library with many dynamic categories would otherwise fire them all at once.
+    const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
     let mut dynamic_categories = JoinSet::new();
+    let mut resolved = Vec::new();
+    /// A whole-library search is not a page request. Ten seconds is enough for
+    /// `/api/categories` and nowhere near enough for `start=-1` on a large
+    /// library — and a timeout here is stored as an empty category, which reads
+    /// as "nothing is in it".
+    const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 45;
+    let mut requested = 0usize;
     for (index, category) in categories.iter().enumerate() {
         if !category.archives.is_empty() {
             continue;
@@ -558,10 +646,10 @@ pub async fn list_categories(
         };
         let base_url = base_url.clone();
         let api_key = api_key.clone();
+        requested += 1;
         dynamic_categories.spawn(async move {
-            let encoded = url::form_urlencoded::byte_serialize(search.as_bytes()).collect::<String>();
-            let url = format!("{}/api/search?filter={encoded}&start=-1", base_url.trim_end_matches('/'));
-            let response = reader_request(reqwest::Method::GET, url, api_key).await.ok()?;
+            let url = build_category_search_url(&base_url, &search).ok()?;
+            let response = reader_request_with_timeout(reqwest::Method::GET, url, api_key, CATEGORY_SEARCH_TIMEOUT_SECONDS).await.ok()?;
             if !response.status().is_success() {
                 return None;
             }
@@ -569,12 +657,24 @@ pub async fn list_categories(
             let archives = parse_search_response(&body).ok()?;
             Some((index, archives.into_iter().map(|archive| archive.archive_id).collect::<Vec<_>>()))
         });
+        if dynamic_categories.len() >= MAX_PARALLEL_CATEGORY_SEARCHES {
+            if let Some(Ok(Some(entry))) = dynamic_categories.join_next().await {
+                resolved.push(entry);
+            }
+        }
     }
     while let Some(result) = dynamic_categories.join_next().await {
-        if let Ok(Some((index, archives))) = result {
-            if let Some(category) = categories.get_mut(index) {
-                category.archives = archives;
-            }
+        if let Ok(Some(entry)) = result {
+            resolved.push(entry);
+        }
+    }
+    // A dynamic category that did not answer keeps an empty membership, which is
+    // the same thing an empty category looks like. Remember that the snapshot is
+    // incomplete so it is retried in minutes rather than in hours.
+    let partial = resolved.len() < requested;
+    for (index, archives) in resolved {
+        if let Some(category) = categories.get_mut(index) {
+            category.archives = archives;
         }
     }
     let sync_result = (|| -> Result<(), String> {
@@ -603,6 +703,7 @@ pub async fn list_categories(
         transaction
             .commit()
             .map_err(|error| format!("提交分类缓存失败：{error}"))?;
+        write_category_cache(&connection, &server_id, &categories, partial)?;
         Ok(())
     })();
     if let Err(error) = sync_result {
@@ -671,6 +772,12 @@ pub async fn add_archive_to_category(
             "LANraragi rejected category assignment",
             false,
         ));
+    }
+    if let Ok(connection) = database.connection.lock() {
+        // Best effort: the assignment already succeeded on the server, so a
+        // failure to drop the local snapshot must not turn into a failed call.
+        // The stale window is 6 hours at worst, not permanent.
+        let _ = invalidate_category_cache(&connection, &server_id);
     }
     Ok(CommandResult::success(record))
 }
@@ -755,6 +862,13 @@ pub async fn update_archive_metadata(
             "LANraragi rejected metadata update",
             false,
         ));
+    }
+    if metadata.tags.is_some() {
+        // Dynamic categories are saved searches over tags, so editing tags can
+        // move an archive in or out of one.
+        if let Ok(connection) = database.connection.lock() {
+            let _ = invalidate_category_cache(&connection, &server_id);
+        }
     }
     Ok(CommandResult::success(record))
 }
@@ -963,6 +1077,8 @@ pub async fn delete_archive(
     ) {
         return Ok(CommandResult::failure("UNKNOWN", error.to_string(), true));
     }
+    // A static category still lists the id it was holding.
+    let _ = invalidate_category_cache(&connection, &server_id);
     Ok(CommandResult::success(()))
 }
 
@@ -1043,6 +1159,19 @@ pub async fn load_reader_page(
     path: String,
     database: State<'_, Database>,
     app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_reader_page_bytes(server_id, archive_id, page_index, path, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+async fn load_reader_page_bytes(
+    server_id: String,
+    archive_id: String,
+    page_index: i64,
+    path: String,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
     use tauri::Manager;
 
@@ -1108,7 +1237,11 @@ pub async fn load_reader_page(
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                let _ = store_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index, &mime, &bytes);
+                // A failed cache write means every later read re-fetches, so it
+                // must not vanish silently.
+                if let Err(error) = store_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index, &mime, &bytes) {
+                    eprintln!("yomika: reader page cache write failed: {error}");
+                }
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -1122,6 +1255,17 @@ pub async fn load_reader_page(
 
 #[tauri::command]
 pub async fn load_archive_thumbnail(
+    server_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_archive_thumbnail_bytes(server_id, archive_id, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+pub(crate) async fn load_archive_thumbnail_bytes(
     server_id: String,
     archive_id: String,
     database: State<'_, Database>,
@@ -1212,7 +1356,9 @@ pub async fn load_archive_thumbnail(
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                let _ = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes);
+                if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes) {
+                    eprintln!("yomika: image cache write failed: {error}");
+                }
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -1228,6 +1374,18 @@ pub async fn load_archive_thumbnail(
 /// Minion job; wait for that job before retrying the binary request.
 #[tauri::command]
 pub async fn load_archive_page_thumbnail(
+    server_id: String,
+    archive_id: String,
+    page: i64,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    load_archive_page_thumbnail_bytes(server_id, archive_id, page, database, app)
+        .await
+        .map(crate::domain::result::into_binary_response)
+}
+
+async fn load_archive_page_thumbnail_bytes(
     server_id: String,
     archive_id: String,
     page: i64,
@@ -1263,6 +1421,25 @@ pub async fn load_archive_page_thumbnail(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
     };
+    let bytes = match fetch_page_thumbnail(&base_url, &archive_id, page, api_key, 60).await {
+        Ok(CommandResult::Success { value, .. }) => value,
+        other => return other,
+    };
+    if let Ok(connection) = database.connection.lock() {
+        if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, "application/octet-stream", &bytes) {
+            eprintln!("yomika: image cache write failed: {error}");
+        }
+    }
+    Ok(CommandResult::success(bytes))
+}
+
+async fn fetch_page_thumbnail(
+    base_url: &str,
+    archive_id: &str,
+    page: i64,
+    api_key: String,
+    poll_attempts: usize,
+) -> Result<CommandResult<Vec<u8>>, String> {
     let thumbnail_url = format!("{}/api/archives/{}/thumbnail?page={}&no_fallback=true", base_url.trim_end_matches('/'), archive_id, page);
     let response = match reader_request(reqwest::Method::GET, thumbnail_url.clone(), api_key.clone()).await {
         Ok(response) => response,
@@ -1279,7 +1456,8 @@ pub async fn load_archive_page_thumbnail(
                 job.as_i64().or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
             });
         if let Some(job_id) = job_id {
-            for _ in 0..60 {
+            let mut finished = false;
+            for _ in 0..poll_attempts {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let status_url = format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
                 let status = match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
@@ -1292,11 +1470,15 @@ pub async fn load_archive_page_thumbnail(
                     .ok()
                     .and_then(|value| value.get("state").and_then(|state| state.as_str()).map(str::to_owned));
                 if matches!(state.as_deref(), Some("finished")) {
+                    finished = true;
                     break;
                 }
                 if matches!(state.as_deref(), Some("failed") | Some("error")) {
                     return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 缩略图生成失败", true));
                 }
+            }
+            if !finished {
+                return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi thumbnail generation timed out", true));
             }
             match reader_request(reqwest::Method::GET, thumbnail_url, api_key).await {
                 Ok(value) => value,
@@ -1306,18 +1488,17 @@ pub async fn load_archive_page_thumbnail(
             return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 未返回缩略图任务编号", true));
         }
     } else { response };
+    if response.status() == reqwest::StatusCode::ACCEPTED {
+        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi thumbnail is not ready", true));
+    }
     if !response.status().is_success() {
         return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", format!("LANraragi request failed ({})", response.status()), response.status().is_server_error()));
     }
-    let mime = response.headers().get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("image/jpeg").to_string();
     match response.bytes().await {
-        Ok(bytes) => {
-            if let Ok(connection) = database.connection.lock() {
-                let _ = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes);
-            }
+        Ok(bytes) if crate::cache::sniff_image_mime("application/octet-stream", &bytes).is_some() => {
             Ok(CommandResult::success(bytes.to_vec()))
         }
+        Ok(_) => Ok(CommandResult::failure("INVALID_RESPONSE", "LANraragi thumbnail response is not an image", true)),
         Err(error) => Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error.to_string(), true)),
     }
 }
@@ -1326,14 +1507,32 @@ fn authorization_value(api_key: &str) -> String {
     format!("Bearer {}", BASE64_STANDARD.encode(api_key.as_bytes()))
 }
 
-fn parse_search_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+/// The whole `/api/search` answer: the rows plus the counts a client needs to
+/// page. `recordsFiltered` is the size of the result set the query selected, so
+/// it — not a local `COUNT(*)` — is what "how many pages are there" means.
+fn parse_search_page(json: &str) -> Result<(Vec<RemoteArchive>, i64, i64), String> {
     let response: SearchResponseWire =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
     if response.records_filtered < 0 || response.records_total < 0 {
         return Err("Invalid LANraragi result counts".to_string());
     }
-    response
-        .data
+    let (filtered, total) = (response.records_filtered, response.records_total);
+    Ok((parse_archive_entries(response.data)?, filtered, total))
+}
+
+fn parse_search_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+    parse_search_page(json).map(|(archives, _, _)| archives)
+}
+
+/// `/api/search/random` answers with `{ "data": [...] }` and no result counts.
+fn parse_random_response(json: &str) -> Result<Vec<RemoteArchive>, String> {
+    let response: RandomResponseWire =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    parse_archive_entries(response.data)
+}
+
+fn parse_archive_entries(entries: Vec<SearchArchiveWire>) -> Result<Vec<RemoteArchive>, String> {
+    entries
         .into_iter()
         .map(|archive| {
             let valid_id = (archive.arcid.len() == 40
@@ -1370,8 +1569,9 @@ fn query_archive_records(
     server_id: &str,
 ) -> Result<Vec<ArchiveRecord>, String> {
     let mut statement = connection.prepare(
-        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json
-         FROM archives WHERE server_id = ?1 AND is_deleted = 0 ORDER BY local_updated_at DESC",
+        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+         FROM archives WHERE server_id = ?1 AND is_deleted = 0
+         ORDER BY COALESCE(added_at, first_seen_at, 0) DESC, archive_id ASC",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([server_id], |row| {
@@ -1387,7 +1587,7 @@ fn query_archive_records(
                 cover_page: row.get(7)?,
                 is_deleted: row.get::<_, i64>(8)? != 0,
                 updated_at: row.get(9)?,
-                added_at: archive_added_at(&tags),
+                added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
                 tags,
             })
         })
@@ -1406,10 +1606,13 @@ fn archive_added_at(tags: &[String]) -> Option<i64> {
 }
 
 fn archive_search_token(value: &str) -> String {
+    // SQLite's LOWER() only folds A-Z, so the pattern must fold the same way.
+    // Rust's full Unicode to_lowercase() turned a typed "É" into "é" and then
+    // never matched the stored "É" that LOWER() had left untouched.
     value
         .trim()
         .trim_end_matches('$')
-        .to_lowercase()
+        .to_ascii_lowercase()
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
@@ -1435,6 +1638,12 @@ fn query_archive_page(
         );
         values.push(category_id.to_string());
     }
+    if input.untagged_only.unwrap_or(false) {
+        // The column is NOT NULL and CHECK-constrained to valid JSON, so an
+        // untagged archive is one whose array is empty — which is a length test,
+        // not a string comparison against every way `[]` could be spelled.
+        clauses.push("json_array_length(a.tags_json) = 0".to_string());
+    }
     for token in input.query.split(',').map(archive_search_token).filter(|token| !token.is_empty()) {
         let pattern = format!("%{token}%");
         if token.contains(':') {
@@ -1457,10 +1666,13 @@ fn query_archive_page(
     let sort = if input.sort_by == "title" {
         "a.title_sort COLLATE NOCASE"
     } else {
-        "COALESCE((SELECT MAX(CAST(substr(value, 12) AS INTEGER)) FROM json_each(a.tags_json) WHERE value LIKE 'date_added:%'), 0)"
+        // Stored column, not a json_each scan over tags: the date_added
+        // namespace can be excluded server-side, and per-row scanning made the
+        // sort O(tags) for every archive.
+        "COALESCE(a.added_at, a.first_seen_at, 0)"
     };
     let page_sql = format!(
-        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json
+        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json, COALESCE(a.added_at, a.first_seen_at)
          FROM archives a WHERE {where_sql} ORDER BY {sort} {direction}, a.archive_id ASC LIMIT {safe_limit} OFFSET {safe_offset}"
     );
     let mut statement = connection.prepare(&page_sql).map_err(|error| error.to_string())?;
@@ -1470,11 +1682,48 @@ fn query_archive_page(
             server_id: row.get(0)?, archive_id: row.get(1)?, title: row.get(2)?, page_count: row.get(3)?,
             summary: row.get(4)?, category: row.get(5)?, language: row.get(6)?, cover_page: row.get(7)?,
             is_deleted: row.get::<_, i64>(8)? != 0, updated_at: row.get(9)?,
-            added_at: archive_added_at(&tags), tags,
+            added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)), tags,
         })
     }).map_err(|error| error.to_string())?;
     let items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(ArchivePage { has_more: safe_offset + (items.len() as i64) < total, items, total })
+}
+
+const ARCHIVE_UPSERT: &str = "INSERT INTO archives (
+        server_id, archive_id, title, title_sort, summary, tags_json, page_count, file_size, local_updated_at, metadata_revision, is_deleted, added_at, first_seen_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, 1, 0, ?9, unixepoch())
+      ON CONFLICT(server_id, archive_id) DO UPDATE SET
+        title = excluded.title, title_sort = excluded.title_sort, summary = excluded.summary,
+        tags_json = excluded.tags_json, page_count = excluded.page_count, file_size = excluded.file_size,
+        local_updated_at = CURRENT_TIMESTAMP, metadata_revision = archives.metadata_revision + 1, is_deleted = 0,
+        added_at = COALESCE(excluded.added_at, archives.added_at),
+        first_seen_at = COALESCE(archives.first_seen_at, excluded.first_seen_at)";
+
+fn upsert_archive_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &str,
+    archives: &[RemoteArchive],
+) -> Result<(), String> {
+    for archive in archives {
+        let tags_json = serde_json::to_string(&archive.tags).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                ARCHIVE_UPSERT,
+                params![
+                    server_id,
+                    archive.archive_id,
+                    archive.title,
+                    archive.title.to_lowercase(),
+                    archive.summary,
+                    tags_json,
+                    archive.page_count,
+                    archive.size,
+                    archive_added_at(&archive.tags),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn replace_server_archives(
@@ -1488,33 +1737,23 @@ fn replace_server_archives(
     transaction
         .execute("UPDATE archives SET is_deleted = 1, local_updated_at = CURRENT_TIMESTAMP WHERE server_id = ?1", [server_id])
         .map_err(|error| error.to_string())?;
-    const UPSERT: &str = "INSERT INTO archives (
-        server_id, archive_id, title, title_sort, summary, tags_json, page_count, file_size, local_updated_at, metadata_revision, is_deleted
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, 1, 0)
-      ON CONFLICT(server_id, archive_id) DO UPDATE SET
-        title = excluded.title, title_sort = excluded.title_sort, summary = excluded.summary,
-        tags_json = excluded.tags_json, page_count = excluded.page_count, file_size = excluded.file_size,
-        local_updated_at = CURRENT_TIMESTAMP, metadata_revision = archives.metadata_revision + 1, is_deleted = 0";
-    for archive in archives {
-        let tags_json = serde_json::to_string(&archive.tags).map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                UPSERT,
-                params![
-                    server_id,
-                    archive.archive_id,
-                    archive.title,
-                    archive.title.to_lowercase(),
-                    archive.summary,
-                    tags_json,
-                    archive.page_count,
-                    archive.size,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-    }
+    upsert_archive_rows(&transaction, server_id, archives)?;
     transaction.commit().map_err(|error| error.to_string())?;
     query_archive_records(connection, server_id)
+}
+
+/// Adds or updates rows without tombstoning anything else. `/api/search/random`
+/// returns a handful of archives, so the full-replace path would wipe the index.
+fn upsert_server_archives(
+    connection: &mut rusqlite::Connection,
+    server_id: &str,
+    archives: &[RemoteArchive],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    upsert_archive_rows(&transaction, server_id, archives)?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1543,7 +1782,7 @@ pub fn replace_archives(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshSearchParams {
     filter: Option<String>,
@@ -1557,22 +1796,156 @@ pub struct RefreshSearchParams {
     groupby_tanks: Option<bool>,
 }
 
+/// Dynamic categories are resolved through the same search endpoint, so they go
+/// through the same builder: LANraragi reads `sortby` without a default, and a
+/// missing one both floods its log with "uninitialized value $sortkey" and
+/// defeats its search cache (every request becomes a full DB parse).
+fn build_category_search_url(base_url: &str, filter: &str) -> Result<String, String> {
+    let params = RefreshSearchParams {
+        filter: Some(filter.to_string()),
+        start: Some(-1),
+        sortby: None,
+        order: None,
+        newonly: None,
+        untaggedonly: None,
+        hidecompleted: None,
+        category: None,
+        groupby_tanks: None,
+    };
+    build_refresh_search_url(base_url, &params)
+}
+
+/// How long a resolved category snapshot stays good. Long enough that browsing
+/// never re-resolves, short enough that a category edited in LANraragi shows up
+/// without a manual refresh.
+const CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
+/// The same, for a snapshot in which at least one dynamic category could not be
+/// resolved. A failed resolution is stored as an empty membership, which is
+/// indistinguishable from "this category is empty" — keeping that for six hours
+/// hides every archive in it, so it is retried sooner instead.
+const PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 10 * 60;
+
+fn category_cache_key(server_id: &str) -> String {
+    format!("categories.cache.{server_id}")
+}
+
+#[derive(Serialize, Deserialize)]
+struct CategoryCacheEnvelope {
+    synced_at: i64,
+    categories: Vec<CategoryRecord>,
+    /// Absent in snapshots written before this field existed; those were only
+    /// written on a complete resolution, so treating them as complete is right.
+    #[serde(default)]
+    partial: bool,
+}
+
+fn read_category_cache(
+    database: &State<'_, Database>,
+    server_id: &str,
+) -> Result<Option<Vec<CategoryRecord>>, String> {
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "数据库锁定失败".to_string())?;
+    read_category_cache_from(&connection, server_id, current_unix_seconds())
+}
+
+fn read_category_cache_from(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    now: i64,
+) -> Result<Option<Vec<CategoryRecord>>, String> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [category_cache_key(server_id)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取分类缓存失败：{error}"))?;
+    let Some(stored) = stored else { return Ok(None) };
+    let envelope: CategoryCacheEnvelope = match serde_json::from_str(&stored) {
+        Ok(value) => value,
+        // A snapshot written by an older schema is simply refetched.
+        Err(_) => return Ok(None),
+    };
+    let max_age = if envelope.partial {
+        PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS
+    } else {
+        CATEGORY_CACHE_MAX_AGE_SECONDS
+    };
+    let age = now.saturating_sub(envelope.synced_at);
+    if age < 0 || age > max_age {
+        return Ok(None);
+    }
+    Ok(Some(envelope.categories))
+}
+
+fn write_category_cache(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    categories: &[CategoryRecord],
+    partial: bool,
+) -> Result<(), String> {
+    let envelope = CategoryCacheEnvelope {
+        synced_at: current_unix_seconds(),
+        categories: categories.to_vec(),
+        partial,
+    };
+    let payload = serde_json::to_string(&envelope).map_err(|error| format!("序列化分类缓存失败：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![category_cache_key(server_id), payload],
+        )
+        .map_err(|error| format!("写入分类缓存失败：{error}"))?;
+    Ok(())
+}
+
+/// Assigning an archive to a category changes what that category holds, so the
+/// snapshot taken for the 6-hour window is wrong the moment the assignment
+/// lands. Dropping the row makes the next read refetch rather than serve a
+/// category that is missing the archive just added to it.
+fn invalidate_category_cache(connection: &rusqlite::Connection, server_id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM settings WHERE key = ?1", [category_cache_key(server_id)])
+        .map(|_| ())
+        .map_err(|error| format!("清除分类缓存失败：{error}"))
+}
+
+fn current_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Result<String, String> {
     let trimmed = base_url.trim_end_matches('/');
     let mut query: Vec<String> = Vec::new();
 
-    let start_value = params.start.unwrap_or(-1);
+    // `start` is an item offset. `-1` is LANraragi's "the whole library, unpaged"
+    // escape hatch, and it is never a safe default: against a large library the
+    // response cannot finish inside the request timeout. Callers that genuinely
+    // want every row ask for it explicitly.
+    let start_value = params.start.unwrap_or(0);
     query.push(format!("start={}", start_value));
 
     if let Some(ref filter) = params.filter {
         query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
     }
-    if let Some(ref sortby) = params.sortby {
-        query.push(format!("sortby={}", url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()));
-    }
-    if let Some(ref order) = params.order {
-        query.push(format!("order={}", url::form_urlencoded::byte_serialize(order.as_bytes()).collect::<String>()));
-    }
+    // LANraragi reads `sortby`/`order` without defaulting them: a missing value
+    // leaves $sortkey undefined, which floods the server log with
+    // "Use of uninitialized value $sortkey" from Model/Search.pm and falls back
+    // to title order. Always send both, defaulting to newest first.
+    let sortby = params.sortby.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or("date_added");
+    query.push(format!("sortby={}", url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()));
+    let order = match params.order.as_deref() {
+        Some("asc") => "asc",
+        _ => "desc",
+    };
+    query.push(format!("order={}", order));
     if let Some(newonly) = params.newonly {
         query.push(format!("newonly={}", newonly));
     }
@@ -1592,13 +1965,74 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
     Ok(format!("{}/api/search?{}", trimmed, query.join("&")))
 }
 
-fn apply_search_response_to_archives(
-    connection: &mut rusqlite::Connection,
-    server_id: &str,
-    search_response_json: &str,
-) -> Result<Vec<ArchiveRecord>, String> {
-    let archives = parse_search_response(search_response_json)?;
-    replace_server_archives(connection, server_id, &archives)
+/// A failure shaped the way `CommandResult::failure` wants it, so the fetch
+/// helpers can report HTTP, transport and decode problems through one channel.
+type SearchFailure = (&'static str, String, bool);
+
+/// One page of `/api/search`, plus `recordsFiltered` and `recordsTotal`.
+async fn fetch_search_page(
+    base_url: &str,
+    api_key: &str,
+    params: &RefreshSearchParams,
+) -> Result<(Vec<RemoteArchive>, i64, i64), SearchFailure> {
+    let url = build_refresh_search_url(base_url, params)
+        .map_err(|error| ("INVALID_INPUT", error, false))?;
+    let response = reader_request(reqwest::Method::GET, url, api_key.to_string())
+        .await
+        .map_err(|error| ("REMOTE_UNAVAILABLE", error, true))?;
+    if let Some(failure) = search_status_failure(response.status()) {
+        return Err(failure);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ("INVALID_RESPONSE", error.to_string(), true))?;
+    parse_search_page(&body).map_err(|error| ("INVALID_RESPONSE", error, false))
+}
+
+/// Walks every page of a query. A server that keeps answering with a full page
+/// no matter the offset would otherwise loop forever, so the walk is capped.
+const MAX_SYNC_PAGES: usize = 2_000;
+
+/// Whether a page walk has reached the end of the result set.
+///
+/// A page shorter than the first one is the last one — LANraragi holds its page
+/// size constant and only the tail is short. The count check covers the case
+/// where every page comes back full because the walk has already consumed
+/// everything `recordsFiltered` promised.
+fn search_walk_is_done(received: usize, first_page_size: usize, collected: i64, filtered: i64) -> bool {
+    received == 0 || received < first_page_size || collected >= filtered
+}
+
+/// Every row a query selects, gathered one page at a time.
+///
+/// The single-request alternative is `start=-1`, which asks LANraragi to
+/// serialise the entire library into one response — for a ten-thousand-archive
+/// library that never finishes inside the request timeout, so the pull failed
+/// and the local index kept serving whatever it last managed to store. Page size
+/// is a server-side preference the client cannot set, so it is learned from the
+/// first response rather than assumed.
+async fn fetch_all_search_pages(
+    base_url: &str,
+    api_key: &str,
+    params: &RefreshSearchParams,
+) -> Result<Vec<RemoteArchive>, SearchFailure> {
+    let mut collected: Vec<RemoteArchive> = Vec::new();
+    let mut page_size: Option<usize> = None;
+    for _ in 0..MAX_SYNC_PAGES {
+        let mut page_params = params.clone();
+        page_params.start = Some(collected.len() as i64);
+        let (archives, filtered, _) = fetch_search_page(base_url, api_key, &page_params).await?;
+        let received = archives.len();
+        collected.extend(archives);
+        // `max(1)` keeps an empty first page from recording a size of zero, which
+        // would read as "no page is ever short" and never end the walk.
+        let size = *page_size.get_or_insert(received.max(1));
+        if search_walk_is_done(received, size, collected.len() as i64, filtered) {
+            return Ok(collected);
+        }
+    }
+    Err(("REMOTE_UNAVAILABLE", "LANraragi search exceeded the page limit before completing the snapshot".into(), true))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1608,6 +2042,12 @@ pub struct RefreshArchivesInput {
     params: RefreshSearchParams,
 }
 
+/// Rebuilds the local offline index from LANraragi.
+///
+/// This is no longer what makes the library list current — `search_archives_page`
+/// reads the server directly for that. What is left is the offline mirror: the
+/// rows the shelves and the duplicate finder read when the server is not
+/// reachable, which is also the only reason a full walk is worth doing.
 #[tauri::command]
 pub async fn refresh_archives(
     input: RefreshArchivesInput,
@@ -1626,7 +2066,94 @@ pub async fn refresh_archives(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
     };
-    let url = match build_refresh_search_url(&base_url, &input.params) {
+    let archives = match fetch_all_search_pages(&base_url, &api_key, &input.params).await {
+        Ok(value) => value,
+        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
+    };
+    let mut connection = match database.connection.lock() {
+        Ok(conn) => conn,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    // Tombstoning happens once, after every page is in hand: doing it per page
+    // would mark the rest of the library deleted between requests.
+    match replace_server_archives(&mut connection, &input.server_id, &archives) {
+        Ok(records) => Ok(CommandResult::success(records)),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+    }
+}
+
+/// Shared HTTP status mapping for the LANraragi search endpoints.
+fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, String, bool)> {
+    match status {
+        reqwest::StatusCode::NO_CONTENT => Some(("LRR_NOT_FOUND", "Search index not ready (204 No Content)".to_string(), true)),
+        reqwest::StatusCode::UNAUTHORIZED => Some(("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false)),
+        reqwest::StatusCode::NOT_FOUND => Some(("LRR_NOT_FOUND", "Server not found (404)".to_string(), false)),
+        reqwest::StatusCode::CONFLICT => Some(("REMOTE_CONFLICT", "Server conflict (409)".to_string(), false)),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Some(("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true)),
+        _ if status.is_server_error() => Some(("REMOTE_UNAVAILABLE", format!("Server error ({})", status), true)),
+        _ if !status.is_success() => Some(("REMOTE_UNAVAILABLE", format!("Unexpected status ({})", status), false)),
+        _ => None,
+    }
+}
+
+/// Newest-first first page, used to detect archives added in LANraragi without
+/// paying for the offline index rebuild that `refresh_archives` performs.
+fn build_probe_search_url(base_url: &str) -> Result<String, String> {
+    build_refresh_search_url(base_url, &RefreshSearchParams {
+        filter: None,
+        start: Some(0),
+        sortby: Some("date_added".to_string()),
+        order: Some("desc".to_string()),
+        newonly: None,
+        untaggedonly: None,
+        hidecompleted: None,
+        category: None,
+        groupby_tanks: None,
+    })
+}
+
+/// Archive ids from the probe page that the local index does not know yet.
+fn unknown_probe_archive_ids(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    archive_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut unknown = Vec::new();
+    let mut statement = connection
+        .prepare("SELECT 1 FROM archives WHERE server_id = ?1 AND archive_id = ?2 AND is_deleted = 0")
+        .map_err(|error| error.to_string())?;
+    for archive_id in archive_ids {
+        let known = statement
+            .exists(params![server_id, archive_id])
+            .map_err(|error| error.to_string())?;
+        if !known {
+            unknown.push(archive_id.clone());
+        }
+    }
+    Ok(unknown)
+}
+
+/// Reports whether LANraragi holds archives the local index is missing, without
+/// pulling the whole library.
+#[tauri::command]
+pub async fn probe_new_archives(
+    server_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<bool>, String> {
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let url = match build_probe_search_url(&base_url) {
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("INVALID_INPUT", error, false)),
     };
@@ -1634,51 +2161,266 @@ pub async fn refresh_archives(
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
-    let status = response.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
-        return Ok(CommandResult::failure(
-            "LRR_NOT_FOUND",
-            "Search index not ready (204 No Content)".to_string(),
-            true,
-        ));
-    }
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(CommandResult::failure("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false));
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(CommandResult::failure("LRR_NOT_FOUND", "Server not found (404)".to_string(), false));
-    }
-    if status == reqwest::StatusCode::CONFLICT {
-        return Ok(CommandResult::failure("REMOTE_CONFLICT", "Server conflict (409)".to_string(), false));
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Ok(CommandResult::failure("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true));
-    }
-    if status.is_server_error() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("Server error ({})", status),
-            true,
-        ));
-    }
-    if !status.is_success() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("Unexpected status ({})", status),
-            response.status().is_server_error(),
-        ));
+    if let Some((code, message, retryable)) = search_status_failure(response.status()) {
+        return Ok(CommandResult::failure(code, message, retryable));
     }
     let body = match response.text().await {
         Ok(text) => text,
         Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
     };
+    let archives = match parse_search_response(&body) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+    };
+    let archive_ids: Vec<String> = archives.into_iter().map(|archive| archive.archive_id).collect();
+    let connection = match database.connection.lock() {
+        Ok(conn) => conn,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    match unknown_probe_archive_ids(&connection, &server_id, &archive_ids) {
+        Ok(unknown) => Ok(CommandResult::success(!unknown.is_empty())),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSearchInput {
+    server_id: String,
+    #[serde(default)]
+    query: String,
+    sort_by: String,
+    order: String,
+    #[serde(default)]
+    category_id: Option<String>,
+    /// LANraragi's own "untagged only" switch. The library offers it as a
+    /// synthetic category, because that is where a user looks for it, but it is
+    /// not a category — an archive with no tags is in no category either, so
+    /// resolving it as one would return nothing.
+    #[serde(default)]
+    untagged_only: Option<bool>,
+    start: i64,
+}
+
+/// LANraragi's sort keys. The UI calls it "added"; the server calls it
+/// `date_added`.
+fn remote_sort_key(sort_by: &str) -> Option<&'static str> {
+    match sort_by {
+        "added" | "date_added" => Some("date_added"),
+        "title" => Some("title"),
+        _ => None,
+    }
+}
+
+/// The library list, read from LANraragi one page at a time.
+///
+/// The local index used to *be* the list, so an archive added on the server
+/// stayed invisible until a full-library pull happened to succeed — and with
+/// `start=-1` against a large library that pull never finished. Here the server
+/// owns ordering, filtering and paging, because it is the only party that knows
+/// what it currently holds. Rows are upserted on the way through, so the local
+/// index keeps working as a cache for covers, the shelves and offline reads.
+///
+/// `start` is an item offset. Page size is a LANraragi preference the client
+/// cannot set, so callers learn it from the length of page zero rather than
+/// asking for a size the server will ignore.
+#[tauri::command]
+pub async fn search_archives_page(
+    input: RemoteSearchInput,
+    database: State<'_, Database>,
+) -> Result<CommandResult<ArchivePage>, String> {
+    let Some(sortby) = remote_sort_key(&input.sort_by) else {
+        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort key".to_string(), false));
+    };
+    if !matches!(input.order.as_str(), "asc" | "desc") {
+        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort order".to_string(), false));
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &input.server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let start = input.start.max(0);
+    // The filter and the category go to the server. LANraragi's own search syntax
+    // ("$" for an exact tag, "-" to exclude) then works as documented instead of
+    // being half-reimplemented in local SQL, and a dynamic category resolves
+    // server-side instead of costing the client one unpaged search per category.
+    let params = RefreshSearchParams {
+        filter: Some(input.query.trim().to_string()).filter(|value| !value.is_empty()),
+        start: Some(start),
+        sortby: Some(sortby.to_string()),
+        order: Some(input.order.clone()),
+        newonly: None,
+        untaggedonly: input.untagged_only.filter(|value| *value),
+        hidecompleted: None,
+        category: input.category_id.clone().filter(|value| !value.is_empty()),
+        groupby_tanks: None,
+    };
+    let (archives, filtered, _) = match fetch_search_page(&base_url, &api_key, &params).await {
+        Ok(value) => value,
+        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
+    };
+    let archive_ids: Vec<String> = archives.iter().map(|archive| archive.archive_id.clone()).collect();
     let mut connection = match database.connection.lock() {
         Ok(conn) => conn,
         Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
     };
-    match apply_search_response_to_archives(&mut connection, &input.server_id, &body) {
+    if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
+        return Ok(CommandResult::failure("LOCAL_DATABASE", error, true));
+    }
+    // Read the rows back instead of mapping the wire payload: `category`,
+    // `language` and `first_seen_at` are local columns with no equivalent in a
+    // search response, and the cards render them.
+    match query_archive_records_by_ids(&connection, &input.server_id, &archive_ids) {
+        Ok(items) => Ok(CommandResult::success(ArchivePage {
+            // An empty page is the end, whatever the count claims. Reporting
+            // `has_more` from the count alone let an offset past the end keep
+            // saying "there is more", and the caller kept asking forever.
+            has_more: !archive_ids.is_empty()
+                && start.saturating_add(archive_ids.len() as i64) < filtered,
+            total: filtered,
+            items,
+        })),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+    }
+}
+
+fn query_archive_records_by_ids(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    archive_ids: &[String],
+) -> Result<Vec<ArchiveRecord>, String> {
+    if archive_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // SQLite caps bound parameters (999 on older builds), and these lists come
+    // from the history and watchlist tables, which have no upper bound.
+    const CHUNK: usize = 500;
+    let mut by_id: std::collections::HashMap<String, ArchiveRecord> =
+        std::collections::HashMap::with_capacity(archive_ids.len());
+    for chunk in archive_ids.chunks(CHUNK) {
+        let placeholders = (0..chunk.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+             FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&server_id);
+        for id in chunk {
+            values.push(id);
+        }
+        let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(values.as_slice(), |row| {
+                let tags = archive_tags(row.get::<_, String>(10)?);
+                Ok(ArchiveRecord {
+                    server_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    title: row.get(2)?,
+                    page_count: row.get(3)?,
+                    summary: row.get(4)?,
+                    category: row.get(5)?,
+                    language: row.get(6)?,
+                    cover_page: row.get(7)?,
+                    is_deleted: row.get::<_, i64>(8)? != 0,
+                    updated_at: row.get(9)?,
+                    added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
+                    tags,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        for record in rows {
+            let record = record.map_err(|error| error.to_string())?;
+            by_id.insert(record.archive_id.clone(), record);
+        }
+    }
+    // Preserve the order the caller asked in: for a random pull that order *is*
+    // the result, and for history it is already sorted by last visit.
+    let mut ordered = Vec::with_capacity(by_id.len());
+    for id in archive_ids {
+        if let Some(record) = by_id.remove(id) {
+            ordered.push(record);
+        }
+    }
+    Ok(ordered)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RandomArchivesInput {
+    server_id: String,
+    count: Option<i64>,
+    filter: Option<String>,
+    category: Option<String>,
+}
+
+fn build_random_search_url(base_url: &str, input: &RandomArchivesInput) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let count = input.count.unwrap_or(8).clamp(1, 100);
+    let mut query = vec![format!("count={count}")];
+    if let Some(filter) = input.filter.as_deref().filter(|value| !value.trim().is_empty()) {
+        query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
+    }
+    if let Some(category) = input.category.as_deref().filter(|value| !value.trim().is_empty()) {
+        query.push(format!("category={}", url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()));
+    }
+    format!("{}/api/search/random?{}", trimmed, query.join("&"))
+}
+
+/// Randomly selected archives straight from LANraragi, instead of shuffling a
+/// full local index client-side (which required pulling the whole library).
+#[tauri::command]
+pub async fn search_random_archives(
+    input: RandomArchivesInput,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Vec<ArchiveRecord>>, String> {
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &input.server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let response = match reader_request(reqwest::Method::GET, build_random_search_url(&base_url, &input), api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    if let Some((code, message, retryable)) = search_status_failure(response.status()) {
+        return Ok(CommandResult::failure(code, message, retryable));
+    }
+    let body = match response.text().await {
+        Ok(text) => text,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+    };
+    let archives = match parse_random_response(&body) {
+        Ok(archives) => archives,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+    };
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+    };
+    if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
+        return Ok(CommandResult::failure("UNKNOWN", error, true));
+    }
+    let ids = archives.iter().map(|archive| archive.archive_id.clone()).collect::<Vec<_>>();
+    match query_archive_records_by_ids(&connection, &input.server_id, &ids) {
         Ok(records) => Ok(CommandResult::success(records)),
-        Err(error) => Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
+        Err(error) => Ok(CommandResult::failure("UNKNOWN", error, true)),
     }
 }
 
@@ -1948,6 +2690,91 @@ pub fn list_archives_page(
     }
 }
 
+/// The shelves (home, history, favourites, to-read) hold a handful of archive
+/// ids and need the records behind them. Reading the whole library to resolve
+/// fourteen titles scaled with the library instead of with the shelf.
+#[tauri::command]
+pub fn list_archives_by_ids(
+    server_id: String,
+    archive_ids: Vec<String>,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<ArchiveRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match query_archive_records_by_ids(&connection, &server_id, &archive_ids) {
+        Ok(archives) => CommandResult::success(archives),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// How many ids one verification pass will check. The shelves show a handful of
+/// cards; a cap keeps a long history from turning into a request storm.
+const VERIFY_ARCHIVE_LIMIT: usize = 32;
+
+/// Confirms that archives the local mirror is about to show still exist on the
+/// server, tombstoning the ones that do not, and answers with those ids.
+///
+/// The mirror only learns about a deletion when a full refresh runs or when
+/// something opens the archive and gets a 404. Since the library list moved to
+/// server-side paging, nothing refreshes the mirror on its own, so the shelves
+/// (history, favourites, to-read, the home rails) kept offering archives that
+/// were gone — the user found out by clicking one.
+///
+/// Requests run one at a time and only a definite 400/404 counts: a timeout or a
+/// server error must never tombstone an archive that is merely unreachable.
+#[tauri::command]
+pub async fn verify_archives_exist(
+    server_id: String,
+    archive_ids: Vec<String>,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Vec<String>>, String> {
+    if archive_ids.is_empty() {
+        return Ok(CommandResult::success(Vec::new()));
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| server_connection(&connection, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let mut missing = Vec::new();
+    for archive_id in archive_ids.iter().take(VERIFY_ARCHIVE_LIMIT) {
+        let url = format!(
+            "{}/api/archives/{}/metadata",
+            base_url.trim_end_matches('/'),
+            archive_id
+        );
+        let response = match reader_request(reqwest::Method::GET, url, api_key.clone()).await {
+            Ok(response) => response,
+            // Unreachable is not deleted.
+            Err(_) => continue,
+        };
+        let status = response.status();
+        if !matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+            continue;
+        }
+        let tombstoned = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|connection| reconcile_missing_archive_status(&connection, &server_id, archive_id, status));
+        match tombstoned {
+            Ok(_) => missing.push(archive_id.clone()),
+            Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
+        }
+    }
+    Ok(CommandResult::success(missing))
+}
+
 #[tauri::command]
 pub fn save_reading_progress(
     progress: ReadingProgressInput,
@@ -1979,11 +2806,14 @@ fn persist_reading_progress(
         Err(error) => return Err(error.to_string()),
     };
     let device_id = get_or_create_device_id(&transaction)?;
-    const UPSERT: &str = "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+    // `cover_alone` uses COALESCE rather than `excluded`: a caller that omits it
+    // (every ordinary page turn does) must not erase a setting the user made.
+    const UPSERT: &str = "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, device_id, revision)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
         ON CONFLICT(scope_id, archive_id) DO UPDATE SET
           page_index = excluded.page_index, page_count = excluded.page_count, layout = excluded.layout,
           direction = excluded.direction, device_id = excluded.device_id,
+          cover_alone = COALESCE(excluded.cover_alone, reading_progress.cover_alone),
           updated_at = CURRENT_TIMESTAMP, revision = reading_progress.revision + 1";
     if let Err(error) = transaction.execute(
         UPSERT,
@@ -1994,18 +2824,20 @@ fn persist_reading_progress(
             progress.page_count,
             progress.layout,
             progress.direction,
+            progress.cover_alone,
             device_id
         ],
     ) {
         return Err(error.to_string());
     }
     let record = transaction.query_row(
-        "SELECT scope_id, archive_id, page_index, page_count, layout, direction, updated_at, revision
+        "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
          FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
         params![progress.scope_id, progress.archive_id],
         |row| Ok(ReadingProgressRecord {
             scope_id: row.get(0)?, archive_id: row.get(1)?, page_index: row.get(2)?, page_count: row.get(3)?,
-            layout: row.get(4)?, direction: row.get(5)?, updated_at: row.get(6)?, revision: row.get(7)?,
+            layout: row.get(4)?, direction: row.get(5)?, cover_alone: row.get(6)?,
+            updated_at: row.get(7)?, revision: row.get(8)?,
         }),
     ).optional();
     let record = match record {
@@ -2019,6 +2851,7 @@ fn persist_reading_progress(
         "pageCount": record.page_count,
         "layout": record.layout,
         "direction": record.direction,
+        "coverAlone": record.cover_alone,
     })
     .to_string();
     let mut hasher = Sha256::new();
@@ -2162,6 +2995,326 @@ fn set_watchlist_entry(
     Ok(record)
 }
 
+/// Reading list ("待看") is deliberately a second list, not a flag on the
+/// watchlist: "I like this" and "I plan to read this" are different answers, and
+/// both have to sync, so this mirrors the watchlist journal shape.
+fn set_reading_list_entry(
+    connection: &mut rusqlite::Connection,
+    scope_id: &str,
+    archive_id: &str,
+    added: bool,
+) -> Result<WatchlistRecord, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let device_id = get_or_create_device_id(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision)
+         VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN NULL ELSE CURRENT_TIMESTAMP END, 1)
+         ON CONFLICT(scope_id, archive_id) DO UPDATE SET
+           updated_at = CURRENT_TIMESTAMP, device_id = excluded.device_id,
+           deleted_at = CASE WHEN ?4 THEN NULL ELSE CURRENT_TIMESTAMP END,
+           revision = reading_list.revision + 1",
+            params![scope_id, archive_id, device_id, added],
+        )
+        .map_err(|error| error.to_string())?;
+    let record = transaction
+        .query_row(
+            "SELECT scope_id, archive_id, added_at, updated_at, device_id, deleted_at, revision
+         FROM reading_list WHERE scope_id = ?1 AND archive_id = ?2",
+            params![scope_id, archive_id],
+            |row| {
+                let deleted_at: Option<String> = row.get(5)?;
+                Ok(WatchlistRecord {
+                    scope_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    added_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    device_id: row.get(4)?,
+                    deleted: deleted_at.is_some(),
+                    deleted_at,
+                    revision: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let payload_json = serde_json::json!({
+        "archiveId": record.archive_id,
+        "deleted": record.deleted,
+    })
+    .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    transaction.execute(
+        "INSERT INTO sync_journal (
+            scope_id, object_id, object_type, operation, device_id,
+            logical_clock, payload_hash, payload_json
+         ) VALUES (?1, ?2, 'reading_list', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
+        params![
+            record.scope_id,
+            format!("{}/{}", record.scope_id, record.archive_id),
+            added,
+            record.device_id,
+            record.revision,
+            format!("{:x}", hasher.finalize()),
+            payload_json,
+        ],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+fn journal_search_preset(
+    connection: &rusqlite::Connection,
+    record: &SearchPresetRecord,
+    upsert: bool,
+) -> Result<(), String> {
+    let payload_json = serde_json::json!({
+        "presetId": record.preset_id,
+        "name": record.name,
+        "query": record.query,
+        "sortBy": record.sort_by,
+        "sortOrder": record.sort_order,
+        "categoryId": record.category_id,
+        "deleted": record.deleted,
+    })
+    .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    connection
+        .execute(
+            "INSERT INTO sync_journal (
+                scope_id, object_id, object_type, operation, device_id,
+                logical_clock, payload_hash, payload_json
+             ) VALUES (?1, ?2, 'search_preset', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
+            params![
+                record.scope_id,
+                format!("{}/{}", record.scope_id, record.preset_id),
+                upsert,
+                record.device_id,
+                record.revision,
+                format!("{:x}", hasher.finalize()),
+                payload_json,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn write_search_preset(
+    connection: &mut rusqlite::Connection,
+    input: &SearchPresetInput,
+) -> Result<SearchPresetRecord, String> {
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let device_id = get_or_create_device_id(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO search_presets (scope_id, preset_id, name, query, sort_by, sort_order, category_id, device_id, deleted_at, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 1)
+             ON CONFLICT(scope_id, preset_id) DO UPDATE SET
+               name = excluded.name, query = excluded.query, sort_by = excluded.sort_by,
+               sort_order = excluded.sort_order, category_id = excluded.category_id,
+               updated_at = CURRENT_TIMESTAMP, device_id = excluded.device_id,
+               deleted_at = NULL, revision = search_presets.revision + 1",
+            params![
+                input.scope_id, input.preset_id, input.name.trim(), input.query,
+                input.sort_by, input.sort_order, input.category_id, device_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let record = read_search_preset(&transaction, &input.scope_id, &input.preset_id)?;
+    journal_search_preset(&transaction, &record, true)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+fn read_search_preset(
+    connection: &rusqlite::Connection,
+    scope_id: &str,
+    preset_id: &str,
+) -> Result<SearchPresetRecord, String> {
+    connection
+        .query_row(
+            "SELECT scope_id, preset_id, name, query, sort_by, sort_order, category_id,
+                    created_at, updated_at, device_id, revision, deleted_at
+             FROM search_presets WHERE scope_id = ?1 AND preset_id = ?2",
+            params![scope_id, preset_id],
+            |row| {
+                let deleted_at: Option<String> = row.get(11)?;
+                Ok(SearchPresetRecord {
+                    scope_id: row.get(0)?,
+                    preset_id: row.get(1)?,
+                    name: row.get(2)?,
+                    query: row.get(3)?,
+                    sort_by: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    category_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    device_id: row.get(9)?,
+                    revision: row.get(10)?,
+                    deleted: deleted_at.is_some(),
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Saved searches: the library toolbar state under a name. Stored per scope and
+/// journalled like the watchlist, so a preset made on one device arrives on the
+/// next sync instead of living only in local settings.
+#[tauri::command]
+pub fn save_search_preset(
+    input: SearchPresetInput,
+    database: State<'_, Database>,
+) -> CommandResult<SearchPresetRecord> {
+    if input.name.trim().is_empty() || input.preset_id.trim().is_empty() {
+        return CommandResult::failure("INVALID_INPUT", "预设需要名称", false);
+    }
+    if !matches!(input.sort_by.as_str(), "title" | "added")
+        || !matches!(input.sort_order.as_str(), "asc" | "desc")
+    {
+        return CommandResult::failure("INVALID_INPUT", "预设排序无效", false);
+    }
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match write_search_preset(&mut connection, &input) {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn delete_search_preset(
+    scope_id: String,
+    preset_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<SearchPresetRecord> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<SearchPresetRecord, String> {
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE search_presets SET deleted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP, revision = revision + 1
+                 WHERE scope_id = ?1 AND preset_id = ?2",
+                params![scope_id, preset_id],
+            )
+            .map_err(|error| error.to_string())?;
+        let record = read_search_preset(&transaction, &scope_id, &preset_id)?;
+        journal_search_preset(&transaction, &record, false)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(record)
+    })();
+    match result {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn list_search_presets(
+    scope_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<SearchPresetRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<Vec<SearchPresetRecord>, String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT scope_id, preset_id, name, query, sort_by, sort_order, category_id,
+                        created_at, updated_at, device_id, revision, deleted_at
+                 FROM search_presets WHERE scope_id = ?1 AND deleted_at IS NULL
+                 ORDER BY name COLLATE NOCASE",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![scope_id], |row| {
+                Ok(SearchPresetRecord {
+                    scope_id: row.get(0)?,
+                    preset_id: row.get(1)?,
+                    name: row.get(2)?,
+                    query: row.get(3)?,
+                    sort_by: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    category_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    device_id: row.get(9)?,
+                    revision: row.get(10)?,
+                    deleted: false,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(records) => CommandResult::success(records),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn set_reading_list(
+    scope_id: String,
+    archive_id: String,
+    added: bool,
+    database: State<'_, Database>,
+) -> CommandResult<WatchlistRecord> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match set_reading_list_entry(&mut connection, &scope_id, &archive_id, added) {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn list_reading_list(
+    scope_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<WatchlistRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let result = (|| -> Result<Vec<WatchlistRecord>, String> {
+        let mut statement = connection.prepare(
+            "SELECT scope_id, archive_id, added_at, updated_at, device_id, deleted_at, revision
+             FROM reading_list WHERE scope_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![scope_id], |row| {
+                Ok(WatchlistRecord {
+                    scope_id: row.get(0)?,
+                    archive_id: row.get(1)?,
+                    added_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    device_id: row.get(4)?,
+                    deleted_at: row.get(5)?,
+                    revision: row.get(6)?,
+                    deleted: false,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(records) => CommandResult::success(records),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 #[tauri::command]
 pub fn set_watchlist(
     scope_id: String,
@@ -2266,13 +3419,13 @@ pub fn load_reading_progress(
     };
     match connection
         .query_row(
-            "SELECT scope_id, archive_id, page_index, page_count, layout, direction, updated_at, revision
+            "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
              FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
             params![scope_id, archive_id],
             |row| Ok(ReadingProgressRecord {
                 scope_id: row.get(0)?, archive_id: row.get(1)?, page_index: row.get(2)?,
                 page_count: row.get(3)?, layout: row.get(4)?, direction: row.get(5)?,
-                updated_at: row.get(6)?, revision: row.get(7)?,
+                cover_alone: row.get(6)?, updated_at: row.get(7)?, revision: row.get(8)?,
             }),
         )
         .optional()
@@ -2373,7 +3526,7 @@ struct CategoryWire {
     archives: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategoryRecord {
     id: String,
@@ -2602,6 +3755,96 @@ fn mark_task_failed(database: &Database, task_id: &str, message: &str) {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DownloadUrlWire {
+    #[serde(default)]
+    job: i64,
+    #[serde(default)]
+    success: i64,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadUrlResult {
+    /// The Minion job LANraragi queued. Shown so the download can be followed on
+    /// the server, which is where the work actually happens.
+    pub job: i64,
+    pub url: String,
+}
+
+/// Hands a URL to LANraragi's own downloader.
+///
+/// The server resolves which downloader plugin applies, so the client does not
+/// have to fetch the plugin list and match URLs against each plugin's regex the
+/// way a browser client must.
+#[tauri::command]
+pub async fn download_url(
+    server_id: String,
+    url: String,
+    category_id: Option<String>,
+    database: State<'_, Database>,
+) -> Result<CommandResult<DownloadUrlResult>, String> {
+    let target = match Url::parse(url.trim()) {
+        Ok(value) if matches!(value.scheme(), "http" | "https") => value,
+        _ => return Ok(CommandResult::failure("INVALID_RESPONSE", "只支持 http/https 链接", false)),
+    };
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| server_connection(&connection, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+    };
+    let mut request_url = match Url::parse(&format!("{}/api/download_url", base_url.trim_end_matches('/'))) {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+    };
+    {
+        let mut pairs = request_url.query_pairs_mut();
+        pairs.append_pair("url", target.as_str());
+        if let Some(category) = category_id.as_deref().filter(|value| !value.is_empty()) {
+            pairs.append_pair("catid", category);
+        }
+    }
+    let response = match reader_request(reqwest::Method::POST, request_url.to_string(), api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    let status = response.status();
+    let wire: DownloadUrlWire = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                if status.is_success() { "INVALID_RESPONSE" } else { "REMOTE_UNAVAILABLE" },
+                error.to_string(),
+                !status.is_success() && status.is_server_error(),
+            ))
+        }
+    };
+    // LANraragi answers 400 with the same envelope, and its `error` says why the
+    // URL was refused — worth more than the status code alone.
+    if !status.is_success() || wire.success != 1 || wire.job <= 0 {
+        let message = wire.error.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+            format!("LANraragi 拒绝了下载请求（{status}）")
+        });
+        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", message, status.is_server_error()));
+    }
+    Ok(CommandResult::success(DownloadUrlResult {
+        job: wire.job,
+        url: if wire.url.is_empty() { target.to_string() } else { wire.url },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -2609,6 +3852,59 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+
+    async fn test_http_server(responses: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = 0;
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                socket.read(&mut request).await.unwrap();
+                let (status, body) = &responses[requests.min(responses.len() - 1)];
+                requests += 1;
+                let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn thumbnail_timeout_is_not_returned_as_image_bytes() {
+        let (url, server) = test_http_server(vec![(202, r#"{"job":1}"#.into())]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 0).await;
+        server.abort();
+        assert!(matches!(result, Ok(CommandResult::Failure { .. })), "unfinished thumbnail must fail: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn thumbnail_retry_rejects_another_accepted_response() {
+        let (url, server) = test_http_server(vec![
+            (202, r#"{"job":1}"#.into()),
+            (200, r#"{"state":"finished"}"#.into()),
+            (202, r#"{"job":2}"#.into()),
+        ]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1).await;
+        server.abort();
+        assert!(matches!(result, Ok(CommandResult::Failure { .. })), "accepted JSON must fail: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn full_search_rejects_an_incomplete_page_walk() {
+        let body = serde_json::json!({
+            "data": [{ "arcid": "a".repeat(40), "title": "Archive", "tags": "", "pagecount": 1, "size": 1 }],
+            "recordsFiltered": MAX_SYNC_PAGES + 1,
+            "recordsTotal": MAX_SYNC_PAGES + 1,
+        }).to_string();
+        let (url, server) = test_http_server(vec![(200, body)]).await;
+        let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
+        let result = fetch_all_search_pages(&url, "key", &params).await;
+        server.abort();
+        assert!(result.is_err(), "the page cap must not produce a replaceable snapshot");
+    }
 
     struct MemoryCredentialStore {
         writes: Mutex<Vec<(String, String)>>,
@@ -2661,6 +3957,18 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0014_cache_archive_scope.sql"))
             .expect("cache archive scope migration");
         connection
+            .execute_batch(include_str!("../../migrations/0016_archive_added_at.sql"))
+            .expect("archive added_at migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0017_reading_list.sql"))
+            .expect("reading list migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0018_search_presets.sql"))
+            .expect("search presets migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0019_reading_progress_cover_alone.sql"))
+            .expect("reading progress cover_alone migration");
+        connection
     }
 
     #[test]
@@ -2675,6 +3983,7 @@ mod tests {
                 page_count: 10,
                 layout: "paged".to_string(),
                 direction: "ltr".to_string(),
+                cover_alone: None,
             },
         )
         .expect("progress write");
@@ -3023,6 +4332,7 @@ mod tests {
             sort_by: "title".to_string(),
             order: "asc".to_string(),
             category_id: None,
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("full-library search");
@@ -3030,6 +4340,32 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "target");
         assert_eq!(page.items[0].tags, vec!["artist:alpha", "language:chinese", "date_added:1756512000"]);
+    }
+
+    #[test]
+    fn archive_query_matches_non_ascii_uppercase_titles() {
+        // SQLite's LOWER() leaves "É" alone. Folding the pattern with Rust's
+        // full Unicode to_lowercase() produced "é" and the row never matched.
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'accented', 'Éclair Special', 'éclair special', '[]', 1);",
+        ).unwrap();
+
+        let page = query_archive_page(&connection, &ArchiveQueryInput {
+            server_id: "scope-a".to_string(),
+            query: "Éclair".to_string(),
+            sort_by: "title".to_string(),
+            order: "asc".to_string(),
+            category_id: None,
+            untagged_only: None,
+            offset: 0,
+            limit: 100,
+        }).expect("accented search");
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].archive_id, "accented");
     }
 
     #[test]
@@ -3049,6 +4385,7 @@ mod tests {
             sort_by: "title".to_string(),
             order: "asc".to_string(),
             category_id: Some("SET_1613080290".to_string()),
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("category query");
@@ -3058,13 +4395,47 @@ mod tests {
     }
 
     #[test]
-    fn archive_query_sorts_by_lanraragi_date_added_tag() {
+    fn archive_query_can_ask_for_untagged_archives_only() {
+        // The library offers this as a synthetic category because that is where a
+        // user looks for it, but it cannot be resolved as one: an archive with no
+        // tags is in no category either, so a category filter would return
+        // nothing. LANraragi has its own `untaggedonly` switch; this is the
+        // offline half of it.
         let connection = migrated_connection();
         connection.execute_batch(
             "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'bare', 'Bare', 'bare', '[]', 1),
+               ('scope-a', 'spaced', 'Spaced', 'spaced', '[ ]', 1),
+               ('scope-a', 'tagged', 'Tagged', 'tagged', '[\"artist:alpha\"]', 1);",
+        ).unwrap();
+
+        let page = query_archive_page(&connection, &ArchiveQueryInput {
+            server_id: "scope-a".to_string(),
+            query: String::new(),
+            sort_by: "title".to_string(),
+            order: "asc".to_string(),
+            category_id: None,
+            untagged_only: Some(true),
+            offset: 0,
+            limit: 100,
+        }).expect("untagged query");
+
+        assert_eq!(page.total, 2);
+        let ids: Vec<&str> = page.items.iter().map(|item| item.archive_id.as_str()).collect();
+        assert_eq!(ids, vec!["bare", "spaced"], "an empty array is untagged however it was written");
+    }
+
+    #[test]
+    fn archive_query_sorts_by_stored_added_at() {
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, local_updated_at, added_at) VALUES
+               ('scope-a', 'a-old', 'Old', 'old', '[\"date_added:100\"]', 1, '2026-08-30 00:00:00', 100),
+               ('scope-a', 'z-new', 'New', 'new', '[\"date_added:200\"]', 1, '2026-08-30 00:00:00', 200);
              INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, local_updated_at) VALUES
-               ('scope-a', 'a-old', 'Old', 'old', '[\"date_added:100\"]', 1, '2026-08-30 00:00:00'),
-               ('scope-a', 'z-new', 'New', 'new', '[\"date_added:200\"]', 1, '2026-08-30 00:00:00');",
+               ('scope-a', 'm-legacy', 'Legacy', 'legacy', '[\"date_added:150\"]', 1, '2026-08-30 00:00:00');",
         ).unwrap();
 
         let page = query_archive_page(&connection, &ArchiveQueryInput {
@@ -3073,12 +4444,35 @@ mod tests {
             sort_by: "added".to_string(),
             order: "desc".to_string(),
             category_id: None,
+            untagged_only: None,
             offset: 0,
             limit: 100,
         }).expect("date-added query");
 
-        assert_eq!(page.items.iter().map(|item| item.archive_id.as_str()).collect::<Vec<_>>(), vec!["z-new", "a-old"]);
-        assert_eq!(page.items.iter().map(|item| item.added_at).collect::<Vec<_>>(), vec![Some(200), Some(100)]);
+        // Stored values drive the order; a row with no stored value (only
+        // possible before the 0016 backfill) sorts last but still reports the
+        // date carried by its tags.
+        assert_eq!(page.items.iter().map(|item| item.archive_id.as_str()).collect::<Vec<_>>(), vec!["z-new", "a-old", "m-legacy"]);
+        assert_eq!(page.items.iter().map(|item| item.added_at).collect::<Vec<_>>(), vec![Some(200), Some(100), Some(150)]);
+    }
+
+    #[test]
+    fn archive_added_at_migration_backfills_the_date_added_tag() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection.execute_batch(include_str!("../../migrations/0001_initial.sql")).expect("initial");
+        connection.execute_batch(include_str!("../../migrations/0002_local_library.sql")).expect("library");
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'legacy', 'Legacy', 'legacy', '[\"artist:someone\",\"date_added:1756512000\"]', 1);",
+        ).expect("legacy row");
+
+        connection.execute_batch(include_str!("../../migrations/0016_archive_added_at.sql")).expect("added_at migration");
+
+        let added: Option<i64> = connection
+            .query_row("SELECT added_at FROM archives WHERE archive_id = 'legacy'", [], |row| row.get(0))
+            .expect("backfilled row");
+        assert_eq!(added, Some(1_756_512_000));
     }
 
     #[test]
@@ -3176,9 +4570,357 @@ mod tests {
         )
         .unwrap();
         assert!(url.contains("/api/search?"));
-        assert!(url.contains("start=-1"));
+        // Defaulting to `start=-1` asked for the whole library unpaged, which no
+        // caller should get by accident: it is the request that could not finish
+        // inside the timeout. An omitted offset means the first page.
+        assert!(url.contains("start=0"), "{url}");
+        // LANraragi warns on every request when sortby is missing, so the
+        // builder must always emit a sort key and order.
+        assert!(url.contains("sortby=date_added"));
+        assert!(url.contains("order=desc"));
         assert!(!url.contains("filter="));
         assert!(!url.contains("category="));
+    }
+
+    #[test]
+    fn random_search_url_uses_the_native_endpoint_with_a_clamped_count() {
+        let url = build_random_search_url("https://lrr.example.com/", &RandomArchivesInput {
+            server_id: "scope-a".to_string(), count: Some(8), filter: None, category: None,
+        });
+        assert_eq!(url, "https://lrr.example.com/api/search/random?count=8");
+
+        let clamped = build_random_search_url("https://lrr.example.com", &RandomArchivesInput {
+            server_id: "scope-a".to_string(), count: Some(9999), filter: Some("fate$".to_string()), category: Some("SET_1613080290".to_string()),
+        });
+        assert!(clamped.contains("count=100"));
+        assert!(clamped.contains("filter=fate%24"));
+        assert!(clamped.contains("category=SET_1613080290"));
+    }
+
+    #[test]
+    fn random_response_parses_without_result_counts() {
+        let archives = parse_random_response(
+            r#"{"data":[{"arcid":"0123456789012345678901234567890123456789","title":"Random","tags":"artist:someone, date_added:1756512000","pagecount":12,"size":2048,"summary":null}]}"#,
+        ).expect("random payload");
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].page_count, 12);
+    }
+
+    #[test]
+    fn random_upsert_keeps_the_rest_of_the_index_alive() {
+        let mut connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at) VALUES
+               ('scope-a', 'keep-me', 'Keep', 'keep', '[]', 1, 100);",
+        ).unwrap();
+        let random = vec![RemoteArchive {
+            archive_id: "0123456789012345678901234567890123456789".to_string(),
+            title: "Random".to_string(),
+            summary: None,
+            tags: vec!["date_added:200".to_string()],
+            page_count: 3,
+            size: 10,
+        }];
+
+        upsert_server_archives(&mut connection, "scope-a", &random).expect("upsert");
+
+        let alive: i64 = connection
+            .query_row("SELECT COUNT(*) FROM archives WHERE server_id='scope-a' AND is_deleted=0", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(alive, 2, "a random pull must not tombstone the library");
+
+        let records = query_archive_records_by_ids(
+            &connection,
+            "scope-a",
+            &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
+        ).expect("records by id");
+        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
+    }
+
+    #[test]
+    fn archives_by_ids_answers_in_order_past_the_parameter_cap() {
+        // The shelves pass their whole id list, which has no upper bound, so the
+        // query chunks. Order still has to follow the ids as asked, and ids the
+        // local index has not seen are dropped rather than faked.
+        let mut connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a')",
+            [],
+        ).unwrap();
+        let total = 1_200;
+        {
+            let transaction = connection.transaction().unwrap();
+            for index in 0..total {
+                transaction.execute(
+                    "INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at) VALUES ('scope-a', ?1, ?2, ?2, '[]', 1, ?3)",
+                    rusqlite::params![format!("id-{index:04}"), format!("title {index}"), index as i64],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        // Reversed, so a wrong answer would come back in insert or rowid order.
+        let mut requested = (0..total).rev().map(|index| format!("id-{index:04}")).collect::<Vec<_>>();
+        requested.push("never-indexed".to_string());
+        let records = query_archive_records_by_ids(&connection, "scope-a", &requested).expect("records by id");
+
+        assert_eq!(records.len(), total as usize, "the unknown id must not add a row");
+        assert_eq!(records.first().map(|record| record.archive_id.as_str()), Some("id-1199"));
+        assert_eq!(records.last().map(|record| record.archive_id.as_str()), Some("id-0000"));
+    }
+
+    #[test]
+    fn archives_by_ids_skips_tombstoned_rows() {
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at, is_deleted) VALUES
+               ('scope-a', 'alive', 'Alive', 'alive', '[]', 1, 100, 0),
+               ('scope-a', 'gone', 'Gone', 'gone', '[]', 1, 200, 1);",
+        ).unwrap();
+
+        let records = query_archive_records_by_ids(
+            &connection,
+            "scope-a",
+            &["gone".to_string(), "alive".to_string()],
+        ).expect("records by id");
+
+        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["alive"]);
+    }
+
+    #[test]
+    fn search_presets_round_trip_tombstone_and_journal() {
+        // Presets sync like every other user record, so saving one has to leave a
+        // journal row; deleting is a tombstone, not a hard delete, or a delete
+        // would never reach the other device.
+        let mut connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a')",
+            [],
+        ).unwrap();
+
+        let input = SearchPresetInput {
+            scope_id: "scope-a".to_string(),
+            preset_id: "preset-1".to_string(),
+            name: "  中文汉化  ".to_string(),
+            query: "language:chinese$".to_string(),
+            sort_by: "added".to_string(),
+            sort_order: "desc".to_string(),
+            category_id: None,
+        };
+        let saved = write_search_preset(&mut connection, &input).expect("save preset");
+        assert_eq!(saved.name, "中文汉化");
+        assert_eq!(saved.revision, 1);
+        assert!(!saved.deleted);
+
+        let again = write_search_preset(&mut connection, &input).expect("update preset");
+        assert_eq!(again.revision, 2);
+
+        let journalled: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='search_preset'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journalled, 2);
+    }
+
+    #[test]
+    fn search_page_carries_the_result_counts() {
+        let json = r#"{
+            "data": [
+                {"arcid":"aaaa1111bbbb2222cccc3333dddd4444eeee5555","title":"One","filename":"one","tags":"artist:test","isnew":false,"extension":"zip","progress":0,"pagecount":20,"lastreadtime":0,"size":2048}
+            ],
+            "recordsFiltered": 137,
+            "recordsTotal": 9001
+        }"#;
+        // How many pages there are is `recordsFiltered`, not a local COUNT(*):
+        // the query ran on the server, so only the server knows what it selected.
+        let (archives, filtered, total) = parse_search_page(json).expect("page");
+        assert_eq!(archives.len(), 1);
+        assert_eq!(filtered, 137);
+        assert_eq!(total, 9001);
+    }
+
+    #[test]
+    fn a_page_walk_stops_on_a_short_page_or_a_satisfied_count() {
+        // A full page is not the end, even when it is the only page seen so far.
+        assert!(!search_walk_is_done(100, 100, 100, 250));
+        // The tail is short.
+        assert!(search_walk_is_done(50, 100, 250, 250));
+        // Every page came back full and the count is satisfied, so there is
+        // nothing left to ask for — without this the walk would keep requesting
+        // offsets past the end of the result set.
+        assert!(search_walk_is_done(100, 100, 200, 200));
+        // An empty answer ends the walk whatever the server claimed to hold.
+        assert!(search_walk_is_done(0, 100, 0, 500));
+    }
+
+    #[test]
+    fn the_remote_list_sends_filter_and_category_to_the_server() {
+        // The point of the rework: LANraragi resolves the search expression and
+        // the category, so a dynamic category costs the client nothing and the
+        // list shows what the server holds right now.
+        let url = build_refresh_search_url(
+            "https://lrr.example.com",
+            &RefreshSearchParams {
+                filter: Some("artist:someone$".to_string()),
+                start: Some(240),
+                sortby: Some("date_added".to_string()),
+                order: Some("asc".to_string()),
+                newonly: None,
+                untaggedonly: None,
+                hidecompleted: None,
+                category: Some("SET_1613080290".to_string()),
+                groupby_tanks: None,
+            },
+        )
+        .expect("remote list url");
+        assert!(url.contains("start=240"), "{url}");
+        assert!(url.contains("filter=artist%3Asomeone%24"), "{url}");
+        assert!(url.contains("category=SET_1613080290"), "{url}");
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=asc"), "{url}");
+    }
+
+    #[test]
+    fn the_ui_sort_key_maps_onto_the_lanraragi_one() {
+        assert_eq!(remote_sort_key("added"), Some("date_added"));
+        assert_eq!(remote_sort_key("title"), Some("title"));
+        // An unknown key is rejected rather than quietly sorted by title, which
+        // is what LANraragi itself falls back to.
+        assert_eq!(remote_sort_key("size"), None);
+        assert_eq!(remote_sort_key(""), None);
+    }
+
+    #[test]
+    fn probe_only_asks_for_the_newest_page_and_flags_unknown_archives() {
+        // The probe answers "is there anything new" and must stay on one page,
+        // whatever the offline index rebuild happens to cost.
+        let url = build_probe_search_url("https://lrr.example.com/").expect("probe url");
+        assert!(url.contains("start=0"), "{url}");
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=desc"), "{url}");
+        assert!(!url.contains("filter="), "{url}");
+
+        let connection = migrated_connection();
+        connection.execute_batch(
+            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+             INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
+               ('scope-a', 'known', 'Known', 'known', '[]', 1),
+               ('scope-a', 'tombstoned', 'Gone', 'gone', '[]', 1);
+             UPDATE archives SET is_deleted = 1 WHERE archive_id = 'tombstoned';",
+        ).unwrap();
+
+        let unknown = unknown_probe_archive_ids(
+            &connection,
+            "scope-a",
+            &["known".to_string(), "fresh".to_string(), "tombstoned".to_string()],
+        ).expect("probe diff");
+
+        assert_eq!(unknown, vec!["fresh".to_string(), "tombstoned".to_string()]);
+        assert!(unknown_probe_archive_ids(&connection, "scope-a", &["known".to_string()])
+            .expect("known only")
+            .is_empty());
+    }
+
+    #[test]
+    fn invalidating_the_category_cache_only_drops_the_named_server() {
+        // Assigning, retagging or deleting an archive changes what a category
+        // holds, so the snapshot has to go — but only that server's, and asking
+        // twice must not turn into an error.
+        let connection = migrated_connection();
+        let categories = vec![CategoryRecord {
+            id: "SET_1613080290".to_string(),
+            name: "Static".to_string(),
+            pinned: false,
+            search: None,
+            archives: vec!["archive-a".to_string()],
+        }];
+        write_category_cache(&connection, "scope-a", &categories, false).expect("write a");
+        write_category_cache(&connection, "scope-b", &categories, false).expect("write b");
+
+        invalidate_category_cache(&connection, "scope-a").expect("invalidate");
+        invalidate_category_cache(&connection, "scope-a").expect("invalidate again");
+
+        assert!(read_category_cache_from(&connection, "scope-a", current_unix_seconds())
+            .expect("read a")
+            .is_none());
+        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+            .expect("read b")
+            .is_some(), "the other server's snapshot must survive");
+    }
+
+    #[test]
+    fn category_cache_serves_a_fresh_snapshot_and_expires_an_old_one() {
+        // Every dynamic category costs one unpaged /api/search, so navigating
+        // back to the library must read this snapshot instead of re-resolving.
+        let connection = migrated_connection();
+        let categories = vec![CategoryRecord {
+            id: "SET_1613080290".to_string(),
+            name: "Dynamic".to_string(),
+            pinned: true,
+            search: Some("artist:someone$".to_string()),
+            archives: vec!["archive-a".to_string()],
+        }];
+        write_category_cache(&connection, "scope-a", &categories, false).expect("write");
+
+        let fresh = read_category_cache_from(&connection, "scope-a", current_unix_seconds())
+            .expect("read fresh");
+        assert_eq!(fresh.as_ref().map(|items| items.len()), Some(1));
+        assert_eq!(fresh.expect("snapshot")[0].search.as_deref(), Some("artist:someone$"));
+
+        let stale = read_category_cache_from(
+            &connection,
+            "scope-a",
+            current_unix_seconds() + CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+        )
+        .expect("read stale");
+        assert!(stale.is_none(), "an aged snapshot must be refetched");
+        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+            .expect("read other scope")
+            .is_none());
+
+        // A snapshot in which a dynamic category failed to resolve holds an empty
+        // membership, which looks exactly like an empty category — so it ages out
+        // in minutes rather than hiding those archives for six hours.
+        write_category_cache(&connection, "scope-c", &categories, true).expect("write partial");
+        assert!(read_category_cache_from(&connection, "scope-c", current_unix_seconds())
+            .expect("read partial")
+            .is_some());
+        assert!(read_category_cache_from(
+            &connection,
+            "scope-c",
+            current_unix_seconds() + PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+        )
+        .expect("read aged partial")
+        .is_none(), "a partial snapshot must not last the full window");
+    }
+
+    #[test]
+    fn dynamic_category_search_always_carries_a_sort_key() {
+        // LANraragi's Controller/Api/Search.pm reads `sortby` with no default,
+        // so an omitted one logs "uninitialized value $sortkey" at
+        // Model/Search.pm:51/52/57 and skips its search cache.
+        let url = build_category_search_url("https://lrr.example.com/", "artist:someone$")
+            .expect("dynamic category url");
+        assert!(url.starts_with("https://lrr.example.com/api/search?"));
+        assert!(url.contains("sortby=date_added"), "{url}");
+        assert!(url.contains("order=desc"), "{url}");
+        assert!(url.contains("start=-1"), "{url}");
+        assert!(url.contains("filter=artist%3Asomeone%24"), "{url}");
+    }
+
+    #[test]
+    fn refresh_archives_query_builder_rejects_a_blank_or_unknown_sort() {
+        let blank = build_refresh_search_url(
+            "https://lrr.example.com",
+            &RefreshSearchParams {
+                filter: None, start: None, sortby: Some("   ".to_string()), order: Some("sideways".to_string()),
+                newonly: None, untaggedonly: None, hidecompleted: None, category: None, groupby_tanks: None,
+            },
+        )
+        .unwrap();
+        assert!(blank.contains("sortby=date_added"));
+        assert!(blank.contains("order=desc"));
     }
 
     #[test]
@@ -3254,11 +4996,8 @@ mod tests {
             .unwrap();
         assert_eq!(old_count, 1);
 
-        let result = apply_search_response_to_archives(
-            &mut connection,
-            "scope-refresh",
-            "not valid json at all {{{",
-        );
+        let result = parse_search_response("not valid json at all {{{")
+            .and_then(|archives| replace_server_archives(&mut connection, "scope-refresh", &archives));
         assert!(result.is_err());
 
         let still_old: i64 = connection
@@ -3304,7 +5043,9 @@ mod tests {
             "recordsTotal": 2
         }"#;
 
-        let records = apply_search_response_to_archives(&mut connection, "scope-atomic", search_json).unwrap();
+        let records = parse_search_response(search_json)
+            .and_then(|archives| replace_server_archives(&mut connection, "scope-atomic", &archives))
+            .unwrap();
         assert_eq!(records.len(), 2);
 
         let all_count: i64 = connection

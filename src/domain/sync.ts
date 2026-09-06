@@ -36,7 +36,7 @@ export function mergeHistory(local: HistoryRecord, remote: HistoryRecord): Histo
   return {
     archiveId: local.archiveId,
     pageIndex: Math.max(local.pageIndex, remote.pageIndex),
-    visitedAt: local.visitedAt >= remote.visitedAt ? local.visitedAt : remote.visitedAt,
+    visitedAt: compareTimestamp(local.visitedAt, remote.visitedAt) >= 0 ? local.visitedAt : remote.visitedAt,
   };
 }
 
@@ -53,8 +53,18 @@ export function mergeWatchlist(
   return compareVersion(local, remote) >= 0 ? local : remote;
 }
 
+/** Compares two wall clocks as instants. Lexical comparison only happens to work
+ * while every writer emits the same `Z` format; a record carrying a `+08:00`
+ * offset would otherwise sort by its printed digits instead of its instant. */
+function compareTimestamp(left: string, right: string): number {
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) return left < right ? -1 : left > right ? 1 : 0;
+  return leftTime - rightTime;
+}
+
 function compareVersion<T>(left: Versioned<T>, right: Versioned<T>): number {
   if (left.logicalClock !== right.logicalClock) return left.logicalClock - right.logicalClock;
-  const wallClockOrder = left.wallClock.localeCompare(right.wallClock);
+  const wallClockOrder = compareTimestamp(left.wallClock, right.wallClock);
   return wallClockOrder !== 0 ? wallClockOrder : left.deviceId.localeCompare(right.deviceId);
 }

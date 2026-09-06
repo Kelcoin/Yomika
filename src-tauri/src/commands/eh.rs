@@ -233,6 +233,136 @@ async fn read_http_response(request: reqwest::RequestBuilder) -> Result<(u16, St
     Ok((status, body))
 }
 
+/// Builds the cookie header the app stores out of name/value pairs, wherever they
+/// came from — a login response's `set-cookie` headers, or the sign-in window's
+/// cookie jar. One rule for both: which cookies matter is a property of E-Hentai,
+/// not of how they were obtained.
+fn cookie_header_from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    let mut member_id = None;
+    let mut pass_hash = None;
+    let mut igneous = None;
+    for (name, value) in pairs {
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if value.is_empty() || value == "deleted" {
+            continue;
+        }
+        match name.as_str() {
+            "ipb_member_id" => member_id = Some(value.to_string()),
+            "ipb_pass_hash" => pass_hash = Some(value.to_string()),
+            // `mystery` is the absence of an ExHentai session, not a session.
+            "igneous" if value != "mystery" => igneous = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    let (member_id, pass_hash) = (member_id?, pass_hash?);
+    let mut cookie = format!("ipb_member_id={member_id}; ipb_pass_hash={pass_hash}");
+    if let Some(igneous) = igneous {
+        cookie.push_str(&format!("; igneous={igneous}"));
+    }
+    Some(cookie)
+}
+
+/// Collects the two authentication cookies out of a login response's
+/// `set-cookie` headers. Extracted so the parsing is testable without network.
+fn extract_login_cookie(set_cookie_values: &[String]) -> Option<String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for header in set_cookie_values {
+        for pair in header.split(';') {
+            let mut parts = pair.splitn(2, '=');
+            pairs.push((
+                parts.next().unwrap_or("").to_string(),
+                parts.next().unwrap_or("").to_string(),
+            ));
+        }
+    }
+    cookie_header_from_pairs(pairs.iter().map(|(name, value)| (name.as_str(), value.as_str())))
+}
+
+/// Why a sign-in POST came back without the authentication cookies.
+///
+/// Every one of these used to be reported as `EH_REAUTH_REQUIRED`, which the UI
+/// presents as "your E-Hentai login has expired, reconfigure the cookie" — twice
+/// wrong on a first sign-in, since nothing was configured and nothing expired.
+/// The login form page itself matches the generic classifier's login patterns,
+/// so this cannot delegate to `classify_eh_status`.
+fn classify_eh_login_failure(status: u16, body: &str) -> (&'static str, String, bool) {
+    let lower = body.to_lowercase();
+    if lower.contains("cf-browser-verification")
+        || lower.contains("_cf_chl_opt")
+        || lower.contains("cf-challenge")
+        || lower.contains("just a moment")
+        || lower.contains("checking your browser")
+    {
+        return ("EH_CLOUDFLARE", "Cloudflare 验证拦截了登录请求，请改用网页登录".into(), false);
+    }
+    if lower.contains("ip address has been temporarily banned")
+        || lower.contains("ip address has been banned")
+    {
+        return ("EH_ACCESS_BLOCKED", "E-Hentai 暂时封禁了当前 IP，请稍后再试".into(), false);
+    }
+    if status == 429 || lower.contains("too many login attempts") || lower.contains("rate limit") {
+        return ("EH_RATE_LIMIT", "登录尝试过于频繁，请稍后再试".into(), true);
+    }
+    if status >= 500 {
+        return ("EH_UNAVAILABLE", "E-Hentai 论坛暂时不可用，请稍后再试".into(), true);
+    }
+    ("EH_LOGIN_REJECTED", "用户名或密码不正确".into(), false)
+}
+
+/// Signs in on the E-Hentai forums and returns the cookie string the app stores.
+/// Users should not have to copy cookies out of a browser by hand.
+#[tauri::command]
+pub async fn login_eh_account(username: String, password: String) -> Result<CommandResult<String>, String> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Ok(CommandResult::failure("INVALID_RESPONSE", "用户名与密码不能为空", false));
+    }
+    // No redirect following here, unlike every other request: the forums answer a
+    // successful sign-in with a redirect, and the authentication cookies are set
+    // on *that* response. Following it leaves only the destination's headers,
+    // which carry no cookies — a successful login then looks like a rejected one.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", format!("无法创建登录请求：{error}"), true)),
+    };
+    let response = client
+        .post("https://forums.e-hentai.org/index.php?act=Login&CODE=01")
+        .form(&[
+            ("CookieDate", "1"),
+            ("b", ""),
+            ("bt", ""),
+            ("UserName", username.trim()),
+            ("PassWord", password.as_str()),
+            ("ipb_login_submit", "Login!"),
+        ])
+        .send()
+        .await;
+    let response = match response {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", format!("无法连接 E-Hentai 论坛：{error}"), true)),
+    };
+    let status = response.status().as_u16();
+    let cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_string))
+        .collect::<Vec<_>>();
+    match extract_login_cookie(&cookies) {
+        Some(cookie) => Ok(CommandResult::success(cookie)),
+        None => {
+            let body = response.text().await.unwrap_or_default();
+            let (code, message, retryable) = classify_eh_login_failure(status, &body);
+            Ok(CommandResult::failure(code, message, retryable))
+        }
+    }
+}
+
 async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<EhSearchResponse> {
     let client = match eh_http_client() {
         Ok(value) => value,
@@ -250,6 +380,82 @@ async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<Eh
     }
     let galleries = parse_search_results(&body);
     CommandResult::success(EhSearchResponse { galleries })
+}
+
+// ── Web sign-in ───────────────────────────────────────────────────────────
+//
+// A Cloudflare challenge is a browser check. No credential makes a reqwest POST
+// pass it, so `login_eh_account` had nothing to offer but "try again later" and
+// the only way in was pasting cookies copied out of another browser by hand.
+// JHenTai's answer is to show E-Hentai's own page, let the person clear the
+// challenge and sign in there, and then read the cookies out of the webview —
+// which is what these three commands are.
+
+/// The sign-in window's label, so a second request focuses the window that is
+/// already open instead of stacking another one on top of it.
+const LOGIN_WINDOW_LABEL: &str = "eh-login";
+const LOGIN_WINDOW_URL: &str = "https://forums.e-hentai.org/index.php?act=Login&CODE=00";
+/// Where the session cookies live. The forums set them for the whole domain, and
+/// `igneous` only ever comes from ExHentai.
+const COOKIE_ORIGINS: [&str; 2] = ["https://e-hentai.org", "https://exhentai.org"];
+
+#[tauri::command]
+pub async fn open_eh_login_window(app: tauri::AppHandle) -> Result<CommandResult<()>, String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(CommandResult::success(()));
+    }
+    let url = match LOGIN_WINDOW_URL.parse::<Url>() {
+        Ok(url) => url,
+        Err(error) => return Ok(CommandResult::failure("UNKNOWN", error.to_string(), false)),
+    };
+    match tauri::WebviewWindowBuilder::new(&app, LOGIN_WINDOW_LABEL, tauri::WebviewUrl::External(url))
+        .title("登录 E-Hentai")
+        .inner_size(980.0, 780.0)
+        .build()
+    {
+        Ok(_) => Ok(CommandResult::success(())),
+        Err(error) => Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false)),
+    }
+}
+
+/// The cookie header if the sign-in window has one yet, `None` while it does not.
+///
+/// Async on purpose: reading the cookie store from a synchronous command
+/// deadlocks on Windows (wry#583). The caller polls this while the window is
+/// open rather than guessing when the user has finished.
+#[tauri::command]
+pub async fn capture_eh_login_cookies(app: tauri::AppHandle) -> Result<CommandResult<Option<String>>, String> {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) else {
+        return Ok(CommandResult::failure("EH_LOGIN_WINDOW_CLOSED", "登录窗口已关闭", false));
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for origin in COOKIE_ORIGINS {
+        let Ok(url) = origin.parse::<Url>() else { continue };
+        match window.cookies_for_url(url) {
+            Ok(cookies) => pairs.extend(
+                cookies.into_iter().map(|cookie| (cookie.name().to_string(), cookie.value().to_string())),
+            ),
+            // A cookie store that cannot be read is not a failed sign-in; the
+            // next poll tries again.
+            Err(_) => continue,
+        }
+    }
+    Ok(CommandResult::success(cookie_header_from_pairs(
+        pairs.iter().map(|(name, value)| (name.as_str(), value.as_str())),
+    )))
+}
+
+#[tauri::command]
+pub async fn close_eh_login_window(app: tauri::AppHandle) -> Result<CommandResult<()>, String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+    Ok(CommandResult::success(()))
 }
 
 #[cfg(test)]
@@ -512,6 +718,83 @@ pub fn set_active_eh_account(account_id: String, database: State<'_, Database>) 
 mod tests {
     use std::sync::Mutex;
     use super::*;
+
+    #[test]
+    fn login_cookie_extraction_keeps_only_the_authentication_pair() {
+        let headers = vec![
+            "ipb_member_id=1234; path=/; domain=.e-hentai.org".to_string(),
+            "ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; path=/".to_string(),
+            "igneous=abcdef1234; path=/".to_string(),
+            "sl=dm_2; path=/".to_string(),
+        ];
+        assert_eq!(
+            extract_login_cookie(&headers).as_deref(),
+            Some("ipb_member_id=1234; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; igneous=abcdef1234"),
+        );
+    }
+
+    #[test]
+    fn login_cookie_extraction_rejects_a_failed_sign_in() {
+        // A rejected login answers with deletion cookies only.
+        let headers = vec![
+            "ipb_member_id=deleted; expires=Thu, 01-Jan-1970 00:00:00 GMT".to_string(),
+            "ipb_pass_hash=deleted; expires=Thu, 01-Jan-1970 00:00:00 GMT".to_string(),
+        ];
+        assert_eq!(extract_login_cookie(&headers), None);
+        assert_eq!(extract_login_cookie(&[]), None);
+    }
+
+    #[test]
+    fn login_cookie_extraction_drops_the_mystery_igneous() {
+        let headers = vec![
+            "ipb_member_id=7; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; igneous=mystery".to_string(),
+        ];
+        assert_eq!(
+            extract_login_cookie(&headers).as_deref(),
+            Some("ipb_member_id=7; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+        );
+    }
+
+    #[test]
+    fn the_sign_in_window_jar_yields_the_same_cookie_header() {
+        // The web sign-in path reads name/value pairs from the webview's cookie
+        // store rather than `set-cookie` headers, and has to agree with the
+        // password path about which of them matter — including that
+        // `igneous=mystery` is the absence of an ExHentai session.
+        let jar = [
+            ("sl", "dm_2"),
+            ("ipb_member_id", "42"),
+            ("igneous", "mystery"),
+            ("ipb_pass_hash", "a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+        ];
+        assert_eq!(
+            cookie_header_from_pairs(jar).as_deref(),
+            Some("ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+        );
+        // Still signed out: the window is open but nothing has been submitted.
+        assert_eq!(cookie_header_from_pairs([("sl", "dm_2")]), None);
+        assert_eq!(cookie_header_from_pairs([("ipb_member_id", "42")]), None);
+    }
+
+    #[test]
+    fn a_refused_sign_in_never_reports_an_expired_session() {
+        // The whole point of the separate code: a first sign-in has no session to
+        // expire and no cookie to reconfigure, which is what EH_REAUTH_REQUIRED
+        // tells the user to do.
+        let cases = [
+            (200, "<title>Login</title>The username or password you entered is incorrect", "EH_LOGIN_REJECTED"),
+            (200, "<div id=\"cf-browser-verification\">Just a moment...</div>", "EH_CLOUDFLARE"),
+            (200, "Your IP address has been temporarily banned for excessive requests", "EH_ACCESS_BLOCKED"),
+            (429, "slow down", "EH_RATE_LIMIT"),
+            (503, "maintenance", "EH_UNAVAILABLE"),
+        ];
+        for (status, body, expected) in cases {
+            let (code, message, _) = classify_eh_login_failure(status, body);
+            assert_eq!(code, expected, "body: {body}");
+            assert_ne!(code, "EH_REAUTH_REQUIRED");
+            assert!(!message.is_empty());
+        }
+    }
 
     struct MemoryStore { writes: Mutex<Vec<(String, String)>>, deletes: Mutex<Vec<String>> }
     impl EhCookieStore for MemoryStore {

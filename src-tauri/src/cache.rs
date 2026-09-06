@@ -1,7 +1,10 @@
 use crate::{db::Database, domain::result::CommandResult};
 use rusqlite::OptionalExtension;
 
-const IMAGE_RENDITIONS: [&str; 3] = ["cover", "page-thumbnail", "reader-page"];
+/// `enhanced` is the upscaler output and `decensored` the de-censoring pipeline's,
+/// both keyed by model version in the identity revision so a model change cannot
+/// serve a stale image.
+const IMAGE_RENDITIONS: [&str; 5] = ["cover", "page-thumbnail", "reader-page", "enhanced", "decensored"];
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;
 const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;
@@ -110,6 +113,26 @@ pub fn load_image_cache(
     Ok(None)
 }
 
+/// LANraragi does not always label thumbnails as `image/*` (some builds answer
+/// `application/octet-stream`), and rejecting those payloads meant the disk
+/// cache stayed empty and every cover was re-fetched. Sniff the magic bytes and
+/// only refuse a payload that is not an image at all.
+pub fn sniff_image_mime(mime: &str, bytes: &[u8]) -> Option<String> {
+    if mime.starts_with("image/") {
+        return Some(mime.to_string());
+    }
+    let detected = match bytes {
+        [0xff, 0xd8, 0xff, ..] => "image/jpeg",
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'B', b'M', ..] => "image/bmp",
+        _ if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => "image/webp",
+        _ if bytes.len() > 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" => "image/avif",
+        _ => return None,
+    };
+    Some(detected.to_string())
+}
+
 pub fn store_image_cache(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
@@ -118,7 +141,12 @@ pub fn store_image_cache(
     bytes: &[u8],
 ) -> Result<(), String> {
     identity.validate()?;
-    if bytes.is_empty() || !mime.starts_with("image/") { return Err("Invalid image cache payload".into()); }
+    if bytes.is_empty() {
+        return Err("Invalid image cache payload".into());
+    }
+    let mime = sniff_image_mime(mime, bytes)
+        .ok_or_else(|| format!("Refusing to cache a non-image payload (content-type: {mime})"))?;
+    let mime = mime.as_str();
     let content_hash = blake3::hash(bytes).to_hex().to_string();
     let relative = format!("cache/images/{}/{}.bin", &content_hash[..2], content_hash);
     let target = controlled_cache_path(app_data, &relative).ok_or_else(|| "Invalid image cache path".to_string())?;
@@ -765,6 +793,26 @@ mod tests {
         assert_eq!(read_cache_stats(&connection).unwrap().bytes, 10);
         let distinct_paths: i64 = connection.query_row("SELECT COUNT(DISTINCT path) FROM cache_entries", [], |row| row.get(0)).unwrap();
         assert_eq!(distinct_paths, 1);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn image_cache_accepts_an_octet_stream_that_is_really_an_image() {
+        // LANraragi builds that answer application/octet-stream used to have
+        // every thumbnail refused, so the disk cache stayed empty forever.
+        assert_eq!(sniff_image_mime("application/octet-stream", &[0xff, 0xd8, 0xff, 0xe0, 1, 2]).as_deref(), Some("image/jpeg"));
+        assert_eq!(sniff_image_mime("", &[0x89, b'P', b'N', b'G', 1]).as_deref(), Some("image/png"));
+        assert_eq!(sniff_image_mime("image/webp", &[1, 2, 3]).as_deref(), Some("image/webp"));
+        assert_eq!(sniff_image_mime("text/html", b"<html>not an image</html>"), None);
+
+        let connection = cache_db();
+        let app_data = temp_app_data("octet-stream-image");
+        let identity = CacheImageIdentity::new("scope-a", "archive-a", "cover", 0);
+        store_image_cache(&connection, &app_data, &identity, "application/octet-stream", &[0xff, 0xd8, 0xff, 0xe0, 9, 9]).unwrap();
+
+        let stored = load_image_cache(&connection, &app_data, &identity).unwrap().expect("cached cover");
+        assert_eq!(stored.mime, "image/jpeg");
+        assert!(store_image_cache(&connection, &app_data, &identity, "text/html", b"<html></html>").is_err());
         std::fs::remove_dir_all(app_data).unwrap();
     }
 

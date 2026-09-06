@@ -50,13 +50,37 @@ describe('EhAccountPanel', () => {
     expect(onCheckHealth).toHaveBeenCalledWith('eh-a');
   });
 
-  it('shows empty state when no accounts', () => {
+  it('renders nothing but the panel when there are no accounts and no way to add one', () => {
     render(<EhAccountPanel accounts={[]} />);
-    expect(screen.getByText('尚未添加 E-Hentai 账户')).toBeDefined();
+    // No nagging copy: the panel is simply empty until a login path is offered.
+    expect(screen.getByLabelText('E-Hentai 账户')).toBeEmptyDOMElement();
   });
 
   it('shows loading state', () => {
     render(<EhAccountPanel accounts={[]} loading />);
     expect(screen.getByText('正在读取账户…')).toBeDefined();
+  });
+
+  it('saves the account from a web sign-in, which is the only way past a challenge', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => undefined);
+    const onBrowserLogin = vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
+    render(<EhAccountPanel accounts={[]} onSave={onSave} onBrowserLogin={onBrowserLogin} />);
+
+    await user.click(screen.getByRole('tab', { name: /网页登录/ }));
+    await user.click(screen.getByRole('button', { name: /打开登录页面/ }));
+
+    expect(onBrowserLogin).toHaveBeenCalledTimes(1);
+    // The cookies the window hands back go through the same save path as a pasted
+    // one, so the site and the account id are still derived rather than asked for.
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      host: 'e-hentai.org',
+      cookie: 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90',
+    }));
+  });
+
+  it('offers no web sign-in when the caller cannot open a window', () => {
+    render(<EhAccountPanel accounts={[]} onSave={vi.fn()} />);
+    expect(screen.queryByRole('tab', { name: /网页登录/ })).toBeNull();
   });
 });

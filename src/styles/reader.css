@@ -6,8 +6,7 @@
   min-width: 320px;
   min-height: 100vh;
   min-height: 100dvh;
-  overflow: hidden;
-  background: var(--reader-canvas);
+  overflow: hidden;  background: var(--reader-canvas);
   color: var(--reader-ink);
   outline: none;
   touch-action: pan-y;
@@ -25,6 +24,25 @@
   user-select: none;
 }
 
+/* Three frames on one track: the slot being read, and the two a swipe reveals.
+   The track carries the drag offset, so a neighbour slides in from exactly where
+   it will land — the gesture used to drag the page off an empty background. */
+.reader-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.reader-frame {
+  position: absolute;
+  inset: 0;
+}
+
+/* The zoom lives inside the frame being read — it is applied inline to the same
+   element that carries the layout class — so the neighbours stay exactly one
+   viewport away whatever the scale is. On the track it scaled the gaps too, and
+   zooming out brought both neighbours into view beside the page. */
+
 .reader-single,
 .reader-spread,
 .reader-webtoon {
@@ -35,8 +53,48 @@
   height: 100%;
 }
 
+/* Two halves, each anchored to the middle of the viewport. As a centred flex row
+   the first page sat in the middle alone and jumped left when the second one
+   arrived, so the pair is a fixed grid and an unloaded page still holds its
+   slot. */
 .reader-spread {
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+}
+
+.reader-spread .reader-slot:first-child { justify-self: end; }
+.reader-spread .reader-slot:last-child { justify-self: start; }
+/* Right to left: the lower page number is the right-hand half. */
+.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
+.reader-spread.is-rtl .reader-slot:last-child { grid-column: 1; justify-self: end; }
+
+.reader-slot {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* Drag feedback. The gesture used to give none until release, so there was no
+   way to tell whether a turn had been triggered: the page now follows the
+   pointer, dims slightly while held, and gains a leading edge once the drag has
+   travelled far enough to commit. */
+.reader-single.is-dragging,
+.reader-spread.is-dragging {
+  cursor: grabbing;
+  opacity: 0.94;
+}
+
+.reader-single.will-turn,
+.reader-spread.will-turn {
+  opacity: 1;
+}
+
+.reader-single.will-turn .reader-page,
+.reader-spread.will-turn .reader-page {
+  box-shadow: 0 0 0 2px var(--brand-cyan);
 }
 
 .reader-webtoon {
@@ -50,9 +108,78 @@
   max-height: none;
 }
 
+/* One slot per page, of a height the renderer and the windowing arithmetic both
+   know. Only the slots inside the window hold anything: continuous mode used to
+   mount the entire archive at once, which is what froze the app. */
+.reader-webtoon-slot {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+}
+
+.reader-webtoon-slot .reader-slot {
+  width: 100%;
+  height: 100%;
+}
+
+/* Loading and failure are one shape in two moods, so a page still on its way and
+   a page that gave up read as the same object rather than as two unrelated
+   screens — they used to share a branch, and every unloaded page was announced
+   as a failure. */
+.reader-page-status {
+  display: grid;
+  place-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  color: var(--reader-muted);
+  font-family: var(--font-utility);
+  font-size: 12px;
+}
+
+.reader-page-status p { margin: 0; }
+.reader-page-status .reader-retry-button { margin: 0; }
+.reader-page-status.is-failed p { color: var(--reader-ink); }
+/* The shared indicator, in the reader's palette. */
+.reader-page-status .loading-indicator { padding: 0; color: var(--reader-muted); }
+.reader-page-status .loading-indicator svg { stroke: var(--reader-ink); }
+
+
+/* The loading state keeps the reader's own dark canvas, so the indicator does not
+   flash against a light background before the first page arrives. */
+.reader-screen-loading .loading-indicator { color: var(--reader-muted); }
+.reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
+
 .reader-error {
   width: min(100% - 32px, 480px);
   text-align: center;
+}
+
+/* Failure view: a single top bar for leaving, message plus retry in the middle. */
+.reader-screen-error {
+  grid-template-rows: auto 1fr;
+  place-items: stretch;
+}
+
+.reader-error-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 64px;
+  padding: calc(8px + env(safe-area-inset-top)) clamp(12px, 3vw, 32px) 8px;
+  background: var(--reader-chrome);
+}
+
+.reader-error-bar strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-screen-error .reader-error {
+  align-self: center;
+  justify-self: center;
 }
 
 .reader-error h1 {
@@ -72,6 +199,21 @@
   color: var(--brand-cyan);
 }
 
+.reader-error-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.reader-error-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+}
+
 .reader-error svg,
 .reader-icon-button svg,
 .reader-toolbar svg {
@@ -79,15 +221,21 @@
   height: 20px;
 }
 
+/* The two bars are positioned, not laid out in a grid, because they animate
+   separately: as one grid with one transform the bottom bar slid in from the top
+   of the screen, which is not where it lives. */
 .reader-chrome {
   position: absolute;
   inset: 0;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  z-index: 3;
   pointer-events: none;
 }
 
-.reader-chrome header {
+.reader-chrome-top {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -98,11 +246,29 @@
   pointer-events: auto;
 }
 
-.reader-chrome header strong {
+.reader-chrome-top strong {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.reader-chrome-settings { flex: none; }
+
+.reader-incognito-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-utility);
+  font-size: 11px;
+}
+
+.reader-incognito-badge svg { width: 14px; height: 14px; }
 
 .reader-icon-button,
 .reader-toolbar button {
@@ -128,7 +294,10 @@
 }
 
 .reader-toolbar {
-  grid-row: 3;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -142,6 +311,13 @@
   pointer-events: auto;
 }
 
+.reader-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.reader-toolbar button:disabled:hover { background: transparent; }
+
 .reader-toolbar span {
   flex: 0 0 auto;
   min-width: 64px;
@@ -154,48 +330,149 @@
   flex: 0 0 44px;
 }
 
-.reader-toolbar button[aria-label="单页"],
-.reader-toolbar button[aria-label="双页"],
-.reader-toolbar button[aria-label="连续滚动"],
-.reader-toolbar button[aria-label="从左到右"],
-.reader-toolbar button[aria-label="从右到左"] {
-  width: auto;
-  padding: 0 12px;
+/* Every control is an icon now, so no button needs extra text width. */
+.reader-webtoon-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.reader-retry-button {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin: var(--space-4) auto 0;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.reader-retry-button:hover { background: rgb(255 255 255 / 0.12); }
+.reader-retry-button svg { width: 24px; height: 24px; }
+
+/* Centred overview instead of a side drawer: cover, size, tags, then pages. */
+.reader-overview-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: clamp(12px, 4vw, 40px);
+  background: rgb(0 0 0 / 0.62);
+  backdrop-filter: blur(6px);
+}
+
+.reader-overview {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--space-3);
+  width: min(100%, 880px);
+  max-height: min(86vh, 760px);
+  padding: var(--space-4);
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: var(--radius-panel, 12px);
+  /* Opaque on purpose — see --reader-panel. The backdrop behind it is already
+     blurred, and this panel's own blur made its thumbnail scroller leave stale
+     tiles that looked like overlapping rows. */
+  background: var(--reader-panel);
+}
+
+.reader-overview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.reader-overview-heading strong {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.reader-thumbnail-panel {
-  position: absolute;
-  top: 72px;
-  right: 0;
-  bottom: 72px;
-  z-index: 3;
+.reader-overview-summary {
   display: grid;
-  grid-template-columns: repeat(2, 72px);
-  gap: 8px;
-  width: min(180px, 45vw);
-  padding: 12px;
-  overflow-y: auto;
-  background: var(--reader-chrome);
-  border-left: 1px solid rgb(255 255 255 / 0.16);
-  backdrop-filter: blur(14px);
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: var(--space-3);
 }
 
-.reader-thumbnail-panel button {
+/* Cover with its own facts underneath: page count and byte size describe the
+   archive, not its tags, and in the wide column they pushed every tag group down
+   a line. */
+.reader-overview-identity {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+}
+
+.reader-overview-cover {
+  width: 120px;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius-control);
+  object-fit: cover;
+}
+
+.reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
+.reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: 12px; }
+/* Grouped like the detail page's tag list, so a namespace is legible at a glance
+   rather than being one run of identical chips. */
+.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
+.reader-overview-tags .tag-group { display: grid; gap: 4px; }
+.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.reader-overview-thumbnails {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  /* `stretch` (the default) overrides a grid item's aspect-ratio, so every row
+     collapsed and the thumbnails stacked on top of each other. Aligning to the
+     start lets the 3:4 ratio size each button. */
+  align-items: start;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.reader-overview-thumbnails button {
+  position: relative;
   display: grid;
   place-items: center;
-  min-height: 92px;
+  aspect-ratio: 3 / 4;
   padding: 0;
+  overflow: hidden;
   border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 6px;
   background: rgb(0 0 0 / 0.24);
   color: inherit;
   cursor: pointer;
 }
 
-.reader-thumbnail-panel button[aria-current="true"] { border-color: var(--brand-cyan); }
-.reader-thumbnail-panel img { width: 100%; height: 100%; object-fit: cover; }
+.reader-overview-thumbnails button[aria-current="true"] { border-color: var(--brand-cyan); }
+.reader-overview-thumbnails img { width: 100%; height: 100%; object-fit: cover; }
 
-@media (max-width: 767px) {
+.reader-overview-page-number {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: rgb(0 0 0 / 0.55);
+  font-family: var(--font-utility);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* Compact layout, matching COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and the
+   shell's own media query. */
+@media (max-width: 900px) {
+  .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
+  .reader-overview-cover { width: 88px; }
   .reader-toolbar {
     justify-content: flex-start;
   }

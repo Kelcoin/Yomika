@@ -3,6 +3,13 @@ import { z } from 'zod';
 export const DomainErrorCodeSchema = z.enum([
   'UNKNOWN',
   'INVALID_RESPONSE',
+  'INVALID_INPUT',
+  'INVALID_MANIFEST',
+  'INVALID_MODEL_IMPORT',
+  'MODEL_MANIFEST_FETCH_FAILED',
+  'MODEL_ALREADY_EXISTS',
+  'MODEL_DOWNLOAD_FAILED',
+  'MODEL_ACTIVATION_FAILED',
   'PLATFORM_UNAVAILABLE',
   'LRR_UNAUTHORIZED',
   'LRR_NOT_FOUND',
@@ -13,6 +20,13 @@ export const DomainErrorCodeSchema = z.enum([
   'INFERENCE_UNAVAILABLE',
   'CACHE_QUOTA_EXCEEDED',
   'EH_UNAUTHORIZED',
+  /** A sign-in attempt was refused. Distinct from EH_REAUTH_REQUIRED, which
+   * means a stored session stopped working: telling someone their login had
+   * expired on their first attempt is a contradiction. */
+  'EH_LOGIN_REJECTED',
+  // The sign-in window was closed before a session appeared, which is how
+  // someone gives up on the web login.
+  'EH_LOGIN_WINDOW_CLOSED',
   'EH_REAUTH_REQUIRED',
   'EH_RATE_LIMIT',
   'EH_CLOUDFLARE',

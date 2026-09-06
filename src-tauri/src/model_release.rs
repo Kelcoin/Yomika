@@ -42,7 +42,15 @@ pub fn validate_manifest(manifest: &ModelReleaseManifest) -> Result<(), String> 
     for asset in &manifest.assets {
         if asset.role.is_empty() || asset.path.is_empty() || asset.size == 0 || asset.sha256.len() != 64 || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(format!("invalid asset {}", asset.path)); }
         if !paths.insert(asset.path.clone()) { return Err(format!("duplicate asset {}", asset.path)); }
-        if asset.path.starts_with('/') || asset.path.contains("..") || asset.path.contains('\\') { return Err(format!("unsafe asset path {}", asset.path)); }
+        for path in std::iter::once(&asset.path).chain(asset.companions.iter()) {
+            // Release paths use forward slashes on every host. Reject Windows
+            // drive prefixes and alternate streams even when validating on Unix.
+            if path.contains(['\\', ':', '\0'])
+                || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(format!("unsafe asset or companion path {path}"));
+            }
+        }
     }
     Ok(())
 }
@@ -116,8 +124,8 @@ pub fn activate_import_directory(staging: &std::path::Path, install: &std::path:
 }
 
 #[tauri::command]
-pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> String {
-    asset_url(&prefix, &owner_repo, &tag, &path)
+pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> crate::domain::result::CommandResult<String> {
+    crate::domain::result::CommandResult::success(asset_url(&prefix, &owner_repo, &tag, &path))
 }
 
 #[tauri::command]
@@ -224,6 +232,29 @@ pub fn model_release_activate(input: ModelActivateInput) -> crate::domain::resul
 mod tests {
     use super::*;
     fn asset() -> ReleaseAsset { ReleaseAsset { role: "detector".into(), path: "mrcnn/weights.onnx".into(), size: 4, sha256: format!("{:x}", Sha256::digest(b"test")), companions: vec![] } }
+    #[test]
+    fn rejects_absolute_and_non_normal_asset_and_companion_paths() {
+        for path in ["C:/outside", "C:relative", "../outside", "weights/../outside", "/outside", "weights\\outside", "", "weights//data", "weights/", "./weights", "weights/./data", "weights:data"] {
+            let mut invalid_asset = asset();
+            invalid_asset.path = path.into();
+            assert!(validate_manifest(&ModelReleaseManifest { tag: "v1".into(), assets: vec![invalid_asset] }).is_err(), "accepted asset path: {path}");
+            let mut invalid_companion = asset();
+            invalid_companion.companions.push(path.into());
+            assert!(validate_manifest(&ModelReleaseManifest { tag: "v1".into(), assets: vec![invalid_companion] }).is_err(), "accepted companion path: {path}");
+        }
+        let mut valid = asset();
+        valid.companions.push("mrcnn/weights.onnx.data".into());
+        assert!(validate_manifest(&ModelReleaseManifest { tag: "v1".into(), assets: vec![valid] }).is_ok());
+    }
+
+    #[test]
+    fn release_url_command_returns_the_bridge_envelope() {
+        let response = model_release_url("".into(), "o/r".into(), "v1".into(), "m.onnx".into());
+        assert_eq!(serde_json::to_value(response).unwrap(), serde_json::json!({
+            "ok": true,
+            "value": "https://github.com/o/r/releases/download/v1/m.onnx",
+        }));
+    }
     #[test] fn builds_direct_url() { assert_eq!(asset_url("", "o/r", "v1", "m.onnx"), "https://github.com/o/r/releases/download/v1/m.onnx"); }
     #[test] fn builds_mirror_url_without_double_slash() { assert_eq!(asset_url("https://gh-proxy.com/", "o/r", "v1", "m.onnx"), "https://gh-proxy.com/https://github.com/o/r/releases/download/v1/m.onnx"); }
     #[test] fn verifies_size_and_digest() { assert!(verify_bytes(&asset(), b"test").is_ok()); assert!(verify_bytes(&asset(), b"bad").is_err()); }

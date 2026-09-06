@@ -14,9 +14,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const closeToast = useCallback((id: number) => {
     const timer = timers.current.get(id);
     if (timer) window.clearTimeout(timer);
-    timers.current.delete(id);
     setItems((current) => current.map((item) => item.id === id ? { ...item, closing: true } : item));
-    window.setTimeout(() => setItems((current) => current.filter((item) => item.id !== id)), 220);
+    // Track the removal timer too, otherwise unmounting mid-animation leaves it
+    // running and the dismissal timer of a dropped toast is never cleared.
+    timers.current.set(id, window.setTimeout(() => {
+      timers.current.delete(id);
+      setItems((current) => current.filter((item) => item.id !== id));
+    }, 220));
   }, []);
   const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600) => {
     const message = String(text ?? '').trim();

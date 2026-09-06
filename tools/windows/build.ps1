@@ -40,9 +40,11 @@ try {
     Push-Location $repoRoot
     if ($Clean) {
         & $cargo clean --manifest-path (Join-Path $repoRoot "src-tauri\Cargo.toml")
+        if ($LASTEXITCODE -ne 0) { throw "Cargo clean failed with exit code $LASTEXITCODE." }
     }
     if (-not $SkipFrontend) {
         & $npm run build
+        if ($LASTEXITCODE -ne 0) { throw "Frontend build failed with exit code $LASTEXITCODE." }
     }
     $tauriArgs = @("run", "tauri", "build", "--", "--ci")
     if (-not $Release) {
@@ -55,7 +57,8 @@ try {
     $output = Join-Path $targetDir "yomika.exe"
 
     # Windows package keeps only Windows runtime libraries.
-    Get-ChildItem -LiteralPath $targetDir -File -Recurse -Include "libonnxruntime*.so","libonnxruntime*.dylib","libdirectml*.so" -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $targetDir -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'libonnxruntime*.so' -or $_.Name -like 'libonnxruntime*.dylib' -or $_.Name -like 'libdirectml*.so' } |
         Remove-Item -Force
 
     # ort's `copy-dylibs` leaves DirectML.dll as a symlink into the per-user ONNX
@@ -75,6 +78,7 @@ try {
         }
     }
 
+    if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw "Built executable missing: $output" }
     Write-Host "Windows portable executable: $output"
 } finally {
     Pop-Location

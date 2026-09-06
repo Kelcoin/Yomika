@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
+import { getNativeImageCache } from '../lib/nativeImageCache';
 import {
   DEFAULT_PREFERENCES,
   NativeSettingsRepository,
@@ -19,6 +20,7 @@ interface PreferencesContextValue {
 const PreferencesContext = createContext<PreferencesContextValue | undefined>(undefined);
 const repository = new NativeSettingsRepository();
 
+
 function applyTheme(theme: PreferenceSnapshot['theme']) {
   if (theme === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = theme;
@@ -32,6 +34,31 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
   themeColor.content = dark ? '#09090b' : '#f3eee4';
 }
 
+function applyPreferences(preferences: PreferenceSnapshot) {
+  applyTheme(preferences.theme);
+  getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
+  applyCustomCss(preferences.customCss);
+}
+
+const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
+
+/** User CSS goes into one managed <style> at the end of head, so it overrides
+ * the design tokens without the app having to know what it contains. It is also
+ * the only theming surface: the accent-colour preference that used to sit beside
+ * it said less than `--brand-vermilion: …` does here. */
+function applyCustomCss(css: string) {
+  if (typeof document === 'undefined') return;
+  const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);
+  if (!css.trim()) {
+    existing?.remove();
+    return;
+  }
+  const element = existing ?? document.createElement('style');
+  element.id = CUSTOM_CSS_ELEMENT_ID;
+  element.textContent = css;
+  if (!existing) document.head.append(element);
+}
+
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [preferences, setPreferences] = useState(DEFAULT_PREFERENCES);
   const [loading, setLoading] = useState(true);
@@ -43,7 +70,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       if (!active) return;
       if (result.ok) {
         setPreferences(result.value);
-        applyTheme(result.value.theme);
+        applyPreferences(result.value);
       } else {
         setError(result.error.message);
       }
@@ -56,7 +83,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     const result = await repository.save(input);
     if (result.ok) {
       setPreferences(result.value);
-      applyTheme(result.value.theme);
+      applyPreferences(result.value);
       setError(undefined);
     }
     return result;
@@ -66,7 +93,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     const result = await repository.importLegacy(encoded);
     if (result.ok) {
       setPreferences(result.value.preferences);
-      applyTheme(result.value.preferences.theme);
+      applyPreferences(result.value.preferences);
       setError(undefined);
     }
     return result;
@@ -83,4 +110,17 @@ export function usePreferences(): PreferencesContextValue {
   const value = useContext(PreferencesContext);
   if (!value) throw new Error('PreferencesProvider is missing');
   return value;
+}
+
+/** The archive card style, and a setter that persists it.
+ *
+ * The library and the three shelves render the same list and have to agree on
+ * how a card is drawn, so the choice is a preference rather than either one's
+ * component state — as state it also reset to the default on every navigation. */
+export function useCardStyle(): { cardStyle: PreferenceSnapshot['cardStyle']; setCardStyle: (value: PreferenceSnapshot['cardStyle']) => void } {
+  const { preferences, save } = usePreferences();
+  return {
+    cardStyle: preferences.cardStyle,
+    setCardStyle: (value) => { void save({ ...preferences, cardStyle: value }); },
+  };
 }

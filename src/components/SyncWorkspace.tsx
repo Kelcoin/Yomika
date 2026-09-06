@@ -6,11 +6,13 @@ import type { WebdavAccount } from '../domain/syncWire';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
 import { EmptyState } from './EmptyState';
+import { useToast } from './Toast';
 
 const libraryRepository = new NativeLibraryRepository();
 const syncRepository = new NativeSyncRepository();
 
 export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {}) {
+  const { showToast } = useToast();
   const [accounts, setAccounts] = useState<WebdavAccount[]>([]);
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -18,6 +20,16 @@ export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {})
   const [message, setMessage] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [syncingId, setSyncingId] = useState<string>();
+
+  // Both reach the toast as well as the page. This panel is embedded in settings,
+  // where every neighbouring control reports that way, and an error rendered only
+  // at the bottom of a scrolled panel is an error nobody sees.
+  useEffect(() => {
+    if (error) showToast(error, 'error');
+  }, [error, showToast]);
+  useEffect(() => {
+    if (message) showToast(message, 'success');
+  }, [message, showToast]);
 
   useEffect(() => {
     let active = true;
@@ -87,8 +99,9 @@ export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {})
     <div className="sync-workspace">
       {!embedded && <header className="workspace-heading"><h1>同步</h1></header>}
       {loading && <p className="server-list-message" role="status">正在读取同步账户…</p>}
-      {error && <p className="form-error" role="alert">{error}</p>}
-      {message && <p className="form-success" role="status">{message}</p>}
+      {/* Both are events — a save landed, a sync ran, one of them failed — and an
+          event belongs in the toast, which is where every neighbouring control in
+          settings already reports. Reporting in both places said everything twice. */}
       {!loading && accounts.length === 0 && (
         <EmptyState icon={Waypoints} title="同步尚未配置" description="添加 WebDAV 账户后，本地阅读进度、历史和待看变更会以密文增量同步。" />
       )}
@@ -110,17 +123,24 @@ export function SyncWorkspace({ embedded = false }: { embedded?: boolean } = {})
       )}
       {!loading && servers.length === 0 && <p className="server-list-message">需要先添加 LANraragi 服务器，才能确定本地同步范围。</p>}
       <section className="sync-setup" aria-labelledby="sync-setup-title">
-        <div>
+        <div className="sync-setup-heading">
           <KeyRound aria-hidden="true" />
-          <div><h2 id="sync-setup-title">添加或更新 WebDAV</h2></div>
+          <div>
+            <h2 id="sync-setup-title">添加或更新 WebDAV</h2>
+            <p>账户信息保存在本机，口令进入系统安全存储。</p>
+          </div>
         </div>
+        {/* Two columns of labelled fields with the wide URL row spanning both:
+            everything used to sit in one cramped stack. */}
         <form className="sync-form" onSubmit={saveAccount}>
-          <label>账户 ID<input name="accountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" spellCheck={false} /></label>
-          <label>名称<input name="label" required autoComplete="off" /></label>
-          <label>WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
+          <label>账户 ID<input name="accountId" required pattern="[A-Za-z0-9_-]+" autoComplete="off" spellCheck={false} placeholder="dav-home" /></label>
+          <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" /></label>
+          <label className="sync-form-wide">WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
           <label>用户名<input name="username" autoComplete="username" spellCheck={false} /></label>
-          <label>密码或 Token<input name="credential" required type="password" autoComplete="current-password" spellCheck={false} /></label>
-          <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存同步账户'}</button>
+          <label>密码或 Token<input name="credential" required type="password" autoComplete="off" spellCheck={false} /></label>
+          <div className="sync-form-actions">
+            <button className="secondary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存同步账户'}</button>
+          </div>
         </form>
       </section>
     </div>

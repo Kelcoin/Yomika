@@ -4,6 +4,7 @@
 
 # Planning state
 /.planning/
+/debug_outputs/
 
 # Local generated previews and skill work
 /.skill-archive/
@@ -26,11 +27,14 @@
 /src-tauri/target-fixed/
 /node_modules/
 /.npm-cache/
+src-tauri/.npm-cache/
 /tools/windows/toolchain/
 *.tsbuildinfo
 .codex-gh/
 /vite.config.js
 /vitest.config.js
+/vite.config.d.ts
+/vitest.config.d.ts
 
 # OS/editor
 .DS_Store

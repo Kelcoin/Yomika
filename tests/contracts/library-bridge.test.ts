@@ -139,15 +139,34 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('keeps the reading list separate from the watchlist', async () => {
+    const record = { scopeId: 'scope-a', archiveId: 'a1', addedAt: '2026-09-03T00:00:00Z', updatedAt: '2026-09-03T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false };
+    const adapter = vi.fn(async () => ({ ok: true, value: record }));
+    setInvokeAdapterForTests(adapter);
+
+    // "I plan to read this" and "I liked this" are different lists, and both
+    // sync, so they are different commands against different tables.
+    await new NativeLibraryRepository().setReadingList('scope-a', 'a1', true);
+    expect(adapter).toHaveBeenCalledWith('set_reading_list', { scopeId: 'scope-a', archiveId: 'a1', added: true });
+
+    setInvokeAdapterForTests(vi.fn(async () => ({ ok: true, value: [record] })));
+    expect(await new NativeLibraryRepository().listReadingList('scope-a')).toEqual({ ok: true, value: [record] });
+  });
+
   it('lists LANraragi categories through the native command', async () => {
     const value = [{ id: 'SET_1613080290', name: 'Favorites', pinned: false, search: null, archives: ['a1'] }];
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
+    const repository = new NativeLibraryRepository();
 
-    const result = await new NativeLibraryRepository().listCategories('scope-a');
+    const result = await repository.listCategories('scope-a');
 
-    expect(adapter).toHaveBeenCalledWith('list_categories', { serverId: 'scope-a' });
+    // Navigation must not re-resolve dynamic categories on the server.
+    expect(adapter).toHaveBeenNthCalledWith(1, 'list_categories', { serverId: 'scope-a', force: false });
     expect(result).toEqual({ ok: true, value });
+
+    await repository.listCategories('scope-a', true);
+    expect(adapter).toHaveBeenNthCalledWith(2, 'list_categories', { serverId: 'scope-a', force: true });
   });
 
   it('adds an archive to a category through the native command', async () => {
@@ -188,6 +207,41 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value: new Uint8Array([255, 216, 255]).buffer });
   });
 
+  it('accepts a binary IPC body for image commands without a JSON envelope', async () => {
+    const adapter = vi.fn(async (command: string) => (command === 'load_reader_page'
+      ? new Uint8Array([255, 216, 255, 224]).buffer
+      : new Uint8Array([137, 80, 78, 71])));
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeLibraryRepository();
+
+    expect(await repository.loadReaderPage('scope-a', 'a1', 0, '00.jpg')).toEqual({
+      ok: true, value: new Uint8Array([255, 216, 255, 224]).buffer,
+    });
+    expect(await repository.loadArchivePageThumbnail('scope-a', 'a1', 3)).toEqual({
+      ok: true, value: new Uint8Array([137, 80, 78, 71]).buffer,
+    });
+  });
+
+  it('keeps the JSON error envelope for failed image commands', async () => {
+    const adapter = vi.fn(async () => ({ ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '页面暂时不可用', retryable: true } }));
+    setInvokeAdapterForTests(adapter);
+
+    expect(await new NativeLibraryRepository().loadReaderPage('scope-a', 'a1', 0, '00.jpg')).toEqual({
+      ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '页面暂时不可用', retryable: true },
+    });
+  });
+
+  it('asks LANraragi for the random selection instead of shuffling locally', async () => {
+    const value = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Random', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z' }];
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().searchRandomArchives('scope-a', 8);
+
+    expect(adapter).toHaveBeenCalledWith('search_random_archives', { input: { serverId: 'scope-a', count: 8 } });
+    expect(result).toEqual({ ok: true, value });
+  });
+
   it('lists schema-validated server records', async () => {
     const value = [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }];
     const adapter = vi.fn(async () => ({ ok: true, value }));
@@ -219,9 +273,47 @@ describe('native library repository bridge', () => {
     const result = await new NativeLibraryRepository().listArchivesPage('s1', 100, 100);
 
     expect(adapter).toHaveBeenCalledWith('list_archives_page', {
-      input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, offset: 100, limit: 100 },
+      input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, offset: 100, limit: 100 },
     });
     expect(result).toEqual({ ok: true, value });
+  });
+
+  it('reads the library list from the server by item offset', async () => {
+    const value = { items: [], total: 14447, hasMore: true };
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().searchArchivesPage('s1', 240, {
+      query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290',
+    });
+
+    // `start` is an item offset, and the query and category go to LANraragi:
+    // resolving them locally is what made an archive added on the server
+    // invisible until a whole-library pull happened to succeed.
+    expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: { serverId: 's1', query: 'artist:someone$', sortBy: 'title', order: 'asc', categoryId: 'SET_1613080290', untaggedOnly: false, start: 240 },
+    });
+    expect(result).toEqual({ ok: true, value });
+  });
+
+  it('resolves shelf ids without reading the whole library', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [{
+      serverId: 's1', archiveId: 'a2', title: 'Second', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z',
+    }] }));
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().listArchivesByIds('s1', ['a2', 'a1']);
+
+    expect(adapter).toHaveBeenCalledWith('list_archives_by_ids', { serverId: 's1', archiveIds: ['a2', 'a1'] });
+    expect(result).toMatchObject({ ok: true, value: [{ archiveId: 'a2' }] });
+  });
+
+  it('answers an empty shelf without crossing the bridge', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [] }));
+    setInvokeAdapterForTests(adapter);
+
+    expect(await new NativeLibraryRepository().listArchivesByIds('s1', [])).toEqual({ ok: true, value: [] });
+    expect(adapter).not.toHaveBeenCalled();
   });
 
   it('accepts nullable archive fields returned from sqlite native rows', async () => {
