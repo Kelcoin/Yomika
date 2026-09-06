@@ -51,7 +51,7 @@ pub fn verify_bytes(asset: &ReleaseAsset, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn download_asset(url: &str, asset: &ReleaseAsset, destination: &std::path::Path) -> Result<(), String> {
+pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(url: &str, asset: &ReleaseAsset, destination: &std::path::Path, mut progress: F) -> Result<(), String> {
     let mut response = reqwest::blocking::get(url).map_err(|e| format!("download failed: {e}"))?;
     if !response.status().is_success() { return Err(format!("download HTTP {}", response.status())); }
     let parent = destination.parent().ok_or_else(|| "destination has no parent".to_string())?;
@@ -60,7 +60,8 @@ pub fn download_asset(url: &str, asset: &ReleaseAsset, destination: &std::path::
     let result = (|| {
         let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new(); let mut total = 0u64; let mut buffer = [0u8; 1024 * 128];
-        loop { let read = response.read(&mut buffer).map_err(|e| e.to_string())?; if read == 0 { break; } file.write_all(&buffer[..read]).map_err(|e| e.to_string())?; hasher.update(&buffer[..read]); total += read as u64; }
+        let length = response.content_length();
+        loop { let read = response.read(&mut buffer).map_err(|e| e.to_string())?; if read == 0 { break; } file.write_all(&buffer[..read]).map_err(|e| e.to_string())?; hasher.update(&buffer[..read]); total += read as u64; progress(total, length); }
         if total != asset.size { return Err(format!("size mismatch for {}", asset.path)); }
         if format!("{:x}", hasher.finalize()) != asset.sha256.to_ascii_lowercase() { return Err(format!("sha256 mismatch for {}", asset.path)); }
         std::fs::rename(&temp, destination).map_err(|e| e.to_string())
@@ -68,6 +69,8 @@ pub fn download_asset(url: &str, asset: &ReleaseAsset, destination: &std::path::
     if result.is_err() { let _ = std::fs::remove_file(&temp); }
     result
 }
+
+pub fn download_asset(url: &str, asset: &ReleaseAsset, destination: &std::path::Path) -> Result<(), String> { download_asset_with_progress(url, asset, destination, |_, _| {}) }
 
 pub fn validate_import_directory(root: &std::path::Path, manifest: &ModelReleaseManifest) -> Result<(), String> {
     validate_manifest(manifest)?;
@@ -101,10 +104,10 @@ pub fn model_release_validate(manifest: ModelReleaseManifest) -> crate::domain::
 pub struct ModelDownloadInput { pub url: String, pub asset: ReleaseAsset, pub destination: String }
 
 #[tauri::command]
-pub fn model_release_download(input: ModelDownloadInput) -> crate::domain::result::CommandResult<()> {
+pub fn model_release_download(app: tauri::AppHandle, input: ModelDownloadInput) -> crate::domain::result::CommandResult<()> {
     let destination = std::path::PathBuf::from(input.destination);
     if !destination.is_absolute() { return crate::domain::result::CommandResult::failure("INVALID_INPUT", "destination must be absolute", false); }
-    match download_asset(&input.url, &input.asset, &destination) {
+    match download_asset_with_progress(&input.url, &input.asset, &destination, |completed, total| { let _ = tauri::Emitter::emit(&app, "model-download-progress", serde_json::json!({"path": input.asset.path, "completed": completed, "total": total})); }) {
         Ok(()) => crate::domain::result::CommandResult::success(()),
         Err(error) => crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true),
     }
