@@ -74,6 +74,8 @@ export function SettingsWorkspace() {
   const [modelMessage, setModelMessage] = useState<string>();
   const [modelPending, setModelPending] = useState(false);
   const [modelManifest, setModelManifest] = useState<unknown>();
+  const [modelTag, setModelTag] = useState('v1');
+  const [modelDestination, setModelDestination] = useState('');
 
   async function validateModelArchive(file: File) {
     setModelPending(true); setModelMessage(undefined);
@@ -87,9 +89,17 @@ export function SettingsWorkspace() {
   async function fetchModelManifest() {
     setModelPending(true); setModelMessage(undefined);
     const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
-    const result = await inferenceRepository.fetchReleaseManifest(prefix, 'Kelcoin/Yomika', 'v1');
+    const result = await inferenceRepository.fetchReleaseManifest(prefix, 'Kelcoin/Yomika', modelTag);
     if (result.ok) { setModelManifest(result.value); setModelMessage('已获取模型清单'); } else setModelMessage(result.error.message);
     setModelPending(false);
+  }
+
+  async function downloadModelBundle() {
+    if (!modelManifest || !modelDestination) { setModelMessage('请先获取清单并填写本地目标目录'); return; }
+    setModelPending(true); setModelMessage(undefined);
+    const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
+    const result = await inferenceRepository.downloadModelBundle({ prefix, ownerRepo: 'Kelcoin/Yomika', manifest: modelManifest, destination: modelDestination });
+    setModelMessage(result.ok ? '模型下载完成，请重启后生效' : result.error.message); setModelPending(false);
   }
 
   useEffect(() => {
@@ -294,6 +304,9 @@ export function SettingsWorkspace() {
           </label>
           {modelMirror === 'custom' && <label className="preference-select">加速前缀<input value={modelPrefix} onChange={(event) => setModelPrefix(event.target.value)} placeholder="https://example.com/" /></label>}
           <button type="button" disabled={modelPending} onClick={() => void fetchModelManifest()}>获取最新模型清单</button>
+          <label className="preference-select">Release TAG<input value={modelTag} onChange={(event) => setModelTag(event.target.value)} /></label>
+          <label className="preference-select">目标目录<input value={modelDestination} onChange={(event) => setModelDestination(event.target.value)} placeholder="绝对路径" /></label>
+          <button type="button" disabled={modelPending} onClick={() => void downloadModelBundle()}>下载完整模型包</button>
           <label className="preference-select">导入模型压缩包
             <input type="file" accept=".json,application/json" disabled={modelPending} onChange={async (event) => { const file = event.target.files?.[0]; if (file) { try { setModelManifest(JSON.parse(await file.text())); setModelMessage('已读取模型清单'); } catch { setModelMessage('模型清单 JSON 无效'); } } }} />
           </label>
