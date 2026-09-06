@@ -53,6 +53,10 @@ export class NativeInferenceRepository {
     return invokeCommand('model_release_validate_archive', { input: { archive, manifest } }, z.undefined());
   }
 
+  activateModelDirectory(staging: string, install: string): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_activate', { input: { staging, install } }, z.undefined());
+  }
+
   releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
     return invokeCommand('model_release_url', { prefix, ownerRepo, tag, path }, z.string());
   }

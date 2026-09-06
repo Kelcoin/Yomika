@@ -109,6 +109,12 @@ pub fn validate_import_archive(bytes: &[u8], manifest: &ModelReleaseManifest) ->
     let _ = std::fs::remove_dir_all(&root); result
 }
 
+pub fn activate_import_directory(staging: &std::path::Path, install: &std::path::Path) -> Result<(), String> {
+    if !staging.is_dir() { return Err("staging directory missing".into()); }
+    if install.exists() { return Err("model version already installed".into()); }
+    std::fs::rename(staging, install).map_err(|e| format!("atomic model activation failed: {e}"))
+}
+
 #[tauri::command]
 pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> String {
     asset_url(&prefix, &owner_repo, &tag, &path)
@@ -163,6 +169,18 @@ pub fn model_release_validate_archive(input: ModelArchiveImportInput) -> crate::
     match validate_import_archive(&input.archive, &input.manifest) {
         Ok(()) => crate::domain::result::CommandResult::success(()),
         Err(error) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", error, false),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelActivateInput { pub staging: String, pub install: String }
+
+#[tauri::command]
+pub fn model_release_activate(input: ModelActivateInput) -> crate::domain::result::CommandResult<()> {
+    match activate_import_directory(std::path::Path::new(&input.staging), std::path::Path::new(&input.install)) {
+        Ok(()) => crate::domain::result::CommandResult::success(()),
+        Err(error) => crate::domain::result::CommandResult::failure("MODEL_ACTIVATION_FAILED", error, false),
     }
 }
 
