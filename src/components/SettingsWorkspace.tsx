@@ -73,11 +73,13 @@ export function SettingsWorkspace() {
   const [modelPrefix, setModelPrefix] = useState('');
   const [modelMessage, setModelMessage] = useState<string>();
   const [modelPending, setModelPending] = useState(false);
+  const [modelManifest, setModelManifest] = useState<unknown>();
 
   async function validateModelArchive(file: File) {
     setModelPending(true); setModelMessage(undefined);
     const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-    const result = await inferenceRepository.validateModelArchive(bytes, { tag: 'local', assets: [] });
+    if (!modelManifest) { setModelMessage('请先选择模型清单 JSON'); setModelPending(false); return; }
+    const result = await inferenceRepository.validateModelArchive(bytes, modelManifest);
     setModelMessage(result.ok ? '模型验证通过' : result.error.message);
     setModelPending(false);
   }
@@ -284,6 +286,9 @@ export function SettingsWorkspace() {
           </label>
           {modelMirror === 'custom' && <label className="preference-select">加速前缀<input value={modelPrefix} onChange={(event) => setModelPrefix(event.target.value)} placeholder="https://example.com/" /></label>}
           <label className="preference-select">导入模型压缩包
+            <input type="file" accept=".json,application/json" disabled={modelPending} onChange={async (event) => { const file = event.target.files?.[0]; if (file) { try { setModelManifest(JSON.parse(await file.text())); setModelMessage('已读取模型清单'); } catch { setModelMessage('模型清单 JSON 无效'); } } }} />
+          </label>
+          <label className="preference-select">模型文件
             <input type="file" accept=".zip,application/zip" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void validateModelArchive(file); }} />
           </label>
           {modelMessage && <p role="status">{modelMessage}</p>}
