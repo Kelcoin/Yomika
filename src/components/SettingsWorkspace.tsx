@@ -13,7 +13,7 @@ import { SyncWorkspace } from './SyncWorkspace';
 import { usePreferences } from '../app/preferences';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 import { NativeInferenceRepository } from '../repositories/nativeInferenceRepository';
-import { MODEL_MIRROR_PRESETS } from '../domain/modelRelease';
+import { MODEL_MIRROR_PRESETS, buildModelAssetUrl } from '../domain/modelRelease';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
@@ -301,6 +301,12 @@ export function SettingsWorkspace() {
             <input type="file" accept=".zip,application/zip" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void validateModelArchive(file); }} />
           </label>
           {modelMessage && <p role="status">{modelMessage}</p>}
+          {Boolean(modelManifest) && typeof modelManifest === 'object' && !!Array.isArray((modelManifest as { assets?: unknown[] }).assets) && <ul aria-label="模型资产">
+            {((modelManifest as { assets: Array<{ path: string; size: number }> }).assets).map((asset) => {
+              const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
+              return <li key={asset.path}><a href={buildModelAssetUrl(prefix, 'Kelcoin/Yomika', 'v1', asset.path)} target="_blank" rel="noreferrer">下载 {asset.path}</a> <small>{asset.size} bytes</small></li>;
+            })}
+          </ul>}
         </section>
       )}
       {selectedSettingsSection === 'settings-migration' && (
