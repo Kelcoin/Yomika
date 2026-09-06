@@ -6,7 +6,7 @@ pub enum InferenceError {
     CacheBusy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
     pub id: String,
@@ -126,6 +126,33 @@ pub fn model_install_roots(
 
 const MAX_MODEL_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
+/// Where the validated manifest is kept inside an installed model directory.
+///
+/// Nothing else records the model's scale, and without it a model cannot be
+/// used: an ONNX output shape is usually dynamic, so the file itself cannot say
+/// how much bigger it makes an image. The name is deliberately ours rather than
+/// `manifest.json`, which an upstream model archive might well contain.
+pub const MODEL_MANIFEST_FILE: &str = "yomika-model.json";
+
+/// The `.onnx` file inside an installed model directory, if there is exactly one.
+pub fn model_file_in(install_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut found = None;
+    for entry in std::fs::read_dir(install_root).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+            && found.replace(path).is_some()
+        {
+            return None;
+        }
+    }
+    found
+}
+
+pub fn read_model_manifest(install_root: &std::path::Path) -> Option<ModelManifest> {
+    let bytes = std::fs::read(install_root.join(MODEL_MANIFEST_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 pub fn install_model_archive(
     archive_bytes: &[u8],
     manifest: &ModelManifest,
@@ -202,6 +229,22 @@ pub fn install_model_archive(
         let model_bytes = std::fs::read(model_path)
             .map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
         validate_model_bytes(manifest, &model_bytes)?;
+        // Written into staging so it lands with the rename: a model directory
+        // without its manifest has no recorded scale and cannot be used. Scoped
+        // so the handle is closed first — Windows refuses to rename a directory
+        // that still has an open file inside it.
+        {
+            let manifest_json = serde_json::to_vec_pretty(manifest)
+                .map_err(|error| InferenceError::InvalidManifest(error.to_string()))?;
+            let mut manifest_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staging_root.join(MODEL_MANIFEST_FILE))
+                .map_err(|_| InferenceError::InvalidManifest(format!("model ZIP must not contain {MODEL_MANIFEST_FILE}")))?;
+            std::io::Write::write_all(&mut manifest_file, &manifest_json)
+                .map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
+            manifest_file.sync_all().map_err(|error| InferenceError::InvalidInput(error.to_string()))?;
+        }
         if install_root.exists() {
             return Err(InferenceError::InvalidInput("model install path already exists".into()));
         }
@@ -216,8 +259,49 @@ pub fn install_model_archive(
     result
 }
 
+pub mod decensor;
+pub mod detect;
+pub mod inpaint;
+pub mod onnx;
+pub mod upscale;
+
+/// Execution providers we know how to ask for, most preferred first per
+/// platform. The ONNX Runtime session picks one of these; CPU always works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendId { Cpu }
+pub enum BackendId { DirectMl, CoreMl, Nnapi, Cpu }
+
+impl BackendId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectMl => "directml",
+            Self::CoreMl => "coreml",
+            Self::Nnapi => "nnapi",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn is_hardware_accelerated(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+}
+
+/// Preference order for the current platform. Windows gets DirectML, Apple
+/// platforms CoreML, Android NNAPI — the same split the mihon fork makes when it
+/// chooses a Vulkan/NNAPI device — and CPU is the universal fallback.
+pub fn platform_backend_preference() -> Vec<BackendId> {
+    let mut order = Vec::new();
+    if cfg!(target_os = "windows") {
+        order.push(BackendId::DirectMl);
+    }
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        order.push(BackendId::CoreMl);
+    }
+    if cfg!(target_os = "android") {
+        order.push(BackendId::Nnapi);
+    }
+    order.push(BackendId::Cpu);
+    order
+}
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,8 +313,11 @@ pub struct InferenceCapabilities {
 
 #[tauri::command]
 pub fn inference_probe() -> crate::domain::result::CommandResult<InferenceCapabilities> {
+    let backends = platform_backend_preference();
     crate::domain::result::CommandResult::success(InferenceCapabilities {
-        backends: vec!["cpu".to_string()], max_pixels: 64_000_000, hardware_acceleration: false,
+        hardware_acceleration: backends.iter().any(|backend| backend.is_hardware_accelerated()),
+        backends: backends.into_iter().map(|backend| backend.as_str().to_string()).collect(),
+        max_pixels: 64_000_000,
     })
 }
 
@@ -275,8 +362,182 @@ pub fn inference_validate_model(input: ModelValidationInput) -> crate::domain::r
 #[serde(rename_all = "camelCase")]
 pub struct ModelInstallInput { pub manifest: ModelManifest, pub archive: Vec<u8> }
 
-#[derive(Debug, serde::Serialize)]
-pub struct InstalledModel { pub id: String, pub version: String }
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledModel {
+    pub id: String,
+    pub version: String,
+    /// From the installed manifest. `None` means the directory has no manifest,
+    /// so the model can be listed but not run.
+    pub scale: Option<u32>,
+    /// What the model does, read from the shape of the install rather than from
+    /// the manifest: a directory holding the four de-censoring files is a
+    /// de-censoring bundle whatever its manifest says. Keeps a bundle out of the
+    /// upscaler's picker, where selecting it silently produced plain nearest
+    /// neighbour output.
+    pub kind: String,
+}
+
+/// How much larger than the page an enhanced rendition is served.
+///
+/// The models available are x4, and x4 is not what a reader needs: it is sixteen
+/// times the pixels, which has to be encoded, cached, decoded and then drawn into
+/// a slot at most a couple of times the page's size. Downsampling the model's
+/// output to x2 keeps the detail the model recovered and drops three quarters of
+/// the bytes — which is also most of the reason enhanced pages felt slow.
+pub const ENHANCED_OUTPUT_SCALE: u32 = 2;
+
+/// Resamples a model's output down to `ENHANCED_OUTPUT_SCALE` times the source.
+/// Anything already at or below that is returned untouched.
+pub fn fit_enhanced_output(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> (std::borrow::Cow<'_, [u8]>, u32, u32) {
+    let target_width = source_width.saturating_mul(ENHANCED_OUTPUT_SCALE);
+    let target_height = source_height.saturating_mul(ENHANCED_OUTPUT_SCALE);
+    if width <= target_width || height <= target_height || target_width == 0 || target_height == 0 {
+        return (std::borrow::Cow::Borrowed(rgba), width, height);
+    }
+    let Some(image) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) else {
+        return (std::borrow::Cow::Borrowed(rgba), width, height);
+    };
+    // Lanczos3 on the way down: the model spent its time recovering edges, and a
+    // box filter would give them straight back.
+    let resized = image::imageops::resize(&image, target_width, target_height, image::imageops::FilterType::Lanczos3);
+    (std::borrow::Cow::Owned(resized.into_raw()), target_width, target_height)
+}
+
+/// The de-censoring sessions, kept for the life of the process and keyed by the
+/// bundle they were opened from.
+///
+/// The detector is a 240 MB graph. It was opened per page, so every page turn paid
+/// to load and initialise it again — the model's size is the reason that mattered,
+/// and nothing about the graph is per-page. Keyed by the detector's path so
+/// switching bundles opens the new one instead of serving the old.
+static DECENSOR_ENGINES: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::path::PathBuf, std::sync::Arc<decensor::DecensorEngines>)>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn decensor_engines_for(
+    bundle: &decensor::DecensorBundle,
+) -> Result<std::sync::Arc<decensor::DecensorEngines>, InferenceError> {
+    let cell = DECENSOR_ENGINES.get_or_init(|| std::sync::Mutex::new(None));
+    let mut held = cell
+        .lock()
+        .map_err(|_| InferenceError::InvalidInput("de-censoring session lock poisoned".into()))?;
+    if let Some((path, engines)) = held.as_ref() {
+        if path == &bundle.detector {
+            return Ok(std::sync::Arc::clone(engines));
+        }
+    }
+    // Drop the previous bundle's sessions before opening the next: two 240 MB
+    // detectors resident at once is not a cost worth paying to switch models.
+    *held = None;
+    let engines = std::sync::Arc::new(decensor::DecensorEngines::open(bundle)?);
+    *held = Some((bundle.detector.clone(), std::sync::Arc::clone(&engines)));
+    Ok(engines)
+}
+
+pub const MODEL_KIND_UPSCALE: &str = "upscale";
+pub const MODEL_KIND_DECENSOR: &str = "decensor";
+
+/// Models on disk, as `models/<id>/<version>/`, newest version of each id first.
+///
+/// A partially-extracted install is a `.<version>.installing` sibling, and those
+/// are skipped: offering one as a choice would name a model that cannot load.
+pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel> {
+    let models_dir = app_data_dir.join("models");
+    let mut found = Vec::new();
+    let Ok(model_dirs) = std::fs::read_dir(&models_dir) else { return found };
+    for model_dir in model_dirs.flatten() {
+        if !model_dir.file_type().map(|kind| kind.is_dir()).unwrap_or(false) { continue }
+        let id = model_dir.file_name().to_string_lossy().to_string();
+        if !safe_model_identity_segment(&id) || id.starts_with('.') { continue }
+        let Ok(versions) = std::fs::read_dir(model_dir.path()) else { continue };
+        let mut ids: Vec<String> = versions
+            .flatten()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            // `model_install_roots` stages an extraction as `.<version>.installing`,
+            // and that leading dot is the only thing separating a finished install
+            // from a half-written one.
+            .filter(|version| safe_model_identity_segment(version) && !version.starts_with('.'))
+            .collect();
+        ids.sort_by(|left, right| right.cmp(left));
+        for version in ids {
+            let root = model_dir.path().join(&version);
+            let scale = read_model_manifest(&root).map(|manifest| manifest.scale);
+            let kind = if decensor::bundle_in(&root).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE };
+            found.push(InstalledModel { id: id.clone(), version, scale, kind: kind.to_string() });
+        }
+    }
+    found.sort_by(|left, right| left.id.cmp(&right.id));
+    found
+}
+
+/// Newest installed version of `model_id` that is actually runnable: it has a
+/// manifest (so a scale) and exactly one ONNX file.
+fn resolve_installed_model(
+    app_data_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<(std::path::PathBuf, ModelManifest)> {
+    installed_models_in(app_data_dir)
+        .into_iter()
+        .filter(|model| model.id == model_id)
+        .find_map(|model| {
+            let root = app_data_dir.join("models").join(&model.id).join(&model.version);
+            let manifest = read_model_manifest(&root)?;
+            model_file_in(&root).map(|path| (path, manifest))
+        })
+}
+
+/// Lets the settings page offer the models that are actually installed instead
+/// of asking the user to type a model name and hope.
+#[tauri::command]
+pub fn inference_list_models(app: tauri::AppHandle) -> crate::domain::result::CommandResult<Vec<InstalledModel>> {
+    use tauri::Manager;
+    match app.path().app_data_dir() {
+        Ok(app_data_dir) => crate::domain::result::CommandResult::success(installed_models_in(&app_data_dir)),
+        Err(error) => crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false),
+    }
+}
+
+/// Installs a de-censoring bundle by copying one out of an existing Aletheia-Lens
+/// directory, since it is far too large to hand over as bytes. See
+/// `decensor::install_bundle_from` for why.
+#[tauri::command]
+pub fn inference_install_decensor_bundle(
+    app: tauri::AppHandle,
+    source_dir: String,
+    version: Option<String>,
+) -> crate::domain::result::CommandResult<InstalledModel> {
+    use tauri::Manager;
+    const BUNDLE_ID: &str = "aletheia-lens";
+    let version = version.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "1".to_string());
+    let result = app.path().app_data_dir()
+        .map_err(|error| InferenceError::InvalidInput(error.to_string()))
+        .and_then(|app_data_dir| {
+            let (staging, install) = model_install_roots(&app_data_dir, BUNDLE_ID, &version)?;
+            decensor::install_bundle_from(std::path::Path::new(&source_dir), &staging, &install)?;
+            Ok(install)
+        });
+    match result {
+        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
+            id: BUNDLE_ID.to_string(),
+            version,
+            // A bundle has four ONNX files and no single scale of its own.
+            scale: None,
+            kind: if decensor::bundle_in(&install).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE }.to_string(),
+        }),
+        Err(InferenceError::InvalidInput(message)) | Err(InferenceError::InvalidManifest(message)) => {
+            crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
+        }
+        Err(error) => crate::domain::result::CommandResult::failure("UNKNOWN", format!("{error:?}"), true),
+    }
+}
 
 #[tauri::command]
 pub fn inference_install_model(
@@ -297,9 +558,11 @@ pub fn inference_install_model(
         });
 
     match result {
-        Ok(_) => crate::domain::result::CommandResult::success(InstalledModel {
+        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
             id: input.manifest.id,
             version: input.manifest.version,
+            scale: Some(input.manifest.scale),
+            kind: if decensor::bundle_in(&install).is_some() { MODEL_KIND_DECENSOR } else { MODEL_KIND_UPSCALE }.to_string(),
         }),
         Err(InferenceError::InvalidInput(message)) => {
             crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
@@ -399,11 +662,18 @@ pub fn inference_clear_cache(
     }
 }
 
+/// Picks the most preferred backend that the model supports and the device has
+/// not blacklisted. Falls back to CPU, which every build can run.
 pub fn select_backend(supported: &[String], blacklist: &[String]) -> BackendId {
-    if supported.iter().any(|backend| backend == "cpu") && !blacklist.iter().any(|backend| backend == "cpu") {
-        return BackendId::Cpu;
-    }
-    BackendId::Cpu
+    let allowed = |backend: BackendId| {
+        let name = backend.as_str();
+        supported.iter().any(|value| value.eq_ignore_ascii_case(name))
+            && !blacklist.iter().any(|value| value.eq_ignore_ascii_case(name))
+    };
+    platform_backend_preference()
+        .into_iter()
+        .find(|backend| allowed(*backend))
+        .unwrap_or(BackendId::Cpu)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -423,6 +693,299 @@ impl serde::Serialize for CpuRgbaOutput {
         state.serialize_field("height", &self.height)?;
         state.end()
     }
+}
+
+/// Upscales one cached reader page and stores the result as the `enhanced`
+/// rendition, keyed by the model version so a model change does not serve a
+/// stale image.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpscalePageInput {
+    pub scope_id: String,
+    pub archive_id: String,
+    pub page_index: i64,
+    #[serde(default)]
+    pub scale: Option<u32>,
+    /// Installed model to run, by id. Absent (or not installed) falls back to the
+    /// nearest-neighbour scaler, which is honest about being model-free rather
+    /// than failing the page.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub tile_size: Option<u32>,
+    #[serde(default)]
+    pub tile_sleep_ms: Option<u64>,
+    /// When set, the upscaler reads this page's de-censored rendition instead of
+    /// the plain one, so the two pipelines chain in the order that matters: fill
+    /// the censored regions at the original scale — which is what the detector and
+    /// the inpainter were trained on — and enlarge the finished page afterwards.
+    /// Upscaling first would hand the inpainter interpolated pixels and smeared
+    /// mosaic blocks.
+    #[serde(default)]
+    pub decensor_model: Option<String>,
+}
+
+#[tauri::command]
+pub fn inference_upscale_page(
+    input: UpscalePageInput,
+    database: tauri::State<'_, crate::db::Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    use tauri::Manager;
+    let app_data = match app.path().app_data_dir() {
+        Ok(value) => value,
+        Err(error) => return Ok(crate::domain::result::into_binary_response(
+            crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        )),
+    };
+    let result = upscale_cached_page(&database, &app_data, &input);
+    Ok(crate::domain::result::into_binary_response(result))
+}
+
+fn upscale_cached_page(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    input: &UpscalePageInput,
+) -> crate::domain::result::CommandResult<Vec<u8>> {
+    use crate::cache::{CacheImageIdentity, load_image_cache, store_image_cache};
+    use crate::domain::result::CommandResult;
+
+    if input.page_index < 0 {
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
+    }
+    // A model's scale is fixed by the model, so it wins over the requested one.
+    // Only the model-free path is free to honour the request.
+    let model = input
+        .model_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| resolve_installed_model(app_data, id));
+    let scale = match &model {
+        Some((_, manifest)) => manifest.scale.clamp(1, 4),
+        None => input.scale.unwrap_or(2).clamp(1, 4),
+    };
+    // The revision keys the cache: switching model, version or scale has to miss
+    // rather than serve the previous model's output. So does chaining onto the
+    // de-censored page, which is a different input entirely.
+    let decensor = input
+        .decensor_model
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| resolve_installed_bundle(app_data, id))
+        .map(|(_, manifest)| format!("{}@{}", manifest.id, manifest.version));
+    let revision = match &model {
+        Some((_, manifest)) => format!("x{scale}:{}@{}", manifest.id, manifest.version),
+        None => format!("x{scale}:nearest"),
+    };
+    let revision = match &decensor {
+        Some(bundle) => format!("{revision}+dc:{bundle}"),
+        None => revision,
+    };
+    let mut enhanced = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "enhanced", input.page_index);
+    enhanced.revision = Some(revision);
+    // Chaining reads the de-censored rendition as the source. Its revision has to
+    // match what the de-censoring command wrote, or this looks for an entry that
+    // does not exist.
+    let source = match &decensor {
+        Some(bundle) => {
+            let mut identity = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "decensored", input.page_index);
+            identity.revision = Some(bundle.clone());
+            identity
+        }
+        None => CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index),
+    };
+
+    let connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match load_image_cache(&connection, app_data, &enhanced) {
+        Ok(Some(image)) => return CommandResult::success(image.bytes),
+        Ok(None) => {}
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    }
+    let page = match load_image_cache(&connection, app_data, &source) {
+        Ok(Some(image)) => image,
+        // Retryable on purpose: when chaining, the de-censored page may still be
+        // being produced, and the caller asks again once it lands.
+        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+
+    let decoded = match image::load_from_memory(&page.bytes) {
+        Ok(value) => value.to_rgba8(),
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
+    };
+    let (width, height) = (decoded.width(), decoded.height());
+    let max_pixels = model.as_ref().map_or(64_000_000, |(_, manifest)| manifest.max_pixels);
+    // An installed model that will not load is reported, not silently swapped for
+    // the nearest-neighbour scaler: the user chose a model and would otherwise
+    // see a blurry page with no explanation.
+    let onnx = match &model {
+        Some((path, manifest)) => match onnx::OnnxEngine::open(path, manifest.scale, max_pixels) {
+            Ok(engine) => Some(engine),
+            Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false),
+        },
+        None => None,
+    };
+    let fallback = upscale::NearestNeighbourEngine { scale, max_pixels };
+    let engine: &dyn upscale::UpscaleEngine = match &onnx {
+        Some(engine) => engine,
+        None => &fallback,
+    };
+    let options = upscale::UpscaleOptions {
+        tile_size: input.tile_size.unwrap_or(upscale::DEFAULT_TILE_SIZE).max(16),
+        tile_sleep_ms: input.tile_sleep_ms.unwrap_or(0),
+        max_pixels,
+        ..upscale::UpscaleOptions::default()
+    };
+    let upscaled = match upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options) {
+        Ok(value) => value,
+        Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels }) => {
+            return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("Image pixel budget exceeded: {pixels} > {max_pixels}"), false)
+        }
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", format!("{error:?}"), false),
+    };
+
+    // Served at twice the page, whatever the model's own factor is. A x4 model
+    // produces sixteen times the pixels of the page — a 1400x2000 scan becomes
+    // 5600x8000, which is 45 MB of RGBA to encode, cache, decode and then draw
+    // into a slot a fraction of that size. Two is the point where the detail is
+    // visible and the cost is not.
+    let (final_rgba, final_width, final_height) = fit_enhanced_output(
+        &upscaled.rgba,
+        upscaled.width,
+        upscaled.height,
+        width,
+        height,
+    );
+
+    let mut encoded = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+    {
+        use image::ImageEncoder;
+        if let Err(error) = encoder.write_image(&final_rgba, final_width, final_height, image::ExtendedColorType::Rgba8) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        }
+    }
+    if let Err(error) = store_image_cache(&connection, app_data, &enhanced, "image/png", &encoded) {
+        // Serving the image still works without a cache entry.
+        eprintln!("yomika: enhanced image cache write failed: {error}");
+    }
+    CommandResult::success(encoded)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecensorPageInput {
+    pub scope_id: String,
+    pub archive_id: String,
+    pub page_index: i64,
+    /// The installed de-censoring bundle to run.
+    pub model_id: String,
+}
+
+#[tauri::command]
+pub fn inference_decensor_page(
+    input: DecensorPageInput,
+    database: tauri::State<'_, crate::db::Database>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    use tauri::Manager;
+    let app_data = match app.path().app_data_dir() {
+        Ok(value) => value,
+        Err(error) => return Ok(crate::domain::result::into_binary_response(
+            crate::domain::result::CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        )),
+    };
+    let result = decensor_cached_page(&database, &app_data, &input);
+    Ok(crate::domain::result::into_binary_response(result))
+}
+
+/// The newest installed version of `model_id` that is a complete de-censoring
+/// bundle, with its manifest for the cache revision.
+fn resolve_installed_bundle(
+    app_data_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<(decensor::DecensorBundle, ModelManifest)> {
+    installed_models_in(app_data_dir)
+        .into_iter()
+        .filter(|model| model.id == model_id && model.kind == MODEL_KIND_DECENSOR)
+        .find_map(|model| {
+            let root = app_data_dir.join("models").join(&model.id).join(&model.version);
+            let manifest = read_model_manifest(&root)?;
+            decensor::bundle_in(&root).map(|bundle| (bundle, manifest))
+        })
+}
+
+fn decensor_cached_page(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    input: &DecensorPageInput,
+) -> crate::domain::result::CommandResult<Vec<u8>> {
+    use crate::cache::{load_image_cache, store_image_cache, CacheImageIdentity};
+    use crate::domain::result::CommandResult;
+
+    if input.page_index < 0 {
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
+    }
+    let Some((bundle, manifest)) = resolve_installed_bundle(app_data, &input.model_id) else {
+        return CommandResult::failure(
+            "INFERENCE_UNAVAILABLE",
+            "No complete de-censoring bundle is installed under that id",
+            false,
+        );
+    };
+    // Keyed on the bundle version: a newer bundle has to miss rather than serve the
+    // previous one's output.
+    let mut decensored = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "decensored", input.page_index);
+    decensored.revision = Some(format!("{}@{}", manifest.id, manifest.version));
+    let source = CacheImageIdentity::new(&input.scope_id, &input.archive_id, "reader-page", input.page_index);
+
+    let connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match load_image_cache(&connection, app_data, &decensored) {
+        Ok(Some(image)) => return CommandResult::success(image.bytes),
+        Ok(None) => {}
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    }
+    let page = match load_image_cache(&connection, app_data, &source) {
+        Ok(Some(image)) => image,
+        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let decoded = match image::load_from_memory(&page.bytes) {
+        Ok(value) => value.to_rgba8(),
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
+    };
+    let (width, height) = (decoded.width(), decoded.height());
+    let mut rgba = decoded.into_raw();
+    let engines = match decensor_engines_for(&bundle) {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false),
+    };
+    if let Err(error) = decensor::decensor_page(&engines, &mut rgba, width, height) {
+        return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false);
+    }
+
+    let mut encoded = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+        if let Err(error) = encoder.write_image(&rgba, width, height, image::ExtendedColorType::Rgba8) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        }
+    }
+    // A page with nothing censored is cached unchanged on purpose: detection is the
+    // expensive half, and re-running it on every view would cost seconds to reach
+    // the same answer.
+    if let Err(error) = store_image_cache(&connection, app_data, &decensored, "image/png", &encoded) {
+        // Serving the image still works without a cache entry.
+        eprintln!("yomika: de-censored image cache write failed: {error}");
+    }
+    CommandResult::success(encoded)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -559,7 +1122,259 @@ pub fn cpu_scale_rgba(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_enhanced_page_is_served_at_twice_the_source() {
+        // The installed models are x4, which is sixteen times the pixels of the
+        // page: a 1400x2000 scan would be encoded, cached and decoded at
+        // 5600x8000 to be drawn into a slot a fraction of that. Two keeps the
+        // detail and drops three quarters of the bytes.
+        let source = (10_u32, 8_u32);
+        let quadrupled = vec![0_u8; (source.0 * 4) as usize * (source.1 * 4) as usize * 4];
+        let (rgba, width, height) = fit_enhanced_output(&quadrupled, source.0 * 4, source.1 * 4, source.0, source.1);
+        assert_eq!((width, height), (source.0 * 2, source.1 * 2));
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+
+        // Already at or below the target: handed back untouched rather than
+        // resampled for nothing.
+        let doubled = vec![7_u8; (source.0 * 2) as usize * (source.1 * 2) as usize * 4];
+        let (same, w, h) = fit_enhanced_output(&doubled, source.0 * 2, source.1 * 2, source.0, source.1);
+        assert_eq!((w, h), (source.0 * 2, source.1 * 2));
+        assert!(matches!(same, std::borrow::Cow::Borrowed(_)));
+    }
     use super::*;
+
+    #[test]
+    fn backend_selection_prefers_the_platform_accelerator_then_falls_back() {
+        let all = ["directml", "coreml", "nnapi", "cpu"].map(str::to_string);
+        let expected = platform_backend_preference()[0];
+        assert_eq!(select_backend(&all, &[]), expected);
+
+        // A device blacklist pushes the choice down the preference order.
+        assert_eq!(select_backend(&all, &[expected.as_str().to_string()]), {
+            let mut rest = platform_backend_preference();
+            rest.retain(|backend| *backend != expected);
+            rest[0]
+        });
+
+        // A model that only ships CPU kernels never gets an accelerator.
+        assert_eq!(select_backend(&["cpu".to_string()], &[]), BackendId::Cpu);
+        // Nothing supported at all still yields a runnable backend.
+        assert_eq!(select_backend(&[], &["cpu".to_string()]), BackendId::Cpu);
+    }
+
+    #[test]
+    fn probe_reports_the_platform_backends_it_would_use() {
+        let capabilities = match inference_probe() {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            _ => panic!("probe must succeed"),
+        };
+        assert!(capabilities.backends.contains(&"cpu".to_string()));
+        assert_eq!(
+            capabilities.hardware_acceleration,
+            platform_backend_preference().iter().any(|backend| backend.is_hardware_accelerated()),
+        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(capabilities.backends.first().map(String::as_str), Some("directml"));
+        }
+    }
+
+    #[test]
+    fn chaining_reads_the_de_censored_page_rather_than_the_plain_one() {
+        // The order matters and only one order is right: the detector and the
+        // inpainter were trained at page scale, so the regions are filled first and
+        // the finished page is what gets enlarged. This proves the chain by leaving
+        // the plain rendition out of the cache entirely — an upscaler that still
+        // read `reader-page` could not produce anything at all.
+        use crate::cache::{store_image_cache, CacheImageIdentity};
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&app_data);
+        // An installed bundle: the four files are what makes a directory a bundle,
+        // and none of them is opened on this path.
+        let install = app_data.join("models").join("aletheia").join("1");
+        for (directory, file) in [
+            ("mrcnn", "weights.onnx"),
+            ("deepcreampy", "bar.onnx"),
+            ("deepcreampy", "mosaic.onnx"),
+            ("esrgan", "4x-Fatal-Pixels.onnx"),
+        ] {
+            std::fs::create_dir_all(install.join(directory)).unwrap();
+            std::fs::write(install.join(directory).join(file), b"stub").unwrap();
+        }
+        let manifest = ModelManifest { id: "aletheia".into(), version: "1".into(), ..model_manifest(b"x") };
+        std::fs::write(install.join(MODEL_MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let mut page = Vec::new();
+        {
+            use image::ImageEncoder;
+            let rgba = vec![9_u8, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255];
+            image::codecs::png::PngEncoder::new(&mut page)
+                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        // Only the de-censored rendition exists, under the revision the de-censoring
+        // command writes.
+        let mut decensored = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 0);
+        decensored.revision = Some("aletheia@1".to_string());
+        store_image_cache(&connection, &app_data, &decensored, "image/png", &page).unwrap();
+
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+        let chained = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None,
+            decensor_model: Some("aletheia".into()),
+        });
+        let bytes = match chained {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("chaining did not read the de-censored page: {other:?}"),
+        };
+        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 4);
+
+        // Without the bundle it looks for the plain page, which is not there.
+        let unchained = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
+        });
+        assert!(
+            matches!(unchained, crate::domain::result::CommandResult::Failure { .. }),
+            "the unchained path must read the plain rendition, which this test never cached",
+        );
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn upscaling_a_cached_page_reuses_the_enhanced_rendition() {
+        use crate::cache::{CacheImageIdentity, load_image_cache, store_image_cache};
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-upscale-{}", std::process::id()));
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        // A tiny red PNG stands in for a cached reader page.
+        let mut page = Vec::new();
+        {
+            use image::ImageEncoder;
+            let rgba = vec![255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+            image::codecs::png::PngEncoder::new(&mut page)
+                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
+        store_image_cache(&connection, &app_data, &source, "image/png", &page).unwrap();
+
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+        let input = UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: Some(2), model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
+        };
+
+        let first = match upscale_cached_page(&database, &app_data, &input) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("expected success, got {other:?}"),
+        };
+        let decoded = image::load_from_memory(&first).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 4), "a 2x model doubles both axes");
+
+        // The result is cached under the enhanced rendition, keyed by scale and
+        // by which engine produced it — a later model must not be served this.
+        let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
+        enhanced.revision = Some("x2:nearest".into());
+        let connection = database.connection.lock().unwrap();
+        assert!(load_image_cache(&connection, &app_data, &enhanced).unwrap().is_some());
+        drop(connection);
+
+        let second = match upscale_cached_page(&database, &app_data, &input) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("expected cache hit, got {other:?}"),
+        };
+        assert_eq!(first, second);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn upscaling_reports_a_page_that_is_not_cached_yet() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let app_data = std::env::temp_dir().join(format!("yomika-upscale-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&app_data).unwrap();
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+
+        let result = upscale_cached_page(&database, &app_data, &UpscalePageInput {
+            scope_id: "scope-a".into(), archive_id: "archive-a".into(), page_index: 0,
+            scale: None, model_id: None, tile_size: None, tile_sleep_ms: None, decensor_model: None,
+        });
+
+        assert!(matches!(result, crate::domain::result::CommandResult::Failure { .. }));
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    /// The whole chain the reader takes, on the real model when it is present:
+    /// a ZIP goes through `install_model_archive`, the installed directory is
+    /// resolved back by id, and the engine built from it upscales a tile.
+    ///
+    /// The temp directory keeps this independent of whatever is installed on
+    /// this machine; `docs/` is gitignored, so a fresh clone skips it.
+    #[test]
+    fn the_downloaded_model_installs_and_resolves_into_a_working_engine() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/models/realesr-general-x4v3.onnx");
+        if !source.exists() {
+            eprintln!("skipping: {} is not present", source.display());
+            return;
+        }
+        let model_bytes = std::fs::read(&source).expect("read the downloaded model");
+
+        let base = std::env::temp_dir().join("yomika-install-real-model");
+        let _ = std::fs::remove_dir_all(&base);
+        let (staging, install) = model_install_roots(&base, "realesr-general-x4v3", "2026.09.04")
+            .expect("install roots");
+
+        let mut manifest = model_manifest(&model_bytes);
+        manifest.id = "realesr-general-x4v3".into();
+        manifest.version = "2026.09.04".into();
+        manifest.scale = 4;
+        install_model_archive(&model_zip(&[("model.onnx", &model_bytes)]), &manifest, &staging, &install)
+            .expect("install the downloaded model");
+
+        let (path, resolved) = resolve_installed_model(&base, "realesr-general-x4v3")
+            .expect("resolve the installed model");
+        assert_eq!(path, install.join("model.onnx"));
+        assert_eq!(resolved, manifest, "the manifest must survive installation verbatim");
+
+        let engine = onnx::OnnxEngine::open(&path, resolved.scale, resolved.max_pixels)
+            .expect("open the installed model");
+        let rgba = vec![128_u8; 8 * 8 * 4];
+        let output = upscale::UpscaleEngine::upscale_tile(&engine, &rgba, 8, 8)
+            .expect("upscale a tile with the installed model");
+        assert_eq!(output.len(), 32 * 32 * 4, "a x4 model turns 8x8 into 32x32");
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     fn model_manifest(bytes: &[u8]) -> ModelManifest {
         use sha2::{Digest, Sha256};
@@ -714,6 +1529,61 @@ mod tests {
     }
 
     #[test]
+    fn installed_models_skip_partial_installs_and_report_newest_version_first() {
+        let base = std::env::temp_dir().join("yomika-installed-models");
+        let _ = std::fs::remove_dir_all(&base);
+        let models = base.join("models");
+        for path in [
+            models.join("realesr-general").join("2026.08.1"),
+            models.join("realesr-general").join("2026.09.2"),
+            // A half-finished extraction, and a name model_install_roots would
+            // never produce: neither can be selected.
+            models.join("realesr-general").join(".2026.10.0.installing"),
+            models.join("waifu2x").join("1"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        // Only one of them records a manifest, so only one has a usable scale.
+        std::fs::write(
+            models.join("realesr-general").join("2026.09.2").join(MODEL_MANIFEST_FILE),
+            serde_json::to_vec(&model_manifest(b"x")).unwrap(),
+        ).unwrap();
+
+        assert_eq!(installed_models_in(&base), vec![
+            InstalledModel { id: "realesr-general".into(), version: "2026.09.2".into(), scale: Some(2), kind: MODEL_KIND_UPSCALE.into() },
+            InstalledModel { id: "realesr-general".into(), version: "2026.08.1".into(), scale: None, kind: MODEL_KIND_UPSCALE.into() },
+            InstalledModel { id: "waifu2x".into(), version: "1".into(), scale: None, kind: MODEL_KIND_UPSCALE.into() },
+        ]);
+        // No models directory at all is an empty list, not an error: a fresh
+        // install has nowhere to look yet.
+        assert!(installed_models_in(&base.join("elsewhere")).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolving_a_model_needs_both_a_manifest_and_exactly_one_onnx_file() {
+        let base = std::env::temp_dir().join("yomika-resolve-model");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("models").join("realesr").join("1");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Manifest but no model file.
+        std::fs::write(root.join(MODEL_MANIFEST_FILE), serde_json::to_vec(&model_manifest(b"x")).unwrap()).unwrap();
+        assert!(resolve_installed_model(&base, "realesr").is_none());
+
+        std::fs::write(root.join("model.onnx"), b"onnx").unwrap();
+        let (path, manifest) = resolve_installed_model(&base, "realesr").expect("resolved model");
+        assert_eq!(path, root.join("model.onnx"));
+        assert_eq!(manifest.scale, 2);
+
+        // Two ONNX files is ambiguous: refusing beats picking one at random.
+        std::fs::write(root.join("other.onnx"), b"onnx").unwrap();
+        assert!(model_file_in(&root).is_none());
+        assert!(resolve_installed_model(&base, "realesr").is_none());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn model_archive_install_extracts_validated_model_then_publishes_atomically() {
         let model = b"valid onnx model";
         let archive = model_zip(&[("model.onnx", model), ("assets/config.json", b"{}")]);
@@ -725,6 +1595,9 @@ mod tests {
         assert_eq!(installed, install);
         assert_eq!(std::fs::read(install.join("model.onnx")).unwrap(), model);
         assert_eq!(std::fs::read(install.join("assets/config.json")).unwrap(), b"{}");
+        // The manifest travels with the model, because nothing else records the
+        // scale the upscaler needs.
+        assert_eq!(read_model_manifest(&install).expect("installed manifest"), manifest);
         assert!(!staging.exists());
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -803,8 +1676,10 @@ mod tests {
     }
 
     #[test]
-    fn backend_selector_always_falls_back_to_cpu() {
-        assert_eq!(select_backend(&["directml".into(), "cpu".into()], &[]), BackendId::Cpu);
+    fn backend_selector_falls_back_to_cpu_when_nothing_else_is_usable() {
+        // Accelerators the platform does not have are never chosen, and an
+        // unsupported or fully blacklisted set still yields a runnable backend.
+        assert_eq!(select_backend(&["nnapi".into(), "coreml".into()], &[]), BackendId::Cpu);
         assert_eq!(select_backend(&["cpu".into()], &["cpu".into()]), BackendId::Cpu);
     }
 

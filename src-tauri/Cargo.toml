@@ -28,5 +28,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 
 [dev-dependencies]
