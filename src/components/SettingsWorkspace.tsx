@@ -84,6 +84,14 @@ export function SettingsWorkspace() {
     setModelPending(false);
   }
 
+  async function fetchModelManifest() {
+    setModelPending(true); setModelMessage(undefined);
+    const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
+    const result = await inferenceRepository.fetchReleaseManifest(prefix, 'Kelcoin/Yomika', 'v1');
+    if (result.ok) { setModelManifest(result.value); setModelMessage('已获取模型清单'); } else setModelMessage(result.error.message);
+    setModelPending(false);
+  }
+
   useEffect(() => {
     const requested = new URLSearchParams(location.search).get('section');
     if (requested && settingsSections.some((section) => section.id === `settings-${requested}`)) {
@@ -285,6 +293,7 @@ export function SettingsWorkspace() {
             </select>
           </label>
           {modelMirror === 'custom' && <label className="preference-select">加速前缀<input value={modelPrefix} onChange={(event) => setModelPrefix(event.target.value)} placeholder="https://example.com/" /></label>}
+          <button type="button" disabled={modelPending} onClick={() => void fetchModelManifest()}>获取最新模型清单</button>
           <label className="preference-select">导入模型压缩包
             <input type="file" accept=".json,application/json" disabled={modelPending} onChange={async (event) => { const file = event.target.files?.[0]; if (file) { try { setModelManifest(JSON.parse(await file.text())); setModelMessage('已读取模型清单'); } catch { setModelMessage('模型清单 JSON 无效'); } } }} />
           </label>
