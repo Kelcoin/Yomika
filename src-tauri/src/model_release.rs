@@ -82,6 +82,20 @@ pub fn model_release_validate(manifest: ModelReleaseManifest) -> crate::domain::
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDownloadInput { pub url: String, pub asset: ReleaseAsset, pub destination: String }
+
+#[tauri::command]
+pub fn model_release_download(input: ModelDownloadInput) -> crate::domain::result::CommandResult<()> {
+    let destination = std::path::PathBuf::from(input.destination);
+    if !destination.is_absolute() { return crate::domain::result::CommandResult::failure("INVALID_INPUT", "destination must be absolute", false); }
+    match download_asset(&input.url, &input.asset, &destination) {
+        Ok(()) => crate::domain::result::CommandResult::success(()),
+        Err(error) => crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

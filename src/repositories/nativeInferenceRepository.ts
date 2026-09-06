@@ -37,6 +37,10 @@ export class NativeInferenceRepository {
     return invokeCommand('model_release_validate', { manifest }, z.undefined());
   }
 
+  downloadReleaseAsset(input: { url: string; asset: unknown; destination: string }): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_download', { input }, z.undefined());
+  }
+
   releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
     return invokeCommand('model_release_url', { prefix, ownerRepo, tag, path }, z.string());
   }
