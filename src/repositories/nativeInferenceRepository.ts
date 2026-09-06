@@ -33,6 +33,13 @@ export interface CpuScaleInput {
 export type CpuRgbaOutput = z.infer<typeof CpuRgbaOutputSchema>;
 
 export class NativeInferenceRepository {
+  validateReleaseManifest(manifest: unknown): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_validate', { manifest }, z.undefined());
+  }
+
+  releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
+    return invokeCommand('model_release_url', { prefix, ownerRepo, tag, path }, z.string());
+  }
   static modelAssetUrl(mirror: ModelMirrorId, ownerRepo: string, tag: string, path: string, customPrefix = ''): string {
     return buildModelAssetUrl(mirrorPrefix(mirror, customPrefix), ownerRepo, tag, path);
   }
