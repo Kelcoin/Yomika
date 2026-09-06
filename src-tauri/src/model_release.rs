@@ -91,6 +91,24 @@ pub fn validate_import_directory(root: &std::path::Path, manifest: &ModelRelease
     Ok(())
 }
 
+pub fn validate_import_archive(bytes: &[u8], manifest: &ModelReleaseManifest) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("invalid model archive: {e}"))?;
+    let root = std::env::temp_dir().join(format!("yomika-model-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root); std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let result = (|| {
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            if entry.is_dir() { continue; }
+            let name = entry.name().replace('\\', "/");
+            if name.starts_with('/') || name.split('/').any(|p| p.is_empty() || p == "." || p == ".." || p.contains(':')) { return Err("unsafe model archive path".into()); }
+            let target = root.join(&name); if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            let mut out = std::fs::File::create(target).map_err(|e| e.to_string())?; std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        }
+        validate_import_directory(&root, manifest)
+    })();
+    let _ = std::fs::remove_dir_all(&root); result
+}
+
 #[tauri::command]
 pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> String {
     asset_url(&prefix, &owner_repo, &tag, &path)
@@ -131,6 +149,18 @@ pub struct ModelImportInput { pub root: String, pub manifest: ModelReleaseManife
 #[tauri::command]
 pub fn model_release_validate_import(input: ModelImportInput) -> crate::domain::result::CommandResult<()> {
     match validate_import_directory(std::path::Path::new(&input.root), &input.manifest) {
+        Ok(()) => crate::domain::result::CommandResult::success(()),
+        Err(error) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", error, false),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelArchiveImportInput { pub archive: Vec<u8>, pub manifest: ModelReleaseManifest }
+
+#[tauri::command]
+pub fn model_release_validate_archive(input: ModelArchiveImportInput) -> crate::domain::result::CommandResult<()> {
+    match validate_import_archive(&input.archive, &input.manifest) {
         Ok(()) => crate::domain::result::CommandResult::success(()),
         Err(error) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", error, false),
     }
