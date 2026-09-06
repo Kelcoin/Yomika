@@ -5,6 +5,7 @@ mod diagnostics;
 mod dedup;
 mod domain;
 mod inference;
+mod model_release;
 mod network;
 mod settings;
 
