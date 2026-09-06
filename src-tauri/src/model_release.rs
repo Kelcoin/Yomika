@@ -164,6 +164,27 @@ pub fn model_release_download_bundle(app: tauri::AppHandle, input: ModelBundleDo
 }
 
 #[tauri::command]
+pub fn model_release_download_default(app: tauri::AppHandle) -> crate::domain::result::CommandResult<()> {
+    use tauri::Manager;
+    let result = app.path().app_data_dir().map_err(|e| e.to_string()).and_then(|data| {
+        let manifest_url = asset_url("", "Kelcoin/Yomika", "v1", "v1.manifest.json");
+        let manifest = reqwest::blocking::get(manifest_url).map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json::<ModelReleaseManifest>().map_err(|e| e.to_string())?;
+        let root = data.join("models").join("yomika-default");
+        let staging = root.with_file_name(".yomika-default.installing");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        for asset in &manifest.assets {
+            let target = staging.join(asset.path.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+            if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            download_asset(&asset_url("", "Kelcoin/Yomika", &manifest.tag, &asset.path), asset, &target)?;
+        }
+        std::fs::write(staging.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        std::fs::rename(staging, root).map_err(|e| e.to_string())
+    });
+    match result { Ok(()) => crate::domain::result::CommandResult::success(()), Err(e) => crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", e, true) }
+}
+
+#[tauri::command]
 pub fn model_release_download(app: tauri::AppHandle, input: ModelDownloadInput) -> crate::domain::result::CommandResult<()> {
     let destination = std::path::PathBuf::from(input.destination);
     if !destination.is_absolute() { return crate::domain::result::CommandResult::failure("INVALID_INPUT", "destination must be absolute", false); }
