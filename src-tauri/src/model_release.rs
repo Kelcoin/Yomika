@@ -1,5 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+use std::sync::{Mutex, OnceLock};
+static CANCELLED_DOWNLOADS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+fn cancelled() -> &'static Mutex<std::collections::HashSet<String>> { CANCELLED_DOWNLOADS.get_or_init(|| Mutex::new(std::collections::HashSet::new())) }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +55,8 @@ pub fn verify_bytes(asset: &ReleaseAsset, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(url: &str, asset: &ReleaseAsset, destination: &std::path::Path, mut progress: F) -> Result<(), String> {
+    let key = destination.to_string_lossy().to_string();
+    cancelled().lock().unwrap().remove(&key);
     let mut response = reqwest::blocking::get(url).map_err(|e| format!("download failed: {e}"))?;
     if !response.status().is_success() { return Err(format!("download HTTP {}", response.status())); }
     let parent = destination.parent().ok_or_else(|| "destination has no parent".to_string())?;
@@ -61,7 +66,7 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(url: &str, asset
         let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new(); let mut total = 0u64; let mut buffer = [0u8; 1024 * 128];
         let length = response.content_length();
-        loop { let read = response.read(&mut buffer).map_err(|e| e.to_string())?; if read == 0 { break; } file.write_all(&buffer[..read]).map_err(|e| e.to_string())?; hasher.update(&buffer[..read]); total += read as u64; progress(total, length); }
+        loop { if cancelled().lock().unwrap().contains(&key) { return Err("download cancelled".into()); } let read = response.read(&mut buffer).map_err(|e| e.to_string())?; if read == 0 { break; } file.write_all(&buffer[..read]).map_err(|e| e.to_string())?; hasher.update(&buffer[..read]); total += read as u64; progress(total, length); }
         if total != asset.size { return Err(format!("size mismatch for {}", asset.path)); }
         if format!("{:x}", hasher.finalize()) != asset.sha256.to_ascii_lowercase() { return Err(format!("sha256 mismatch for {}", asset.path)); }
         std::fs::rename(&temp, destination).map_err(|e| e.to_string())
@@ -111,6 +116,12 @@ pub fn model_release_download(app: tauri::AppHandle, input: ModelDownloadInput) 
         Ok(()) => crate::domain::result::CommandResult::success(()),
         Err(error) => crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true),
     }
+}
+
+#[tauri::command]
+pub fn model_release_cancel(destination: String) -> crate::domain::result::CommandResult<()> {
+    cancelled().lock().unwrap().insert(destination);
+    crate::domain::result::CommandResult::success(())
 }
 
 #[derive(Debug, serde::Deserialize)]
