@@ -139,6 +139,20 @@ pub fn model_release_validate(manifest: ModelReleaseManifest) -> crate::domain::
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownloadInput { pub url: String, pub asset: ReleaseAsset, pub destination: String }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBundleDownloadInput { pub prefix: String, pub owner_repo: String, pub manifest: ModelReleaseManifest, pub destination: String }
+
+#[tauri::command]
+pub fn model_release_download_bundle(app: tauri::AppHandle, input: ModelBundleDownloadInput) -> crate::domain::result::CommandResult<()> {
+    if let Err(error) = validate_manifest(&input.manifest) { return crate::domain::result::CommandResult::failure("INVALID_MANIFEST", error, false); }
+    let root = std::path::PathBuf::from(&input.destination); if !root.is_absolute() { return crate::domain::result::CommandResult::failure("INVALID_INPUT", "destination must be absolute", false); }
+    if root.exists() { return crate::domain::result::CommandResult::failure("MODEL_ALREADY_EXISTS", "destination already exists", false); }
+    if let Err(error) = std::fs::create_dir_all(&root) { return crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error.to_string(), true); }
+    let result = (|| { for asset in &input.manifest.assets { let url = asset_url(&input.prefix, &input.owner_repo, &input.manifest.tag, &asset.path); let target = root.join(asset.path.replace('/', &std::path::MAIN_SEPARATOR.to_string())); if let Some(parent)=target.parent(){std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;} download_asset_with_progress(&url, asset, &target, |done,total| { let _=tauri::Emitter::emit(&app,"model-download-progress",serde_json::json!({"path":asset.path,"completed":done,"total":total})); })?; } Ok::<(),String>(()) })();
+    match result { Ok(()) => crate::domain::result::CommandResult::success(()), Err(error) => { let _=std::fs::remove_dir_all(&root); crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true) } }
+}
+
 #[tauri::command]
 pub fn model_release_download(app: tauri::AppHandle, input: ModelDownloadInput) -> crate::domain::result::CommandResult<()> {
     let destination = std::path::PathBuf::from(input.destination);

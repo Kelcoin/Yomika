@@ -30,7 +30,7 @@ use commands::legacy::import_legacy_export;
 use db::Database;
 use tauri::Manager;
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
-use model_release::{model_release_activate, model_release_cancel, model_release_download, model_release_fetch_manifest, model_release_url, model_release_validate, model_release_validate_archive, model_release_validate_import, model_release_validate_local};
+use model_release::{model_release_activate, model_release_cancel, model_release_download, model_release_download_bundle, model_release_fetch_manifest, model_release_url, model_release_validate, model_release_validate_archive, model_release_validate_import, model_release_validate_local};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -107,6 +107,7 @@ pub fn run() {
             model_release_fetch_manifest,
             model_release_validate,
             model_release_download,
+            model_release_download_bundle,
             model_release_validate_import,
             model_release_cancel,
             model_release_validate_archive,

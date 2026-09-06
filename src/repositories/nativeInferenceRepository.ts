@@ -41,6 +41,10 @@ export class NativeInferenceRepository {
     return invokeCommand('model_release_download', { input }, z.undefined());
   }
 
+  downloadModelBundle(input: { prefix: string; ownerRepo: string; manifest: unknown; destination: string }): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_download_bundle', { input }, z.undefined());
+  }
+
   validateModelImport(root: string, manifest: unknown): Promise<CommandResult<void>> {
     return invokeCommand('model_release_validate_import', { input: { root, manifest } }, z.undefined());
   }
