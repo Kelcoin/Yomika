@@ -174,6 +174,19 @@ pub fn model_release_validate_archive(input: ModelArchiveImportInput) -> crate::
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelLocalImportInput { pub path: String, pub manifest: ModelReleaseManifest }
+
+#[tauri::command]
+pub fn model_release_validate_local(input: ModelLocalImportInput) -> crate::domain::result::CommandResult<()> {
+    let path = std::path::Path::new(&input.path);
+    let result = if path.is_dir() { validate_import_directory(path, &input.manifest) }
+        else if path.is_file() { std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| validate_import_archive(&bytes, &input.manifest)) }
+        else { Err("model path does not exist".into()) };
+    match result { Ok(()) => crate::domain::result::CommandResult::success(()), Err(error) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", error, false) }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelActivateInput { pub staging: String, pub install: String }
 
 #[tauri::command]

@@ -57,6 +57,10 @@ export class NativeInferenceRepository {
     return invokeCommand('model_release_activate', { input: { staging, install } }, z.undefined());
   }
 
+  validateLocalModel(path: string, manifest: unknown): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_validate_local', { input: { path, manifest } }, z.undefined());
+  }
+
   releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
     return invokeCommand('model_release_url', { prefix, ownerRepo, tag, path }, z.string());
   }
