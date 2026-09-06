@@ -30,6 +30,7 @@ use commands::legacy::import_legacy_export;
 use db::Database;
 use tauri::Manager;
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
+use model_release::{model_release_url, model_release_validate};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -102,6 +103,8 @@ pub fn run() {
             inference_validate_model,
             inference_install_model,
             inference_clear_cache,
+            model_release_url,
+            model_release_validate,
             save_eh_account,
             list_eh_accounts,
             search_eh_galleries,

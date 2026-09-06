@@ -50,6 +50,19 @@ pub fn verify_bytes(asset: &ReleaseAsset, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: String) -> String {
+    asset_url(&prefix, &owner_repo, &tag, &path)
+}
+
+#[tauri::command]
+pub fn model_release_validate(manifest: ModelReleaseManifest) -> crate::domain::result::CommandResult<()> {
+    match validate_manifest(&manifest) {
+        Ok(()) => crate::domain::result::CommandResult::success(()),
+        Err(error) => crate::domain::result::CommandResult::failure("INVALID_MANIFEST", error, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
