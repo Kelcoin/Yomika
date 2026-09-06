@@ -57,6 +57,9 @@ export class NativeInferenceRepository {
   downloadModelBundle(input: { prefix: string; ownerRepo: string; manifest: unknown; destination: string }): Promise<CommandResult<void>> {
     return invokeCommand('model_release_download_bundle', { input }, VoidResponseSchema);
   }
+  downloadDefaultModel(): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_download_default', {}, VoidResponseSchema);
+  }
 
   validateModelImport(root: string, manifest: unknown): Promise<CommandResult<void>> {
     return invokeCommand('model_release_validate_import', { input: { root, manifest } }, VoidResponseSchema);
@@ -121,6 +124,7 @@ export class NativeInferenceRepository {
   resume(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_resume', { id }, InferenceJobSchema); }
   validateModel(manifest: ModelManifest, model: number[]): Promise<CommandResult<void>> { return invokeCommand('inference_validate_model', { input: { manifest, model } }, VoidResponseSchema); }
   installModel(manifest: ModelManifest, archive: number[]): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_model', { input: { manifest, archive } }, InstalledModelResponse); }
+  importModelFile(file: number[], filename: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_import_model_file', { input: { file, filename } }, InstalledModelResponse); }
   /** The models actually on disk, so the settings page can offer a choice
    * instead of asking for a model name to be typed from memory. */
   /** Installs a de-censoring bundle by copying it out of a directory the user

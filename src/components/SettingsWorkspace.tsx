@@ -17,9 +17,7 @@ import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
 import { CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
-import { MODEL_MIRROR_PRESETS, buildModelAssetUrl } from '../domain/modelRelease';
 import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
-import { pickDirectory } from '../bridge/filePicker';
 import { MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -60,13 +58,12 @@ function modelOption(model: InstalledModel): { value: string; label: string } {
  * defaults, the cache and the upscaler at once. */const settingsSections = [
   { id: 'settings-general', label: '通用' },
   { id: 'settings-reading', label: '阅读' },
-  { id: 'settings-models', label: '模型' },
   { id: 'settings-appearance', label: '样式' },
   { id: 'settings-eh', label: 'E-Hentai' },
   { id: 'settings-sync', label: '同步' },
   { id: 'settings-advanced', label: '高级' },
-  { id: 'settings-tools', label: '工具' },
   { id: 'settings-about', label: '关于' },
+  { id: 'settings-tools', label: '工具' },
 ] as const;
 
 /** Sections whose content lives inside the single preferences form. */
@@ -105,38 +102,9 @@ export function SettingsWorkspace() {
   const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
-  const [modelMirror, setModelMirror] = useState('direct');
-  const [modelPrefix, setModelPrefix] = useState('');
   const [modelMessage, setModelMessage] = useState<string>();
   const [modelPending, setModelPending] = useState(false);
-  const [modelManifest, setModelManifest] = useState<unknown>();
-  const [modelTag, setModelTag] = useState('v1');
-  const [modelDestination, setModelDestination] = useState('');
-
-  async function validateModelArchive(file: File) {
-    setModelPending(true); setModelMessage(undefined);
-    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-    if (!modelManifest) { setModelMessage('请先选择模型清单 JSON'); setModelPending(false); return; }
-    const result = await inferenceRepository.validateModelArchive(bytes, modelManifest);
-    setModelMessage(result.ok ? '模型验证通过' : result.error.message);
-    setModelPending(false);
-  }
-
-  async function fetchModelManifest() {
-    setModelPending(true); setModelMessage(undefined);
-    const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
-    const result = await inferenceRepository.fetchReleaseManifest(prefix, 'Kelcoin/Yomika', modelTag);
-    if (result.ok) { setModelManifest(result.value); setModelMessage('已获取模型清单'); } else setModelMessage(result.error.message);
-    setModelPending(false);
-  }
-
-  async function downloadModelBundle() {
-    if (!modelManifest || !modelDestination) { setModelMessage('请先获取清单并填写本地目标目录'); return; }
-    setModelPending(true); setModelMessage(undefined);
-    const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
-    const result = await inferenceRepository.downloadModelBundle({ prefix, ownerRepo: 'Kelcoin/Yomika', manifest: modelManifest, destination: modelDestination });
-    setModelMessage(result.ok ? '模型下载完成，请重启后生效' : result.error.message); setModelPending(false);
-  }
+  const modelInputRef = useRef<HTMLInputElement>(null);
 
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
@@ -257,20 +225,31 @@ export function SettingsWorkspace() {
     }
   }
 
-  /** Installs a de-censoring bundle from a directory the user picks. Nothing is
-   * downloaded and nothing is shipped: the files are copied out of an existing
-   * Aletheia-Lens install, because 337 MB neither fits through IPC nor belongs in
-   * the repository. */
+  async function refreshModels() {
+    const models = await inferenceRepository.listModels();
+    if (models.ok) setInstalledModels(models.value);
+  }
+
+  async function importModelFile(file: File) {
+    setModelPending(true); setModelMessage(undefined);
+    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+    const result = await inferenceRepository.importModelFile(bytes, file.name);
+    setModelPending(false);
+    if (!result.ok) { showToast(result.error.message, 'error'); return; }
+    showToast(`模型已导入：${result.value.id}`, 'success');
+    await refreshModels();
+  }
+
+  /** Kept as one action while native fixed-path import is added. */
   async function installDecensorBundle() {
-    const directory = await pickDirectory();
+    const directory = modelInputRef.current?.files?.[0]?.name;
     if (!directory) return;
     setInstallingBundle(true);
     const result = await inferenceRepository.installDecensorBundle(directory);
     setInstallingBundle(false);
     if (!result.ok) { showToast(result.error.message, 'error'); return; }
     showToast(`去码模型包已安装：${result.value.id} · ${result.value.version}`, 'success');
-    const models = await inferenceRepository.listModels();
-    if (models.ok) setInstalledModels(models.value);
+    await refreshModels();
     editPreferences({ decensorModel: result.value.id });
   }
 
@@ -478,7 +457,7 @@ export function SettingsWorkspace() {
                 onChange={(event) => editPreferences({ coverConcurrency: Number(event.target.value) })}
               />
             </label>}
-            {selectedSettingsSection === 'settings-reading' && (
+            {selectedSettingsSection === 'settings-advanced' && (
               /* One switch per feature, and the selects below it offer real
                  choices only. They used to carry the off state themselves — a
                  backend list whose first entry was 关闭, a model list whose first
@@ -487,12 +466,14 @@ export function SettingsWorkspace() {
               <fieldset className="preference-switch">
                 <legend>超分</legend>
                 <label className="preference-toggle">
-                  <input
-                    type="checkbox"
+                  <button
+                    className="switch-control"
+                    type="button"
+                    role="switch"
                     name="upscaleEnabled"
-                    checked={upscaleOn}
+                    aria-checked={upscaleOn}
                     disabled={!runnableModels?.length}
-                    onChange={(event) => editPreferences(event.target.checked
+                    onClick={() => editPreferences(!upscaleOn
                       ? { upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || runnableModels?.[0]?.id || '' }
                       : { upscaleBackend: 'off' })}
                   />
@@ -505,7 +486,7 @@ export function SettingsWorkspace() {
                 )}
               </fieldset>
             )}
-            {selectedSettingsSection === 'settings-reading' && upscaleOn && runnableModels?.length ? <fieldset>
+            {selectedSettingsSection === 'settings-advanced' && upscaleOn && runnableModels?.length ? <fieldset>
               <legend>超分模型</legend>
               {/* The models that are actually installed and runnable, not a name
                   typed from memory: a typo here used to fail silently at upscale
@@ -525,21 +506,22 @@ export function SettingsWorkspace() {
                 onChange={(value) => editPreferences({ upscaleModel: value })}
               />
             </fieldset> : null}
-            {selectedSettingsSection === 'settings-reading' && upscaleOn && runnableModels?.length ? <fieldset>
+            {selectedSettingsSection === 'settings-advanced' && upscaleOn && runnableModels?.length ? <fieldset>
               <legend>超分后端</legend>
               <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'auto', label: '自动（优先 GPU）' }, { value: 'cpu', label: 'CPU' }]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
               <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['auto', '自动（优先 GPU）'], ['cpu', 'CPU']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
             </fieldset> : null}
-            {selectedSettingsSection === 'settings-reading' && (
+            {selectedSettingsSection === 'settings-advanced' && (
               <fieldset className="preference-switch">
                 <legend>去码</legend>
                 <label className="preference-toggle">
-                  <input
-                    type="checkbox"
+                  <button
+                    type="button"
+                    role="switch"
                     name="decensorEnabled"
-                    checked={decensorOn}
+                    aria-checked={decensorOn}
                     disabled={!decensorBundles?.length}
-                    onChange={(event) => editPreferences({ decensorModel: event.target.checked ? decensorBundles?.[0]?.id ?? '' : '' })}
+                    onClick={() => editPreferences({ decensorModel: decensorOn ? '' : decensorBundles?.[0]?.id ?? '' })}
                   />
                   <span>修补被审查的区域</span>
                 </label>
@@ -550,17 +532,12 @@ export function SettingsWorkspace() {
                         detector alone, so it does not travel as bytes and it is not
                         in the repository. Pointing at a directory that already has
                         it costs a copy and nothing else. */}
-                    <p className="server-list-message" role="status">尚未安装去码模型包。选择 Aletheia-Lens 的 <code>_internal/models</code> 目录即可安装（约 337 MB，会复制到本机）。</p>
-                    <div className="settings-actions">
-                      <button className="settings-action" type="button" disabled={installingBundle} aria-busy={installingBundle} onClick={() => void installDecensorBundle()}>
-                        {installingBundle ? '安装中…' : '选择目录安装'}
-                      </button>
-                    </div>
+                    <p className="server-list-message" role="status">尚未安装去码模型包。请在下方模型管理中导入模型文件。</p>
                   </>
                 )}
               </fieldset>
             )}
-            {selectedSettingsSection === 'settings-reading' && decensorOn && (decensorBundles?.length ?? 0) > 1 ? <fieldset>
+            {selectedSettingsSection === 'settings-advanced' && decensorOn && (decensorBundles?.length ?? 0) > 1 ? <fieldset>
               <legend>去码模型包</legend>
               <SelectField
                 name="decensorModel"
@@ -576,7 +553,7 @@ export function SettingsWorkspace() {
                 onChange={(value) => editPreferences({ decensorModel: value })}
               />
             </fieldset> : null}
-            {selectedSettingsSection === 'settings-advanced' && <label className="preference-select">图片缓存上限（GB）
+            {selectedSettingsSection === 'settings-general' && <label className="preference-select">图片缓存上限（GB）
               <input
                 name="cacheMaxBytes"
                 aria-label="图片缓存上限"
@@ -588,7 +565,7 @@ export function SettingsWorkspace() {
                 onChange={(event) => editPreferences({ cacheMaxBytes: Number(event.target.value) * GIB })}
               />
             </label>}
-            {selectedSettingsSection === 'settings-advanced' && <section className="cache-settings" aria-label="图片缓存">
+            {selectedSettingsSection === 'settings-general' && <section className="cache-settings" aria-label="图片缓存">
               {/* Clearing sits immediately left of the number it changes, and in
                   that order on purpose: the button is anchored to the start of
                   the row, so a smaller total after clearing cannot shift it. */}
@@ -636,35 +613,19 @@ export function SettingsWorkspace() {
         )}
       </section>
       )}
-      {selectedSettingsSection === 'settings-models' && (
-        <section className="preferences-panel" id="settings-models" aria-label={sectionLabel(selectedSettingsSection)}>
-          <label className="preference-select">下载源
-            <select value={modelMirror} onChange={(event) => setModelMirror(event.target.value)}>
-              {MODEL_MIRROR_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
-              <option value="custom">自定义</option>
-            </select>
-          </label>
-          {modelMirror === 'custom' && <label className="preference-select">加速前缀<input value={modelPrefix} onChange={(event) => setModelPrefix(event.target.value)} placeholder="https://example.com/" /></label>}
-          <button type="button" disabled={modelPending} onClick={() => void fetchModelManifest()}>获取最新模型清单</button>
-          <label className="preference-select">Release TAG<input value={modelTag} onChange={(event) => setModelTag(event.target.value)} /></label>
-          <label className="preference-select">目标目录<input value={modelDestination} onChange={(event) => setModelDestination(event.target.value)} placeholder="绝对路径" /></label>
-          <button type="button" disabled={modelPending} onClick={() => void downloadModelBundle()}>下载完整模型包</button>
-          <label className="preference-select">导入模型压缩包
-            <input type="file" accept=".json,application/json" disabled={modelPending} onChange={async (event) => { const file = event.target.files?.[0]; if (file) { try { setModelManifest(JSON.parse(await file.text())); setModelMessage('已读取模型清单'); } catch { setModelMessage('模型清单 JSON 无效'); } } }} />
-          </label>
-          <label className="preference-select">模型文件
-            <input type="file" accept=".zip,application/zip" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void validateModelArchive(file); }} />
-          </label>
-          {modelMessage && <p role="status">{modelMessage}</p>}
-          {Boolean(modelManifest) && typeof modelManifest === 'object' && !!Array.isArray((modelManifest as { assets?: unknown[] }).assets) && <ul aria-label="模型资产">
-            {((modelManifest as { assets: Array<{ path: string; size: number }> }).assets).map((asset) => {
-              const prefix = modelMirror === 'custom' ? modelPrefix : (MODEL_MIRROR_PRESETS.find((item) => item.id === modelMirror)?.prefix ?? '');
-              return <li key={asset.path}><a href={buildModelAssetUrl(prefix, 'Kelcoin/Yomika', 'v1', asset.path)} target="_blank" rel="noreferrer">下载 {asset.path}</a> <small>{asset.size} bytes</small></li>;
-            })}
-          </ul>}
+      {selectedSettingsSection === 'settings-advanced' && (
+        <section className="settings-section model-settings" aria-label="模型管理">
+          <h2>模型</h2>
+          <p>模型自动存放在应用数据目录的 models 文件夹中。</p>
+          <div className="settings-actions">
+            <button type="button" className="settings-action is-primary" disabled={modelPending} onClick={async () => { setModelPending(true); const result = await inferenceRepository.downloadDefaultModel(); setModelPending(false); if (result.ok) { showToast('模型下载完成', 'success'); await refreshModels(); } else showToast(result.error.message, 'error'); }}>下载模型</button>
+            <button type="button" className="settings-action" disabled={modelPending} onClick={() => modelInputRef.current?.click()}>导入模型</button>
+          </div>
+          <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
+          {installedModels?.length ? <ul className="model-list" aria-label="已安装模型">{installedModels.map((model) => <li key={`${model.id}-${model.version}`}>{modelOption(model).label}</li>)}</ul> : <p className="settings-tool-hint">尚未安装模型</p>}
         </section>
       )}
-      {selectedSettingsSection === 'settings-advanced' && (
+      {selectedSettingsSection === 'settings-sync' && (
       <section className="settings-section" id="settings-migration" aria-labelledby="migration-title">
         <div>
           <h2 id="migration-title">数据迁移</h2>

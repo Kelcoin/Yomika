@@ -585,6 +585,47 @@ pub fn inference_install_model(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ModelImportFileInput { pub file: Vec<u8>, pub filename: String }
+
+/// Imports either a zip containing `manifest.json` and model assets, or a raw
+/// ONNX file. Raw files receive a conservative CPU manifest and use the fixed
+/// application data model directory through the normal installer.
+#[tauri::command]
+pub fn inference_import_model_file(
+    app: tauri::AppHandle,
+    input: ModelImportFileInput,
+) -> crate::domain::result::CommandResult<InstalledModel> {
+    use tauri::Manager;
+    let result = app.path().app_data_dir().map_err(|e| InferenceError::InvalidInput(e.to_string())).and_then(|data| {
+        let (manifest, archive) = if input.filename.to_ascii_lowercase().ends_with(".onnx") {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(&input.file).iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let manifest = ModelManifest { id: "imported-model".into(), version: "1".into(), format: "onnx".into(), scale: 2, max_pixels: 64_000_000, sha256: hash, supported_backends: vec!["cpu".into()] };
+            let mut archive = std::io::Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut archive);
+                writer.start_file("model.onnx", zip::write::SimpleFileOptions::default()).map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
+                std::io::Write::write_all(&mut writer, &input.file).map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
+                writer.finish().map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
+            }
+            (manifest, archive.into_inner())
+        } else {
+            let manifest = {
+                let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&input.file)).map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
+                let mut manifest_file = zip.by_name("manifest.json").map_err(|e| InferenceError::InvalidManifest(format!("manifest.json missing: {e}")))?;
+                let mut manifest_bytes = Vec::new();
+                std::io::Read::read_to_end(&mut manifest_file, &mut manifest_bytes).map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
+                serde_json::from_slice::<ModelManifest>(&manifest_bytes).map_err(|e| InferenceError::InvalidManifest(e.to_string()))?
+            };
+            (manifest, input.file)
+        };
+        let (staging, install) = model_install_roots(&data, &manifest.id, &manifest.version)?;
+        install_model_archive(&archive, &manifest, &staging, &install).map(|_| InstalledModel { id: manifest.id, version: manifest.version, scale: Some(manifest.scale), kind: MODEL_KIND_UPSCALE.to_string() })
+    });
+    match result { Ok(model) => crate::domain::result::CommandResult::success(model), Err(e) => crate::domain::result::CommandResult::failure("INVALID_MODEL_IMPORT", format!("{e:?}"), false) }
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceCacheClearResult { pub entries_cleared: usize }

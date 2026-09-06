@@ -30,14 +30,14 @@ use commands::sync::{
     encrypt_sync_manifest, list_sync_journal, list_webdav_accounts, merge_sync_manifests,
     save_webdav_account, set_sync_journal_state, sync_webdav_scope,
 };
-use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_install_decensor_bundle, inference_install_model, inference_list_models, inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page, inference_validate_model, inference_decensor_page};
+use inference::{inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale, inference_get_job, inference_import_model_file, inference_install_decensor_bundle, inference_install_model, inference_list_models, inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page, inference_validate_model, inference_decensor_page};
 use dedup::{dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact, dedup_import_readoshi, dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan};
 use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, list_eh_accounts, login_eh_account, open_eh_login_window, remove_eh_favorite, save_eh_account, search_eh_galleries, set_active_eh_account, vote_eh_comment};
 use commands::legacy::import_legacy_export;
 use db::Database;
 use tauri::Manager;
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
-use model_release::{model_release_activate, model_release_cancel, model_release_download, model_release_download_bundle, model_release_fetch_manifest, model_release_url, model_release_validate, model_release_validate_archive, model_release_validate_import, model_release_validate_local};
+use model_release::{model_release_activate, model_release_cancel, model_release_download, model_release_download_bundle, model_release_download_default, model_release_fetch_manifest, model_release_url, model_release_validate, model_release_validate_archive, model_release_validate_import, model_release_validate_local};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -120,6 +120,7 @@ pub fn run() {
             inference_resume,
             inference_validate_model,
             inference_install_model,
+            inference_import_model_file,
             inference_install_decensor_bundle,
             inference_list_models,
             inference_clear_cache,
@@ -128,6 +129,7 @@ pub fn run() {
             model_release_validate,
             model_release_download,
             model_release_download_bundle,
+            model_release_download_default,
             model_release_validate_import,
             model_release_cancel,
             model_release_validate_archive,
