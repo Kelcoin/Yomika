@@ -148,9 +148,11 @@ pub fn model_release_download_bundle(app: tauri::AppHandle, input: ModelBundleDo
     if let Err(error) = validate_manifest(&input.manifest) { return crate::domain::result::CommandResult::failure("INVALID_MANIFEST", error, false); }
     let root = std::path::PathBuf::from(&input.destination); if !root.is_absolute() { return crate::domain::result::CommandResult::failure("INVALID_INPUT", "destination must be absolute", false); }
     if root.exists() { return crate::domain::result::CommandResult::failure("MODEL_ALREADY_EXISTS", "destination already exists", false); }
-    if let Err(error) = std::fs::create_dir_all(&root) { return crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error.to_string(), true); }
-    let result = (|| { for asset in &input.manifest.assets { let url = asset_url(&input.prefix, &input.owner_repo, &input.manifest.tag, &asset.path); let target = root.join(asset.path.replace('/', &std::path::MAIN_SEPARATOR.to_string())); if let Some(parent)=target.parent(){std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;} download_asset_with_progress(&url, asset, &target, |done,total| { let _=tauri::Emitter::emit(&app,"model-download-progress",serde_json::json!({"path":asset.path,"completed":done,"total":total})); })?; } Ok::<(),String>(()) })();
-    match result { Ok(()) => crate::domain::result::CommandResult::success(()), Err(error) => { let _=std::fs::remove_dir_all(&root); crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true) } }
+    let staging = root.with_file_name(format!(".{}.installing", root.file_name().unwrap_or_default().to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(error) = std::fs::create_dir_all(&staging) { return crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error.to_string(), true); }
+    let result = (|| { for asset in &input.manifest.assets { let url = asset_url(&input.prefix, &input.owner_repo, &input.manifest.tag, &asset.path); let target = staging.join(asset.path.replace('/', &std::path::MAIN_SEPARATOR.to_string())); if let Some(parent)=target.parent(){std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;} download_asset_with_progress(&url, asset, &target, |done,total| { let _=tauri::Emitter::emit(&app,"model-download-progress",serde_json::json!({"path":asset.path,"completed":done,"total":total})); })?; } std::fs::rename(&staging, &root).map_err(|e|e.to_string()) })();
+    match result { Ok(()) => crate::domain::result::CommandResult::success(()), Err(error) => { let _=std::fs::remove_dir_all(&staging); crate::domain::result::CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true) } }
 }
 
 #[tauri::command]
