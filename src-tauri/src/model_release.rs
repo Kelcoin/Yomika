@@ -121,6 +121,13 @@ pub fn model_release_url(prefix: String, owner_repo: String, tag: String, path: 
 }
 
 #[tauri::command]
+pub fn model_release_fetch_manifest(prefix: String, owner_repo: String, tag: String) -> crate::domain::result::CommandResult<ModelReleaseManifest> {
+    let url = asset_url(&prefix, &owner_repo, &tag, &format!("{tag}.manifest.json"));
+    let result = reqwest::blocking::get(url).map_err(|e| e.to_string()).and_then(|r| r.error_for_status().map_err(|e| e.to_string())).and_then(|r| r.json::<ModelReleaseManifest>().map_err(|e| e.to_string())).and_then(|m| validate_manifest(&m).map(|_| m));
+    match result { Ok(manifest) => crate::domain::result::CommandResult::success(manifest), Err(error) => crate::domain::result::CommandResult::failure("MODEL_MANIFEST_FETCH_FAILED", error, true) }
+}
+
+#[tauri::command]
 pub fn model_release_validate(manifest: ModelReleaseManifest) -> crate::domain::result::CommandResult<()> {
     match validate_manifest(&manifest) {
         Ok(()) => crate::domain::result::CommandResult::success(()),

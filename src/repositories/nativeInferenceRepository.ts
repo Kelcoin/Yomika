@@ -64,6 +64,10 @@ export class NativeInferenceRepository {
   releaseAssetUrl(prefix: string, ownerRepo: string, tag: string, path: string): Promise<CommandResult<string>> {
     return invokeCommand('model_release_url', { prefix, ownerRepo, tag, path }, z.string());
   }
+
+  fetchReleaseManifest(prefix: string, ownerRepo: string, tag: string): Promise<CommandResult<unknown>> {
+    return invokeCommand('model_release_fetch_manifest', { prefix, ownerRepo, tag }, z.unknown());
+  }
   static modelAssetUrl(mirror: ModelMirrorId, ownerRepo: string, tag: string, path: string, customPrefix = ''): string {
     return buildModelAssetUrl(mirrorPrefix(mirror, customPrefix), ownerRepo, tag, path);
   }
