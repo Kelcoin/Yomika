@@ -12,6 +12,8 @@ import { ServerSetupDialog } from './ServerSetupDialog';
 import { SyncWorkspace } from './SyncWorkspace';
 import { usePreferences } from '../app/preferences';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
+import { NativeInferenceRepository } from '../repositories/nativeInferenceRepository';
+import { MODEL_MIRROR_PRESETS } from '../domain/modelRelease';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
@@ -21,6 +23,7 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
 const cacheRepository = new NativeCacheRepository();
+const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
 
 function formatCacheBytes(value: number): string {
@@ -36,6 +39,7 @@ const settingsSections = [
   { id: 'settings-server', label: '服务器连接' },
   { id: 'settings-migration', label: '数据迁移' },
   { id: 'settings-sync', label: '同步账户' },
+  { id: 'settings-models', label: '模型' },
 ] as const;
 
 export function SettingsWorkspace() {
@@ -65,6 +69,18 @@ export function SettingsWorkspace() {
   const [cacheClearing, setCacheClearing] = useState(false);
   const [cacheMessage, setCacheMessage] = useState<string>();
   const [cacheError, setCacheError] = useState(false);
+  const [modelMirror, setModelMirror] = useState('direct');
+  const [modelPrefix, setModelPrefix] = useState('');
+  const [modelMessage, setModelMessage] = useState<string>();
+  const [modelPending, setModelPending] = useState(false);
+
+  async function validateModelArchive(file: File) {
+    setModelPending(true); setModelMessage(undefined);
+    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+    const result = await inferenceRepository.validateModelArchive(bytes, { tag: 'local', assets: [] });
+    setModelMessage(result.ok ? '模型验证通过' : result.error.message);
+    setModelPending(false);
+  }
 
   useEffect(() => {
     const requested = new URLSearchParams(location.search).get('section');
@@ -256,6 +272,22 @@ export function SettingsWorkspace() {
           </form>
         )}
       </section>
+      )}
+      {selectedSettingsSection === 'settings-models' && (
+        <section className="preferences-panel" id="settings-models" aria-labelledby="models-title">
+          <h2 id="models-title">模型</h2>
+          <label className="preference-select">下载源
+            <select value={modelMirror} onChange={(event) => setModelMirror(event.target.value)}>
+              {MODEL_MIRROR_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          {modelMirror === 'custom' && <label className="preference-select">加速前缀<input value={modelPrefix} onChange={(event) => setModelPrefix(event.target.value)} placeholder="https://example.com/" /></label>}
+          <label className="preference-select">导入模型压缩包
+            <input type="file" accept=".zip,application/zip" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void validateModelArchive(file); }} />
+          </label>
+          {modelMessage && <p role="status">{modelMessage}</p>}
+        </section>
       )}
       {selectedSettingsSection === 'settings-migration' && (
       <>
