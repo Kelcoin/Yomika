@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
+import { buildModelAssetUrl, mirrorPrefix, type ModelMirrorId } from '../domain/modelRelease';
 
 const CpuRgbaOutputSchema = z.object({
   rgba: z.array(z.number().int().min(0).max(255)),
@@ -32,6 +33,9 @@ export interface CpuScaleInput {
 export type CpuRgbaOutput = z.infer<typeof CpuRgbaOutputSchema>;
 
 export class NativeInferenceRepository {
+  static modelAssetUrl(mirror: ModelMirrorId, ownerRepo: string, tag: string, path: string, customPrefix = ''): string {
+    return buildModelAssetUrl(mirrorPrefix(mirror, customPrefix), ownerRepo, tag, path);
+  }
   probe(): Promise<CommandResult<InferenceCapabilities>> {
     return invokeCommand('inference_probe', {}, InferenceCapabilitiesSchema);
   }
