@@ -77,7 +77,8 @@ describe('native shell configuration', () => {
     expect(lib).toContain('save_reading_progress');
     expect(database).toContain('0001_initial.sql');
     expect(database).toContain('0002_local_library.sql');
-    expect(database).toContain('app_data_dir');
+    expect(database).toContain('crate::data_paths::data_dir(app)');
+    expect(read('../../src-tauri/src/data_paths.rs')).toContain('app.path().app_data_dir()');
     expect(commands).toContain('connection.transaction()');
     expect(commands).toContain('WHERE server_id = ?1');
     expect(commands).toContain('ON CONFLICT(scope_id, archive_id)');

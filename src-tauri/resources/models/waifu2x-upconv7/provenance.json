@@ -1,0 +1,25 @@
+{
+  "source": "Mihon waifu2x-models-upconv7/scale2.0x_model",
+  "paramSha256": "413195ffde05b4d43807792c6c020c916cecdf25dcf002ee83f5e28d5cc246c6",
+  "weightsSha256": "27d880903ff81390a3b4a900b67af3381c465279e34297546c9a58781855f7ef",
+  "onnxSha256": "3bd55b489f136c502dbedfd03d77b6912ac7dfb75c98d93ed2c9ab552f285272",
+  "upstream": "https://github.com/nihui/waifu2x-ncnn-vulkan/tree/master/models/models-upconv_7_anime_style_art_rgb",
+  "conversion": "float16 weights expanded exactly to float32; upstream RGB channels and 7px replicated border",
+  "verification": [
+    {
+      "width": 1,
+      "height": 1,
+      "maxAbsoluteError": 4.76837158203125e-07
+    },
+    {
+      "width": 23,
+      "height": 17,
+      "maxAbsoluteError": 2.5033950805664062e-06
+    },
+    {
+      "width": 64,
+      "height": 64,
+      "maxAbsoluteError": 4.410743713378906e-06
+    }
+  ]
+}

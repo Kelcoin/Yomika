@@ -146,6 +146,40 @@ describe('library workspace', () => {
     expect(screen.getAllByText('1 页').some((element) => element.classList.contains('metadata-chip'))).toBe(true);
   });
 
+  it('uses card-shaped skeletons while the initial archive page is loading', () => {
+    renderWorkspace({ archives: [], listLoading: true, cardStyle: 'wide' });
+    expect(screen.getByRole('status', { name: '正在读取档案' })).toHaveClass('archive-list-skeleton');
+    expect(document.querySelectorAll('.archive-row-skeleton')).toHaveLength(5);
+    expect(screen.queryByText('暂无档案库')).not.toBeInTheDocument();
+  });
+
+  it('balances wide-card tags across three rendered rows', () => {
+    renderWorkspace({ archives: [{
+      ...archives[0]!,
+      tags: ['female:a', 'female:b', 'male:c', 'other:d', 'artist:e', 'cosplayer:f', 'language:g'],
+    }] });
+
+    const lines = document.querySelectorAll('.archive-row-tag-line');
+    expect(lines).toHaveLength(3);
+    expect([...lines].map((line) => line.children.length)).toEqual([3, 2, 2]);
+  });
+
+  it('renders history time on the connected rail outside the archive button', () => {
+    renderWorkspace({
+      archives: archives.slice(0, 2),
+      timelineByArchiveId: new Map([
+        ['archive-0', '08:15'],
+        ['archive-1', '09:30'],
+      ]),
+    });
+
+    const firstItem = screen.getAllByRole('listitem')[0]!;
+    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    const timeline = firstItem.querySelector<HTMLElement>('.archive-row-timeline');
+    expect(timeline).toHaveTextContent('08:15');
+    expect(card).not.toContainElement(timeline);
+  });
+
   it('uses an icon on the archive refresh tool', () => {
     renderWorkspace({ archives, onRefresh: vi.fn() });
 

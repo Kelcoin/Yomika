@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
-import { LoadingIndicator } from './LoadingIndicator';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
@@ -62,6 +61,8 @@ interface LibrarySnapshot {
 
 export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: boolean } = {}) {
   const { showToast } = useToast();
+  const [urlSearchParams] = useSearchParams();
+  const requestedQuery = urlSearchParams.has('q') ? (urlSearchParams.get('q') ?? '').trim() : undefined;
   // Snapshot from the last visit: switching to another route and back used to
   // start from an empty list and a closed detail pane.
   const snapshot = readRouteCache<LibrarySnapshot>(LIBRARY_SNAPSHOT_KEY);
@@ -107,9 +108,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const fetchedCount = useRef(snapshot?.fetchedCount ?? snapshot?.archives.length ?? 0);
   const initialArchivesLoaded = useRef(Boolean(snapshot));
   const snapshotIsFresh = useRef(
-    Boolean(snapshot?.archives.length) && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
+    Boolean(snapshot?.archives.length)
+      && (requestedQuery === undefined || requestedQuery === snapshot?.searchQuery)
+      && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
   );
-  const [searchQuery, setSearchQuery] = useState(snapshot?.searchQuery ?? '');
+  const [searchQuery, setSearchQuery] = useState(requestedQuery ?? snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
@@ -119,7 +122,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
    * component state the choice reset on every navigation. */
   const { cardStyle, setCardStyle } = useCardStyle();
   const navigate = useNavigate();
-  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
+  const { open: openContextMenu, menu: contextMenu, requestDelete } = useArchiveContextMenu({
+    onDeleted: (archiveId) => {
+      setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      setTotalArchives((current) => Math.max(0, current - 1));
+      setCategories((current) => current.map((category) => ({ ...category, archives: category.archives.filter((id) => id !== archiveId) })));
+      setMetadata(undefined);
+    },
     inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
     categories: assignableCategories(categories),
     onAddCategory: (archive, categoryId) => {
@@ -327,6 +336,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     void loadLibrary();
   }, [loadLibrary]);
 
+  useEffect(() => {
+    if (requestedQuery === undefined) return;
+    setSearchQuery(requestedQuery);
+    setCategoryFilter('');
+  }, [requestedQuery]);
+
   const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean } = {}) => {
     const request = ++pageRequest.current;
     // Keep the existing input/list mounted while a filter request is in flight.
@@ -442,15 +457,6 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     } satisfies LibrarySnapshot);
   }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, sortMode, sortOrder, totalArchives]);
 
-  if (loading) {
-    return (
-      <div className="library-shell-loading">
-        <header className="workspace-heading"><h1>档案库</h1></header>
-        <LoadingIndicator label="正在读取档案" size="lg" />
-      </div>
-    );
-  }
-
   if (error) {
     return (
       <div>
@@ -521,19 +527,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           return result;
         }}
         onDelete={async (archive) => {
-        if (!serverId) return { ok: false, error: { message: '服务器未就绪' } };
-        const result = await repository.deleteArchive(serverId, archive.archiveId);
-        if (!result.ok) {
-          setDeleteError(result.error.message);
-          return result;
-        }
-        setArchives((current) => current.filter((item) => item.archiveId !== archive.archiveId));
-        // A static category was still listing it.
-        setCategories((current) => current.map((category) => category.archives.includes(archive.archiveId)
-          ? { ...category, archives: category.archives.filter((id) => id !== archive.archiveId) }
-          : category));
-        setMetadata(undefined);
-        return result;
+        requestDelete(archive);
+        return { ok: true };
       }}
       onSelect={(archive) => {
         if (!serverId || !scopeId) return;

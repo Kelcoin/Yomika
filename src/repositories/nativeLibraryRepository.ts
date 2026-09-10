@@ -22,6 +22,15 @@ import {
   type ReadingHistoryRecord,
 } from '../domain/library';
 import type { CommandResult } from '../domain/result';
+import { invalidateRouteCache } from '../lib/routeCache';
+
+function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
+  if (result.ok) {
+    invalidateRouteCache('home:');
+    invalidateRouteCache('state:');
+  }
+  return result;
+}
 import type { ServerIdentity } from '../domain/server';
 
 type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'>;
@@ -99,7 +108,7 @@ export interface SearchPresetInput {
 
 export class NativeLibraryRepository {
   setWatchlist(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema);
+    return invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
   }
   listWatchlist(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_watchlist', { scopeId }, z.array(WatchlistRecordSchema));
@@ -107,7 +116,7 @@ export class NativeLibraryRepository {
   /** Reading list ("待看") is a second list beside the watchlist ("收藏夹"):
    * intent to read versus having liked something. */
   setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema);
+    return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
   }
   listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
@@ -146,7 +155,10 @@ export class NativeLibraryRepository {
     return invokeCommand('load_archive_metadata', { serverId, archiveId }, ArchiveMetadataSchema);
   }
   deleteArchive(serverId: string, archiveId: string): Promise<CommandResult<null>> {
-    return invokeCommand('delete_archive', { serverId, archiveId }, z.null());
+    return invokeCommand('delete_archive', { serverId, archiveId }, z.null()).then(invalidateShelves);
+  }
+  downloadArchive(serverId: string, archiveId: string): Promise<CommandResult<string>> {
+    return invokeCommand('download_archive', { serverId, archiveId }, z.string().min(1));
   }
   createTask(input: { kind: 'download' | 'sync' | 'inference' | 'maintenance'; label: string }): Promise<CommandResult<TaskRecord>> {
     return invokeCommand('create_task', { task: input }, TaskRecordSchema);
@@ -186,7 +198,7 @@ export class NativeLibraryRepository {
     return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema);
   }
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema);
+    return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(invalidateShelves);
   }
   listMetadataPlugins(serverId: string): Promise<CommandResult<unknown>> {
     return invokeCommand('list_metadata_plugins', { serverId }, z.unknown());
@@ -331,7 +343,7 @@ export class NativeLibraryRepository {
   }
 
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {
-    return invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema);
+    return invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves);
   }
 
   loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {

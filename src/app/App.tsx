@@ -25,6 +25,8 @@ function StartupRoute() {
 export function App() {
   const { pathname } = useLocation();
   useEffect(() => {
+    const suppressNativeMenu = (event: Event) => event.preventDefault();
+    document.addEventListener('contextmenu', suppressNativeMenu);
     const updateLifecycle = () => {
       if (document.visibilityState === 'hidden') stopTagTranslationUpdates();
       else startTagTranslationUpdates();
@@ -32,6 +34,7 @@ export function App() {
     updateLifecycle();
     document.addEventListener('visibilitychange', updateLifecycle);
     return () => {
+      document.removeEventListener('contextmenu', suppressNativeMenu);
       document.removeEventListener('visibilitychange', updateLifecycle);
       stopTagTranslationUpdates();
     };

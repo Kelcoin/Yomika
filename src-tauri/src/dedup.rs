@@ -989,17 +989,38 @@ fn decoded_cover_signature(bytes: &[u8]) -> Result<String, String> {
     use image::imageops::FilterType;
     let image = image::load_from_memory(bytes).map_err(|error| error.to_string())?;
     let ratio = image.width() as f64 / image.height().max(1) as f64;
-    let pixels = image.resize_exact(16, 16, FilterType::Triangle).to_rgb8().into_raw();
-    let luminance = pixels.chunks_exact(3).map(|pixel| pixel[0] as f64 * 0.299 + pixel[1] as f64 * 0.587 + pixel[2] as f64 * 0.114).collect::<Vec<_>>();
+    let pixels = image
+        .resize_exact(16, 16, FilterType::Triangle)
+        .to_rgb8()
+        .into_raw();
+    let luminance = pixels
+        .chunks_exact(3)
+        .map(|pixel| pixel[0] as f64 * 0.299 + pixel[1] as f64 * 0.587 + pixel[2] as f64 * 0.114)
+        .collect::<Vec<_>>();
     let mean = luminance.iter().sum::<f64>() / luminance.len().max(1) as f64;
-    let standard_deviation = (luminance.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / luminance.len().max(1) as f64).sqrt();
+    let standard_deviation = (luminance
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / luminance.len().max(1) as f64)
+        .sqrt();
     let mut bins = [0usize; 16];
-    for value in &luminance { bins[(*value as usize / 16).min(15)] += 1; }
-    let dominant_fraction = bins.into_iter().max().unwrap_or_default() as f64 / luminance.len().max(1) as f64;
+    for value in &luminance {
+        bins[(*value as usize / 16).min(15)] += 1;
+    }
+    let dominant_fraction =
+        bins.into_iter().max().unwrap_or_default() as f64 / luminance.len().max(1) as f64;
     if dominant_fraction >= 0.98 && standard_deviation <= 4.0 {
         return Err("low-information cover".into());
     }
-    serde_json::to_string(&StoredImageSignature { ratio, pixels, mean, standard_deviation, dominant_fraction }).map_err(|error| error.to_string())
+    serde_json::to_string(&StoredImageSignature {
+        ratio,
+        pixels,
+        mean,
+        standard_deviation,
+        dominant_fraction,
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn signature_changed_ratio(left: &str, right: &str) -> Option<f64> {
@@ -1009,17 +1030,41 @@ fn signature_changed_ratio(left: &str, right: &str) -> Option<f64> {
         || (left.standard_deviation <= 12.0 && right.standard_deviation >= 32.0)
         || (right.standard_deviation <= 12.0 && left.standard_deviation >= 32.0)
         || (left.dominant_fraction >= 0.75 && right.dominant_fraction >= 0.75)
-    { return None; }
-    let mut differences = left.pixels.chunks_exact(3).zip(right.pixels.chunks_exact(3)).map(|(left, right)| {
-        left.iter().zip(right).map(|(left, right)| (*left as i32 - *right as i32).unsigned_abs()).sum::<u32>()
-    }).collect::<Vec<_>>();
-    if differences.is_empty() { return None; }
-    let changed_ratio = differences.iter().filter(|difference| **difference > 30).count() as f64 / differences.len() as f64;
-    if changed_ratio < 0.2 { return Some(changed_ratio); }
-    if changed_ratio > 0.55 { return None; }
+    {
+        return None;
+    }
+    let mut differences = left
+        .pixels
+        .chunks_exact(3)
+        .zip(right.pixels.chunks_exact(3))
+        .map(|(left, right)| {
+            left.iter()
+                .zip(right)
+                .map(|(left, right)| (*left as i32 - *right as i32).unsigned_abs())
+                .sum::<u32>()
+        })
+        .collect::<Vec<_>>();
+    if differences.is_empty() {
+        return None;
+    }
+    let changed_ratio = differences
+        .iter()
+        .filter(|difference| **difference > 30)
+        .count() as f64
+        / differences.len() as f64;
+    if changed_ratio < 0.2 {
+        return Some(changed_ratio);
+    }
+    if changed_ratio > 0.55 {
+        return None;
+    }
     differences.sort_unstable();
     differences.truncate(((differences.len() as f64 * 0.85).floor() as usize).max(1));
-    let tolerant_ratio = differences.iter().filter(|difference| **difference > 30).count() as f64 / differences.len() as f64;
+    let tolerant_ratio = differences
+        .iter()
+        .filter(|difference| **difference > 30)
+        .count() as f64
+        / differences.len() as f64;
     (tolerant_ratio < 0.2).then_some(tolerant_ratio)
 }
 
@@ -1889,9 +1934,18 @@ pub fn dedup_save_non_duplicate(
             .map_err(|_| "Database lock failed".into())
             .and_then(|mut connection| {
                 let scope_id = input.scope_id.clone();
-                let (pair_key, left, right) = pair_key(&input.left_archive_id, &input.right_archive_id)?;
+                let (pair_key, left, right) =
+                    pair_key(&input.left_archive_id, &input.right_archive_id)?;
                 save_non_duplicate(&mut connection, input)?;
-                crate::commands::sync::append_dedup_journal(&mut connection, &scope_id, &pair_key, "upsert", &left, &right, false)
+                crate::commands::sync::append_dedup_journal(
+                    &mut connection,
+                    &scope_id,
+                    &pair_key,
+                    "upsert",
+                    &left,
+                    &right,
+                    false,
+                )
             }),
     )
 }
@@ -1907,14 +1961,24 @@ pub fn dedup_remove_non_duplicate(
             .map_err(|_| "Database lock failed".into())
             .and_then(|mut connection| {
                 let scope_id = input.scope_id.clone();
-                let (pair_key, left, right) = pair_key(&input.left_archive_id, &input.right_archive_id)?;
+                let (pair_key, left, right) =
+                    pair_key(&input.left_archive_id, &input.right_archive_id)?;
                 remove_non_duplicate(&mut connection, input)?;
-                crate::commands::sync::append_dedup_journal(&mut connection, &scope_id, &pair_key, "delete", &left, &right, true)
+                crate::commands::sync::append_dedup_journal(
+                    &mut connection,
+                    &scope_id,
+                    &pair_key,
+                    "delete",
+                    &left,
+                    &right,
+                    true,
+                )
             }),
     )
 }
 async fn dedup_delete_selected_impl(
     input: DedupDeleteSelectedInput,
+    sync_favorite: bool,
     database: tauri::State<'_, crate::db::Database>,
 ) -> crate::domain::result::CommandResult<DedupDeleteSelectedResult> {
     let session_id = input.session_id;
@@ -2005,9 +2069,10 @@ async fn dedup_delete_selected_impl(
     };
     let mut outcomes = Vec::new();
     for archive_id in selected {
-        let outcome = match crate::commands::library::delete_archive(
+        let outcome = match crate::commands::library::delete_archive_with_favorite_sync(
             server_id.clone(),
             archive_id.clone(),
+            sync_favorite,
             database.clone(),
         )
         .await
@@ -2059,9 +2124,10 @@ async fn dedup_delete_selected_impl(
 #[tauri::command]
 pub async fn dedup_delete_selected(
     input: DedupDeleteSelectedInput,
+    sync_favorite: Option<bool>,
     database: tauri::State<'_, crate::db::Database>,
 ) -> Result<crate::domain::result::CommandResult<DedupDeleteSelectedResult>, String> {
-    Ok(dedup_delete_selected_impl(input, database).await)
+    Ok(dedup_delete_selected_impl(input, sync_favorite.unwrap_or(false), database).await)
 }
 #[tauri::command]
 pub fn dedup_import_readoshi(
@@ -2078,8 +2144,17 @@ pub fn dedup_import_readoshi(
                 let pairs = input.pairs.clone();
                 import_readoshi(&mut connection, input)?;
                 for pair in pairs {
-                    let (pair_key, left, right) = pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
-                    crate::commands::sync::append_dedup_journal(&mut connection, &scope_id, &pair_key, "upsert", &left, &right, false)?;
+                    let (pair_key, left, right) =
+                        pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
+                    crate::commands::sync::append_dedup_journal(
+                        &mut connection,
+                        &scope_id,
+                        &pair_key,
+                        "upsert",
+                        &left,
+                        &right,
+                        false,
+                    )?;
                 }
                 Ok(())
             }),
@@ -2091,7 +2166,6 @@ async fn dedup_scan_impl(
     app: tauri::AppHandle,
     database: tauri::State<'_, crate::db::Database>,
 ) -> crate::domain::result::CommandResult<DedupScanProgress> {
-    use tauri::Manager;
     if input.session_id.trim().is_empty()
         || input.scope_id.trim().is_empty()
         || input.algorithm_version.trim().is_empty()
@@ -2102,7 +2176,7 @@ async fn dedup_scan_impl(
             false,
         );
     }
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
         Err(error) => {
             return crate::domain::result::CommandResult::failure(

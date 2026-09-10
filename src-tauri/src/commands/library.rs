@@ -277,9 +277,16 @@ pub struct TaskRecord {
 
 fn read_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
-        id: row.get(0)?, kind: row.get(1)?, label: row.get(2)?, status: row.get(3)?,
-        progress: row.get(4)?, error: row.get(5)?, cancelable: row.get::<_, i64>(6)? != 0,
-        retryable: row.get::<_, i64>(7)? != 0, created_at: row.get(8)?, updated_at: row.get(9)?,
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        label: row.get(2)?,
+        status: row.get(3)?,
+        progress: row.get(4)?,
+        error: row.get(5)?,
+        cancelable: row.get::<_, i64>(6)? != 0,
+        retryable: row.get::<_, i64>(7)? != 0,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -291,7 +298,9 @@ fn read_task(connection: &rusqlite::Connection, id: &str) -> Result<TaskRecord, 
     ).map_err(|error| error.to_string())
 }
 
-pub(crate) fn recover_interrupted_tasks(connection: &rusqlite::Connection) -> Result<usize, String> {
+pub(crate) fn recover_interrupted_tasks(
+    connection: &rusqlite::Connection,
+) -> Result<usize, String> {
     connection.execute(
         "UPDATE tasks SET status=CASE WHEN retryable=1 THEN 'queued' ELSE 'failed' END,error=CASE WHEN retryable=1 THEN error ELSE 'Interrupted by application restart' END,updated_at=CURRENT_TIMESTAMP WHERE status='running'",
         [],
@@ -306,7 +315,10 @@ fn transition_task(
     error: Option<&str>,
 ) -> Result<TaskRecord, String> {
     let current = read_task(connection, id)?;
-    if matches!(current.status.as_str(), "completed" | "failed" | "cancelled") {
+    if matches!(
+        current.status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) {
         return Err("Task is already terminal".into());
     }
     let status = requested_status.unwrap_or(&current.status);
@@ -317,10 +329,16 @@ fn transition_task(
     let allowed = matches!(
         (current.status.as_str(), status),
         ("queued", "queued" | "running" | "cancelled")
-            | ("running", "running" | "paused" | "completed" | "failed" | "cancelled")
+            | (
+                "running",
+                "running" | "paused" | "completed" | "failed" | "cancelled"
+            )
             | ("paused", "paused" | "running" | "cancelled")
     );
-    if !allowed || (status == "cancelled" && !current.cancelable) || (status == "completed" && progress != 1.0) {
+    if !allowed
+        || (status == "cancelled" && !current.cancelable)
+        || (status == "completed" && progress != 1.0)
+    {
         return Err("Invalid task state transition".into());
     }
     connection.execute(
@@ -335,10 +353,12 @@ fn retry_failed_task(connection: &rusqlite::Connection, id: &str) -> Result<Task
     if current.status != "failed" || !current.retryable {
         return Err("Task cannot be retried".into());
     }
-    connection.execute(
-        "UPDATE tasks SET status='queued',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
-        [id],
-    ).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE tasks SET status='queued',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [id],
+        )
+        .map_err(|error| error.to_string())?;
     read_task(connection, id)
 }
 
@@ -405,7 +425,8 @@ fn normalize_reader_page_path(value: &str) -> Result<String, String> {
     let route = candidate.strip_prefix("./").unwrap_or(&candidate);
     let route_without_root = route.strip_prefix('/').unwrap_or(route);
     if route_without_root.starts_with("api/archives/") {
-        let normalized_route = format!("/{route_without_root}").replacen("/page&path=", "/page?path=", 1);
+        let normalized_route =
+            format!("/{route_without_root}").replacen("/page&path=", "/page?path=", 1);
         let parsed = Url::parse(&format!("http://lanraragi.local{normalized_route}"))
             .map_err(|_| "Invalid reader page path".to_string())?;
         let segments = parsed
@@ -461,7 +482,8 @@ fn load_reader_page_cache(
     archive_id: &str,
     page_index: i64,
 ) -> Result<Option<Vec<u8>>, String> {
-    let identity = crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
+    let identity =
+        crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
     crate::cache::load_image_cache(connection, app_data, &identity)
         .map(|image| image.map(|image| image.bytes))
 }
@@ -475,7 +497,8 @@ fn store_reader_page_cache(
     mime: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let identity = crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
+    let identity =
+        crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
     crate::cache::store_image_cache(connection, app_data, &identity, mime, bytes)
 }
 
@@ -498,7 +521,10 @@ fn reconcile_missing_archive_status(
     archive_id: &str,
     status: reqwest::StatusCode,
 ) -> Result<bool, String> {
-    if !matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+    if !matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+    ) {
         return Ok(false);
     }
     connection.execute(
@@ -564,7 +590,13 @@ pub async fn list_categories(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let response = match reader_request(
         reqwest::Method::GET,
@@ -596,11 +628,15 @@ pub async fn list_categories(
     let wire_result: Result<Vec<CategoryWire>, String> = match raw_categories {
         serde_json::Value::Array(items) => serde_json::from_value(serde_json::Value::Array(items)),
         serde_json::Value::Object(mut object) => {
-            let items = object.remove("data").or_else(|| object.remove("categories")).unwrap_or(serde_json::Value::Array(Vec::new()));
+            let items = object
+                .remove("data")
+                .or_else(|| object.remove("categories"))
+                .unwrap_or(serde_json::Value::Array(Vec::new()));
             serde_json::from_value(items)
         }
         _ => serde_json::from_str("null"),
-    }.map_err(|error| error.to_string());
+    }
+    .map_err(|error| error.to_string());
     let wire = match wire_result {
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
@@ -641,7 +677,13 @@ pub async fn list_categories(
         if !category.archives.is_empty() {
             continue;
         }
-        let Some(search) = category.search.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned) else {
+        let Some(search) = category
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        else {
             continue;
         };
         let base_url = base_url.clone();
@@ -649,13 +691,26 @@ pub async fn list_categories(
         requested += 1;
         dynamic_categories.spawn(async move {
             let url = build_category_search_url(&base_url, &search).ok()?;
-            let response = reader_request_with_timeout(reqwest::Method::GET, url, api_key, CATEGORY_SEARCH_TIMEOUT_SECONDS).await.ok()?;
+            let response = reader_request_with_timeout(
+                reqwest::Method::GET,
+                url,
+                api_key,
+                CATEGORY_SEARCH_TIMEOUT_SECONDS,
+            )
+            .await
+            .ok()?;
             if !response.status().is_success() {
                 return None;
             }
             let body = response.text().await.ok()?;
             let archives = parse_search_response(&body).ok()?;
-            Some((index, archives.into_iter().map(|archive| archive.archive_id).collect::<Vec<_>>()))
+            Some((
+                index,
+                archives
+                    .into_iter()
+                    .map(|archive| archive.archive_id)
+                    .collect::<Vec<_>>(),
+            ))
         });
         if dynamic_categories.len() >= MAX_PARALLEL_CATEGORY_SEARCHES {
             if let Some(Ok(Some(entry))) = dynamic_categories.join_next().await {
@@ -686,7 +741,10 @@ pub async fn list_categories(
             .transaction()
             .map_err(|error| format!("开启分类缓存事务失败：{error}"))?;
         transaction
-            .execute("DELETE FROM archive_categories WHERE server_id = ?1", [&server_id])
+            .execute(
+                "DELETE FROM archive_categories WHERE server_id = ?1",
+                [&server_id],
+            )
             .map_err(|error| format!("清理分类缓存失败：{error}"))?;
         for category in &categories {
             for archive_id in &category.archives {
@@ -737,7 +795,13 @@ pub async fn add_archive_to_category(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let url = format!(
         "{}/api/categories/{}/{}",
@@ -807,7 +871,13 @@ pub async fn update_archive_metadata(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let mut url = match Url::parse(&format!(
         "{}/api/archives/{}/metadata",
@@ -889,7 +959,13 @@ pub async fn list_metadata_plugins(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let url = format!("{}/api/plugins/metadata", base_url.trim_end_matches('/'));
     let response = match reader_request(reqwest::Method::GET, url, api_key).await {
@@ -897,11 +973,19 @@ pub async fn list_metadata_plugins(
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
     if !response.status().is_success() {
-        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", format!("LANraragi request failed ({})", response.status()), response.status().is_server_error()));
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            format!("LANraragi request failed ({})", response.status()),
+            response.status().is_server_error(),
+        ));
     }
     match response.json::<serde_json::Value>().await {
         Ok(value) => Ok(CommandResult::success(value)),
-        Err(error) => Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+        Err(error) => Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            error.to_string(),
+            false,
+        )),
     }
 }
 
@@ -924,23 +1008,49 @@ pub async fn use_metadata_plugin(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
-    let mut url = match Url::parse(&format!("{}/api/plugins/use", base_url.trim_end_matches('/'))) {
+    let mut url = match Url::parse(&format!(
+        "{}/api/plugins/use",
+        base_url.trim_end_matches('/')
+    )) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                false,
+            ))
+        }
     };
-    url.query_pairs_mut().append_pair("id", &archive_id).append_pair("plugin", &plugin).append_pair("arg", &arg);
+    url.query_pairs_mut()
+        .append_pair("id", &archive_id)
+        .append_pair("plugin", &plugin)
+        .append_pair("arg", &arg);
     let response = match reader_request(reqwest::Method::POST, url.to_string(), api_key).await {
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
     if !response.status().is_success() {
-        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", format!("LANraragi request failed ({})", response.status()), response.status().is_server_error()));
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            format!("LANraragi request failed ({})", response.status()),
+            response.status().is_server_error(),
+        ));
     }
     match response.json::<serde_json::Value>().await {
         Ok(value) => Ok(CommandResult::success(value)),
-        Err(error) => Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+        Err(error) => Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            error.to_string(),
+            false,
+        )),
     }
 }
 
@@ -961,7 +1071,13 @@ pub async fn load_archive_metadata(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let url = format!(
         "{}/api/archives/{}/metadata",
@@ -973,12 +1089,17 @@ pub async fn load_archive_metadata(
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
     let status = response.status();
-    if matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+    if matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+    ) {
         let reconciliation = database
             .connection
             .lock()
             .map_err(|_| "Database lock failed".to_string())
-            .and_then(|connection| reconcile_missing_archive_status(&connection, &server_id, &archive_id, status));
+            .and_then(|connection| {
+                reconcile_missing_archive_status(&connection, &server_id, &archive_id, status)
+            });
         if let Err(error) = reconciliation {
             return Ok(CommandResult::failure("UNKNOWN", error, true));
         }
@@ -1027,6 +1148,213 @@ pub async fn load_archive_metadata(
 }
 
 #[tauri::command]
+pub async fn download_archive(
+    app: tauri::AppHandle,
+    server_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<String>, String> {
+    if archive_id.len() != 40 || !archive_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "Invalid archive ID",
+            false,
+        ));
+    }
+    let (base_url, scope_id, directory) = {
+        let connection = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())?;
+        let (base_url, scope_id) = server_connection(&connection, &server_id)?;
+        let preferences = crate::settings::load_preferences_from(&connection)?;
+        let directory = if preferences.download_directory.is_empty() {
+            crate::inference::model_data_dir(&app)
+                .map_err(|error| error.to_string())?
+                .join("downloads")
+        } else {
+            std::path::PathBuf::from(preferences.download_directory)
+        };
+        (base_url, scope_id, directory)
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let api_key = SystemCredentialStore
+            .get_server_api_key(&scope_id)
+            .map_err(credential_read_error)?;
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(3600))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let url = format!(
+            "{}/api/archives/{}",
+            base_url.trim_end_matches('/'),
+            archive_id
+        );
+        let metadata: serde_json::Value = client
+            .get(format!("{url}/metadata"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                authorization_value(&api_key),
+            )
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json)
+            .map_err(|error| error.to_string())?;
+        let filename = archive_download_filename(&archive_id, &metadata);
+        let mut response = client
+            .get(format!("{url}/download"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                authorization_value(&api_key),
+            )
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(|error| error.to_string())?;
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("json") || value.contains("text/html"))
+        {
+            return Err("Server returned an error page instead of an archive".into());
+        }
+        save_archive_download(&mut response, &directory, &filename)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(match result {
+        Ok(path) => CommandResult::success(path),
+        Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+    })
+}
+
+fn archive_download_filename(archive_id: &str, metadata: &serde_json::Value) -> String {
+    let filename = metadata["filename"].as_str().unwrap_or_default();
+    let extension = std::path::Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .or_else(|| metadata["extension"].as_str())
+        .unwrap_or("zip")
+        .trim_start_matches('.');
+    let extension = if !extension.is_empty()
+        && extension.len() <= 10
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        extension
+    } else {
+        "zip"
+    };
+    let mut title = String::new();
+    for ch in metadata["title"].as_str().unwrap_or("archive").chars() {
+        let ch = if ch.is_control() || "<>:\"/\\|?*".contains(ch) {
+            '_'
+        } else {
+            ch
+        };
+        if title.len() + ch.len_utf8() > 160 {
+            break;
+        }
+        title.push(ch);
+    }
+    format!(
+        "{}-{}.{}",
+        archive_id,
+        title.trim_end_matches([' ', '.']),
+        extension
+    )
+}
+
+fn save_archive_download(
+    source: &mut impl std::io::Read,
+    directory: &std::path::Path,
+    filename: &str,
+) -> Result<String, String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    let bytes =
+        std::io::copy(source, temporary.as_file_mut()).map_err(|error| error.to_string())?;
+    if bytes == 0 {
+        return Err("Server returned an empty archive".into());
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    publish_archive_download(temporary, directory, filename)
+}
+
+#[cfg(test)]
+mod archive_download_tests {
+    use super::*;
+
+    #[test]
+    fn filenames_keep_format_and_cannot_escape_directory() {
+        let metadata = serde_json::json!({"filename": "original.cbr", "title": format!("../CON:<bad> {}", "漫画".repeat(100))});
+        let filename = archive_download_filename(&"a".repeat(40), &metadata);
+        assert!(filename.ends_with(".cbr"));
+        assert!(filename.len() < 240);
+        assert!(!filename.contains('/') && !filename.contains('\\') && !filename.contains(':'));
+    }
+
+    #[test]
+    fn repeated_download_preserves_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let first =
+            save_archive_download(&mut &b"first"[..], directory.path(), "archive.zip").unwrap();
+        let second =
+            save_archive_download(&mut &b"second"[..], directory.path(), "archive.zip").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(first).unwrap(), b"first");
+        assert_eq!(std::fs::read(second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn failed_download_leaves_no_partial_archive() {
+        struct Interrupted;
+        impl std::io::Read for Interrupted {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("connection closed"))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        assert!(save_archive_download(&mut Interrupted, directory.path(), "archive.zip").is_err());
+        assert!(save_archive_download(&mut &b""[..], directory.path(), "archive.zip").is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+}
+
+fn publish_archive_download(
+    temporary: tempfile::NamedTempFile,
+    directory: &std::path::Path,
+    filename: &str,
+) -> Result<String, String> {
+    let mut temporary = temporary;
+    for suffix in 0..1000 {
+        let name = if suffix == 0 {
+            filename.to_string()
+        } else {
+            let path = std::path::Path::new(filename);
+            format!(
+                "{} ({suffix}).{}",
+                path.file_stem().unwrap_or_default().to_string_lossy(),
+                path.extension().unwrap_or_default().to_string_lossy()
+            )
+        };
+        let destination = directory.join(name);
+        match temporary.persist_noclobber(&destination) {
+            Ok(_) => return Ok(destination.to_string_lossy().into_owned()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary = error.file
+            }
+            Err(error) => return Err(error.error.to_string()),
+        }
+    }
+    Err("Too many existing copies of this archive".into())
+}
+
+#[tauri::command]
 pub async fn delete_archive(
     server_id: String,
     archive_id: String,
@@ -1043,7 +1371,13 @@ pub async fn delete_archive(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let url = format!(
         "{}/api/archives/{}",
@@ -1059,6 +1393,25 @@ pub async fn delete_archive(
             "REMOTE_UNAVAILABLE",
             format!("LANraragi request failed ({})", response.status()),
             response.status().is_server_error(),
+        ));
+    }
+    let operation: serde_json::Value = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                false,
+            ))
+        }
+    };
+    if operation["success"].as_i64() != Some(1) {
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            operation["error"]
+                .as_str()
+                .unwrap_or("LANraragi did not confirm deletion"),
+            false,
         ));
     }
     let connection = match database.connection.lock() {
@@ -1082,6 +1435,92 @@ pub async fn delete_archive(
     Ok(CommandResult::success(()))
 }
 
+pub(crate) async fn delete_archive_with_favorite_sync(
+    server_id: String,
+    archive_id: String,
+    sync_favorite: bool,
+    database: State<'_, Database>,
+) -> Result<CommandResult<()>, String> {
+    if sync_favorite {
+        let metadata =
+            match load_archive_metadata(server_id.clone(), archive_id.clone(), database.clone())
+                .await?
+            {
+                CommandResult::Success { value, .. } => value,
+                CommandResult::Failure { error, .. } => {
+                    return Ok(CommandResult::Failure { ok: false, error })
+                }
+            };
+        if let Some((gallery_id, token)) = eh_gallery_from_tags(&metadata.tags) {
+            let account_id = {
+                let connection = database
+                    .connection
+                    .lock()
+                    .map_err(|_| "Database lock failed".to_string())?;
+                connection
+                    .query_row(
+                        "SELECT id FROM eh_accounts WHERE is_active=1 ORDER BY id LIMIT 1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?
+            };
+            let Some(account_id) = account_id else {
+                return Ok(CommandResult::failure(
+                    "EH_REAUTH_REQUIRED",
+                    "请先登录 E-Hentai，或关闭本次收藏同步删除",
+                    false,
+                ));
+            };
+            match crate::commands::eh::remove_eh_favorite(
+                account_id,
+                gallery_id,
+                token,
+                database.clone(),
+            )
+            .await?
+            {
+                CommandResult::Success { .. } => (),
+                failure @ CommandResult::Failure { .. } => return Ok(failure),
+            }
+        }
+    }
+    delete_archive(server_id, archive_id, database).await
+}
+
+fn eh_gallery_from_tags(tags: &str) -> Option<(String, String)> {
+    tags.split(',').find_map(|tag| {
+        let (namespace, source) = tag.trim().split_once(':')?;
+        if !namespace.trim().eq_ignore_ascii_case("source") {
+            return None;
+        }
+        let source = source.trim();
+        let source = if source.contains("://") {
+            source.to_string()
+        } else {
+            format!("https://{source}")
+        };
+        let url = Url::parse(&source).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(url.host_str(), Some("e-hentai.org" | "exhentai.org"))
+        {
+            return None;
+        }
+        let segments: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        if segments.len() != 3
+            || segments[0] != "g"
+            || segments[1].is_empty()
+            || segments[2].is_empty()
+            || !segments[1].bytes().all(|byte| byte.is_ascii_digit())
+            || !segments[2].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some((segments[1].to_string(), segments[2].to_string()))
+    })
+}
+
 #[tauri::command]
 pub async fn load_reader_manifest(
     server_id: String,
@@ -1099,7 +1538,13 @@ pub async fn load_reader_manifest(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let title = database
         .connection
@@ -1173,10 +1618,12 @@ async fn load_reader_page_bytes(
     database: State<'_, Database>,
     app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
-    use tauri::Manager;
-
     if page_index < 0 {
-        return Ok(CommandResult::failure("INVALID_RESPONSE", "Invalid reader page index", false));
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "Invalid reader page index",
+            false,
+        ));
     }
     let path = match normalize_reader_page_path(&path) {
         Ok(path) => path,
@@ -1191,12 +1638,23 @@ async fn load_reader_page_bytes(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
     };
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                error.to_string(),
+                true,
+            ))
+        }
     };
-    let cached = database.connection.lock().map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| load_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index));
+    let cached = database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| {
+            load_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index)
+        });
     match cached {
         Ok(Some(bytes)) => return Ok(CommandResult::success(bytes)),
         Ok(None) => {}
@@ -1204,7 +1662,13 @@ async fn load_reader_page_bytes(
     }
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let mut url = match Url::parse(&format!(
         "{}/api/archives/{}/page",
@@ -1232,14 +1696,26 @@ async fn load_reader_page_bytes(
             response.status().is_server_error(),
         ));
     }
-    let mime = response.headers().get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("application/octet-stream").to_string();
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
                 // A failed cache write means every later read re-fetches, so it
                 // must not vanish silently.
-                if let Err(error) = store_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index, &mime, &bytes) {
+                if let Err(error) = store_reader_page_cache(
+                    &connection,
+                    &app_data,
+                    &scope_id,
+                    &archive_id,
+                    page_index,
+                    &mime,
+                    &bytes,
+                ) {
                     eprintln!("yomika: reader page cache write failed: {error}");
                 }
             }
@@ -1271,7 +1747,6 @@ pub(crate) async fn load_archive_thumbnail_bytes(
     database: State<'_, Database>,
     app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
-    use tauri::Manager;
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -1281,21 +1756,37 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
     };
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                error.to_string(),
+                true,
+            ))
+        }
     };
     let cache_identity = crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "cover", 0);
-    match database.connection.lock().map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| crate::cache::load_image_cache(&connection, &app_data, &cache_identity))
-    {
+    match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| {
+            crate::cache::load_image_cache(&connection, &app_data, &cache_identity)
+        }) {
         Ok(Some(image)) => return Ok(CommandResult::success(image.bytes)),
         Ok(None) => {}
         Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
     }
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     // Cover requests follow Readoshi's normal thumbnail endpoint. The
     // no_fallback flag is reserved for page thumbnails where extraction is
@@ -1311,39 +1802,70 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
     let response = if response.status().as_u16() == 202 {
-        let job_id = response.bytes().await.ok()
+        let job_id = response
+            .bytes()
+            .await
+            .ok()
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
             .and_then(|value| {
                 let job = value.get("job").cloned().unwrap_or(value);
-                job.as_i64().or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
+                job.as_i64()
+                    .or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
             });
         if let Some(job_id) = job_id {
             let mut finished = false;
             for _ in 0..60 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let status_url = format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
-                let status = match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                let state = status.json::<serde_json::Value>().await.ok()
-                    .and_then(|value| value.get("state").and_then(|state| state.as_str()).map(str::to_owned));
-                if state.as_deref() == Some("finished") { finished = true; break; }
+                let status_url =
+                    format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
+                let status =
+                    match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                let state = status
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("state")
+                            .and_then(|state| state.as_str())
+                            .map(str::to_owned)
+                    });
+                if state.as_deref() == Some("finished") {
+                    finished = true;
+                    break;
+                }
                 if matches!(state.as_deref(), Some("failed") | Some("error")) {
-                    return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 缩略图生成失败", true));
+                    return Ok(CommandResult::failure(
+                        "REMOTE_UNAVAILABLE",
+                        "LANraragi 缩略图生成失败",
+                        true,
+                    ));
                 }
             }
             if !finished {
-                return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 缩略图生成超时", true));
+                return Ok(CommandResult::failure(
+                    "REMOTE_UNAVAILABLE",
+                    "LANraragi 缩略图生成超时",
+                    true,
+                ));
             }
             match reader_request(reqwest::Method::GET, url, api_key).await {
                 Ok(value) => value,
                 Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
             }
         } else {
-            return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 未返回缩略图任务编号", true));
+            return Ok(CommandResult::failure(
+                "REMOTE_UNAVAILABLE",
+                "LANraragi 未返回缩略图任务编号",
+                true,
+            ));
         }
-    } else { response };
+    } else {
+        response
+    };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
             "REMOTE_UNAVAILABLE",
@@ -1351,12 +1873,22 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             response.status().is_server_error(),
         ));
     }
-    let mime = response.headers().get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("image/jpeg").to_string();
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
     match response.bytes().await {
         Ok(bytes) => {
             if let Ok(connection) = database.connection.lock() {
-                if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, &mime, &bytes) {
+                if let Err(error) = crate::cache::store_image_cache(
+                    &connection,
+                    &app_data,
+                    &cache_identity,
+                    &mime,
+                    &bytes,
+                ) {
                     eprintln!("yomika: image cache write failed: {error}");
                 }
             }
@@ -1392,9 +1924,12 @@ async fn load_archive_page_thumbnail_bytes(
     database: State<'_, Database>,
     app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
-    use tauri::Manager;
     if page < 1 {
-        return Ok(CommandResult::failure("INVALID_INPUT", "页码必须大于 0", false));
+        return Ok(CommandResult::failure(
+            "INVALID_INPUT",
+            "页码必须大于 0",
+            false,
+        ));
     }
     let (base_url, scope_id) = match database
         .connection
@@ -1405,28 +1940,51 @@ async fn load_archive_page_thumbnail_bytes(
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
     };
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                error.to_string(),
+                true,
+            ))
+        }
     };
-    let cache_identity = crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "page-thumbnail", page - 1);
-    match database.connection.lock().map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| crate::cache::load_image_cache(&connection, &app_data, &cache_identity))
-    {
+    let cache_identity =
+        crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "page-thumbnail", page - 1);
+    match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| {
+            crate::cache::load_image_cache(&connection, &app_data, &cache_identity)
+        }) {
         Ok(Some(image)) => return Ok(CommandResult::success(image.bytes)),
         Ok(None) => {}
         Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
     }
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let bytes = match fetch_page_thumbnail(&base_url, &archive_id, page, api_key, 60).await {
         Ok(CommandResult::Success { value, .. }) => value,
         other => return other,
     };
     if let Ok(connection) = database.connection.lock() {
-        if let Err(error) = crate::cache::store_image_cache(&connection, &app_data, &cache_identity, "application/octet-stream", &bytes) {
+        if let Err(error) = crate::cache::store_image_cache(
+            &connection,
+            &app_data,
+            &cache_identity,
+            "application/octet-stream",
+            &bytes,
+        ) {
             eprintln!("yomika: image cache write failed: {error}");
         }
     }
@@ -1440,11 +1998,17 @@ async fn fetch_page_thumbnail(
     api_key: String,
     poll_attempts: usize,
 ) -> Result<CommandResult<Vec<u8>>, String> {
-    let thumbnail_url = format!("{}/api/archives/{}/thumbnail?page={}&no_fallback=true", base_url.trim_end_matches('/'), archive_id, page);
-    let response = match reader_request(reqwest::Method::GET, thumbnail_url.clone(), api_key.clone()).await {
-        Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
-    };
+    let thumbnail_url = format!(
+        "{}/api/archives/{}/thumbnail?page={}&no_fallback=true",
+        base_url.trim_end_matches('/'),
+        archive_id,
+        page
+    );
+    let response =
+        match reader_request(reqwest::Method::GET, thumbnail_url.clone(), api_key.clone()).await {
+            Ok(response) => response,
+            Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        };
     let response = if response.status().as_u16() == 202 {
         let job_id = response
             .bytes()
@@ -1453,53 +2017,93 @@ async fn fetch_page_thumbnail(
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
             .and_then(|value| {
                 let job = value.get("job").cloned().unwrap_or(value);
-                job.as_i64().or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
+                job.as_i64()
+                    .or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
             });
         if let Some(job_id) = job_id {
             let mut finished = false;
             for _ in 0..poll_attempts {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let status_url = format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
-                let status = match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
+                let status_url =
+                    format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
+                let status =
+                    match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
                 let state = status
                     .json::<serde_json::Value>()
                     .await
                     .ok()
-                    .and_then(|value| value.get("state").and_then(|state| state.as_str()).map(str::to_owned));
+                    .and_then(|value| {
+                        value
+                            .get("state")
+                            .and_then(|state| state.as_str())
+                            .map(str::to_owned)
+                    });
                 if matches!(state.as_deref(), Some("finished")) {
                     finished = true;
                     break;
                 }
                 if matches!(state.as_deref(), Some("failed") | Some("error")) {
-                    return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 缩略图生成失败", true));
+                    return Ok(CommandResult::failure(
+                        "REMOTE_UNAVAILABLE",
+                        "LANraragi 缩略图生成失败",
+                        true,
+                    ));
                 }
             }
             if !finished {
-                return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi thumbnail generation timed out", true));
+                return Ok(CommandResult::failure(
+                    "REMOTE_UNAVAILABLE",
+                    "LANraragi thumbnail generation timed out",
+                    true,
+                ));
             }
             match reader_request(reqwest::Method::GET, thumbnail_url, api_key).await {
                 Ok(value) => value,
                 Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
             }
         } else {
-            return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 未返回缩略图任务编号", true));
+            return Ok(CommandResult::failure(
+                "REMOTE_UNAVAILABLE",
+                "LANraragi 未返回缩略图任务编号",
+                true,
+            ));
         }
-    } else { response };
+    } else {
+        response
+    };
     if response.status() == reqwest::StatusCode::ACCEPTED {
-        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi thumbnail is not ready", true));
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            "LANraragi thumbnail is not ready",
+            true,
+        ));
     }
     if !response.status().is_success() {
-        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", format!("LANraragi request failed ({})", response.status()), response.status().is_server_error()));
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            format!("LANraragi request failed ({})", response.status()),
+            response.status().is_server_error(),
+        ));
     }
     match response.bytes().await {
-        Ok(bytes) if crate::cache::sniff_image_mime("application/octet-stream", &bytes).is_some() => {
+        Ok(bytes)
+            if crate::cache::sniff_image_mime("application/octet-stream", &bytes).is_some() =>
+        {
             Ok(CommandResult::success(bytes.to_vec()))
         }
-        Ok(_) => Ok(CommandResult::failure("INVALID_RESPONSE", "LANraragi thumbnail response is not an image", true)),
-        Err(error) => Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error.to_string(), true)),
+        Ok(_) => Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "LANraragi thumbnail response is not an image",
+            true,
+        )),
+        Err(error) => Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            error.to_string(),
+            true,
+        )),
     }
 }
 
@@ -1587,7 +2191,9 @@ fn query_archive_records(
                 cover_page: row.get(7)?,
                 is_deleted: row.get::<_, i64>(8)? != 0,
                 updated_at: row.get(9)?,
-                added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
+                added_at: row
+                    .get::<_, Option<i64>>(11)?
+                    .or_else(|| archive_added_at(&tags)),
                 tags,
             })
         })
@@ -1601,8 +2207,10 @@ fn archive_tags(tags_json: String) -> Vec<String> {
 }
 
 fn archive_added_at(tags: &[String]) -> Option<i64> {
-    tags.iter()
-        .find_map(|tag| tag.strip_prefix("date_added:").and_then(|value| value.parse::<i64>().ok()))
+    tags.iter().find_map(|tag| {
+        tag.strip_prefix("date_added:")
+            .and_then(|value| value.parse::<i64>().ok())
+    })
 }
 
 fn archive_search_token(value: &str) -> String {
@@ -1629,9 +2237,16 @@ fn query_archive_page(
     }
     let safe_offset = input.offset.max(0);
     let safe_limit = input.limit.clamp(1, 200);
-    let mut clauses = vec!["a.server_id = ?".to_string(), "a.is_deleted = 0".to_string()];
+    let mut clauses = vec![
+        "a.server_id = ?".to_string(),
+        "a.is_deleted = 0".to_string(),
+    ];
     let mut values = vec![input.server_id.clone()];
-    if let Some(category_id) = input.category_id.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(category_id) = input
+        .category_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         clauses.push(
             "EXISTS (SELECT 1 FROM archive_categories ac WHERE ac.server_id = a.server_id AND ac.archive_id = a.archive_id AND ac.category_id = ?)"
                 .to_string(),
@@ -1644,24 +2259,32 @@ fn query_archive_page(
         // not a string comparison against every way `[]` could be spelled.
         clauses.push("json_array_length(a.tags_json) = 0".to_string());
     }
-    for token in input.query.split(',').map(archive_search_token).filter(|token| !token.is_empty()) {
+    for token in input
+        .query
+        .split(',')
+        .map(archive_search_token)
+        .filter(|token| !token.is_empty())
+    {
         let pattern = format!("%{token}%");
         if token.contains(':') {
             clauses.push("LOWER(a.tags_json) LIKE ? ESCAPE '\\'".to_string());
             values.push(pattern);
         } else {
-            clauses.push("(LOWER(a.title) LIKE ? ESCAPE '\\' OR LOWER(a.tags_json) LIKE ? ESCAPE '\\')".to_string());
+            clauses.push(
+                "(LOWER(a.title) LIKE ? ESCAPE '\\' OR LOWER(a.tags_json) LIKE ? ESCAPE '\\')"
+                    .to_string(),
+            );
             values.push(pattern.clone());
             values.push(pattern);
         }
     }
     let where_sql = clauses.join(" AND ");
     let total_sql = format!("SELECT COUNT(*) FROM archives a WHERE {where_sql}");
-    let total: i64 = connection.query_row(
-        &total_sql,
-        params_from_iter(values.iter()),
-        |row| row.get(0),
-    ).map_err(|error| error.to_string())?;
+    let total: i64 = connection
+        .query_row(&total_sql, params_from_iter(values.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
     let direction = if input.order == "asc" { "ASC" } else { "DESC" };
     let sort = if input.sort_by == "title" {
         "a.title_sort COLLATE NOCASE"
@@ -1675,18 +2298,38 @@ fn query_archive_page(
         "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json, COALESCE(a.added_at, a.first_seen_at)
          FROM archives a WHERE {where_sql} ORDER BY {sort} {direction}, a.archive_id ASC LIMIT {safe_limit} OFFSET {safe_offset}"
     );
-    let mut statement = connection.prepare(&page_sql).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params_from_iter(values.iter()), |row| {
-        let tags = archive_tags(row.get::<_, String>(10)?);
-        Ok(ArchiveRecord {
-            server_id: row.get(0)?, archive_id: row.get(1)?, title: row.get(2)?, page_count: row.get(3)?,
-            summary: row.get(4)?, category: row.get(5)?, language: row.get(6)?, cover_page: row.get(7)?,
-            is_deleted: row.get::<_, i64>(8)? != 0, updated_at: row.get(9)?,
-            added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)), tags,
+    let mut statement = connection
+        .prepare(&page_sql)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            let tags = archive_tags(row.get::<_, String>(10)?);
+            Ok(ArchiveRecord {
+                server_id: row.get(0)?,
+                archive_id: row.get(1)?,
+                title: row.get(2)?,
+                page_count: row.get(3)?,
+                summary: row.get(4)?,
+                category: row.get(5)?,
+                language: row.get(6)?,
+                cover_page: row.get(7)?,
+                is_deleted: row.get::<_, i64>(8)? != 0,
+                updated_at: row.get(9)?,
+                added_at: row
+                    .get::<_, Option<i64>>(11)?
+                    .or_else(|| archive_added_at(&tags)),
+                tags,
+            })
         })
-    }).map_err(|error| error.to_string())?;
-    let items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    Ok(ArchivePage { has_more: safe_offset + (items.len() as i64) < total, items, total })
+        .map_err(|error| error.to_string())?;
+    let items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(ArchivePage {
+        has_more: safe_offset + (items.len() as i64) < total,
+        items,
+        total,
+    })
 }
 
 const ARCHIVE_UPSERT: &str = "INSERT INTO archives (
@@ -1863,7 +2506,9 @@ fn read_category_cache_from(
         )
         .optional()
         .map_err(|error| format!("读取分类缓存失败：{error}"))?;
-    let Some(stored) = stored else { return Ok(None) };
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
     let envelope: CategoryCacheEnvelope = match serde_json::from_str(&stored) {
         Ok(value) => value,
         // A snapshot written by an older schema is simply refetched.
@@ -1892,7 +2537,8 @@ fn write_category_cache(
         categories: categories.to_vec(),
         partial,
     };
-    let payload = serde_json::to_string(&envelope).map_err(|error| format!("序列化分类缓存失败：{error}"))?;
+    let payload =
+        serde_json::to_string(&envelope).map_err(|error| format!("序列化分类缓存失败：{error}"))?;
     connection
         .execute(
             "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
@@ -1907,9 +2553,15 @@ fn write_category_cache(
 /// snapshot taken for the 6-hour window is wrong the moment the assignment
 /// lands. Dropping the row makes the next read refetch rather than serve a
 /// category that is missing the archive just added to it.
-fn invalidate_category_cache(connection: &rusqlite::Connection, server_id: &str) -> Result<(), String> {
+fn invalidate_category_cache(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+) -> Result<(), String> {
     connection
-        .execute("DELETE FROM settings WHERE key = ?1", [category_cache_key(server_id)])
+        .execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [category_cache_key(server_id)],
+        )
         .map(|_| ())
         .map_err(|error| format!("清除分类缓存失败：{error}"))
 }
@@ -1921,7 +2573,10 @@ fn current_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Result<String, String> {
+fn build_refresh_search_url(
+    base_url: &str,
+    params: &RefreshSearchParams,
+) -> Result<String, String> {
     let trimmed = base_url.trim_end_matches('/');
     let mut query: Vec<String> = Vec::new();
 
@@ -1933,14 +2588,24 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
     query.push(format!("start={}", start_value));
 
     if let Some(ref filter) = params.filter {
-        query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
+        query.push(format!(
+            "filter={}",
+            url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()
+        ));
     }
     // LANraragi reads `sortby`/`order` without defaulting them: a missing value
     // leaves $sortkey undefined, which floods the server log with
     // "Use of uninitialized value $sortkey" from Model/Search.pm and falls back
     // to title order. Always send both, defaulting to newest first.
-    let sortby = params.sortby.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or("date_added");
-    query.push(format!("sortby={}", url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()));
+    let sortby = params
+        .sortby
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("date_added");
+    query.push(format!(
+        "sortby={}",
+        url::form_urlencoded::byte_serialize(sortby.as_bytes()).collect::<String>()
+    ));
     let order = match params.order.as_deref() {
         Some("asc") => "asc",
         _ => "desc",
@@ -1956,7 +2621,10 @@ fn build_refresh_search_url(base_url: &str, params: &RefreshSearchParams) -> Res
         query.push(format!("hidecompleted={}", hidecompleted));
     }
     if let Some(ref category) = params.category {
-        query.push(format!("category={}", url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()));
+        query.push(format!(
+            "category={}",
+            url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()
+        ));
     }
     if let Some(groupby_tanks) = params.groupby_tanks {
         query.push(format!("groupby_tanks={}", groupby_tanks));
@@ -2000,7 +2668,12 @@ const MAX_SYNC_PAGES: usize = 2_000;
 /// size constant and only the tail is short. The count check covers the case
 /// where every page comes back full because the walk has already consumed
 /// everything `recordsFiltered` promised.
-fn search_walk_is_done(received: usize, first_page_size: usize, collected: i64, filtered: i64) -> bool {
+fn search_walk_is_done(
+    received: usize,
+    first_page_size: usize,
+    collected: i64,
+    filtered: i64,
+) -> bool {
     received == 0 || received < first_page_size || collected >= filtered
 }
 
@@ -2032,7 +2705,11 @@ async fn fetch_all_search_pages(
             return Ok(collected);
         }
     }
-    Err(("REMOTE_UNAVAILABLE", "LANraragi search exceeded the page limit before completing the snapshot".into(), true))
+    Err((
+        "REMOTE_UNAVAILABLE",
+        "LANraragi search exceeded the page limit before completing the snapshot".into(),
+        true,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2064,15 +2741,29 @@ pub async fn refresh_archives(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let archives = match fetch_all_search_pages(&base_url, &api_key, &input.params).await {
         Ok(value) => value,
-        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
+        Err((code, message, retryable)) => {
+            return Ok(CommandResult::failure(code, message, retryable))
+        }
     };
     let mut connection = match database.connection.lock() {
         Ok(conn) => conn,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+        Err(_) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
+                "Database lock failed".to_string(),
+                true,
+            ))
+        }
     };
     // Tombstoning happens once, after every page is in hand: doing it per page
     // would mark the rest of the library deleted between requests.
@@ -2085,13 +2776,35 @@ pub async fn refresh_archives(
 /// Shared HTTP status mapping for the LANraragi search endpoints.
 fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, String, bool)> {
     match status {
-        reqwest::StatusCode::NO_CONTENT => Some(("LRR_NOT_FOUND", "Search index not ready (204 No Content)".to_string(), true)),
-        reqwest::StatusCode::UNAUTHORIZED => Some(("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false)),
-        reqwest::StatusCode::NOT_FOUND => Some(("LRR_NOT_FOUND", "Server not found (404)".to_string(), false)),
-        reqwest::StatusCode::CONFLICT => Some(("REMOTE_CONFLICT", "Server conflict (409)".to_string(), false)),
-        reqwest::StatusCode::TOO_MANY_REQUESTS => Some(("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true)),
-        _ if status.is_server_error() => Some(("REMOTE_UNAVAILABLE", format!("Server error ({})", status), true)),
-        _ if !status.is_success() => Some(("REMOTE_UNAVAILABLE", format!("Unexpected status ({})", status), false)),
+        reqwest::StatusCode::NO_CONTENT => Some((
+            "LRR_NOT_FOUND",
+            "Search index not ready (204 No Content)".to_string(),
+            true,
+        )),
+        reqwest::StatusCode::UNAUTHORIZED => {
+            Some(("LRR_UNAUTHORIZED", "Invalid API key".to_string(), false))
+        }
+        reqwest::StatusCode::NOT_FOUND => {
+            Some(("LRR_NOT_FOUND", "Server not found (404)".to_string(), false))
+        }
+        reqwest::StatusCode::CONFLICT => Some((
+            "REMOTE_CONFLICT",
+            "Server conflict (409)".to_string(),
+            false,
+        )),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            Some(("REMOTE_RATE_LIMIT", "Rate limited (429)".to_string(), true))
+        }
+        _ if status.is_server_error() => Some((
+            "REMOTE_UNAVAILABLE",
+            format!("Server error ({})", status),
+            true,
+        )),
+        _ if !status.is_success() => Some((
+            "REMOTE_UNAVAILABLE",
+            format!("Unexpected status ({})", status),
+            false,
+        )),
         _ => None,
     }
 }
@@ -2099,17 +2812,20 @@ fn search_status_failure(status: reqwest::StatusCode) -> Option<(&'static str, S
 /// Newest-first first page, used to detect archives added in LANraragi without
 /// paying for the offline index rebuild that `refresh_archives` performs.
 fn build_probe_search_url(base_url: &str) -> Result<String, String> {
-    build_refresh_search_url(base_url, &RefreshSearchParams {
-        filter: None,
-        start: Some(0),
-        sortby: Some("date_added".to_string()),
-        order: Some("desc".to_string()),
-        newonly: None,
-        untaggedonly: None,
-        hidecompleted: None,
-        category: None,
-        groupby_tanks: None,
-    })
+    build_refresh_search_url(
+        base_url,
+        &RefreshSearchParams {
+            filter: None,
+            start: Some(0),
+            sortby: Some("date_added".to_string()),
+            order: Some("desc".to_string()),
+            newonly: None,
+            untaggedonly: None,
+            hidecompleted: None,
+            category: None,
+            groupby_tanks: None,
+        },
+    )
 }
 
 /// Archive ids from the probe page that the local index does not know yet.
@@ -2120,7 +2836,9 @@ fn unknown_probe_archive_ids(
 ) -> Result<Vec<String>, String> {
     let mut unknown = Vec::new();
     let mut statement = connection
-        .prepare("SELECT 1 FROM archives WHERE server_id = ?1 AND archive_id = ?2 AND is_deleted = 0")
+        .prepare(
+            "SELECT 1 FROM archives WHERE server_id = ?1 AND archive_id = ?2 AND is_deleted = 0",
+        )
         .map_err(|error| error.to_string())?;
     for archive_id in archive_ids {
         let known = statement
@@ -2151,7 +2869,13 @@ pub async fn probe_new_archives(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let url = match build_probe_search_url(&base_url) {
         Ok(value) => value,
@@ -2166,16 +2890,31 @@ pub async fn probe_new_archives(
     }
     let body = match response.text().await {
         Ok(text) => text,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                true,
+            ))
+        }
     };
     let archives = match parse_search_response(&body) {
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
     };
-    let archive_ids: Vec<String> = archives.into_iter().map(|archive| archive.archive_id).collect();
+    let archive_ids: Vec<String> = archives
+        .into_iter()
+        .map(|archive| archive.archive_id)
+        .collect();
     let connection = match database.connection.lock() {
         Ok(conn) => conn,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+        Err(_) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
+                "Database lock failed".to_string(),
+                true,
+            ))
+        }
     };
     match unknown_probe_archive_ids(&connection, &server_id, &archive_ids) {
         Ok(unknown) => Ok(CommandResult::success(!unknown.is_empty())),
@@ -2230,10 +2969,18 @@ pub async fn search_archives_page(
     database: State<'_, Database>,
 ) -> Result<CommandResult<ArchivePage>, String> {
     let Some(sortby) = remote_sort_key(&input.sort_by) else {
-        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort key".to_string(), false));
+        return Ok(CommandResult::failure(
+            "INVALID_INPUT",
+            "Invalid archive sort key".to_string(),
+            false,
+        ));
     };
     if !matches!(input.order.as_str(), "asc" | "desc") {
-        return Ok(CommandResult::failure("INVALID_INPUT", "Invalid archive sort order".to_string(), false));
+        return Ok(CommandResult::failure(
+            "INVALID_INPUT",
+            "Invalid archive sort order".to_string(),
+            false,
+        ));
     }
     let (base_url, scope_id) = match database
         .connection
@@ -2246,7 +2993,13 @@ pub async fn search_archives_page(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let start = input.start.max(0);
     // The filter and the category go to the server. LANraragi's own search syntax
@@ -2266,12 +3019,23 @@ pub async fn search_archives_page(
     };
     let (archives, filtered, _) = match fetch_search_page(&base_url, &api_key, &params).await {
         Ok(value) => value,
-        Err((code, message, retryable)) => return Ok(CommandResult::failure(code, message, retryable)),
+        Err((code, message, retryable)) => {
+            return Ok(CommandResult::failure(code, message, retryable))
+        }
     };
-    let archive_ids: Vec<String> = archives.iter().map(|archive| archive.archive_id.clone()).collect();
+    let archive_ids: Vec<String> = archives
+        .iter()
+        .map(|archive| archive.archive_id.clone())
+        .collect();
     let mut connection = match database.connection.lock() {
         Ok(conn) => conn,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+        Err(_) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
+                "Database lock failed".to_string(),
+                true,
+            ))
+        }
     };
     if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
         return Ok(CommandResult::failure("LOCAL_DATABASE", error, true));
@@ -2307,7 +3071,10 @@ fn query_archive_records_by_ids(
     let mut by_id: std::collections::HashMap<String, ArchiveRecord> =
         std::collections::HashMap::with_capacity(archive_ids.len());
     for chunk in archive_ids.chunks(CHUNK) {
-        let placeholders = (0..chunk.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(", ");
+        let placeholders = (0..chunk.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
              FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
@@ -2317,7 +3084,9 @@ fn query_archive_records_by_ids(
         for id in chunk {
             values.push(id);
         }
-        let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(values.as_slice(), |row| {
                 let tags = archive_tags(row.get::<_, String>(10)?);
@@ -2332,7 +3101,9 @@ fn query_archive_records_by_ids(
                     cover_page: row.get(7)?,
                     is_deleted: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
-                    added_at: row.get::<_, Option<i64>>(11)?.or_else(|| archive_added_at(&tags)),
+                    added_at: row
+                        .get::<_, Option<i64>>(11)?
+                        .or_else(|| archive_added_at(&tags)),
                     tags,
                 })
             })
@@ -2366,11 +3137,25 @@ fn build_random_search_url(base_url: &str, input: &RandomArchivesInput) -> Strin
     let trimmed = base_url.trim_end_matches('/');
     let count = input.count.unwrap_or(8).clamp(1, 100);
     let mut query = vec![format!("count={count}")];
-    if let Some(filter) = input.filter.as_deref().filter(|value| !value.trim().is_empty()) {
-        query.push(format!("filter={}", url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()));
+    if let Some(filter) = input
+        .filter
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        query.push(format!(
+            "filter={}",
+            url::form_urlencoded::byte_serialize(filter.as_bytes()).collect::<String>()
+        ));
     }
-    if let Some(category) = input.category.as_deref().filter(|value| !value.trim().is_empty()) {
-        query.push(format!("category={}", url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()));
+    if let Some(category) = input
+        .category
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        query.push(format!(
+            "category={}",
+            url::form_urlencoded::byte_serialize(category.as_bytes()).collect::<String>()
+        ));
     }
     format!("{}/api/search/random?{}", trimmed, query.join("&"))
 }
@@ -2393,9 +3178,21 @@ pub async fn search_random_archives(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
-    let response = match reader_request(reqwest::Method::GET, build_random_search_url(&base_url, &input), api_key).await {
+    let response = match reader_request(
+        reqwest::Method::GET,
+        build_random_search_url(&base_url, &input),
+        api_key,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
     };
@@ -2404,7 +3201,13 @@ pub async fn search_random_archives(
     }
     let body = match response.text().await {
         Ok(text) => text,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                true,
+            ))
+        }
     };
     let archives = match parse_random_response(&body) {
         Ok(archives) => archives,
@@ -2412,12 +3215,21 @@ pub async fn search_random_archives(
     };
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed".to_string(), true)),
+        Err(_) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
+                "Database lock failed".to_string(),
+                true,
+            ))
+        }
     };
     if let Err(error) = upsert_server_archives(&mut connection, &input.server_id, &archives) {
         return Ok(CommandResult::failure("UNKNOWN", error, true));
     }
-    let ids = archives.iter().map(|archive| archive.archive_id.clone()).collect::<Vec<_>>();
+    let ids = archives
+        .iter()
+        .map(|archive| archive.archive_id.clone())
+        .collect::<Vec<_>>();
     match query_archive_records_by_ids(&connection, &input.server_id, &ids) {
         Ok(records) => Ok(CommandResult::success(records)),
         Err(error) => Ok(CommandResult::failure("UNKNOWN", error, true)),
@@ -2506,32 +3318,65 @@ pub async fn save_server(
                 && url.username().is_empty()
                 && url.password().is_none()
                 && url.query().is_none()
-                && url.fragment().is_none() => url,
-        _ => return Ok(CommandResult::failure("INVALID_RESPONSE", "Invalid server URL", false)),
+                && url.fragment().is_none() =>
+        {
+            url
+        }
+        _ => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                "Invalid server URL",
+                false,
+            ))
+        }
     };
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
-        return Ok(CommandResult::failure("INVALID_RESPONSE", "API Key is required", false));
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "API Key is required",
+            false,
+        ));
     }
     let url = format!("{}/api/info", parsed_url.as_str().trim_end_matches('/'));
     let response = match reader_request(reqwest::Method::GET, url, api_key.clone()).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", format!("无法连接 LANraragi：{error}"), true)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "REMOTE_UNAVAILABLE",
+                format!("无法连接 LANraragi：{error}"),
+                true,
+            ))
+        }
     };
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(CommandResult::failure("LRR_UNAUTHORIZED", "API Key 无效", false));
+        return Ok(CommandResult::failure(
+            "LRR_UNAUTHORIZED",
+            "API Key 无效",
+            false,
+        ));
     }
     if !status.is_success() {
         return Ok(CommandResult::failure(
-            if status.is_server_error() { "REMOTE_UNAVAILABLE" } else { "INVALID_RESPONSE" },
+            if status.is_server_error() {
+                "REMOTE_UNAVAILABLE"
+            } else {
+                "INVALID_RESPONSE"
+            },
             format!("LANraragi 请求失败 ({status})"),
             status.is_server_error(),
         ));
     }
     let info: ServerInfoWire = match response.json().await {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", format!("LANraragi 返回了无效的服务器信息：{error}"), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                format!("LANraragi 返回了无效的服务器信息：{error}"),
+                false,
+            ))
+        }
     };
     let resolved_name = if server.name.trim().is_empty() {
         info.name.unwrap_or_default().trim().to_string()
@@ -2539,14 +3384,33 @@ pub async fn save_server(
         server.name.trim().to_string()
     };
     if resolved_name.is_empty() {
-        return Ok(CommandResult::failure("INVALID_RESPONSE", "LANraragi 未返回服务器名称，请手动填写名称", false));
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "LANraragi 未返回服务器名称，请手动填写名称",
+            false,
+        ));
     }
-    let server = ServerInput { name: resolved_name, base_url: parsed_url.as_str().trim_end_matches('/').to_string(), scope_id: server.scope_id };
+    let server = ServerInput {
+        name: resolved_name,
+        base_url: parsed_url.as_str().trim_end_matches('/').to_string(),
+        scope_id: server.scope_id,
+    };
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+        Err(_) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
+                "Database lock failed",
+                true,
+            ))
+        }
     };
-    Ok(save_server_record(&mut connection, &SystemCredentialStore, server, api_key))
+    Ok(save_server_record(
+        &mut connection,
+        &SystemCredentialStore,
+        server,
+        api_key,
+    ))
 }
 
 #[tauri::command]
@@ -2579,11 +3443,19 @@ pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRe
 }
 
 #[tauri::command]
-pub async fn check_server_status(database: State<'_, Database>) -> Result<CommandResult<Vec<ServerStatusRecord>>, String> {
+pub async fn check_server_status(
+    database: State<'_, Database>,
+) -> Result<CommandResult<Vec<ServerStatusRecord>>, String> {
     let servers = {
         let connection = match database.connection.lock() {
             Ok(connection) => connection,
-            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+            Err(_) => {
+                return Ok(CommandResult::failure(
+                    "UNKNOWN",
+                    "Database lock failed",
+                    true,
+                ))
+            }
         };
         let mut statement = match connection.prepare(
             "SELECT id, name, base_url, scope_id FROM servers ORDER BY name COLLATE NOCASE, id",
@@ -2644,8 +3516,16 @@ pub async fn check_server_status(database: State<'_, Database>) -> Result<Comman
                 continue;
             }
         };
-        let valid_name = info.name.as_deref().map(str::trim).filter(|value| !value.is_empty());
-        let valid_version = info.version.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let valid_name = info
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let valid_version = info
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         if valid_name.is_none() || valid_version.is_none() {
             statuses.push(offline("LANraragi 返回了不完整的服务器信息".to_string()));
             continue;
@@ -2744,7 +3624,13 @@ pub async fn verify_archives_exist(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let mut missing = Vec::new();
     for archive_id in archive_ids.iter().take(VERIFY_ARCHIVE_LIMIT) {
@@ -2759,14 +3645,19 @@ pub async fn verify_archives_exist(
             Err(_) => continue,
         };
         let status = response.status();
-        if !matches!(status, reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND) {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+        ) {
             continue;
         }
         let tombstoned = database
             .connection
             .lock()
             .map_err(|_| "Database lock failed".to_string())
-            .and_then(|connection| reconcile_missing_archive_status(&connection, &server_id, archive_id, status));
+            .and_then(|connection| {
+                reconcile_missing_archive_status(&connection, &server_id, archive_id, status)
+            });
         match tombstoned {
             Ok(_) => missing.push(archive_id.clone()),
             Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
@@ -2922,6 +3813,19 @@ fn persist_reading_progress(
             ],
         )
         .map_err(|error| error.to_string())?;
+    // Page indexes are zero-based. Strictly above 90%, never at exactly 90%.
+    // Tombstone only existing active entries, and journal once in this transaction.
+    if record.page_count > 0
+        && (i128::from(record.page_index) + 1) * 10 > i128::from(record.page_count) * 9
+    {
+        let listed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reading_list WHERE scope_id=?1 AND archive_id=?2 AND deleted_at IS NULL)",
+            params![record.scope_id, record.archive_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if listed {
+            write_reading_list_entry(&transaction, &record.scope_id, &record.archive_id, false)?;
+        }
+    }
     if let Err(error) = transaction.commit() {
         return Err(error.to_string());
     }
@@ -3007,6 +3911,17 @@ fn set_reading_list_entry(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
+    let record = write_reading_list_entry(&transaction, scope_id, archive_id, added)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+fn write_reading_list_entry(
+    transaction: &rusqlite::Transaction<'_>,
+    scope_id: &str,
+    archive_id: &str,
+    added: bool,
+) -> Result<WatchlistRecord, String> {
     let device_id = get_or_create_device_id(&transaction)?;
     transaction
         .execute(
@@ -3061,7 +3976,6 @@ fn set_reading_list_entry(
             payload_json,
         ],
     ).map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())?;
     Ok(record)
 }
 
@@ -3106,7 +4020,9 @@ fn write_search_preset(
     connection: &mut rusqlite::Connection,
     input: &SearchPresetInput,
 ) -> Result<SearchPresetRecord, String> {
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let device_id = get_or_create_device_id(&transaction)?;
     transaction
         .execute(
@@ -3198,7 +4114,9 @@ pub fn delete_search_preset(
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
     let result = (|| -> Result<SearchPresetRecord, String> {
-        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
         transaction
             .execute(
                 "UPDATE search_presets SET deleted_at = CURRENT_TIMESTAMP,
@@ -3254,7 +4172,8 @@ pub fn list_search_presets(
                 })
             })
             .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     })();
     match result {
         Ok(records) => CommandResult::success(records),
@@ -3288,27 +4207,29 @@ pub fn list_reading_list(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let result = (|| -> Result<Vec<WatchlistRecord>, String> {
-        let mut statement = connection.prepare(
+    let result =
+        (|| -> Result<Vec<WatchlistRecord>, String> {
+            let mut statement = connection.prepare(
             "SELECT scope_id, archive_id, added_at, updated_at, device_id, deleted_at, revision
              FROM reading_list WHERE scope_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
         ).map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(params![scope_id], |row| {
-                Ok(WatchlistRecord {
-                    scope_id: row.get(0)?,
-                    archive_id: row.get(1)?,
-                    added_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    device_id: row.get(4)?,
-                    deleted_at: row.get(5)?,
-                    revision: row.get(6)?,
-                    deleted: false,
+            let rows = statement
+                .query_map(params![scope_id], |row| {
+                    Ok(WatchlistRecord {
+                        scope_id: row.get(0)?,
+                        archive_id: row.get(1)?,
+                        added_at: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        device_id: row.get(4)?,
+                        deleted_at: row.get(5)?,
+                        revision: row.get(6)?,
+                        deleted: false,
+                    })
                 })
-            })
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
-    })();
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())
+        })();
     match result {
         Ok(records) => CommandResult::success(records),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
@@ -3537,9 +4458,24 @@ pub struct CategoryRecord {
 }
 
 fn normalize_category_archives(value: serde_json::Value) -> Vec<String> {
-    value.as_array().map(|items| items.iter().filter_map(|item| {
-        item.as_str().map(str::to_owned).or_else(|| item.get("arcid").and_then(|id| id.as_str()).map(str::to_owned)).or_else(|| item.get("id").and_then(|id| id.as_str()).map(str::to_owned))
-    }).collect()).unwrap_or_default()
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            item.get("arcid")
+                                .and_then(|id| id.as_str())
+                                .map(str::to_owned)
+                        })
+                        .or_else(|| item.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3601,9 +4537,17 @@ pub fn update_task(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    match transition_task(&connection, &id, update.status.as_deref(), update.progress, update.error.as_deref()) {
+    match transition_task(
+        &connection,
+        &id,
+        update.status.as_deref(),
+        update.progress,
+        update.error.as_deref(),
+    ) {
         Ok(task) => CommandResult::success(task),
-        Err(error) if error.contains("not found") => CommandResult::failure("LRR_NOT_FOUND", error, false),
+        Err(error) if error.contains("not found") => {
+            CommandResult::failure("LRR_NOT_FOUND", error, false)
+        }
         Err(error) => CommandResult::failure("REMOTE_CONFLICT", error, false),
     }
 }
@@ -3666,7 +4610,13 @@ pub async fn upload_archive(
     }
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -3790,7 +4740,13 @@ pub async fn download_url(
 ) -> Result<CommandResult<DownloadUrlResult>, String> {
     let target = match Url::parse(url.trim()) {
         Ok(value) if matches!(value.scheme(), "http" | "https") => value,
-        _ => return Ok(CommandResult::failure("INVALID_RESPONSE", "只支持 http/https 链接", false)),
+        _ => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                "只支持 http/https 链接",
+                false,
+            ))
+        }
     };
     let (base_url, scope_id) = match database
         .connection
@@ -3803,11 +4759,26 @@ pub async fn download_url(
     };
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", credential_read_error(error), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
     };
-    let mut request_url = match Url::parse(&format!("{}/api/download_url", base_url.trim_end_matches('/'))) {
+    let mut request_url = match Url::parse(&format!(
+        "{}/api/download_url",
+        base_url.trim_end_matches('/')
+    )) {
         Ok(value) => value,
-        Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                false,
+            ))
+        }
     };
     {
         let mut pairs = request_url.query_pairs_mut();
@@ -3816,16 +4787,21 @@ pub async fn download_url(
             pairs.append_pair("catid", category);
         }
     }
-    let response = match reader_request(reqwest::Method::POST, request_url.to_string(), api_key).await {
-        Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
-    };
+    let response =
+        match reader_request(reqwest::Method::POST, request_url.to_string(), api_key).await {
+            Ok(response) => response,
+            Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        };
     let status = response.status();
     let wire: DownloadUrlWire = match response.json().await {
         Ok(value) => value,
         Err(error) => {
             return Ok(CommandResult::failure(
-                if status.is_success() { "INVALID_RESPONSE" } else { "REMOTE_UNAVAILABLE" },
+                if status.is_success() {
+                    "INVALID_RESPONSE"
+                } else {
+                    "REMOTE_UNAVAILABLE"
+                },
                 error.to_string(),
                 !status.is_success() && status.is_server_error(),
             ))
@@ -3834,14 +4810,23 @@ pub async fn download_url(
     // LANraragi answers 400 with the same envelope, and its `error` says why the
     // URL was refused — worth more than the status code alone.
     if !status.is_success() || wire.success != 1 || wire.job <= 0 {
-        let message = wire.error.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
-            format!("LANraragi 拒绝了下载请求（{status}）")
-        });
-        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", message, status.is_server_error()));
+        let message = wire
+            .error
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("LANraragi 拒绝了下载请求（{status}）"));
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            message,
+            status.is_server_error(),
+        ));
     }
     Ok(CommandResult::success(DownloadUrlResult {
         job: wire.job,
-        url: if wire.url.is_empty() { target.to_string() } else { wire.url },
+        url: if wire.url.is_empty() {
+            target.to_string()
+        } else {
+            wire.url
+        },
     }))
 }
 
@@ -3853,7 +4838,9 @@ mod tests {
 
     use super::*;
 
-    async fn test_http_server(responses: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn test_http_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -3877,7 +4864,10 @@ mod tests {
         let (url, server) = test_http_server(vec![(202, r#"{"job":1}"#.into())]).await;
         let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 0).await;
         server.abort();
-        assert!(matches!(result, Ok(CommandResult::Failure { .. })), "unfinished thumbnail must fail: {result:?}");
+        assert!(
+            matches!(result, Ok(CommandResult::Failure { .. })),
+            "unfinished thumbnail must fail: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -3886,10 +4876,14 @@ mod tests {
             (202, r#"{"job":1}"#.into()),
             (200, r#"{"state":"finished"}"#.into()),
             (202, r#"{"job":2}"#.into()),
-        ]).await;
+        ])
+        .await;
         let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1).await;
         server.abort();
-        assert!(matches!(result, Ok(CommandResult::Failure { .. })), "accepted JSON must fail: {result:?}");
+        assert!(
+            matches!(result, Ok(CommandResult::Failure { .. })),
+            "accepted JSON must fail: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -3903,7 +4897,10 @@ mod tests {
         let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
         let result = fetch_all_search_pages(&url, "key", &params).await;
         server.abort();
-        assert!(result.is_err(), "the page cap must not produce a replaceable snapshot");
+        assert!(
+            result.is_err(),
+            "the page cap must not produce a replaceable snapshot"
+        );
     }
 
     struct MemoryCredentialStore {
@@ -3951,10 +4948,14 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0012_archive_categories.sql"))
             .expect("archive categories migration");
         connection
-            .execute_batch(include_str!("../../migrations/0013_unified_image_cache.sql"))
+            .execute_batch(include_str!(
+                "../../migrations/0013_unified_image_cache.sql"
+            ))
             .expect("unified image cache migration");
         connection
-            .execute_batch(include_str!("../../migrations/0014_cache_archive_scope.sql"))
+            .execute_batch(include_str!(
+                "../../migrations/0014_cache_archive_scope.sql"
+            ))
             .expect("cache archive scope migration");
         connection
             .execute_batch(include_str!("../../migrations/0016_archive_added_at.sql"))
@@ -3966,9 +4967,52 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0018_search_presets.sql"))
             .expect("search presets migration");
         connection
-            .execute_batch(include_str!("../../migrations/0019_reading_progress_cover_alone.sql"))
+            .execute_batch(include_str!(
+                "../../migrations/0019_reading_progress_cover_alone.sql"
+            ))
             .expect("reading progress cover_alone migration");
         connection
+    }
+
+    #[test]
+    fn reading_past_ninety_percent_removes_only_active_to_read_once() {
+        let mut connection = migrated_connection();
+        set_reading_list_entry(&mut connection, "scope-a", "archive-a", true).unwrap();
+        set_reading_list_entry(&mut connection, "scope-b", "archive-a", true).unwrap();
+        set_watchlist_entry(&mut connection, "scope-a", "archive-a", true).unwrap();
+        for (index, expected_deleted) in [(89, false), (90, true), (99, true)] {
+            persist_reading_progress(
+                &mut connection,
+                ReadingProgressInput {
+                    scope_id: "scope-a".into(),
+                    archive_id: "archive-a".into(),
+                    page_index: index,
+                    page_count: 100,
+                    layout: "paged".into(),
+                    direction: "ltr".into(),
+                    cover_alone: None,
+                },
+            )
+            .unwrap();
+            let deleted: bool = connection
+                .query_row(
+                    "SELECT deleted_at IS NOT NULL FROM reading_list WHERE scope_id='scope-a'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(deleted, expected_deleted);
+        }
+        let deletes: i64 = connection.query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='reading_list' AND operation='delete'", [], |row| row.get(0)).unwrap();
+        assert_eq!(deletes, 1);
+        for sql in [
+            "SELECT deleted_at IS NULL FROM reading_list WHERE scope_id='scope-b'",
+            "SELECT deleted_at IS NULL FROM watchlist WHERE scope_id='scope-a'",
+        ] {
+            assert!(connection
+                .query_row(sql, [], |row| row.get::<_, bool>(0))
+                .unwrap());
+        }
     }
 
     #[test]
@@ -4180,7 +5224,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM servers", [], |row| row.get(0))
             .expect("server count");
         assert_eq!(count, 0);
-        assert!(credentials.writes.lock().expect("credential writes").is_empty());
+        assert!(credentials
+            .writes
+            .lock()
+            .expect("credential writes")
+            .is_empty());
     }
 
     #[test]
@@ -4288,7 +5336,8 @@ mod tests {
             "scope-a",
             "archive-a",
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-        ).unwrap());
+        )
+        .unwrap());
         assert_eq!(connection.query_row(
             "SELECT is_deleted FROM archives WHERE server_id='scope-a' AND archive_id='archive-a'",
             [],
@@ -4300,7 +5349,8 @@ mod tests {
             "scope-a",
             "archive-a",
             reqwest::StatusCode::BAD_REQUEST,
-        ).unwrap());
+        )
+        .unwrap());
         assert_eq!(connection.query_row(
             "SELECT is_deleted FROM archives WHERE server_id='scope-a' AND archive_id='archive-a'",
             [],
@@ -4326,20 +5376,27 @@ mod tests {
             params!["scope-a", "target", "Moon Reader", "moon reader", r#"["artist:alpha","language:chinese","date_added:1756512000"]"#],
         ).unwrap();
 
-        let page = query_archive_page(&connection, &ArchiveQueryInput {
-            server_id: "scope-a".to_string(),
-            query: "artist:alpha, moon".to_string(),
-            sort_by: "title".to_string(),
-            order: "asc".to_string(),
-            category_id: None,
-            untagged_only: None,
-            offset: 0,
-            limit: 100,
-        }).expect("full-library search");
+        let page = query_archive_page(
+            &connection,
+            &ArchiveQueryInput {
+                server_id: "scope-a".to_string(),
+                query: "artist:alpha, moon".to_string(),
+                sort_by: "title".to_string(),
+                order: "asc".to_string(),
+                category_id: None,
+                untagged_only: None,
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .expect("full-library search");
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "target");
-        assert_eq!(page.items[0].tags, vec!["artist:alpha", "language:chinese", "date_added:1756512000"]);
+        assert_eq!(
+            page.items[0].tags,
+            vec!["artist:alpha", "language:chinese", "date_added:1756512000"]
+        );
     }
 
     #[test]
@@ -4353,16 +5410,20 @@ mod tests {
                ('scope-a', 'accented', 'Éclair Special', 'éclair special', '[]', 1);",
         ).unwrap();
 
-        let page = query_archive_page(&connection, &ArchiveQueryInput {
-            server_id: "scope-a".to_string(),
-            query: "Éclair".to_string(),
-            sort_by: "title".to_string(),
-            order: "asc".to_string(),
-            category_id: None,
-            untagged_only: None,
-            offset: 0,
-            limit: 100,
-        }).expect("accented search");
+        let page = query_archive_page(
+            &connection,
+            &ArchiveQueryInput {
+                server_id: "scope-a".to_string(),
+                query: "Éclair".to_string(),
+                sort_by: "title".to_string(),
+                order: "asc".to_string(),
+                category_id: None,
+                untagged_only: None,
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .expect("accented search");
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "accented");
@@ -4379,16 +5440,20 @@ mod tests {
              INSERT INTO archive_categories (server_id, category_id, archive_id) VALUES ('scope-a', 'SET_1613080290', 'inside');",
         ).unwrap();
 
-        let page = query_archive_page(&connection, &ArchiveQueryInput {
-            server_id: "scope-a".to_string(),
-            query: String::new(),
-            sort_by: "title".to_string(),
-            order: "asc".to_string(),
-            category_id: Some("SET_1613080290".to_string()),
-            untagged_only: None,
-            offset: 0,
-            limit: 100,
-        }).expect("category query");
+        let page = query_archive_page(
+            &connection,
+            &ArchiveQueryInput {
+                server_id: "scope-a".to_string(),
+                query: String::new(),
+                sort_by: "title".to_string(),
+                order: "asc".to_string(),
+                category_id: Some("SET_1613080290".to_string()),
+                untagged_only: None,
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .expect("category query");
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].archive_id, "inside");
@@ -4410,20 +5475,32 @@ mod tests {
                ('scope-a', 'tagged', 'Tagged', 'tagged', '[\"artist:alpha\"]', 1);",
         ).unwrap();
 
-        let page = query_archive_page(&connection, &ArchiveQueryInput {
-            server_id: "scope-a".to_string(),
-            query: String::new(),
-            sort_by: "title".to_string(),
-            order: "asc".to_string(),
-            category_id: None,
-            untagged_only: Some(true),
-            offset: 0,
-            limit: 100,
-        }).expect("untagged query");
+        let page = query_archive_page(
+            &connection,
+            &ArchiveQueryInput {
+                server_id: "scope-a".to_string(),
+                query: String::new(),
+                sort_by: "title".to_string(),
+                order: "asc".to_string(),
+                category_id: None,
+                untagged_only: Some(true),
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .expect("untagged query");
 
         assert_eq!(page.total, 2);
-        let ids: Vec<&str> = page.items.iter().map(|item| item.archive_id.as_str()).collect();
-        assert_eq!(ids, vec!["bare", "spaced"], "an empty array is untagged however it was written");
+        let ids: Vec<&str> = page
+            .items
+            .iter()
+            .map(|item| item.archive_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["bare", "spaced"],
+            "an empty array is untagged however it was written"
+        );
     }
 
     #[test]
@@ -4438,39 +5515,65 @@ mod tests {
                ('scope-a', 'm-legacy', 'Legacy', 'legacy', '[\"date_added:150\"]', 1, '2026-08-30 00:00:00');",
         ).unwrap();
 
-        let page = query_archive_page(&connection, &ArchiveQueryInput {
-            server_id: "scope-a".to_string(),
-            query: String::new(),
-            sort_by: "added".to_string(),
-            order: "desc".to_string(),
-            category_id: None,
-            untagged_only: None,
-            offset: 0,
-            limit: 100,
-        }).expect("date-added query");
+        let page = query_archive_page(
+            &connection,
+            &ArchiveQueryInput {
+                server_id: "scope-a".to_string(),
+                query: String::new(),
+                sort_by: "added".to_string(),
+                order: "desc".to_string(),
+                category_id: None,
+                untagged_only: None,
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .expect("date-added query");
 
         // Stored values drive the order; a row with no stored value (only
         // possible before the 0016 backfill) sorts last but still reports the
         // date carried by its tags.
-        assert_eq!(page.items.iter().map(|item| item.archive_id.as_str()).collect::<Vec<_>>(), vec!["z-new", "a-old", "m-legacy"]);
-        assert_eq!(page.items.iter().map(|item| item.added_at).collect::<Vec<_>>(), vec![Some(200), Some(100), Some(150)]);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.archive_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z-new", "a-old", "m-legacy"]
+        );
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.added_at)
+                .collect::<Vec<_>>(),
+            vec![Some(200), Some(100), Some(150)]
+        );
     }
 
     #[test]
     fn archive_added_at_migration_backfills_the_date_added_tag() {
         let connection = Connection::open_in_memory().expect("in-memory database");
-        connection.execute_batch(include_str!("../../migrations/0001_initial.sql")).expect("initial");
-        connection.execute_batch(include_str!("../../migrations/0002_local_library.sql")).expect("library");
+        connection
+            .execute_batch(include_str!("../../migrations/0001_initial.sql"))
+            .expect("initial");
+        connection
+            .execute_batch(include_str!("../../migrations/0002_local_library.sql"))
+            .expect("library");
         connection.execute_batch(
             "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
              INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count) VALUES
                ('scope-a', 'legacy', 'Legacy', 'legacy', '[\"artist:someone\",\"date_added:1756512000\"]', 1);",
         ).expect("legacy row");
 
-        connection.execute_batch(include_str!("../../migrations/0016_archive_added_at.sql")).expect("added_at migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0016_archive_added_at.sql"))
+            .expect("added_at migration");
 
         let added: Option<i64> = connection
-            .query_row("SELECT added_at FROM archives WHERE archive_id = 'legacy'", [], |row| row.get(0))
+            .query_row(
+                "SELECT added_at FROM archives WHERE archive_id = 'legacy'",
+                [],
+                |row| row.get(0),
+            )
             .expect("backfilled row");
         assert_eq!(added, Some(1_756_512_000));
     }
@@ -4510,45 +5613,138 @@ mod tests {
     #[test]
     fn reader_page_file_cache_is_content_addressed_scoped_and_self_healing() {
         let connection = migrated_connection();
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let app_data = std::env::temp_dir().join(format!("yomika-reader-cache-{}-{unique}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let app_data = std::env::temp_dir().join(format!(
+            "yomika-reader-cache-{}-{unique}",
+            std::process::id()
+        ));
         let bytes = b"reader page";
 
-        store_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0, "image/jpeg", bytes).expect("stored page");
-        assert_eq!(load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(), Some(bytes.to_vec()));
-        assert_eq!(load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(), None);
-        store_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0, "image/jpeg", bytes).expect("shared content stored for second scope");
-        assert_eq!(load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(), Some(bytes.to_vec()));
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        store_reader_page_cache(
+            &connection,
+            &app_data,
+            "scope-a",
+            "archive-a",
+            0,
+            "image/jpeg",
+            bytes,
+        )
+        .expect("stored page");
+        assert_eq!(
+            load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(),
+            Some(bytes.to_vec())
+        );
+        assert_eq!(
+            load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(),
+            None
+        );
+        store_reader_page_cache(
+            &connection,
+            &app_data,
+            "scope-b",
+            "archive-a",
+            0,
+            "image/jpeg",
+            bytes,
+        )
+        .expect("shared content stored for second scope");
+        assert_eq!(
+            load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(),
+            Some(bytes.to_vec())
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
 
-        let relative_path: String = connection.query_row("SELECT path FROM cache_entries WHERE key=?1", [reader_page_cache_key("scope-a", "archive-a", 0)], |row| row.get(0)).unwrap();
+        let relative_path: String = connection
+            .query_row(
+                "SELECT path FROM cache_entries WHERE key=?1",
+                [reader_page_cache_key("scope-a", "archive-a", 0)],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(relative_path.starts_with("cache/images/"));
         let stored_path = app_data.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
         assert_eq!(std::fs::read(&stored_path).unwrap(), bytes);
-        assert!(!stored_path.parent().unwrap().read_dir().unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().contains(".tmp")));
+        assert!(!stored_path
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp")));
 
         std::fs::write(&stored_path, b"corrupt").unwrap();
-        assert_eq!(load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(), None);
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
     #[test]
     fn task_runtime_recovers_interrupted_jobs_and_enforces_transitions() {
         let connection = migrated_connection();
-        connection.execute_batch("INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES
+        connection
+            .execute_batch(
+                "INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES
           ('recover','download','Recover','running',0.4,1,1),
-          ('stop','maintenance','Stop','running',0.2,0,0);").unwrap();
+          ('stop','maintenance','Stop','running',0.2,0,0);",
+            )
+            .unwrap();
 
         assert_eq!(recover_interrupted_tasks(&connection).unwrap(), 2);
-        assert_eq!(connection.query_row("SELECT status FROM tasks WHERE id='recover'", [], |row| row.get::<_, String>(0)).unwrap(), "queued");
-        assert_eq!(connection.query_row("SELECT status FROM tasks WHERE id='stop'", [], |row| row.get::<_, String>(0)).unwrap(), "failed");
+        assert_eq!(
+            connection
+                .query_row("SELECT status FROM tasks WHERE id='recover'", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT status FROM tasks WHERE id='stop'", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            "failed"
+        );
 
-        assert!(transition_task(&connection, "recover", Some("completed"), Some(0.5), None).is_err());
+        assert!(
+            transition_task(&connection, "recover", Some("completed"), Some(0.5), None).is_err()
+        );
         assert!(transition_task(&connection, "recover", Some("running"), Some(0.3), None).is_err());
         transition_task(&connection, "recover", Some("running"), Some(0.5), None).unwrap();
-        transition_task(&connection, "recover", Some("failed"), None, Some("offline")).unwrap();
-        assert_eq!(retry_failed_task(&connection, "recover").unwrap().status, "queued");
+        transition_task(
+            &connection,
+            "recover",
+            Some("failed"),
+            None,
+            Some("offline"),
+        )
+        .unwrap();
+        assert_eq!(
+            retry_failed_task(&connection, "recover").unwrap().status,
+            "queued"
+        );
         assert!(retry_failed_task(&connection, "stop").is_err());
     }
 
@@ -4584,14 +5780,26 @@ mod tests {
 
     #[test]
     fn random_search_url_uses_the_native_endpoint_with_a_clamped_count() {
-        let url = build_random_search_url("https://lrr.example.com/", &RandomArchivesInput {
-            server_id: "scope-a".to_string(), count: Some(8), filter: None, category: None,
-        });
+        let url = build_random_search_url(
+            "https://lrr.example.com/",
+            &RandomArchivesInput {
+                server_id: "scope-a".to_string(),
+                count: Some(8),
+                filter: None,
+                category: None,
+            },
+        );
         assert_eq!(url, "https://lrr.example.com/api/search/random?count=8");
 
-        let clamped = build_random_search_url("https://lrr.example.com", &RandomArchivesInput {
-            server_id: "scope-a".to_string(), count: Some(9999), filter: Some("fate$".to_string()), category: Some("SET_1613080290".to_string()),
-        });
+        let clamped = build_random_search_url(
+            "https://lrr.example.com",
+            &RandomArchivesInput {
+                server_id: "scope-a".to_string(),
+                count: Some(9999),
+                filter: Some("fate$".to_string()),
+                category: Some("SET_1613080290".to_string()),
+            },
+        );
         assert!(clamped.contains("count=100"));
         assert!(clamped.contains("filter=fate%24"));
         assert!(clamped.contains("category=SET_1613080290"));
@@ -4626,16 +5834,30 @@ mod tests {
         upsert_server_archives(&mut connection, "scope-a", &random).expect("upsert");
 
         let alive: i64 = connection
-            .query_row("SELECT COUNT(*) FROM archives WHERE server_id='scope-a' AND is_deleted=0", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM archives WHERE server_id='scope-a' AND is_deleted=0",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(alive, 2, "a random pull must not tombstone the library");
 
         let records = query_archive_records_by_ids(
             &connection,
             "scope-a",
-            &["0123456789012345678901234567890123456789".to_string(), "keep-me".to_string()],
-        ).expect("records by id");
-        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["0123456789012345678901234567890123456789", "keep-me"]);
+            &[
+                "0123456789012345678901234567890123456789".to_string(),
+                "keep-me".to_string(),
+            ],
+        )
+        .expect("records by id");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.archive_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0123456789012345678901234567890123456789", "keep-me"]
+        );
     }
 
     #[test]
@@ -4661,13 +5883,27 @@ mod tests {
         }
 
         // Reversed, so a wrong answer would come back in insert or rowid order.
-        let mut requested = (0..total).rev().map(|index| format!("id-{index:04}")).collect::<Vec<_>>();
+        let mut requested = (0..total)
+            .rev()
+            .map(|index| format!("id-{index:04}"))
+            .collect::<Vec<_>>();
         requested.push("never-indexed".to_string());
-        let records = query_archive_records_by_ids(&connection, "scope-a", &requested).expect("records by id");
+        let records = query_archive_records_by_ids(&connection, "scope-a", &requested)
+            .expect("records by id");
 
-        assert_eq!(records.len(), total as usize, "the unknown id must not add a row");
-        assert_eq!(records.first().map(|record| record.archive_id.as_str()), Some("id-1199"));
-        assert_eq!(records.last().map(|record| record.archive_id.as_str()), Some("id-0000"));
+        assert_eq!(
+            records.len(),
+            total as usize,
+            "the unknown id must not add a row"
+        );
+        assert_eq!(
+            records.first().map(|record| record.archive_id.as_str()),
+            Some("id-1199")
+        );
+        assert_eq!(
+            records.last().map(|record| record.archive_id.as_str()),
+            Some("id-0000")
+        );
     }
 
     #[test]
@@ -4684,9 +5920,16 @@ mod tests {
             &connection,
             "scope-a",
             &["gone".to_string(), "alive".to_string()],
-        ).expect("records by id");
+        )
+        .expect("records by id");
 
-        assert_eq!(records.iter().map(|record| record.archive_id.as_str()).collect::<Vec<_>>(), vec!["alive"]);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.archive_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alive"]
+        );
     }
 
     #[test]
@@ -4718,7 +5961,11 @@ mod tests {
         assert_eq!(again.revision, 2);
 
         let journalled: i64 = connection
-            .query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='search_preset'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sync_journal WHERE object_type='search_preset'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(journalled, 2);
     }
@@ -4813,13 +6060,20 @@ mod tests {
         let unknown = unknown_probe_archive_ids(
             &connection,
             "scope-a",
-            &["known".to_string(), "fresh".to_string(), "tombstoned".to_string()],
-        ).expect("probe diff");
+            &[
+                "known".to_string(),
+                "fresh".to_string(),
+                "tombstoned".to_string(),
+            ],
+        )
+        .expect("probe diff");
 
         assert_eq!(unknown, vec!["fresh".to_string(), "tombstoned".to_string()]);
-        assert!(unknown_probe_archive_ids(&connection, "scope-a", &["known".to_string()])
-            .expect("known only")
-            .is_empty());
+        assert!(
+            unknown_probe_archive_ids(&connection, "scope-a", &["known".to_string()])
+                .expect("known only")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4841,12 +6095,17 @@ mod tests {
         invalidate_category_cache(&connection, "scope-a").expect("invalidate");
         invalidate_category_cache(&connection, "scope-a").expect("invalidate again");
 
-        assert!(read_category_cache_from(&connection, "scope-a", current_unix_seconds())
-            .expect("read a")
-            .is_none());
-        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
-            .expect("read b")
-            .is_some(), "the other server's snapshot must survive");
+        assert!(
+            read_category_cache_from(&connection, "scope-a", current_unix_seconds())
+                .expect("read a")
+                .is_none()
+        );
+        assert!(
+            read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+                .expect("read b")
+                .is_some(),
+            "the other server's snapshot must survive"
+        );
     }
 
     #[test]
@@ -4866,7 +6125,10 @@ mod tests {
         let fresh = read_category_cache_from(&connection, "scope-a", current_unix_seconds())
             .expect("read fresh");
         assert_eq!(fresh.as_ref().map(|items| items.len()), Some(1));
-        assert_eq!(fresh.expect("snapshot")[0].search.as_deref(), Some("artist:someone$"));
+        assert_eq!(
+            fresh.expect("snapshot")[0].search.as_deref(),
+            Some("artist:someone$")
+        );
 
         let stale = read_category_cache_from(
             &connection,
@@ -4875,24 +6137,31 @@ mod tests {
         )
         .expect("read stale");
         assert!(stale.is_none(), "an aged snapshot must be refetched");
-        assert!(read_category_cache_from(&connection, "scope-b", current_unix_seconds())
-            .expect("read other scope")
-            .is_none());
+        assert!(
+            read_category_cache_from(&connection, "scope-b", current_unix_seconds())
+                .expect("read other scope")
+                .is_none()
+        );
 
         // A snapshot in which a dynamic category failed to resolve holds an empty
         // membership, which looks exactly like an empty category — so it ages out
         // in minutes rather than hiding those archives for six hours.
         write_category_cache(&connection, "scope-c", &categories, true).expect("write partial");
-        assert!(read_category_cache_from(&connection, "scope-c", current_unix_seconds())
-            .expect("read partial")
-            .is_some());
-        assert!(read_category_cache_from(
-            &connection,
-            "scope-c",
-            current_unix_seconds() + PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
-        )
-        .expect("read aged partial")
-        .is_none(), "a partial snapshot must not last the full window");
+        assert!(
+            read_category_cache_from(&connection, "scope-c", current_unix_seconds())
+                .expect("read partial")
+                .is_some()
+        );
+        assert!(
+            read_category_cache_from(
+                &connection,
+                "scope-c",
+                current_unix_seconds() + PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+            )
+            .expect("read aged partial")
+            .is_none(),
+            "a partial snapshot must not last the full window"
+        );
     }
 
     #[test]
@@ -4914,8 +6183,15 @@ mod tests {
         let blank = build_refresh_search_url(
             "https://lrr.example.com",
             &RefreshSearchParams {
-                filter: None, start: None, sortby: Some("   ".to_string()), order: Some("sideways".to_string()),
-                newonly: None, untaggedonly: None, hidecompleted: None, category: None, groupby_tanks: None,
+                filter: None,
+                start: None,
+                sortby: Some("   ".to_string()),
+                order: Some("sideways".to_string()),
+                newonly: None,
+                untaggedonly: None,
+                hidecompleted: None,
+                category: None,
+                groupby_tanks: None,
             },
         )
         .unwrap();
@@ -4966,7 +6242,10 @@ mod tests {
     #[test]
     fn refresh_archives_preserves_old_snapshots_on_parse_failure() {
         let mut connection = migrated_connection();
-        let creds = MemoryCredentialStore { writes: Mutex::new(vec![]), failure: None };
+        let creds = MemoryCredentialStore {
+            writes: Mutex::new(vec![]),
+            failure: None,
+        };
         let result = save_server_record(
             &mut connection,
             &creds,
@@ -4996,8 +6275,9 @@ mod tests {
             .unwrap();
         assert_eq!(old_count, 1);
 
-        let result = parse_search_response("not valid json at all {{{")
-            .and_then(|archives| replace_server_archives(&mut connection, "scope-refresh", &archives));
+        let result = parse_search_response("not valid json at all {{{").and_then(|archives| {
+            replace_server_archives(&mut connection, "scope-refresh", &archives)
+        });
         assert!(result.is_err());
 
         let still_old: i64 = connection
@@ -5007,13 +6287,19 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(still_old, 1, "old snapshot must be preserved on parse failure");
+        assert_eq!(
+            still_old, 1,
+            "old snapshot must be preserved on parse failure"
+        );
     }
 
     #[test]
     fn refresh_archives_success_replaces_index_atomically() {
         let mut connection = migrated_connection();
-        let creds = MemoryCredentialStore { writes: Mutex::new(vec![]), failure: None };
+        let creds = MemoryCredentialStore {
+            writes: Mutex::new(vec![]),
+            failure: None,
+        };
         let result = save_server_record(
             &mut connection,
             &creds,
@@ -5044,7 +6330,9 @@ mod tests {
         }"#;
 
         let records = parse_search_response(search_json)
-            .and_then(|archives| replace_server_archives(&mut connection, "scope-atomic", &archives))
+            .and_then(|archives| {
+                replace_server_archives(&mut connection, "scope-atomic", &archives)
+            })
             .unwrap();
         assert_eq!(records.len(), 2);
 

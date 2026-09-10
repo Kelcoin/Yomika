@@ -7,6 +7,7 @@ import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetFilePickerForTests, setDirectoryPickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
+import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -24,30 +25,143 @@ function renderSettings(section?: string) {
 }
 
 describe('settings workspace', () => {
-  it('opens model downloads from the sidebar and preserves release controls', async () => {
+  it('opens About links through the native external browser command', async () => {
     const user = userEvent.setup();
-    const manifest = { assets: [{ path: 'model.onnx', size: 256 }] };
-    const adapter = vi.fn(async (command: string) => {
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'open_external_url') return { ok: true, value: null };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('about');
+
+    await user.click(screen.getByRole('button', { name: 'LANraragi 文档' }));
+    expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://sugoi.gitbook.io/lanraragi' });
+    expect(screen.queryByText('仓库')).not.toBeInTheDocument();
+  });
+
+  it('shows only upload and dedup in tools', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+    renderSettings('tools');
+    expect(await screen.findByRole('link', { name: /上传档案/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /重复档案查重/ })).toBeInTheDocument();
+    expect(screen.queryByText('任务列表')).not.toBeInTheDocument();
+  });
+
+  it('persists a chosen download directory and restores its default', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    setDirectoryPickerForTests(async () => 'E:\\Comics');
+    renderSettings('general');
+    await user.click(await screen.findByRole('button', { name: '选择下载目录' }));
+    expect(await screen.findByText('E:\\Comics')).toBeInTheDocument();
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, downloadDirectory: 'E:\\Comics' } }));
+    await user.click(screen.getByRole('button', { name: '恢复默认下载目录' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: DEFAULT_PREFERENCES }));
+  });
+
+  it('uses drawn switches for favorite deletion sync and per-deletion confirmation', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('sync');
+    const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
+    expect(toggle).toHaveClass('switch-control');
+    const confirmation = screen.getByRole('switch', { name: '每次确认收藏同步删除' });
+    expect(confirmation).toBeDisabled();
+    await user.click(toggle);
+    await user.click(confirmation);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: true, confirmEhFavoriteDelete: false } }));
+  });
+
+  it('loads models directly in advanced settings and toggles decensor', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'model_release_fetch_manifest') return { ok: true, value: manifest };
-      if (command === 'model_release_download_bundle') return { ok: true, value: undefined };
+      if (command === 'inference_list_models') return { ok: true, value: [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor', components: [
+        { id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' },
+        { id: 'deepcreampy-bar', name: 'DeepCreamPy Bar', role: '条状遮挡修补', path: 'deepcreampy/bar.onnx' },
+        { id: 'deepcreampy-mosaic', name: 'DeepCreamPy Mosaic', role: '马赛克修补', path: 'deepcreampy/mosaic.onnx' },
+        { id: 'fatal-pixels', name: 'Fatal Pixels', role: '修复结果增强', path: 'esrgan/4x-Fatal-Pixels.onnx' },
+      ] }] };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings();
+    renderSettings('advanced');
+    const toggle = await screen.findByRole('switch', { name: '启用去码' });
+    await user.click(screen.getByRole('button', { name: '去码流程 · 1' }));
+    expect(screen.queryByRole('button', { name: '下载去码流程 · 1' })).toBeNull();
+    expect(screen.getByText('遮挡区域检测')).toBeInTheDocument();
+    expect(screen.getByText('Mask R-CNN')).toBeInTheDocument();
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveClass('switch-control');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('region', { name: '模型导入' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('目标目录')).not.toBeInTheDocument();
+    expect(screen.queryByText('修补被审查的区域')).not.toBeInTheDocument();
+    expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(1);
+  });
 
-    await user.click(await screen.findByRole('link', { name: '模型' }));
-    const panel = within(screen.getByRole('region', { name: '模型' }));
-    expect(panel.getByLabelText('导入模型压缩包')).toHaveAttribute('accept', '.json,application/json');
-    expect(panel.getByLabelText('模型文件')).toHaveAttribute('accept', '.zip,application/zip');
-    await user.click(panel.getByRole('button', { name: '获取最新模型清单' }));
-    expect(adapter).toHaveBeenCalledWith('model_release_fetch_manifest', { prefix: '', ownerRepo: 'Kelcoin/Yomika', tag: 'v1' });
-    expect(await panel.findByRole('link', { name: '下载 model.onnx' })).toHaveAttribute('href', 'https://github.com/Kelcoin/Yomika/releases/download/v1/model.onnx');
-    await user.type(panel.getByLabelText('目标目录'), 'C:\\models');
-    await user.click(panel.getByRole('button', { name: '下载完整模型包' }));
-    expect(adapter).toHaveBeenCalledWith('model_release_download_bundle', { input: { prefix: '', ownerRepo: 'Kelcoin/Yomika', manifest, destination: 'C:\\models' } });
-    expect(await panel.findByRole('status')).toHaveTextContent('模型下载完成');
+  it('blocks an incomplete decensor bundle with a toast instead of enabling it', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [{
+          id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor',
+          components: [{ id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' }],
+        }],
+      };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+    const toggle = await screen.findByRole('switch', { name: '启用去码' });
+
+    expect(toggle).not.toBeDisabled();
+    await user.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(await screen.findByRole('alert')).toHaveTextContent('去码模型不完整');
+    expect(adapter.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
+  });
+
+  it('hides the download action for an installed upscale model', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [{ id: 'waifu2x-upconv7', version: '1', scale: 2, kind: 'upscale', components: [] }],
+      };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+    await user.click(await screen.findByRole('button', { name: 'waifu2x 轻量增强 · 2 倍' }));
+    expect(screen.queryByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' })).toBeNull();
   });
 
   it('loads saved servers from the native repository', async () => {
@@ -132,7 +246,7 @@ describe('settings workspace', () => {
 
     expect(await screen.findByRole('region', { name: '服务器' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '数据迁移' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('link', { name: /高级/ }));
+    await user.click(screen.getByRole('link', { name: /同步/ }));
     expect(screen.getByRole('heading', { name: '数据迁移' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
   });
@@ -166,7 +280,7 @@ describe('settings workspace', () => {
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
     // Saving one section still writes the whole snapshot.
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, theme: 'light' },
+      input: { ...DEFAULT_PREFERENCES, ...loaded, theme: 'light' },
     });
   });
 
@@ -185,7 +299,7 @@ describe('settings workspace', () => {
     expect(screen.queryByLabelText('图片缓存上限')).not.toBeInTheDocument();
     view.unmount();
 
-    renderSettings('advanced');
+    renderSettings('general');
     expect(await screen.findByLabelText('图片缓存上限')).toHaveValue(4);
     expect(screen.queryByRole('radio', { name: '双页' })).not.toBeInTheDocument();
   });
@@ -224,6 +338,7 @@ describe('settings workspace', () => {
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'inference_list_models') return { ok: true, value: [
         { id: 'realesr-general', version: '2026.09.2', scale: 4 },
+        { id: 'waifu2x-upconv7', version: '1', scale: 2, kind: 'upscale' },
         // No manifest means no recorded scale, so this one cannot be run and
         // must not be offered as a choice.
         { id: 'mystery-model', version: '1', scale: null },
@@ -246,25 +361,24 @@ describe('settings workspace', () => {
     // upscaling on meant knowing which two unrelated controls to change.
     expect(screen.queryByLabelText('超分模型')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('超分后端')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('checkbox', { name: '放大阅读页面' }));
+    await user.click(screen.getByRole('link', { name: '高级' }));
+    await user.click(await screen.findByRole('switch', { name: '启用超分' }));
 
     // Installed models are offered by name, with the scale the model itself
     // produces; typing a name from memory was a silent failure at upscale time.
-    expect(await screen.findByRole('radio', { name: 'realesr-general · 2026.09.2 · x4' })).toBeInTheDocument();
-    expect(screen.queryByRole('radio', { name: /mystery-model/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'realesr general · 4 倍' }));
+    expect(screen.queryByRole('button', { name: /下载realesr general/ })).toBeNull();
+    expect(screen.getAllByLabelText('超分模型').length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('超分后端')).not.toBeInTheDocument();
     // Turning it on picks a backend and the one runnable model, rather than
     // leaving two controls still saying "no".
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'auto', upscaleModel: 'realesr-general' },
+      input: { ...DEFAULT_PREFERENCES, ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'auto', upscaleModel: 'realesr-general' },
     }));
 
-    await user.click(screen.getByRole('radio', { name: 'CPU' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'cpu', upscaleModel: 'realesr-general' },
-    }));
   });
 
-  it('installs a de-censoring bundle by copying a directory the user already has', async () => {
+  it('imports a decensor zip through the unified model input', async () => {
     const user = userEvent.setup();
     const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
     let installed: unknown[] = [];
@@ -273,24 +387,54 @@ describe('settings workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'inference_list_models') return { ok: true, value: installed };
-      if (command === 'inference_install_decensor_bundle') {
-        installed = [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor' }];
+      if (command === 'inference_import_model_file') {
+        installed = [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor', components: [
+          { id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' },
+          { id: 'deepcreampy-bar', name: 'DeepCreamPy Bar', role: '条状遮挡修补', path: 'deepcreampy/bar.onnx' },
+          { id: 'deepcreampy-mosaic', name: 'DeepCreamPy Mosaic', role: '马赛克修补', path: 'deepcreampy/mosaic.onnx' },
+          { id: 'fatal-pixels', name: 'Fatal Pixels', role: '修复结果增强', path: 'esrgan/4x-Fatal-Pixels.onnx' },
+        ] }];
         return { ok: true, value: installed[0] };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    setDirectoryPickerForTests(async () => 'E:/Aletheia-Lens/_internal/models');
-    renderSettings('reading');
-
-    // 337 MB does not travel as bytes and is not in the repository, so the install
-    // is a copy out of a directory the user points at.
-    await user.click(await screen.findByRole('button', { name: '选择目录安装' }));
-    expect(adapter).toHaveBeenCalledWith('inference_install_decensor_bundle', { sourceDir: 'E:/Aletheia-Lens/_internal/models' });
-    // Installing it is also choosing it: a bundle nobody selected does nothing.
+    renderSettings('advanced');
+    const toggle = await screen.findByRole('switch', { name: '启用去码' });
+    expect(toggle).not.toBeDisabled();
+    await user.click(toggle);
+    expect(await screen.findByRole('alert')).toHaveTextContent('去码模型不完整');
+    const file = new File(['zip'], 'bundle.zip', { type: 'application/zip' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new Uint8Array([1, 2, 3]).buffer });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_import_model_file', { input: { file: [1, 2, 3], filename: 'bundle.zip' } }));
+    await vi.waitFor(() => expect(toggle).toBeEnabled());
+    await user.click(toggle);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...loaded, decensorModel: 'aletheia-lens' },
+      input: { ...DEFAULT_PREFERENCES, ...loaded, decensorModel: 'aletheia-lens' },
     }));
+  });
+
+  it('downloads the model named by each model option', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return { ok: true, value: [] };
+      if (command === 'model_release_download_default') return { ok: true, value: null };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    await user.click(await screen.findByRole('button', { name: 'waifu2x 轻量增强 · 2 倍' }));
+    await user.click(screen.getByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' }));
+    expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
+
+    await user.click(screen.getByRole('button', { name: 'Aletheia Lens · 去码模型包' }));
+    await user.click(screen.getByRole('button', { name: '下载Aletheia Lens · 去码模型包' }));
+    expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'aletheia-lens' });
   });
 
   it('shows cache usage by rendition and clears unprotected images', async () => {
@@ -309,6 +453,9 @@ describe('settings workspace', () => {
             cover: { bytes: 1024, entries: 1 },
             'page-thumbnail': { bytes: 2048, entries: 1 },
             'reader-page': { bytes: 4096, entries: 2 },
+            enhanced: { bytes: 1024, entries: 1 },
+            decensored: { bytes: 1024, entries: 1 },
+            inference: { bytes: 1024, entries: 1 },
             other: { bytes: 0, entries: 0 },
           },
         } : {
@@ -330,14 +477,17 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    renderSettings('advanced');
+    renderSettings('general');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /通用/ }));
     expect(await screen.findByText('7 KB')).toBeInTheDocument();
     const breakdown = screen.getByLabelText('图片缓存明细');
     expect(breakdown).toHaveTextContent('封面 1 KB');
     expect(breakdown).toHaveTextContent('页缩略图 2 KB');
     expect(breakdown).toHaveTextContent('阅读页 4 KB');
+    expect(breakdown).not.toHaveTextContent('超分结果');
+    expect(breakdown).not.toHaveTextContent('去码结果');
+    expect(breakdown).not.toHaveTextContent('旧版推理结果');
     await user.click(screen.getByRole('button', { name: '清空图片缓存' }));
     expect(adapter).toHaveBeenCalledWith('cache_clear_images', {});
     expect(await screen.findByText('已释放 6.88 KB，保留 128 B 受保护缓存')).toBeInTheDocument();
@@ -388,9 +538,9 @@ describe('settings workspace', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('advanced');
+    renderSettings('sync');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /同步/ }));
     await user.type(screen.getByLabelText('导出 JSON'), 'encoded-config');
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
@@ -414,9 +564,9 @@ describe('settings workspace', () => {
       if (command === 'list_watchlist') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a2', addedAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false }] };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings('advanced');
+    renderSettings('sync');
 
-    await user.click(await screen.findByRole('link', { name: /高级/ }));
+    await user.click(await screen.findByRole('link', { name: /同步/ }));
     await user.click(screen.getByRole('button', { name: '导出数据' }));
 
     expect(await screen.findByText('已导出 2 项本地记录')).toBeInTheDocument();
@@ -433,13 +583,13 @@ describe('settings workspace', () => {
       if (command === 'import_legacy_preferences') return { ok: false, error: { code: 'INVALID_RESPONSE', message: '旧配置无有效普通偏好', retryable: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings('advanced');
+    renderSettings('sync');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /高级/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /同步/ }));
     await user.type(screen.getByLabelText('导出 JSON'), 'secret-only');
     await user.click(screen.getByRole('button', { name: '导入数据' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('旧配置无有效普通偏好');
+    expect(await screen.findByText('旧配置无有效普通偏好')).toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: /通用/ }));
     expect(screen.getByRole('radio', { name: '深色' })).toBeChecked();
   });

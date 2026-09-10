@@ -109,7 +109,9 @@ describe('native dedup bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: { rejectedArchiveIds: [], outcomes: [] } }));
     setInvokeAdapterForTests(adapter);
     await new NativeDedupRepository().deleteSelected({ sessionId: 'scan-1' });
-    expect(adapter).toHaveBeenCalledWith('dedup_delete_selected', { input: { sessionId: 'scan-1', outcomes: [] } });
+    expect(adapter).toHaveBeenCalledWith('dedup_delete_selected', { input: { sessionId: 'scan-1', outcomes: [] }, syncFavorite: false });
+    await new NativeDedupRepository().deleteSelected({ sessionId: 'scan-1' }, true);
+    expect(adapter).toHaveBeenLastCalledWith('dedup_delete_selected', { input: { sessionId: 'scan-1', outcomes: [] }, syncFavorite: true });
   });
 
   it('rejects malformed native scan results', async () => {

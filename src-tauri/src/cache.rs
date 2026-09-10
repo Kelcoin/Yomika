@@ -4,7 +4,13 @@ use rusqlite::OptionalExtension;
 /// `enhanced` is the upscaler output and `decensored` the de-censoring pipeline's,
 /// both keyed by model version in the identity revision so a model change cannot
 /// serve a stale image.
-const IMAGE_RENDITIONS: [&str; 5] = ["cover", "page-thumbnail", "reader-page", "enhanced", "decensored"];
+const IMAGE_RENDITIONS: [&str; 5] = [
+    "cover",
+    "page-thumbnail",
+    "reader-page",
+    "enhanced",
+    "decensored",
+];
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;
 const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;
@@ -37,8 +43,14 @@ impl CacheImageIdentity {
             || self.archive_id.trim().is_empty()
             || self.page_index < 0
             || !IMAGE_RENDITIONS.contains(&self.rendition.as_str())
-            || self.revision.as_ref().is_some_and(|value| value.len() > 256)
-            || self.transform.as_ref().is_some_and(|value| value.len() > 256)
+            || self
+                .revision
+                .as_ref()
+                .is_some_and(|value| value.len() > 256)
+            || self
+                .transform
+                .as_ref()
+                .is_some_and(|value| value.len() > 256)
         {
             return Err("Invalid image cache identity".into());
         }
@@ -89,27 +101,41 @@ pub fn load_image_cache(
         rusqlite::params![key, identity.scope_id, identity.rendition],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional().map_err(|error| error.to_string())?;
-    let Some((relative, expected_size, expected_hash, mime)) = entry else { return Ok(None); };
-    let expected_relative = if expected_hash.len() == 64 && expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    let Some((relative, expected_size, expected_hash, mime)) = entry else {
+        return Ok(None);
+    };
+    let expected_relative = if expected_hash.len() == 64
+        && expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         format!("cache/images/{}/{}.bin", &expected_hash[..2], expected_hash)
     } else {
         String::new()
     };
     let path = controlled_cache_path(app_data, &relative);
     let bytes = path.as_ref().and_then(|path| std::fs::read(path).ok());
-    let valid = relative == expected_relative && bytes.as_ref().is_some_and(|bytes| {
-        bytes.len() as i64 == expected_size && blake3::hash(bytes).to_hex().as_str() == expected_hash
-    });
+    let valid = relative == expected_relative
+        && bytes.as_ref().is_some_and(|bytes| {
+            bytes.len() as i64 == expected_size
+                && blake3::hash(bytes).to_hex().as_str() == expected_hash
+        });
     if valid {
-        connection.execute("UPDATE cache_entries SET last_accessed_at=CURRENT_TIMESTAMP WHERE key=?1", [&key])
+        connection
+            .execute(
+                "UPDATE cache_entries SET last_accessed_at=CURRENT_TIMESTAMP WHERE key=?1",
+                [&key],
+            )
             .map_err(|error| error.to_string())?;
         return Ok(Some(CachedImage {
             bytes: bytes.unwrap_or_default(),
             mime: mime.unwrap_or_else(|| "application/octet-stream".into()),
         }));
     }
-    connection.execute("DELETE FROM cache_entries WHERE path=?1", [&relative]).map_err(|error| error.to_string())?;
-    if let Some(path) = path { let _ = std::fs::remove_file(path); }
+    connection
+        .execute("DELETE FROM cache_entries WHERE path=?1", [&relative])
+        .map_err(|error| error.to_string())?;
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
     Ok(None)
 }
 
@@ -126,8 +152,12 @@ pub fn sniff_image_mime(mime: &str, bytes: &[u8]) -> Option<String> {
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
         [b'B', b'M', ..] => "image/bmp",
-        _ if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => "image/webp",
-        _ if bytes.len() > 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" => "image/avif",
+        _ if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+            "image/webp"
+        }
+        _ if bytes.len() > 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" => {
+            "image/avif"
+        }
         _ => return None,
     };
     Some(detected.to_string())
@@ -149,8 +179,11 @@ pub fn store_image_cache(
     let mime = mime.as_str();
     let content_hash = blake3::hash(bytes).to_hex().to_string();
     let relative = format!("cache/images/{}/{}.bin", &content_hash[..2], content_hash);
-    let target = controlled_cache_path(app_data, &relative).ok_or_else(|| "Invalid image cache path".to_string())?;
-    let parent = target.parent().ok_or_else(|| "Invalid image cache path".to_string())?;
+    let target = controlled_cache_path(app_data, &relative)
+        .ok_or_else(|| "Invalid image cache path".to_string())?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Invalid image cache path".to_string())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let target_is_valid = std::fs::read(&target).ok().is_some_and(|stored| {
         stored.len() == bytes.len() && blake3::hash(&stored).to_hex().as_str() == content_hash
@@ -158,10 +191,18 @@ pub fn store_image_cache(
     if !target_is_valid {
         let _ = std::fs::remove_file(&target);
         use std::io::Write;
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?.as_nanos();
-        let temporary = parent.join(format!(".{content_hash}.tmp-{}-{nonce}", std::process::id()));
-        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let temporary = parent.join(format!(
+            ".{content_hash}.tmp-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
             .map_err(|error| error.to_string())?;
         if let Err(error) = output.write_all(bytes).and_then(|_| output.sync_all()) {
             drop(output);
@@ -171,7 +212,9 @@ pub fn store_image_cache(
         drop(output);
         if let Err(error) = std::fs::rename(&temporary, &target) {
             let _ = std::fs::remove_file(&temporary);
-            if !target.exists() { return Err(error.to_string()); }
+            if !target.exists() {
+                return Err(error.to_string());
+            }
         }
     }
     connection.execute(
@@ -187,10 +230,15 @@ pub fn cache_read_image(
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
 ) -> CommandResult<Option<CachedImage>> {
-    use tauri::Manager;
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("PLATFORM_UNAVAILABLE", "App data directory unavailable", true),
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -208,16 +256,27 @@ pub fn cache_store_image(
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
 ) -> CommandResult<()> {
-    use tauri::Manager;
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("PLATFORM_UNAVAILABLE", "App data directory unavailable", true),
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    match store_image_cache(&connection, &app_data, &input.identity, &input.mime, &input.bytes) {
+    match store_image_cache(
+        &connection,
+        &app_data,
+        &input.identity,
+        &input.mime,
+        &input.bytes,
+    ) {
         Ok(()) => CommandResult::success(()),
         Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
     }
@@ -244,7 +303,10 @@ pub struct CacheStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CacheBreakdown { pub bytes: u64, pub entries: usize }
+pub struct CacheBreakdown {
+    pub bytes: u64,
+    pub entries: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,7 +327,10 @@ pub struct CacheInvalidateResult {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CacheEvictionInput { pub max_bytes: u64, pub batch_limit: usize }
+pub struct CacheEvictionInput {
+    pub max_bytes: u64,
+    pub batch_limit: usize,
+}
 
 fn indexed_cache_bytes(connection: &rusqlite::Connection) -> Result<u64, String> {
     let bytes: i64 = connection.query_row(
@@ -277,34 +342,63 @@ fn indexed_cache_bytes(connection: &rusqlite::Connection) -> Result<u64, String>
 }
 
 fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, String> {
-    let entries: i64 = connection.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))
+    let entries: i64 = connection
+        .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
     let mut by_rendition = std::collections::BTreeMap::new();
-    for kind in ["cover", "page-thumbnail", "reader-page", "other"] {
-        by_rendition.insert(kind.to_string(), CacheBreakdown { bytes: 0, entries: 0 });
+    for kind in [
+        "cover",
+        "page-thumbnail",
+        "reader-page",
+        "enhanced",
+        "decensored",
+        "inference",
+        "other",
+    ] {
+        by_rendition.insert(
+            kind.to_string(),
+            CacheBreakdown {
+                bytes: 0,
+                entries: 0,
+            },
+        );
     }
-    let mut statement = connection.prepare("SELECT CASE WHEN kind IN ('cover','page-thumbnail','reader-page') THEN kind ELSE 'other' END, COUNT(*) FROM cache_entries GROUP BY 1")
+    let mut statement = connection.prepare("SELECT CASE WHEN kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored','inference') THEN kind ELSE 'other' END, COUNT(*) FROM cache_entries GROUP BY 1")
         .map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| {
-        let kind: String = row.get(0)?;
-        let entries: i64 = row.get(1)?;
-        Ok((kind, entries))
-    }).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            let kind: String = row.get(0)?;
+            let entries: i64 = row.get(1)?;
+            Ok((kind, entries))
+        })
+        .map_err(|error| error.to_string())?;
     for row in rows {
         let (kind, entries) = row.map_err(|error| error.to_string())?;
         if let Some(value) = by_rendition.get_mut(&kind) {
-            value.entries = usize::try_from(entries).map_err(|_| "Invalid cache entry count".to_string())?;
+            value.entries =
+                usize::try_from(entries).map_err(|_| "Invalid cache entry count".to_string())?;
         }
     }
-    let mut statement = connection.prepare("SELECT path, MAX(size), MIN(CASE kind WHEN 'cover' THEN 0 WHEN 'page-thumbnail' THEN 1 WHEN 'reader-page' THEN 2 ELSE 3 END) FROM cache_entries GROUP BY path")
+    let mut statement = connection.prepare("SELECT path, MAX(size), MIN(CASE kind WHEN 'cover' THEN 0 WHEN 'page-thumbnail' THEN 1 WHEN 'reader-page' THEN 2 WHEN 'enhanced' THEN 3 WHEN 'decensored' THEN 4 WHEN 'inference' THEN 5 ELSE 6 END) FROM cache_entries GROUP BY path")
         .map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
         .map_err(|error| error.to_string())?;
     for row in rows {
         let (bytes, priority) = row.map_err(|error| error.to_string())?;
-        let kind = match priority { 0 => "cover", 1 => "page-thumbnail", 2 => "reader-page", _ => "other" };
+        let kind = match priority {
+            0 => "cover",
+            1 => "page-thumbnail",
+            2 => "reader-page",
+            3 => "enhanced",
+            4 => "decensored",
+            5 => "inference",
+            _ => "other",
+        };
         if let Some(value) = by_rendition.get_mut(kind) {
-            value.bytes = value.bytes.saturating_add(u64::try_from(bytes).map_err(|_| "Invalid cache size".to_string())?);
+            value.bytes = value.bytes.saturating_add(
+                u64::try_from(bytes).map_err(|_| "Invalid cache size".to_string())?,
+            );
         }
     }
     Ok(CacheStats {
@@ -327,11 +421,15 @@ pub fn cache_stats(database: tauri::State<'_, Database>) -> CommandResult<CacheS
 }
 
 fn controlled_cache_path(app_data: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
-    if !app_data.is_absolute() || relative.contains('\\') { return None; }
+    if !app_data.is_absolute() || relative.contains('\\') {
+        return None;
+    }
     let parts: Vec<&str> = relative.split('/').collect();
     if parts.len() < 3
         || parts[0] != "cache"
-        || parts.iter().any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains(':'))
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains(':'))
     {
         return None;
     }
@@ -340,7 +438,9 @@ fn controlled_cache_path(app_data: &std::path::Path, relative: &str) -> Option<s
         path.push(part);
         if index + 1 < parts.len() {
             match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return None,
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return None
+                }
                 Ok(_) | Err(_) => {}
             }
         }
@@ -348,16 +448,25 @@ fn controlled_cache_path(app_data: &std::path::Path, relative: &str) -> Option<s
     Some(path)
 }
 
-fn isolate_cache_file(app_data: &std::path::Path, relative: &str) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>, String> {
-    let Some(path) = controlled_cache_path(app_data, relative) else { return Ok(None); };
+fn isolate_cache_file(
+    app_data: &std::path::Path,
+    relative: &str,
+) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>, String> {
+    let Some(path) = controlled_cache_path(app_data, relative) else {
+        return Ok(None);
+    };
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() { return Ok(None); }
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?.as_nanos();
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
     let quarantine = path.with_file_name(format!(
         ".{}.deleting-{}-{nonce}",
         path.file_name().unwrap_or_default().to_string_lossy(),
@@ -367,8 +476,13 @@ fn isolate_cache_file(app_data: &std::path::Path, relative: &str) -> Result<Opti
     Ok(Some((path, quarantine)))
 }
 
-fn finish_isolated_file(isolated: Option<(std::path::PathBuf, std::path::PathBuf)>, restore: bool) -> Result<bool, String> {
-    let Some((path, quarantine)) = isolated else { return Ok(false); };
+fn finish_isolated_file(
+    isolated: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    restore: bool,
+) -> Result<bool, String> {
+    let Some((path, quarantine)) = isolated else {
+        return Ok(false);
+    };
     if restore {
         std::fs::rename(&quarantine, &path).map_err(|error| error.to_string())?;
         return Ok(false);
@@ -377,14 +491,23 @@ fn finish_isolated_file(isolated: Option<(std::path::PathBuf, std::path::PathBuf
     Ok(true)
 }
 
-pub fn clear_image_cache(connection: &rusqlite::Connection, app_data: &std::path::Path) -> Result<CacheClearResult, String> {
-    if !app_data.is_absolute() { return Err("Invalid cache root".into()); }
+pub fn clear_image_cache(
+    connection: &rusqlite::Connection,
+    app_data: &std::path::Path,
+) -> Result<CacheClearResult, String> {
+    if !app_data.is_absolute() {
+        return Err("Invalid cache root".into());
+    }
     let candidates = {
         let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page') AND pinned=0 GROUP BY path")
             .map_err(|error| error.to_string())?;
-        let values = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        let values = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         values
     };
     let mut removed_entries = 0;
@@ -395,7 +518,11 @@ pub fn clear_image_cache(connection: &rusqlite::Connection, app_data: &std::path
             "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(kind IN ('cover','page-thumbnail','reader-page') AND pinned=0)",
             [&relative], |row| row.get(0),
         ).map_err(|error| error.to_string())?;
-        let isolated = if remaining == 0 { isolate_cache_file(app_data, &relative)? } else { None };
+        let isolated = if remaining == 0 {
+            isolate_cache_file(app_data, &relative)?
+        } else {
+            None
+        };
         match connection.execute("DELETE FROM cache_entries WHERE path=?1 AND kind IN ('cover','page-thumbnail','reader-page') AND pinned=0", [&relative]) {
             Ok(count) => removed_entries += count,
             Err(error) => {
@@ -416,7 +543,8 @@ pub fn clear_image_cache(connection: &rusqlite::Connection, app_data: &std::path
         removed_entries,
         removed_files,
         bytes_freed,
-        protected_bytes: u64::try_from(protected).map_err(|_| "Invalid protected cache size".to_string())?,
+        protected_bytes: u64::try_from(protected)
+            .map_err(|_| "Invalid protected cache size".to_string())?,
     })
 }
 
@@ -432,9 +560,13 @@ pub fn invalidate_archive_cache(
     let candidates = {
         let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page') GROUP BY path")
             .map_err(|error| error.to_string())?;
-        let values = statement.query_map(rusqlite::params![scope_id, archive_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        let values = statement
+            .query_map(rusqlite::params![scope_id, archive_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         values
     };
     let mut removed_entries = 0;
@@ -445,7 +577,11 @@ pub fn invalidate_archive_cache(
             "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page'))",
             rusqlite::params![relative, scope_id, archive_id], |row| row.get(0),
         ).map_err(|error| error.to_string())?;
-        let isolated = if remaining == 0 { isolate_cache_file(app_data, &relative)? } else { None };
+        let isolated = if remaining == 0 {
+            isolate_cache_file(app_data, &relative)?
+        } else {
+            None
+        };
         match connection.execute(
             "DELETE FROM cache_entries WHERE path=?1 AND source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page')",
             rusqlite::params![relative, scope_id, archive_id],
@@ -461,15 +597,27 @@ pub fn invalidate_archive_cache(
             bytes_freed = bytes_freed.saturating_add(u64::try_from(size).unwrap_or(0));
         }
     }
-    Ok(CacheInvalidateResult { removed_entries, removed_files, bytes_freed })
+    Ok(CacheInvalidateResult {
+        removed_entries,
+        removed_files,
+        bytes_freed,
+    })
 }
 
 #[tauri::command]
-pub fn cache_clear_images(app: tauri::AppHandle, database: tauri::State<'_, Database>) -> CommandResult<CacheClearResult> {
-    use tauri::Manager;
-    let app_data = match app.path().app_data_dir() {
+pub fn cache_clear_images(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, Database>,
+) -> CommandResult<CacheClearResult> {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("PLATFORM_UNAVAILABLE", "App data directory unavailable", true),
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -488,10 +636,15 @@ pub fn cache_invalidate_archive(
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
 ) -> CommandResult<CacheInvalidateResult> {
-    use tauri::Manager;
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("PLATFORM_UNAVAILABLE", "App data directory unavailable", true),
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -515,8 +668,12 @@ pub fn evict_cache_batch(
     let before = indexed_cache_bytes(connection)?;
     if before <= max_bytes {
         return Ok(CacheEvictionResult {
-            removed_entries: 0, removed_files: 0, bytes_freed: 0,
-            remaining_bytes: before, quota_satisfied: true, has_more: false,
+            removed_entries: 0,
+            removed_files: 0,
+            bytes_freed: 0,
+            remaining_bytes: before,
+            quota_satisfied: true,
+            has_more: false,
         });
     }
 
@@ -524,9 +681,13 @@ pub fn evict_cache_batch(
         let mut statement = connection.prepare(
             "SELECT path,MAX(size) FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 ORDER BY MIN(last_accessed_at),path LIMIT ?1"
         ).map_err(|error| error.to_string())?;
-        let rows = statement.query_map([batch_limit as i64], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        let rows = statement
+            .query_map([batch_limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         rows
     };
 
@@ -534,9 +695,12 @@ pub fn evict_cache_batch(
     let mut removed_files = 0;
     let mut bytes_freed = 0_u64;
     for (relative, indexed_size) in candidates {
-        if indexed_cache_bytes(connection)? <= max_bytes { break; }
+        if indexed_cache_bytes(connection)? <= max_bytes {
+            break;
+        }
         let Some(path) = controlled_cache_path(app_data, &relative) else {
-            removed_entries += connection.execute("DELETE FROM cache_entries WHERE path=?1", [&relative])
+            removed_entries += connection
+                .execute("DELETE FROM cache_entries WHERE path=?1", [&relative])
                 .map_err(|error| error.to_string())?;
             continue;
         };
@@ -547,8 +711,11 @@ pub fn evict_cache_batch(
         ));
         let isolated = match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-                if quarantine.exists() { return Err("Cache eviction already pending".into()); }
-                std::fs::rename(&path, &quarantine).map_err(|_| "Cache file isolation failed".to_string())?;
+                if quarantine.exists() {
+                    return Err("Cache eviction already pending".into());
+                }
+                std::fs::rename(&path, &quarantine)
+                    .map_err(|_| "Cache file isolation failed".to_string())?;
                 true
             }
             Ok(_) | Err(_) => false,
@@ -556,23 +723,28 @@ pub fn evict_cache_batch(
         match connection.execute("DELETE FROM cache_entries WHERE path=?1", [&relative]) {
             Ok(count) => removed_entries += count,
             Err(error) => {
-                if isolated { let _ = std::fs::rename(&quarantine, &path); }
+                if isolated {
+                    let _ = std::fs::rename(&quarantine, &path);
+                }
                 return Err(error.to_string());
             }
         }
         if isolated {
-            std::fs::remove_file(&quarantine).map_err(|_| "Cache file removal failed".to_string())?;
+            std::fs::remove_file(&quarantine)
+                .map_err(|_| "Cache file removal failed".to_string())?;
             removed_files += 1;
             bytes_freed = bytes_freed.saturating_add(u64::try_from(indexed_size).unwrap_or(0));
         }
     }
 
     let remaining_bytes = indexed_cache_bytes(connection)?;
-    let has_evictable: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 LIMIT 1)",
-        [],
-        |row| row.get(0),
-    ).map_err(|error| error.to_string())?;
+    let has_evictable: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
     Ok(CacheEvictionResult {
         removed_entries,
         removed_files,
@@ -587,19 +759,26 @@ pub fn maintain_image_cache_quota(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
 ) -> Result<(), String> {
-    let quota = connection.query_row(
-        "SELECT value_json FROM settings WHERE key='preferences.cache_max_bytes'",
-        [],
-        |row| row.get::<_, String>(0),
-    ).optional().map_err(|error| error.to_string())?
+    let quota = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key='preferences.cache_max_bytes'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
         .and_then(|value| serde_json::from_str::<u64>(&value).ok())
         .unwrap_or(DEFAULT_CACHE_QUOTA_BYTES);
     let trigger = quota.saturating_mul(CACHE_EVICTION_TRIGGER_PERCENT) / 100;
-    if indexed_cache_bytes(connection)? < trigger { return Ok(()); }
+    if indexed_cache_bytes(connection)? < trigger {
+        return Ok(());
+    }
     let target = quota.saturating_mul(CACHE_EVICTION_TARGET_PERCENT) / 100;
     for _ in 0..16 {
         let result = evict_cache_batch(connection, app_data, target, 256)?;
-        if result.quota_satisfied || !result.has_more { break; }
+        if result.quota_satisfied || !result.has_more {
+            break;
+        }
     }
     Ok(())
 }
@@ -610,11 +789,15 @@ pub fn cache_evict(
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
 ) -> CommandResult<CacheEvictionResult> {
-    use tauri::Manager;
-
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("PLATFORM_UNAVAILABLE", "App data directory unavailable", true),
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -635,16 +818,29 @@ mod tests {
 
     fn cache_db() -> rusqlite::Connection {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch(include_str!("../migrations/0001_initial.sql")).unwrap();
-        connection.execute_batch(include_str!("../migrations/0002_local_library.sql")).unwrap();
-        connection.execute_batch(include_str!("../migrations/0010_cache_path_sharing.sql")).unwrap();
-        connection.execute_batch(include_str!("../migrations/0013_unified_image_cache.sql")).unwrap();
-        connection.execute_batch(include_str!("../migrations/0014_cache_archive_scope.sql")).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_initial.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0002_local_library.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0010_cache_path_sharing.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0013_unified_image_cache.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0014_cache_archive_scope.sql"))
+            .unwrap();
         connection
     }
 
     fn temp_app_data(name: &str) -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("yomika-{name}-{}-{nonce}", std::process::id()))
     }
 
@@ -665,11 +861,41 @@ mod tests {
 
         let result = evict_cache_batch(&connection, &app_data, 14, 1).expect("evicted batch");
 
-        assert_eq!(result, CacheEvictionResult { removed_entries: 2, removed_files: 1, bytes_freed: 6, remaining_bytes: 14, quota_satisfied: true, has_more: false });
+        assert_eq!(
+            result,
+            CacheEvictionResult {
+                removed_entries: 2,
+                removed_files: 1,
+                bytes_freed: 6,
+                remaining_bytes: 14,
+                quota_satisfied: true,
+                has_more: false
+            }
+        );
         assert!(!cache.join("old.bin").exists());
         assert!(cache.join("new.bin").exists());
         assert!(cache.join("pinned.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn cache_stats_separates_enhancement_outputs_from_other() {
+        let connection = cache_db();
+        connection
+            .execute_batch(
+                "INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash) VALUES
+          ('up','enhanced','cache/images/up.bin',120,'scope','up'),
+          ('de','decensored','cache/images/de.bin',30,'scope','de'),
+          ('old','inference','cache/inference/old.bin',10,'scope','old'),
+          ('misc','image','cache/images/misc.bin',5,'scope','misc')",
+            )
+            .unwrap();
+        let stats = read_cache_stats(&connection).unwrap();
+        assert_eq!(stats.bytes, 165);
+        assert_eq!(stats.by_rendition["enhanced"].bytes, 120);
+        assert_eq!(stats.by_rendition["decensored"].bytes, 30);
+        assert_eq!(stats.by_rendition["inference"].bytes, 10);
+        assert_eq!(stats.by_rendition["other"].bytes, 5);
     }
 
     #[test]
@@ -681,9 +907,28 @@ mod tests {
         let stats = read_cache_stats(&connection).unwrap();
         assert_eq!(stats.bytes, 12);
         assert_eq!(stats.entries, 2);
-        assert_eq!(stats.by_rendition.values().map(|value| value.bytes).sum::<u64>(), 12);
-        assert_eq!(stats.by_rendition["cover"], CacheBreakdown { bytes: 12, entries: 1 });
-        assert_eq!(stats.by_rendition["reader-page"], CacheBreakdown { bytes: 0, entries: 1 });
+        assert_eq!(
+            stats
+                .by_rendition
+                .values()
+                .map(|value| value.bytes)
+                .sum::<u64>(),
+            12
+        );
+        assert_eq!(
+            stats.by_rendition["cover"],
+            CacheBreakdown {
+                bytes: 12,
+                entries: 1
+            }
+        );
+        assert_eq!(
+            stats.by_rendition["reader-page"],
+            CacheBreakdown {
+                bytes: 0,
+                entries: 1
+            }
+        );
     }
 
     #[test]
@@ -700,7 +945,15 @@ mod tests {
 
         let result = clear_image_cache(&connection, &app_data).unwrap();
 
-        assert_eq!(result, CacheClearResult { removed_entries: 1, removed_files: 1, bytes_freed: 4, protected_bytes: 6 });
+        assert_eq!(
+            result,
+            CacheClearResult {
+                removed_entries: 1,
+                removed_files: 1,
+                bytes_freed: 4,
+                protected_bytes: 6
+            }
+        );
         assert!(!cache.join("free.bin").exists());
         assert!(cache.join("pinned.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
@@ -717,11 +970,25 @@ mod tests {
           ('target','cover','cache/images/shared.bin',6,'scope-a','archive-a','shared'),
           ('keep','cover','cache/images/shared.bin',6,'scope-b','archive-b','shared')").unwrap();
 
-        let result = invalidate_archive_cache(&connection, &app_data, "scope-a", "archive-a").unwrap();
+        let result =
+            invalidate_archive_cache(&connection, &app_data, "scope-a", "archive-a").unwrap();
 
-        assert_eq!(result, CacheInvalidateResult { removed_entries: 1, removed_files: 0, bytes_freed: 0 });
+        assert_eq!(
+            result,
+            CacheInvalidateResult {
+                removed_entries: 1,
+                removed_files: 0,
+                bytes_freed: 0
+            }
+        );
         assert!(cache.join("shared.bin").exists());
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
@@ -734,7 +1001,8 @@ mod tests {
         std::fs::write(&outside, b"keep").unwrap();
         connection.execute("INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash) VALUES ('bad','image','cache/../keep.bin',4,'a','bad')", []).unwrap();
 
-        let result = evict_cache_batch(&connection, &app_data, 0, 8).expect("invalid index discarded");
+        let result =
+            evict_cache_batch(&connection, &app_data, 0, 8).expect("invalid index discarded");
 
         assert!(outside.exists());
         assert_eq!(result.removed_entries, 1);
@@ -748,7 +1016,9 @@ mod tests {
         let app_data = temp_app_data("cache-batches");
         let cache = app_data.join("cache/images");
         std::fs::create_dir_all(&cache).unwrap();
-        for name in ["one", "two"] { std::fs::write(cache.join(format!("{name}.bin")), b"1234").unwrap(); }
+        for name in ["one", "two"] {
+            std::fs::write(cache.join(format!("{name}.bin")), b"1234").unwrap();
+        }
         std::fs::write(cache.join("pin.bin"), b"1234567890").unwrap();
         connection.execute_batch("INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash,pinned,last_accessed_at) VALUES
           ('one','image','cache/images/one.bin',4,'a','one',0,'2026-01-01'),
@@ -774,7 +1044,10 @@ mod tests {
 
         assert_ne!(image_cache_key(&cover), image_cache_key(&other_scope));
         assert_ne!(image_cache_key(&cover), image_cache_key(&page));
-        assert_eq!(image_cache_key(&cover), image_cache_key(&CacheImageIdentity::new("scope-a", "archive-a", "cover", 0)));
+        assert_eq!(
+            image_cache_key(&cover),
+            image_cache_key(&CacheImageIdentity::new("scope-a", "archive-a", "cover", 0))
+        );
     }
 
     #[test]
@@ -787,11 +1060,19 @@ mod tests {
         store_image_cache(&connection, &app_data, &first, "image/jpeg", b"same-image").unwrap();
         store_image_cache(&connection, &app_data, &second, "image/jpeg", b"same-image").unwrap();
 
-        let loaded = load_image_cache(&connection, &app_data, &first).unwrap().unwrap();
+        let loaded = load_image_cache(&connection, &app_data, &first)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.bytes, b"same-image");
         assert_eq!(loaded.mime, "image/jpeg");
         assert_eq!(read_cache_stats(&connection).unwrap().bytes, 10);
-        let distinct_paths: i64 = connection.query_row("SELECT COUNT(DISTINCT path) FROM cache_entries", [], |row| row.get(0)).unwrap();
+        let distinct_paths: i64 = connection
+            .query_row(
+                "SELECT COUNT(DISTINCT path) FROM cache_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(distinct_paths, 1);
         std::fs::remove_dir_all(app_data).unwrap();
     }
@@ -800,19 +1081,48 @@ mod tests {
     fn image_cache_accepts_an_octet_stream_that_is_really_an_image() {
         // LANraragi builds that answer application/octet-stream used to have
         // every thumbnail refused, so the disk cache stayed empty forever.
-        assert_eq!(sniff_image_mime("application/octet-stream", &[0xff, 0xd8, 0xff, 0xe0, 1, 2]).as_deref(), Some("image/jpeg"));
-        assert_eq!(sniff_image_mime("", &[0x89, b'P', b'N', b'G', 1]).as_deref(), Some("image/png"));
-        assert_eq!(sniff_image_mime("image/webp", &[1, 2, 3]).as_deref(), Some("image/webp"));
-        assert_eq!(sniff_image_mime("text/html", b"<html>not an image</html>"), None);
+        assert_eq!(
+            sniff_image_mime("application/octet-stream", &[0xff, 0xd8, 0xff, 0xe0, 1, 2])
+                .as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            sniff_image_mime("", &[0x89, b'P', b'N', b'G', 1]).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_image_mime("image/webp", &[1, 2, 3]).as_deref(),
+            Some("image/webp")
+        );
+        assert_eq!(
+            sniff_image_mime("text/html", b"<html>not an image</html>"),
+            None
+        );
 
         let connection = cache_db();
         let app_data = temp_app_data("octet-stream-image");
         let identity = CacheImageIdentity::new("scope-a", "archive-a", "cover", 0);
-        store_image_cache(&connection, &app_data, &identity, "application/octet-stream", &[0xff, 0xd8, 0xff, 0xe0, 9, 9]).unwrap();
+        store_image_cache(
+            &connection,
+            &app_data,
+            &identity,
+            "application/octet-stream",
+            &[0xff, 0xd8, 0xff, 0xe0, 9, 9],
+        )
+        .unwrap();
 
-        let stored = load_image_cache(&connection, &app_data, &identity).unwrap().expect("cached cover");
+        let stored = load_image_cache(&connection, &app_data, &identity)
+            .unwrap()
+            .expect("cached cover");
         assert_eq!(stored.mime, "image/jpeg");
-        assert!(store_image_cache(&connection, &app_data, &identity, "text/html", b"<html></html>").is_err());
+        assert!(store_image_cache(
+            &connection,
+            &app_data,
+            &identity,
+            "text/html",
+            b"<html></html>"
+        )
+        .is_err());
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
@@ -822,11 +1132,21 @@ mod tests {
         let app_data = temp_app_data("unified-corrupt");
         let identity = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 3);
         store_image_cache(&connection, &app_data, &identity, "image/png", b"valid").unwrap();
-        let relative: String = connection.query_row("SELECT path FROM cache_entries WHERE key=?1", [image_cache_key(&identity)], |row| row.get(0)).unwrap();
+        let relative: String = connection
+            .query_row(
+                "SELECT path FROM cache_entries WHERE key=?1",
+                [image_cache_key(&identity)],
+                |row| row.get(0),
+            )
+            .unwrap();
         std::fs::write(app_data.join(relative), b"broken").unwrap();
 
-        assert!(load_image_cache(&connection, &app_data, &identity).unwrap().is_none());
-        let count: i64 = connection.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0)).unwrap();
+        assert!(load_image_cache(&connection, &app_data, &identity)
+            .unwrap()
+            .is_none());
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 0);
         std::fs::remove_dir_all(app_data).unwrap();
     }

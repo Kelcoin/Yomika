@@ -40,10 +40,13 @@ export function writeRouteCache(key: string, value: unknown): void {
 export function invalidateRouteCache(prefix?: string): void {
   if (!prefix) {
     entries.clear();
-    return;
+  } else {
+    for (const key of [...entries.keys()]) {
+      if (key.startsWith(prefix)) entries.delete(key);
+    }
   }
-  for (const key of [...entries.keys()]) {
-    if (key.startsWith(prefix)) entries.delete(key);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('yomika:route-cache-invalidated', { detail: { prefix } }));
   }
 }
 

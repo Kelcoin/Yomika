@@ -62,6 +62,19 @@ export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progr
  * above the rail, which put them visually outside the panel they belong to. */
 function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
+  const [railWidth, setRailWidth] = useState(0);
+  useEffect(() => {
+    const element = scroller.elementRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return undefined;
+    const measure = () => setRailWidth(element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [scroller.elementRef]);
+  const visibleSkeletonCount = railWidth > 0
+    ? Math.max(1, Math.ceil((railWidth + 12) / 162))
+    : skeletonCount;
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
       {headingContent ?? <h2>{title}</h2>}
@@ -71,7 +84,7 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
     </div>}
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       {archives.length === 0 && loading
-        ? Array.from({ length: skeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
         : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
     </div>
   </section>;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -10,6 +10,7 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
 import type { ImageHandle } from '../lib/unifiedImageCache';
+import { useReturnNavigation } from '../lib/useReturnNavigation';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
@@ -24,6 +25,7 @@ interface ReaderContext {
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [searchParams] = useSearchParams();
+  const goBack = useReturnNavigation();
   const { showToast } = useToast();
   const { preferences } = usePreferences();
   const prefetchDistance = preferences.prefetchPages;
@@ -31,15 +33,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // the same pixels at four times the bytes — strictly worse than the plain
   // page. Upscaling therefore needs a model, not just a backend.
   const upscaleConfigured = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
-  /** De-censoring has no separate switch in settings: choosing a bundle is what
-   * turns it on. */
+  // Settings grant availability; every reading session starts with original images.
   const decensorConfigured = preferences.decensorModel !== '';
   /** Per-session overrides for the two enhancements, driven from the reader's own
    * toolbar. Settings decide whether a model exists; these decide whether this
    * sitting uses it, which is the only way to see what either one does to the
    * page in front of you. */
-  const [upscaleWanted, setUpscaleWanted] = useState(true);
-  const [decensorWanted, setDecensorWanted] = useState(true);
+  const [upscaleWanted, setUpscaleWanted] = useState(false);
+  const [decensorWanted, setDecensorWanted] = useState(false);
+  useLayoutEffect(() => {
+    setUpscaleWanted(false);
+    setDecensorWanted(false);
+  }, [archiveId]);
+  useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
+  useEffect(() => { if (!decensorConfigured) setDecensorWanted(false); }, [decensorConfigured]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
   const decensorEnabled = decensorConfigured && decensorWanted;
   /** Bumped whenever a switch flips, so the reader drops the renditions it is
@@ -219,15 +226,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         // Both on: de-censor first, then enlarge the finished page. The detector
         // and the inpainter were trained at page scale, so upscaling first would
         // hand the inpainter interpolated pixels and smeared mosaic blocks.
-        const censored = job.decensorModel
+        const censored = job.decensorModel && !job.upscaleModel
           ? await imageCache.load({ ...identity, rendition: 'decensored', modelId: job.decensorModel }).catch(() => undefined)
           : undefined;
-        const enhanced = job.generation === derivedGenerationRef.current && job.upscaleModel && (!job.decensorModel || censored)
+        const enhanced = job.generation === derivedGenerationRef.current && job.upscaleModel
           ? await imageCache.load({
             ...identity,
             rendition: 'enhanced',
             modelId: job.upscaleModel,
-            ...(censored ? { decensorModelId: job.decensorModel } : {}),
+            ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
           }).catch(() => undefined)
           : undefined;
         const derived = enhanced ?? censored;
@@ -370,7 +377,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     return (
       <main className="reader-screen reader-screen-error">
         <header className="reader-error-bar">
-          <Link className="reader-icon-button" to="/library" aria-label="返回档案库"><ArrowLeft aria-hidden="true" /></Link>
+          <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
           <strong>{title}</strong>
         </header>
         <section className="reader-error">

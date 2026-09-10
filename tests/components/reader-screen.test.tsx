@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
@@ -24,6 +24,108 @@ function renderReader() {
 }
 
 describe('reader screen', () => {
+  it('continues panning with the remaining finger after a pinch', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    const x = window.innerWidth / 2;
+    const y = window.innerHeight / 2;
+    fireEvent.touchStart(reader, { touches: [{ clientX: x - 50, clientY: y }, { clientX: x + 50, clientY: y }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
+    fireEvent.touchEnd(reader, { touches: [{ clientX: x - 100, clientY: y }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: x, clientY: y + 40 }] });
+    expect(frame.style.transform).toBe('scale(2) translate(50px, 20px)');
+    expect(frame.style.transition).toBe('none');
+    fireEvent.touchEnd(reader, { touches: [] });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('cancels a captured mouse swipe without changing page', () => {
+    vi.useFakeTimers();
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const track = reader.querySelector('.reader-track') as HTMLElement;
+      fireEvent.mouseDown(reader, { button: 0, clientX: 500, clientY: 300 });
+      fireEvent.mouseMove(reader, { buttons: 1, clientX: 200, clientY: 300 });
+      act(() => vi.advanceTimersByTime(20));
+      expect(track.style.transform).toBe('translate3d(-300px,0,0)');
+      fireEvent.pointerCancel(reader);
+      fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 300 });
+      expect(track.style.transform).toBe('translate3d(0,0,0)');
+      expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it('pans an enlarged page without paging and disables transform easing during drag', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    fireEvent.doubleClick(reader);
+    fireEvent.mouseDown(reader, { button: 0, clientX: 300, clientY: 300 });
+    fireEvent.mouseMove(reader, { buttons: 1, clientX: 400, clientY: 360 });
+    expect(frame.style.transform).toBe('scale(2) translate(50px, 30px)');
+    expect(frame.style.transition).toBe('none');
+    fireEvent.mouseUp(reader, { button: 0, clientX: 400, clientY: 360 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('zooms about the midpoint of two fingers and springs undershoot back', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    const y = window.innerHeight / 2;
+    const x = window.innerWidth / 2 + 100;
+    fireEvent.touchStart(reader, { touches: [{ clientX: x - 50, clientY: y }, { clientX: x + 50, clientY: y }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
+    expect(frame.style.transform).toBe('scale(2) translate(-50px, 0px)');
+    fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
+    expect(frame.style.transform).toContain('scale(0.88)');
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
+    expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
+  });
+
+  it('reveals the toolbar at the hovered edge only', async () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: 110 });
+    expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+    expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
+    expect(screen.getByRole('toolbar')).toBeInTheDocument();
+    await vi.waitFor(() => expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument());
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight / 2 });
+    await vi.waitFor(() => expect(screen.queryByRole('toolbar')).not.toBeInTheDocument());
+  });
+
+  it('clears a pending swipe when a second finger joins', () => {
+    vi.useFakeTimers();
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const track = reader.querySelector('.reader-track') as HTMLElement;
+      fireEvent.touchStart(reader, { touches: [{ clientX: 400, clientY: 300 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 300, clientY: 300 }] });
+      act(() => vi.advanceTimersByTime(20));
+      expect(track.style.transform).toBe('translate3d(-100px,0,0)');
+      fireEvent.touchStart(reader, { touches: [{ clientX: 300, clientY: 300 }, { clientX: 500, clientY: 300 }] });
+      act(() => vi.advanceTimersByTime(250));
+      expect(track.style.transform).toBe('translate3d(0,0,0)');
+      expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it('does not start a page swipe from a toolbar control', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    const button = screen.getByRole('button', { name: '全屏' });
+    fireEvent.mouseDown(button, { button: 0, clientX: 500, clientY: 700 });
+    fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
+    fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 700 });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
   it('scrolls continuous pages when keyboard navigation changes progress', () => {
     const onProgress = vi.fn();
     render(<MemoryRouter><ReaderScreen archiveId="continuous" title="Continuous" pages={pages} layout="webtoon" onProgress={onProgress} /></MemoryRouter>);
@@ -94,7 +196,7 @@ describe('reader screen', () => {
     // centre. The curve is multiplicative, so 120 units of wheel is
     // exp(-0.18) ≈ 0.835.
     const zoomed = () => container.querySelector('.reader-single, .reader-spread') as HTMLElement;
-    expect(zoomed().getAttribute('style')).toMatch(/scale\(0\.83/);
+    expect(zoomed().getAttribute('style')).toMatch(/scale\(0\.96/);
     expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
     // Coming back within 5% of 100% snaps exactly onto it.
@@ -233,6 +335,39 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
   });
 
+  it('finishes the slide before replacing the current page', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = reader.querySelector('.reader-track') as HTMLDivElement;
+    const animation = { cancel: vi.fn(), onfinish: undefined as (() => void) | undefined };
+    const animate = vi.fn(() => animation);
+    Object.defineProperty(track, 'animate', { value: animate, configurable: true });
+    fireEvent.mouseDown(reader, { button: 0, clientX: 600, clientY: 200 });
+    fireEvent.mouseMove(reader, { buttons: 1, clientX: 300, clientY: 200 });
+    fireEvent.mouseUp(reader, { button: 0, clientX: 300, clientY: 200 });
+    expect(animate).toHaveBeenCalledWith([
+      { transform: 'translate3d(-300px,0,0)' },
+      { transform: `translate3d(${-window.innerWidth}px,0,0)` },
+    ], expect.objectContaining({ duration: 240 }));
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    act(() => animation.onfinish?.());
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    expect(track.style.transform).toBe('translate3d(0,0,0)');
+  });
+
+  it('allows a damped undershoot but settles back to 100 percent', () => {
+    vi.useFakeTimers();
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+      fireEvent.wheel(reader, { deltaY: 120 });
+      expect(frame.style.transform).toMatch(/scale\(0\.96/);
+      act(() => vi.advanceTimersByTime(180));
+      expect(frame.style.transform).toContain('scale(1)');
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
   it('opens the overview panel in the centre with archive facts', async () => {
     const user = userEvent.setup();
     render(
@@ -257,6 +392,23 @@ describe('reader screen', () => {
     await user.click(within(overview).getByRole('button', { name: '跳转到第 3 页' }));
     expect(screen.queryByRole('complementary', { name: '档案概览' })).not.toBeInTheDocument();
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+  });
+
+  it('links overview tags to an exact library search', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} info={{ tags: ['female:big breasts'] }} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+
+    expect(screen.getByRole('link', { name: /搜索标签 (big breasts|巨乳)/ })).toHaveAttribute(
+      'href',
+      '/library?q=female%3Abig+breasts%24%2C+',
+    );
   });
 
   it('renders double pages and webtoon pages as distinct layouts', async () => {
@@ -356,7 +508,7 @@ describe('reader screen', () => {
     const zoomed = () => container.querySelector('.reader-single') as HTMLElement;
 
     fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 });
-    expect(zoomed().style.transform).toMatch(/scale\(0\.83/);
+    expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
 
     // The enhanced rendition arrives after the plain page and takes its place in
     // the same slot. It used to be awaited inside the page load instead, so
@@ -368,7 +520,7 @@ describe('reader screen', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
-    expect(zoomed().style.transform).toMatch(/scale\(0\.83/);
+    expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
   });
 
   it('asks for enhancement only for the pages on screen', async () => {
@@ -426,7 +578,7 @@ describe('reader screen', () => {
     expect(zoomed().style.transform).toContain('scale(1)');
   });
 
-  it('switches the two enhancements from the toolbar and says when one has no model', async () => {
+  it('shows only available enhancement controls', async () => {
     const user = userEvent.setup();
     const toggleUpscale = vi.fn();
     render(
@@ -444,9 +596,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '关闭超分' }));
     expect(toggleUpscale).toHaveBeenCalledTimes(1);
-    // With nothing installed the button says so instead of silently doing
-    // nothing, which is how these went unverifiable from inside the reader.
-    expect(screen.getByRole('button', { name: '去码：未选择模型包' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /去码/ })).not.toBeInTheDocument();
   });
 
   it('loads only a window of pages in continuous mode', async () => {
@@ -496,6 +646,16 @@ describe('reader screen', () => {
     fireEvent.touchStart(reader, { touches: [{ clientX: 50, clientY: 100 }] });
     fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 200, clientY: 100 }] });
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('preserves the decoded neighbouring image when a swipe lands', () => {
+    const { container } = renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const incoming = container.querySelector('img[alt="第 2 页"]');
+    expect(incoming).not.toBeNull();
+    fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 100 }] });
+    fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 50, clientY: 100 }] });
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBe(incoming);
   });
 
   it('ignores short swipes below the threshold', () => {

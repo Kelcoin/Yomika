@@ -6,6 +6,8 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeDedupRepository, type DedupLoadResult, type DedupScanProgress } from '../repositories/nativeDedupRepository';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
+import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
+import { invalidateRouteCache } from '../lib/routeCache';
 
 const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
@@ -24,6 +26,7 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
   const [sourceFilter, setSourceFilter] = useState<'all' | DuplicateSource>('all');
   const [view, setView] = useState<'groups' | 'chains'>('groups');
   const [busy, setBusy] = useState(false);
+  const [deleteSession, setDeleteSession] = useState<{ id: string; count: number }>();
   const scanGeneration = useRef(0);
 
   useEffect(() => {
@@ -102,14 +105,17 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
     else showToast(loaded.error.message, 'error');
   }
 
-  async function deleteSelected() {
-    if (!result || selected.size === 0) return;
-    if (!window.confirm(`确认删除已选择的 ${selected.size} 个重复档案？此操作不可撤销。`)) return;
-    const sessionId = result.session.sessionId;
-    const response = await dedup.deleteSelected({ sessionId });
-    if (!response.ok) { showToast(response.error.message, 'error'); return; }
+  async function deleteSelected(syncFavorite: boolean) {
+    if (!deleteSession) return;
+    const sessionId = deleteSession.id;
+    const response = await dedup.deleteSelected({ sessionId }, syncFavorite);
+    if (!response.ok) throw new Error(response.error.message);
     if (response.value.rejectedArchiveIds.length) showToast('为保护重复组，部分档案未删除', 'error');
-    else showToast('删除任务已完成', 'success');
+    else {
+      const failed = response.value.outcomes.filter((outcome) => !outcome.deleted);
+      showToast(failed.length ? `${failed.length} 个档案未删除：${failed[0]?.message ?? '请重试'}` : '删除任务已完成', failed.length ? 'error' : 'success');
+    }
+    if (response.value.outcomes.some((outcome) => outcome.deleted)) invalidateRouteCache();
     // Reload from the backend: keeping the stale selection would let a second
     // click re-issue deletes for archives that are already gone.
     const reloaded = await dedup.loadResult(sessionId);
@@ -132,8 +138,9 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
       {progress?.status === 'cancelled' && <button className="secondary-action" type="button" onClick={() => void runScan(true)}><RefreshCw aria-hidden="true" />恢复</button>}
     </section>
     {progress && <div className="progress-line" role="status">{progress.stage} · {progress.processed}/{progress.total} · 命中 {progress.pairCount}{progress.degraded ? ' · 结果不完整' : ''}</div>}
+    {deleteSession && <ArchiveDeletionConfirmation description={`将永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => setDeleteSession(undefined)} onConfirm={deleteSelected} />}
     {result && <>
-      <section className="toolbar-row dedup-filters"><label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label><label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }]} onChange={(value) => setView(value as typeof view)} /></label><button className="secondary-action" type="button" onClick={() => void smartSelect()}><ShieldCheck aria-hidden="true" />智能选择</button><button className="danger-action" type="button" disabled={!selected.size} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />删除所选</button></section>
+      <section className="toolbar-row dedup-filters"><label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label><label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }]} onChange={(value) => setView(value as typeof view)} /></label><button className="secondary-action" type="button" onClick={() => void smartSelect()}><ShieldCheck aria-hidden="true" />智能选择</button><button className="danger-action" type="button" disabled={!selected.size || busy} onClick={() => setDeleteSession({ id: result.session.sessionId, count: selected.size })}><Trash2 aria-hidden="true" />删除所选</button></section>
       <ul className="dedup-groups" aria-label="重复结果">{visibleGroups.map((group, index) => <li className="dedup-group" key={`${index}-${group.map((item) => item.archiveId).join('-')}`}><div className="dedup-group-heading"><strong>重复组 {index + 1}</strong><span>{group.length} 项</span></div><ul>{group.map((archive) => <li key={archive.archiveId}><label><input type="checkbox" checked={selected.has(archive.archiveId)} onChange={(event) => void toggleSelected(archive.archiveId, event.target.checked)} /><span>{archive.title || archive.archiveId}</span><small>{archive.archiveId}</small></label>{selected.has(archive.archiveId) && <Check aria-hidden="true" />}</li>)}</ul>{group.length > 1 && <button className="icon-button" type="button" title="标记为不重复" aria-label="标记为不重复" onClick={() => server && void dedup.saveNonDuplicate({ scopeId: server.scopeId, leftArchiveId: group[0]!.archiveId, rightArchiveId: group[1]!.archiveId })}><X aria-hidden="true" /></button>}</li>)}</ul>
     </>}
     {!result && !busy && <p className="empty-state">尚未运行查重扫描。</p>}

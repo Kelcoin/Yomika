@@ -3,9 +3,12 @@ import { Check, Info, X, XCircle } from 'lucide-react';
 
 type ToastType = 'info' | 'success' | 'error';
 type ToastItem = { id: number; text: string; type: ToastType; closing: boolean };
-type ToastContextValue = { showToast: (text: string, type?: ToastType, duration?: number) => void };
+type ToastContextValue = {
+  showToast: (text: string, type?: ToastType, duration?: number) => void;
+  clearToasts: (type?: ToastType) => void;
+};
 const ToastContext = createContext<ToastContextValue | null>(null);
-const fallbackToastContext: ToastContextValue = { showToast: () => undefined };
+const fallbackToastContext: ToastContextValue = { showToast: () => undefined, clearToasts: () => undefined };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
@@ -29,8 +32,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setItems((current) => [...current, { id, text: message, type, closing: false }].slice(-4));
     timers.current.set(id, window.setTimeout(() => closeToast(id), duration));
   }, [closeToast]);
+  const clearToasts = useCallback((type?: ToastType) => {
+    setItems((current) => {
+      const removed = current.filter((item) => !type || item.type === type);
+      for (const item of removed) {
+        const timer = timers.current.get(item.id);
+        if (timer) window.clearTimeout(timer);
+        timers.current.delete(item.id);
+      }
+      return current.filter((item) => type && item.type !== type);
+    });
+  }, []);
   useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
-  const value = useMemo(() => ({ showToast }), [showToast]);
+  const value = useMemo(() => ({ showToast, clearToasts }), [clearToasts, showToast]);
   return <ToastContext.Provider value={value}>{children}<div className="toast-stack" aria-live="polite">
     {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} role={item.type === 'error' ? 'alert' : 'status'} key={item.id}>
       <span className="toast-icon" aria-hidden="true">{item.type === 'success' ? <Check /> : item.type === 'error' ? <XCircle /> : <Info />}</span><span className="toast-text">{item.text}</span><button className="toast-close" type="button" aria-label="关闭提示" onClick={() => closeToast(item.id)}><X aria-hidden="true" /></button>

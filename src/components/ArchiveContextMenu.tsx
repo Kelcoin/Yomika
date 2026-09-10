@@ -1,5 +1,5 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2 } from 'lucide-react';
+import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff } from 'lucide-react';
 
 import { getCategoryDisplayName } from '../lib/tags';
 import type { ArchiveRecord } from '../domain/library';
@@ -21,6 +21,11 @@ interface ArchiveContextMenuProps {
   /** Absent when the caller has no reading list, e.g. the dedup workspace. */
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
   inReadingList?: boolean | undefined;
+  onToggleFavorite?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
+  inFavorites?: boolean | undefined;
+  membershipLoading?: boolean | undefined;
+  favoriteLoading?: boolean | undefined;
+  onDownload?: ((archive: ArchiveRecord) => void) | undefined;
   /** What that item is called. The favourites shelf uses the same slot to remove
    * a favourite, and calling that 移出待看 named the wrong shelf. */
   readingListLabels?: { add: string; remove: string } | undefined;
@@ -44,6 +49,11 @@ export function ArchiveContextMenu({
   onCopyId,
   onToggleReadingList,
   inReadingList = false,
+  onToggleFavorite,
+  inFavorites = false,
+  membershipLoading = false,
+  favoriteLoading = false,
+  onDownload,
   readingListLabels = { add: '加入待看', remove: '移出待看' },
   categories,
   onAddCategory,
@@ -68,11 +78,18 @@ export function ArchiveContextMenu({
             <EyeOff aria-hidden="true" />无痕阅读
           </DropdownMenu.Item>
           {onToggleReadingList && (
-            <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onToggleReadingList(archive, !inReadingList)}>
+            <DropdownMenu.Item className="archive-context-menu-item" disabled={membershipLoading} onSelect={() => onToggleReadingList(archive, !inReadingList)}>
               {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
               {inReadingList ? readingListLabels.remove : readingListLabels.add}
             </DropdownMenu.Item>
           )}
+          {onToggleFavorite && <DropdownMenu.Item className="archive-context-menu-item" disabled={favoriteLoading} onSelect={() => onToggleFavorite(archive, !inFavorites)}>
+            {inFavorites ? <HeartOff aria-hidden="true" /> : <Heart aria-hidden="true" />}
+            {inFavorites ? '移出收藏夹' : '加入收藏夹'}
+          </DropdownMenu.Item>}
+          {onDownload && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onDownload(archive)}>
+            <Download aria-hidden="true" />下载档案
+          </DropdownMenu.Item>}
           {onEditMetadata && (
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onEditMetadata(archive)}>
               <Pencil aria-hidden="true" />编辑元数据

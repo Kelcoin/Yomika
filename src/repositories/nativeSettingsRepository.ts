@@ -27,6 +27,9 @@ export const PreferenceSnapshotSchema = z.object({
   /** Installed de-censoring bundle to run on reader pages. Empty means off:
    * a bundle that is not chosen is the only sense in which it can be off. */
   decensorModel: z.string().max(128).default(''),
+  downloadDirectory: z.string().max(4096).default(''),
+  ehFavoriteDeleteSync: z.boolean().default(false),
+  confirmEhFavoriteDelete: z.boolean().default(true),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
@@ -59,6 +62,9 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   upscaleBackend: 'off',
   upscaleModel: '',
   decensorModel: '',
+  downloadDirectory: '',
+  ehFavoriteDeleteSync: false,
+  confirmEhFavoriteDelete: true,
   customCss: '',
 };
 

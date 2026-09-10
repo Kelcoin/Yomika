@@ -73,7 +73,9 @@ pub fn install_bundle_from(
         ));
     };
     if install.exists() {
-        return Err(InferenceError::InvalidInput("该版本的去码模型包已安装".into()));
+        return Err(InferenceError::InvalidInput(
+            "该版本的去码模型包已安装".into(),
+        ));
     }
     let _ = std::fs::remove_dir_all(staging);
     let files: [(&std::path::Path, [&str; 2]); 4] = [
@@ -86,17 +88,20 @@ pub fn install_bundle_from(
         for (from, parts) in files {
             let target = staging.join(parts[0]).join(parts[1]);
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| InferenceError::InvalidInput(format!("创建目录失败：{error}")))?;
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    InferenceError::InvalidInput(format!("创建目录失败：{error}"))
+                })?;
             }
-            std::fs::copy(from, &target)
-                .map_err(|error| InferenceError::InvalidInput(format!("复制 {} 失败：{error}", parts[1])))?;
+            std::fs::copy(from, &target).map_err(|error| {
+                InferenceError::InvalidInput(format!("复制 {} 失败：{error}", parts[1]))
+            })?;
             // ESRGAN keeps its weights in a sibling `.onnx.data`, and the two have
             // to stay in the same directory or the session cannot open.
             let sidecar = from.with_extension("onnx.data");
             if sidecar.is_file() {
-                std::fs::copy(&sidecar, target.with_extension("onnx.data"))
-                    .map_err(|error| InferenceError::InvalidInput(format!("复制外置权重失败：{error}")))?;
+                std::fs::copy(&sidecar, target.with_extension("onnx.data")).map_err(|error| {
+                    InferenceError::InvalidInput(format!("复制外置权重失败：{error}"))
+                })?;
             }
         }
         Ok(())
@@ -166,7 +171,9 @@ pub fn inpaint_window(
         return Err(InferenceError::InvalidInput("region has no pixels".into()));
     }
     if region.x >= image_width || region.y >= image_height {
-        return Err(InferenceError::InvalidInput("region starts outside the page".into()));
+        return Err(InferenceError::InvalidInput(
+            "region starts outside the page".into(),
+        ));
     }
     let longest = region.width.max(region.height);
     let wanted = ((f64::from(longest) * 1.5).round() as u32).max(INPAINT_WINDOW_MIN);
@@ -176,7 +183,12 @@ pub fn inpaint_window(
     let center_y = region.y + region.height / 2;
     let x = center_x.saturating_sub(side / 2).min(image_width - side);
     let y = center_y.saturating_sub(side / 2).min(image_height - side);
-    Ok(CropWindow { x, y, width: side, height: side })
+    Ok(CropWindow {
+        x,
+        y,
+        width: side,
+        height: side,
+    })
 }
 
 /// The inpainting graph's own input side, which is also the floor on a window: a
@@ -192,10 +204,14 @@ pub fn crop_rgba(
     window: &CropWindow,
 ) -> Result<Vec<u8>, InferenceError> {
     if rgba.len() != image_width as usize * image_height as usize * 4 {
-        return Err(InferenceError::InvalidInput("RGBA page dimensions do not match".into()));
+        return Err(InferenceError::InvalidInput(
+            "RGBA page dimensions do not match".into(),
+        ));
     }
     if window.x + window.width > image_width || window.y + window.height > image_height {
-        return Err(InferenceError::InvalidInput("crop window leaves the page".into()));
+        return Err(InferenceError::InvalidInput(
+            "crop window leaves the page".into(),
+        ));
     }
     let mut crop = Vec::with_capacity(window.width as usize * window.height as usize * 4);
     for row in 0..window.height {
@@ -221,17 +237,25 @@ pub fn paste_masked_rgba(
     mask: &[u8],
 ) -> Result<usize, InferenceError> {
     if page.len() != image_width as usize * image_height as usize * 4 {
-        return Err(InferenceError::InvalidInput("RGBA page dimensions do not match".into()));
+        return Err(InferenceError::InvalidInput(
+            "RGBA page dimensions do not match".into(),
+        ));
     }
     let pixels = window.width as usize * window.height as usize;
     if patch.len() != pixels * 4 {
-        return Err(InferenceError::InvalidInput("patch dimensions do not match the window".into()));
+        return Err(InferenceError::InvalidInput(
+            "patch dimensions do not match the window".into(),
+        ));
     }
     if mask.len() != pixels {
-        return Err(InferenceError::InvalidInput("mask dimensions do not match the window".into()));
+        return Err(InferenceError::InvalidInput(
+            "mask dimensions do not match the window".into(),
+        ));
     }
     if window.x + window.width > image_width || window.y + window.height > image_height {
-        return Err(InferenceError::InvalidInput("crop window leaves the page".into()));
+        return Err(InferenceError::InvalidInput(
+            "crop window leaves the page".into(),
+        ));
     }
     let mut written = 0;
     for row in 0..window.height as usize {
@@ -240,7 +264,8 @@ pub fn paste_masked_rgba(
             if mask[index] == 0 {
                 continue;
             }
-            let target = ((window.y as usize + row) * image_width as usize + window.x as usize + column) * 4;
+            let target =
+                ((window.y as usize + row) * image_width as usize + window.x as usize + column) * 4;
             // Alpha stays the page's: an inpainting model has no opinion about it,
             // and a transparent page pixel must not become opaque.
             page[target] = patch[index * 4];
@@ -279,7 +304,10 @@ impl DecensorEngines {
         })
     }
 
-    fn inpainter(&self, kind: CensorKind) -> Result<&super::inpaint::InpaintEngine, InferenceError> {
+    fn inpainter(
+        &self,
+        kind: CensorKind,
+    ) -> Result<&super::inpaint::InpaintEngine, InferenceError> {
         let (slot, path) = match kind {
             CensorKind::Bar => (&self.bar, &self.bundle.bar),
             CensorKind::Mosaic => (&self.mosaic, &self.bundle.mosaic),
@@ -290,7 +318,8 @@ impl DecensorEngines {
         let engine = super::inpaint::InpaintEngine::open(path, kind)?;
         // A race only means the loser's session is dropped; both are equivalent.
         let _ = slot.set(engine);
-        slot.get().ok_or_else(|| InferenceError::InvalidInput("inpainting session unavailable".into()))
+        slot.get()
+            .ok_or_else(|| InferenceError::InvalidInput("inpainting session unavailable".into()))
     }
 }
 
@@ -306,19 +335,54 @@ pub fn decensor_page(
     height: u32,
 ) -> Result<usize, InferenceError> {
     let regions = engines.detector.detect(rgba, width, height)?;
+    inpaint_detections(
+        rgba,
+        width,
+        height,
+        &regions,
+        |kind, crop, window, censored| {
+            engines
+                .inpainter(kind)?
+                .inpaint(crop, window.width, window.height, censored)
+        },
+    )
+}
+
+fn inpaint_detections(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    regions: &[super::detect::Detection],
+    mut inpaint: impl FnMut(CensorKind, &[u8], &CropWindow, &[u8]) -> Result<Vec<u8>, InferenceError>,
+) -> Result<usize, InferenceError> {
     if regions.is_empty() {
         return Ok(0);
     }
+    let original = rgba.to_vec();
     let mut filled = 0;
-    for detection in &regions {
+    for detection in regions {
         let window = inpaint_window(&detection.region, width, height)?;
         let censored = detection.mask_in_window(&window);
         if censored.iter().all(|&value| value == 0) {
             continue;
         }
-        let engine = engines.inpainter(detection.region.kind)?;
-        let crop = crop_rgba(rgba, width, height, &window)?;
-        let patch = engine.inpaint(&crop, window.width, window.height, &censored)?;
+        // Upstream crops the original page with a union mask, so nearby damage
+        // and earlier model predictions cannot be mistaken for known artwork.
+        let mut context_mask = censored.clone();
+        for neighbour in regions {
+            if neighbour.region.kind != detection.region.kind || std::ptr::eq(neighbour, detection)
+            {
+                continue;
+            }
+            for (target, source) in context_mask
+                .iter_mut()
+                .zip(neighbour.mask_in_window(&window))
+            {
+                *target |= source;
+            }
+        }
+        let crop = crop_rgba(&original, width, height, &window)?;
+        let patch = inpaint(detection.region.kind, &crop, &window, &context_mask)?;
         // Only the censored pixels are the model's; the context it was given stays
         // the artwork it already was.
         if paste_masked_rgba(rgba, width, height, &window, &patch, &censored)? > 0 {
@@ -331,6 +395,50 @@ pub fn decensor_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neighbouring_repairs_share_the_damage_mask_and_original_context() {
+        let original = [100, 110, 120, 255].repeat(16);
+        let mut page = original.clone();
+        let detections: Vec<_> = [0, 2]
+            .into_iter()
+            .map(|x| super::super::detect::Detection {
+                region: CensorRegion {
+                    x,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    kind: CensorKind::Bar,
+                },
+                score: 1.0,
+                mask: vec![1],
+            })
+            .collect();
+        let mut calls = 0;
+        let count = inpaint_detections(&mut page, 4, 4, &detections, |_, crop, _, mask| {
+            assert_eq!(
+                crop, original,
+                "generated pixels must never become input context"
+            );
+            assert_eq!(
+                mask.iter().filter(|&&value| value != 0).count(),
+                2,
+                "both damaged areas must be unknown"
+            );
+            calls += 1;
+            Ok([200, 210, 220, 255].repeat(16))
+        })
+        .unwrap();
+        assert_eq!((count, calls), (2, 2));
+        for index in 0..16 {
+            let expected = if index == 0 || index == 2 {
+                &[200, 210, 220, 255]
+            } else {
+                &[100, 110, 120, 255]
+            };
+            assert_eq!(&page[index * 4..index * 4 + 4], expected);
+        }
+    }
 
     #[test]
     fn installing_a_bundle_copies_all_four_files_and_the_external_weights() {
@@ -346,17 +454,34 @@ mod tests {
         std::fs::write(source.join("mrcnn").join("weights.onnx"), b"detector").unwrap();
         std::fs::write(source.join("deepcreampy").join("bar.onnx"), b"bar").unwrap();
         std::fs::write(source.join("deepcreampy").join("mosaic.onnx"), b"mosaic").unwrap();
-        std::fs::write(source.join("esrgan").join("4x-Fatal-Pixels.onnx"), b"esrgan").unwrap();
+        std::fs::write(
+            source.join("esrgan").join("4x-Fatal-Pixels.onnx"),
+            b"esrgan",
+        )
+        .unwrap();
         // ESRGAN keeps its weights beside the graph; a session cannot open without.
-        std::fs::write(source.join("esrgan").join("4x-Fatal-Pixels.onnx.data"), b"weights").unwrap();
+        std::fs::write(
+            source.join("esrgan").join("4x-Fatal-Pixels.onnx.data"),
+            b"weights",
+        )
+        .unwrap();
 
         let staging = base.join(".1.installing");
         let install = base.join("1");
         install_bundle_from(&source, &staging, &install).expect("install");
 
-        assert!(bundle_in(&install).is_some(), "the copy has to be a bundle in its own right");
-        assert_eq!(std::fs::read(install.join("esrgan").join("4x-Fatal-Pixels.onnx.data")).unwrap(), b"weights");
-        assert!(!staging.exists(), "the staging directory is renamed, not left behind");
+        assert!(
+            bundle_in(&install).is_some(),
+            "the copy has to be a bundle in its own right"
+        );
+        assert_eq!(
+            std::fs::read(install.join("esrgan").join("4x-Fatal-Pixels.onnx.data")).unwrap(),
+            b"weights"
+        );
+        assert!(
+            !staging.exists(),
+            "the staging directory is renamed, not left behind"
+        );
 
         // Installing twice is refused rather than half-overwriting a live bundle.
         assert!(install_bundle_from(&source, &staging, &install).is_err());
@@ -365,7 +490,9 @@ mod tests {
         let partial = base.join("partial");
         std::fs::create_dir_all(partial.join("mrcnn")).unwrap();
         std::fs::write(partial.join("mrcnn").join("weights.onnx"), b"detector").unwrap();
-        assert!(install_bundle_from(&partial, &base.join(".2.installing"), &base.join("2")).is_err());
+        assert!(
+            install_bundle_from(&partial, &base.join(".2.installing"), &base.join("2")).is_err()
+        );
 
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -397,7 +524,10 @@ mod tests {
         let third = crate::inference::decensor_engines_for(&bundle).expect("cached again");
         let warm = started.elapsed();
 
-        assert!(std::sync::Arc::ptr_eq(&again, &third), "the same sessions have to come back");
+        assert!(
+            std::sync::Arc::ptr_eq(&again, &third),
+            "the same sessions have to come back"
+        );
         // An absolute bound rather than a ratio: ORT memory-maps the initialisers,
         // so a cold open can itself be quick, and a ratio would then be measuring
         // noise. A lookup that does not open anything cannot take milliseconds.
@@ -432,7 +562,13 @@ mod tests {
     }
 
     fn region(x: u32, y: u32, width: u32, height: u32) -> CensorRegion {
-        CensorRegion { x, y, width, height, kind: CensorKind::Mosaic }
+        CensorRegion {
+            x,
+            y,
+            width,
+            height,
+            kind: CensorKind::Mosaic,
+        }
     }
 
     #[test]
@@ -444,7 +580,11 @@ mod tests {
         assert_eq!((window.x, window.y), (350, 310));
 
         let small = inpaint_window(&region(400, 400, 20, 20), 2000, 2000).expect("window");
-        assert_eq!((small.width, small.height), (256, 256), "a tiny box still gets the graph's own side");
+        assert_eq!(
+            (small.width, small.height),
+            (256, 256),
+            "a tiny box still gets the graph's own side"
+        );
     }
 
     #[test]
@@ -457,15 +597,29 @@ mod tests {
 
         let window = inpaint_window(&region(960, 1160, 40, 40), 1000, 1200).expect("window");
         assert_eq!(window.width, window.height);
-        assert!(window.x + window.width <= 1000, "window {window:?} leaves the page");
-        assert!(window.y + window.height <= 1200, "window {window:?} leaves the page");
+        assert!(
+            window.x + window.width <= 1000,
+            "window {window:?} leaves the page"
+        );
+        assert!(
+            window.y + window.height <= 1200,
+            "window {window:?} leaves the page"
+        );
     }
 
     #[test]
     fn a_page_smaller_than_the_graph_gives_a_window_of_the_whole_page() {
         // The shorter side is the ceiling, so the window cannot exceed the page.
         let window = inpaint_window(&region(0, 0, 3, 3), 200, 120).expect("window");
-        assert_eq!(window, CropWindow { x: 0, y: 0, width: 120, height: 120 });
+        assert_eq!(
+            window,
+            CropWindow {
+                x: 0,
+                y: 0,
+                width: 120,
+                height: 120
+            }
+        );
     }
 
     #[test]
@@ -482,8 +636,24 @@ mod tests {
         for index in 0..6_u8 {
             page.extend_from_slice(&[index * 10, 0, 0, 255]);
         }
-        let crop = crop_rgba(&page, 3, 2, &CropWindow { x: 1, y: 0, width: 2, height: 2 }).expect("crop");
-        assert_eq!(crop.chunks_exact(4).map(|pixel| pixel[0]).collect::<Vec<_>>(), vec![10, 20, 40, 50]);
+        let crop = crop_rgba(
+            &page,
+            3,
+            2,
+            &CropWindow {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("crop");
+        assert_eq!(
+            crop.chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            vec![10, 20, 40, 50]
+        );
     }
 
     #[test]
@@ -492,11 +662,13 @@ mod tests {
         for pixel in page.chunks_exact_mut(4) {
             pixel[3] = 128;
         }
-        let window = CropWindow { x: 1, y: 0, width: 2, height: 2 };
-        let patch = vec![
-            9, 9, 9, 255, 8, 8, 8, 255,
-            7, 7, 7, 255, 6, 6, 6, 255,
-        ];
+        let window = CropWindow {
+            x: 1,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let patch = vec![9, 9, 9, 255, 8, 8, 8, 255, 7, 7, 7, 255, 6, 6, 6, 255];
         // Only the patch's top-right and bottom-left pixels are the model's.
         let mask = vec![0, 1, 1, 0];
         let written = paste_masked_rgba(&mut page, 3, 2, &window, &patch, &mask).expect("paste");
@@ -504,17 +676,29 @@ mod tests {
 
         let reds: Vec<u8> = page.chunks_exact(4).map(|pixel| pixel[0]).collect();
         assert_eq!(reds, vec![0, 0, 8, 0, 7, 0]);
-        assert!(page.chunks_exact(4).all(|pixel| pixel[3] == 128), "alpha must survive the paste");
+        assert!(
+            page.chunks_exact(4).all(|pixel| pixel[3] == 128),
+            "alpha must survive the paste"
+        );
     }
 
     #[test]
     fn a_mismatched_patch_or_mask_is_rejected_rather_than_pasted_short() {
         let mut page = vec![0_u8; 4 * 4 * 4];
-        let window = CropWindow { x: 0, y: 0, width: 2, height: 2 };
+        let window = CropWindow {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
         assert!(paste_masked_rgba(&mut page, 4, 4, &window, &vec![0; 8], &vec![1; 4]).is_err());
         assert!(paste_masked_rgba(&mut page, 4, 4, &window, &vec![0; 16], &vec![1; 3]).is_err());
-        let off_page = CropWindow { x: 3, y: 3, width: 2, height: 2 };
+        let off_page = CropWindow {
+            x: 3,
+            y: 3,
+            width: 2,
+            height: 2,
+        };
         assert!(paste_masked_rgba(&mut page, 4, 4, &off_page, &vec![0; 16], &vec![1; 4]).is_err());
     }
-
 }

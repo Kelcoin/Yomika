@@ -18,12 +18,12 @@ export type ReaderLayout = Exclude<ReaderLayoutPreference, 'auto'>;
 export type ReadingDirection = 'ltr' | 'rtl';
 export type ReaderPhase = 'booting' | 'loading-page' | 'ready' | 'chrome-visible' | 'prefetching' | 'enhancing' | 'error-recoverable' | 'closing';
 
-const ZOOM_MIN = 0.5;
+const ZOOM_MIN = 1;
 const ZOOM_MAX = 3;
 const DOUBLE_TAP_ZOOM = 2;
 /** Gestures may overshoot the limits and spring back, the way native viewers
  * behave; only `settleZoom` enforces the hard bounds. */
-export const ZOOM_RUBBER_MIN = 0.35;
+export const ZOOM_RUBBER_MIN = 0.88;
 export const ZOOM_RUBBER_MAX = 4;
 /** Wheel steps land on 100% instead of sliding past it. */
 const ZOOM_SNAP_TOLERANCE = 0.05;
@@ -43,12 +43,26 @@ export function clampZoom(scale: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale));
 }
 
-/** Multiplicative wheel zoom: a fixed additive step feels violent at 50% and
- * sluggish at 300%, which is why the old linear curve never settled on 100%. */
+/** Coordinates are relative to the viewport centre; pan is in unscaled pixels. */
+export function zoomAtPoint(zoom: ZoomState, scale: number, x: number, y: number): ZoomState {
+  if (scale <= 1) return { scale, panX: 0, panY: 0 };
+  return { scale, panX: zoom.panX + x / scale - x / zoom.scale, panY: zoom.panY + y / scale - y / zoom.scale };
+}
+
+export function panZoom(zoom: ZoomState, dx: number, dy: number, width: number, height: number): ZoomState {
+  if (zoom.scale <= 1) return zoom;
+  const maxX = width * (1 - 1 / zoom.scale) / 2;
+  const maxY = height * (1 - 1 / zoom.scale) / 2;
+  return { ...zoom, panX: Math.max(-maxX, Math.min(maxX, zoom.panX + dx / zoom.scale)), panY: Math.max(-maxY, Math.min(maxY, zoom.panY + dy / zoom.scale)) };
+}
+
+/** Multiplicative wheel zoom keeps wheel steps proportional to the current scale. */
 export function zoomByWheel(zoom: ZoomState, deltaY: number): ZoomState {
   if (!Number.isFinite(deltaY) || deltaY === 0) return zoom;
-  const scaled = zoom.scale * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY);
-  const snapped = Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
+  if (zoom.scale < 1 && deltaY < 0) return createZoomState();
+  const resistance = zoom.scale <= 1 && deltaY > 0 ? 0.22 : 1;
+  const scaled = zoom.scale * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY * resistance);
+  const snapped = zoom.scale > 1 && Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
   const scale = Math.min(ZOOM_RUBBER_MAX, Math.max(ZOOM_RUBBER_MIN, snapped));
   return scale === 1 ? { scale: 1, panX: 0, panY: 0 } : { ...zoom, scale };
 }
@@ -141,8 +155,8 @@ function findSlot(slots: number[][], pageIndex: number): number {
 
 /** Whether a horizontal drag has earned a page turn.
  *
- * Ported from ComicReadScript's `turnPage.ts:18-41`: a third of the viewport, or
- * a flick fast enough that distance stops mattering. A fixed pixel threshold —
+ * Adapted from ComicReadScript's `turnPage.ts:18-41`: viewport-relative distance,
+ * or a directional flick. A fixed pixel threshold —
  * what this used before — is wrong at both ends: 50px is a twitch on a desktop
  * monitor and half the screen on a phone, and it ignored speed entirely, so a
  * fast short flick did nothing.
@@ -151,19 +165,15 @@ export const PAGE_TURN_FLICK_VELOCITY = 0.4;
 /** Below this a gesture is a twitch, whatever its velocity says. Without a floor
  * an instantaneous six-pixel jitter reads as an infinitely fast flick. */
 export const MIN_PAGE_TURN_DISTANCE = 30;
-/** Fraction of the viewport a slow drag has to cover to turn the page.
- *
- * A third of the viewport — what this was — is over 500px on a desktop window, so
- * a deliberate drag that was plainly a page turn kept springing back. A sixth is
- * still far past the tap slop and past what a scroll gesture drifts sideways, and
- * it is the distance at which the next page is already visibly coming in. */
-const PAGE_TURN_DISTANCE_FRACTION = 1 / 6;
+/** Slow drags travel 20% of the reading area, capped at 180px on desktop.
+ * Recent release velocity distinguishes a flick from a drag held stationary. */
 
-export function shouldCommitPageTurn(dx: number, elapsedMs: number, viewportWidth: number): boolean {
+export function shouldCommitPageTurn(dx: number, elapsedMs: number, viewportWidth: number, releaseVelocity?: number): boolean {
   const distance = Math.abs(dx);
   if (!Number.isFinite(distance) || distance <= MIN_PAGE_TURN_DISTANCE) return false;
   const width = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1;
-  const reach = width * PAGE_TURN_DISTANCE_FRACTION;
+  const reach = Math.min(180, width * 0.2);
+  if (releaseVelocity !== undefined) return distance > reach || (Number.isFinite(releaseVelocity) && Math.sign(releaseVelocity) === Math.sign(dx) && Math.abs(releaseVelocity) > PAGE_TURN_FLICK_VELOCITY);
   // A duration we cannot use is not the same as a fast one: with no way to judge
   // velocity, ask for more distance instead of guessing.
   if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return distance > reach * 2;

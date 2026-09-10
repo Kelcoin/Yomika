@@ -1,62 +1,34 @@
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { EhWorkspace } from '../../src/components/EhWorkspace';
 import type { EhAccount } from '../../src/domain/eh';
-import type { EhSearchResult } from '../../src/services/ehClient';
 
 describe('EhWorkspace', () => {
   const sampleAccounts: EhAccount[] = [
     { id: 'eh-a', label: 'EH Main', host: 'e-hentai.org', cookieRef: 'ref-a', isActive: true, status: 'verified', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
   ];
 
-  const sampleResults: EhSearchResult[] = [
-    { galleryKey: '12345', url: '/g/12345/abc/', title: 'Test Gallery', category: 'Doujinshi', uploader: 'author', pageCount: 10, tags: ['tag1'] },
-  ];
-
-  it('renders account panel and search input', () => {
+  it('renders account management without an EH search field', () => {
     render(<EhWorkspace accounts={sampleAccounts} />);
-    expect(screen.getByLabelText('E-Hentai 账户')).toBeDefined();
-    expect(screen.getByRole('searchbox', { name: '搜索 E-Hentai' })).toBeDefined();
-  });
-
-  it('calls onSearch when search form submitted', async () => {
-    const onSearch = vi.fn();
-    const user = userEvent.setup();
-    render(<EhWorkspace accounts={sampleAccounts} onSearch={onSearch} />);
-    const input = screen.getByRole('searchbox', { name: '搜索 E-Hentai' });
-    await user.type(input, 'test query');
-    await user.keyboard('{Enter}');
-    expect(onSearch).toHaveBeenCalledWith('test query');
-  });
-
-  it('displays search results when provided', () => {
-    render(<EhWorkspace accounts={sampleAccounts} results={sampleResults} />);
-    expect(screen.getByText('Test Gallery')).toBeDefined();
-    expect(screen.getByText('Doujinshi')).toHaveClass('metadata-chip');
-    expect(screen.getByText('author')).toBeDefined();
-    expect(screen.getByText('10 pages')).toHaveClass('metadata-chip');
-  });
-
-  it('shows empty state when no results', () => {
-    render(<EhWorkspace accounts={sampleAccounts} results={[]} searched />);
-    expect(screen.getByText('未找到匹配的画廊')).toBeDefined();
-  });
-
-  it('shows loading state during search', () => {
-    render(<EhWorkspace accounts={sampleAccounts} searching />);
-    expect(screen.getByText('正在搜索…')).toBeDefined();
-  });
-
-  it('displays search error when provided', () => {
-    render(<EhWorkspace accounts={sampleAccounts} searchError="Rate limit reached" />);
-    expect(screen.getByRole('alert')).toHaveTextContent('Rate limit reached');
-  });
-
-  it('hides search entirely until an account is active', () => {
-    render(<EhWorkspace accounts={[]} onSearch={vi.fn()} />);
-
+    expect(screen.getByLabelText('E-Hentai 账户')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'E-Hentai 账户' })).not.toBeInTheDocument();
     expect(screen.queryByRole('searchbox', { name: '搜索 E-Hentai' })).not.toBeInTheDocument();
-    expect(screen.queryByText('请先添加并激活一个 E-Hentai 账户')).not.toBeInTheDocument();
+  });
+
+  it('hides every login control when an account is configured', () => {
+    render(<EhWorkspace accounts={sampleAccounts} onSaveAccount={async () => {}} onPasswordLogin={async () => ''} onBrowserLogin={async () => ''} />);
+    expect(screen.queryByRole('tab', { name: '账号登录' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /添加|收起|展开/ })).not.toBeInTheDocument();
+  });
+
+  it('moves the account surface with the pointer and reveals its actions', () => {
+    render(<EhWorkspace accounts={sampleAccounts} onReadCookie={async () => 'ipb_member_id=1'} onLogout={async () => {}} />);
+    const surface = screen.getByTestId('eh-account-surface-eh-a');
+    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
+    fireEvent.touchMove(surface, { touches: [{ clientX: 140 }] });
+    expect(surface).toHaveStyle({ transform: 'translate3d(-100px, 0, 0)' });
+    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 140 }] });
+    expect(screen.getByRole('button', { name: '导出EH Main Cookie' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '登出EH Main' })).toBeVisible();
   });
 });

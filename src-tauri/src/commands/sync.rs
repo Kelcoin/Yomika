@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use url::Url;
 
-use crate::{db::Database, domain::result::CommandResult, network::webdav::WebdavClient, settings::get_or_create_device_id};
+use crate::{
+    db::Database, domain::result::CommandResult, network::webdav::WebdavClient,
+    settings::get_or_create_device_id,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -166,7 +169,10 @@ fn build_segment_from_records(
 ) -> Result<Option<BuiltSyncSegment>, String> {
     let mut latest = std::collections::BTreeMap::new();
     for record in records {
-        latest.insert((record.object_type.clone(), record.object_id.clone()), record);
+        latest.insert(
+            (record.object_type.clone(), record.object_id.clone()),
+            record,
+        );
     }
     if latest.is_empty() {
         return Ok(None);
@@ -561,7 +567,9 @@ fn set_journal_batch_state(
     transaction.commit().map_err(|e| e.to_string())
 }
 
-fn sync_error(error: impl std::fmt::Display) -> String { error.to_string() }
+fn sync_error(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
 
 #[tauri::command]
 pub fn sync_webdav_scope(
@@ -570,126 +578,192 @@ pub fn sync_webdav_scope(
     database: State<'_, Database>,
 ) -> CommandResult<usize> {
     tauri::async_runtime::block_on(async move {
-    let (account, key, claimed, segment, device_id) = {
-        let mut connection = match database.connection.lock() {
-            Ok(connection) => connection,
-            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-        };
-        let account = match read_webdav_account(&connection, &account_id) {
-            Ok(account) => account,
-            Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
-        };
-        let key = match load_sync_key(&account_id) {
-            Ok(key) => key,
-            Err(error) => return CommandResult::failure("UNKNOWN", error, false),
-        };
-        let device_id = {
-            let transaction = match connection.transaction() {
-                Ok(transaction) => transaction,
-                Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+        let (account, key, claimed, segment, device_id) = {
+            let mut connection = match database.connection.lock() {
+                Ok(connection) => connection,
+                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
             };
-            let device_id = match get_or_create_device_id(&transaction) {
-                Ok(device_id) => device_id,
+            let account = match read_webdav_account(&connection, &account_id) {
+                Ok(account) => account,
+                Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
+            };
+            let key = match load_sync_key(&account_id) {
+                Ok(key) => key,
+                Err(error) => return CommandResult::failure("UNKNOWN", error, false),
+            };
+            let device_id = {
+                let transaction = match connection.transaction() {
+                    Ok(transaction) => transaction,
+                    Err(error) => {
+                        return CommandResult::failure("UNKNOWN", error.to_string(), true)
+                    }
+                };
+                let device_id = match get_or_create_device_id(&transaction) {
+                    Ok(device_id) => device_id,
+                    Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+                };
+                if let Err(error) = transaction.commit() {
+                    return CommandResult::failure("UNKNOWN", error.to_string(), true);
+                }
+                device_id
+            };
+            let claimed = match claim_journal_entries(&mut connection, &scope_id, 256) {
+                Ok(records) => records,
                 Err(error) => return CommandResult::failure("UNKNOWN", error, true),
             };
-            if let Err(error) = transaction.commit() {
-                return CommandResult::failure("UNKNOWN", error.to_string(), true);
+            if claimed.is_empty() {
+                return CommandResult::success(0);
             }
-            device_id
+            let segment = match build_segment_from_records(claimed.clone(), &key) {
+                Ok(Some(segment)) => segment,
+                Ok(None) => return CommandResult::success(0),
+                Err(error) => {
+                    let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+                    let _ = set_journal_batch_state(
+                        &mut connection,
+                        &scope_id,
+                        &sequences,
+                        "retryable",
+                        Some(&error),
+                    );
+                    return CommandResult::failure("INVALID_RESPONSE", error, false);
+                }
+            };
+            (account, key, claimed, segment, device_id)
         };
-        let claimed = match claim_journal_entries(&mut connection, &scope_id, 256) {
-            Ok(records) => records,
-            Err(error) => return CommandResult::failure("UNKNOWN", error, true),
-        };
-        if claimed.is_empty() {
-            return CommandResult::success(0);
-        }
-        let segment = match build_segment_from_records(claimed.clone(), &key) {
-            Ok(Some(segment)) => segment,
-            Ok(None) => return CommandResult::success(0),
-            Err(error) => {
-                let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-                let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&error));
-                return CommandResult::failure("INVALID_RESPONSE", error, false);
-            }
-        };
-        (account, key, claimed, segment, device_id)
-    };
 
-    let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref) {
-        Ok(value) => value,
-        Err(error) => {
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&error));
-            return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
-        }
-    };
-    let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
-        Ok(client) => client,
-        Err(error) => {
-            let message = sync_error(error);
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&message));
-            return CommandResult::failure("INVALID_RESPONSE", message, false);
-        }
-    };
-    let upload = client.upload_segment(&account.id, &device_id, segment.sequence_start, segment.sequence_end, &segment.ciphertext).await;
-    if let Err(error) = upload {
-        let message = sync_error(error);
-        let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-        let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-        let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&message));
-        return CommandResult::failure("NETWORK", message, true);
-    }
-
-    let remote = match client.get_manifest(&account.id).await {
-        Ok(value) => value,
-        Err(error) => {
-            let message = sync_error(error);
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&message));
-            return CommandResult::failure("NETWORK", message, true);
-        }
-    };
-    let local = SyncManifest {
-        version: 1,
-        epoch: 0,
-        segments: vec![SyncManifestSegment { hash: segment.hash, size: segment.size as u64, sequence_start: segment.sequence_start, sequence_end: segment.sequence_end }],
-        device_cursors: std::collections::BTreeMap::from([(device_id, segment.sequence_end)]),
-    };
-    let (initial, etag) = match remote {
-        Some(remote) => match decode_encrypted_manifest(&key, &remote.ciphertext) {
-            Ok(remote_manifest) => (merge_manifests(&local, &remote_manifest), remote.etag),
+        let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref) {
+            Ok(value) => value,
             Err(error) => {
                 let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
                 let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-                let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&error));
-                return CommandResult::failure("INVALID_RESPONSE", error, false);
+                let _ = set_journal_batch_state(
+                    &mut connection,
+                    &scope_id,
+                    &sequences,
+                    "retryable",
+                    Some(&error),
+                );
+                return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
             }
-        },
-        None => (local, None),
-    };
-    let ciphertext = match encode_encrypted_manifest(&key, &initial) { Ok(bytes) => bytes, Err(error) => return CommandResult::failure("UNKNOWN", error, true) };
-    let result = client.update_manifest_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
-        let remote = decode_encrypted_manifest(&key, remote_bytes).map_err(crate::network::webdav::WebdavError::Verification)?;
-        encode_encrypted_manifest(&key, &merge_manifests(&initial, &remote)).map_err(crate::network::webdav::WebdavError::Verification)
-    }).await;
-    if let Err(error) = result {
-        let message = sync_error(error);
+        };
+        let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
+            Ok(client) => client,
+            Err(error) => {
+                let message = sync_error(error);
+                let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+                let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+                let _ = set_journal_batch_state(
+                    &mut connection,
+                    &scope_id,
+                    &sequences,
+                    "retryable",
+                    Some(&message),
+                );
+                return CommandResult::failure("INVALID_RESPONSE", message, false);
+            }
+        };
+        let upload = client
+            .upload_segment(
+                &account.id,
+                &device_id,
+                segment.sequence_start,
+                segment.sequence_end,
+                &segment.ciphertext,
+            )
+            .await;
+        if let Err(error) = upload {
+            let message = sync_error(error);
+            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+            let _ = set_journal_batch_state(
+                &mut connection,
+                &scope_id,
+                &sequences,
+                "retryable",
+                Some(&message),
+            );
+            return CommandResult::failure("NETWORK", message, true);
+        }
+
+        let remote = match client.get_manifest(&account.id).await {
+            Ok(value) => value,
+            Err(error) => {
+                let message = sync_error(error);
+                let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+                let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+                let _ = set_journal_batch_state(
+                    &mut connection,
+                    &scope_id,
+                    &sequences,
+                    "retryable",
+                    Some(&message),
+                );
+                return CommandResult::failure("NETWORK", message, true);
+            }
+        };
+        let local = SyncManifest {
+            version: 1,
+            epoch: 0,
+            segments: vec![SyncManifestSegment {
+                hash: segment.hash,
+                size: segment.size as u64,
+                sequence_start: segment.sequence_start,
+                sequence_end: segment.sequence_end,
+            }],
+            device_cursors: std::collections::BTreeMap::from([(device_id, segment.sequence_end)]),
+        };
+        let (initial, etag) = match remote {
+            Some(remote) => match decode_encrypted_manifest(&key, &remote.ciphertext) {
+                Ok(remote_manifest) => (merge_manifests(&local, &remote_manifest), remote.etag),
+                Err(error) => {
+                    let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+                    let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+                    let _ = set_journal_batch_state(
+                        &mut connection,
+                        &scope_id,
+                        &sequences,
+                        "retryable",
+                        Some(&error),
+                    );
+                    return CommandResult::failure("INVALID_RESPONSE", error, false);
+                }
+            },
+            None => (local, None),
+        };
+        let ciphertext = match encode_encrypted_manifest(&key, &initial) {
+            Ok(bytes) => bytes,
+            Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+        };
+        let result = client
+            .update_manifest_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
+                let remote = decode_encrypted_manifest(&key, remote_bytes)
+                    .map_err(crate::network::webdav::WebdavError::Verification)?;
+                encode_encrypted_manifest(&key, &merge_manifests(&initial, &remote))
+                    .map_err(crate::network::webdav::WebdavError::Verification)
+            })
+            .await;
+        if let Err(error) = result {
+            let message = sync_error(error);
+            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
+            let _ = set_journal_batch_state(
+                &mut connection,
+                &scope_id,
+                &sequences,
+                "retryable",
+                Some(&message),
+            );
+            return CommandResult::failure("NETWORK", message, true);
+        }
         let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
         let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-        let _ = set_journal_batch_state(&mut connection, &scope_id, &sequences, "retryable", Some(&message));
-        return CommandResult::failure("NETWORK", message, true);
-    }
-    let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-    let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-    if let Err(error) = set_journal_batch_state(&mut connection, &scope_id, &sequences, "completed", None) {
-        return CommandResult::failure("UNKNOWN", error, true);
-    }
-    CommandResult::success(claimed.len())
+        if let Err(error) =
+            set_journal_batch_state(&mut connection, &scope_id, &sequences, "completed", None)
+        {
+            return CommandResult::failure("UNKNOWN", error, true);
+        }
+        CommandResult::success(claimed.len())
     })
 }
 
@@ -817,7 +891,10 @@ pub(crate) fn append_dedup_journal(
     right_archive_id: &str,
     tombstoned: bool,
 ) -> Result<(), String> {
-    if scope_id.trim().is_empty() || pair_key.trim().is_empty() || !matches!(operation, "upsert" | "delete") {
+    if scope_id.trim().is_empty()
+        || pair_key.trim().is_empty()
+        || !matches!(operation, "upsert" | "delete")
+    {
         return Err("Invalid dedup sync relation".into());
     }
     let payload = serde_json::json!({
@@ -829,7 +906,9 @@ pub(crate) fn append_dedup_journal(
     let payload_json = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     let payload_hash = format!("{:x}", sha2::Sha256::digest(payload_json.as_bytes()));
     use sha2::Digest as _;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let device_id = get_or_create_device_id(&transaction)?;
     let logical_clock: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?2",
@@ -908,7 +987,9 @@ fn claim_journal_entries(
     if limit <= 0 || limit > 256 {
         return Err("Invalid sync journal claim limit".to_string());
     }
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let sequences = {
         let mut statement = transaction
             .prepare(
@@ -1173,14 +1254,27 @@ mod tests {
         append_journal_entry(&connection, input("scope-a", "archive-a")).expect("first");
         append_journal_entry(&connection, input("scope-a", "archive-b")).expect("second");
         append_journal_entry(&connection, input("scope-b", "archive-c")).expect("other scope");
-        let retryable = append_journal_entry(&connection, input("scope-a", "archive-d")).expect("retryable");
-        update_journal_state(&connection, "scope-a", retryable.sequence, "retryable", Some("offline"))
-            .expect("retryable state");
+        let retryable =
+            append_journal_entry(&connection, input("scope-a", "archive-d")).expect("retryable");
+        update_journal_state(
+            &connection,
+            "scope-a",
+            retryable.sequence,
+            "retryable",
+            Some("offline"),
+        )
+        .expect("retryable state");
 
         let claimed = claim_journal_entries(&mut connection, "scope-a", 2).expect("claim batch");
 
         assert_eq!(claimed.len(), 2);
-        assert_eq!(claimed.iter().map(|record| record.sequence).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert!(claimed.iter().all(|record| record.status == "processing"));
         assert_eq!(claimed[0].attempt_count, 0);
         let pending: i64 = connection
@@ -1283,7 +1377,11 @@ mod tests {
         let decoded = decode_encrypted_segment(&[4_u8; 32], &segment.ciphertext).expect("decode");
         assert_eq!(decoded.objects.len(), 2);
         assert_eq!(
-            decoded.objects.iter().map(|item| item.object_type.as_str()).collect::<Vec<_>>(),
+            decoded
+                .objects
+                .iter()
+                .map(|item| item.object_type.as_str())
+                .collect::<Vec<_>>(),
             vec!["reading_progress", "history"],
         );
     }

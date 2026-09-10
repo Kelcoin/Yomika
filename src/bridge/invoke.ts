@@ -32,7 +32,7 @@ export const VoidResponseSchema = z.union([z.null(), z.undefined()]).transform((
 export async function invokeCommand<TRequest extends Record<string, unknown>, TResponse>(
   name: string,
   request: TRequest,
-  schema: z.ZodType<TResponse>,
+  schema: z.ZodType<TResponse, z.ZodTypeDef, unknown>,
 ): Promise<CommandResult<TResponse>> {
   try {
     const adapter = testAdapter ?? await loadNativeAdapter();

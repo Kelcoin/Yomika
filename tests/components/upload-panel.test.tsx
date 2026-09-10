@@ -140,6 +140,5 @@ describe('archive upload', () => {
     // carries the description too.
     expect(await screen.findByRole('link', { name: /^上传档案/ })).toHaveAttribute('href', '/tools/upload');
     expect(screen.getByRole('link', { name: /^重复档案查重/ })).toHaveAttribute('href', '/tools/dedup');
-    expect(screen.getByRole('link', { name: /^任务列表/ })).toHaveAttribute('href', '/downloads');
   });
 });

@@ -31,7 +31,7 @@ describe('native cache bridge', () => {
     expect(adapter).toHaveBeenCalledWith('cache_store_image', { input: { identity, mime: 'image/png', bytes: [4, 5] } });
   });
 
-  it('reads indexed cache usage', async () => {
+  it('reads indexed cache usage and defaults enhancement categories from older responses', async () => {
     const adapter = vi.fn(async () => ({ ok: true, value: {
       bytes: 4096,
       entries: 2,
@@ -50,6 +50,9 @@ describe('native cache bridge', () => {
         cover: { bytes: 1024, entries: 1 },
         'page-thumbnail': { bytes: 1024, entries: 0 },
         'reader-page': { bytes: 2048, entries: 1 },
+        enhanced: { bytes: 0, entries: 0 },
+        decensored: { bytes: 0, entries: 0 },
+        inference: { bytes: 0, entries: 0 },
         other: { bytes: 0, entries: 0 },
       },
     } });

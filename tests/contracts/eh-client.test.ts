@@ -110,7 +110,7 @@ describe('EH HTTP boundary', () => {
       fetcher: async () => new Response('<div class="c1" id="c7"><div class="c3"><a>Bob</a></div><div class="c6">Hello</div></div>', { status: 200 }),
     });
     await expect(client.getComments('https://e-hentai.org/g/123/abcdef/')).resolves.toEqual({
-      ok: true, value: [{ id: '7', author: 'Bob', body: 'Hello', score: 0 }],
+      ok: true, value: [{ id: '7', author: 'Bob', body: 'Hello', score: 0, postedAt: '', isUploader: false, isEditable: false, myVote: 0 }],
     });
   });
 
@@ -138,7 +138,7 @@ describe('EH HTTP boundary', () => {
 
   it('parses comments into safe text models with scores', () => {
     const comments = parseEhComments(`<div class="c1" id="c100"><div class="c3"><a>Alice</a></div><div class="c5"><b>+12</b></div><div class="c6">Hello <script>alert(1)</script><a href="javascript:bad">link</a></div></div>`);
-    expect(comments).toEqual([{ id: '100', author: 'Alice', body: 'Hello alert(1)link', score: 12 }]);
+    expect(comments).toEqual([{ id: '100', author: 'Alice', body: 'Hello alert(1)link', score: 12, postedAt: '', isUploader: false, isEditable: false, myVote: 0 }]);
     expect(JSON.stringify(comments)).not.toContain('<script>');
   });
 
@@ -315,8 +315,10 @@ describe('EH HTTP boundary', () => {
     expect(body.get('act')).toBe('votecomment');
     expect(body.get('gid')).toBe('12345');
     expect(body.get('t')).toBe('abcdef');
-    expect(body.get('ac')).toBe('777');
-    expect(body.get('vote')).toBe('1');
+    expect(body.get('comment_id')).toBe('777');
+    expect(body.get('comment_vote')).toBe('1');
+    expect(body.get('ac')).toBeNull();
+    expect(body.get('vote')).toBeNull();
   });
 
   it('rejects voteComment with invalid galleryId before network access', async () => {

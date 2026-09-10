@@ -16,6 +16,9 @@ const preferences = {
   cardStyle: 'wide' as const,
   upscaleBackend: 'off' as const,
   upscaleModel: '', decensorModel: '',
+  downloadDirectory: '',
+  ehFavoriteDeleteSync: false,
+  confirmEhFavoriteDelete: true,
   customCss: '',
 };
 

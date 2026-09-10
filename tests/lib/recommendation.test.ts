@@ -8,6 +8,7 @@ import {
   scoreCandidate,
   normalizeSourceTags,
   tagWeight,
+  sortSameCreatorRecommendations,
 } from '../../src/lib/recommendation';
 
 describe('recommendation rules', () => {
@@ -61,8 +62,19 @@ describe('recommendation rules', () => {
   });
 
   it('groups a cosplay set by cosplayer and everything else by artist or group', () => {
-    expect(sameCreatorTags(['cosplayer:someone', 'artist:ignored'])).toEqual({ namespace: 'cosplayer', tags: ['cosplayer:someone'] });
+    expect(sameCreatorTags(['category:cosplay', 'cosplayer:someone', 'artist:ignored'])).toEqual({ namespace: 'cosplayer', tags: ['cosplayer:someone'] });
+    expect(sameCreatorTags(['cosplayer:someone', 'artist:preferred'])).toEqual({ namespace: 'artist', tags: ['artist:preferred'] });
     expect(sameCreatorTags(['artist:a', 'group:b', 'female:glasses'])).toEqual({ namespace: 'artist', tags: ['artist:a', 'group:b'] });
     expect(sameCreatorTags(['female:glasses'])).toEqual({ namespace: 'artist', tags: [] });
+  });
+
+  it('puts completed creator matches last and sorts each group by archive title', () => {
+    const sorted = sortSameCreatorRecommendations([
+      { archiveId: 'z', title: 'Zeta', tags: ['artist:a'], pageCount: 10, readPages: 10 },
+      { archiveId: 'b', title: 'Beta', tags: ['artist:a'], pageCount: 10, readPages: 0 },
+      { archiveId: 'a', title: 'Alpha', tags: ['artist:a'], pageCount: 10, readPages: 2 },
+      { archiveId: 'c', title: 'Alpha', tags: ['artist:a'], pageCount: 10, readPages: 2 },
+    ]);
+    expect(sorted.map((item) => item.archiveId)).toEqual(['a', 'c', 'b', 'z']);
   });
 });

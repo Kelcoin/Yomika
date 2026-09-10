@@ -81,6 +81,7 @@ function identity<T>(items: T[]): T[] {
 
 export interface RecommendationCandidate {
   archiveId: string;
+  title?: string | undefined;
   tags?: readonly string[] | undefined;
   pageCount?: number | undefined;
   readPages?: number | undefined;
@@ -125,9 +126,22 @@ export function rankRecommendations<T extends RecommendationCandidate>(
 
 /** Cosplay sets are grouped by cosplayer; everything else by artist/group. */
 export function sameCreatorTags(tags: readonly string[]): { namespace: 'cosplayer' | 'artist'; tags: string[] } {
-  const hasCosplayer = tags.some((tag) => namespaceOf(tag) === 'cosplayer');
+  const hasCosplayCategory = tags.some((tag) => tag.trim().toLowerCase() === 'category:cosplay');
+  const hasCosplayer = hasCosplayCategory && tags.some((tag) => namespaceOf(tag) === 'cosplayer');
   if (hasCosplayer) {
     return { namespace: 'cosplayer', tags: tags.filter((tag) => namespaceOf(tag) === 'cosplayer') };
   }
   return { namespace: 'artist', tags: tags.filter((tag) => ['artist', 'group'].includes(namespaceOf(tag))) };
+}
+
+/** Readoshi keeps creator matches easy to scan: unfinished work first, then
+ * completed work, with archive title as the only user-facing ordering key. */
+export function sortSameCreatorRecommendations<T extends RecommendationCandidate>(candidates: readonly T[]): T[] {
+  return [...candidates].sort((left, right) => {
+    const leftFinished = Boolean(left.pageCount && left.readPages !== undefined && left.readPages >= left.pageCount);
+    const rightFinished = Boolean(right.pageCount && right.readPages !== undefined && right.readPages >= right.pageCount);
+    if (leftFinished !== rightFinished) return leftFinished ? 1 : -1;
+    return (left.title ?? '').localeCompare(right.title ?? '', undefined, { sensitivity: 'base' })
+      || left.archiveId.localeCompare(right.archiveId);
+  });
 }

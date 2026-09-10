@@ -29,7 +29,16 @@ export interface EhGallery {
   tags: string[];
 }
 
-export interface EhComment { id: string; author: string; body: string; score: number; }
+export interface EhComment {
+  id: string;
+  author: string;
+  body: string;
+  score: number;
+  postedAt: string;
+  isUploader: boolean;
+  isEditable: boolean;
+  myVote: number;
+}
 
 export interface EhSearchResult {
   galleryKey: string;
@@ -52,14 +61,23 @@ export interface EhSearchResponse {
 
 export function parseEhComments(html: string): EhComment[] {
   const document = new DOMParser().parseFromString(html, 'text/html');
-  return [...document.querySelectorAll('.c1[id]')].map((node) => {
-    const rawId = node.id;
-    const scoreText = node.querySelector('.c5')?.textContent?.trim() ?? '0';
+  return [...document.querySelectorAll<HTMLElement>('.c6[id^="comment_"], .c1[id^="c"]')].map((candidate) => {
+    const bodyNode = candidate.matches('.c6') ? candidate : candidate.querySelector<HTMLElement>('.c6');
+    const node = candidate.matches('.c1') ? candidate : candidate.closest('.c1') ?? candidate.parentElement;
+    const id = candidate.matches('.c6') ? candidate.id.replace(/^comment_/, '') : candidate.id.replace(/^c/, '');
+    const metadata = node?.querySelector('.c3')?.textContent?.trim() ?? '';
+    const scoreText = node?.querySelector('.c5')?.textContent?.trim() ?? '0';
+    const up = document.getElementById(`comment_vote_up_${id}`);
+    const down = document.getElementById(`comment_vote_down_${id}`);
     return {
-      id: rawId.replace(/^c/, ''),
-      author: node.querySelector('.c3 a')?.textContent?.trim() ?? '',
-      body: node.querySelector('.c6')?.textContent?.trim() ?? '',
+      id,
+      author: node?.querySelector('.c3 a:last-of-type')?.textContent?.trim() ?? '',
+      body: bodyNode?.textContent?.trim() ?? '',
       score: Number(scoreText.match(/[+-]?\d+/)?.[0] ?? 0),
+      postedAt: metadata.match(/^Posted on (.*?) by /)?.[1]?.trim() ?? '',
+      isUploader: Boolean(node?.querySelector('[name="ulcomment"]')),
+      isEditable: Boolean(node?.querySelector('[onclick*="edit_comment"]')),
+      myVote: up?.hasAttribute('style') ? 1 : down?.hasAttribute('style') ? -1 : 0,
     };
   }).filter((comment) => comment.id.length > 0);
 }
@@ -280,7 +298,13 @@ export class EhHttpClient {
       return err('INVALID_RESPONSE', 'Invalid E-Hentai vote input', false);
     }
     try {
-      const body = new URLSearchParams({ gid: galleryId, t: token, ac: commentId, act: 'votecomment', vote: String(vote) });
+      const body = new URLSearchParams({
+        gid: galleryId,
+        t: token,
+        act: 'votecomment',
+        comment_id: commentId,
+        comment_vote: String(vote),
+      });
       const cookie = this.cookieJar.headerFor(this.host);
       const headers: HeadersInit = { 'Content-Type': 'application/x-www-form-urlencoded', ...(cookie ? { Cookie: cookie } : {}) };
       const response = await this.fetcher(`${this.baseUrl}/gallerypopups.php`, { method: 'POST', headers, body, ...(signal ? { signal } : {}) });

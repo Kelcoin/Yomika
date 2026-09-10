@@ -19,9 +19,31 @@ import {
   toggleReaderChrome,
   webtoonWindow,
   zoomByWheel,
+  zoomAtPoint,
+  panZoom,
 } from '../../src/domain/reader';
 
 describe('reader domain', () => {
+  it('keeps the image point under the zoom anchor stationary', () => {
+    const before = { scale: 1.5, panX: -20, panY: 10 };
+    const after = zoomAtPoint(before, 2.2, 200, -100);
+    const imageX = 200 / before.scale - before.panX;
+    const imageY = -100 / before.scale - before.panY;
+    expect((imageX + after.panX) * after.scale).toBeCloseTo(200);
+    expect((imageY + after.panY) * after.scale).toBeCloseTo(-100);
+  });
+
+  it('pans in screen pixels and bounds movement at the enlarged viewport edges', () => {
+    expect(panZoom({ scale: 2, panX: 0, panY: 0 }, 100, -60, 1000, 800)).toEqual({ scale: 2, panX: 50, panY: -30 });
+    expect(panZoom({ scale: 2, panX: 0, panY: 0 }, 5000, -5000, 1000, 800)).toEqual({ scale: 2, panX: 250, panY: -200 });
+    expect(zoomAtPoint({ scale: 2, panX: 250, panY: -200 }, 1, 200, 100)).toEqual(createZoomState());
+  });
+  it('uses release velocity and bounded desktop distance for page turns', () => {
+    expect(shouldCommitPageTurn(100, 2000, 1600, 0.8)).toBe(true);
+    expect(shouldCommitPageTurn(100, 100, 1600, 0)).toBe(false);
+    expect(shouldCommitPageTurn(100, 100, 1600, -0.8)).toBe(false);
+    expect(shouldCommitPageTurn(190, 2000, 2560, 0)).toBe(true);
+  });
   it('commits a page turn on distance or on speed, and ignores twitches', () => {
     // A sixth of the viewport is enough on its own, at any speed. A third — what
     // this asked for — is over 500px on a desktop window, so a slow deliberate
@@ -226,11 +248,11 @@ describe('reader domain', () => {
     });
 
     it('clamps zoom level to min and max bounds', () => {
-      expect(clampZoom(0.3)).toBe(0.5);
-      expect(clampZoom(0.5)).toBe(0.5);
+      expect(clampZoom(0.3)).toBe(1);
+      expect(clampZoom(0.5)).toBe(1);
       expect(clampZoom(1.5)).toBe(1.5);
       expect(clampZoom(4)).toBe(3);
-      expect(clampZoom(-1)).toBe(0.5);
+      expect(clampZoom(-1)).toBe(1);
     });
 
     it('sends a double tap back to 1x from any scale, not only from the target', () => {
@@ -284,7 +306,8 @@ describe('reader domain', () => {
       // A wheel notch scales by exp(-delta * 0.0015) rather than a fixed step, so
       // the curve feels the same at 50% and at 300%.
       const zoomedOut = zoomByWheel(start, 120);
-      expect(zoomedOut.scale).toBeCloseTo(Math.exp(-0.18), 5);
+      expect(zoomedOut.scale).toBeCloseTo(Math.exp(-0.18 * 0.22), 5);
+      expect(settleZoom(zoomedOut).scale).toBe(1);
       expect(zoomByWheel(zoomedOut, -120).scale).toBe(1);
 
       // Coming back within the snap tolerance lands exactly on 100%, pan cleared.
@@ -296,7 +319,7 @@ describe('reader domain', () => {
       expect(overshot.scale).toBeLessThanOrEqual(4);
       // ...and settling pulls them back in.
       expect(settleZoom(overshot).scale).toBe(3);
-      expect(settleZoom({ scale: 0.36, panX: 5, panY: 5 })).toEqual({ scale: 0.5, panX: 0, panY: 0 });
+      expect(settleZoom({ scale: 0.36, panX: 5, panY: 5 })).toEqual({ scale: 1, panX: 0, panY: 0 });
       expect(settleZoom({ scale: 2, panX: 5, panY: 5 })).toEqual({ scale: 2, panX: 5, panY: 5 });
 
       expect(zoomByWheel(start, 0)).toBe(start);

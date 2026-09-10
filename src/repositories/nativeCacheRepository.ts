@@ -19,6 +19,9 @@ const CacheStatsSchema = z.object({
     cover: CacheBreakdownSchema,
     'page-thumbnail': CacheBreakdownSchema,
     'reader-page': CacheBreakdownSchema,
+    enhanced: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
+    decensored: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
+    inference: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
     other: CacheBreakdownSchema,
   }),
 });

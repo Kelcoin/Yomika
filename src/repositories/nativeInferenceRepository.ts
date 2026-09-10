@@ -22,6 +22,7 @@ const InstalledModelSchema = z.object({
    * so a de-censoring bundle cannot be offered as an upscaler — picking one there
    * silently produced plain nearest-neighbour output. */
   kind: z.enum(['upscale', 'decensor']).default('upscale'),
+  components: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), path: z.string() })).default([]),
 });
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
 export type InferenceJob = z.infer<typeof InferenceJobSchema>;
@@ -57,8 +58,8 @@ export class NativeInferenceRepository {
   downloadModelBundle(input: { prefix: string; ownerRepo: string; manifest: unknown; destination: string }): Promise<CommandResult<void>> {
     return invokeCommand('model_release_download_bundle', { input }, VoidResponseSchema);
   }
-  downloadDefaultModel(): Promise<CommandResult<void>> {
-    return invokeCommand('model_release_download_default', {}, VoidResponseSchema);
+  downloadDefaultModel(modelId?: string): Promise<CommandResult<void>> {
+    return invokeCommand('model_release_download_default', modelId ? { modelId } : {}, VoidResponseSchema);
   }
 
   validateModelImport(root: string, manifest: unknown): Promise<CommandResult<void>> {

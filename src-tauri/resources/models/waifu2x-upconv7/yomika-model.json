@@ -1,0 +1,11 @@
+{
+  "id": "waifu2x-upconv7",
+  "version": "1",
+  "format": "onnx",
+  "scale": 2,
+  "maxPixels": 64000000,
+  "sha256": "3bd55b489f136c502dbedfd03d77b6912ac7dfb75c98d93ed2c9ab552f285272",
+  "supportedBackends": [
+    "cpu"
+  ]
+}

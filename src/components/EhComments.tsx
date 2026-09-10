@@ -1,0 +1,156 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ArrowDown, ArrowUp, Clock3, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import type { EhComment } from '../services/ehClient';
+import { NativeEhRepository } from '../repositories/nativeEhRepository';
+import { presentEhError } from '../services/ehClient';
+import { useToast } from './Toast';
+
+const repository = new NativeEhRepository();
+const COMMENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const COMMENT_CACHE_STORAGE_PREFIX = 'yomika.eh.comments.v1:';
+type CommentsResult = Awaited<ReturnType<NativeEhRepository['getComments']>>;
+type CommentsCacheEntry = { comments: EhComment[]; cachedAt: number };
+const commentsCache = new Map<string, CommentsCacheEntry>();
+const commentsInflight = new Map<string, Promise<CommentsResult>>();
+
+function commentsCacheKey(accountId: string, galleryId: string, token: string): string {
+  return `${accountId}\u0000${galleryId}\u0000${token}`;
+}
+
+function loadComments(accountId: string, galleryId: string, token: string): Promise<CommentsResult> {
+  const key = commentsCacheKey(accountId, galleryId, token);
+  const cached = commentsCache.get(key) ?? readPersistedComments(key);
+  if (cached && !commentsCache.has(key)) commentsCache.set(key, cached);
+  if (cached && Date.now() - cached.cachedAt < COMMENT_CACHE_TTL_MS) {
+    return Promise.resolve({ ok: true, value: cached.comments });
+  }
+  const existing = commentsInflight.get(key);
+  if (existing) return existing;
+  const request = repository.getComments(accountId, galleryId, token).then((result) => {
+    if (result.ok) {
+      const entry = { comments: result.value, cachedAt: Date.now() };
+      commentsCache.set(key, entry);
+      writePersistedComments(key, entry);
+    } else if (cached) {
+      // Keep a stale snapshot visible when the refresh is blocked by a
+      // transient network or Cloudflare failure. A later manual refresh can
+      // replace it once the service is reachable again.
+      return { ok: true as const, value: cached.comments };
+    }
+    return result;
+  }).finally(() => {
+    commentsInflight.delete(key);
+  });
+  commentsInflight.set(key, request);
+  return request;
+}
+
+function invalidateComments(accountId: string, galleryId: string, token: string): void {
+  const key = commentsCacheKey(accountId, galleryId, token);
+  commentsCache.delete(key);
+  try { window.localStorage.removeItem(`${COMMENT_CACHE_STORAGE_PREFIX}${key}`); } catch { /* storage unavailable */ }
+}
+
+function readPersistedComments(key: string): CommentsCacheEntry | undefined {
+  try {
+    const raw = window.localStorage.getItem(`${COMMENT_CACHE_STORAGE_PREFIX}${key}`);
+    if (!raw) return undefined;
+    const value = JSON.parse(raw) as Partial<CommentsCacheEntry>;
+    if (!Array.isArray(value.comments) || typeof value.cachedAt !== 'number') return undefined;
+    return { comments: value.comments as EhComment[], cachedAt: value.cachedAt };
+  } catch { return undefined; }
+}
+
+function writePersistedComments(key: string, entry: CommentsCacheEntry): void {
+  try { window.localStorage.setItem(`${COMMENT_CACHE_STORAGE_PREFIX}${key}`, JSON.stringify(entry)); } catch { /* storage unavailable */ }
+}
+
+/** Keeps isolated component tests from sharing module-level comment snapshots. */
+export function clearEhCommentsCacheForTests(): void {
+  commentsCache.clear();
+  commentsInflight.clear();
+  try {
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(COMMENT_CACHE_STORAGE_PREFIX)) window.localStorage.removeItem(key);
+    }
+  } catch { /* storage unavailable */ }
+}
+
+export function EhComments({ accountId, galleryId, token, prefetch = false }: { accountId: string; galleryId: string; token: string; prefetch?: boolean }) {
+  const { showToast } = useToast();
+  const [comments, setComments] = useState<EhComment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const [reload, setReload] = useState(0);
+  const [body, setBody] = useState('');
+  const [posting, setPosting] = useState(false);
+  const [votingId, setVotingId] = useState<string>();
+  const refresh = useCallback(() => setReload((value) => value + 1), []);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(undefined);
+    void loadComments(accountId, galleryId, token).then((result) => {
+      if (!active) return;
+      if (result.ok) setComments(result.value);
+      else setError(presentEhError(result.error.code, result.error.message));
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [accountId, galleryId, reload, token]);
+
+  useEffect(() => {
+    if (error) showToast(error, 'error');
+  }, [error, showToast]);
+
+  const vote = async (comment: EhComment, value: 1 | -1) => {
+    setVotingId(comment.id);
+    setError(undefined);
+    const result = await repository.voteComment(accountId, galleryId, token, comment.id, value);
+    setVotingId(undefined);
+    if (result.ok) {
+      invalidateComments(accountId, galleryId, token);
+      refresh();
+    }
+    else setError(presentEhError(result.error.code, result.error.message));
+  };
+
+  const post = async () => {
+    const text = body.trim();
+    if (!text) return;
+    setPosting(true);
+    setError(undefined);
+    const result = await repository.postComment(accountId, galleryId, token, text);
+    setPosting(false);
+    if (result.ok) {
+      setBody('');
+      invalidateComments(accountId, galleryId, token);
+      refresh();
+    }
+    else setError(presentEhError(result.error.code, result.error.message));
+  };
+
+  if (prefetch) return null;
+  return (
+    <section className="eh-comments" aria-label="E-Hentai 评论">
+      <div className="eh-comments-heading">
+        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
+        <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
+      </div>
+      {loading && comments.length === 0 ? <p role="status">正在读取评论…</p> : !error && comments.length === 0 ? <p className="eh-comments-empty">暂无评论</p> : null}
+      {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
+        <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
+          <div className="eh-comment-meta"><span><strong>{comment.author || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span><time><Clock3 aria-hidden="true" />{comment.postedAt}</time></div>
+          <p>{comment.body}</p>
+          {!comment.isUploader && <div className="eh-comment-votes"><button type="button" disabled={votingId === comment.id} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button><span className={comment.score < 0 ? 'is-negative' : undefined} aria-label={`评分 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span><button type="button" disabled={votingId === comment.id} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button></div>}
+        </li>
+      ))}</ul>}
+      <div className="eh-comment-composer">
+        <textarea value={body} onChange={(event) => setBody(event.target.value)} aria-label="发表评论" placeholder="发表评论…" rows={3} />
+        <button className="primary-action" type="button" disabled={posting || !body.trim()} onClick={() => void post()} aria-label="发送评论"><Send aria-hidden="true" />{posting ? '发送中…' : '发送'}</button>
+      </div>
+    </section>
+  );
+}

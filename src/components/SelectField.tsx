@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 export interface SelectOption { value: string; label: string; }
 interface SelectFieldProps {
@@ -8,10 +8,11 @@ interface SelectFieldProps {
   value: string;
   options: SelectOption[];
   onChange: (value: string) => void;
+  optionAction?: (option: SelectOption) => ReactNode;
   'aria-label'?: string;
 }
 
-export function SelectField({ id, name, value, options, onChange, 'aria-label': ariaLabel }: SelectFieldProps) {
+export function SelectField({ id, name, value, options, onChange, optionAction, 'aria-label': ariaLabel }: SelectFieldProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = options.find((option) => option.value === value) ?? options[0];
@@ -45,9 +46,10 @@ export function SelectField({ id, name, value, options, onChange, 'aria-label': 
         <span>{selected?.label}</span><ChevronDown aria-hidden="true" />
       </button>
       {open && <div className="select-menu" id={listId} role="listbox" aria-label={ariaLabel}>
-        {options.map((option) => <button className="select-option" type="button" role="option" aria-selected={option.value === value} key={option.value} onClick={() => { onChange(option.value); setOpen(false); }}>
-          <span>{option.label}</span>{option.value === value && <Check aria-hidden="true" />}
-        </button>)}
+        {options.map((option) => <div className="select-option" role="option" aria-selected={option.value === value} key={option.value}>
+          <button className="select-option-main" type="button" onClick={() => { onChange(option.value); setOpen(false); }}><span>{option.label}</span>{option.value === value && <Check aria-hidden="true" />}</button>
+          {optionAction?.(option)}
+        </div>)}
       </div>}
     </div>
   );

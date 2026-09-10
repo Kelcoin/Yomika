@@ -28,6 +28,22 @@ export function pickCardTags(tags: readonly string[] = [], limit = 6): string[] 
     .map((entry) => entry.tag);
 }
 
+/** Splits chosen tags into contiguous, balanced rows. */
+export function distributeCardTags(tags: readonly string[], rowCount: number): string[][] {
+  const rows = Math.max(0, Math.min(Math.floor(rowCount), tags.length));
+  if (rows === 0) return [];
+  const baseSize = Math.floor(tags.length / rows);
+  const remainder = tags.length % rows;
+  const result: string[][] = [];
+  let offset = 0;
+  for (let row = 0; row < rows; row += 1) {
+    const size = baseSize + (row < remainder ? 1 : 0);
+    result.push(tags.slice(offset, offset + size));
+    offset += size;
+  }
+  return result;
+}
+
 /** Uniform sample without replacement. `sort(() => Math.random() - 0.5)` is not
  * a shuffle: the comparator is intransitive, so the engine's sort keeps most of
  * the original order. */

@@ -50,7 +50,11 @@ fn image_tensor(rgb256: &[u8], censored256: &[u8], kind: CensorKind) -> Vec<f32>
     for index in 0..pixels {
         let blank = kind == CensorKind::Bar && censored256[index] != 0;
         for channel in 0..3 {
-            let level = if blank { 0.0 } else { f32::from(rgb256[index * 3 + channel]) / 255.0 };
+            let level = if blank {
+                0.0
+            } else {
+                f32::from(rgb256[index * 3 + channel]) / 255.0
+            };
             values.push(level * 2.0 - 1.0);
         }
     }
@@ -87,15 +91,23 @@ fn denormalise(values: &[f32]) -> Vec<u8> {
 impl InpaintEngine {
     pub fn open(model_path: &Path, kind: CensorKind) -> Result<Self, InferenceError> {
         let open = || -> Result<ort::session::Session, String> {
-            let mut builder = ort::session::Session::builder().map_err(|error| error.to_string())?;
+            let mut builder =
+                ort::session::Session::builder().map_err(|error| error.to_string())?;
             // Pinned to CPU on purpose — see the module comment.
             builder = builder
                 .with_execution_providers([ort::ep::CPU::default().build()])
                 .map_err(|error| error.to_string())?;
-            builder.commit_from_file(model_path).map_err(|error| error.to_string())
+            builder
+                .commit_from_file(model_path)
+                .map_err(|error| error.to_string())
         };
-        let session = open().map_err(|error| InferenceError::InvalidInput(format!("inpainting session failed: {error}")))?;
-        Ok(Self { session: Mutex::new(session), kind })
+        let session = open().map_err(|error| {
+            InferenceError::InvalidInput(format!("inpainting session failed: {error}"))
+        })?;
+        Ok(Self {
+            session: Mutex::new(session),
+            kind,
+        })
     }
 
     /// Fills the censored pixels of one RGBA crop, returning an RGBA patch of the
@@ -113,10 +125,14 @@ impl InpaintEngine {
     ) -> Result<Vec<u8>, InferenceError> {
         let pixels = width as usize * height as usize;
         if width == 0 || height == 0 || rgba.len() != pixels * 4 {
-            return Err(InferenceError::InvalidInput("RGBA crop dimensions do not match".into()));
+            return Err(InferenceError::InvalidInput(
+                "RGBA crop dimensions do not match".into(),
+            ));
         }
         if censored.len() != pixels {
-            return Err(InferenceError::InvalidInput("mask dimensions do not match the crop".into()));
+            return Err(InferenceError::InvalidInput(
+                "mask dimensions do not match the crop".into(),
+            ));
         }
 
         let side = INPAINT_SIDE;
@@ -127,8 +143,10 @@ impl InpaintEngine {
         // Nearest for both, as upstream does: the mask must stay a hard 0/1 after
         // resizing, and interpolating it would smear the boundary into values that
         // are neither known nor unknown.
-        let small = image::imageops::resize(&source, side, side, image::imageops::FilterType::Nearest);
-        let small_mask = image::imageops::resize(&mask, side, side, image::imageops::FilterType::Nearest);
+        let small =
+            image::imageops::resize(&source, side, side, image::imageops::FilterType::Nearest);
+        let small_mask =
+            image::imageops::resize(&mask, side, side, image::imageops::FilterType::Nearest);
 
         let small_pixels = (side * side) as usize;
         let mut rgb = Vec::with_capacity(small_pixels * 3);
@@ -140,13 +158,19 @@ impl InpaintEngine {
         let shape = vec![1_i64, i64::from(side), i64::from(side), 3];
         let image_values = image_tensor(&rgb, &censored_small, self.kind);
         let image_input = ort::value::Tensor::from_array((shape.clone(), image_values.clone()))
-            .map_err(|error| InferenceError::InvalidInput(format!("inpainting input failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("inpainting input failed: {error}"))
+            })?;
         // The graph takes the image twice: once as the generator's input and once as
         // the source of the pixels it composites back unchanged.
-        let image_again = ort::value::Tensor::from_array((shape.clone(), image_values))
-            .map_err(|error| InferenceError::InvalidInput(format!("inpainting input failed: {error}")))?;
+        let image_again =
+            ort::value::Tensor::from_array((shape.clone(), image_values)).map_err(|error| {
+                InferenceError::InvalidInput(format!("inpainting input failed: {error}"))
+            })?;
         let mask_input = ort::value::Tensor::from_array((shape, known_tensor(&censored_small)))
-            .map_err(|error| InferenceError::InvalidInput(format!("inpainting mask failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("inpainting mask failed: {error}"))
+            })?;
 
         let mut session = self
             .session
@@ -158,10 +182,14 @@ impl InpaintEngine {
                 IMAGE_INPUT_AGAIN => image_again,
                 MASK_INPUT => mask_input,
             ])
-            .map_err(|error| InferenceError::InvalidInput(format!("inpainting run failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("inpainting run failed: {error}"))
+            })?;
         let (out_shape, values) = outputs[OUTPUT]
             .try_extract_tensor::<f32>()
-            .map_err(|error| InferenceError::InvalidInput(format!("inpainting output failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("inpainting output failed: {error}"))
+            })?;
         let expected = [1_i64, i64::from(side), i64::from(side), 3];
         if out_shape.as_ref() != expected {
             return Err(InferenceError::InvalidManifest(format!(
@@ -172,12 +200,22 @@ impl InpaintEngine {
         let bytes = denormalise(values);
         let mut filled = image::RgbaImage::new(side, side);
         for (index, pixel) in filled.pixels_mut().enumerate() {
-            *pixel = image::Rgba([bytes[index * 3], bytes[index * 3 + 1], bytes[index * 3 + 2], 255]);
+            *pixel = image::Rgba([
+                bytes[index * 3],
+                bytes[index * 3 + 1],
+                bytes[index * 3 + 2],
+                255,
+            ]);
         }
         // Bicubic on the way back out, nearest on the way in: the same asymmetry
         // upstream has, and the right one — a synthesised patch should not come back
         // blocky, while a mask must not be interpolated at all.
-        let restored = image::imageops::resize(&filled, width, height, image::imageops::FilterType::CatmullRom);
+        let restored = image::imageops::resize(
+            &filled,
+            width,
+            height,
+            image::imageops::FilterType::CatmullRom,
+        );
         let mut patch = restored.into_raw();
         // Alpha is the page's, never the model's.
         for index in 0..pixels {
@@ -207,10 +245,17 @@ mod tests {
 
         let bar = image_tensor(&rgb, &censored, CensorKind::Bar);
         assert_eq!(&bar[0..3], &[1.0, 1.0, 1.0], "a known white pixel is +1");
-        assert_eq!(&bar[3..6], &[-1.0, -1.0, -1.0], "a bar's own colour must not be context");
+        assert_eq!(
+            &bar[3..6],
+            &[-1.0, -1.0, -1.0],
+            "a bar's own colour must not be context"
+        );
 
         let mosaic = image_tensor(&rgb, &censored, CensorKind::Mosaic);
-        assert!((mosaic[3] - (128.0 / 255.0 * 2.0 - 1.0)).abs() < 1e-6, "a mosaic still carries colour");
+        assert!(
+            (mosaic[3] - (128.0 / 255.0 * 2.0 - 1.0)).abs() < 1e-6,
+            "a mosaic still carries colour"
+        );
     }
 
     #[test]
@@ -218,7 +263,10 @@ mod tests {
         // The graph clips its own output, but a NaN cast straight to u8 is a bright
         // speckle in the middle of a page.
         assert_eq!(denormalise(&[-1.0, 0.0, 1.0]), vec![0, 128, 255]);
-        assert_eq!(denormalise(&[-3.0, 3.0, f32::NAN, f32::INFINITY]), vec![0, 255, 0, 0]);
+        assert_eq!(
+            denormalise(&[-3.0, 3.0, f32::NAN, f32::INFINITY]),
+            vec![0, 255, 0, 0]
+        );
     }
 
     /// The real model, when it is on this machine.
@@ -267,7 +315,10 @@ mod tests {
             Err(error) => panic!("running the inpainting model failed: {error:?}"),
         };
         assert_eq!(patch.len(), rgba.len());
-        assert!(patch.chunks_exact(4).all(|pixel| pixel[3] == 200), "alpha must be the page's");
+        assert!(
+            patch.chunks_exact(4).all(|pixel| pixel[3] == 200),
+            "alpha must be the page's"
+        );
 
         // Known pixels are composited straight through, so only the [-1, 1] byte
         // round trip may move them.
@@ -275,7 +326,10 @@ mod tests {
         let mut changed_censored = 0;
         for index in 0..(side * side) as usize {
             let difference = (0..3)
-                .map(|channel| (i32::from(patch[index * 4 + channel]) - i32::from(rgba[index * 4 + channel])).abs())
+                .map(|channel| {
+                    (i32::from(patch[index * 4 + channel]) - i32::from(rgba[index * 4 + channel]))
+                        .abs()
+                })
                 .max()
                 .unwrap_or(0);
             if censored[index] == 0 {
@@ -284,7 +338,10 @@ mod tests {
                 changed_censored += 1;
             }
         }
-        assert!(worst_known <= 2, "a known pixel moved by {worst_known}: the mask is inverted or the range is wrong");
+        assert!(
+            worst_known <= 2,
+            "a known pixel moved by {worst_known}: the mask is inverted or the range is wrong"
+        );
         assert!(
             changed_censored > 1_000,
             "only {changed_censored} censored pixels changed: the model filled nothing",

@@ -31,12 +31,20 @@ impl OnnxEngine {
     /// asked how much bigger it makes things.
     pub fn open(model_path: &Path, scale: u32, max_pixels: usize) -> Result<Self, InferenceError> {
         if scale == 0 {
-            return Err(InferenceError::InvalidManifest("model scale must be at least 1".into()));
+            return Err(InferenceError::InvalidManifest(
+                "model scale must be at least 1".into(),
+            ));
         }
         let session = ort::session::Session::builder()
             .and_then(|mut builder| builder.commit_from_file(model_path))
-            .map_err(|error| InferenceError::InvalidInput(format!("ONNX session failed: {error}")))?;
-        Ok(Self { session: Mutex::new(session), scale, max_pixels })
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("ONNX session failed: {error}"))
+            })?;
+        Ok(Self {
+            session: Mutex::new(session),
+            scale,
+            max_pixels,
+        })
     }
 }
 
@@ -71,9 +79,16 @@ impl UpscaleEngine for OnnxEngine {
         self.scale
     }
 
-    fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, InferenceError> {
+    fn upscale_tile(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, InferenceError> {
         if rgba.len() != width as usize * height as usize * 4 {
-            return Err(InferenceError::InvalidInput("RGBA tile dimensions do not match".into()));
+            return Err(InferenceError::InvalidInput(
+                "RGBA tile dimensions do not match".into(),
+            ));
         }
         // The nearest-neighbour result is both the alpha carrier and the shape
         // the caller expects back, so a model that answers with the wrong size
@@ -93,9 +108,9 @@ impl UpscaleEngine for OnnxEngine {
         let outputs = session
             .run(ort::inputs![input])
             .map_err(|error| InferenceError::InvalidInput(format!("ONNX run failed: {error}")))?;
-        let (shape, values) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| InferenceError::InvalidInput(format!("ONNX output failed: {error}")))?;
+        let (shape, values) = outputs[0].try_extract_tensor::<f32>().map_err(|error| {
+            InferenceError::InvalidInput(format!("ONNX output failed: {error}"))
+        })?;
 
         let expected = [
             1_i64,
@@ -125,11 +140,24 @@ mod tests {
         let rgba = vec![10, 20, 30, 40, 200, 210, 220, 230];
         let planar = rgba_to_nchw(&rgba, 2, 1);
         // Planar means all reds, then all greens, then all blues.
-        assert_eq!(planar, vec![10.0 / 255.0, 200.0 / 255.0, 20.0 / 255.0, 210.0 / 255.0, 30.0 / 255.0, 220.0 / 255.0]);
+        assert_eq!(
+            planar,
+            vec![
+                10.0 / 255.0,
+                200.0 / 255.0,
+                20.0 / 255.0,
+                210.0 / 255.0,
+                30.0 / 255.0,
+                220.0 / 255.0
+            ]
+        );
 
         let mut restored = vec![0, 0, 0, 40, 0, 0, 0, 230];
         nchw_over_rgba(&planar, &mut restored);
-        assert_eq!(restored, rgba, "alpha must survive a round trip the model cannot see");
+        assert_eq!(
+            restored, rgba,
+            "alpha must survive a round trip the model cannot see"
+        );
     }
 
     #[test]
@@ -197,10 +225,16 @@ mod tests {
         let nearest = crate::inference::cpu_scale_rgba(&rgba, width, height, 4, 64_000_000)
             .expect("nearest-neighbour reference")
             .rgba;
-        assert_ne!(output, nearest, "the model output matched plain upscaling exactly");
+        assert_ne!(
+            output, nearest,
+            "the model output matched plain upscaling exactly"
+        );
         // Red still rises left to right in the enlarged tile, so the channels did
         // not come back permuted.
         let row = 32 * width as usize * 4 * 4;
-        assert!(output[row] < output[row + 60 * 4], "red no longer increases along x");
+        assert!(
+            output[row] < output[row + 60 * 4],
+            "red no longer increases along x"
+        );
     }
 }

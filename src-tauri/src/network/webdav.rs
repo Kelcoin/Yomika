@@ -139,7 +139,9 @@ pub enum WebdavError {
 impl std::fmt::Display for WebdavError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidUrl(value) | Self::Request(value) | Self::Verification(value) => formatter.write_str(value),
+            Self::InvalidUrl(value) | Self::Request(value) | Self::Verification(value) => {
+                formatter.write_str(value)
+            }
             Self::ManifestConflict => formatter.write_str("WebDAV manifest conflict"),
             Self::Http(status) => write!(formatter, "WebDAV HTTP {}", status),
         }

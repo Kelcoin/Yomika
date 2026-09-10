@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ArrowLeft, ChevronRight, RefreshCw, Upload, CopyCheck, Eraser } from 'lucide-react';
+import { ArrowLeft, ChevronRight, RefreshCw, Upload, CopyCheck, Eraser, FolderOpen, RotateCcw, Download } from 'lucide-react';
 import { SelectField } from './SelectField';
+import { pickDirectory } from '../bridge/filePicker';
 import { EhRouteWorkspace } from './EhRouteWorkspace';
 import { useToast } from './Toast';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -19,6 +20,7 @@ import { CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
 import { MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
+import { openExternalUrl } from '../bridge/externalUrl';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
@@ -38,7 +40,6 @@ const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
 const APP_VERSION = __APP_VERSION__;
 const APP_AUTHOR = __APP_AUTHOR__;
 const APP_LICENSE = __APP_LICENSE__;
-const APP_REPOSITORY = __APP_REPOSITORY__;
 
 function formatCacheBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -51,7 +52,18 @@ function formatCacheBytes(value: number): string {
 /** Names a model by id, version and the scale it produces, since the scale is
  * the model's to decide and not the user's. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
-  return { value: model.id, label: `${model.id} · ${model.version}${model.scale ? ` · x${model.scale}` : ''}` };
+  if (model.kind === 'decensor') return { value: model.id, label: `去码流程 · ${model.version}` };
+  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x 轻量增强', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN 通用增强', '4x-Fatal-Pixels': 'Fatal Pixels 漫画增强' };
+  const name = names[model.id] ?? model.id.replaceAll('-', ' ');
+  return { value: model.id, label: `${name}${model.scale ? ` · ${model.scale} 倍` : ' · 去码模型包'}` };
+}
+
+const DECENSOR_COMPONENT_IDS = ['mrcnn', 'deepcreampy-bar', 'deepcreampy-mosaic', 'fatal-pixels'] as const;
+
+function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
+  if (!model || model.kind !== 'decensor') return false;
+  const installed = new Set(model.components.map((component) => component.id));
+  return DECENSOR_COMPONENT_IDS.every((id) => installed.has(id));
 }
 
 /** Grouped by topic: one "阅读与存储" panel used to hold the theme, the reader
@@ -67,7 +79,7 @@ function modelOption(model: InstalledModel): { value: string; label: string } {
 ] as const;
 
 /** Sections whose content lives inside the single preferences form. */
-const PREFERENCE_SECTIONS = ['settings-general', 'settings-reading', 'settings-appearance', 'settings-advanced'] as const;
+const PREFERENCE_SECTIONS = ['settings-general', 'settings-reading', 'settings-appearance', 'settings-advanced', 'settings-sync'] as const;
 
 /** The sections no longer print their own title, so the accessible name for a
  * panel comes from the same list the sidebar is built from. */
@@ -102,7 +114,10 @@ export function SettingsWorkspace() {
   const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
-  const [modelMessage, setModelMessage] = useState<string>();
+  const openAboutLink = async (url: string) => {
+    const result = await openExternalUrl(url);
+    if (!result.ok) showToast(result.error.message, 'error');
+  };
   const [modelPending, setModelPending] = useState(false);
   const modelInputRef = useRef<HTMLInputElement>(null);
 
@@ -113,10 +128,19 @@ export function SettingsWorkspace() {
   /** One switch each, derived from what is stored rather than stored separately:
    * a second boolean would be one more thing to keep in step with the model it
    * points at. Off is the backend being off, and no bundle chosen. */
-  const upscaleOn = preferenceDraft.upscaleBackend !== 'off';
-  const decensorOn = preferenceDraft.decensorModel !== '';
+  const upscaleOn = preferenceDraft.upscaleBackend !== 'off' && Boolean(runnableModels?.length);
+  const decensorOn = preferenceDraft.decensorModel !== '' && hasCompleteDecensorBundle(
+    installedModels?.find((model) => model.id === preferenceDraft.decensorModel),
+  );
   const decensorBundles = installedModels?.filter((model) => model.kind === 'decensor');
-  const [installingBundle, setInstallingBundle] = useState(false);
+  const selectedDecensorBundle = decensorBundles?.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles?.[0];
+  const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
+  const upscaleReady = Boolean(runnableModels?.length);
+  const upscaleModelOptions = runnableModels?.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
+  const decensorModelOptions = decensorBundles?.length ? decensorBundles.map(modelOption) : [{ value: 'aletheia-lens', label: 'Aletheia Lens · 去码模型包' }];
+  const upscaleOptions = runnableModels?.length
+    ? runnableModels.map(modelOption)
+    : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -167,7 +191,7 @@ export function SettingsWorkspace() {
   useEffect(() => {
     // Once per visit to the section: the URL effect and the initial render used
     // to fire two identical cache_stats calls back to back.
-    if (selectedSettingsSection !== 'settings-advanced') return;
+    if (selectedSettingsSection !== 'settings-general') return;
     if (statsRequestedRef.current) return;
     statsRequestedRef.current = true;
     void refreshCacheStats();
@@ -188,13 +212,12 @@ export function SettingsWorkspace() {
   }
 
   useEffect(() => {
-    // Only the reading section shows the model picker, and the list comes off
-    // disk, so it is read on demand rather than at mount.
-    if (selectedSettingsSection !== 'settings-reading' || installedModels) return;
+    if (selectedSettingsSection !== 'settings-advanced' || installedModels) return;
     void inferenceRepository.listModels().then((result) => {
       setInstalledModels(result.ok ? result.value : []);
+      if (!result.ok) showToast(result.error.message, 'error');
     });
-  }, [installedModels, selectedSettingsSection]);
+  }, [installedModels, selectedSettingsSection, showToast]);
 
   /** Saves a change straight away. The old form had a 保存偏好 button, which meant
    * a toggle could look applied and silently not be. Rapid edits (typing in the
@@ -231,27 +254,27 @@ export function SettingsWorkspace() {
   }
 
   async function importModelFile(file: File) {
-    setModelPending(true); setModelMessage(undefined);
-    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-    const result = await inferenceRepository.importModelFile(bytes, file.name);
-    setModelPending(false);
-    if (!result.ok) { showToast(result.error.message, 'error'); return; }
-    showToast(`模型已导入：${result.value.id}`, 'success');
-    await refreshModels();
+    setModelPending(true);
+    try {
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const result = await inferenceRepository.importModelFile(bytes, file.name);
+      if (!result.ok) { showToast(result.error.message, 'error'); return; }
+      showToast(`模型已导入：${modelOption(result.value).label}`, 'success');
+      await refreshModels();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '模型导入失败', 'error');
+    } finally { setModelPending(false); }
   }
 
-  /** Kept as one action while native fixed-path import is added. */
-  async function installDecensorBundle() {
-    const directory = modelInputRef.current?.files?.[0]?.name;
-    if (!directory) return;
-    setInstallingBundle(true);
-    const result = await inferenceRepository.installDecensorBundle(directory);
-    setInstallingBundle(false);
-    if (!result.ok) { showToast(result.error.message, 'error'); return; }
-    showToast(`去码模型包已安装：${result.value.id} · ${result.value.version}`, 'success');
-    await refreshModels();
-    editPreferences({ decensorModel: result.value.id });
+  async function downloadModel(modelId: string) {
+    setModelPending(true);
+    try {
+      const result = await inferenceRepository.downloadDefaultModel(modelId);
+      if (result.ok) { showToast('模型下载完成', 'success'); await refreshModels(); }
+      else showToast(result.error.message, 'error');
+    } finally { setModelPending(false); }
   }
+
 
   /** One control pair for both payload shapes: a unified export (Readoshi's
    * worker envelope) goes to the native importer, anything else is treated as a
@@ -372,7 +395,7 @@ export function SettingsWorkspace() {
         </header>
       )}
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
-      <section className="preferences-panel" id={selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
+      <section className="preferences-panel" id={selectedSettingsSection === 'settings-sync' ? 'settings-sync-preferences' : selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
         {/* No section title here: the sidebar already names the section, and one
             visible section at a time meant the heading only reserved a column of
             empty space beside every control. No autosave notice either — every
@@ -380,7 +403,7 @@ export function SettingsWorkspace() {
             section was chrome that never told anyone anything they could act on.
             A failed save still interrupts, through the toast. */}
         {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
-          <div className="preferences-form">
+          <div className={`preferences-form${selectedSettingsSection === 'settings-advanced' ? ' enhancement-settings' : ''}`}>
             {selectedSettingsSection === 'settings-general' && <fieldset>
               <legend>启动时打开</legend>
               <SelectField name="startupRoute" aria-label="启动时打开" value={preferenceDraft.startupRoute} options={[{ value: 'home', label: '首页' }, { value: 'library', label: '档案库' }]} onChange={(value) => editPreferences({ startupRoute: value as PreferenceSnapshot['startupRoute'] })} />
@@ -458,101 +481,83 @@ export function SettingsWorkspace() {
               />
             </label>}
             {selectedSettingsSection === 'settings-advanced' && (
-              /* One switch per feature, and the selects below it offer real
-                 choices only. They used to carry the off state themselves — a
-                 backend list whose first entry was 关闭, a model list whose first
-                 entry was 未选择 — so turning upscaling on meant knowing that two
-                 unrelated controls had to stop saying "no". */
-              <fieldset className="preference-switch">
+              <fieldset className="model-feature-block">
                 <legend>超分</legend>
-                <label className="preference-toggle">
+                <div className="model-feature-heading">
+                  <span>启用超分</span>
                   <button
                     className="switch-control"
                     type="button"
                     role="switch"
                     name="upscaleEnabled"
+                    aria-label="启用超分"
                     aria-checked={upscaleOn}
-                    disabled={!runnableModels?.length}
-                    onClick={() => editPreferences(!upscaleOn
-                      ? { upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || runnableModels?.[0]?.id || '' }
-                      : { upscaleBackend: 'off' })}
+                    onClick={() => {
+                      if (upscaleOn) { editPreferences({ upscaleBackend: 'off' }); return; }
+                      if (!upscaleReady) { showToast('超分模型未安装，无法启用', 'error'); return; }
+                      editPreferences({ upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || upscaleModelOptions[0]!.value });
+                    }}
                   />
-                  <span>放大阅读页面</span>
-                </label>
-                {!runnableModels?.length && (
-                  <p className="server-list-message" role="status">
-                    {runnableModels ? '尚未安装可用的超分模型，安装后会出现在这里。' : '正在读取已安装模型…'}
-                  </p>
-                )}
+                </div>
+                <div className="model-choice-row">
+                  <SelectField name="upscaleModel" aria-label="超分模型" value={preferenceDraft.upscaleModel || upscaleModelOptions[0]!.value} options={upscaleModelOptions} onChange={(value) => editPreferences({ upscaleModel: value })} optionAction={(option) => runnableModels?.some((model) => model.id === option.value) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>} />
+                </div>
+                {!runnableModels?.length && <p className="server-list-message" role="status">{runnableModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</p>}
               </fieldset>
             )}
-            {selectedSettingsSection === 'settings-advanced' && upscaleOn && runnableModels?.length ? <fieldset>
-              <legend>超分模型</legend>
-              {/* The models that are actually installed and runnable, not a name
-                  typed from memory: a typo here used to fail silently at upscale
-                  time. A model whose directory has no manifest has no recorded
-                  scale, so it cannot be run and is not offered. */}
-              <SelectField
-                name="upscaleModel"
-                aria-label="超分模型"
-                value={preferenceDraft.upscaleModel || (runnableModels[0]?.id ?? '')}
-                options={runnableModels.map(modelOption)}
-                onChange={(value) => editPreferences({ upscaleModel: value })}
-              />
-              <PreferenceRadioFallback
-                name="upscaleModel"
-                value={preferenceDraft.upscaleModel || (runnableModels[0]?.id ?? '')}
-                options={runnableModels.map((model) => [model.id, modelOption(model).label])}
-                onChange={(value) => editPreferences({ upscaleModel: value })}
-              />
-            </fieldset> : null}
-            {selectedSettingsSection === 'settings-advanced' && upscaleOn && runnableModels?.length ? <fieldset>
-              <legend>超分后端</legend>
-              <SelectField name="upscaleBackend" aria-label="超分后端" value={preferenceDraft.upscaleBackend} options={[{ value: 'auto', label: '自动（优先 GPU）' }, { value: 'cpu', label: 'CPU' }]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-              <PreferenceRadioFallback name="upscaleBackend" value={preferenceDraft.upscaleBackend} options={[['auto', '自动（优先 GPU）'], ['cpu', 'CPU']]} onChange={(value) => editPreferences({ upscaleBackend: value as PreferenceSnapshot['upscaleBackend'] })} />
-            </fieldset> : null}
             {selectedSettingsSection === 'settings-advanced' && (
-              <fieldset className="preference-switch">
+              <fieldset className="model-feature-block">
                 <legend>去码</legend>
-                <label className="preference-toggle">
+                <div className="model-feature-heading">
+                  <span>启用去码</span>
                   <button
+                    className="switch-control"
                     type="button"
                     role="switch"
                     name="decensorEnabled"
+                    aria-label="启用去码"
                     aria-checked={decensorOn}
-                    disabled={!decensorBundles?.length}
-                    onClick={() => editPreferences({ decensorModel: decensorOn ? '' : decensorBundles?.[0]?.id ?? '' })}
+                    onClick={() => {
+                      if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
+                      if (!decensorReady) { showToast('去码模型不完整，无法启用', 'error'); return; }
+                      editPreferences({ decensorModel: decensorModelOptions[0]!.value });
+                    }}
                   />
-                  <span>修补被审查的区域</span>
-                </label>
-                <p className="settings-tool-hint">在阅读页面上运行检测与修补，结果按页缓存。修补模型固定使用 CPU。</p>
-                {!decensorBundles?.length && installedModels && (
-                  <>
-                    {/* The bundle is 337 MB, a quarter of a gigabyte of it the
-                        detector alone, so it does not travel as bytes and it is not
-                        in the repository. Pointing at a directory that already has
-                        it costs a copy and nothing else. */}
-                    <p className="server-list-message" role="status">尚未安装去码模型包。请在下方模型管理中导入模型文件。</p>
-                  </>
-                )}
+                </div>
+                <div className="model-choice-row">
+                  <SelectField name="decensorModel" aria-label="去码模型" value={preferenceDraft.decensorModel || decensorModelOptions[0]!.value} options={decensorModelOptions} onChange={(value) => editPreferences({ decensorModel: value })} optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>} />
+                </div>
+                <div className="model-stage-list" aria-label="去码流程模型">
+                  {DECENSOR_COMPONENT_IDS.map((id) => {
+                    const component = selectedDecensorBundle?.components.find((item) => item.id === id);
+                    return <div className="model-stage-row" key={id}><span>{component?.role ?? ({
+                      mrcnn: '遮挡区域检测',
+                      'deepcreampy-bar': '条状遮挡修补',
+                      'deepcreampy-mosaic': '马赛克修补',
+                      'fatal-pixels': '修复结果增强',
+                    } as Record<string, string>)[id]}</span><strong>{component?.name ?? '未安装'}</strong></div>;
+                  })}
+                </div>
+                {!decensorBundles?.length && <p className="server-list-message" role="status">{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</p>}
               </fieldset>
             )}
-            {selectedSettingsSection === 'settings-advanced' && decensorOn && (decensorBundles?.length ?? 0) > 1 ? <fieldset>
-              <legend>去码模型包</legend>
-              <SelectField
-                name="decensorModel"
-                aria-label="去码模型包"
-                value={preferenceDraft.decensorModel}
-                options={(decensorBundles ?? []).map((model) => ({ value: model.id, label: `${model.id} · ${model.version}` }))}
-                onChange={(value) => editPreferences({ decensorModel: value })}
-              />
-              <PreferenceRadioFallback
-                name="decensorModel"
-                value={preferenceDraft.decensorModel}
-                options={(decensorBundles ?? []).map((model) => [model.id, `${model.id} · ${model.version}`] as [string, string])}
-                onChange={(value) => editPreferences({ decensorModel: value })}
-              />
-            </fieldset> : null}
+            {selectedSettingsSection === 'settings-sync' && <fieldset className="preference-switch">
+              <legend>删除档案</legend>
+              <label className="preference-toggle"><button className="switch-control" type="button" role="switch" aria-label="同步删除 E-Hentai 收藏" aria-checked={preferenceDraft.ehFavoriteDeleteSync} onClick={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}><span /></button><span>同步删除 E-Hentai 收藏</span></label>
+              <label className="preference-toggle"><button className="switch-control" type="button" role="switch" aria-label="每次确认收藏同步删除" aria-checked={preferenceDraft.confirmEhFavoriteDelete} disabled={!preferenceDraft.ehFavoriteDeleteSync} onClick={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}><span /></button><span>每次确认收藏同步删除</span></label>
+            </fieldset>}
+            {selectedSettingsSection === 'settings-general' && <fieldset>
+              <legend>下载目录</legend>
+              <div className="download-directory-setting">
+                <span title={preferenceDraft.downloadDirectory}>{preferenceDraft.downloadDirectory || '默认数据目录 / downloads'}</span>
+                <button className="secondary-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
+                  void pickDirectory().then((selected) => {
+                    if (typeof selected === 'string') editPreferences({ downloadDirectory: selected });
+                  }).catch(() => showToast('无法打开目录选择器', 'error'));
+                }}><FolderOpen aria-hidden="true" /></button>
+                <button className="secondary-action" type="button" title="恢复默认目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" /></button>
+              </div>
+            </fieldset>}
             {selectedSettingsSection === 'settings-general' && <label className="preference-select">图片缓存上限（GB）
               <input
                 name="cacheMaxBytes"
@@ -595,7 +600,7 @@ export function SettingsWorkspace() {
                     <span
                       key={kind}
                       className={`cache-bar-slice is-${kind}`}
-                      style={{ width: `${Math.max(1, Math.round((bytes / cacheStats.bytes) * 100))}%` }}
+                      style={{ flexGrow: bytes, flexBasis: 0 }}
                     />
                   ))}
                 </div>
@@ -614,15 +619,9 @@ export function SettingsWorkspace() {
       </section>
       )}
       {selectedSettingsSection === 'settings-advanced' && (
-        <section className="settings-section model-settings" aria-label="模型管理">
-          <h2>模型</h2>
-          <p>模型自动存放在应用数据目录的 models 文件夹中。</p>
-          <div className="settings-actions">
-            <button type="button" className="settings-action is-primary" disabled={modelPending} onClick={async () => { setModelPending(true); const result = await inferenceRepository.downloadDefaultModel(); setModelPending(false); if (result.ok) { showToast('模型下载完成', 'success'); await refreshModels(); } else showToast(result.error.message, 'error'); }}>下载模型</button>
-            <button type="button" className="settings-action" disabled={modelPending} onClick={() => modelInputRef.current?.click()}>导入模型</button>
-          </div>
+        <section className="model-import-row" aria-label="模型导入">
+          <button type="button" className="settings-action" disabled={modelPending} onClick={() => modelInputRef.current?.click()}><Upload aria-hidden="true" />导入模型文件或压缩包</button>
           <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
-          {installedModels?.length ? <ul className="model-list" aria-label="已安装模型">{installedModels.map((model) => <li key={`${model.id}-${model.version}`}>{modelOption(model).label}</li>)}</ul> : <p className="settings-tool-hint">尚未安装模型</p>}
         </section>
       )}
       {selectedSettingsSection === 'settings-sync' && (
@@ -726,19 +725,13 @@ export function SettingsWorkspace() {
         </div>
         <dl className="settings-about-list">
           {APP_AUTHOR && <div><dt>开发者</dt><dd>{APP_AUTHOR}</dd></div>}
-          {APP_REPOSITORY && (
-            <div><dt>仓库</dt><dd>
-              <a href={APP_REPOSITORY} target="_blank" rel="noreferrer noopener">{APP_REPOSITORY.replace(/^https?:\/\//, '')}</a>
-            </dd></div>
-          )}
           {/* Absent until the project declares one in package.json. Better a
               missing row than a licence the app made up on its behalf. */}
           {APP_LICENSE && <div><dt>开源协议</dt><dd>{APP_LICENSE}</dd></div>}
           <div><dt>构建于</dt><dd>Tauri 2 · React 18 · SQLite</dd></div>
         </dl>
         <div className="about-links settings-actions">
-          {APP_REPOSITORY && <a className="settings-action" href={APP_REPOSITORY} target="_blank" rel="noreferrer noopener">项目仓库</a>}
-          <a className="settings-action" href="https://sugoi.gitbook.io/lanraragi" target="_blank" rel="noreferrer noopener">LANraragi 文档</a>
+          <button className="settings-action" type="button" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')}>LANraragi 文档</button>
         </div>
       </section>
       )}
@@ -756,11 +749,6 @@ export function SettingsWorkspace() {
             <CopyCheck aria-hidden="true" />
             <strong>重复档案查重</strong>
             <span>按内容比对整个库，逐组确认后删除。</span>
-          </Link>
-          <Link className="tool-card" to="/downloads">
-            <RefreshCw aria-hidden="true" />
-            <strong>任务列表</strong>
-            <span>查看下载与上传任务的进度，重试失败项。</span>
           </Link>
         </div>
       </section>

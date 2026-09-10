@@ -204,9 +204,22 @@ export function parseArchiveTagString(value: string): string[] {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 export interface TagGroup { namespace: string; label: string; values: string[]; }
-export function categorizeTags(tags: string[] = []): TagGroup[] {
-  const groups = new Map<string, string[]>();
-  for (const raw of tags) { const [head = '', ...rest] = raw.split(':'); const namespace = rest.length ? head.trim().toLowerCase() : 'general'; const value = rest.length ? rest.join(':').trim() : raw.trim(); if (!value) continue; groups.set(namespace, [...(groups.get(namespace) ?? []), translateTag(namespace, value)]); }
+export interface SearchableTag { label: string; query: string; }
+export interface SearchableTagGroup { namespace: string; label: string; values: SearchableTag[]; }
+export function categorizeSearchableTags(tags: string[] = []): SearchableTagGroup[] {
+  const groups = new Map<string, SearchableTag[]>();
+  for (const raw of tags) {
+    const [head = '', ...rest] = raw.split(':');
+    const namespaced = rest.length > 0;
+    const namespace = namespaced ? head.trim().toLowerCase() : 'general';
+    const value = namespaced ? rest.join(':').trim() : raw.trim();
+    if (!value) continue;
+    const exactTag = namespaced ? `${namespace}:${value}` : value;
+    groups.set(namespace, [...(groups.get(namespace) ?? []), { label: translateTag(namespace, value), query: `${exactTag}$` }]);
+  }
   const order = [...TAG_NAMESPACE_ORDER, ...TAG_BOTTOM_NAMESPACES];
   return [...groups.entries()].sort(([a], [b]) => (order.indexOf(a) < 0 ? 999 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 999 : order.indexOf(b)) || a.localeCompare(b)).map(([namespace, values]) => ({ namespace, label: TAG_NAMESPACE_LABELS[namespace] ?? namespace, values }));
+}
+export function categorizeTags(tags: string[] = []): TagGroup[] {
+  return categorizeSearchableTags(tags).map((group) => ({ ...group, values: group.values.map((tag) => tag.label) }));
 }

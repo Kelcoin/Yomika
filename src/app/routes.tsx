@@ -1,10 +1,8 @@
 import { ArrowRight, FolderHeart, RefreshCw, Server } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, Navigate, Route, Routes, useParams } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
-import { LoadingIndicator } from '../components/LoadingIndicator';
-import { EhWorkspace } from '../components/EhWorkspace';
 import { LibraryShell } from '../components/LibraryShell';
 import { LibraryWorkspace } from '../components/LibraryWorkspace';
 import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
@@ -26,7 +24,6 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
-import { presentEhError, type EhSearchResult } from '../services/ehClient';
 
 const workspaces = {
   history: ['历史', '开始阅读后，进度会保存在这里。'],
@@ -157,7 +154,12 @@ function HomeWorkspace() {
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
-  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
+    onDeleted: (archiveId) => {
+      setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      setRandomArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
+    },
+  });
   const recent = useMemo(() => history.slice(0, 6), [history]);
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   const continueReading = useMemo(
@@ -244,22 +246,38 @@ function HomeWorkspace() {
 const repository = new NativeLibraryRepository();
 const stateImageCache = getNativeImageCache();
 
+interface ShelfSnapshot {
+  history: ReadingHistoryRecord[];
+  watchlist: WatchlistRecord[];
+  archives: ArchiveRecord[];
+  serverId: string;
+  scopeId: string;
+  query: string;
+}
+
 function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) {
-  const [history, setHistory] = useState<ReadingHistoryRecord[]>([]);
-  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>([]);
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
-  const [serverId, setServerId] = useState<string>();
-  const [scopeId, setScopeId] = useState<string>();
+  const cacheKey = `state:${name}`;
+  const snapshot = useRef(readRouteCache<ShelfSnapshot>(cacheKey)).current;
+  const [reloadToken, setReloadToken] = useState(0);
+  const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
+  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
+  const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  const [serverId, setServerId] = useState<string | undefined>(snapshot?.serverId);
+  const [scopeId, setScopeId] = useState<string | undefined>(snapshot?.scopeId);
   const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!snapshot);
   const [hasServer, setHasServer] = useState(true);
   /** Filters this shelf's own records in the browser. The bar is the library's,
    * the scope is not: a shelf holds a few dozen entries it already has titles
    * for, so there is nothing to ask the server. */
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(snapshot?.query ?? '');
   /** The style chosen in the library. A shelf shows the same cards, so it shows
    * them the same way. */
   const { cardStyle, setCardStyle } = useCardStyle();
+  // A history entry has a time relationship to adjacent entries. The thumbnail
+  // grid has no continuous vertical edge for that rail, so history always uses
+  // the shared wide row presentation.
+  const shelfCardStyle = name === 'history' ? 'wide' : cardStyle;
   const [shelfMessage, setShelfMessage] = useState<string>();
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
@@ -267,27 +285,30 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   // used to do it was the only control on the page, and one card at a time is
   // what a right click already addresses.
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
-    inReadingList: () => name !== 'history',
-    ...(name === 'history' ? {} : {
-      readingListLabels: name === 'toRead'
-        ? { add: '加入待看', remove: '移出待看' }
-        : { add: '加入收藏夹', remove: '移出收藏夹' },
-      onToggleReadingList: (archive: ArchiveRecord) => {
-        if (!scopeId) return;
-        const remove = name === 'toRead'
-          ? repository.setReadingList(scopeId, archive.archiveId, false)
-          : repository.setWatchlist(scopeId, archive.archiveId, false);
-        void remove.then((result) => {
-          if (!result.ok) { setShelfMessage(`未能移除：${result.error.message}`); return; }
-          setWatchlist((current) => current.filter((item) => item.archiveId !== archive.archiveId));
-          setShelfMessage('已保存在本机，等待同步');
-        });
-      },
-    }),
+    onMembershipChange: (archiveId, list, next) => {
+      if (!next && ((name === 'toRead' && list === 'reading') || (name === 'watchlist' && list === 'favorites'))) {
+        setWatchlist((current) => current.filter((item) => item.archiveId !== archiveId));
+        setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      }
+    },
+    onDeleted: (archiveId) => setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId)),
   });
+  useEffect(() => {
+    const handleInvalidation = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'state:') {
+        setLoading(true);
+        setError(undefined);
+        setReloadToken((value) => value + 1);
+      }
+    };
+    window.addEventListener('yomika:route-cache-invalidated', handleInvalidation);
+    return () => window.removeEventListener('yomika:route-cache-invalidated', handleInvalidation);
+  }, []);
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
+    if (snapshot && reloadToken === 0) return;
     let active = true;
     void (async () => {
       const servers = await repository.listServers();
@@ -323,7 +344,11 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })();
     return () => { active = false; };
-  }, [name]);
+  }, [name, reloadToken, snapshot]);
+  useEffect(() => {
+    if (loading || error || !serverId || !scopeId) return;
+    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query } satisfies ShelfSnapshot);
+  }, [archives, cacheKey, error, history, loading, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
   const sortedHistory = useMemo(
     () => [...history].sort((left, right) => right.visitedAt.localeCompare(left.visitedAt)),
@@ -376,7 +401,19 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       {/* No page title: the sidebar already names the shelf, and a 40px heading
           above an empty state was most of what the page showed. No control bar
           either — the order is fixed and the card style follows the library. */}
-      {loading && <LoadingIndicator label={`正在读取${title}`} size="lg" />}
+      {loading && (
+        <LibraryWorkspace
+          archives={[]}
+          listLoading
+          showDetail={false}
+          heading={null}
+          showToolbar={false}
+          cardStyle={shelfCardStyle}
+          searchQuery={query}
+          onSearchQueryChange={setQuery}
+          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+        />
+      )}
       {error && <p className="form-error" role="alert">{error}</p>}
       {shelfMessage && <p className="server-list-message" role="status">{shelfMessage}</p>}
       {!loading && !error && !hasServer && (
@@ -398,8 +435,8 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
           heading={null}
           showToolbar={false}
           showDetail={false}
-          cardStyle={cardStyle}
-          onCardStyleChange={setCardStyle}
+          cardStyle={shelfCardStyle}
+          {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
           searchQuery={query}
           onSearchQueryChange={setQuery}
           searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
@@ -425,15 +462,29 @@ function UploadRoute() {
 }
 
 export function WorkspaceRoutes() {
+  const { pathname } = useLocation();
+  const routeKey = pathname === '/' ? 'home'
+    : /^\/library(?:\/[^/]+)?$/.test(pathname) ? 'library'
+      : pathname === '/history' ? 'history'
+        : pathname === '/watchlist' ? 'watchlist'
+          : pathname === '/to-read' ? 'toRead'
+            : undefined;
+  const [mountedRoutes, setMountedRoutes] = useState<Set<string>>(() => new Set(routeKey ? [routeKey] : []));
+  useEffect(() => {
+    if (!routeKey) return;
+    setMountedRoutes((current) => current.has(routeKey) ? current : new Set(current).add(routeKey));
+  }, [routeKey]);
+  const isMounted = (key: string) => routeKey === key || mountedRoutes.has(key);
+  const libraryArchiveId = routeKey === 'library' ? pathname.match(/^\/library\/([^/]+)$/)?.[1] : undefined;
   return (
-    <Routes>
-      <Route path="/" element={<HomeWorkspace />} />
-      <Route path="/library" element={<LibraryShell />} />
-      <Route path="/library/:archiveId" element={<LibraryShell />} />
+    <>
+      {isMounted('home') && <section className="route-cache-panel" hidden={routeKey !== 'home'}><HomeWorkspace /></section>}
+      {isMounted('library') && <section className="route-cache-panel" hidden={routeKey !== 'library'}><LibraryShell archiveId={libraryArchiveId} /></section>}
+      {isMounted('history') && <section className="route-cache-panel" hidden={routeKey !== 'history'}><StateWorkspace name="history" /></section>}
+      {isMounted('watchlist') && <section className="route-cache-panel" hidden={routeKey !== 'watchlist'}><StateWorkspace name="watchlist" /></section>}
+      {isMounted('toRead') && <section className="route-cache-panel" hidden={routeKey !== 'toRead'}><StateWorkspace name="toRead" /></section>}
+      {!routeKey && <Routes>
       <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
-      <Route path="/history" element={<StateWorkspace name="history" />} />
-      <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
-      <Route path="/to-read" element={<StateWorkspace name="toRead" />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
       {/* Tools live on their own routes; the settings section is only an index. */}
@@ -443,7 +494,8 @@ export function WorkspaceRoutes() {
       <Route path="/sync" element={<Navigate to="/settings?section=sync" replace />} />
       <Route path="/settings" element={<SettingsWorkspace />} />
       <Route path="*" element={<HomeWorkspace />} />
-    </Routes>
+      </Routes>}
+    </>
   );
 }
 

@@ -67,7 +67,13 @@ textarea {
   color: var(--control-text);
   font-weight: 600;
   text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-standard), background-color var(--motion-standard), box-shadow var(--motion-standard), transform var(--motion-fast);
 }
+
+.select-trigger:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ink-secondary) 45%, transparent); background: var(--control-background-hover); }
+.select-trigger:active:not(:disabled) { transform: translateY(1px); }
+.select-trigger:focus-visible { outline: none; box-shadow: var(--focus-shadow); }
 
 .select-trigger svg { width: 17px; height: 17px; margin-left: auto; color: var(--ink-secondary); }
 
@@ -88,19 +94,26 @@ textarea {
 }
 
 .select-option {
-  justify-content: space-between;
   width: 100%;
   min-height: 40px;
-  padding: 0 10px;
-  border-radius: 6px;
+  padding: 0;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--control-text);
   text-align: left;
+  display: flex;
+  align-items: center;
 }
 
 .select-option:hover,
 .select-option[aria-selected='true'] { background: var(--brand-paper); }
-.select-option svg { width: 16px; height: 16px; color: var(--brand-vermilion); }
+.select-option:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.select-option-main { display: flex; align-items: center; justify-content: space-between; flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 0 10px; border-radius: var(--radius-control); background: transparent; color: inherit; text-align: left; }
+.select-option-main svg { width: 16px; height: 16px; color: var(--brand-vermilion); }
+.select-option-download { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; margin-right: 2px; border-radius: var(--radius-control); background: transparent; color: var(--ink-secondary); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast); }
+.select-option-download:hover:not(:disabled) { background: var(--surface-muted); color: var(--brand-vermilion); }
+.select-option-download:active:not(:disabled) { transform: translateY(1px); }
+.select-option-download svg { width: 15px; height: 15px; }
 
 select {
   appearance: none;
@@ -205,6 +218,7 @@ select:focus,
 textarea:focus {
   border-color: var(--focus-ring);
   outline: none;
+  box-shadow: var(--focus-shadow);
 }
 
 input:hover:not(:disabled),

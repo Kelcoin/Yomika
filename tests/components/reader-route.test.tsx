@@ -36,8 +36,10 @@ describe('reader route', () => {
     const enhance = vi.fn(() => new Promise<ImageHandle>((resolve) => { complete = resolve; }));
     const release = enhancedReader(1, enhance);
     await screen.findByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(enhance).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(enhance).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(enhance).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '关闭超分' }));
     const handle = { key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 };
     await act(async () => complete(handle));
@@ -51,6 +53,9 @@ describe('reader route', () => {
 
   it('releases derived images after their pages leave the retention window', async () => {
     const release = enhancedReader(14, async (index) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 1 }));
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     for (let index = 1; index <= 10; index += 1) {
@@ -194,7 +199,7 @@ describe('reader route', () => {
     expect(await within(canvas).findByRole('alert')).toHaveTextContent('服务器暂时不可用');
     // The route is shell-free, so it has to offer its own exit; the message also
     // has to reach the shared toast.
-    expect(await screen.findByRole('link', { name: '返回档案库' })).toHaveAttribute('href', '/library');
+    expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
     expect(screen.getAllByText('服务器暂时不可用').length).toBeGreaterThan(1);
 
     await user.click(screen.getByRole('button', { name: '重试加载' }));
@@ -275,13 +280,22 @@ describe('reader route', () => {
 
     const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(commands).not.toContain('inference_upscale_page');
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(commands).toContain('inference_upscale_page'));
     view.unmount();
 
     // A failing upscale must leave the plain page on screen.
     upscaleWorks = false;
+    commands.length = 0;
     const failed = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+    expect(commands).not.toContain('inference_upscale_page');
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(commands).toContain('inference_upscale_page'));
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
     failed.unmount();
 
     // A backend with no model would run the nearest-neighbour fallback, which

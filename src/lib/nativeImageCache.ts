@@ -14,6 +14,9 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   ) {}
 
   async read(identity: ImageCacheIdentity): Promise<CachedImageData | null> {
+    // Enhanced pages are session results. Ignore old on-disk entries left by
+    // earlier builds and run the selected pipeline for this reading session.
+    if (identity.rendition === 'enhanced' || identity.rendition === 'decensored') return null;
     const result = await this.cache.readImage(identity);
     if (!result.ok) return null;
     return result.value;

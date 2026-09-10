@@ -100,7 +100,7 @@ export class NativeDedupRepository {
     }
     return this.importReadoshi({ scopeId, pairs: report.pairs }).then((result) => result.ok ? { ok: true, value: report } : result as CommandResult<ReadoshiImportReport>);
   }
-  deleteSelected(input: { sessionId: string; outcomes?: DedupDeletionOutcomeInput[] }) {
-    return invokeCommand('dedup_delete_selected', { input: { ...input, outcomes: input.outcomes ?? [] } }, DedupDeleteResultSchema);
+  deleteSelected(input: { sessionId: string; outcomes?: DedupDeletionOutcomeInput[] }, syncFavorite = false) {
+    return invokeCommand('dedup_delete_selected', { input: { ...input, outcomes: input.outcomes ?? [] }, syncFavorite }, DedupDeleteResultSchema);
   }
 }

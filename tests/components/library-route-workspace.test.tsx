@@ -27,6 +27,41 @@ function servedPage(items: unknown[]) {
 }
 
 describe('library route workspace', () => {
+  it('keeps the library shell mounted and shows card skeletons during the first request', async () => {
+    let resolveServers!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return new Promise((resolve) => { resolveServers = resolve; });
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+
+    renderLibrary();
+
+    expect(await screen.findByRole('status', { name: '正在读取档案' })).toHaveClass('archive-list-skeleton');
+    expect(screen.queryByText('正在读取档案', { selector: '.loading-indicator-label' })).not.toBeInTheDocument();
+
+    await act(async () => resolveServers({ ok: true, value: [] }));
+  });
+
+  it('uses a tag query from the URL instead of a cached library search', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return servedPage([]);
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderLibrary('/library?q=female%3Abig+breasts%24');
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', {
+      input: expect.objectContaining({ query: 'female:big breasts$' }),
+    }));
+    expect(screen.getByRole('combobox', { name: '搜索档案' })).toHaveValue('female:big breasts$');
+  });
+
   it('discards an old pagination response after the sort changes', async () => {
     let complete!: (value: unknown) => void;
     const row = (title: string) => ({ serverId: 's', archiveId: title, title, pageCount: 3, updatedAt: '2026-09-06T00:00:00Z' });
@@ -79,6 +114,23 @@ describe('library route workspace', () => {
     // renders in the shared card metadata slot.
     expect(await screen.findByRole('button', { name: /历史档案标题/ })).toBeInTheDocument();
     expect(screen.getByText('5/12 页')).toBeInTheDocument();
+  });
+
+  it('keeps history in wide rows so its external timeline remains visible', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Timeline archive', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
+      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, cardStyle: 'thumbnail' } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
+
+    await screen.findByRole('button', { name: /Timeline archive/ });
+    const list = screen.getByRole('list', { name: '档案' });
+    expect(list).toHaveClass('is-wide');
+    expect(list.querySelector('.archive-row-timeline')).not.toBeNull();
   });
 
   it('orders history by most recent visit regardless of native return order', async () => {
@@ -136,13 +188,14 @@ describe('library route workspace', () => {
 
   it('removes a shelf entry from the card context menu', async () => {
     const user = userEvent.setup();
+    let removed = false;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_watchlist') return { ok: true, value: [
+      if (command === 'list_watchlist') return { ok: true, value: removed ? [] : [
         { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
       ] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a', title: 'Remove archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' }] };
-      if (command === 'set_watchlist') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T01:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-28T01:00:00Z', revision: 2, deleted: true } };
+      if (command === 'set_watchlist') { removed = true; return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T01:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-28T01:00:00Z', revision: 2, deleted: true } }; }
       if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
@@ -156,8 +209,8 @@ describe('library route workspace', () => {
     await user.click(await screen.findByRole('menuitem', { name: /移出收藏夹/ }));
 
     expect(adapter).toHaveBeenCalledWith('set_watchlist', { scopeId: 'scope-a', archiveId: 'a', added: false });
-    expect(screen.queryByRole('button', { name: /Remove archive/ })).not.toBeInTheDocument();
-    expect(await screen.findByText('已保存在本机，等待同步')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Remove archive/ })).not.toBeInTheDocument());
+    expect(await screen.findByText('已移出收藏夹')).toBeInTheDocument();
   });
 
   it('asks LANraragi for untagged archives when that filter is picked', async () => {
@@ -336,6 +389,7 @@ describe('library route workspace', () => {
   it('requires confirmation before deleting the selected archive', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Delete me', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories' || command === 'list_watchlist') return { ok: true, value: [] };

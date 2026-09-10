@@ -79,6 +79,21 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw "Built executable missing: $output" }
+    # Ship the bundled model beside the portable executable so a fresh package
+    # works immediately and uses the same fixed data/models path as the app.
+    $bundledModel = Join-Path $repoRoot "src-tauri\resources\models\waifu2x-upconv7"
+    $portableModel = Join-Path $targetDir "data\models\waifu2x-upconv7\1"
+    if (Test-Path -LiteralPath $bundledModel -PathType Container) {
+        New-Item -ItemType Directory -Force -Path $portableModel | Out-Null
+        Get-ChildItem -LiteralPath $bundledModel -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($bundledModel.Length).TrimStart([char]92, [char]47)
+            $destination = Join-Path $portableModel $relative
+            $parent = Split-Path -Parent $destination
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+        }
+        Write-Host "Bundled model copied to: $portableModel"
+    }
     Write-Host "Windows portable executable: $output"
 } finally {
     Pop-Location

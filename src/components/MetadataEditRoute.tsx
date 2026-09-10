@@ -6,15 +6,19 @@ import { parseArchiveTagString } from '../lib/tags';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-import { MetadataTagChip } from './MetadataTagChip';
+import { MetadataTagRows } from './MetadataTagRows';
+import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { TagSuggest } from './TagSuggest';
 import { useToast } from './Toast';
+import { SelectField } from './SelectField';
+import { useReturnNavigation } from '../lib/useReturnNavigation';
 
 const repository = new NativeLibraryRepository();
 
 export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const goBack = useReturnNavigation();
   useTagTranslations();
   const [serverId, setServerId] = useState<string>();
   const [title, setTitle] = useState('');
@@ -26,6 +30,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const [plugins, setPlugins] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<'save' | 'plugin' | 'delete' | ''>('');
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
 
@@ -66,7 +71,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
           return [{ id: value, name: String(item.name ?? value) }];
         });
         setPlugins(normalized);
-        setPlugin(normalized[0]?.id ?? '');
+        const preferred = normalized.find((item) => /e[\s_-]?hentai/i.test(`${item.id} ${item.name}`));
+        setPlugin(preferred?.id ?? normalized[0]?.id ?? '');
       }
       setLoading(false);
     })();
@@ -120,26 +126,13 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     } else setError(result.error.message);
     setBusy('');
   };
-  const deleteArchive = async () => {
-    if (!serverId || busy) return;
-    if (!window.confirm('确认删除此档案？此操作不可撤销。')) return;
-    setBusy('delete');
-    const result = await repository.deleteArchive(serverId, archiveId);
-    if (result.ok) {
-      // Every cached view of this archive is now a card that leads nowhere.
-      invalidateRouteCache('archive-detail:');
-      invalidateRouteCache('recommendations:');
-      navigate('/library');
-    } else setError(result.error.message);
-    setBusy('');
-  };
 
   if (loading) return <main className="metadata-edit-page metadata-edit-loading"><LoaderCircle className="spin" aria-hidden="true" /><span>正在载入元数据…</span></main>;
-  if (error && !serverId) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><Link className="secondary-action" to={`/library/${archiveId}`}><ArrowLeft aria-hidden="true" />返回详情</Link></main>;
+  if (error && !serverId) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button></main>;
   return (
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">
       <header className="metadata-edit-header">
-        <Link className="reader-icon-button" to={`/library/${archiveId}`} aria-label="返回详情"><ArrowLeft aria-hidden="true" /></Link>
+        <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
         <h1 id="metadata-edit-title">编辑元数据</h1>
       </header>
       <form className="metadata-edit-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -152,9 +145,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
         <div className="metadata-tag-field">
           <span className="metadata-tag-field-label" id="metadata-tags-label">标签</span>
           <div className="metadata-tags-box" role="group" aria-labelledby="metadata-tags-label">
-            {tagList.map((tag) => (
-              <MetadataTagChip key={tag} tag={tag} onDelete={() => setTagList(tagList.filter((item) => item !== tag))} />
-            ))}
+            <MetadataTagRows tags={tagList} onDelete={(tag) => setTagList(tagList.filter((item) => item !== tag))} />
             {tagList.length === 0 && <span className="metadata-tags-empty">还没有标签</span>}
           </div>
           <label className="metadata-tag-input">
@@ -179,15 +170,16 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
           </label>
         </div>
         <label>简介<textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
-        {plugins.length > 0 && <div className="metadata-plugin-row"><select aria-label="元数据插件" value={plugin} onChange={(event) => setPlugin(event.target.value)}>{plugins.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
+        {plugins.length > 0 && <div className="metadata-plugin-row"><SelectField name="metadataPlugin" aria-label="元数据插件" value={plugin} onChange={setPlugin} options={plugins.map((item) => ({ value: item.id, label: item.name }))} /><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
       {/* Same as the sync panel: a save landing or failing is an event, and the
           toast is where events are reported. */}
         <div className="metadata-edit-actions">
           <button className="primary-action" type="submit" aria-label="保存元数据" disabled={!!busy}><Save aria-hidden="true" />{busy === 'save' ? '保存中…' : '保存元数据'}</button>
           <Link className="secondary-action" to={`/reader/${archiveId}`}><BookOpen aria-hidden="true" />阅读</Link>
-          <button className="secondary-action" type="button" disabled={!!busy} onClick={() => void deleteArchive()}><Trash2 aria-hidden="true" />删除</button>
+          <button className="secondary-action" type="button" disabled={!!busy} onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" />删除</button>
         </div>
       </form>
+      {deleteOpen && serverId && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}
     </main>
   );
 }

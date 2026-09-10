@@ -1,10 +1,13 @@
-import { useCallback, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
+import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { useToast } from './Toast';
 import type { ArchiveRecord } from '../domain/library';
-import type { Category } from '../repositories/nativeLibraryRepository';
+import { NativeLibraryRepository, type Category } from '../repositories/nativeLibraryRepository';
+
+const repository = new NativeLibraryRepository();
 
 /** The card context menu plus the state and the surface-independent actions it
  * needs, so every place that draws archive cards can answer a right click.
@@ -24,40 +27,83 @@ export function useArchiveContextMenu(options: {
   readingListLabels?: { add: string; remove: string } | undefined;
   categories?: Category[] | undefined;
   onAddCategory?: ((archive: ArchiveRecord, categoryId: string) => void) | undefined;
+  onMembershipChange?: ((archiveId: string, list: 'reading' | 'favorites', next: boolean) => void) | undefined;
+  onDeleted?: ((archiveId: string) => void) | undefined;
 } = {}): {
   /** Pass as `onArchiveContextMenu` / `onContextMenu` to a card list. */
   open: (archive: ArchiveRecord, at: { x: number; y: number }) => void;
   /** Render once, anywhere in the same tree. */
   menu: JSX.Element;
+  requestDelete: (archive: ArchiveRecord) => void;
 } {
   const navigate = useNavigate();
+  const location = useLocation();
   const { showToast } = useToast();
   const [target, setTarget] = useState<ArchiveContextMenuTarget>();
+  const [deleteTarget, setDeleteTarget] = useState<ArchiveRecord>();
+  const [membership, setMembership] = useState<{ scopeId: string; reading: boolean | undefined; favorites: boolean | undefined }>();
+  const membershipRequest = useRef(0);
+  useEffect(() => {
+    const request = ++membershipRequest.current;
+    setMembership(undefined);
+    if (!target) return;
+    void (async () => {
+      const servers = await repository.listServers();
+      const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
+      if (!server) return;
+      const [reading, favorites] = await Promise.all([repository.listReadingList(server.scopeId), repository.listWatchlist(server.scopeId)]);
+      if (request !== membershipRequest.current) return;
+      if (!reading.ok || !favorites.ok) showToast('部分待看或收藏状态读取失败', 'error');
+      setMembership({ scopeId: server.scopeId, reading: reading.ok ? reading.value.some((item) => item.archiveId === target.archive.archiveId && !item.deleted) : undefined, favorites: favorites.ok ? favorites.value.some((item) => item.archiveId === target.archive.archiveId && !item.deleted) : undefined });
+    })();
+    return () => { membershipRequest.current += 1; };
+  }, [target, showToast]);
+  const toggleMembership = (archive: ArchiveRecord, list: 'reading' | 'favorites', next: boolean) => {
+    if (!membership) return;
+    const update = list === 'reading' ? repository.setReadingList(membership.scopeId, archive.archiveId, next) : repository.setWatchlist(membership.scopeId, archive.archiveId, next);
+    void update.then((result) => {
+      if (!result.ok) { showToast(result.error.message, 'error'); return; }
+      options.onMembershipChange?.(archive.archiveId, list, next);
+      showToast(`${next ? '已加入' : '已移出'}${list === 'reading' ? '待看' : '收藏夹'}`, 'success');
+    });
+  };
   const open = useCallback(
     (archive: ArchiveRecord, at: { x: number; y: number }) => setTarget({ archive, ...at }),
     [],
   );
 
-  const menu = (
+  const menu = (<>
     <ArchiveContextMenu
       target={target}
       onClose={() => setTarget(undefined)}
       onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}`)}
+      onDelete={setDeleteTarget}
       onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1`)}
-      onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`)}
+      onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`, { state: { returnTo: `${location.pathname}${location.search}` } })}
       onCopyId={(archive) => {
         void navigator.clipboard?.writeText(archive.archiveId).then(
           () => showToast('档案 ID 已复制', 'success'),
           () => showToast('复制失败', 'error'),
         );
       }}
-      inReadingList={target ? options.inReadingList?.(target.archive.archiveId) ?? false : false}
-      {...(options.onToggleReadingList ? { onToggleReadingList: options.onToggleReadingList } : {})}
+      inReadingList={target ? options.inReadingList?.(target.archive.archiveId) ?? membership?.reading ?? false : false}
+      membershipLoading={!options.onToggleReadingList && membership?.reading === undefined}
+      favoriteLoading={membership?.favorites === undefined}
+      inFavorites={membership?.favorites ?? false}
+      onToggleReadingList={options.onToggleReadingList ?? ((archive, next) => toggleMembership(archive, 'reading', next))}
+      onToggleFavorite={(archive, next) => toggleMembership(archive, 'favorites', next)}
+      onDownload={(archive) => {
+        showToast('正在下载档案', 'info');
+        void repository.downloadArchive(archive.serverId, archive.archiveId).then((result) => {
+          showToast(result.ok ? `下载完成：${result.value}` : result.error.message, result.ok ? 'success' : 'error');
+        });
+      }}
       {...(options.readingListLabels ? { readingListLabels: options.readingListLabels } : {})}
       {...(options.categories ? { categories: options.categories } : {})}
       {...(options.onAddCategory ? { onAddCategory: options.onAddCategory } : {})}
     />
-  );
+    {deleteTarget && <ArchiveDeleteDialog archive={deleteTarget} onClose={() => setDeleteTarget(undefined)} onDeleted={() => options.onDeleted?.(deleteTarget.archiveId)} />}
+  </>);
 
-  return { open, menu };
+  return { open, menu, requestDelete: setDeleteTarget };
 }

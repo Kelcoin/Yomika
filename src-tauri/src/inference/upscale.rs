@@ -68,7 +68,14 @@ pub fn plan_tiles(width: u32, height: u32, tile_size: u32, padding: u32) -> Vec<
     tiles
 }
 
-pub fn crop_rgba(source: &[u8], width: u32, x: u32, y: u32, tile_width: u32, tile_height: u32) -> Vec<u8> {
+pub fn crop_rgba(
+    source: &[u8],
+    width: u32,
+    x: u32,
+    y: u32,
+    tile_width: u32,
+    tile_height: u32,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(tile_width as usize * tile_height as usize * 4);
     for row in 0..tile_height {
         let start = ((y + row) as usize * width as usize + x as usize) * 4;
@@ -89,12 +96,17 @@ pub fn blit_tile(
     let tile_width = tile.padded_width * scale;
     let tile_height = tile.padded_height * scale;
     if upscaled.len() != tile_width as usize * tile_height as usize * 4 {
-        return Err(InferenceError::InvalidInput("upscaled tile does not match its padded size".into()));
+        return Err(InferenceError::InvalidInput(
+            "upscaled tile does not match its padded size".into(),
+        ));
     }
     let keep_width = tile.inner_width * scale;
     for row in 0..tile.inner_height * scale {
-        let source_index = (((offset_y * scale + row) * tile_width + offset_x * scale) as usize) * 4;
-        let destination_index = (((tile.inner_y * scale + row) * destination_width + tile.inner_x * scale) as usize) * 4;
+        let source_index =
+            (((offset_y * scale + row) * tile_width + offset_x * scale) as usize) * 4;
+        let destination_index = (((tile.inner_y * scale + row) * destination_width
+            + tile.inner_x * scale) as usize)
+            * 4;
         destination[destination_index..destination_index + keep_width as usize * 4]
             .copy_from_slice(&upscaled[source_index..source_index + keep_width as usize * 4]);
     }
@@ -107,7 +119,8 @@ pub trait UpscaleEngine {
     fn scale(&self) -> u32;
     /// Upscales one RGBA tile. `rgba` is `width * height * 4` bytes and the
     /// result must be `width * scale * height * scale * 4`.
-    fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, InferenceError>;
+    fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32)
+        -> Result<Vec<u8>, InferenceError>;
 }
 
 /// Model-free engine used when no model is installed, and as the reference
@@ -122,7 +135,12 @@ impl UpscaleEngine for NearestNeighbourEngine {
         self.scale
     }
 
-    fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, InferenceError> {
+    fn upscale_tile(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, InferenceError> {
         cpu_scale_rgba(rgba, width, height, self.scale, self.max_pixels).map(|output| output.rgba)
     }
 }
@@ -164,31 +182,57 @@ pub fn upscale_rgba(
     options: UpscaleOptions,
 ) -> Result<UpscaledImage, InferenceError> {
     let scale = engine.scale();
-    if width == 0 || height == 0 || scale == 0 || source.len() != width as usize * height as usize * 4 {
-        return Err(InferenceError::InvalidInput("RGBA buffer dimensions do not match".into()));
+    if width == 0
+        || height == 0
+        || scale == 0
+        || source.len() != width as usize * height as usize * 4
+    {
+        return Err(InferenceError::InvalidInput(
+            "RGBA buffer dimensions do not match".into(),
+        ));
     }
     let output_width = width.checked_mul(scale);
     let output_height = height.checked_mul(scale);
     let (output_width, output_height) = match (output_width, output_height) {
         (Some(w), Some(h)) => (w, h),
-        _ => return Err(InferenceError::PixelBudgetExceeded { pixels: usize::MAX, max_pixels: options.max_pixels }),
+        _ => {
+            return Err(InferenceError::PixelBudgetExceeded {
+                pixels: usize::MAX,
+                max_pixels: options.max_pixels,
+            })
+        }
     };
     let pixels = output_width as usize * output_height as usize;
     if pixels > options.max_pixels {
-        return Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels: options.max_pixels });
+        return Err(InferenceError::PixelBudgetExceeded {
+            pixels,
+            max_pixels: options.max_pixels,
+        });
     }
 
     let tiles = plan_tiles(width, height, options.tile_size, options.tile_padding);
     let mut destination = vec![0_u8; pixels * 4];
     for tile in &tiles {
-        let input = crop_rgba(source, width, tile.padded_x, tile.padded_y, tile.padded_width, tile.padded_height);
+        let input = crop_rgba(
+            source,
+            width,
+            tile.padded_x,
+            tile.padded_y,
+            tile.padded_width,
+            tile.padded_height,
+        );
         let upscaled = engine.upscale_tile(&input, tile.padded_width, tile.padded_height)?;
         blit_tile(&mut destination, output_width, tile, scale, &upscaled)?;
         if options.tile_sleep_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(options.tile_sleep_ms));
         }
     }
-    Ok(UpscaledImage { rgba: destination, width: output_width, height: output_height, tiles: tiles.len() })
+    Ok(UpscaledImage {
+        rgba: destination,
+        width: output_width,
+        height: output_height,
+        tiles: tiles.len(),
+    })
 }
 
 #[cfg(test)]
@@ -199,7 +243,12 @@ mod tests {
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
             for x in 0..width {
-                rgba.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255]);
+                rgba.extend_from_slice(&[
+                    (x % 256) as u8,
+                    (y % 256) as u8,
+                    ((x + y) % 256) as u8,
+                    255,
+                ]);
             }
         }
         rgba
@@ -209,7 +258,10 @@ mod tests {
     fn tiles_cover_the_image_exactly_once() {
         let tiles = plan_tiles(300, 200, 128, 8);
         assert_eq!(tiles.len(), 6, "3 columns x 2 rows");
-        let covered: u32 = tiles.iter().map(|tile| tile.inner_width * tile.inner_height).sum();
+        let covered: u32 = tiles
+            .iter()
+            .map(|tile| tile.inner_width * tile.inner_height)
+            .sum();
         assert_eq!(covered, 300 * 200);
         for tile in &tiles {
             // The padded region contains the kept region and stays inside the image.
@@ -223,12 +275,22 @@ mod tests {
     #[test]
     fn interior_tiles_carry_padding_on_every_side() {
         let tiles = plan_tiles(300, 300, 100, 10);
-        let interior = tiles.iter().find(|tile| tile.inner_x == 100 && tile.inner_y == 100).expect("interior tile");
+        let interior = tiles
+            .iter()
+            .find(|tile| tile.inner_x == 100 && tile.inner_y == 100)
+            .expect("interior tile");
         assert_eq!(interior.crop_offset(), (10, 10));
         assert_eq!((interior.padded_width, interior.padded_height), (120, 120));
 
-        let corner = tiles.iter().find(|tile| tile.inner_x == 0 && tile.inner_y == 0).expect("corner tile");
-        assert_eq!(corner.crop_offset(), (0, 0), "an edge tile is not padded outward");
+        let corner = tiles
+            .iter()
+            .find(|tile| tile.inner_x == 0 && tile.inner_y == 0)
+            .expect("corner tile");
+        assert_eq!(
+            corner.crop_offset(),
+            (0, 0),
+            "an edge tile is not padded outward"
+        );
         assert_eq!((corner.padded_width, corner.padded_height), (110, 110));
     }
 
@@ -244,26 +306,54 @@ mod tests {
         // The point of the padding is that seams do not appear: tiling must be
         // invisible in the output.
         let source = gradient(70, 50);
-        let engine = NearestNeighbourEngine { scale: 2, max_pixels: 64_000_000 };
+        let engine = NearestNeighbourEngine {
+            scale: 2,
+            max_pixels: 64_000_000,
+        };
         let whole = cpu_scale_rgba(&source, 70, 50, 2, 64_000_000).expect("reference");
 
         for tile_size in [8, 16, 32, 128] {
-            let tiled = upscale_rgba(&engine, &source, 70, 50, UpscaleOptions { tile_size, tile_padding: 4, ..UpscaleOptions::default() })
-                .expect("tiled upscale");
+            let tiled = upscale_rgba(
+                &engine,
+                &source,
+                70,
+                50,
+                UpscaleOptions {
+                    tile_size,
+                    tile_padding: 4,
+                    ..UpscaleOptions::default()
+                },
+            )
+            .expect("tiled upscale");
             assert_eq!((tiled.width, tiled.height), (whole.width, whole.height));
-            assert_eq!(tiled.rgba, whole.rgba, "tile size {tile_size} produced seams");
+            assert_eq!(
+                tiled.rgba, whole.rgba,
+                "tile size {tile_size} produced seams"
+            );
         }
     }
 
     #[test]
     fn upscaling_refuses_a_mismatched_buffer_or_an_oversized_result() {
-        let engine = NearestNeighbourEngine { scale: 4, max_pixels: 1_000 };
+        let engine = NearestNeighbourEngine {
+            scale: 4,
+            max_pixels: 1_000,
+        };
         assert!(matches!(
             upscale_rgba(&engine, &[0, 0, 0, 255], 2, 2, UpscaleOptions::default()),
             Err(InferenceError::InvalidInput(_)),
         ));
         assert!(matches!(
-            upscale_rgba(&engine, &gradient(40, 40), 40, 40, UpscaleOptions { max_pixels: 1_000, ..UpscaleOptions::default() }),
+            upscale_rgba(
+                &engine,
+                &gradient(40, 40),
+                40,
+                40,
+                UpscaleOptions {
+                    max_pixels: 1_000,
+                    ..UpscaleOptions::default()
+                }
+            ),
             Err(InferenceError::PixelBudgetExceeded { .. }),
         ));
     }

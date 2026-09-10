@@ -45,7 +45,7 @@ const CLASS_BAR: i32 = 1;
 const CLASS_MOSAIC: i32 = 2;
 const NUM_CLASSES: usize = 3;
 /// `_unmold_mask` thresholds the 28x28 map at this.
-const MASK_THRESHOLD: u8 = 128;
+const MASK_THRESHOLD: f32 = 0.5;
 
 const IMAGE_INPUT: &str = "input_image";
 const META_INPUT: &str = "input_image_meta";
@@ -83,7 +83,8 @@ impl Detection {
                 if self.mask[source] == 0 {
                     continue;
                 }
-                let target = (page_y - window.y) as usize * window.width as usize + (page_x - window.x) as usize;
+                let target = (page_y - window.y) as usize * window.width as usize
+                    + (page_x - window.x) as usize;
                 projected[target] = 1;
             }
         }
@@ -102,10 +103,55 @@ pub struct MoldedPage {
     pub scale: f64,
 }
 
+/// OpenCV's default `cv2.resize` mode is half-pixel bilinear interpolation.
+/// `image::imageops::Triangle` is an antialiased triangular filter instead, and
+/// its different edge values can move a detector score across the exported
+/// model's threshold. Keep this local so detector input matches Aletheia exactly.
+fn resize_bilinear_rgba(source: &image::RgbaImage, width: u32, height: u32) -> image::RgbaImage {
+    if source.width() == width && source.height() == height {
+        return source.clone();
+    }
+    let src_width = source.width().max(1) as usize;
+    let src_height = source.height().max(1) as usize;
+    let mut output = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        let position_y = (((y as f64 + 0.5) * src_height as f64 / height as f64) - 0.5)
+            .clamp(0.0, (src_height - 1) as f64);
+        let y0 = position_y.floor() as usize;
+        let y1 = (y0 + 1).min(src_height - 1);
+        let fy = position_y - y0 as f64;
+        for x in 0..width {
+            let position_x = (((x as f64 + 0.5) * src_width as f64 / width as f64) - 0.5)
+                .clamp(0.0, (src_width - 1) as f64);
+            let x0 = position_x.floor() as usize;
+            let x1 = (x0 + 1).min(src_width - 1);
+            let fx = position_x - x0 as f64;
+            let top = source.get_pixel(x0 as u32, y0 as u32);
+            let top_right = source.get_pixel(x1 as u32, y0 as u32);
+            let bottom = source.get_pixel(x0 as u32, y1 as u32);
+            let bottom_right = source.get_pixel(x1 as u32, y1 as u32);
+            let mut pixel = [0_u8; 4];
+            for channel in 0..4 {
+                let top_value =
+                    f64::from(top[channel]) * (1.0 - fx) + f64::from(top_right[channel]) * fx;
+                let bottom_value =
+                    f64::from(bottom[channel]) * (1.0 - fx) + f64::from(bottom_right[channel]) * fx;
+                pixel[channel] = (top_value * (1.0 - fy) + bottom_value * fy)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+            output.put_pixel(x, y, image::Rgba(pixel));
+        }
+    }
+    output
+}
+
 /// `_resize_image(mode="square")` followed by `_mold_image`.
 pub fn mold_page(rgba: &[u8], width: u32, height: u32) -> Result<MoldedPage, InferenceError> {
     if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
-        return Err(InferenceError::InvalidInput("RGBA page dimensions do not match".into()));
+        return Err(InferenceError::InvalidInput(
+            "RGBA page dimensions do not match".into(),
+        ));
     }
     let side = DETECTOR_SIDE;
     let (short, long) = (f64::from(width.min(height)), f64::from(width.max(height)));
@@ -122,7 +168,7 @@ pub fn mold_page(rgba: &[u8], width: u32, height: u32) -> Result<MoldedPage, Inf
     let resized = if (resized_width, resized_height) == (width, height) {
         source
     } else {
-        image::imageops::resize(&source, resized_width, resized_height, image::imageops::FilterType::Triangle)
+        resize_bilinear_rgba(&source, resized_width, resized_height)
     };
 
     let top = (side - resized_height) / 2;
@@ -162,7 +208,15 @@ pub fn mold_page(rgba: &[u8], width: u32, height: u32) -> Result<MoldedPage, Inf
 pub fn image_meta(width: u32, height: u32, molded: &MoldedPage) -> Vec<f32> {
     let side = f64::from(DETECTOR_SIDE);
     let mut meta = Vec::with_capacity(12 + NUM_CLASSES);
-    meta.extend_from_slice(&[0.0, f64::from(height), f64::from(width), 3.0, side, side, 3.0]);
+    meta.extend_from_slice(&[
+        0.0,
+        f64::from(height),
+        f64::from(width),
+        3.0,
+        side,
+        side,
+        3.0,
+    ]);
     meta.extend_from_slice(&molded.window);
     meta.push(molded.scale);
     meta.extend(std::iter::repeat(0.0).take(NUM_CLASSES));
@@ -214,11 +268,18 @@ pub struct DetectorEngine {
 impl DetectorEngine {
     pub fn open(model_path: &Path) -> Result<Self, InferenceError> {
         let open = || -> Result<ort::session::Session, String> {
-            let mut builder = ort::session::Session::builder().map_err(|error| error.to_string())?;
-            builder.commit_from_file(model_path).map_err(|error| error.to_string())
+            let mut builder =
+                ort::session::Session::builder().map_err(|error| error.to_string())?;
+            builder
+                .commit_from_file(model_path)
+                .map_err(|error| error.to_string())
         };
-        let session = open().map_err(|error| InferenceError::InvalidInput(format!("detector session failed: {error}")))?;
-        Ok(Self { session: Mutex::new(session) })
+        let session = open().map_err(|error| {
+            InferenceError::InvalidInput(format!("detector session failed: {error}"))
+        })?;
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 
     /// Finds the censored regions of one RGBA page, in page pixels.
@@ -229,18 +290,31 @@ impl DetectorEngine {
     /// fp16 build compares two empty lists. The class scores are populated whatever
     /// the threshold does with them, which makes them the thing to compare.
     #[cfg(test)]
-    pub(crate) fn raw_output(&self, rgba: &[u8], width: u32, height: u32, name: &str) -> Result<Vec<f32>, InferenceError> {
+    pub(crate) fn raw_output(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        name: &str,
+    ) -> Result<Vec<f32>, InferenceError> {
         let molded = mold_page(rgba, width, height)?;
         let side = i64::from(DETECTOR_SIDE);
         let meta = image_meta(width, height, &molded);
         let anchors = pyramid_anchors(DETECTOR_SIDE);
         let anchor_count = (anchors.len() / 4) as i64;
-        let image_input = ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor.clone()))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector input failed: {error}")))?;
+        let image_input =
+            ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor.clone()))
+                .map_err(|error| {
+                    InferenceError::InvalidInput(format!("detector input failed: {error}"))
+                })?;
         let meta_input = ort::value::Tensor::from_array((vec![1, meta.len() as i64], meta))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector meta failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector meta failed: {error}"))
+            })?;
         let anchor_input = ort::value::Tensor::from_array((vec![1, anchor_count, 4], anchors))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector anchors failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector anchors failed: {error}"))
+            })?;
         let mut session = self
             .session
             .lock()
@@ -251,26 +325,40 @@ impl DetectorEngine {
                 META_INPUT => meta_input,
                 ANCHOR_INPUT => anchor_input,
             ])
-            .map_err(|error| InferenceError::InvalidInput(format!("detector run failed: {error}")))?;
-        let (_, values) = outputs[name]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| InferenceError::InvalidInput(format!("detector output {name} failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector run failed: {error}"))
+            })?;
+        let (_, values) = outputs[name].try_extract_tensor::<f32>().map_err(|error| {
+            InferenceError::InvalidInput(format!("detector output {name} failed: {error}"))
+        })?;
         Ok(values.to_vec())
     }
 
-    pub fn detect(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<Detection>, InferenceError> {
+    pub fn detect(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<Detection>, InferenceError> {
         let molded = mold_page(rgba, width, height)?;
         let side = i64::from(DETECTOR_SIDE);
         let meta = image_meta(width, height, &molded);
         let anchors = pyramid_anchors(DETECTOR_SIDE);
         let anchor_count = (anchors.len() / 4) as i64;
 
-        let image_input = ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor.clone()))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector input failed: {error}")))?;
+        let image_input =
+            ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor.clone()))
+                .map_err(|error| {
+                    InferenceError::InvalidInput(format!("detector input failed: {error}"))
+                })?;
         let meta_input = ort::value::Tensor::from_array((vec![1, meta.len() as i64], meta))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector meta failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector meta failed: {error}"))
+            })?;
         let anchor_input = ort::value::Tensor::from_array((vec![1, anchor_count, 4], anchors))
-            .map_err(|error| InferenceError::InvalidInput(format!("detector anchors failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector anchors failed: {error}"))
+            })?;
 
         let mut session = self
             .session
@@ -282,15 +370,22 @@ impl DetectorEngine {
                 META_INPUT => meta_input,
                 ANCHOR_INPUT => anchor_input,
             ])
-            .map_err(|error| InferenceError::InvalidInput(format!("detector run failed: {error}")))?;
+            .map_err(|error| {
+                InferenceError::InvalidInput(format!("detector run failed: {error}"))
+            })?;
         // By name: the export's output order is not stable, and picking the wrong
         // tensor here would be a silent reinterpretation of unrelated numbers.
         let (detection_shape, detections) = outputs[DETECTION_OUTPUT]
             .try_extract_tensor::<f32>()
-            .map_err(|error| InferenceError::InvalidInput(format!("detector output failed: {error}")))?;
-        let (mask_shape, masks) = outputs[MASK_OUTPUT]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| InferenceError::InvalidInput(format!("detector masks failed: {error}")))?;
+            .map_err(|error| {
+            InferenceError::InvalidInput(format!("detector output failed: {error}"))
+        })?;
+        let (mask_shape, masks) =
+            outputs[MASK_OUTPUT]
+                .try_extract_tensor::<f32>()
+                .map_err(|error| {
+                    InferenceError::InvalidInput(format!("detector masks failed: {error}"))
+                })?;
         decode_detections(
             detection_shape.as_ref(),
             detections,
@@ -317,10 +412,14 @@ fn decode_detections(
     molded: &MoldedPage,
 ) -> Result<Vec<Detection>, InferenceError> {
     if detection_shape.len() != 3 || detection_shape[2] != 6 {
-        return Err(InferenceError::InvalidManifest(format!("detection shape {detection_shape:?} is not [1, N, 6]")));
+        return Err(InferenceError::InvalidManifest(format!(
+            "detection shape {detection_shape:?} is not [1, N, 6]"
+        )));
     }
     if mask_shape.len() != 5 || mask_shape[4] != NUM_CLASSES as i64 {
-        return Err(InferenceError::InvalidManifest(format!("mask shape {mask_shape:?} is not [1, N, h, w, classes]")));
+        return Err(InferenceError::InvalidManifest(format!(
+            "mask shape {mask_shape:?} is not [1, N, h, w, classes]"
+        )));
     }
     let rows = detection_shape[1] as usize;
     let (mask_height, mask_width) = (mask_shape[2] as usize, mask_shape[3] as usize);
@@ -334,7 +433,9 @@ fn decode_detections(
     ];
     let (window_height, window_width) = (window[2] - window[0], window[3] - window[1]);
     if window_height <= 0.0 || window_width <= 0.0 {
-        return Err(InferenceError::InvalidInput("detector window has no area".into()));
+        return Err(InferenceError::InvalidInput(
+            "detector window has no area".into(),
+        ));
     }
 
     let mut found = Vec::new();
@@ -356,7 +457,11 @@ fn decode_detections(
             .map(|index| {
                 let value = f64::from(detections[base + index]);
                 let shift = if index % 2 == 0 { window[0] } else { window[1] };
-                let span = if index % 2 == 0 { window_height } else { window_width };
+                let span = if index % 2 == 0 {
+                    window_height
+                } else {
+                    window_width
+                };
                 (value - shift) / span
             })
             .collect();
@@ -380,29 +485,43 @@ fn decode_detections(
         // The mask head answers per class; only the detected class's channel is the
         // mask for this box.
         let plane_start = row * mask_height * mask_width * NUM_CLASSES;
-        let mut small = image::GrayImage::new(mask_width as u32, mask_height as u32);
-        for y in 0..mask_height {
-            for x in 0..mask_width {
-                let value = masks[plane_start + (y * mask_width + x) * NUM_CLASSES + class_id as usize];
-                // Resized as bytes rather than floats: bilinear interpolation then a
-                // 0.5 threshold differs from the float path by at most one level,
-                // and the boundary is already a hard edge either way.
-                let level = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-                small.put_pixel(x as u32, y as u32, image::Luma([level]));
+        // Match cv2.INTER_LINEAR's half-pixel coordinates and edge replication.
+        // image::resize adds an antialiasing filter when shrinking; OpenCV does not.
+        let coordinate = |index: u32, output: u32, input: usize| {
+            let position = ((f64::from(index) + 0.5) * input as f64 / f64::from(output) - 0.5)
+                .clamp(0.0, (input - 1) as f64);
+            let low = position.floor() as usize;
+            (
+                low,
+                (low + 1).min(input - 1),
+                (position - low as f64) as f32,
+            )
+        };
+        let sample = |x: usize, y: usize| {
+            masks[plane_start + (y * mask_width + x) * NUM_CLASSES + class_id as usize]
+        };
+        let mut mask = Vec::with_capacity(box_width as usize * box_height as usize);
+        for y in 0..box_height {
+            let (y0, y1, fy) = coordinate(y, box_height, mask_height);
+            for x in 0..box_width {
+                let (x0, x1, fx) = coordinate(x, box_width, mask_width);
+                let top = sample(x0, y0) * (1.0 - fx) + sample(x1, y0) * fx;
+                let bottom = sample(x0, y1) * (1.0 - fx) + sample(x1, y1) * fx;
+                let value = top * (1.0 - fy) + bottom * fy;
+                mask.push(u8::from(value >= MASK_THRESHOLD));
             }
         }
-        let resized = image::imageops::resize(
-            &small,
-            box_width,
-            box_height,
-            image::imageops::FilterType::Triangle,
-        );
-        let mask: Vec<u8> = resized.into_raw().into_iter().map(|level| u8::from(level >= MASK_THRESHOLD)).collect();
         if mask.iter().all(|&value| value == 0) {
             continue;
         }
         found.push(Detection {
-            region: CensorRegion { x: x1, y: y1, width: box_width, height: box_height, kind },
+            region: CensorRegion {
+                x: x1,
+                y: y1,
+                width: box_width,
+                height: box_height,
+                kind,
+            },
             score,
             mask,
         });
@@ -454,10 +573,18 @@ mod tests {
         // The second cell along x is one stride to the right, and the row after that
         // is one stride down: row-major over the feature map, ratios innermost.
         let per_cell = 3 * 4;
-        let second_cell_x = f64::from(anchors[per_cell + 1]) * normaliser + 0.5 * (32.0 * 0.5_f64.sqrt());
-        assert!((second_cell_x - 4.0).abs() < 1e-4, "second anchor cell is not one stride along x");
-        let second_row_y = f64::from(anchors[per_cell * 256]) * normaliser + 0.5 * (32.0 / 0.5_f64.sqrt());
-        assert!((second_row_y - 4.0).abs() < 1e-4, "the row stride is not row-major over the feature map");
+        let second_cell_x =
+            f64::from(anchors[per_cell + 1]) * normaliser + 0.5 * (32.0 * 0.5_f64.sqrt());
+        assert!(
+            (second_cell_x - 4.0).abs() < 1e-4,
+            "second anchor cell is not one stride along x"
+        );
+        let second_row_y =
+            f64::from(anchors[per_cell * 256]) * normaliser + 0.5 * (32.0 / 0.5_f64.sqrt());
+        assert!(
+            (second_row_y - 4.0).abs() < 1e-4,
+            "the row stride is not row-major over the feature map"
+        );
     }
 
     #[test]
@@ -479,13 +606,22 @@ mod tests {
         // A page already at the input size, so nothing is resampled.
         let page = vec![255_u8; 1024 * 1024 * 4];
         let molded = mold_page(&page, 1024, 1024).expect("molded");
-        assert!((molded.tensor[0] - (255.0 - MEAN_PIXEL[0])).abs() < 1e-4, "the mean is not subtracted");
-        assert!(molded.tensor[0] > 100.0, "0-255 range: dividing by 255 first would leave this near zero");
+        assert!(
+            (molded.tensor[0] - (255.0 - MEAN_PIXEL[0])).abs() < 1e-4,
+            "the mean is not subtracted"
+        );
+        assert!(
+            molded.tensor[0] > 100.0,
+            "0-255 range: dividing by 255 first would leave this near zero"
+        );
 
         // A small page: the padding is zero minus the mean, not zero.
         let small = vec![255_u8; 16 * 16 * 4];
         let molded = mold_page(&small, 16, 16).expect("molded");
-        assert!((molded.tensor[0] + MEAN_PIXEL[0]).abs() < 1e-4, "padding must carry -MEAN_PIXEL");
+        assert!(
+            (molded.tensor[0] + MEAN_PIXEL[0]).abs() < 1e-4,
+            "padding must carry -MEAN_PIXEL"
+        );
     }
 
     #[test]
@@ -506,7 +642,47 @@ mod tests {
                 molded.window[3] as f32,
             ],
         );
-        assert_eq!(&meta[12..15], &[0.0, 0.0, 0.0], "active class ids are training-only zeros");
+        assert_eq!(
+            &meta[12..15],
+            &[0.0, 0.0, 0.0],
+            "active class ids are training-only zeros"
+        );
+    }
+
+    #[test]
+    fn decoding_keeps_float_mask_boundaries_and_opencv_downsampling() {
+        let molded = MoldedPage {
+            tensor: vec![],
+            window: [0.0, 0.0, 1024.0, 1024.0],
+            scale: 1.0,
+        };
+        let decode = |values: &[f32], width: u32| {
+            let masks: Vec<f32> = values.iter().flat_map(|&value| [0.0, value, 0.0]).collect();
+            decode_detections(
+                &[1, 1, 6],
+                &[0.0, 0.0, 1.0, 1.0, 1.0, 0.9],
+                &[1, 1, 1, values.len() as i64, 3],
+                &masks,
+                width,
+                1,
+                &molded,
+            )
+            .unwrap()
+        };
+        // cv2.INTER_LINEAR: centre is 0.4996, below the 0.5 threshold.
+        assert_eq!(decode(&[0.4991, 0.5001], 3)[0].mask, vec![0, 0, 1]);
+        // Linear shrinking samples the two centre pixels, without area averaging.
+        assert!(decode(&[0.99, 0.4, 0.4, 0.99], 1).is_empty());
+    }
+
+    #[test]
+    fn detector_resize_uses_half_pixel_bilinear_and_preserves_channels() {
+        let source =
+            image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 17, 0, 0, 255, 231]).expect("source");
+        let resized = resize_bilinear_rgba(&source, 3, 1);
+        assert_eq!(resized.get_pixel(0, 0).0, [255, 0, 0, 17]);
+        assert_eq!(resized.get_pixel(2, 0).0, [0, 0, 255, 231]);
+        assert_eq!(resized.get_pixel(1, 0).0, [128, 0, 128, 124]);
     }
 
     #[test]
@@ -525,12 +701,25 @@ mod tests {
         let (span_y, span_x) = (window[2] - window[0], window[3] - window[1]);
         let quarter = |start: f64, span: f64, fraction: f64| (start + span * fraction) as f32;
         let detections: Vec<f32> = vec![
-            quarter(window[0], span_y, 0.25), quarter(window[1], span_x, 0.25),
-            quarter(window[0], span_y, 0.75), quarter(window[1], span_x, 0.75),
-            2.0, 0.9,
+            quarter(window[0], span_y, 0.25),
+            quarter(window[1], span_x, 0.25),
+            quarter(window[0], span_y, 0.75),
+            quarter(window[1], span_x, 0.75),
+            2.0,
+            0.9,
             // Background: everything after this is padding.
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.1, 0.1, 0.2, 0.2, 1.0, 0.99,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            0.1,
+            0.2,
+            0.2,
+            1.0,
+            0.99,
         ];
         // Two 2x2 mask planes over three classes; the mosaic channel is the only one
         // that is set, so picking the wrong channel yields an empty mask.
@@ -539,32 +728,75 @@ mod tests {
             masks[pixel * NUM_CLASSES + CLASS_MOSAIC as usize] = 1.0;
         }
 
-        let found = decode_detections(&[1, 3, 6], &detections, &[1, 3, 2, 2, 3], &masks, 512, 512, &molded)
-            .expect("decoded");
+        let found = decode_detections(
+            &[1, 3, 6],
+            &detections,
+            &[1, 3, 2, 2, 3],
+            &masks,
+            512,
+            512,
+            &molded,
+        )
+        .expect("decoded");
         assert_eq!(found.len(), 1, "the background row must end the list");
         let detection = &found[0];
         assert_eq!(detection.region.kind, CensorKind::Mosaic);
         assert!((detection.score - 0.9).abs() < 1e-6);
         // A quarter to three quarters of a 512 page, within a pixel of rounding.
-        assert!((detection.region.x as i32 - 128).abs() <= 2, "x was {}", detection.region.x);
-        assert!((detection.region.y as i32 - 128).abs() <= 2, "y was {}", detection.region.y);
-        assert!((detection.region.width as i32 - 256).abs() <= 2, "width was {}", detection.region.width);
-        assert!(detection.mask.iter().all(|&value| value == 1), "the mosaic channel was not the one read");
+        assert!(
+            (detection.region.x as i32 - 128).abs() <= 2,
+            "x was {}",
+            detection.region.x
+        );
+        assert!(
+            (detection.region.y as i32 - 128).abs() <= 2,
+            "y was {}",
+            detection.region.y
+        );
+        assert!(
+            (detection.region.width as i32 - 256).abs() <= 2,
+            "width was {}",
+            detection.region.width
+        );
+        assert!(
+            detection.mask.iter().all(|&value| value == 1),
+            "the mosaic channel was not the one read"
+        );
     }
 
     #[test]
     fn a_mask_projects_into_a_crop_window_without_leaving_it() {
         let detection = Detection {
-            region: CensorRegion { x: 10, y: 10, width: 2, height: 2, kind: CensorKind::Bar },
+            region: CensorRegion {
+                x: 10,
+                y: 10,
+                width: 2,
+                height: 2,
+                kind: CensorKind::Bar,
+            },
             score: 1.0,
             mask: vec![1, 0, 0, 1],
         };
         // A window that only overlaps the detection's bottom-right pixel.
-        let window = CropWindow { x: 11, y: 11, width: 4, height: 4 };
+        let window = CropWindow {
+            x: 11,
+            y: 11,
+            width: 4,
+            height: 4,
+        };
         let projected = detection.mask_in_window(&window);
         assert_eq!(projected.len(), 16);
-        assert_eq!(projected[0], 1, "the overlapping censored pixel is the window's origin");
-        assert_eq!(projected.iter().map(|&value| usize::from(value)).sum::<usize>(), 1);
+        assert_eq!(
+            projected[0], 1,
+            "the overlapping censored pixel is the window's origin"
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .map(|&value| usize::from(value))
+                .sum::<usize>(),
+            1
+        );
     }
 
     /// The real detector, when it is on this machine.
@@ -588,7 +820,11 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let inside_bar = (200..400).contains(&x) && (400..500).contains(&y);
-                let level = if inside_bar { 0 } else { ((x + y) % 200 + 40) as u8 };
+                let level = if inside_bar {
+                    0
+                } else {
+                    ((x + y) % 200 + 40) as u8
+                };
                 bar.extend_from_slice(&[level, level, level, 255]);
             }
         }
@@ -600,14 +836,21 @@ mod tests {
                 let inside = (180..420).contains(&x) && (360..560).contains(&y);
                 let (r, g, b) = if inside {
                     let block = ((x / 16) * 37 + (y / 16) * 61) % 96;
-                    (200 - block as u8 / 2, 160 - block as u8 / 3, 140 - block as u8 / 4)
+                    (
+                        200 - block as u8 / 2,
+                        160 - block as u8 / 3,
+                        140 - block as u8 / 4,
+                    )
                 } else {
                     (226 - (y % 24) as u8, 188 - (x % 20) as u8, 170)
                 };
                 mosaic.extend_from_slice(&[r, g, b, 255]);
             }
         }
-        vec![("bar", width, height, bar), ("mosaic", width, height, mosaic)]
+        vec![
+            ("bar", width, height, bar),
+            ("mosaic", width, height, mosaic),
+        ]
     }
 
     /// The fp16 detector against the float32 one, when both are on this machine.
@@ -622,11 +865,16 @@ mod tests {
     /// That gap is the same one the anchor ordering has, and it needs a real page.
     #[test]
     fn the_fp16_detector_agrees_with_the_float32_one() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/Aletheia-Lens/_internal");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/Aletheia-Lens/_internal");
         let full = root.join("models/mrcnn/weights.onnx");
         let half = root.join("models-fp16/mrcnn/weights.onnx");
         if !full.exists() || !half.exists() {
-            eprintln!("skipping: {} or {} is not present", full.display(), half.display());
+            eprintln!(
+                "skipping: {} or {} is not present",
+                full.display(),
+                half.display()
+            );
             return;
         }
         // Worth stating in the assertion: the point of the conversion is the size.
@@ -640,37 +888,74 @@ mod tests {
         let full_engine = DetectorEngine::open(&full).expect("float32 detector");
         let half_engine = DetectorEngine::open(&half).expect("fp16 detector");
         for (name, width, height, rgba) in synthetic_pages() {
-            let expected = full_engine.detect(&rgba, width, height).expect("float32 detect");
-            let actual = half_engine.detect(&rgba, width, height).expect("fp16 detect");
+            let expected = full_engine
+                .detect(&rgba, width, height)
+                .expect("float32 detect");
+            let actual = half_engine
+                .detect(&rgba, width, height)
+                .expect("fp16 detect");
             // Printed rather than asserted: how many regions a synthetic page yields
             // is the model's business, and the number is what says whether this
             // comparison saw anything at all.
-            eprintln!("{name}: float32 found {}, fp16 found {}", expected.len(), actual.len());
+            eprintln!(
+                "{name}: float32 found {}, fp16 found {}",
+                expected.len(),
+                actual.len()
+            );
             assert_eq!(actual.len(), expected.len(), "{name}: region count differs");
             // Neither build detects anything in a synthetic page, so the comparison
             // above is a comparison of two empty lists. The class scores are the
             // numbers that exist either way, and they are what says the conversion
             // preserved the arithmetic.
-            let full_scores = full_engine.raw_output(&rgba, width, height, "mrcnn_class").expect("float32 scores");
-            let half_scores = half_engine.raw_output(&rgba, width, height, "mrcnn_class").expect("fp16 scores");
-            assert_eq!(full_scores.len(), half_scores.len(), "{name}: score tensor size differs");
-            assert!(full_scores.iter().all(|value| value.is_finite()), "{name}: float32 produced non-finite scores");
-            assert!(half_scores.iter().all(|value| value.is_finite()), "{name}: fp16 produced non-finite scores");
-            let worst = full_scores.iter().zip(half_scores.iter())
+            let full_scores = full_engine
+                .raw_output(&rgba, width, height, "mrcnn_class")
+                .expect("float32 scores");
+            let half_scores = half_engine
+                .raw_output(&rgba, width, height, "mrcnn_class")
+                .expect("fp16 scores");
+            assert_eq!(
+                full_scores.len(),
+                half_scores.len(),
+                "{name}: score tensor size differs"
+            );
+            assert!(
+                full_scores.iter().all(|value| value.is_finite()),
+                "{name}: float32 produced non-finite scores"
+            );
+            assert!(
+                half_scores.iter().all(|value| value.is_finite()),
+                "{name}: fp16 produced non-finite scores"
+            );
+            let worst = full_scores
+                .iter()
+                .zip(half_scores.iter())
                 .map(|(left, right)| (left - right).abs())
                 .fold(0.0_f32, f32::max);
             let spread = full_scores.iter().copied().fold(0.0_f32, f32::max);
-            eprintln!("{name}: worst class-score difference {worst:.5} over a range up to {spread:.5}");
+            eprintln!(
+                "{name}: worst class-score difference {worst:.5} over a range up to {spread:.5}"
+            );
             // fp16 carries about three decimal digits, and these are probabilities.
-            assert!(worst < 0.01, "{name}: class scores differ by {worst}, which is more than rounding");
+            assert!(
+                worst < 0.01,
+                "{name}: class scores differ by {worst}, which is more than rounding"
+            );
             for (left, right) in expected.iter().zip(actual.iter()) {
                 assert_eq!(left.region.kind, right.region.kind, "{name}: class differs");
                 // A box that moves by a pixel or two is fp16 rounding; the window
                 // grown around it is 1.5x and at least 256px, so it is absorbed.
                 let dx = left.region.x.abs_diff(right.region.x);
                 let dy = left.region.y.abs_diff(right.region.y);
-                assert!(dx <= 4 && dy <= 4, "{name}: box moved by ({dx},{dy}): {left:?} vs {right:?}");
-                assert!((left.score - right.score).abs() < 0.05, "{name}: score {} vs {}", left.score, right.score);
+                assert!(
+                    dx <= 4 && dy <= 4,
+                    "{name}: box moved by ({dx},{dy}): {left:?} vs {right:?}"
+                );
+                assert!(
+                    (left.score - right.score).abs() < 0.05,
+                    "{name}: score {} vs {}",
+                    left.score,
+                    right.score
+                );
             }
         }
     }
@@ -695,7 +980,11 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let inside_bar = (200..400).contains(&x) && (400..500).contains(&y);
-                let level = if inside_bar { 0 } else { ((x + y) % 200 + 40) as u8 };
+                let level = if inside_bar {
+                    0
+                } else {
+                    ((x + y) % 200 + 40) as u8
+                };
                 rgba.extend_from_slice(&[level, level, level, 255]);
             }
         }
@@ -707,12 +996,28 @@ mod tests {
         // Whatever it found has to be inside the page and usable: a displaced window
         // or a permuted anchor array shows up here as boxes off the page.
         for detection in &found {
-            assert!(detection.region.x + detection.region.width <= width, "box leaves the page: {detection:?}");
-            assert!(detection.region.y + detection.region.height <= height, "box leaves the page: {detection:?}");
-            assert!(detection.score.is_finite() && detection.score >= 0.75, "score {} is not a kept detection", detection.score);
-            assert_eq!(detection.mask.len(), (detection.region.width * detection.region.height) as usize);
+            assert!(
+                detection.region.x + detection.region.width <= width,
+                "box leaves the page: {detection:?}"
+            );
+            assert!(
+                detection.region.y + detection.region.height <= height,
+                "box leaves the page: {detection:?}"
+            );
+            assert!(
+                detection.score.is_finite() && detection.score >= 0.75,
+                "score {} is not a kept detection",
+                detection.score
+            );
+            assert_eq!(
+                detection.mask.len(),
+                (detection.region.width * detection.region.height) as usize
+            );
         }
-        eprintln!("detector returned {} region(s) on the synthetic page", found.len());
+        eprintln!(
+            "detector returned {} region(s) on the synthetic page",
+            found.len()
+        );
     }
 
     /// Proves the anchor array is load-bearing.
@@ -740,15 +1045,22 @@ mod tests {
         assert_ne!(wrong.len(), pyramid_anchors(DETECTOR_SIDE).len());
 
         let side = i64::from(DETECTOR_SIDE);
-        let image_input = ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor)).expect("image");
-        let meta_input = ort::value::Tensor::from_array((vec![1, meta.len() as i64], meta)).expect("meta");
-        let anchor_input = ort::value::Tensor::from_array((vec![1, (wrong.len() / 4) as i64, 4], wrong)).expect("anchors");
+        let image_input =
+            ort::value::Tensor::from_array((vec![1, side, side, 3], molded.tensor)).expect("image");
+        let meta_input =
+            ort::value::Tensor::from_array((vec![1, meta.len() as i64], meta)).expect("meta");
+        let anchor_input =
+            ort::value::Tensor::from_array((vec![1, (wrong.len() / 4) as i64, 4], wrong))
+                .expect("anchors");
         let mut session = engine.session.lock().expect("session");
         let outcome = session.run(ort::inputs![
             IMAGE_INPUT => image_input,
             META_INPUT => meta_input,
             ANCHOR_INPUT => anchor_input,
         ]);
-        assert!(outcome.is_err(), "the graph accepted a pyramid it cannot index: the anchors are not what drives it");
+        assert!(
+            outcome.is_err(),
+            "the graph accepted a pyramid it cannot index: the anchors are not what drives it"
+        );
     }
 }

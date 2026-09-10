@@ -17,6 +17,9 @@ const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
 const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
+const DOWNLOAD_DIRECTORY_KEY: &str = "preferences.download_directory";
+const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
+const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -83,6 +86,12 @@ pub struct PreferenceSnapshot {
     /// only sense in which the feature can be off.
     #[serde(default)]
     pub decensor_model: String,
+    #[serde(default)]
+    pub download_directory: String,
+    #[serde(default)]
+    pub eh_favorite_delete_sync: bool,
+    #[serde(default = "default_true")]
+    pub confirm_eh_favorite_delete: bool,
     /// Free-form CSS appended after the design tokens. This is the whole
     /// customisation surface: it superseded a single accent-colour preference,
     /// which could not express the themes people actually want and became one
@@ -91,11 +100,24 @@ pub struct PreferenceSnapshot {
     pub custom_css: String,
 }
 
-fn default_prefetch_pages() -> u8 { 1 }
-fn default_cover_concurrency() -> u8 { 4 }
-fn default_startup_route() -> String { "home".to_string() }
-fn default_card_style() -> String { "wide".to_string() }
-fn default_upscale_backend() -> String { "off".to_string() }
+fn default_prefetch_pages() -> u8 {
+    1
+}
+fn default_true() -> bool {
+    true
+}
+fn default_cover_concurrency() -> u8 {
+    4
+}
+fn default_startup_route() -> String {
+    "home".to_string()
+}
+fn default_card_style() -> String {
+    "wide".to_string()
+}
+fn default_upscale_backend() -> String {
+    "off".to_string()
+}
 
 impl Default for PreferenceSnapshot {
     fn default() -> Self {
@@ -111,6 +133,9 @@ impl Default for PreferenceSnapshot {
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
             decensor_model: String::new(),
+            download_directory: String::new(),
+            eh_favorite_delete_sync: false,
+            confirm_eh_favorite_delete: true,
             custom_css: String::new(),
         }
     }
@@ -136,6 +161,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
         || value.decensor_model.len() > 128
+        || value.download_directory.len() > 4096
+        || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
         || value.custom_css.len() > 20_000
     {
@@ -171,12 +198,31 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         default_direction: load_value(connection, DIRECTION_KEY, defaults.default_direction)?,
         cache_max_bytes: load_value(connection, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
         prefetch_pages: load_value(connection, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
-        cover_concurrency: load_value(connection, COVER_CONCURRENCY_KEY, defaults.cover_concurrency)?,
+        cover_concurrency: load_value(
+            connection,
+            COVER_CONCURRENCY_KEY,
+            defaults.cover_concurrency,
+        )?,
         startup_route: load_value(connection, STARTUP_ROUTE_KEY, defaults.startup_route)?,
         card_style: load_value(connection, CARD_STYLE_KEY, defaults.card_style)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
         decensor_model: load_value(connection, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
+        download_directory: load_value(
+            connection,
+            DOWNLOAD_DIRECTORY_KEY,
+            defaults.download_directory,
+        )?,
+        eh_favorite_delete_sync: load_value(
+            connection,
+            EH_FAVORITE_DELETE_SYNC_KEY,
+            defaults.eh_favorite_delete_sync,
+        )?,
+        confirm_eh_favorite_delete: load_value(
+            connection,
+            CONFIRM_EH_FAVORITE_DELETE_KEY,
+            defaults.confirm_eh_favorite_delete,
+        )?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
     };
     validate_preferences(&value)?;
@@ -188,19 +234,57 @@ pub fn save_preferences_to(
     value: PreferenceSnapshot,
 ) -> Result<PreferenceSnapshot, String> {
     validate_preferences(&value)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     for (key, encoded) in [
         (THEME_KEY, serde_json::to_string(&value.theme)),
         (LAYOUT_KEY, serde_json::to_string(&value.default_layout)),
-        (DIRECTION_KEY, serde_json::to_string(&value.default_direction)),
-        (CACHE_MAX_BYTES_KEY, serde_json::to_string(&value.cache_max_bytes)),
-        (PREFETCH_PAGES_KEY, serde_json::to_string(&value.prefetch_pages)),
-        (COVER_CONCURRENCY_KEY, serde_json::to_string(&value.cover_concurrency)),
-        (STARTUP_ROUTE_KEY, serde_json::to_string(&value.startup_route)),
+        (
+            DIRECTION_KEY,
+            serde_json::to_string(&value.default_direction),
+        ),
+        (
+            CACHE_MAX_BYTES_KEY,
+            serde_json::to_string(&value.cache_max_bytes),
+        ),
+        (
+            PREFETCH_PAGES_KEY,
+            serde_json::to_string(&value.prefetch_pages),
+        ),
+        (
+            COVER_CONCURRENCY_KEY,
+            serde_json::to_string(&value.cover_concurrency),
+        ),
+        (
+            STARTUP_ROUTE_KEY,
+            serde_json::to_string(&value.startup_route),
+        ),
         (CARD_STYLE_KEY, serde_json::to_string(&value.card_style)),
-        (UPSCALE_BACKEND_KEY, serde_json::to_string(&value.upscale_backend)),
-        (UPSCALE_MODEL_KEY, serde_json::to_string(&value.upscale_model)),
-        (DECENSOR_MODEL_KEY, serde_json::to_string(&value.decensor_model)),
+        (
+            UPSCALE_BACKEND_KEY,
+            serde_json::to_string(&value.upscale_backend),
+        ),
+        (
+            UPSCALE_MODEL_KEY,
+            serde_json::to_string(&value.upscale_model),
+        ),
+        (
+            DECENSOR_MODEL_KEY,
+            serde_json::to_string(&value.decensor_model),
+        ),
+        (
+            DOWNLOAD_DIRECTORY_KEY,
+            serde_json::to_string(&value.download_directory),
+        ),
+        (
+            EH_FAVORITE_DELETE_SYNC_KEY,
+            serde_json::to_string(&value.eh_favorite_delete_sync),
+        ),
+        (
+            CONFIRM_EH_FAVORITE_DELETE_KEY,
+            serde_json::to_string(&value.confirm_eh_favorite_delete),
+        ),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
     ] {
         transaction
@@ -281,7 +365,9 @@ pub fn load_preferences(database: tauri::State<'_, Database>) -> CommandResult<P
     };
     match load_preferences_from(&connection) {
         Ok(value) => CommandResult::success(value),
-        Err(_) => CommandResult::failure("INVALID_RESPONSE", "Stored preferences are invalid", false),
+        Err(_) => {
+            CommandResult::failure("INVALID_RESPONSE", "Stored preferences are invalid", false)
+        }
     }
 }
 
@@ -296,7 +382,9 @@ pub fn save_preferences(
     };
     match save_preferences_to(&mut connection, input) {
         Ok(value) => CommandResult::success(value),
-        Err(_) => CommandResult::failure("INVALID_RESPONSE", "Preference snapshot is invalid", false),
+        Err(_) => {
+            CommandResult::failure("INVALID_RESPONSE", "Preference snapshot is invalid", false)
+        }
     }
 }
 
@@ -347,7 +435,10 @@ mod tests {
             )
             .expect("unrelated setting fixture");
 
-        assert_eq!(load_preferences_from(&connection).expect("defaults"), PreferenceSnapshot::default());
+        assert_eq!(
+            load_preferences_from(&connection).expect("defaults"),
+            PreferenceSnapshot::default()
+        );
 
         let wanted = PreferenceSnapshot {
             theme: "dark".into(),
@@ -361,10 +452,16 @@ mod tests {
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
             decensor_model: "aletheia-lens".into(),
+            download_directory: std::env::temp_dir().to_string_lossy().into_owned(),
+            eh_favorite_delete_sync: true,
+            confirm_eh_favorite_delete: false,
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");
-        assert_eq!(load_preferences_from(&connection).expect("saved preferences"), wanted);
+        assert_eq!(
+            load_preferences_from(&connection).expect("saved preferences"),
+            wanted
+        );
         let device_id: String = connection
             .query_row(
                 "SELECT value_json FROM settings WHERE key='sync.device_id'",
@@ -381,34 +478,75 @@ mod tests {
         // accent-colour preference, which could not express a theme. The only
         // rule is that it cannot bloat the settings row.
         let mut connection = settings_db();
-        let themed = PreferenceSnapshot { custom_css: "body { letter-spacing: 0.01em; }".into(), ..PreferenceSnapshot::default() };
-        assert_eq!(save_preferences_to(&mut connection, themed.clone()).expect("save css"), themed);
-        assert_eq!(load_preferences_from(&connection).expect("load css").custom_css, "body { letter-spacing: 0.01em; }");
+        let themed = PreferenceSnapshot {
+            custom_css: "body { letter-spacing: 0.01em; }".into(),
+            ..PreferenceSnapshot::default()
+        };
+        assert_eq!(
+            save_preferences_to(&mut connection, themed.clone()).expect("save css"),
+            themed
+        );
+        assert_eq!(
+            load_preferences_from(&connection)
+                .expect("load css")
+                .custom_css,
+            "body { letter-spacing: 0.01em; }"
+        );
 
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            custom_css: "a".repeat(20_001), ..PreferenceSnapshot::default()
-        }).is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                custom_css: "a".repeat(20_001),
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
     fn preferences_reject_invalid_enum_and_quota_values() {
         let mut connection = settings_db();
         // Ten pages of prefetch is allowed now; eleven is not.
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            prefetch_pages: MAX_PREFETCH_PAGES, ..PreferenceSnapshot::default()
-        }).is_ok());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            prefetch_pages: MAX_PREFETCH_PAGES + 1, ..PreferenceSnapshot::default()
-        }).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            cover_concurrency: 0, ..PreferenceSnapshot::default()
-        }).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            upscale_backend: "gpu".into(), ..PreferenceSnapshot::default()
-        }).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            startup_route: "reader".into(), ..PreferenceSnapshot::default()
-        }).is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                prefetch_pages: MAX_PREFETCH_PAGES,
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_ok());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                prefetch_pages: MAX_PREFETCH_PAGES + 1,
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                cover_concurrency: 0,
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                upscale_backend: "gpu".into(),
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                startup_route: "reader".into(),
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
 
         let invalid_theme = PreferenceSnapshot {
             theme: "sepia".into(),
@@ -421,14 +559,22 @@ mod tests {
             ..PreferenceSnapshot::default()
         };
         assert!(save_preferences_to(&mut connection, invalid_quota).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            cache_max_bytes: 1_073_741_823,
-            ..PreferenceSnapshot::default()
-        }).is_err());
-        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
-            cache_max_bytes: 34_359_738_369,
-            ..PreferenceSnapshot::default()
-        }).is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                cache_max_bytes: 1_073_741_823,
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
+        assert!(save_preferences_to(
+            &mut connection,
+            PreferenceSnapshot {
+                cache_max_bytes: 34_359_738_369,
+                ..PreferenceSnapshot::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -464,11 +610,9 @@ mod tests {
     fn legacy_preferences_reject_malformed_or_unmapped_exports() {
         let mut connection = settings_db();
         assert!(import_legacy_preferences_from(&mut connection, "not-base64").is_err());
-        assert!(import_legacy_preferences_from(
-            &mut connection,
-            &STANDARD.encode("not-json")
-        )
-        .is_err());
+        assert!(
+            import_legacy_preferences_from(&mut connection, &STANDARD.encode("not-json")).is_err()
+        );
         assert!(import_legacy_preferences_from(
             &mut connection,
             &STANDARD.encode(r#"{"lrr_api_key":"secret-only"}"#)

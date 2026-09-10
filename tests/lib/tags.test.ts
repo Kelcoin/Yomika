@@ -1,4 +1,4 @@
-import { categorizeTags, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
+import { categorizeSearchableTags, categorizeTags, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
 import { formatArchiveDate } from '../../src/lib/archiveCardPresentation';
 
 describe('tag translations', () => {
@@ -6,6 +6,15 @@ describe('tag translations', () => {
     installTagTranslations({ female: { 'big breasts': '巨乳', 'dark skin': '黑皮' } });
     expect(categorizeTags(['female:big breasts', 'female:dark skin'])).toEqual([
       { namespace: 'female', label: '女性', values: ['巨乳', '黑皮'] },
+    ]);
+  });
+
+  it('keeps the raw exact query beside a translated tag label', () => {
+    installTagTranslations({ female: { 'big breasts': '巨乳' } });
+
+    expect(categorizeSearchableTags(['female:big breasts', 'plain tag'])).toEqual([
+      { namespace: 'female', label: '女性', values: [{ label: '巨乳', query: 'female:big breasts$' }] },
+      { namespace: 'general', label: '通用', values: [{ label: 'plain tag', query: 'plain tag$' }] },
     ]);
   });
 

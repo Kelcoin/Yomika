@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { EhAccountPanel } from '../../src/components/EhAccountPanel';
+import { ToastProvider } from '../../src/components/Toast';
 import type { EhAccount } from '../../src/domain/eh';
 
 describe('EhAccountPanel', () => {
@@ -15,7 +16,8 @@ describe('EhAccountPanel', () => {
     const items = screen.getAllByRole('listitem');
     expect(items).toHaveLength(2);
     expect(within(items[0]!).getByText('EH Main')).toBeDefined();
-    expect(within(items[0]!).getByText('e-hentai.org')).toBeDefined();
+    expect(within(items[0]!).getByText('正在检测 EXHENTAI 访问权限…')).toBeDefined();
+    expect(within(items[0]!).getByText('正在更新资产…')).toBeDefined();
     expect(within(items[1]!).getByText('EX Account')).toBeDefined();
   });
 
@@ -26,10 +28,10 @@ describe('EhAccountPanel', () => {
     expect(items[1]!.className).not.toContain('active');
   });
 
-  it('displays verification status for each account', () => {
+  it('does not display verification labels in the account row', () => {
     render(<EhAccountPanel accounts={sampleAccounts} />);
-    expect(screen.getByText('已验证')).toBeDefined();
-    expect(screen.getByText('未验证')).toBeDefined();
+    expect(screen.queryByText('已验证')).toBeNull();
+    expect(screen.queryByText('未验证')).toBeNull();
   });
 
   it('calls onSwitch with account id when switch button clicked', async () => {
@@ -82,5 +84,71 @@ describe('EhAccountPanel', () => {
   it('offers no web sign-in when the caller cannot open a window', () => {
     render(<EhAccountPanel accounts={[]} onSave={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /网页登录/ })).toBeNull();
+  });
+
+  it('clears an earlier account-import error after a cookie saves successfully', async () => {
+    const user = userEvent.setup();
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    render(<ToastProvider><EhAccountPanel accounts={[]} onSave={vi.fn(async () => undefined)} /></ToastProvider>);
+
+    await user.click(screen.getByRole('tab', { name: 'Cookie 导入' }));
+    const cookie = screen.getByLabelText('Cookie');
+    await user.type(cookie, 'broken');
+    await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('未能识别 Cookie');
+
+    await user.clear(cookie);
+    await user.type(cookie, `ipb_member_id=99; ipb_pass_hash=${hash}`);
+    await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
+    await vi.waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('keeps the igneous refresh action available before ExHentai cookie exists', async () => {
+    const user = userEvent.setup();
+    const onReadCookie = vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
+    const onCheckHealth = vi.fn(async () => undefined);
+    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={onReadCookie} onCheckHealth={onCheckHealth} />);
+    const surface = screen.getByTestId('eh-account-surface-eh-a');
+    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
+    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
+    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
+    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
+    expect((await screen.findAllByText('未获取')).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole('button', { name: '刷新 igneous' }));
+    expect(onCheckHealth).toHaveBeenCalledWith('eh-a');
+  });
+
+  it('shows every stored cookie in a popup with one copy-all action', async () => {
+    const user = userEvent.setup();
+    const cookie = 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; sl=dm_2; sk=abc123';
+    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => cookie)} />);
+    const surface = screen.getByTestId('eh-account-surface-eh-a');
+    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
+    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
+    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
+    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('sl')).toBeInTheDocument();
+    expect(within(dialog).getByText('dm_2')).toBeInTheDocument();
+    expect(within(dialog).getByText('sk')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '复制全部 Cookie' })).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /复制 ipb_member_id/ })).toBeNull();
+  });
+
+  it('lists the standard EH cookie fields even before a legacy account has refreshed them', async () => {
+    const user = userEvent.setup();
+    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90')} />);
+    const surface = screen.getByTestId('eh-account-surface-eh-a');
+    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
+    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
+    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
+    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('nw')).toBeInTheDocument();
+    expect(within(dialog).getByText('datatags')).toBeInTheDocument();
+    expect(within(dialog).getByText('ipb_session_id')).toBeInTheDocument();
+    expect(within(dialog).getByText('hath_perks')).toBeInTheDocument();
   });
 });

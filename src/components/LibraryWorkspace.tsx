@@ -1,29 +1,28 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
-import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
 import { EmptyState } from './EmptyState';
-import { LoadingIndicator } from './LoadingIndicator';
 import { SelectField } from './SelectField';
-import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
+import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, distributeCardTags, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
+import { TagSearchLink } from './TagSearchLink';
 
 /** Chips a card offers. These were 8 and 12, low enough that the cap — not the
  * space — was what limited the list: the CSS slot clips the overflow anyway, so a
  * generous number costs a few unrendered nodes and lets a wide card fill its
  * rows. */
-const CARD_TAG_LIMIT_THUMBNAIL = 14;
-const CARD_TAG_LIMIT_WIDE = 24;
+const CARD_TAG_LIMIT_THUMBNAIL = 24;
+const CARD_TAG_LIMIT_WIDE = 36;
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -109,6 +108,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
+  const savedPanelLayout = useDefaultLayout({
+    id: 'library-detail-layout',
+    panelIds: showDetail ? ['library-list', 'library-detail'] : ['library-list'],
+    storage: window.localStorage,
+    onlySaveAfterUserInteractions: true,
+  });
   const navigate = useNavigate();
   useTagTranslations();
 
@@ -195,7 +200,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     initialRect: { width: 720, height: 560 },
   });
 
-  const renderArchiveButton = (archive: ArchiveRecord, eager: boolean) => (
+  const renderArchiveButton = (archive: ArchiveRecord, eager: boolean) => {
+    const cardTags = pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE);
+    const tagRows = displayMode === 'wide' ? distributeCardTags(cardTags, 3) : [];
+    return (
     <>
     {onToggleSelected && (
       <input
@@ -234,21 +242,23 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       })} eager={eager} />}
       <span className="archive-row-copy">
         <strong>{archive.title}</strong>
-        <span className="archive-row-tags">{pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE).map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>
+        {displayMode === 'wide'
+          ? <span className="archive-row-tags">{tagRows.map((row, rowIndex) => <span className="archive-row-tag-line" key={rowIndex}>{row.map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>)}</span>
+          : <span className="archive-row-tags">{cardTags.map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
         <span className="archive-row-footer">
           <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
           <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
         </span>
       </span>
-      {/* When the caller has a time for this archive, it goes on the right as a
-          timeline entry rather than being folded into the stats line, so a run of
-          rows reads as a sequence. */}
-      {timelineByArchiveId?.get(archive.archiveId) && (
-        <span className="archive-row-timeline" aria-hidden="true">{timelineByArchiveId.get(archive.archiveId)}</span>
-      )}
     </button>
+    {/* The timeline belongs to the list rail, so it sits outside the clickable
+        card and connects continuously between neighbouring cards. */}
+    {timelineByArchiveId?.get(archive.archiveId) && (
+      <span className="archive-row-timeline" aria-hidden="true">{timelineByArchiveId.get(archive.archiveId)}</span>
+    )}
     </>
-  );
+    );
+  };
 
   return (
     <div className="library-workspace">
@@ -311,8 +321,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
         {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
         {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>}
-      <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal">
-        <Panel defaultSize={showDetail ? '64' : '100'} minSize="40">
+      <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={savedPanelLayout.defaultLayout} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
+        <Panel id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
           <div className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''}`} data-scroll-region ref={scrollRef} role="list" aria-label="档案" onScroll={(event) => {
             const target = event.currentTarget;
             if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
@@ -321,7 +331,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 branch, so arriving at the library flashed 暂无档案库 before the
                 first page landed. */}
             {filteredArchives.length === 0 && (listLoading
-              ? <LoadingIndicator label="正在读取档案" size="lg" />
+              ? <ArchiveListSkeleton mode={displayMode} />
               : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
             {displayMode === 'thumbnail' ? (
               <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
@@ -368,7 +378,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </div>
         </Panel>
         {showDetail && <><Separator className="panel-separator" />
-        <Panel defaultSize="36" minSize="24">
+        <Panel id="library-detail" defaultSize="36" minSize="24">
           {selected && (
             <section className="archive-detail" aria-labelledby="archive-detail-title">
               <h2 id="archive-detail-title">{selected.title}</h2>
@@ -378,7 +388,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 {archiveLanguageLabel(selected) && <span className="metadata-chip">{archiveLanguageLabel(selected)}</span>}
               </div>
               {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}
-              {(selected.tags ?? []).length > 0 && <div className="archive-detail-tags" aria-label="档案标签">{categorizeTags(selected.tags ?? []).map((group) => <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}><h3>{group.label}</h3><div>{group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`}>{tag}</span>)}</div></section>)}</div>}
+              {(selected.tags ?? []).length > 0 && <div className="archive-detail-tags" aria-label="档案标签">{categorizeSearchableTags(selected.tags ?? []).map((group) => <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}><h3>{group.label}</h3><div>{group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}</div></section>)}</div>}
               <div className="archive-detail-actions">
                 <Link className="primary-action" to={`/reader/${selected.archiveId}`} aria-label={`阅读 ${selected.title}`}>
                   <BookOpen aria-hidden="true" />
@@ -412,22 +422,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 </form>
               )}
               {onDelete && (
-                <Dialog.Root>
-                  <Dialog.Trigger asChild><button className="secondary-action" type="button">删除档案</button></Dialog.Trigger>
-                  <Dialog.Portal>
-                    <Dialog.Overlay className="dialog-overlay" />
-                    <Dialog.Content className="dialog-content">
-                      <Dialog.Title>确认删除</Dialog.Title>
-                      <Dialog.Description>将从 LANraragi 删除“{selected.title}”，此操作不可撤销。</Dialog.Description>
-                      <div className="dialog-actions">
-                        <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
-                        <Dialog.Close asChild>
-                          <button className="primary-action" type="button" onClick={() => void onDelete(selected)}>确认删除</button>
-                        </Dialog.Close>
-                      </div>
-                    </Dialog.Content>
-                  </Dialog.Portal>
-                </Dialog.Root>
+                <button className="secondary-action" type="button" onClick={() => void onDelete(selected)}>删除档案</button>
               )}
               <dl>
                 <div><dt>页数</dt><dd>{selected.pageCount}</dd></div>
@@ -445,7 +440,21 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           )}
         </Panel></>}
       </Group>
-      {hasMore && loadingMore && <LoadingIndicator label="正在加载更多档案" size="sm" />}
+      {hasMore && loadingMore && <div className="archive-load-more-skeleton" role="status" aria-label="正在加载更多档案"><span className="skeleton-line" /><span className="skeleton-line" /></div>}
+    </div>
+  );
+}
+
+function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
+  const count = mode === 'thumbnail' ? 8 : 5;
+  return (
+    <div className={`archive-list-skeleton is-${mode}`} role="status" aria-label="正在读取档案">
+      {Array.from({ length: count }, (_, index) => (
+        <div className="archive-row-skeleton" key={index}>
+          <span className="skeleton-block archive-row-skeleton-cover" />
+          <span className="archive-row-skeleton-copy"><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line" /></span>
+        </div>
+      ))}
     </div>
   );
 }

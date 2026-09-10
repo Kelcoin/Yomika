@@ -7,11 +7,13 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
+import { resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
   installTagTranslations({});
   vi.restoreAllMocks();
+  resetRouteCacheForTests();
 });
 
 const server = { id: 'server-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' };
@@ -37,6 +39,20 @@ function renderDetail() {
 }
 
 describe('archive detail route', () => {
+  it('paints the last detail snapshot before server lookup completes', async () => {
+    const cached = { ...metadata, title: 'Cached detail' };
+    writeRouteCache('archive-detail:last:archive-a', cached);
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return new Promise(() => undefined);
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderDetail();
+    expect(await screen.findByRole('heading', { name: 'Cached detail' })).toBeInTheDocument();
+  });
+
   it('uses a persistent cached cover without requesting LANraragi', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [server] };
@@ -53,6 +69,48 @@ describe('archive detail route', () => {
     expect(await screen.findByRole('img', { name: 'Archive detail 封面' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
     expect(adapter).not.toHaveBeenCalledWith('load_archive_thumbnail', expect.anything());
     view.unmount();
+  });
+
+  it('shows only the cover over a blurred backdrop and closes from any click', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    const trigger = await screen.findByRole('button', { name: '查看Archive detail大图' });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveAttribute('aria-label', 'Archive detail封面大图');
+    const preview = within(dialog).getByRole('img', { name: 'Archive detail 封面大图' });
+    expect(preview).toBeInTheDocument();
+    expect(within(dialog).queryByRole('heading')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button')).not.toBeInTheDocument();
+    fireEvent.click(preview);
+    expect(screen.queryByRole('dialog', { name: 'Archive detail封面大图' })).not.toBeInTheDocument();
+  });
+
+  it('links translated detail tags to an exact library search', async () => {
+    installTagTranslations({ female: { 'big breasts': '巨乳' } });
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('link', { name: '搜索标签 巨乳' })).toHaveAttribute(
+      'href',
+      '/library?q=female%3Abig+breasts%24%2C+',
+    );
   });
 
   it('uses persistent page thumbnails without requesting LANraragi', async () => {
@@ -73,6 +131,7 @@ describe('archive detail route', () => {
 
     renderDetail();
 
+    fireEvent.click(await screen.findByRole('tab', { name: '详情' }));
     // The page image itself is decorative: the visible page number labels it.
     const thumbnail = await screen.findByRole('button', { name: '查看第 1 页' });
     await vi.waitFor(() => expect(thumbnail.querySelector('img')).toHaveAttribute('src', expect.stringMatching(/^blob:/)));
@@ -243,7 +302,7 @@ describe('archive detail route', () => {
     expect(screen.getByText('本次阅读不会记录进度，也不会写入历史。')).toBeInTheDocument();
   });
 
-  it('recommends by shared tags and same creator above the page thumbnails', async () => {
+  it('switches between recommendations and page thumbnails below the action toolbar', async () => {
     setInvokeAdapterForTests(async (command, args) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_archive_metadata') {
@@ -285,8 +344,97 @@ describe('archive detail route', () => {
     const creator = await screen.findByRole('region', { name: '同作者作品' });
     expect(await within(creator).findByRole('link', { name: /By same artist/ })).toBeInTheDocument();
 
-    const thumbnails = screen.getByRole('region', { name: '页面缩略图' });
-    expect(creator.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await screen.findByRole('region', { name: '页面缩略图' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '同作者作品' })).toBeInTheDocument();
+  });
+
+  it('preloads every thumbnail after selecting the panel without waiting for viewport intersection', async () => {
+    const OriginalObserver = window.IntersectionObserver;
+    window.IntersectionObserver = class {
+      disconnect() {}
+      observe() {}
+      takeRecords() { return []; }
+      unobserve() {}
+      root = null;
+      rootMargin = '0px';
+      thresholds = [0];
+    } as unknown as typeof IntersectionObserver;
+    const adapter = vi.fn(async (command: string, args?: Record<string, any>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 4 } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      if (command === 'load_archive_page_thumbnail') return { ok: true, value: [255, 216, 255, 224] };
+      throw new Error(`Unexpected command: ${command} ${JSON.stringify(args)}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    try {
+      renderDetail();
+      await screen.findByRole('tab', { name: '详情' });
+      await vi.waitFor(() => {
+        expect(adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail')).toHaveLength(4);
+      });
+    } finally {
+      window.IntersectionObserver = OriginalObserver;
+    }
+  });
+
+  it('offers comments only for a verified active E-Hentai account', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://e-hentai.org/g/12345/abc/, artist:sample' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-a', label: 'EH', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'verified', createdAt: '', updatedAt: '' }] };
+      if (command === 'get_eh_comments') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDetail();
+    await vi.waitFor(() => expect(adapter.mock.calls.some(([command]) => command === 'get_eh_comments')).toBe(true));
+    fireEvent.click(await screen.findByRole('tab', { name: '评论' }));
+    expect(await screen.findByRole('region', { name: 'E-Hentai 评论' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '页面缩略图' })).not.toBeInTheDocument();
+  });
+
+  it('keeps both detail tabs available when the E-Hentai account is not verified', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://e-hentai.org/g/12345/abc/' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-a', label: 'EH', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'error', createdAt: '', updatedAt: '' }] };
+      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderDetail();
+    await screen.findByRole('tab', { name: '详情' });
+    const comments = screen.getByRole('tab', { name: '评论' });
+    fireEvent.click(comments);
+    expect(await screen.findByText('此档案没有可读取的 E-Hentai 评论。')).toBeInTheDocument();
+  });
+
+  it('does not render or cache recommendations confirmed missing by LANraragi', async () => {
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_archives_page') return { ok: true, value: { items: [
+        { serverId: server.id, archiveId: 'gone', title: 'Gone recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
+        { serverId: server.id, archiveId: 'kept', title: 'Kept recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
+      ], total: 2, hasMore: false } };
+      if (command === 'verify_archives_exist') return { ok: true, value: ['gone'] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command} ${(args as any)?.input ?? ''}`);
+    });
+    renderDetail();
+    const rail = await screen.findByRole('region', { name: '猜你喜欢' });
+    expect(within(rail).getByRole('link', { name: /Kept recommendation/ })).toBeInTheDocument();
+    expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
   });
 
   it('reuses the recommendations it already searched for on a second visit', async () => {

@@ -5,17 +5,20 @@ import {
   BookmarkX,
   BookOpen,
   Heart,
+  Images,
+  MessageCircle,
   Pencil,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
-import { categorizeTags, parseArchiveTagString } from '../lib/tags';
-import { pickSeedTags, rankRecommendations, sameCreatorTags } from '../lib/recommendation';
+import { categorizeSearchableTags, parseArchiveTagString } from '../lib/tags';
+import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { readRouteCache, writeRouteCache } from '../lib/routeCache';
+import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
   NativeLibraryRepository,
   type ArchiveMetadata,
@@ -24,8 +27,16 @@ import type { ArchiveRecord } from '../domain/library';
 import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
+import { useReturnNavigation } from '../lib/useReturnNavigation';
+import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
+import { findMissingArchives } from '../lib/archiveExistence';
+import { ehGalleryFromTags } from '../lib/archiveDeletion';
+import { EhComments } from './EhComments';
+import { NativeEhRepository } from '../repositories/nativeEhRepository';
+import { TagSearchLink } from './TagSearchLink';
 
 const repository = new NativeLibraryRepository();
+const ehRepository = new NativeEhRepository();
 /** Long enough not to fire on a normal tap, short enough to discover by holding.
  * Matches the platform convention rather than the drag thresholds. */
 const LONG_PRESS_MS = 500;
@@ -36,7 +47,12 @@ const LONG_PRESS_MS = 500;
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
-  const [metadata, setMetadata] = useState<ArchiveMetadata>();
+  // The server scope is only known after listServers IPC. Keep a second,
+  // archive-keyed pointer so a route remount can paint cached metadata on its
+  // first render instead of flashing the loading shell while that lookup runs.
+  const [metadata, setMetadata] = useState<ArchiveMetadata | undefined>(() => (
+    readRouteCache<ArchiveMetadata>(`archive-detail:last:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS)
+  ));
   const [cover, setCover] = useState<string>();
   const [coverLoading, setCoverLoading] = useState(true);
   const [metadataLoading, setMetadataLoading] = useState(true);
@@ -50,6 +66,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
    * also follow the link, so the click is swallowed once. */
   const [incognitoAsk, setIncognitoAsk] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [coverPreviewOpen, setCoverPreviewOpen] = useState(false);
+  const [detailPanel, setDetailPanel] = useState<'media' | 'comments'>('media');
+  const [ehAccountId, setEhAccountId] = useState<string>();
   const incognitoTimer = useRef<number>();
   const incognitoPrompted = useRef(false);
 
@@ -68,14 +88,17 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   }, []);
 
   useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
+  useEffect(() => {
+    if (!coverPreviewOpen) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setCoverPreviewOpen(false); };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [coverPreviewOpen]);
 
   /** Back means back. This was a hardcoded link to the library, so arriving from
    * the home shelves and pressing it took you somewhere you had never been.
    * A direct visit has nothing to return to, so that case still falls back. */
-  const goBack = useCallback(() => {
-    if (window.history.length > 1) navigate(-1);
-    else navigate('/library');
-  }, [navigate]);
+  const goBack = useReturnNavigation();
   const { showToast } = useToast();
   useTagTranslations();
 
@@ -90,7 +113,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     let active = true;
     const coverController = new AbortController();
     let coverHandle: import('../lib/unifiedImageCache').ImageHandle | undefined;
-    setMetadata(undefined);
+    const lastSnapshot = readRouteCache<ArchiveMetadata>(`archive-detail:last:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+    setMetadata(lastSnapshot);
     setCover(undefined);
     setCoverLoading(true);
     setMetadataLoading(true);
@@ -99,6 +123,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     setScopeId(undefined);
     setFavorite(false);
     setMessage(undefined);
+    setEhAccountId(undefined);
+    setDetailPanel('media');
 
     void repository.listServers().then((servers) => {
       if (!active) return;
@@ -115,17 +141,32 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       // Stale while revalidating: the page paints from the last visit's metadata
       // and corrects itself a beat later. Skipping the request instead would show
       // a stale title after the metadata editor wrote a new one.
+      const scopedLast = readRouteCache<ArchiveMetadata>(`archive-detail:last:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
       const cached = readRouteCache<ArchiveMetadata>(`archive-detail:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+      if (scopedLast) setMetadata(scopedLast);
       if (cached) {
         setMetadata(cached);
         setMetadataLoading(false);
+      } else {
+        setMetadata(undefined);
       }
       void repository.loadArchiveMetadata(server.id, archiveId).then((result) => {
         if (!active) return;
         if (result.ok) {
           setMetadata(result.value);
           writeRouteCache(`archive-detail:${server.id}:${archiveId}`, result.value);
+          writeRouteCache(`archive-detail:last:${server.id}:${archiveId}`, result.value);
+          writeRouteCache(`archive-detail:last:${archiveId}`, result.value);
         } else if (result.error.code === 'LRR_NOT_FOUND') {
+          // The recommendation rail is intentionally cached. A remote 404 is
+          // authoritative, so invalidate every affected snapshot before
+          // leaving the route; otherwise the same stale card reappears when
+          // the detail page is opened again.
+          invalidateRouteCache('archive-detail:');
+          invalidateRouteCache('recommendations:');
+          invalidateRouteCache('home:');
+          invalidateRouteCache('library:');
+          invalidateRouteCache('state:');
           showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
           navigate('/library', { replace: true });
         } else if (!cached) setError(result.error.message);
@@ -151,6 +192,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       void repository.listReadingList(server.scopeId).then((result) => {
         if (!active || !result.ok) return;
         setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
+      });
+      void ehRepository.listAccounts().then((result) => {
+        if (!active || !result.ok) return;
+        setEhAccountId(result.value.find((item) => item.isActive && item.status === 'verified')?.id);
       });
     });
 
@@ -182,7 +227,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
   const title = metadata?.title || archiveId;
   const tags = metadata ? parseArchiveTagString(metadata.tags) : [];
-  const tagGroups = categorizeTags(tags);
+  const tagGroups = categorizeSearchableTags(tags);
+  const ehGallery = ehGalleryFromTags(tags);
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
@@ -193,7 +239,9 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       <div className="archive-detail-overview">
         <div className="archive-detail-route-cover">
           {cover
-            ? <img src={cover} alt={`${title} 封面`} />
+            ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setCoverPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图">
+                <img src={cover} alt={`${title} 封面`} />
+              </button>
             : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
@@ -205,7 +253,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
                   <h2>{group.label}</h2>
                   <div className={`archive-detail-tag-row${groupIndex === tagGroups.length - 1 && metadata ? ' has-meta' : ''}`}>
                     <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <span className="metadata-chip" key={`${group.namespace}-${tag}-${index}`} title={tag}>{tag}</span>)}
+                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}
                     </span>
                     {groupIndex === tagGroups.length - 1 && metadata && <span className="archive-detail-meta archive-detail-meta-inline"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></span>}
                   </div>
@@ -251,28 +299,11 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             else setMessage(result.error.message);
           });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>
-        <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit`)}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
+        <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
 
         {serverId && (
-          <Dialog.Root>
-            <Dialog.Trigger asChild><button className="archive-action-button" type="button" aria-label="删除档案" title="删除档案"><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button></Dialog.Trigger>
-            <Dialog.Portal>
-              <Dialog.Overlay className="dialog-overlay" />
-              <Dialog.Content className="dialog-content">
-                <Dialog.Title>确认删除</Dialog.Title>
-                <Dialog.Description>将从 LANraragi 删除“{title}”，此操作不可撤销。</Dialog.Description>
-                <div className="dialog-actions">
-                  <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
-                  <Dialog.Close asChild><button className="primary-action archive-confirm-delete" type="button" onClick={() => {
-                    void repository.deleteArchive(serverId, archiveId).then((result) => {
-                      if (result.ok) navigate('/library');
-                      else setMessage(result.error.message);
-                    });
-                  }}>确认删除</button></Dialog.Close>
-                </div>
-              </Dialog.Content>
-            </Dialog.Portal>
-          </Dialog.Root>
+          <><button className="archive-action-button" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
+          {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}</>
         )}
       </div>
 
@@ -295,11 +326,20 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         </Dialog.Portal>
       </Dialog.Root>
 
-      {/* Recommendations sit above the page thumbnails: they are about what to
-          read next, not about this archive's pages. */}
-      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+      {coverPreviewOpen && cover && (
+        <div className="archive-cover-preview" role="dialog" aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setCoverPreviewOpen(false)}>
+          <img src={cover} alt={`${title} 封面大图`} />
+        </div>
+      )}
 
-      {metadata && metadata.pageCount > 0 && serverId && scopeId && (
+      <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容">
+        <button type="button" role="tab" aria-selected={detailPanel === 'media'} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => setDetailPanel('media')}><Images aria-hidden="true" /><Sparkles aria-hidden="true" /><span>详情</span></button>
+        <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
+      </div>
+
+      {detailPanel === 'media' && serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+
+      {detailPanel === 'media' && metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
           <div className="archive-page-thumbnails-grid">
             {Array.from({ length: metadata.pageCount }, (_, index) => (
@@ -310,6 +350,9 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
+      {ehGallery && ehAccountId
+        ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} prefetch={detailPanel !== 'comments'} />
+        : detailPanel === 'comments' && <p className="archive-comments-unavailable">此档案没有可读取的 E-Hentai 评论。</p>}
     </main>
   );
 }
@@ -322,7 +365,7 @@ interface RecommendationSnapshot {
 /** Recommendations cost up to a dozen searches on the server, and the answer for
  * one archive does not change minute to minute. Stepping back into a detail page
  * should not pay for them again. */
-const RECOMMENDATION_SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
+const RECOMMENDATION_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1000;
 
 function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
@@ -331,45 +374,103 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
   const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
   const [tab, setTab] = useState<'similar' | 'creator'>('similar');
-  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu();
+  const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
+    onDeleted: (archiveId) => {
+      setSimilar((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      setSameCreator((current) => current.filter((archive) => archive.archiveId !== archiveId));
+    },
+  });
   const creator = useMemo(() => sameCreatorTags(tags), [tags]);
 
   useEffect(() => {
     if (tags.length === 0) return undefined;
+    let active = true;
+    const loadProgress = async () => {
+      const result = await repository.listHistory(scopeId);
+      if (!result.ok) return new Map<string, number>();
+      return new Map(result.value.map((item) => [item.archiveId, item.pageIndex + 1]));
+    };
+    const addProgress = (archives: readonly ArchiveRecord[], progress: ReadonlyMap<string, number>) => archives.map((archive) => ({
+      ...archive,
+      readPages: progress.get(archive.archiveId) ?? 0,
+    }));
     const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
     if (cached) {
-      setSimilar(cached.similar);
-      setSameCreator(cached.sameCreator);
       setLoading(false);
-      return undefined;
+      void loadProgress().then((progress) => {
+        if (!active) return;
+        const cachedSimilar = addProgress(cached.similar, progress);
+        const cachedCreator = sortSameCreatorRecommendations(addProgress(cached.sameCreator, progress));
+        setSimilar(cachedSimilar);
+        setSameCreator(cachedCreator);
+        // A cached recommendation can outlive the remote archive. Revalidate the
+        // ids before the next visit writes the stale card back to the DOM.
+        return Promise.all([
+          findMissingArchives(serverId, cachedSimilar.map((archive) => archive.archiveId)),
+          findMissingArchives(serverId, cachedCreator.map((archive) => archive.archiveId)),
+        ]).then(([missingSimilar, missingCreator]) => {
+        if (!active || (missingSimilar.size === 0 && missingCreator.size === 0)) return;
+        const nextSimilar = cachedSimilar.filter((archive) => !missingSimilar.has(archive.archiveId));
+        const nextCreator = cachedCreator.filter((archive) => !missingCreator.has(archive.archiveId));
+        setSimilar(nextSimilar);
+        setSameCreator(nextCreator);
+        writeRouteCache(snapshotKey, { similar: nextSimilar, sameCreator: nextCreator } satisfies RecommendationSnapshot);
+      });
+      });
+      return () => { active = false; };
     }
-    let active = true;
     setLoading(true);
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
+      if (seeds.length === 0) return found;
       for (const seed of seeds) {
+        // The native LANraragi adapter treats a trailing `$` as an exact-tag
+        // marker and strips it before querying SQLite. Passing the plain tag
+        // here keeps the same exact-match semantics while also working with
+        // remote/test adapters that return the original tag text verbatim.
         const result = await repository.listArchivesPage(serverId, 0, 100, { query: seed });
         if (!active) return found;
         if (!result.ok) continue;
+        const normalizedSeed = seed.trim().toLowerCase();
         for (const archive of result.value.items) {
-          if (archive.archiveId !== currentArchiveId) found.set(archive.archiveId, archive);
+          // LANraragi's text search is a substring match. Readoshi's `$`
+          // suffix means an exact tag, so enforce that part here after the
+          // broad server query to prevent `artist:foo` matching
+          // `artist:foobar` (and the same issue for taste tags).
+          const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
+          if (archive.archiveId !== currentArchiveId && hasExactTag) found.set(archive.archiveId, archive);
         }
       }
       return found;
     };
 
     void (async () => {
+      const progress = await loadProgress();
+      if (!active) return;
       const seeds = pickSeedTags(tags);
       const candidates = await searchByTags(seeds);
       if (!active) return;
-      const ranked = rankRecommendations(tags, [...candidates.values()]).slice(0, 12);
-      setSimilar(ranked);
+      const ranked = rankRecommendations(tags, addProgress([...candidates.values()], progress), Number.MAX_SAFE_INTEGER);
       const creatorMatches = await searchByTags(creator.tags);
       if (!active) return;
-      const byCreator = [...creatorMatches.values()].slice(0, 12);
-      setSameCreator(byCreator);
+      const byCreator = sortSameCreatorRecommendations(addProgress([...creatorMatches.values()], progress));
+      // Verify each rail independently. The native verifier intentionally caps
+      // one pass, so a large similarity result must not consume the budget and
+      // leave the creator rail's first cards unchecked.
+      const [missingSimilar, missingCreator] = await Promise.all([
+        findMissingArchives(serverId, ranked.map((archive) => archive.archiveId)),
+        findMissingArchives(serverId, byCreator.map((archive) => archive.archiveId)),
+      ]);
+      if (!active) return;
+      const nextSimilar = ranked.filter((archive) => !missingSimilar.has(archive.archiveId)).slice(0, 15);
+      const nextCreator = byCreator.filter((archive) => !missingCreator.has(archive.archiveId)).slice(0, 15);
+      setSimilar(nextSimilar);
+      setSameCreator(nextCreator);
       setLoading(false);
-      writeRouteCache(snapshotKey, { similar: ranked, sameCreator: byCreator } satisfies RecommendationSnapshot);
+      writeRouteCache(snapshotKey, {
+        similar: nextSimilar,
+        sameCreator: nextCreator,
+      } satisfies RecommendationSnapshot);
     })();
     return () => { active = false; };
   }, [creator, currentArchiveId, serverId, snapshotKey, tags]);
@@ -455,18 +556,8 @@ function ArchivePageThumbnail({
         }
       });
     };
-    let observer: IntersectionObserver | undefined;
-    if (typeof IntersectionObserver === 'undefined') load();
-    else {
-      observer = new IntersectionObserver(([entry]) => {
-        if (!entry?.isIntersecting) return;
-        observer?.disconnect();
-        load();
-      }, { rootMargin: '320px' });
-      observer.observe(node);
-    }
+    load();
     return () => {
-      observer?.disconnect();
       controller.abort();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (handle) getNativeImageCache().release(handle);

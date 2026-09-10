@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
-import { EhAccountSchema, type EhAccount, type SaveEhAccountInput } from '../domain/eh';
+import { EhAccountSchema, EhAccountStatusSchema, type EhAccount, type EhAccountStatus, type SaveEhAccountInput } from '../domain/eh';
 
 const EhSearchResultSchema = z.object({
   galleryKey: z.string(),
@@ -15,6 +15,17 @@ const EhSearchResultSchema = z.object({
 
 const EhSearchResponseSchema = z.object({
   galleries: z.array(EhSearchResultSchema),
+});
+
+const EhCommentSchema = z.object({
+  id: z.string().min(1),
+  author: z.string(),
+  body: z.string(),
+  score: z.number().int(),
+  postedAt: z.string(),
+  isUploader: z.boolean(),
+  isEditable: z.boolean(),
+  myVote: z.number().int(),
 });
 
 export type EhSearchBridgeParams = { category?: number; page?: number };
@@ -42,6 +53,12 @@ export class NativeEhRepository {
   listAccounts(): Promise<CommandResult<EhAccount[]>> {
     return invokeCommand('list_eh_accounts', {}, z.array(EhAccountSchema));
   }
+  readAccountCookie(accountId: string): Promise<CommandResult<string>> {
+    return invokeCommand('read_eh_account_cookie', { accountId }, z.string().min(1));
+  }
+  removeAccount(accountId: string): Promise<CommandResult<void>> {
+    return invokeCommand('remove_eh_account', { accountId }, VoidResponseSchema);
+  }
   searchGalleries(accountId: string, query: string, params?: EhSearchBridgeParams): Promise<CommandResult<z.infer<typeof EhSearchResponseSchema>>> {
     return invokeCommand('search_eh_galleries', { accountId, query, params: params ?? {} }, EhSearchResponseSchema);
   }
@@ -51,8 +68,14 @@ export class NativeEhRepository {
   voteComment(accountId: string, galleryId: string, token: string, commentId: string, vote: number): Promise<CommandResult<void>> {
     return invokeCommand('vote_eh_comment', { accountId, galleryId, token, commentId, vote }, VoidResponseSchema);
   }
-  checkLoginHealth(accountId: string): Promise<CommandResult<{ loggedIn: boolean }>> {
-    return invokeCommand('check_eh_login_health', { accountId }, z.object({ loggedIn: z.boolean() }));
+  getComments(accountId: string, galleryId: string, token: string): Promise<CommandResult<z.infer<typeof EhCommentSchema>[]>> {
+    return invokeCommand('get_eh_comments', { accountId, galleryId, token }, z.array(EhCommentSchema));
+  }
+  postComment(accountId: string, galleryId: string, token: string, body: string): Promise<CommandResult<void>> {
+    return invokeCommand('post_eh_comment', { accountId, galleryId, token, body }, VoidResponseSchema);
+  }
+  checkLoginHealth(accountId: string): Promise<CommandResult<EhAccountStatus>> {
+    return invokeCommand('check_eh_login_health', { accountId }, EhAccountStatusSchema);
   }
   setActiveAccount(accountId: string): Promise<CommandResult<void>> {
     return invokeCommand('set_active_eh_account', { accountId }, VoidResponseSchema);

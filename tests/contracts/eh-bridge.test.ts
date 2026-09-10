@@ -15,6 +15,12 @@ describe('native EH account bridge', () => {
     expect(adapter).toHaveBeenNthCalledWith(1, 'save_eh_account', { input: { id: 'eh-a', label: 'EH', host: 'e-hentai.org', usernameHint: 'reader', cookie: 'secret' } });
     expect(JSON.stringify(account)).not.toContain('secret');
   });
+
+  it('accepts legacy accounts with an unknown ExHentai access state', async () => {
+    const account = { id: 'eh-a', label: 'EH', host: 'e-hentai.org', usernameHint: null, cookieRef: 'eh-a-ref', isActive: true, status: 'verified', createdAt: '2026-01-01', updatedAt: '2026-01-01', assets: null, exhentaiAccess: null };
+    setInvokeAdapterForTests(vi.fn(async () => ({ ok: true, value: [account] })));
+    await expect(new NativeEhRepository().listAccounts()).resolves.toEqual({ ok: true, value: [account] });
+  });
 });
 
 describe('native EH search bridge', () => {
@@ -69,12 +75,33 @@ describe('native EH voteComment bridge', () => {
   });
 });
 
-describe('native EH login health check bridge', () => {
-  it('checks login status through the native bridge', async () => {
-    const adapter = vi.fn(async () => ({ ok: true, value: { loggedIn: true } }));
+describe('native EH comment bridge', () => {
+  it('loads and posts comments through the native bridge', async () => {
+    const comment = { id: '777', author: 'Reader', body: 'Useful', score: 4, postedAt: 'Today', isUploader: false, isEditable: false, myVote: 0 };
+    const adapter = vi.fn(async (command: string) => command === 'get_eh_comments'
+      ? { ok: true, value: [comment] }
+      : { ok: true, value: undefined });
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.checkLoginHealth('eh-a')).toEqual({ ok: true, value: { loggedIn: true } });
+
+    expect(await repository.getComments('eh-a', '12345', 'abcdef')).toEqual({ ok: true, value: [comment] });
+    expect(await repository.postComment('eh-a', '12345', 'abcdef', 'New comment')).toEqual({ ok: true, value: undefined });
+    expect(adapter).toHaveBeenCalledWith('post_eh_comment', { accountId: 'eh-a', galleryId: '12345', token: 'abcdef', body: 'New comment' });
+  });
+});
+
+describe('native EH login health check bridge', () => {
+  it('checks login status through the native bridge', async () => {
+    const accountStatus = {
+      loggedIn: true,
+      username: 'Reader',
+      assets: { gp: '12,345', credits: '6,789', hath: '42' },
+      exhentaiAccess: true,
+    };
+    const adapter = vi.fn(async () => ({ ok: true, value: accountStatus }));
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeEhRepository();
+    expect(await repository.checkLoginHealth('eh-a')).toEqual({ ok: true, value: accountStatus });
     expect(adapter).toHaveBeenCalledWith('check_eh_login_health', { accountId: 'eh-a' });
   });
 

@@ -1,11 +1,7 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::{fs, path::Path, sync::Mutex};
 
 use rusqlite::Connection;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 pub struct Database {
     pub connection: Mutex<Connection>,
@@ -13,11 +9,9 @@ pub struct Database {
 
 impl Database {
     pub fn open(app: &AppHandle) -> Result<Self, String> {
-        let app_data = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| error.to_string())?;
-        let path = resolve_database_path(app_data)?;
+        let path = crate::data_paths::data_dir(app)
+            .map_err(|error| error.to_string())?
+            .join("yomika.sqlite3");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -37,68 +31,6 @@ impl Database {
     }
 }
 
-fn resolve_database_path(app_data: PathBuf) -> Result<PathBuf, String> {
-    let app_data_path = app_data.join("yomika.sqlite3");
-
-    // Keep the database beside Tauri's app data so it follows the same identity
-    // as the Windows keyring. Older experimental portable builds stored it next
-    // to the executable; use that location only when no user database exists.
-    let portable_path = if cfg!(all(target_os = "windows", not(debug_assertions))) {
-        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        executable.parent().map(|parent| parent.join("data").join("yomika.sqlite3"))
-    } else {
-        None
-    };
-    Ok(select_database_path(app_data_path, portable_path))
-}
-
-fn select_database_path(app_data_path: PathBuf, portable_path: Option<PathBuf>) -> PathBuf {
-    if !app_data_path.exists() {
-        if let Some(path) = portable_path.filter(|path| path.exists()) {
-            return path;
-        }
-    }
-    app_data_path
-}
-
-#[cfg(test)]
-mod path_tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn default_database_path_stays_under_app_data_in_tests() {
-        let path = resolve_database_path(PathBuf::from("C:/Users/test/AppData/Yomika")).unwrap();
-        assert_eq!(path, PathBuf::from("C:/Users/test/AppData/Yomika/yomika.sqlite3"));
-    }
-
-    #[test]
-    fn existing_user_database_wins_over_legacy_portable_database() {
-        let root = std::env::temp_dir().join(format!("yomika-path-{}", std::process::id()));
-        let app_data = root.join("app");
-        let portable = root.join("portable").join("yomika.sqlite3");
-        fs::create_dir_all(&app_data).unwrap();
-        fs::create_dir_all(portable.parent().unwrap()).unwrap();
-        fs::write(app_data.join("yomika.sqlite3"), b"user").unwrap();
-        fs::write(&portable, b"portable").unwrap();
-
-        assert_eq!(select_database_path(app_data.join("yomika.sqlite3"), Some(portable.clone())), app_data.join("yomika.sqlite3"));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn legacy_portable_database_is_used_when_user_database_is_missing() {
-        let root = std::env::temp_dir().join(format!("yomika-path-missing-{}", std::process::id()));
-        let app_data_path = root.join("app").join("yomika.sqlite3");
-        let portable_path = root.join("portable").join("yomika.sqlite3");
-        fs::create_dir_all(portable_path.parent().unwrap()).unwrap();
-        fs::write(&portable_path, b"portable").unwrap();
-
-        assert_eq!(select_database_path(app_data_path, Some(portable_path.clone())), portable_path);
-        fs::remove_dir_all(root).unwrap();
-    }
-}
-
 fn run_migrations(connection: &mut Connection) -> Result<(), String> {
     const MIGRATIONS: &[(i64, &str)] = &[
         (1, include_str!("../../migrations/0001_initial.sql")),
@@ -110,16 +42,38 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         (7, include_str!("../../migrations/0007_eh_accounts.sql")),
         (8, include_str!("../../migrations/0008_dedup_features.sql")),
         (9, include_str!("../../migrations/0009_inference_jobs.sql")),
-        (10, include_str!("../../migrations/0010_cache_path_sharing.sql")),
+        (
+            10,
+            include_str!("../../migrations/0010_cache_path_sharing.sql"),
+        ),
         (11, include_str!("../../migrations/0011_task_runtime.sql")),
-        (12, include_str!("../../migrations/0012_archive_categories.sql")),
-        (13, include_str!("../../migrations/0013_unified_image_cache.sql")),
-        (14, include_str!("../../migrations/0014_cache_archive_scope.sql")),
+        (
+            12,
+            include_str!("../../migrations/0012_archive_categories.sql"),
+        ),
+        (
+            13,
+            include_str!("../../migrations/0013_unified_image_cache.sql"),
+        ),
+        (
+            14,
+            include_str!("../../migrations/0014_cache_archive_scope.sql"),
+        ),
         (15, include_str!("../../migrations/0015_dedup_sessions.sql")),
-        (16, include_str!("../../migrations/0016_archive_added_at.sql")),
+        (
+            16,
+            include_str!("../../migrations/0016_archive_added_at.sql"),
+        ),
         (17, include_str!("../../migrations/0017_reading_list.sql")),
         (18, include_str!("../../migrations/0018_search_presets.sql")),
-        (19, include_str!("../../migrations/0019_reading_progress_cover_alone.sql")),
+        (
+            19,
+            include_str!("../../migrations/0019_reading_progress_cover_alone.sql"),
+        ),
+        (
+            20,
+            include_str!("../../migrations/0020_eh_health_cache.sql"),
+        ),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -208,6 +162,13 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("cache archive index");
+            let eh_health_columns: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('eh_accounts') WHERE name IN ('gp','credits','hath','exhentai_access')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("eh health columns");
             let mut archive_categories_fk_statement = connection
                 .prepare("PRAGMA foreign_key_list(archive_categories)")
                 .expect("archive categories foreign keys");
@@ -233,8 +194,20 @@ mod tests {
                     archive_categories_fk_count,
                     cache_archive_column.as_str(),
                     cache_archive_index.as_str(),
+                    eh_health_columns,
                 ),
-                (19, 1, "servers", "webdav_accounts", "archive_categories", "archive_categories_lookup_idx", 2, "source_archive", "cache_entries_archive_idx")
+                (
+                    20,
+                    1,
+                    "servers",
+                    "webdav_accounts",
+                    "archive_categories",
+                    "archive_categories_lookup_idx",
+                    2,
+                    "source_archive",
+                    "cache_entries_archive_idx",
+                    4
+                )
             );
             connection.execute(
                 "INSERT INTO tasks (id,kind,label,status,progress,cancelable,retryable) VALUES ('restart-task','download','Restart','running',0.4,1,1)",
@@ -252,9 +225,16 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 18);
-        let recovered_status: String = reopened.connection.lock().expect("database lock")
-            .query_row("SELECT status FROM tasks WHERE id='restart-task'", [], |row| row.get(0))
+        assert_eq!(migration_count, 19);
+        let recovered_status: String = reopened
+            .connection
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT status FROM tasks WHERE id='restart-task'",
+                [],
+                |row| row.get(0),
+            )
             .expect("recovered task");
         assert_eq!(recovered_status, "queued");
         drop(reopened);

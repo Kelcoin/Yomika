@@ -4,6 +4,7 @@ import {
   archiveCategoryLabel,
   formatArchiveDate,
   formatArchivePageMeta,
+  distributeCardTags,
   isWideCoverRatio,
   pickCardTags,
   pickRandomSample,
@@ -87,5 +88,26 @@ describe('archive card presentation', () => {
 
   it('keeps unknown namespaces last instead of dropping them', () => {
     expect(pickCardTags(['weird:tag', 'female:tag'], 5)).toEqual(['female:tag', 'weird:tag']);
+  });
+
+  it('uses lower-priority descriptive namespaces to fill spare card space', () => {
+    const tags = ['language:chinese', 'cosplayer:alice', 'artist:someone', 'other:full color', 'female:glasses'];
+
+    expect(pickCardTags(tags, 5)).toEqual([
+      'female:glasses',
+      'other:full color',
+      'artist:someone',
+      'cosplayer:alice',
+      'language:chinese',
+    ]);
+  });
+
+  it('distributes list-card tags evenly across the available rows', () => {
+    expect(distributeCardTags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], 3)).toEqual([
+      ['a', 'b', 'c'],
+      ['d', 'e', 'f'],
+      ['g', 'h'],
+    ]);
+    expect(distributeCardTags(['a', 'b'], 3)).toEqual([['a'], ['b']]);
   });
 });

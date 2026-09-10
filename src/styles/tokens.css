@@ -23,7 +23,9 @@
     --surface-canvas: #f6f4f8;
     --surface-panel: #fffdff;
     --surface-elevated: #ffffff;
+    --surface-muted: #eeebf0;
     --surface-overlay: rgb(30 27 36 / 0.84);
+    --backdrop-overlay: rgb(5 5 7 / 0.74);
 
     /* Ink. Both secondary tiers clear 4.5:1 against --surface-panel: the previous
        --ink-faint sat at 2.8:1, which is what made tags, dates and page counts
@@ -37,6 +39,7 @@
     /* Brand (hanko identity: ink / vermilion / paper) */
     --brand-ink: #171717;
     --brand-vermilion: #b63a2e;
+    --brand-vermilion-strong: #9d2f25;
     --brand-paper: #f3eee4;
     --brand-violet: #665b57;
     --brand-cyan: #8c817b;
@@ -51,11 +54,19 @@
     --category-doujinshi: #fc4e4e;
     --category-game-cg: #05bf0b;
     --category-image-set: #5050d7;
+    --category-artist-cg: #a9b91d;
+    --category-western: #6e9f62;
+    --category-non-h: #3199a3;
+    --category-cosplay: #8d48af;
+    --category-asian-porn: #a43b86;
+    --category-misc: #77737d;
     --category-default: #9e9e9e;
 
     /* Lines, focus, selection */
     --hairline: rgb(30 27 36 / 0.1);
+    --hairline-strong: rgb(30 27 36 / 0.18);
     --focus-ring: var(--brand-vermilion);
+    --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 28%, transparent);
     --selection-background: color-mix(in srgb, var(--brand-vermilion) 24%, transparent);
     --selection-ink: var(--ink-primary);
 
@@ -64,6 +75,12 @@
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
     --reader-chrome: rgb(5 5 7 / 0.82);
+    --reader-border: rgb(244 241 248 / 0.24);
+    --reader-border-muted: rgb(244 241 248 / 0.16);
+    --reader-control-hover: rgb(244 241 248 / 0.1);
+    --reader-thumbnail-surface: rgb(5 5 7 / 0.24);
+    --reader-page-overlay: rgb(5 5 7 / 0.55);
+    --reader-backdrop: rgb(5 5 7 / 0.62);
     /* Opaque, unlike the chrome: the overview panel holds a scroller, and a
        scroller inside a backdrop-filter layer is a known source of stale tiles —
        which is what made its thumbnails appear to overlap. */
@@ -73,6 +90,7 @@
     --shadow-menu: 0 12px 30px rgb(30 27 36 / 0.18);
     --shadow-overlay: 0 24px 80px rgb(30 27 36 / 0.28);
     --shadow-tooltip: 0 8px 24px rgb(30 27 36 / 0.16);
+    --shadow-card: 0 8px 24px rgb(30 27 36 / 0.12);
 
     /* Controls */
     --control-background: var(--surface-elevated);
@@ -127,6 +145,8 @@
     --z-overlay: 50;
     --z-modal: 51;
     --z-skip-link: 60;
+    --z-reader-chrome: 3;
+    --z-reader-overview: 4;
   }
 
   :root[data-theme='light'] {
@@ -139,13 +159,16 @@
       --surface-canvas: #0b0b0f;
       --surface-panel: #15151c;
       --surface-elevated: #1c1c25;
+      --surface-muted: #24232c;
       --surface-overlay: rgb(5 5 6 / 0.88);
+      --backdrop-overlay: rgb(5 5 7 / 0.78);
       --ink-primary: #f4f1f8;
       --ink-secondary: #b4adc0;
       --ink-faint: #948da2;
       --ink-on-brand: #0b0b0f;
       --brand-ink: #f4f1f8;
       --brand-vermilion: #e36a5c;
+      --brand-vermilion-strong: #f08374;
       --brand-paper: #272229;
       --brand-violet: #a99b95;
       --brand-cyan: #b8aaa2;
@@ -153,9 +176,12 @@
       --state-warning: #f1b36c;
       --state-danger: #f17b91;
       --hairline: rgb(244 241 248 / 0.12);
+      --hairline-strong: rgb(244 241 248 / 0.2);
+      --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 38%, transparent);
       --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
       --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
       --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
+      --shadow-card: 0 8px 24px rgb(0 0 0 / 0.36);
     }
   }
 
@@ -164,13 +190,16 @@
     --surface-canvas: #0b0b0f;
     --surface-panel: #15151c;
     --surface-elevated: #1c1c25;
+    --surface-muted: #24232c;
     --surface-overlay: rgb(5 5 6 / 0.88);
+    --backdrop-overlay: rgb(5 5 7 / 0.78);
     --ink-primary: #f4f1f8;
     --ink-secondary: #b4adc0;
     --ink-faint: #948da2;
     --ink-on-brand: #0b0b0f;
     --brand-ink: #f4f1f8;
     --brand-vermilion: #e36a5c;
+    --brand-vermilion-strong: #f08374;
     --brand-paper: #272229;
     --brand-violet: #a99b95;
     --brand-cyan: #b8aaa2;
@@ -178,8 +207,11 @@
     --state-warning: #f1b36c;
     --state-danger: #f17b91;
     --hairline: rgb(244 241 248 / 0.12);
+    --hairline-strong: rgb(244 241 248 / 0.2);
+    --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 38%, transparent);
     --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
     --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
     --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
+    --shadow-card: 0 8px 24px rgb(0 0 0 / 0.36);
   }
 }

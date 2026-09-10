@@ -21,8 +21,9 @@ function cssVariables(block: string): Map<string, string> {
  * layer and merge the dark overrides into the light theme. Count braces. */
 function ruleBody(css: string, selector: string): string {
   const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  const at = source.indexOf(selector);
-  const open = at < 0 ? -1 : source.indexOf('{', at);
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`${escaped}\\s*\\{`).exec(source);
+  const open = match ? match.index + match[0].lastIndexOf('{') : -1;
   if (open < 0) throw new Error(`Rule not found: ${selector}`);
   let depth = 0;
   for (let index = open; index < source.length; index += 1) {
@@ -57,6 +58,10 @@ function linear(channel: number): number {
 }
 
 describe('design system contract', () => {
+  it('does not stretch shelf errors into a full-page obstruction', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell).toMatch(/\.shelf-workspace\s*>\s*\.form-error\s*\{[^}]*align-self:\s*start/);
+  });
   it('binds the supplied logo assets to native builds', () => {
     const config = JSON.parse(read('src-tauri/tauri.conf.json')) as { bundle?: { icon?: string[] } };
     expect(config.bundle?.icon).toEqual(expect.arrayContaining([
@@ -98,6 +103,43 @@ describe('design system contract', () => {
     expect(tokens).toMatch(/--category-doujinshi:/);
     expect(shell).toMatch(/\.metadata-chip\s*\{/);
     expect(shell).toMatch(/\.archive-row-meta\s*\{/);
+    expect(shell).toMatch(/\.archive-row-category\[data-category='Manga'\][\s\S]*border-color:/);
+    expect(shell).toMatch(/\.archive-row-category\[data-category='Cosplay'\][\s\S]*background:/);
+  });
+
+  it('defines semantic card and reader surface tokens', () => {
+    const tokens = read('src/styles/tokens.css');
+    const reader = read('src/styles/reader.css');
+    const shell = read('src/styles/shell.css');
+    expect(tokens).toMatch(/--shadow-card:/);
+    expect(tokens).toMatch(/--brand-vermilion-strong:/);
+    expect(tokens).toMatch(/--reader-border:/);
+    expect(tokens).toMatch(/--reader-backdrop:/);
+    expect(tokens).toMatch(/--z-reader-chrome:/);
+    expect(tokens).toMatch(/--z-reader-overview:/);
+    expect(reader).not.toMatch(/rgb\(255 255 255|rgb\(0 0 0/);
+    expect(reader).not.toMatch(/--radius-panel/);
+    expect(shell).not.toMatch(/color-mix\([^;]*#000/);
+  });
+
+  it('keeps compact content above navigation without a padded black band', () => {
+    const shell = read('src/styles/shell.css');
+    const compactMain = shell.match(/@media \(max-width: 900px\)[\s\S]*?\.app-main\s*\{([\s\S]*?)\}/)?.[1] ?? '';
+    const archiveList = ruleBody(shell, '.archive-list');
+    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ env\(safe-area-inset-bottom\)\)\)/);
+    expect(archiveList).toMatch(/background:\s*var\(--surface-panel\)/);
+    expect(shell).not.toMatch(/\.workspace\.is-library-workspace \.archive-list\s*\{[\s\S]*padding-bottom:\s*calc\(80px/);
+  });
+
+  it('uses the content surface behind short workspaces instead of exposing canvas', () => {
+    const shell = read('src/styles/shell.css');
+    const appMain = ruleBody(shell, '.app-main');
+    expect(appMain).toMatch(/background:\s*var\(--surface-panel\)/);
+  });
+
+  it('keeps embedded sync controls aligned to the full settings column', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell).toMatch(/\.settings-sync-content,[\s\S]*?\.settings-sync-content \.sync-form\s*\{[\s\S]*?width:\s*100%[\s\S]*?max-width:\s*none/);
   });
 
   it('enables the native Windows credential backend for release builds', () => {
@@ -115,6 +157,21 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.settings-nav a\s*\{[\s\S]*min-height:\s*40px/);
     expect(shell).toMatch(/\.sidebar-toggle\s*\{[\s\S]*flex:\s*0 0 44px/);
     expect(shell).toMatch(/\.segmented-control\s*\{[\s\S]*width:\s*fit-content/);
+  });
+
+  it('uses one sidebar hover box and clips detail covers to the visible art', () => {
+    const shell = read('src/styles/shell.css');
+    const nav = ruleBody(shell, '.nav-link');
+    const collapsed = ruleBody(shell, '.is-sidebar-collapsed .side-nav .nav-link');
+    const collapsedShell = ruleBody(shell, '.app-shell.is-sidebar-collapsed');
+    const collapsedSidebar = ruleBody(shell, '.is-sidebar-collapsed .sidebar');
+    const cover = ruleBody(shell, '.archive-detail-route-cover img');
+    expect(nav).not.toMatch(/transform:/);
+    expect(collapsedShell).toMatch(/grid-template-columns:\s*65px/);
+    expect(collapsedSidebar).toMatch(/padding-inline:\s*10px/);
+    expect(collapsed).toMatch(/width:\s*44px/);
+    expect(collapsed).toMatch(/margin-inline:\s*0/);
+    expect(cover).toMatch(/object-fit:\s*cover/);
   });
 
   it('keeps design tokens in a cascade layer so user CSS can override them', () => {
@@ -175,6 +232,7 @@ describe('design system contract', () => {
     // The wide card has the biggest tag area in the app, so it gets full-size
     // chips: it used to pair the largest area with the smallest chips.
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{[\s\S]*font-size:\s*12px/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags\s*\{[\s\S]*grid-template-rows:\s*repeat\(3,/);
     expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
   });
 
@@ -186,6 +244,12 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.status-item\s*\{[\s\S]*font-family:\s*var\(--font-body\)/);
     expect(shell).toMatch(/\.icon-button\s*\{[\s\S]*width:\s*var\(--icon-button-size\)[\s\S]*height:\s*var\(--icon-button-size\)/);
     expect(reader).toMatch(/\.reader-icon-button,[\s\S]*?\.reader-toolbar button\s*\{[\s\S]*width:\s*var\(--icon-button-size\)[\s\S]*height:\s*var\(--icon-button-size\)/);
+  });
+
+  it('anchors the enabled switch thumb to the track end even if its flex row shrinks', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*flex:\s*0 0 44px[^}]*min-width:\s*44px/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{[^}]*left:\s*auto[^}]*right:\s*3px/);
   });
 
   it('keeps toast text at WCAG AA contrast in light and dark themes', () => {
