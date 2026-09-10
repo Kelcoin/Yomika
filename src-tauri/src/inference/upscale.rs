@@ -117,6 +117,13 @@ pub fn blit_tile(
 /// below never needs to know which engine it is talking to.
 pub trait UpscaleEngine {
     fn scale(&self) -> u32;
+    /// How far past a tile's edge the engine reads, in source pixels. The tiler
+    /// keeps this much margin around every tile and crops it away again, so an
+    /// engine whose kernel reaches further than the default has to say so or its
+    /// tiles will show their edges.
+    fn tile_padding(&self) -> u32 {
+        DEFAULT_TILE_PADDING
+    }
     /// Upscales one RGBA tile. `rgba` is `width * height * 4` bytes and the
     /// result must be `width * scale * height * scale * 4`.
     fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32)
@@ -210,7 +217,14 @@ pub fn upscale_rgba(
         });
     }
 
-    let tiles = plan_tiles(width, height, options.tile_size, options.tile_padding);
+    // The engine's own reach is a floor: a caller asking for less padding than
+    // the kernel needs would get seams, not a faster result.
+    let tiles = plan_tiles(
+        width,
+        height,
+        options.tile_size,
+        options.tile_padding.max(engine.tile_padding()),
+    );
     let mut destination = vec![0_u8; pixels * 4];
     for tile in &tiles {
         let input = crop_rgba(

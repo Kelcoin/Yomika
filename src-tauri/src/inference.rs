@@ -319,6 +319,7 @@ pub fn install_model_archive(
     result
 }
 
+pub mod anime4k;
 pub mod decensor;
 pub mod detect;
 pub mod inpaint;
@@ -764,6 +765,46 @@ fn resolve_installed_model(
         })
 }
 
+/// Upscalers that ship inside the binary. Anime4K is a shader chain rather than
+/// an ONNX file, so there is nothing to download and no directory to find: it is
+/// listed alongside the installed models and resolved by id.
+pub fn builtin_upscale_models() -> Vec<InstalledModel> {
+    anime4k::ANIME4K_PRESETS
+        .iter()
+        .map(|preset| InstalledModel {
+            id: preset.id.to_string(),
+            version: preset.version.to_string(),
+            scale: Some(preset.scale),
+            kind: MODEL_KIND_UPSCALE.to_string(),
+            components: Vec::new(),
+        })
+        .collect()
+}
+
+/// What a `upscaleModel` id names: a built-in chain, a model on disk, or nothing
+/// at all, which leaves the pipeline on the nearest-neighbour scaler.
+enum ResolvedUpscaler {
+    Onnx(std::path::PathBuf, ModelManifest),
+    Anime4k(&'static anime4k::Anime4kPreset),
+}
+
+fn resolve_upscaler(app_data_dir: &std::path::Path, model_id: &str) -> Option<ResolvedUpscaler> {
+    if let Some(preset) = anime4k::preset_by_id(model_id) {
+        return Some(ResolvedUpscaler::Anime4k(preset));
+    }
+    resolve_installed_model(app_data_dir, model_id)
+        .map(|(path, manifest)| ResolvedUpscaler::Onnx(path, manifest))
+}
+
+/// An installed model and a built-in one are the same kind of choice in the
+/// settings list; the built-ins come first so a fresh install can turn upscaling
+/// on without downloading anything.
+pub fn listed_upscale_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel> {
+    let mut models = builtin_upscale_models();
+    models.extend(installed_models_in(app_data_dir));
+    models
+}
+
 /// Lets the settings page offer the models that are actually installed instead
 /// of asking the user to type a model name and hope.
 #[tauri::command]
@@ -772,7 +813,7 @@ pub fn inference_list_models(
 ) -> crate::domain::result::CommandResult<Vec<InstalledModel>> {
     match model_data_dir(&app) {
         Ok(app_data_dir) => {
-            crate::domain::result::CommandResult::success(installed_models_in(&app_data_dir))
+            crate::domain::result::CommandResult::success(listed_upscale_models_in(&app_data_dir))
         }
         Err(error) => crate::domain::result::CommandResult::failure(
             "PLATFORM_UNAVAILABLE",
@@ -1288,13 +1329,14 @@ fn upscale_cached_page_with_models(
     }
     // A model's scale is fixed by the model, so it wins over the requested one.
     // Only the model-free path is free to honour the request.
-    let model = input
+    let resolved = input
         .model_id
         .as_deref()
         .filter(|id| !id.is_empty())
-        .and_then(|id| resolve_installed_model(models_data, id));
-    let scale = match &model {
-        Some((_, manifest)) => manifest.scale.clamp(1, 4),
+        .and_then(|id| resolve_upscaler(models_data, id));
+    let scale = match &resolved {
+        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.scale.clamp(1, 4),
+        Some(ResolvedUpscaler::Anime4k(preset)) => preset.scale,
         None => input.scale.unwrap_or(2).clamp(1, 4),
     };
     let source = CacheImageIdentity::new(
@@ -1329,15 +1371,29 @@ fn upscale_cached_page_with_models(
         Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
     };
     let (width, height) = (decoded.width(), decoded.height());
-    let max_pixels = model
-        .as_ref()
-        .map_or(64_000_000, |(_, manifest)| manifest.max_pixels);
-    // An installed model that will not load is reported, not silently swapped for
-    // the nearest-neighbour scaler: the user chose a model and would otherwise
-    // see a blurry page with no explanation.
-    let onnx = match &model {
-        Some((path, manifest)) => match onnx::OnnxEngine::open(path, manifest.scale, max_pixels) {
-            Ok(engine) => Some(engine),
+    let max_pixels = match &resolved {
+        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.max_pixels,
+        Some(ResolvedUpscaler::Anime4k(_)) => anime4k::ANIME4K_MAX_PIXELS,
+        None => 64_000_000,
+    };
+    // A chosen engine that will not load is reported, not silently swapped for
+    // the nearest-neighbour scaler: the user asked for a model and would
+    // otherwise see a blurry page with no explanation.
+    let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match &resolved {
+        Some(ResolvedUpscaler::Onnx(path, manifest)) => {
+            match onnx::OnnxEngine::open(path, manifest.scale, max_pixels) {
+                Ok(engine) => Some(Box::new(engine)),
+                Err(error) => {
+                    return CommandResult::failure(
+                        "INFERENCE_UNAVAILABLE",
+                        format!("{error:?}"),
+                        false,
+                    )
+                }
+            }
+        }
+        Some(ResolvedUpscaler::Anime4k(preset)) => match anime4k::Anime4kEngine::open(preset) {
+            Ok(engine) => Some(Box::new(engine)),
             Err(error) => {
                 return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false)
             }
@@ -1345,8 +1401,8 @@ fn upscale_cached_page_with_models(
         None => None,
     };
     let fallback = upscale::NearestNeighbourEngine { scale, max_pixels };
-    let engine: &dyn upscale::UpscaleEngine = match &onnx {
-        Some(engine) => engine,
+    let engine: &dyn upscale::UpscaleEngine = match &chosen {
+        Some(engine) => engine.as_ref(),
         None => &fallback,
     };
     let options = upscale::UpscaleOptions {
@@ -2428,6 +2484,45 @@ mod tests {
             .expect("upscale a tile with the installed model");
         assert_eq!(output.len(), 32 * 32 * 4, "a x4 model turns 8x8 into 32x32");
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn built_in_upscalers_are_listed_before_the_installed_models() {
+        let base = std::env::temp_dir().join("yomika-builtin-models");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // A fresh install has no models directory, but still has a usable choice.
+        let fresh = listed_upscale_models_in(&base);
+        assert_eq!(fresh.len(), anime4k::ANIME4K_PRESETS.len());
+        assert_eq!(fresh[0].id, "anime4k");
+        assert_eq!(fresh[0].kind, MODEL_KIND_UPSCALE);
+        assert_eq!(fresh[0].scale, Some(2));
+        assert!(fresh.iter().all(|model| !model.version.is_empty()));
+
+        // An installed model is appended, not replaced by the built-ins.
+        let root = base.join("models").join("realesr").join("1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(MODEL_MANIFEST_FILE),
+            serde_json::to_vec(&model_manifest(b"x")).unwrap(),
+        )
+        .unwrap();
+        let listed = listed_upscale_models_in(&base);
+        assert_eq!(listed.len(), anime4k::ANIME4K_PRESETS.len() + 1);
+        assert!(listed.iter().any(|model| model.id == "realesr"));
+        assert_eq!(listed[0].id, "anime4k", "built-ins come first");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_built_in_id_resolves_with_nothing_installed() {
+        let base = std::env::temp_dir().join("yomika-builtin-resolve");
+        let _ = std::fs::remove_dir_all(&base);
+        match resolve_upscaler(&base, "anime4k-hq") {
+            Some(ResolvedUpscaler::Anime4k(preset)) => assert_eq!(preset.id, "anime4k-hq"),
+            _ => panic!("a built-in id has to resolve without a model directory"),
+        }
+        assert!(resolve_upscaler(&base, "not-installed").is_none());
     }
 
     fn model_manifest(bytes: &[u8]) -> ModelManifest {

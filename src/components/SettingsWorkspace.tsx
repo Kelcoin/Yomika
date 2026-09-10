@@ -53,12 +53,27 @@ function formatCacheBytes(value: number): string {
  * the model's to decide and not the user's. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
   if (model.kind === 'decensor') return { value: model.id, label: `去码流程 · ${model.version}` };
-  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x 轻量增强', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN 通用增强', '4x-Fatal-Pixels': 'Fatal Pixels 漫画增强' };
+  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x 轻量增强', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN 通用增强', '4x-Fatal-Pixels': 'Fatal Pixels 漫画增强', anime4k: 'Anime4K 极速', 'anime4k-hq': 'Anime4K 高质量', 'anime4k-ultra': 'Anime4K 极致' };
   const name = names[model.id] ?? model.id.replaceAll('-', ' ');
   return { value: model.id, label: `${name}${model.scale ? ` · ${model.scale} 倍` : ' · 去码模型包'}` };
 }
 
 const DECENSOR_COMPONENT_IDS = ['mrcnn', 'deepcreampy-bar', 'deepcreampy-mosaic', 'fatal-pixels'] as const;
+const DECENSOR_STAGE_META: Record<(typeof DECENSOR_COMPONENT_IDS)[number], { role: string; name: string }> = {
+  mrcnn: { role: '遮挡区域检测', name: 'Mask R-CNN' },
+  'deepcreampy-bar': { role: '条状遮挡修补', name: 'DeepCreamPy Bar' },
+  'deepcreampy-mosaic': { role: '马赛克修补', name: 'DeepCreamPy Mosaic' },
+  'fatal-pixels': { role: '修复结果增强', name: 'Fatal Pixels' },
+};
+
+function decensorStageOptions(models: InstalledModel[] | undefined, componentId: string) {
+  return (models ?? [])
+    .filter((model) => model.kind === 'decensor' && model.components.some((component) => component.id === componentId))
+    .map((model) => {
+      const component = model.components.find((item) => item.id === componentId);
+      return { value: model.id, label: `${component?.name ?? model.id} · ${model.version}` };
+    });
+}
 
 function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
   if (!model || model.kind !== 'decensor') return false;
@@ -137,7 +152,6 @@ export function SettingsWorkspace() {
   const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
   const upscaleReady = Boolean(runnableModels?.length);
   const upscaleModelOptions = runnableModels?.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
-  const decensorModelOptions = decensorBundles?.length ? decensorBundles.map(modelOption) : [{ value: 'aletheia-lens', label: 'Aletheia Lens · 去码模型包' }];
   const upscaleOptions = runnableModels?.length
     ? runnableModels.map(modelOption)
     : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
@@ -394,6 +408,12 @@ export function SettingsWorkspace() {
           <h2>{sectionLabel(selectedSettingsSection)}</h2>
         </header>
       )}
+      {selectedSettingsSection === 'settings-advanced' && (
+        <section className="model-import-row" aria-label="模型导入">
+          <button type="button" className="icon-button model-import-button" disabled={modelPending} aria-label="导入模型文件或压缩包" title="导入模型文件或压缩包" onClick={() => modelInputRef.current?.click()}><Upload aria-hidden="true" /></button>
+          <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
+        </section>
+      )}
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
       <section className="preferences-panel" id={selectedSettingsSection === 'settings-sync' ? 'settings-sync-preferences' : selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
         {/* No section title here: the sidebar already names the section, and one
@@ -520,22 +540,16 @@ export function SettingsWorkspace() {
                     onClick={() => {
                       if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
                       if (!decensorReady) { showToast('去码模型不完整，无法启用', 'error'); return; }
-                      editPreferences({ decensorModel: decensorModelOptions[0]!.value });
+                      editPreferences({ decensorModel: decensorBundles?.[0]?.id ?? '' });
                     }}
                   />
-                </div>
-                <div className="model-choice-row">
-                  <SelectField name="decensorModel" aria-label="去码模型" value={preferenceDraft.decensorModel || decensorModelOptions[0]!.value} options={decensorModelOptions} onChange={(value) => editPreferences({ decensorModel: value })} optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>} />
                 </div>
                 <div className="model-stage-list" aria-label="去码流程模型">
                   {DECENSOR_COMPONENT_IDS.map((id) => {
                     const component = selectedDecensorBundle?.components.find((item) => item.id === id);
-                    return <div className="model-stage-row" key={id}><span>{component?.role ?? ({
-                      mrcnn: '遮挡区域检测',
-                      'deepcreampy-bar': '条状遮挡修补',
-                      'deepcreampy-mosaic': '马赛克修补',
-                      'fatal-pixels': '修复结果增强',
-                    } as Record<string, string>)[id]}</span><strong>{component?.name ?? '未安装'}</strong></div>;
+                    const stageOptions = decensorStageOptions(decensorBundles, id);
+                    const fallback = { value: 'aletheia-lens', label: DECENSOR_STAGE_META[id].name };
+                    return <div className="model-stage-row" key={id}><span>{component?.role ?? DECENSOR_STAGE_META[id].role}</span><SelectField name={`decensor-${id}`} aria-label={`${component?.role ?? DECENSOR_STAGE_META[id].role}模型`} value={preferenceDraft.decensorModel || stageOptions[0]?.value || fallback.value} options={stageOptions.length ? stageOptions : [fallback]} onChange={(value) => { if (value) editPreferences({ decensorModel: value }); }} optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>} /></div>;
                   })}
                 </div>
                 {!decensorBundles?.length && <p className="server-list-message" role="status">{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</p>}
@@ -617,12 +631,6 @@ export function SettingsWorkspace() {
           </div>
         )}
       </section>
-      )}
-      {selectedSettingsSection === 'settings-advanced' && (
-        <section className="model-import-row" aria-label="模型导入">
-          <button type="button" className="settings-action" disabled={modelPending} onClick={() => modelInputRef.current?.click()}><Upload aria-hidden="true" />导入模型文件或压缩包</button>
-          <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
-        </section>
       )}
       {selectedSettingsSection === 'settings-sync' && (
       <section className="settings-section" id="settings-migration" aria-labelledby="migration-title">

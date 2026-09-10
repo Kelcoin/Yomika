@@ -8,6 +8,7 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { resetFilePickerForTests, setDirectoryPickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
+import { CSS_THEME_PRESETS } from '../../src/lib/cssThemePresets';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -105,10 +106,12 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
     const toggle = await screen.findByRole('switch', { name: '启用去码' });
-    await user.click(screen.getByRole('button', { name: '去码流程 · 1' }));
-    expect(screen.queryByRole('button', { name: '下载去码流程 · 1' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Mask R-CNN · 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'DeepCreamPy Bar · 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'DeepCreamPy Mosaic · 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Fatal Pixels · 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^下载/ })).toBeNull();
     expect(screen.getByText('遮挡区域检测')).toBeInTheDocument();
-    expect(screen.getByText('Mask R-CNN')).toBeInTheDocument();
     expect(toggle).toBeEnabled();
     expect(toggle).toHaveClass('switch-control');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
@@ -162,6 +165,34 @@ describe('settings workspace', () => {
     renderSettings('advanced');
     await user.click(await screen.findByRole('button', { name: 'waifu2x 轻量增强 · 2 倍' }));
     expect(screen.queryByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' })).toBeNull();
+  });
+
+  it('lists the built-in Anime4K chains as choices with nothing to download', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [
+          { id: 'anime4k', version: '2', scale: 2, kind: 'upscale', components: [] },
+          { id: 'anime4k-hq', version: '2', scale: 2, kind: 'upscale', components: [] },
+          { id: 'anime4k-ultra', version: '1', scale: 2, kind: 'upscale', components: [] },
+        ],
+      };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    // The first built-in is the default the toggle turns on, and neither chain
+    // offers a download button because both ship inside the binary.
+    await user.click(await screen.findByRole('button', { name: 'Anime4K 极速 · 2 倍' }));
+    expect(screen.getByRole('button', { name: 'Anime4K 高质量 · 2 倍' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Anime4K 极致 · 2 倍' })).toBeInTheDocument();
+    for (const label of ['Anime4K 极速 · 2 倍', 'Anime4K 高质量 · 2 倍', 'Anime4K 极致 · 2 倍']) {
+      expect(screen.queryByRole('button', { name: `下载${label}` })).toBeNull();
+    }
   });
 
   it('loads saved servers from the native repository', async () => {
@@ -432,8 +463,8 @@ describe('settings workspace', () => {
     await user.click(screen.getByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
 
-    await user.click(screen.getByRole('button', { name: 'Aletheia Lens · 去码模型包' }));
-    await user.click(screen.getByRole('button', { name: '下载Aletheia Lens · 去码模型包' }));
+    await user.click(screen.getByRole('button', { name: 'Mask R-CNN' }));
+    await user.click(screen.getByRole('button', { name: '下载Mask R-CNN' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'aletheia-lens' });
   });
 
@@ -651,14 +682,15 @@ describe('settings workspace', () => {
     // Each preset card names the theme and what it changes, so it is found by a
     // prefix rather than an exact label.
     await user.click(await screen.findByRole('link', { name: /样式/ }));
-    await user.click(await screen.findByRole('button', { name: /^紧凑/ }));
-    expect((screen.getByLabelText('自定义 CSS') as HTMLTextAreaElement).value).toContain('.archive-row-tags .metadata-chip');
+    const paperCss = CSS_THEME_PRESETS.find((preset) => preset.id === 'paper-reading')!.css;
+    await user.click(await screen.findByRole('button', { name: /^纸张阅读/ }));
+    expect((screen.getByLabelText('自定义 CSS') as HTMLTextAreaElement).value).toBe(paperCss);
     // The picked card stays marked, and no save step stands between the click
     // and the stylesheet.
-    expect(screen.getByRole('button', { name: /^紧凑/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^纸张阅读/ })).toHaveAttribute('aria-pressed', 'true');
 
     await vi.waitFor(() => {
-      expect(document.getElementById('yomika-custom-css')?.textContent).toContain('.archive-row-tags .metadata-chip');
+      expect(document.getElementById('yomika-custom-css')?.textContent).toBe(paperCss);
     });
   });
 });

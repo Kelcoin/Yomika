@@ -1,0 +1,26 @@
+{
+  "id": "anime4k",
+  "description": "Anime4K upscaling, restore and de-ring shaders, vendored verbatim and read by src-tauri/src/inference/anime4k.rs.",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2019-2021 bloc97",
+  "upstream": "https://github.com/bloc97/Anime4K",
+  "source": "docs/mihon_img_upscale-master/app/src/main/assets/anime4k/",
+  "files": [
+    "Anime4K_Clamp_Highlights.glsl",
+    "Anime4K_Restore_CNN_VL.glsl",
+    "Anime4K_Upscale_CNN_x2_M.glsl",
+    "Anime4K_Upscale_CNN_x2_VL.glsl"
+  ],
+  "sha256": {
+    "Anime4K_Clamp_Highlights.glsl": "a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a",
+    "Anime4K_Restore_CNN_VL.glsl": "35036722733305cd4d4e57660b883bbe2569ba2914033c254327107d7b77e35e",
+    "Anime4K_Upscale_CNN_x2_M.glsl": "716e02098a68f0d648761f2b96b4dd139e1cb09b174bb369fca3aa34328fff7e",
+    "Anime4K_Upscale_CNN_x2_VL.glsl": "5638fe31c37c151a3443fea3451a3ef91af073f4dbb9615f6c0d1e29db11493d"
+  },
+  "notes": [
+    "The shader files carry the Anime4K licence header themselves; they are not modified.",
+    "Only the mpv pass format directives these files use are understood: //!DESC, //!HOOK, //!BIND, //!SAVE, //!WIDTH, //!HEIGHT, //!COMPONENTS and //!WHEN.",
+    "Passes are split the way mpv splits them, and mpv stages them: every pass hooking MAIN runs before every pass hooking PREKERNEL, whatever order the files are listed in. The de-ring clamp depends on that ordering.",
+    "The reference port in docs/mihon_img_upscale-master/app/src/main/cpp/anime4k.cpp compiles a whole shader file as one pass, which cannot work for a multi-pass Anime4K file; it also never resolves the HOOKED alias or the PREKERNEL hook."
+  ]
+}

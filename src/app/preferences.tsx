@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 import type { CommandResult } from '../domain/result';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { upgradeCssThemePreset } from '../lib/cssThemePresets';
 import {
   DEFAULT_PREFERENCES,
   NativeSettingsRepository,
@@ -69,8 +70,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     void repository.load().then((result) => {
       if (!active) return;
       if (result.ok) {
-        setPreferences(result.value);
-        applyPreferences(result.value);
+        const preferences = { ...result.value, customCss: upgradeCssThemePreset(result.value.customCss) };
+        setPreferences(preferences);
+        applyPreferences(preferences);
       } else {
         setError(result.error.message);
       }
@@ -92,8 +94,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   async function importLegacy(encoded: string): Promise<CommandResult<LegacyPreferenceImport>> {
     const result = await repository.importLegacy(encoded);
     if (result.ok) {
-      setPreferences(result.value.preferences);
-      applyPreferences(result.value.preferences);
+      const preferences = { ...result.value.preferences, customCss: upgradeCssThemePreset(result.value.preferences.customCss) };
+      setPreferences(preferences);
+      applyPreferences(preferences);
       setError(undefined);
     }
     return result;
