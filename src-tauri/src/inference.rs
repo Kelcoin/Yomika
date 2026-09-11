@@ -771,6 +771,9 @@ fn resolve_installed_model(
 pub fn builtin_upscale_models() -> Vec<InstalledModel> {
     anime4k::ANIME4K_PRESETS
         .iter()
+        // Anime4K exposes one curated chain in settings. The legacy presets
+        // remain addressable by the renderer so existing cached pages work.
+        .filter(|preset| preset.id == "anime4k-hq")
         .map(|preset| InstalledModel {
             id: preset.id.to_string(),
             version: preset.version.to_string(),
@@ -2493,8 +2496,8 @@ mod tests {
 
         // A fresh install has no models directory, but still has a usable choice.
         let fresh = listed_upscale_models_in(&base);
-        assert_eq!(fresh.len(), anime4k::ANIME4K_PRESETS.len());
-        assert_eq!(fresh[0].id, "anime4k");
+        assert_eq!(fresh.len(), 1, "settings expose one curated Anime4K chain");
+        assert_eq!(fresh[0].id, "anime4k-hq");
         assert_eq!(fresh[0].kind, MODEL_KIND_UPSCALE);
         assert_eq!(fresh[0].scale, Some(2));
         assert!(fresh.iter().all(|model| !model.version.is_empty()));
@@ -2508,9 +2511,9 @@ mod tests {
         )
         .unwrap();
         let listed = listed_upscale_models_in(&base);
-        assert_eq!(listed.len(), anime4k::ANIME4K_PRESETS.len() + 1);
+        assert_eq!(listed.len(), 2);
         assert!(listed.iter().any(|model| model.id == "realesr"));
-        assert_eq!(listed[0].id, "anime4k", "built-ins come first");
+        assert_eq!(listed[0].id, "anime4k-hq", "built-ins come first");
         std::fs::remove_dir_all(base).unwrap();
     }
 

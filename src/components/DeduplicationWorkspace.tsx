@@ -8,6 +8,7 @@ import { SelectField } from './SelectField';
 import { useToast } from './Toast';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
 import { invalidateRouteCache } from '../lib/routeCache';
+import { DatePicker } from './DatePicker';
 
 const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
@@ -131,8 +132,8 @@ export function DeduplicationWorkspace({ embedded = false }: { embedded?: boolea
     {!embedded && <header className="workspace-heading"><div><span className="eyebrow">重复管理</span><h1>查重工作区</h1></div><CopyCheck aria-hidden="true" /></header>}
     <section className="toolbar-row" aria-label="查重设置">
       <label>服务器<SelectField name="dedupServer" aria-label="服务器" value={server?.id ?? ''} options={servers.map((item) => ({ value: item.id, label: item.name }))} onChange={(value) => setServer(servers.find((item) => item.id === value))} /></label>
-      <label>起始日期<input className="date-field" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
-      <label>结束日期<input className="date-field" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
+      <DatePicker label="起始日期" value={startDate} onChange={setStartDate} />
+      <DatePicker label="结束日期" value={endDate} onChange={setEndDate} />
       <button className="primary-action" type="button" disabled={!server || busy} onClick={() => void runScan()}><Play aria-hidden="true" />{busy ? '扫描中…' : '开始扫描'}</button>
       {busy && <button className="secondary-action" type="button" onClick={() => void cancelScan()}><X aria-hidden="true" />取消</button>}
       {progress?.status === 'cancelled' && <button className="secondary-action" type="button" onClick={() => void runScan(true)}><RefreshCw aria-hidden="true" />恢复</button>}

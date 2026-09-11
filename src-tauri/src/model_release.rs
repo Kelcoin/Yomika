@@ -20,6 +20,10 @@ pub struct ReleaseAsset {
     pub sha256: String,
     #[serde(default)]
     pub companions: Vec<String>,
+    /// Optional upstream URL. It is attempted first; the project Release
+    /// mirrors remain the deterministic fallback when it is absent or stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_url: Option<String>,
 }
 
 impl ReleaseAsset {
@@ -74,7 +78,16 @@ fn download_asset_with_fallback(
     destination: &std::path::Path,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
-    for url in candidate_urls(owner_repo, tag, asset.remote_name()) {
+    let mut urls = Vec::new();
+    if let Some(url) = asset
+        .direct_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
+        urls.push(url.to_string());
+    }
+    urls.extend(candidate_urls(owner_repo, tag, asset.remote_name()));
+    for url in urls {
         match download_asset(&url, asset, destination) {
             Ok(()) => return Ok(()),
             Err(error) => errors.push(format!("{url}: {error}")),
@@ -83,6 +96,18 @@ fn download_asset_with_fallback(
     Err(format!(
         "all model download sources failed: {}",
         errors.join("; ")
+    ))
+}
+
+fn aletheia_direct_url(asset: &ReleaseAsset) -> Option<String> {
+    // The upstream project publishes the ONNX files as flat Release assets;
+    // Yomika's manifest keeps their installed subdirectories separately.
+    let name = asset.remote_name();
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    Some(format!(
+        "https://github.com/Cec1c/Aletheia-Lens/releases/download/models-v1/{name}"
     ))
 }
 
@@ -129,6 +154,11 @@ pub fn validate_manifest(manifest: &ModelReleaseManifest) -> Result<(), String> 
             || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit())
         {
             return Err(format!("invalid asset {}", asset.path));
+        }
+        if let Some(url) = asset.direct_url.as_deref() {
+            if !url.starts_with("https://") {
+                return Err(format!("external model URL must use HTTPS: {url}"));
+            }
         }
         if !paths.insert(asset.path.clone()) {
             return Err(format!("duplicate asset {}", asset.path));
@@ -417,12 +447,21 @@ pub fn model_release_download_bundle(
             }
             let mut errors = Vec::new();
             let mut downloaded = false;
-            for url in candidate_urls_with_prefix(
+            let mut urls = Vec::new();
+            if let Some(url) = asset
+                .direct_url
+                .as_deref()
+                .filter(|url| !url.trim().is_empty())
+            {
+                urls.push(url.to_string());
+            }
+            urls.extend(candidate_urls_with_prefix(
                 &input.prefix,
                 &input.owner_repo,
                 &input.manifest.tag,
                 asset.remote_name(),
-            ) {
+            ));
+            for url in urls {
                 match download_asset_with_progress(&url, asset, &target, |done, total| {
                     let _ = tauri::Emitter::emit(
                         &app,
@@ -492,10 +531,15 @@ pub fn model_release_download_default(
                         if let Some(parent) = target.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                         }
+                        let mut configured_asset = asset.clone();
+                        configured_asset.direct_url = configured_asset
+                            .direct_url
+                            .clone()
+                            .or_else(|| aletheia_direct_url(asset));
                         download_asset_with_fallback(
                             "Kelcoin/Yomika",
                             &manifest.tag,
-                            asset,
+                            &configured_asset,
                             &target,
                         )?;
                     }
@@ -668,6 +712,7 @@ mod tests {
             size: 4,
             sha256: format!("{:x}", Sha256::digest(b"test")),
             companions: vec![],
+            direct_url: None,
         }
     }
     #[test]

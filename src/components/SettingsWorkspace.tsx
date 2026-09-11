@@ -32,6 +32,15 @@ const legacyRepository = new NativeLegacyRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
+const CACHE_RENDITIONS = [
+  ['cover', '封面'],
+  ['page-thumbnail', '页缩略图'],
+  ['reader-page', '阅读页'],
+  ['enhanced', '超分结果'],
+  ['decensored', '去码结果'],
+  ['inference', '推理缓存'],
+  ['other', '其他'],
+] as const;
 /** The same file the window icon and the sidebar brand use, so the About page
  * cannot show a stand-in that drifts from the real mark. */
 const markUrl = new URL('../../assets/yomika-icon.svg', import.meta.url).href;
@@ -49,13 +58,12 @@ function formatCacheBytes(value: number): string {
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
 }
 
-/** Names a model by id, version and the scale it produces, since the scale is
- * the model's to decide and not the user's. */
+/** Keep the selector compact: version and scale are implementation metadata. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
-  if (model.kind === 'decensor') return { value: model.id, label: `去码流程 · ${model.version}` };
-  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x 轻量增强', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN 通用增强', '4x-Fatal-Pixels': 'Fatal Pixels 漫画增强', anime4k: 'Anime4K 极速', 'anime4k-hq': 'Anime4K 高质量', 'anime4k-ultra': 'Anime4K 极致' };
+  if (model.kind === 'decensor') return { value: model.id, label: model.id === 'aletheia-lens' ? 'Aletheia Lens' : model.id.replaceAll('-', ' ') };
+  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K' };
   const name = names[model.id] ?? model.id.replaceAll('-', ' ');
-  return { value: model.id, label: `${name}${model.scale ? ` · ${model.scale} 倍` : ' · 去码模型包'}` };
+  return { value: model.id, label: name };
 }
 
 const DECENSOR_COMPONENT_IDS = ['mrcnn', 'deepcreampy-bar', 'deepcreampy-mosaic', 'fatal-pixels'] as const;
@@ -81,8 +89,9 @@ function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
   return DECENSOR_COMPONENT_IDS.every((id) => installed.has(id));
 }
 
-/** Grouped by topic: one "阅读与存储" panel used to hold the theme, the reader
- * defaults, the cache and the upscaler at once. */const settingsSections = [
+/** Settings are split by workflow so everyday controls stay separate from
+ * visual preferences, synchronization, and model tooling. */
+const settingsSections = [
   { id: 'settings-general', label: '通用' },
   { id: 'settings-reading', label: '阅读' },
   { id: 'settings-appearance', label: '样式' },
@@ -151,10 +160,10 @@ export function SettingsWorkspace() {
   const selectedDecensorBundle = decensorBundles?.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles?.[0];
   const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
   const upscaleReady = Boolean(runnableModels?.length);
-  const upscaleModelOptions = runnableModels?.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
+  const upscaleModelOptions = runnableModels?.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x' }];
   const upscaleOptions = runnableModels?.length
     ? runnableModels.map(modelOption)
-    : [{ value: 'waifu2x-upconv7', label: 'waifu2x 轻量增强 · 2 倍' }];
+    : [{ value: 'waifu2x-upconv7', label: 'waifu2x' }];
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -429,13 +438,6 @@ export function SettingsWorkspace() {
               <SelectField name="startupRoute" aria-label="启动时打开" value={preferenceDraft.startupRoute} options={[{ value: 'home', label: '首页' }, { value: 'library', label: '档案库' }]} onChange={(value) => editPreferences({ startupRoute: value as PreferenceSnapshot['startupRoute'] })} />
               <PreferenceRadioFallback name="startupRoute" value={preferenceDraft.startupRoute} options={[['home', '首页'], ['library', '档案库']]} onChange={(value) => editPreferences({ startupRoute: value as PreferenceSnapshot['startupRoute'] })} />
             </fieldset>}
-            {/* Theme belongs with the app-wide basics. 样式 is the custom-CSS
-                surface, and 通用 used to hold nothing but the server list. */}
-            {selectedSettingsSection === 'settings-general' && <fieldset>
-              <legend>主题</legend>
-              <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
-              <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
-            </fieldset>}
             {selectedSettingsSection === 'settings-reading' && <fieldset>
               <legend>默认布局</legend>
               <SelectField name="layout" aria-label="默认布局" value={preferenceDraft.defaultLayout} options={[{ value: 'auto', label: '自动' }, { value: 'single', label: '单页' }, { value: 'double', label: '双页' }, { value: 'webtoon', label: '条漫' }]} onChange={(value) => editPreferences({ defaultLayout: value as PreferenceSnapshot['defaultLayout'] })} />
@@ -445,6 +447,11 @@ export function SettingsWorkspace() {
               <legend>默认方向</legend>
               <SelectField name="direction" aria-label="默认方向" value={preferenceDraft.defaultDirection} options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]} onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
               <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
+            </fieldset>}
+            {selectedSettingsSection === 'settings-appearance' && <fieldset>
+              <legend>主题</legend>
+              <SelectField name="theme" aria-label="主题" value={preferenceDraft.theme} options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
+              <PreferenceRadioFallback name="theme" value={preferenceDraft.theme} options={[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]} onChange={(value) => editPreferences({ theme: value as PreferenceSnapshot['theme'] })} />
             </fieldset>}
             {selectedSettingsSection === 'settings-appearance' && <fieldset className="custom-css-editor">
               <legend>自定义 CSS</legend>
@@ -605,12 +612,7 @@ export function SettingsWorkspace() {
               {cacheStats && cacheStats.bytes > 0 && (
                 /* Proportions read faster than four byte counts side by side. */
                 <div className="cache-bar" aria-hidden="true">
-                  {([
-                    ['cover', cacheStats.byRendition.cover.bytes],
-                    ['page-thumbnail', cacheStats.byRendition['page-thumbnail'].bytes],
-                    ['reader-page', cacheStats.byRendition['reader-page'].bytes],
-                    ['other', cacheStats.byRendition.other.bytes],
-                  ] as const).filter(([, bytes]) => bytes > 0).map(([kind, bytes]) => (
+                  {CACHE_RENDITIONS.map(([kind]) => [kind, cacheStats.byRendition[kind].bytes] as const).filter(([, bytes]) => bytes > 0).map(([kind, bytes]) => (
                     <span
                       key={kind}
                       className={`cache-bar-slice is-${kind}`}
@@ -621,10 +623,7 @@ export function SettingsWorkspace() {
               )}
               {cacheStats && (
                 <div className="cache-breakdown" aria-label="图片缓存明细">
-                  <span><i className="cache-swatch is-cover" aria-hidden="true" />封面 {formatCacheBytes(cacheStats.byRendition.cover.bytes)}</span>
-                  <span><i className="cache-swatch is-page-thumbnail" aria-hidden="true" />页缩略图 {formatCacheBytes(cacheStats.byRendition['page-thumbnail'].bytes)}</span>
-                  <span><i className="cache-swatch is-reader-page" aria-hidden="true" />阅读页 {formatCacheBytes(cacheStats.byRendition['reader-page'].bytes)}</span>
-                  {cacheStats.byRendition.other.bytes > 0 && <span><i className="cache-swatch is-other" aria-hidden="true" />其他 {formatCacheBytes(cacheStats.byRendition.other.bytes)}</span>}
+                  {CACHE_RENDITIONS.map(([kind, label]) => cacheStats.byRendition[kind].bytes > 0 && <span key={kind}><i className={`cache-swatch is-${kind}`} aria-hidden="true" />{label} {formatCacheBytes(cacheStats.byRendition[kind].bytes)}</span>)}
                 </div>
               )}
             </section>}

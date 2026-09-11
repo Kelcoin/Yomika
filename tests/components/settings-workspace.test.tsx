@@ -163,8 +163,8 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
-    await user.click(await screen.findByRole('button', { name: 'waifu2x 轻量增强 · 2 倍' }));
-    expect(screen.queryByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' })).toBeNull();
+    await user.click(await screen.findByRole('button', { name: 'waifu2x' }));
+    expect(screen.queryByRole('button', { name: '下载waifu2x' })).toBeNull();
   });
 
   it('lists the built-in Anime4K chains as choices with nothing to download', async () => {
@@ -176,8 +176,6 @@ describe('settings workspace', () => {
         ok: true,
         value: [
           { id: 'anime4k', version: '2', scale: 2, kind: 'upscale', components: [] },
-          { id: 'anime4k-hq', version: '2', scale: 2, kind: 'upscale', components: [] },
-          { id: 'anime4k-ultra', version: '1', scale: 2, kind: 'upscale', components: [] },
         ],
       };
       return { ok: true, value: [] };
@@ -185,14 +183,9 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
 
-    // The first built-in is the default the toggle turns on, and neither chain
-    // offers a download button because both ship inside the binary.
-    await user.click(await screen.findByRole('button', { name: 'Anime4K 极速 · 2 倍' }));
-    expect(screen.getByRole('button', { name: 'Anime4K 高质量 · 2 倍' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Anime4K 极致 · 2 倍' })).toBeInTheDocument();
-    for (const label of ['Anime4K 极速 · 2 倍', 'Anime4K 高质量 · 2 倍', 'Anime4K 极致 · 2 倍']) {
-      expect(screen.queryByRole('button', { name: `下载${label}` })).toBeNull();
-    }
+    await user.click(await screen.findByRole('button', { name: 'Anime4K' }));
+    expect(screen.getAllByRole('button', { name: 'Anime4K' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: '下载Anime4K' })).toBeNull();
   });
 
   it('loads saved servers from the native repository', async () => {
@@ -293,9 +286,7 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
 
-    // The theme sits in 通用 with the other app-wide basics; 样式 is the
-    // custom-CSS surface.
-    renderSettings('general');
+    renderSettings('appearance');
 
     expect(await screen.findByRole('radio', { name: '深色' })).toBeChecked();
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
@@ -397,8 +388,8 @@ describe('settings workspace', () => {
 
     // Installed models are offered by name, with the scale the model itself
     // produces; typing a name from memory was a silent failure at upscale time.
-    await user.click(screen.getByRole('button', { name: 'realesr general · 4 倍' }));
-    expect(screen.queryByRole('button', { name: /下载realesr general/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Real-ESRGAN' }));
+    expect(screen.queryByRole('button', { name: /下载Real-ESRGAN/ })).toBeNull();
     expect(screen.getAllByLabelText('超分模型').length).toBeGreaterThan(0);
     expect(screen.queryByLabelText('超分后端')).not.toBeInTheDocument();
     // Turning it on picks a backend and the one runnable model, rather than
@@ -459,8 +450,8 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
 
-    await user.click(await screen.findByRole('button', { name: 'waifu2x 轻量增强 · 2 倍' }));
-    await user.click(screen.getByRole('button', { name: '下载waifu2x 轻量增强 · 2 倍' }));
+    await user.click(await screen.findByRole('button', { name: 'waifu2x' }));
+    await user.click(screen.getByRole('button', { name: '下载waifu2x' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
 
     await user.click(screen.getByRole('button', { name: 'Mask R-CNN' }));
@@ -516,9 +507,9 @@ describe('settings workspace', () => {
     expect(breakdown).toHaveTextContent('封面 1 KB');
     expect(breakdown).toHaveTextContent('页缩略图 2 KB');
     expect(breakdown).toHaveTextContent('阅读页 4 KB');
-    expect(breakdown).not.toHaveTextContent('超分结果');
-    expect(breakdown).not.toHaveTextContent('去码结果');
-    expect(breakdown).not.toHaveTextContent('旧版推理结果');
+    expect(breakdown).toHaveTextContent('超分结果 1 KB');
+    expect(breakdown).toHaveTextContent('去码结果 1 KB');
+    expect(breakdown).toHaveTextContent('推理缓存 1 KB');
     await user.click(screen.getByRole('button', { name: '清空图片缓存' }));
     expect(adapter).toHaveBeenCalledWith('cache_clear_images', {});
     expect(await screen.findByText('已释放 6.88 KB，保留 128 B 受保护缓存')).toBeInTheDocument();
@@ -578,7 +569,7 @@ describe('settings workspace', () => {
     expect(await screen.findByText('已导入 3 项偏好设置')).toBeInTheDocument();
     // The imported snapshot lands across sections: theme in 通用, reader
     // defaults in 阅读.
-    await user.click(screen.getByRole('link', { name: /通用/ }));
+    await user.click(screen.getByRole('link', { name: /样式/ }));
     expect(screen.getByRole('radio', { name: '浅色' })).toBeChecked();
     await user.click(screen.getByRole('link', { name: /阅读/ }));
     expect(screen.getByRole('radio', { name: '条漫' })).toBeChecked();
@@ -622,6 +613,7 @@ describe('settings workspace', () => {
 
     expect(await screen.findByText('旧配置无有效普通偏好')).toBeInTheDocument();
     await user.click(screen.getByRole('link', { name: /通用/ }));
+    await user.click(screen.getByRole('link', { name: /样式/ }));
     expect(screen.getByRole('radio', { name: '深色' })).toBeChecked();
   });
 

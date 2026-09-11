@@ -234,6 +234,9 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{[\s\S]*font-size:\s*12px/);
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags\s*\{[\s\S]*grid-template-rows:\s*repeat\(3,/);
     expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
+    expect(shell).toMatch(/\.archive-row-thumb\s*\{[\s\S]*overflow:\s*hidden[\s\S]*border-radius:\s*var\(--radius-control\)/);
+    expect(shell).toMatch(/\.archive-row-thumb img\s*\{[\s\S]*border-radius:\s*inherit/);
+    expect(shell).not.toMatch(/@container app-main \(max-width: 1280px\)/);
   });
 
   it('uses the project font and stable icon slots for status chrome', () => {
