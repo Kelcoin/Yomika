@@ -37,6 +37,8 @@ export const PreferenceSnapshotSchema = z.object({
    * cards and detail pages, colouring those chips with the account's preset
    * colours. Needs a signed-in account and one mytags fetch. */
   ehMyTagsPriority: z.boolean().default(false),
+  /** SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。 */
+  sfwMode: z.boolean().default(false),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
@@ -82,6 +84,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   confirmEhFavoriteDelete: true,
   continueReadingShowFinished: true,
   ehMyTagsPriority: false,
+  sfwMode: false,
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],

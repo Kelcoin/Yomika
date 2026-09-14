@@ -1944,6 +1944,34 @@ body::-webkit-scrollbar,
   height: 100%;
   object-fit: contain;
   border-radius: inherit;
+  transition: filter var(--motion-fast), transform var(--motion-fast);
+}
+
+/* SFW 模式：封面一律模糊；悬停封面本身、点击卡片（获得焦点）或按下时临时
+   显示那一枚，移开或失焦自动恢复——blur 走根属性 data-sfw，不触碰组件。
+   列表封面（archive-row-thumb）、rail/网格封面（archive-thumb-card-media）
+   与详情封面都参与。 */
+:root[data-sfw='true'] .archive-row-thumb img,
+:root[data-sfw='true'] .archive-thumb-card-media img,
+:root[data-sfw='true'] .archive-detail-cover-trigger img {
+  filter: blur(24px);
+  transform: scale(1.12);
+}
+
+:root[data-sfw='true'] .archive-row-thumb:hover img,
+:root[data-sfw='true'] .archive-thumb-card-media:hover img,
+:root[data-sfw='true'] .archive-thumb-card:hover img,
+:root[data-sfw='true'] .archive-thumb-card:focus img,
+:root[data-sfw='true'] .archive-thumb-card:focus-visible img,
+:root[data-sfw='true'] .archive-thumb-card:active img,
+:root[data-sfw='true'] .archive-row:hover img,
+:root[data-sfw='true'] .archive-row:focus img,
+:root[data-sfw='true'] .archive-row:focus-visible img,
+:root[data-sfw='true'] .archive-row:active img,
+:root[data-sfw='true'] .archive-detail-cover-trigger:hover img,
+:root[data-sfw='true'] .archive-detail-cover-trigger:focus-visible img {
+  filter: none;
+  transform: none;
 }
 
 /* A wide cover only takes two columns of width; its height stays identical to a

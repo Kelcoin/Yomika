@@ -40,6 +40,9 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   applyTheme(preferences.theme);
   getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
   setEhMyTagsPriorityEnabled(preferences.ehMyTagsPriority);
+  // SFW 模式走根属性：模糊与显隐是纯 CSS 合同，样式自定义无需知道开关。
+  if (preferences.sfwMode) document.documentElement.dataset.sfw = 'true';
+  else delete document.documentElement.dataset.sfw;
   applyCustomCss(preferences.customCss);
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, 
 import { Link, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, ChevronDown, ChevronRight, Copy,
-  CopyCheck, Database, Download, Eraser, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
+  CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Lock, Check, Minus,
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
   SlidersHorizontal, Sparkles, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints,
@@ -975,6 +975,15 @@ export function SettingsWorkspace() {
                 max={8}
                 format={(value) => `${value} 个`}
                 onChange={(value) => editPreferences({ coverConcurrency: value })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-appearance' && (
+              <SettingsSwitch
+                icon={<EyeOff />}
+                label="SFW 模式"
+                hint="所有封面模糊显示；悬停封面或点击卡片才临时显示那一枚，移开或失焦自动恢复"
+                checked={preferenceDraft.sfwMode}
+                onToggle={() => editPreferences({ sfwMode: !preferenceDraft.sfwMode })}
               />
             )}
             {selectedSettingsSection === 'settings-appearance' && (

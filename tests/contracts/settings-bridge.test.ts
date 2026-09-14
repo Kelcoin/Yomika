@@ -21,6 +21,7 @@ const preferences = {
   confirmEhFavoriteDelete: true,
   continueReadingShowFinished: true,
   ehMyTagsPriority: false,
+  sfwMode: false,
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,

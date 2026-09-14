@@ -22,6 +22,7 @@ const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
 const CONTINUE_READING_SHOW_FINISHED_KEY: &str = "preferences.continue_reading_show_finished";
 const EH_MY_TAGS_PRIORITY_KEY: &str = "preferences.eh_my_tags_priority";
+const SFW_MODE_KEY: &str = "preferences.sfw_mode";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 pub const GIB_BYTES: u64 = 1_073_741_824;
@@ -105,6 +106,9 @@ pub struct PreferenceSnapshot {
     /// colours. Needs a signed-in account and one mytags fetch.
     #[serde(default)]
     pub eh_my_tags_priority: bool,
+    /// SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。
+    #[serde(default)]
+    pub sfw_mode: bool,
     /// Free-form CSS appended after the design tokens. This is the whole
     /// customisation surface: it superseded a single accent-colour preference,
     /// which could not express the themes people actually want and became one
@@ -167,6 +171,7 @@ impl Default for PreferenceSnapshot {
             confirm_eh_favorite_delete: true,
             continue_reading_show_finished: true,
             eh_my_tags_priority: false,
+            sfw_mode: false,
             custom_css: String::new(),
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
@@ -297,6 +302,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             EH_MY_TAGS_PRIORITY_KEY,
             defaults.eh_my_tags_priority,
         )?,
+        sfw_mode: load_value(connection, SFW_MODE_KEY, defaults.sfw_mode)?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: load_value(connection, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
@@ -368,6 +374,7 @@ pub fn save_preferences_to(
             EH_MY_TAGS_PRIORITY_KEY,
             serde_json::to_string(&value.eh_my_tags_priority),
         ),
+        (SFW_MODE_KEY, serde_json::to_string(&value.sfw_mode)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
         (FLOATING_NAV_KEY, serde_json::to_string(&value.floating_nav)),
         (
@@ -545,6 +552,7 @@ mod tests {
             confirm_eh_favorite_delete: false,
             continue_reading_show_finished: false,
             eh_my_tags_priority: true,
+            sfw_mode: true,
             floating_nav: true,
             bottom_nav_items: vec![
                 "home".into(),

@@ -95,7 +95,7 @@ describe('settings workspace', () => {
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: true, confirmEhFavoriteDelete: false } }));
   });
 
-  it('persists the continue-reading finished filter and the my-tags priority switches', async () => {
+  it('persists the feature switches in general, appearance and eh sections', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
@@ -108,6 +108,12 @@ describe('settings workspace', () => {
     const finished = await screen.findByRole('switch', { name: '继续阅读显示已读完' });
     await user.click(finished);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, continueReadingShowFinished: false } }));
+
+    renderSettings('appearance');
+    // SFW 模式：封面一律模糊，悬停/点击临时显示。
+    const sfw = await screen.findByRole('switch', { name: 'SFW 模式' });
+    await user.click(sfw);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, sfwMode: true } }));
 
     renderSettings('eh');
     // 未登录时开关锁定为关闭（disabled 且显示未勾选），不写入偏好。

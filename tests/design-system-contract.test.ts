@@ -3,7 +3,9 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const root = resolve(__dirname, '..');
-const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
+// 归一化行尾：git 的 autocrlf checkout 会把源文件写成 CRLF，而合同的换行
+// 断言只应关心内容本身。
+const read = (path: string) => readFileSync(resolve(root, path), 'utf8').replace(/\r\n/g, '\n');
 
 type Rgb = [number, number, number];
 
@@ -574,6 +576,22 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-card-check \{/);
     expect(workspace).toMatch(/role: 'checkbox', 'aria-checked': isSelected/);
     expect(workspace).toMatch(/modifiers.shiftKey && anchor >= 0/);
+  });
+
+  it('blurs covers in SFW mode and reveals exactly one on hover, click or focus', () => {
+    const shell = read('src/styles/shell.css');
+    const preferences = read('src/app/preferences.tsx');
+    // 开关只翻转根属性：模糊与显隐是纯 CSS 合同，自定义 CSS 无需知道开关。
+    expect(preferences).toMatch(/documentElement\.dataset\.sfw/);
+    // 列表封面、rail/网格封面与详情封面都参与模糊；SFW 下点击卡片（获得焦点）也算显示意图。
+    expect(shell).toMatch(/:root\[data-sfw='true'\] \.archive-row-thumb img/);
+    expect(shell).toMatch(/:root\[data-sfw='true'\] \.archive-thumb-card-media img/);
+    expect(shell).toMatch(/:root\[data-sfw='true'\] \.archive-detail-cover-trigger img/);
+    // 悬停封面本身与卡片焦点/按下都解除模糊。
+    expect(shell).toMatch(/\.archive-row-thumb:hover img/);
+    expect(shell).toMatch(/\.archive-thumb-card:focus img/);
+    expect(shell).toMatch(/\.archive-row:focus-visible img/);
+    expect(shell).toMatch(/\.archive-detail-cover-trigger:focus-visible img/);
   });
 
   it('draws the E-Hentai mark as a tonal M3 tile from theme tokens', () => {
