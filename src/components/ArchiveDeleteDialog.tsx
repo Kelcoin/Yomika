@@ -34,7 +34,8 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
       if (!active) return;
       if (!result.ok) { showToast(result.error.message, 'error'); return; }
       setPreferences(result.value);
-      setSyncFavorite(result.value.ehFavoriteDeleteSync);
+      // 开关只是默认值：删除始终需要确认，这里决定的是它的初始勾选。
+      setSyncFavorite(result.value.ehFavoriteDeleteSync && result.value.confirmEhFavoriteDelete);
     });
     return () => { active = false; };
   }, [showToast]);
@@ -53,9 +54,9 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
       <Dialog.Content className="dialog-content archive-delete-dialog">
         <Dialog.Title>确认删除</Dialog.Title>
         <Dialog.Description>{description}</Dialog.Description>
-        {preferences?.ehFavoriteDeleteSync && (preferences.confirmEhFavoriteDelete
-          ? <label className="preference-toggle"><button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={syncFavorite} disabled={busy} onClick={() => setSyncFavorite(!syncFavorite)}><span /></button><span>同步删除 E-Hentai 收藏</span></label>
-          : <p>同时删除对应的 E-Hentai 收藏</p>)}
+        {preferences?.ehFavoriteDeleteSync && (
+          <label className="preference-toggle"><button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={syncFavorite} disabled={busy} onClick={() => setSyncFavorite(!syncFavorite)}><span /></button><span>同步删除 E-Hentai 收藏</span></label>
+        )}
         <div className="dialog-actions">
           <button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button>
           <button className="primary-action" type="button" disabled={busy || !preferences} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>

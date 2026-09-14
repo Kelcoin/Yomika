@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Pause, Play, RotateCcw, X } from 'lucide-react';
+import { Download, Pause, Play, RotateCcw, X } from 'lucide-react';
+
+import { EmptyState } from './EmptyState';
 
 import type { TaskRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -53,12 +55,12 @@ export function TaskCenter() {
 
   return (
     <div className="task-center">
-      <header className="workspace-heading task-heading">
-        <div><h1>下载</h1></div>
-      </header>
+      <h1 className="visually-hidden">下载</h1>
       {loading && <p className="server-list-message" role="status">正在读取任务…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {!loading && !error && tasks.length === 0 && <p className="server-list-message">暂无下载任务</p>}
+      {!loading && !error && tasks.length === 0 && (
+        <EmptyState icon={Download} title="暂无下载任务" description="开始下载后，任务和进度会显示在这里。" />
+      )}
       {!loading && !error && tasks.length > 0 && (
         <section className="task-list" aria-label="任务列表">
           {tasks.map((task) => (

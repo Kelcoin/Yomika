@@ -4,9 +4,7 @@
   place-items: center;
   width: 100%;
   min-width: 320px;
-  min-height: 100vh;
   min-height: 100dvh;
-  height: 100vh;
   height: 100dvh;
   overflow: clip;
   background: var(--reader-canvas);
@@ -132,8 +130,8 @@
   gap: var(--space-3);
   padding: var(--space-6);
   color: var(--reader-muted);
-  font-family: var(--font-utility);
-  font-size: 12px;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
 }
 
 .reader-page-status p { margin: 0; }
@@ -142,7 +140,6 @@
 /* The shared indicator, in the reader's palette. */
 .reader-page-status .loading-indicator { padding: 0; color: var(--reader-muted); }
 .reader-page-status .loading-indicator svg { stroke: var(--reader-ink); }
-
 
 /* The loading state keeps the reader's own dark canvas, so the indicator does not
    flash against a light background before the first page arrives. */
@@ -181,7 +178,7 @@
 }
 
 .reader-error h1 {
-  font-size: 24px;
+  font-size: var(--text-heading);
 }
 
 .reader-error p {
@@ -195,21 +192,6 @@
   gap: var(--space-2);
   min-height: 44px;
   color: var(--brand-cyan);
-}
-
-.reader-error-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
-}
-
-.reader-error-actions button {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 44px;
 }
 
 .reader-error svg,
@@ -262,8 +244,8 @@
   padding: 2px 8px;
   border: 1px solid var(--reader-border);
   border-radius: var(--radius-pill);
-  font-family: var(--font-utility);
-  font-size: 11px;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
 }
 
 .reader-incognito-badge svg { width: 14px; height: 14px; }
@@ -320,7 +302,7 @@
   flex: 0 0 auto;
   min-width: 64px;
   font-family: var(--font-utility);
-  font-size: 12px;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
@@ -395,7 +377,7 @@
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  font-size: 15px;
+  font-size: var(--text-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -423,12 +405,12 @@
 }
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
-.reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: 12px; }
+.reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
    rather than being one run of identical chips. */
 .reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }
-.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: var(--text-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .reader-overview-thumbnails {
@@ -473,7 +455,7 @@
   left: 0;
   background: var(--reader-page-overlay);
   font-family: var(--font-utility);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 14px;
   text-align: center;
 }

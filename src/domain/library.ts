@@ -14,6 +14,7 @@ export const ArchiveRecordSchema = z.object({
   archiveId: z.string().min(1),
   title: z.string(),
   pageCount: z.number().int().nonnegative(),
+  fileSize: z.number().int().nonnegative().optional(),
   summary: z.string().nullable().optional(),
   category: z.string().nullable().optional(),
   language: z.string().nullable().optional(),

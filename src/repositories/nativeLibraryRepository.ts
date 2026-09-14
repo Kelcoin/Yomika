@@ -197,6 +197,9 @@ export class NativeLibraryRepository {
   addArchiveToCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema);
   }
+  removeArchiveFromCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
+    return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateShelves);
+  }
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(invalidateShelves);
   }
@@ -277,6 +280,11 @@ export class NativeLibraryRepository {
       server: input.identity,
       apiKey: input.apiKey,
     }, ServerRecordSchema);
+  }
+
+  /** 编辑已配置服务器时读回系统安全存储中的 API Key，供弹窗展示与预填。 */
+  readServerApiKey(scopeId: string): Promise<CommandResult<string>> {
+    return invokeCommand('read_server_api_key', { scopeId }, z.string());
   }
 
   listArchives(serverId: string): Promise<CommandResult<ArchiveRecord[]>> {

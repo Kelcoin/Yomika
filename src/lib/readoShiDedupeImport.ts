@@ -21,6 +21,12 @@ function pair(left: unknown, right: unknown): DedupPairInput | undefined {
 }
 
 function readPair(value: unknown): DedupPairInput | undefined {
+  // The worker's dedupe KV is an array of normalized 'a|b' strings.
+  if (typeof value === 'string') {
+    const halves = value.split('|').map((part) => part.trim()).filter(Boolean);
+    if (halves.length !== 2) return undefined;
+    return pair(halves[0], halves[1]);
+  }
   if (Array.isArray(value) && value.length >= 2) return pair(value[0], value[1]);
   if (!value || typeof value !== 'object') return undefined;
   const item = value as UnknownRecord;

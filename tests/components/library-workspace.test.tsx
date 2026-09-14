@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -18,6 +18,14 @@ function renderWorkspace(props: React.ComponentProps<typeof LibraryWorkspace>) {
   return render(<MemoryRouter><LibraryWorkspace {...props} /></MemoryRouter>);
 }
 
+/** jsdom has no layout: scrollTop, clientHeight and scrollHeight are all 0, so
+ * every list reads as being at both ends at once. Pin what the gesture asks for. */
+function scrollable(element: HTMLElement, metrics: { scrollTop: number; clientHeight: number; scrollHeight: number }) {
+  for (const [key, value] of Object.entries(metrics)) {
+    Object.defineProperty(element, key, { value, configurable: true, writable: true });
+  }
+}
+
 describe('library workspace', () => {
   it('keeps a useful empty state', () => {
     renderWorkspace({ archives: [] });
@@ -28,7 +36,7 @@ describe('library workspace', () => {
     const user = userEvent.setup();
     renderWorkspace({ archives });
 
-    expect(screen.getByText('100 项')).toBeInTheDocument();
+    // The status bar reads the total from the server itself; the page no longer publishes one.
     await user.click(screen.getByRole('button', { name: /^Archive 1\b/ }));
     expect(screen.getByRole('heading', { name: 'Archive 1' })).toBeInTheDocument();
     expect(screen.getByRole('separator')).toHaveAttribute('aria-orientation', 'vertical');
@@ -92,7 +100,10 @@ describe('library workspace', () => {
     renderWorkspace({ archives });
 
     expect(screen.getByLabelText('搜索档案')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '按标题降序' })).toBeInTheDocument();
+    // The field carries the direction now; the button that used to hold it is
+    // gone, which is also where the multi-select toggle sits.
+    expect(screen.getByRole('button', { name: '名称' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /按.*序$/ })).toBeNull();
   });
 
   it('applies and saves search presets from the toolbar', async () => {
@@ -108,14 +119,17 @@ describe('library workspace', () => {
     const onDeletePreset = vi.fn();
     renderWorkspace({ archives, presets: [preset], onApplyPreset, onSavePreset, onDeletePreset });
 
-    // A preset carries the whole toolbar state, so applying is one click.
-    await user.click(screen.getByRole('button', { name: '中文汉化' }));
+    // Everything a preset can do lives in one menu behind the bookmark button.
+    await user.click(screen.getByRole('button', { name: '检索预设' }));
+    await user.click(await screen.findByRole('menuitem', { name: '中文汉化' }));
     expect(onApplyPreset).toHaveBeenCalledWith(preset);
 
-    await user.click(screen.getByRole('button', { name: '存为预设' }));
+    await user.click(screen.getByRole('button', { name: '检索预设' }));
+    await user.click(await screen.findByRole('menuitem', { name: '新增预设' }));
     expect(onSavePreset).toHaveBeenCalled();
 
-    await user.click(screen.getByRole('button', { name: '删除预设 中文汉化' }));
+    await user.click(screen.getByRole('button', { name: '检索预设' }));
+    await user.click(await screen.findByRole('button', { name: '删除预设 中文汉化' }));
     expect(onDeletePreset).toHaveBeenCalledWith(preset);
   });
 
@@ -168,35 +182,247 @@ describe('library workspace', () => {
     renderWorkspace({
       archives: archives.slice(0, 2),
       timelineByArchiveId: new Map([
-        ['archive-0', '08:15'],
-        ['archive-1', '09:30'],
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15' }],
+        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '09:30' }],
       ]),
     });
 
     const firstItem = screen.getAllByRole('listitem')[0]!;
     const card = screen.getByRole('button', { name: /^Archive 0\b/ });
     const timeline = firstItem.querySelector<HTMLElement>('.archive-row-timeline');
+    // The day's first row names the day; every row still shows its own time.
+    expect(timeline).toHaveTextContent('今天');
     expect(timeline).toHaveTextContent('08:15');
     expect(card).not.toContainElement(timeline);
+
+    const secondItem = screen.getAllByRole('listitem')[1]!;
+    const secondTimeline = secondItem.querySelector<HTMLElement>('.archive-row-timeline');
+    expect(secondTimeline?.querySelector('.archive-row-timeline-day')).toBeNull();
+    expect(secondTimeline).toHaveTextContent('09:30');
   });
 
-  it('uses an icon on the archive refresh tool', () => {
-    renderWorkspace({ archives, onRefresh: vi.fn() });
+  it('refreshes only when a pull past the top of the list is released', async () => {
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    // jsdom has no layout and reports zeros, which read as "at both ends".
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
 
-    expect(screen.getByRole('button', { name: '刷新档案库' }).querySelector('svg')).toBeTruthy();
+    // The list itself moves with the gesture, damped to half the wheel travel,
+    // and the disc comes with it.
+    fireEvent.wheel(list, { deltaY: -40 });
+    expect(pull).toHaveStyle({ transform: 'translateY(20px)' });
+    expect(list.querySelector('.library-pull-indicator')).toHaveClass('is-visible');
+    // Short of the threshold, so letting go springs the list back.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
+
+    // Scrolling the other way is ordinary scrolling, never an overscroll.
+    fireEvent.wheel(list, { deltaY: 120 });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    // Past the threshold, releasing hands it to the refresh; the list goes back
+    // to its place while the disc stays over it.
+    fireEvent.wheel(list, { deltaY: -200 });
+    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });
 
-  it('sorts archives by title ascending and descending', async () => {
-    const user = userEvent.setup();
+  it('keeps the refresh disc styled and hidden until it has something to say', () => {
+    // A class built as `disc${cond ? ' x' : undefined}` renders as
+    // "discundefined": no rule matches, so the bare icon sat drawn in the corner
+    // of the list for good. Assert the class list itself, not just the element.
+    const { rerender } = renderWorkspace({ archives, onRefresh: () => {} });
+    const list = screen.getByRole('list', { name: '档案' });
+    const indicator = list.querySelector('.library-pull-indicator');
+    const disc = list.querySelector('.library-pull-disc');
+
+    expect(indicator).not.toBeNull();
+    expect(disc).not.toBeNull();
+    expect(disc?.className).toBe('library-pull-disc');
+    expect(indicator?.className).toBe('library-pull-indicator');
+    // Nothing inside the list may carry a class that came from an undefined.
+    expect(list.innerHTML).not.toMatch(/class="[^"]*undefined/);
+
+    rerender(<MemoryRouter><LibraryWorkspace archives={archives} onRefresh={() => {}} refreshing /></MemoryRouter>);
+    expect(list.querySelector('.library-pull-disc')?.className).toBe('library-pull-disc is-spinning');
+    expect(list.querySelector('.library-pull-indicator')?.className).toBe('library-pull-indicator is-visible');
+  });
+
+  it('bounces off the bottom of the list without asking for anything', async () => {
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 3200, clientHeight: 800, scrollHeight: 4000 });
+
+    // The last wheel notch past the end lifts the list instead of scrolling it.
+    fireEvent.wheel(list, { deltaY: 100 });
+    expect(pull).toHaveStyle({ transform: 'translateY(-50px)' });
+    // The end of the list is not a refresh, and the disc never shows for it.
+    expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('bounces on the shelves too, where there is no refresh to ask for', () => {
+    // No onRefresh: the shelves get the same overscroll, minus the disc.
     renderWorkspace({ archives: archives.slice(0, 5) });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
 
-    expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toBeInTheDocument();
+    fireEvent.wheel(list, { deltaY: -200 });
+    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    expect(list.querySelector('.library-pull-indicator')).toBeNull();
+  });
 
-    await user.click(screen.getByRole('button', { name: '按标题降序' }));
-    expect(screen.getByText('5 项')).toBeInTheDocument();
+  it('pulls with a finger and refreshes on lift', () => {
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
 
-    await user.click(screen.getByRole('button', { name: '按标题升序' }));
-    expect(screen.getByText('5 项')).toBeInTheDocument();
+    fireEvent.touchStart(list, { touches: [{ clientY: 10 }] });
+    // Dragging up is the list scrolling itself, so it must not pull.
+    fireEvent.touchMove(list, { touches: [{ clientY: 0 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    fireEvent.touchStart(list, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 170 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    // A held pull has not been released yet, so nothing has been asked for.
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    fireEvent.touchEnd(list);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    // The list is already back where it belongs; the disc carries the request.
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  });
+
+  it('sorts by choosing a field, and flips the direction when it is chosen again', async () => {
+    const user = userEvent.setup();
+    const onSortModeChange = vi.fn();
+    const onSortOrderChange = vi.fn();
+    renderWorkspace({
+      archives: archives.slice(0, 5),
+      sortMode: 'added',
+      sortOrder: 'desc',
+      onSortModeChange,
+      onSortOrderChange,
+    });
+
+    // Another field: the mode changes and the direction is left alone.
+    await user.click(screen.getByRole('button', { name: '添加时间' }));
+    await user.click(within(screen.getByRole('listbox')).getByRole('button', { name: '名称' }));
+    expect(onSortModeChange).toHaveBeenCalledWith('title');
+    expect(onSortOrderChange).not.toHaveBeenCalled();
+
+    // The field already chosen: the same click flips the direction instead.
+    await user.click(screen.getByRole('button', { name: '添加时间' }));
+    await user.click(within(screen.getByRole('listbox')).getByRole('button', { name: '添加时间' }));
+    expect(onSortOrderChange).toHaveBeenCalledWith('asc');
+    expect(onSortModeChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects cards with a click, a shift range, and a ctrl click outside the mode', async () => {
+    const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
+    const onSelectionModeChange = vi.fn();
+    renderWorkspace({
+      archives: archives.slice(0, 4),
+      selectionMode: true,
+      selectedArchiveIds: new Set<string>(),
+      onSelectionChange,
+      onSelectionModeChange,
+    });
+    const card = (index: number) => screen.getByRole('checkbox', { name: `选择 Archive ${index}` });
+
+    await user.click(card(0));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(new Set(['archive-0']));
+
+    // Shift reaches back to the card last touched and takes everything between.
+    await user.keyboard('{Shift>}');
+    await user.click(card(2));
+    await user.keyboard('{/Shift}');
+    expect(onSelectionChange).toHaveBeenLastCalledWith(new Set(['archive-0', 'archive-1', 'archive-2']));
+  });
+
+  it('enters the selection mode from a ctrl click on a card', async () => {
+    const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
+    const onSelectionModeChange = vi.fn();
+    renderWorkspace({ archives: archives.slice(0, 4), onSelectionChange, onSelectionModeChange });
+
+    await user.keyboard('{Control>}');
+    await user.click(screen.getByRole('button', { name: /^Archive 1\b/ }));
+    await user.keyboard('{/Control}');
+
+    expect(onSelectionModeChange).toHaveBeenCalledWith(true);
+    expect(onSelectionChange).toHaveBeenCalledWith(new Set(['archive-1']));
+  });
+
+  it('shows the selection bar with a count, select-all, and the page actions', async () => {
+    const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
+    renderWorkspace({
+      archives: archives.slice(0, 4),
+      selectionMode: true,
+      selectedArchiveIds: new Set(['archive-0']),
+      onSelectionChange,
+      selectionActions: <button type="button">删除所选</button>,
+    });
+
+    expect(screen.getByText('已选 1 个')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '删除所选' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '全选当前' }));
+    expect(onSelectionChange).toHaveBeenCalledWith(new Set(['archive-0', 'archive-1', 'archive-2', 'archive-3']));
+  });
+
+  it('offers select-all-finished in the selection bar when the page can define it', async () => {
+    const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
+    const onSelectAllFinished = vi.fn(() => onSelectionChange(new Set(['archive-1', 'archive-3'])));
+    renderWorkspace({
+      archives: archives.slice(0, 4),
+      selectionMode: true,
+      onSelectionChange,
+      onSelectAllFinished,
+      finishedSelectableCount: 2,
+    });
+
+    const button = screen.getByRole('button', { name: '全选已读完' });
+    await user.click(button);
+    expect(onSelectAllFinished).toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledWith(new Set(['archive-1', 'archive-3']));
+
+    // 没有已读完条目时按钮被禁用而不是消失——多选里少一个动作比动作闪现清楚。
+    cleanup();
+    renderWorkspace({
+      archives: archives.slice(0, 2),
+      selectionMode: true,
+      onSelectionChange,
+      onSelectAllFinished,
+      finishedSelectableCount: 0,
+    });
+    expect(screen.getByRole('button', { name: '全选已读完' })).toBeDisabled();
+  });
+
+  it('offers the multi-select toggle beside the presets where there is no toolbar', () => {
+    const onSelectionModeChange = vi.fn();
+    renderWorkspace({ archives: archives.slice(0, 4), showToolbar: false, onSavePreset: () => {}, onSelectionModeChange });
+
+    // No toolbar on the shelves: the toggle joins the search row instead.
+    expect(screen.queryByRole('toolbar', { name: '档案库工具' })).toBeNull();
+    expect(screen.getByRole('button', { name: '多选' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '检索预设' })).toBeInTheDocument();
   });
 
   it('does not render the obsolete category assignment control', () => {

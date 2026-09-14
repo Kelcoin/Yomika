@@ -1,4 +1,4 @@
-/** Fixed-width thumbnail grid geometry, ported from Readoshi's ArchiveGrid.
+/** Fixed-width thumbnail grid geometry.
  *
  * Cards have one of two widths, and a wide card is exactly two narrow cards plus
  * the gap. That keeps the column count deterministic, which is what makes the
@@ -6,7 +6,7 @@
  * unknown to JS, so an index could not be mapped to a row.
  */
 export const ARCHIVE_GRID_CARD_WIDTH = 180;
-export const ARCHIVE_GRID_GAP = 12;
+export const ARCHIVE_GRID_GAP = 8;
 /** Card geometry is fixed so the row height is exact. A `minmax()` row plus a
  * `min-height` let a card grow past the row it was placed in, and neighbouring
  * rows then overlapped it. Keep these in step with `.archive-list.is-thumbnail`
@@ -28,6 +28,18 @@ export const ARCHIVE_GRID_CARD_PADDING = 8;
 export const ARCHIVE_GRID_CARD_GAP = 8;
 export const ARCHIVE_GRID_ROW_HEIGHT =
   ARCHIVE_GRID_COVER_HEIGHT + ARCHIVE_GRID_CARD_GAP + ARCHIVE_GRID_COPY_HEIGHT + ARCHIVE_GRID_CARD_PADDING * 2;
+
+/** Wide/list rows use one geometry for every shelf: a 158px card inside a 166px
+ * stride, so neighbouring cards keep a visible 8px gap instead of sharing an
+ * edge. Keep in step with `.archive-list.is-wide .archive-row-wrap` in shell.css
+ * — the virtualizer positions rows absolutely, so a mismatch overlaps them. */
+export const ARCHIVE_LIST_ROW_HEIGHT = 158;
+export const ARCHIVE_LIST_ROW_GAP = 8;
+export const ARCHIVE_LIST_ROW_STRIDE = ARCHIVE_LIST_ROW_HEIGHT + ARCHIVE_LIST_ROW_GAP;
+
+/** Compact history replaces the right-hand rail with a dated section bar above
+ * each day's first card. Keep in step with `.archive-day-divider` in shell.css. */
+export const ARCHIVE_DAY_DIVIDER_HEIGHT = 28;
 
 export function getWideArchiveCardWidth(gap = ARCHIVE_GRID_GAP): number {
   const safeGap = Number.isFinite(gap) && gap >= 0 ? gap : ARCHIVE_GRID_GAP;

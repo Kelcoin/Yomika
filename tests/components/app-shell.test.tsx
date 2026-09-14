@@ -10,6 +10,8 @@ vi.mock('../../src/lib/tagTranslationService', async (importOriginal) => ({
   stopTagTranslationUpdates: translationLifecycle.stop,
 }));
 
+import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
+import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetArchiveExistenceForTests } from '../../src/lib/archiveExistence';
@@ -313,5 +315,40 @@ describe('application shell', () => {
     await user.click(collapse);
 
     expect(screen.getByRole('button', { name: '展开侧栏' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('collects the pages the compact bar cannot fit under 更多', async () => {
+    const user = userEvent.setup();
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === COMPACT_WIDTH_QUERY,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      setInvokeAdapterForTests(async (command) => {
+        if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+        if (command === 'list_servers') return { ok: true, value: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      renderAt('/');
+
+      await user.click(await screen.findByRole('button', { name: /更多/ }));
+      const menu = screen.getByRole('menu', { name: '更多页面' });
+      // 默认底栏＝首页/档案库/历史/收藏夹/设置(+钉住)，菜单只列缺的待看与下载；
+      // 已在底栏里的页面不再重复出现。
+      expect(within(menu).getByRole('menuitem', { name: /待看/ })).toBeInTheDocument();
+      expect(within(menu).getByRole('menuitem', { name: /下载/ })).toBeInTheDocument();
+      expect(within(menu).queryByRole('menuitem', { name: /历史/ })).not.toBeInTheDocument();
+      await user.click(within(menu).getByRole('menuitem', { name: /待看/ }));
+      expect(screen.queryByRole('menu', { name: '更多页面' })).not.toBeInTheDocument();
+    } finally {
+      window.matchMedia = original;
+    }
   });
 });

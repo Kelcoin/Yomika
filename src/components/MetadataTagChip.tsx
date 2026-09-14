@@ -9,7 +9,7 @@ import { translateRawTag } from '../lib/tags';
  * read-only run of translated chips underneath. Nothing tied them together, so
  * the translations were decoration and every edit was string surgery.
  *
- * Following Readoshi's `MetadataTagChip.jsx`, a chip shows the translation and
+ * A chip shows the translation and
  * reveals the original underneath it. Hover does it on a mouse; a tap does it on
  * touch, where there is no hover to rely on. The delete button sits on the right
  * so removing a tag is one click rather than finding it in a string.

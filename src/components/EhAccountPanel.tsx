@@ -1,12 +1,21 @@
-import { Copy, Globe, KeyRound, LogIn, RefreshCw, ArrowRightLeft, Download, LogOut, RotateCw, X } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { KeyRound, LogIn, RefreshCw, Download, LogOut, Pencil } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { writeClipboardText } from '../bridge/clipboard';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '../lib/ehCookie';
 import { useToast } from './Toast';
 
+/** What the account is called anywhere it is shown: the username when one has
+ * been recorded, otherwise the generic 「E 站用户」 — the member id is not a
+ * display name, and the user can set a real one with the edit button. */
+export function accountDisplayName(account: EhAccount): string {
+  if (account.username) return account.username;
+  if (account.usernameHint) return account.usernameHint;
+  return 'E 站用户';
+}
+
 interface EhAccountPanelProps {
   accounts: EhAccount[];
-  onSwitch?: ((accountId: string) => void) | undefined;
   onCheckHealth?: ((accountId: string) => Promise<void>) | undefined;
   loading?: boolean | undefined;
   onSave?: ((input: SaveEhAccountInput) => Promise<void>) | undefined;
@@ -17,9 +26,14 @@ interface EhAccountPanelProps {
   saving?: boolean | undefined;
   onReadCookie?: ((accountId: string) => Promise<string | undefined>) | undefined;
   onLogout?: ((accountId: string) => Promise<void>) | undefined;
+  /** 用户名手动输入弹窗：网页登录抓取失败后弹出，或由账户卡上的编辑按钮打开。 */
+  usernameDialogAccountId?: string | undefined;
+  onRequestUsernameDialog?: ((accountId: string) => void) | undefined;
+  onCloseUsernameDialog?: (() => void) | undefined;
+  onEditUsername?: ((accountId: string, username: string) => Promise<void>) | undefined;
 }
 
-/** Three ways in, as in JHenTai: sign in with the account, sign in on E-Hentai's
+/** Three ways in: sign in with the account, sign in on E-Hentai's
  * own page, or paste the cookies. Everything else (site, account id, label) is
  * derived — the old form asked for an "account ID", a "name", a site and a
  * "username hint", none of which the user can meaningfully answer.
@@ -28,96 +42,16 @@ interface EhAccountPanelProps {
  * so the password form cannot pass it however correct the credentials are, and
  * before this the only way through was copying cookies out of another browser by
  * hand. */
-export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, saving, onReadCookie, onLogout }: EhAccountPanelProps) {
+export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, saving, onReadCookie, onLogout, onEditUsername }: EhAccountPanelProps) {
   const { showToast, clearToasts } = useToast();
   const [mode, setMode] = useState<'password' | 'browser' | 'cookie'>('password');
   const [browserPending, setBrowserPending] = useState(false);
-  const [revealedId, setRevealedId] = useState<string>();
-  const [dragOffset, setDragOffset] = useState(0);
-  const [cookieAccount, setCookieAccount] = useState<{ accountId: string; label: string; cookie: string }>();
-  const pointerDrag = useRef<{ id: string; pointerId: number; startX: number; baseOffset: number }>();
-  const touchDrag = useRef<{ id: string; startX: number; baseOffset: number }>();
+  /** 原地编辑态：正在改名的账户与草稿值。Enter 或失焦提交，Esc 取消。 */
+  const [editingAccountId, setEditingAccountId] = useState<string>();
+  const [usernameDraft, setUsernameDraft] = useState('');
+  const [savingUsername, setSavingUsername] = useState(false);
   const browserAbortRef = useRef<AbortController>();
   useEffect(() => () => browserAbortRef.current?.abort(), []);
-
-  const accountActionWidth = 112;
-
-  function accountDisplayName(account: EhAccount): string {
-    if (account.username) return account.username;
-    if (account.usernameHint) return account.usernameHint;
-    return /^E-Hentai\s+\d+$/i.test(account.label) ? 'E-Hentai 账户' : account.label;
-  }
-
-  function pointerOffsetFor(accountId: string) {
-    if (pointerDrag.current?.id === accountId || touchDrag.current?.id === accountId) return dragOffset;
-    return revealedId === accountId ? -accountActionWidth : 0;
-  }
-
-  function beginAccountDrag(accountId: string, event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.pointerType === 'touch') return;
-    pointerDrag.current = {
-      id: accountId,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      baseOffset: revealedId === accountId ? -accountActionWidth : 0,
-    };
-    setDragOffset(pointerDrag.current.baseOffset);
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  }
-
-  function moveAccountDrag(accountId: string, event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.pointerType === 'touch') return;
-    const drag = pointerDrag.current;
-    if (!drag || drag.id !== accountId || drag.pointerId !== event.pointerId) return;
-    const next = Math.max(-accountActionWidth, Math.min(0, drag.baseOffset + event.clientX - drag.startX));
-    setDragOffset(next);
-  }
-
-  function finishAccountDrag(accountId: string, event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.pointerType === 'touch') return;
-    const drag = pointerDrag.current;
-    if (!drag || drag.id !== accountId || drag.pointerId !== event.pointerId) return;
-    const finalOffset = Math.max(-accountActionWidth, Math.min(0, drag.baseOffset + event.clientX - drag.startX));
-    setRevealedId(finalOffset < -accountActionWidth * 0.35 ? accountId : undefined);
-    setDragOffset(0);
-    pointerDrag.current = undefined;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-  }
-
-  function beginAccountTouch(accountId: string, clientX: number) {
-    touchDrag.current = {
-      id: accountId,
-      startX: clientX,
-      baseOffset: revealedId === accountId ? -accountActionWidth : 0,
-    };
-    setDragOffset(touchDrag.current.baseOffset);
-  }
-
-  function moveAccountTouch(accountId: string, clientX: number) {
-    const drag = touchDrag.current;
-    if (!drag || drag.id !== accountId) return;
-    setDragOffset(Math.max(-accountActionWidth, Math.min(0, drag.baseOffset + clientX - drag.startX)));
-  }
-
-  function finishAccountTouch(accountId: string, clientX: number) {
-    const drag = touchDrag.current;
-    if (!drag || drag.id !== accountId) return;
-    const finalOffset = Math.max(-accountActionWidth, Math.min(0, drag.baseOffset + clientX - drag.startX));
-    setRevealedId(finalOffset < -accountActionWidth * 0.35 ? accountId : undefined);
-    setDragOffset(0);
-    touchDrag.current = undefined;
-  }
-
-  function readCookieFields(cookie: string) {
-    const preferred = ['nw', 'datatags', 'ipb_member_id', 'ipb_pass_hash', 'ipb_coppa', 'ipb_session_id', 'igneous', 'sk', 'star', 'event', 'hath_perks'];
-    const defaults: Record<string, string> = { nw: '1', datatags: '1' };
-    const actual = cookie.split(';').map((part) => part.trim()).filter((part) => part.includes('='));
-    const fieldsByName = new Map(actual.map((field) => [field.slice(0, field.indexOf('=')).trim().toLowerCase(), field]));
-    return [
-      ...preferred.map((name) => fieldsByName.get(name) ?? `${name}=${defaults[name] ?? ''}`),
-      ...actual.filter((field) => !preferred.includes(field.slice(0, field.indexOf('=')).trim().toLowerCase())),
-    ];
-  }
 
   async function saveCookie(rawCookie: string) {
     const credentials = parseEhCookie(rawCookie);
@@ -174,6 +108,53 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
     }
   }
 
+  /** Export is one step: the stored cookie goes to the clipboard as a header
+   * string, ready to paste wherever a `Cookie:` header is asked for. */
+  async function exportCookie(account: EhAccount) {
+    if (!onReadCookie) return;
+    try {
+      const cookie = await onReadCookie(account.id);
+      if (!cookie) {
+        showToast('未能读取 Cookie', 'error');
+        return;
+      }
+      await writeClipboardText(formatEhCookieHeader(cookie));
+      showToast('Cookie 已复制到剪贴板', 'success');
+    } catch {
+      showToast('复制 Cookie 失败', 'error');
+    }
+  }
+
+  /** 原地提交：Enter 或失焦时调用；空名视为取消（回到原显示）。 */
+  async function commitUsername() {
+    const accountId = editingAccountId;
+    if (!accountId || !onEditUsername) return;
+    const name = usernameDraft.trim();
+    const account = accounts.find((item) => item.id === accountId);
+    const previous = account?.username ?? account?.usernameHint ?? '';
+    if (name === previous || !name) {
+      // 没改或清空了：不保存，退出编辑态。
+      setEditingAccountId(undefined);
+      return;
+    }
+    setSavingUsername(true);
+    try {
+      await onEditUsername(accountId, name);
+      showToast('账户名已更新', 'success');
+      setEditingAccountId(undefined);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '保存失败', 'error');
+    } finally {
+      setSavingUsername(false);
+    }
+  }
+
+  function startEditing(account: EhAccount) {
+    // 草稿只带已记录的显示名；「E 站用户」回退不是用户的真名，不带。
+    setUsernameDraft(account.username ?? account.usernameHint ?? '');
+    setEditingAccountId(account.id);
+  }
+
   if (loading) {
     return (
       <section className="eh-account-panel" aria-label="E-Hentai 账户">
@@ -192,7 +173,7 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
             </button>
             {onBrowserLogin && (
               <button type="button" role="tab" aria-selected={mode === 'browser'} className={`secondary-action${mode === 'browser' ? ' is-active' : ''}`} onClick={() => setMode('browser')}>
-                <Globe aria-hidden="true" />网页登录
+                <KeyRound aria-hidden="true" />网页登录
               </button>
             )}
             <button type="button" role="tab" aria-selected={mode === 'cookie'} className={`secondary-action${mode === 'cookie' ? ' is-active' : ''}`} onClick={() => setMode('cookie')}>
@@ -217,7 +198,7 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
                 </>
               ) : (
                 <button className="primary-action" type="button" onClick={() => void startBrowserLogin()} disabled={saving} aria-busy={saving}>
-                  <Globe aria-hidden="true" />打开登录页面
+                  <KeyRound aria-hidden="true" />打开登录页面
                 </button>
               )}
             </div>
@@ -232,6 +213,9 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
         </div>
       )}
       {accounts.length > 0 && (
+      /* The account info sits straight in the menu body — no inner frame. The
+         EH roundel stands in for a profile picture, the access badge rides the
+         name line, and the assets read as one quiet metric line. */
       <ul>
         {accounts.map((account) => {
           const assets = account.assets;
@@ -240,52 +224,74 @@ export function EhAccountPanel({ accounts, onSwitch, onCheckHealth, loading, onS
             ? `GP ${assets?.gp || '-'} · Credits ${assets?.credits || '-'} · Hath ${assets?.hath || '-'}`
             : '正在更新资产…';
           return (
-          <li key={account.id} className={`eh-account-swipe-row${account.isActive ? ' active' : ''}${revealedId === account.id ? ' is-revealed' : ''}`}>
-            <div className="eh-account-swipe-actions" aria-hidden={revealedId !== account.id}>
-              <button type="button" className="icon-button" tabIndex={revealedId === account.id ? 0 : -1} aria-label={`导出${account.label} Cookie`} title="导出 Cookie" onClick={() => { if (onReadCookie) void onReadCookie(account.id).then((cookie) => { if (cookie) setCookieAccount({ accountId: account.id, label: accountDisplayName(account), cookie }); }); }}><Download aria-hidden="true" /></button>
-              <button type="button" className="icon-button danger" tabIndex={revealedId === account.id ? 0 : -1} aria-label={`登出${account.label}`} title="登出" onClick={() => { if (onLogout) void onLogout(account.id); setRevealedId(undefined); }}><LogOut aria-hidden="true" /></button>
-            </div>
-            <div
-              className="eh-account-swipe-surface"
-              data-testid={`eh-account-surface-${account.id}`}
-              style={{ transform: `translate3d(${pointerOffsetFor(account.id)}px, 0, 0)` }}
-              onPointerDown={(event) => beginAccountDrag(account.id, event)}
-              onPointerMove={(event) => moveAccountDrag(account.id, event)}
-              onPointerUp={(event) => finishAccountDrag(account.id, event)}
-              onPointerCancel={(event) => finishAccountDrag(account.id, event)}
-              onTouchStart={(event) => { const touch = event.touches[0]; if (touch) beginAccountTouch(account.id, touch.clientX); }}
-              onTouchMove={(event) => { event.preventDefault(); const touch = event.touches[0]; if (touch) moveAccountTouch(account.id, touch.clientX); }}
-              onTouchEnd={(event) => { const touch = event.changedTouches[0]; if (touch) finishAccountTouch(account.id, touch.clientX); }}
-            >
+          <li key={account.id} className="eh-account">
+            <div className="eh-account-status">
+              <EhRoundel className="eh-account-glyph" aria-hidden="true" />
               <div className="eh-account-summary">
-                <strong>{accountDisplayName(account)}</strong>
-                <span>{account.exhentaiAccess === true ? 'EXHENTAI 可访问' : account.exhentaiAccess === false ? 'EXHENTAI 不可访问' : '正在检测 EXHENTAI 访问权限…'}</span>
+                <strong>
+                  {editingAccountId === account.id ? (
+                    <input
+                      className="eh-name-input"
+                      value={usernameDraft}
+                      disabled={savingUsername}
+                      aria-label="账户名"
+                      autoComplete="off"
+                      spellCheck={false}
+                      autoFocus
+                      onChange={(event) => setUsernameDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') { event.preventDefault(); void commitUsername(); }
+                        else if (event.key === 'Escape') { setEditingAccountId(undefined); }
+                      }}
+                      onBlur={() => { if (!savingUsername) void commitUsername(); }}
+                    />
+                  ) : (
+                    accountDisplayName(account)
+                  )}
+                  {onEditUsername && editingAccountId !== account.id && (
+                    <button type="button" className="eh-name-edit" aria-label={`编辑 ${accountDisplayName(account)} 的账户名`} title="编辑账户名" onClick={() => startEditing(account)}>
+                      <Pencil aria-hidden="true" />
+                    </button>
+                  )}
+                  <span className={`eh-access-badge is-${account.exhentaiAccess === true ? 'ok' : account.exhentaiAccess === false ? 'off' : 'unknown'}`}>
+                    {account.exhentaiAccess === true ? 'EX 可访问' : account.exhentaiAccess === false ? 'EX 不可访问' : '检测 EX 中…'}
+                  </span>
+                </strong>
                 <small>{assetsLabel}</small>
               </div>
-              <div className="account-actions">
+            </div>
+            <div className="eh-account-actions">
               {onCheckHealth && (
-                <button type="button" className="icon-button" aria-label={`检查${account.label}`} title="更新账户信息" onPointerDown={(event) => event.stopPropagation()} onClick={() => onCheckHealth(account.id)}>
-                  <RefreshCw aria-hidden="true" />
+                <button type="button" className="settings-action" onClick={() => onCheckHealth(account.id)}>
+                  <RefreshCw aria-hidden="true" />检查登录状态
                 </button>
               )}
-              {onSwitch && !account.isActive && (
-                <button type="button" className="icon-button" aria-label={`切换到${account.label}`} title="切换账户" onPointerDown={(event) => event.stopPropagation()} onClick={() => onSwitch(account.id)}>
-                  <ArrowRightLeft aria-hidden="true" />
+              {onReadCookie && (
+                <button type="button" className="settings-action" onClick={() => { void exportCookie(account); }}>
+                  <Download aria-hidden="true" />导出 Cookie
                 </button>
               )}
-              {account.isActive && <span className="visually-hidden" aria-label="当前活跃">当前活跃</span>}
-              </div>
+              {onLogout && (
+                <button type="button" className="settings-action is-danger" onClick={() => { void onLogout(account.id); }}>
+                  <LogOut aria-hidden="true" />退出登录
+                </button>
+              )}
             </div>
           </li>
         );})}
       </ul>
       )}
-      {cookieAccount && <div className="eh-cookie-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCookieAccount(undefined); }}>
-        <div className="eh-cookie-dialog" role="dialog" aria-modal="true" aria-label={`${cookieAccount.label} Cookie`}>
-          <div className="eh-cookie-dialog-header"><strong>{cookieAccount.label}</strong><div className="eh-cookie-dialog-actions"><button type="button" className="icon-button" aria-label="复制全部 Cookie" title="复制全部 Cookie" onClick={() => { void navigator.clipboard?.writeText(cookieAccount.cookie).then(() => showToast('Cookie 已复制', 'success'), () => showToast('复制 Cookie 失败', 'error')); }}><Copy aria-hidden="true" /></button><button type="button" className="icon-button" aria-label="关闭 Cookie" onClick={() => setCookieAccount(undefined)}><X aria-hidden="true" /></button></div></div>
-          <div className="eh-cookie-fields">{readCookieFields(cookieAccount.cookie).map((field) => { const [name, ...rest] = field.split('='); const value = rest.join('='); return <div className="eh-cookie-field" key={name}><code>{name}</code><span title={value}>{value || '未获取'}</span>{name === 'igneous' && <button type="button" className="icon-button" aria-label="刷新 igneous" title="刷新 igneous" onClick={() => { if (!onCheckHealth || !onReadCookie) return; void onCheckHealth(cookieAccount.accountId).then(async () => { const cookie = await onReadCookie(cookieAccount.accountId); if (cookie) setCookieAccount({ ...cookieAccount, cookie }); }); }}><RotateCw aria-hidden="true" /></button>}</div>; })}</div>
-        </div>
-      </div>}
     </section>
+  );
+}
+
+/** E-Hentai 的品牌标识：站点标志性的深红圆盘 + 白色 "E"（沿用站点 favicon
+ * 的形态），红盘走品牌变量、盘上字形走固定白，深浅主题下都一眼可辨。 */
+function EhRoundel({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="11" fill="var(--eh-brand, #5C0D12)" />
+      <path d="M8.2 6.6h8v2.6h-5.4v2.5h5v2.5h-5v2.7h5.6v2.6h-8.2z" fill="#fff" />
+    </svg>
   );
 }

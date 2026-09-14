@@ -1,9 +1,21 @@
 /*
  * Yomika design tokens — single source of truth.
- * Layer semantics: canvas < panel < elevated < overlay.
- * Light values are the :root default; dark blocks below only override
- * tokens whose value actually changes. Never hard-code a color, shadow,
- * duration, or z-index in component styles — extend this file instead.
+ *
+ * Material 3 semantic model: color roles, a tonal surface scale, shape,
+ * spacing, motion and z-index. Light values are the :root default; the dark
+ * blocks below only override tokens whose value actually changes. Never
+ * hard-code a color, shadow, duration, or z-index in component styles —
+ * extend this file instead.
+ *
+ * The palette is the brand triad 朱砂 × 青瓷 × 琥珀:
+ *   primary   (朱砂红)  current navigation, primary actions, focus, selection
+ *   secondary (青瓷绿)  filters, sync, supporting actions, information
+ *   tertiary  (琥珀金)  archive categories, reminders, recommendation sources
+ *   error / success / warning  destructive, complete, waiting states
+ *
+ * Legacy token names (--surface-canvas, --brand-vermilion, --ink-primary …)
+ * remain valid migration aliases mapped onto the M3 roles below, so existing
+ * component CSS recolors from this file without being rewritten first.
  *
  * The whole file sits in a cascade layer, and that is load-bearing: user CSS
  * (the custom-CSS box and its presets) is injected unlayered, and unlayered
@@ -19,37 +31,86 @@
   :root {
     color-scheme: light;
 
-    /* Surfaces */
-    --surface-canvas: #f6f4f8;
-    --surface-panel: #fffdff;
-    --surface-elevated: #ffffff;
-    --surface-muted: #eeebf0;
-    --surface-overlay: rgb(30 27 36 / 0.84);
-    --backdrop-overlay: rgb(5 5 7 / 0.74);
+    /* ---- M3 color roles: 朱砂 (primary) ---------------------------------- */
+    --primary: #a83b32;
+    --on-primary: #ffffff;
+    --primary-container: #ffdad5;
+    --on-primary-container: #410003;
+    /* Pressed/hover shade of primary. Interaction only, never a resting fill. */
+    --primary-hover: #8f2f27;
 
-    /* Ink. Both secondary tiers clear 4.5:1 against --surface-panel: the previous
-       --ink-faint sat at 2.8:1, which is what made tags, dates and page counts
-       hard to read rather than merely quiet. */
-    --ink-primary: #1e1b24;
-    --ink-secondary: #5a5464;
-    --ink-faint: #6f6a7b;
+    /* ---- M3 color roles: 青瓷 (secondary) -------------------------------- */
+    --secondary: #4b635d;
+    --on-secondary: #ffffff;
+    --secondary-container: #cde8de;
+    --on-secondary-container: #073730;
+    --secondary-hover: #3d514c;
+    --secondary-container-hover: #bedbd0;
+
+    /* ---- M3 color roles: 琥珀 (tertiary) --------------------------------- */
+    --tertiary: #795900;
+    --on-tertiary: #ffffff;
+    --tertiary-container: #ffe08a;
+    --on-tertiary-container: #261a00;
+    --tertiary-hover: #614700;
+
+    /* ---- State roles ----------------------------------------------------- */
+    --error: #b3261e;
+    --on-error: #ffffff;
+    --error-container: #f9dedc;
+    --on-error-container: #410e0b;
+    --error-hover: #8f1d17;
+
+    --success: #2e7d5b;
+    --on-success: #ffffff;
+    --success-container: #cdebdC;
+    --on-success-container: #08281b;
+
+    --warning: #7a5900;
+    --on-warning: #ffffff;
+    --warning-container: #ffe08a;
+    --on-warning-container: #261a00;
+
+    /* ---- Surfaces: tonal scale replaces elevation shadows ---------------- */
+    --surface: #fbf8f3;
+    --surface-container-low: #f5f2ed;
+    --surface-container: #efeee9;
+    --surface-container-high: #e9e9e4;
+    --surface-container-highest: #e3e4df;
+    --on-surface: #1a1c1a;
+    --on-surface-variant: #454845;
+    --outline: #757a76;
+    --outline-variant: #c5cbc5;
+    --inverse-surface: #2e312e;
+    --inverse-on-surface: #f2f1ec;
+    --inverse-primary: #ffb4a9;
+
+    /* ---- Migration aliases (existing component CSS keeps working) -------- */
+    --surface-canvas: #fbf8f3;
+    --surface-panel: #f5f2ed;
+    --surface-elevated: #e9e9e4;
+    --surface-muted: #efeee9;
+    --surface-overlay: #2e312e;
+    --backdrop-overlay: rgb(26 28 26 / 0.42);
+
+    --ink-primary: #1a1c1a;
+    --ink-secondary: #454845;
+    --ink-faint: #5f6360;
     --ink-on-brand: #ffffff;
-    --ink-on-overlay: #ffffff;
+    --ink-on-overlay: #f2f1ec;
 
-    /* Brand (hanko identity: ink / vermilion / paper) */
-    --brand-ink: #171717;
-    --brand-vermilion: #b63a2e;
-    --brand-vermilion-strong: #9d2f25;
-    --brand-paper: #f3eee4;
-    --brand-violet: #665b57;
-    --brand-cyan: #8c817b;
+    --brand-ink: #1a1c1a;
+    --brand-vermilion: #a83b32;
+    --brand-vermilion-strong: #8f2f27;
+    --brand-paper: #ffdad5;
+    --brand-violet: #4b635d;
+    --brand-cyan: #4b635d;
 
-    /* State */
-    --state-success: #3c9d77;
-    --state-warning: #c67a33;
-    --state-danger: #c64b67;
+    --state-success: #2e7d5b;
+    --state-warning: #7a5900;
+    --state-danger: #b3261e;
 
-    /* Archive category accents */
+    /* ---- Archive category accents (theme-independent) -------------------- */
     --category-manga: #fcb417;
     --category-doujinshi: #fc4e4e;
     --category-game-cg: #05bf0b;
@@ -62,15 +123,53 @@
     --category-misc: #77737d;
     --category-default: #9e9e9e;
 
-    /* Lines, focus, selection */
-    --hairline: rgb(30 27 36 / 0.1);
-    --hairline-strong: rgb(30 27 36 / 0.18);
-    --focus-ring: var(--brand-vermilion);
-    --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 28%, transparent);
-    --selection-background: color-mix(in srgb, var(--brand-vermilion) 24%, transparent);
-    --selection-ink: var(--ink-primary);
+    /* ---- E-Hentai mark: a tonal M3 tile that rides the theme ------------- */
+    --eh-mark-plate: var(--primary-container);
+    --eh-mark-ink: var(--on-primary-container);
 
-    /* Reader chrome is theme-independent black */
+    /* ---- Tag namespaces (JHenTai model) ---------------------------------- */
+    /* One hue per namespace, as a background plus its readable text colour.
+       Labels and chips are two-colour surfaces: no border, no third tone. */
+    --tag-ns-artist-bg: #cdebdC;
+    --tag-ns-artist-ink: #0a3a26;
+    --tag-ns-group-bg: #d9ebc4;
+    --tag-ns-group-ink: #24400e;
+    --tag-ns-parody-bg: #fad4ce;
+    --tag-ns-parody-ink: #4a120c;
+    --tag-ns-character-bg: #f6d2e4;
+    --tag-ns-character-ink: #4a0f31;
+    --tag-ns-female-bg: #f8ddb4;
+    --tag-ns-female-ink: #4a2a00;
+    --tag-ns-male-bg: #c9e4ec;
+    --tag-ns-male-ink: #0b3a46;
+    --tag-ns-mixed-bg: #e4d9f5;
+    --tag-ns-mixed-ink: #3a2260;
+    --tag-ns-cosplayer-bg: #eadcf2;
+    --tag-ns-cosplayer-ink: #3a2456;
+    --tag-ns-language-bg: #d6e2f5;
+    --tag-ns-language-ink: #16305a;
+    --tag-ns-category-bg: #ffe9b8;
+    --tag-ns-category-ink: #4a3200;
+    --tag-ns-uploader-bg: #e6d8ec;
+    --tag-ns-uploader-ink: #452050;
+    --tag-ns-date_added-bg: #d9ddf2;
+    --tag-ns-date_added-ink: #232b5c;
+    --tag-ns-timestamp-bg: #d9ddf2;
+    --tag-ns-timestamp-ink: #232b5c;
+    --tag-ns-source-bg: #d8e9e6;
+    --tag-ns-source-ink: #103b36;
+    --tag-ns-other-bg: #e2e2de;
+    --tag-ns-other-ink: #2e2f2b;
+
+    /* ---- Lines, focus, selection ---------------------------------------- */
+    --hairline: #c5cbc5;
+    --hairline-strong: #757a76;
+    --focus-ring: #a83b32;
+    --focus-shadow: 0 0 0 3px color-mix(in srgb, #a83b32 30%, transparent);
+    --selection-background: color-mix(in srgb, #a83b32 24%, transparent);
+    --selection-ink: #1a1c1a;
+
+    /* ---- Reader chrome is theme-independent black ----------------------- */
     --reader-canvas: #050506;
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
@@ -86,35 +185,66 @@
        which is what made its thumbnails appear to overlap. */
     --reader-panel: #131318;
 
-    /* Elevation: low, diffuse, never harsh */
-    --shadow-menu: 0 12px 30px rgb(30 27 36 / 0.18);
-    --shadow-overlay: 0 24px 80px rgb(30 27 36 / 0.28);
-    --shadow-tooltip: 0 8px 24px rgb(30 27 36 / 0.16);
-    --shadow-card: 0 8px 24px rgb(30 27 36 / 0.12);
+    /* ---- Elevation: menus, dialogs and masks only ----------------------- */
+    --shadow-menu: 0 8px 24px rgb(26 28 26 / 0.16);
+    --shadow-overlay: 0 16px 48px rgb(26 28 26 / 0.24);
+    --shadow-tooltip: 0 6px 16px rgb(26 28 26 / 0.14);
+    --shadow-card: 0 4px 12px rgb(26 28 26 / 0.1);
+    /* The multi-select disc floats over cover art of any brightness; the disc
+       and its tick each get one shadow so the mark reads on both. */
+    --shadow-check: 0 1px 3px rgb(0 0 0 / 0.4);
+    --shadow-check-ink: drop-shadow(0 1px 1px rgb(0 0 0 / 0.45));
 
-    /* Controls */
-    --control-background: var(--surface-elevated);
-    --control-background-hover: var(--brand-paper);
-    --control-border: var(--hairline);
-    --control-text: var(--ink-primary);
-    --control-placeholder: var(--ink-faint);
+    /* ---- Controls ------------------------------------------------------- */
+    --control-background: #f5f2ed;
+    --control-background-hover: #efeee9;
+    --control-border: #757a76;
+    --control-text: #1a1c1a;
+    --control-placeholder: #5f6360;
     --control-height: 44px;
     --icon-button-size: 44px;
-    --control-selected-background: var(--brand-ink);
-    --control-selected-text: var(--ink-on-brand);
+    --control-selected-background: #a83b32;
+    --control-selected-text: #ffffff;
 
-    /* Typography */
+    /* Chips (tags on cards and detail pages). The fill is one step deeper into
+       the secondary hue than --secondary-container: derived colour schemes mix
+       both the container roles out of the same panel colour, which used to
+       collapse chip and card into one shade. Resolved at use time, so a custom
+       scheme's --secondary rides in. */
+    --chip-background: color-mix(in srgb, var(--secondary) 30%, var(--secondary-container));
+    --chip-ink: var(--on-secondary-container);
+
+    /* Height of the persistent bottom chrome a scroll container should clear:
+       the desktop status bar. On compact the bottom nav is already subtracted
+       from .app-main's height, so this drops to 0 there (see base of shell.css). */
+    --chrome-bottom: 28px;
+
+    /* ---- Card geometry (keep in step with src/lib/archiveGridLayout.ts) -- */
+    --card-gap: 8px;
+    /* How far an overscroll can drag the list. Anything drawn inside the content
+       that has to keep reaching an edge — the history rail — overshoots by this
+       much; keep it above PULL_MAX + BOUNCE_MAX in LibraryWorkspace. */
+    --overscroll-reach: 120px;
+    /* The brand mark's plate: a surface step rather than hard black, so the
+       inline YomikaMark reads on both themes and every colour scheme. The
+       frame rides the theme accent — a tier between the plate and the ink
+       glyph, so the mark's three layers stay distinguishable at a glance. */
+    --yomika-mark-plate: var(--surface-container-highest);
+    --yomika-mark-frame: var(--primary);
+
+    /* ---- Typography ----------------------------------------------------- */
     --font-body: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
     --font-display: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
     --font-utility: ui-monospace, "Cascadia Code", monospace;
-    --text-xs: 11px;
+    --text-xs: 12px;
     --text-sm: 13px;
     --text-md: 14px;
+    --text-heading: 24px;
     --text-lg: 20px;
     --text-title: 32px;
     --text-page-title: 40px;
 
-    /* Spacing (4px base) */
+    /* ---- Spacing (4px base) -------------------------------------------- */
     --space-1: 4px;
     --space-2: 8px;
     --space-3: 12px;
@@ -125,23 +255,24 @@
     --space-10: 40px;
     --space-12: 48px;
 
-    /* Radius scale */
+    /* ---- Shape scale (M3): control = inputs, chips and the toast; card =
+       archive cards and detail blocks; overlay = dialogs and floating
+       panels; pill = buttons, badges, switches and progress tracks. ------- */
     --radius-control: 8px;
-    --radius-card: 16px;
-    --radius-overlay: 24px;
+    --radius-card: 12px;
+    --radius-overlay: 28px;
     --radius-pill: 999px;
 
-    /* Motion: spring-like curve only; never linear / ease-in-out */
+    /* ---- Motion: spring-like curve only; never linear / ease-in-out ---- */
     --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
     --motion-fast: 140ms var(--ease-standard);
     --motion-standard: 220ms var(--ease-standard);
     --motion-slow: 480ms var(--ease-standard);
 
-    /* Systemic z-index layers — arbitrary values are banned */
+    /* ---- Systemic z-index layers — arbitrary values are banned --------- */
     --z-sticky: 10;
     --z-compact-nav: 20;
     --z-menu: 30;
-    --z-tooltip: 40;
     --z-overlay: 50;
     --z-modal: 51;
     --z-skip-link: 60;
@@ -156,62 +287,238 @@
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme]) {
       color-scheme: dark;
-      --surface-canvas: #0b0b0f;
-      --surface-panel: #15151c;
-      --surface-elevated: #1c1c25;
-      --surface-muted: #24232c;
-      --surface-overlay: rgb(5 5 6 / 0.88);
-      --backdrop-overlay: rgb(5 5 7 / 0.78);
-      --ink-primary: #f4f1f8;
-      --ink-secondary: #b4adc0;
-      --ink-faint: #948da2;
-      --ink-on-brand: #0b0b0f;
-      --brand-ink: #f4f1f8;
-      --brand-vermilion: #e36a5c;
-      --brand-vermilion-strong: #f08374;
-      --brand-paper: #272229;
-      --brand-violet: #a99b95;
-      --brand-cyan: #b8aaa2;
-      --state-success: #66d0a5;
-      --state-warning: #f1b36c;
-      --state-danger: #f17b91;
-      --hairline: rgb(244 241 248 / 0.12);
-      --hairline-strong: rgb(244 241 248 / 0.2);
-      --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 38%, transparent);
-      --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
-      --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
-      --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
-      --shadow-card: 0 8px 24px rgb(0 0 0 / 0.36);
+      --primary: #ffb4a9;
+      --on-primary: #5f120d;
+      --primary-container: #81251d;
+      --on-primary-container: #ffdad5;
+      --primary-hover: #ffc7be;
+      --secondary: #b1ccc3;
+      --on-secondary: #1d352f;
+      --secondary-container: #334b45;
+      --on-secondary-container: #cde8de;
+      --secondary-hover: #c9ded6;
+      --secondary-container-hover: #3c5650;
+      --tertiary: #f5c454;
+      --on-tertiary: #3f2e00;
+      --tertiary-container: #5c4300;
+      --on-tertiary-container: #ffe08a;
+      --tertiary-hover: #ffd57a;
+      --error: #f2b8b5;
+      --on-error: #601410;
+      --error-container: #8c1d18;
+      --on-error-container: #f9dedc;
+      --error-hover: #f7cbc9;
+      --success: #7ad7aa;
+      --on-success: #00391f;
+      --success-container: #1f4e38;
+      --on-success-container: #cdebdC;
+      --warning: #f5c454;
+      --on-warning: #3f2e00;
+      --warning-container: #5c4300;
+      --on-warning-container: #ffe08a;
+
+      --surface: #121412;
+      --surface-container-low: #1a1d1b;
+      --surface-container: #202421;
+      --surface-container-high: #2a2e2b;
+      --surface-container-highest: #353936;
+      --on-surface: #e4e3df;
+      --on-surface-variant: #bec8c1;
+      --outline: #89938c;
+      --outline-variant: #414a44;
+      --inverse-surface: #e4e3df;
+      --inverse-on-surface: #1a1c1a;
+      --inverse-primary: #a83b32;
+
+      --surface-canvas: #121412;
+      --surface-panel: #1a1d1b;
+      --surface-elevated: #2a2e2b;
+      --surface-muted: #202421;
+      --surface-overlay: #e4e3df;
+      --backdrop-overlay: rgb(0 0 0 / 0.6);
+      --ink-primary: #e4e3df;
+      --ink-secondary: #bec8c1;
+      --ink-faint: #a7b1aa;
+      --ink-on-brand: #5f120d;
+      --ink-on-overlay: #1a1c1a;
+      --brand-ink: #e4e3df;
+      --brand-vermilion: #ffb4a9;
+      --brand-vermilion-strong: #ffc7be;
+      --brand-paper: #81251d;
+      --brand-violet: #b1ccc3;
+      --brand-cyan: #b1ccc3;
+      --state-success: #7ad7aa;
+      --state-warning: #f5c454;
+      --state-danger: #f2b8b5;
+      --tag-ns-artist-bg: #1f4e38;
+      --tag-ns-artist-ink: #cdebdC;
+      --tag-ns-group-bg: #3a5220;
+      --tag-ns-group-ink: #dcefc6;
+      --tag-ns-parody-bg: #6b2419;
+      --tag-ns-parody-ink: #ffdad5;
+      --tag-ns-character-bg: #5e2444;
+      --tag-ns-character-ink: #f8d8e8;
+      --tag-ns-female-bg: #6b4a1e;
+      --tag-ns-female-ink: #ffe0b8;
+      --tag-ns-male-bg: #1e4a55;
+      --tag-ns-male-ink: #c9e9f2;
+      --tag-ns-mixed-bg: #4a3a6b;
+      --tag-ns-mixed-ink: #e4d9f5;
+      --tag-ns-cosplayer-bg: #463459;
+      --tag-ns-cosplayer-ink: #e6dcf2;
+      --tag-ns-language-bg: #274268;
+      --tag-ns-language-ink: #d6e2f5;
+      --tag-ns-category-bg: #5c4300;
+      --tag-ns-category-ink: #ffe9b8;
+      --tag-ns-uploader-bg: #4a2a50;
+      --tag-ns-uploader-ink: #eadbec;
+      --tag-ns-date_added-bg: #2e3357;
+      --tag-ns-date_added-ink: #d9ddf2;
+      --tag-ns-timestamp-bg: #2e3357;
+      --tag-ns-timestamp-ink: #d9ddf2;
+      --tag-ns-source-bg: #274a45;
+      --tag-ns-source-ink: #d4ebe6;
+      --tag-ns-other-bg: #34352f;
+      --tag-ns-other-ink: #e2e2df;
+      --hairline: #414a44;
+      --hairline-strong: #89938c;
+      --focus-ring: #ffb4a9;
+      --focus-shadow: 0 0 0 3px color-mix(in srgb, #ffb4a9 34%, transparent);
+      --selection-background: color-mix(in srgb, #ffb4a9 26%, transparent);
+      --selection-ink: #e4e3df;
+      --control-background: #1a1d1b;
+      --control-background-hover: #202421;
+      --control-border: #89938c;
+      --control-text: #e4e3df;
+      --control-placeholder: #a7b1aa;
+      --control-selected-background: #ffb4a9;
+      --control-selected-text: #5f120d;
+      --shadow-menu: 0 8px 24px rgb(0 0 0 / 0.46);
+      --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.52);
+      --shadow-tooltip: 0 6px 16px rgb(0 0 0 / 0.42);
+      --shadow-card: 0 4px 12px rgb(0 0 0 / 0.34);
+    }
+  }
+
+  /* Compact: the bottom nav is subtracted from .app-main's height, so a scroll
+     container does not reserve it a second time. */
+  @media (max-width: 900px) {
+    :root {
+      --chrome-bottom: 0px;
     }
   }
 
   :root[data-theme='dark'] {
     color-scheme: dark;
-    --surface-canvas: #0b0b0f;
-    --surface-panel: #15151c;
-    --surface-elevated: #1c1c25;
-    --surface-muted: #24232c;
-    --surface-overlay: rgb(5 5 6 / 0.88);
-    --backdrop-overlay: rgb(5 5 7 / 0.78);
-    --ink-primary: #f4f1f8;
-    --ink-secondary: #b4adc0;
-    --ink-faint: #948da2;
-    --ink-on-brand: #0b0b0f;
-    --brand-ink: #f4f1f8;
-    --brand-vermilion: #e36a5c;
-    --brand-vermilion-strong: #f08374;
-    --brand-paper: #272229;
-    --brand-violet: #a99b95;
-    --brand-cyan: #b8aaa2;
-    --state-success: #66d0a5;
-    --state-warning: #f1b36c;
-    --state-danger: #f17b91;
-    --hairline: rgb(244 241 248 / 0.12);
-    --hairline-strong: rgb(244 241 248 / 0.2);
-    --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-vermilion) 38%, transparent);
-    --shadow-menu: 0 12px 30px rgb(0 0 0 / 0.5);
-    --shadow-overlay: 0 24px 80px rgb(0 0 0 / 0.55);
-    --shadow-tooltip: 0 8px 24px rgb(0 0 0 / 0.45);
-    --shadow-card: 0 8px 24px rgb(0 0 0 / 0.36);
+    --primary: #ffb4a9;
+    --on-primary: #5f120d;
+    --primary-container: #81251d;
+    --on-primary-container: #ffdad5;
+    --primary-hover: #ffc7be;
+    --secondary: #b1ccc3;
+    --on-secondary: #1d352f;
+    --secondary-container: #334b45;
+    --on-secondary-container: #cde8de;
+    --secondary-hover: #c9ded6;
+    --secondary-container-hover: #3c5650;
+    --tertiary: #f5c454;
+    --on-tertiary: #3f2e00;
+    --tertiary-container: #5c4300;
+    --on-tertiary-container: #ffe08a;
+    --tertiary-hover: #ffd57a;
+    --error: #f2b8b5;
+    --on-error: #601410;
+    --error-container: #8c1d18;
+    --on-error-container: #f9dedc;
+    --error-hover: #f7cbc9;
+    --success: #7ad7aa;
+    --on-success: #00391f;
+    --success-container: #1f4e38;
+    --on-success-container: #cdebdC;
+    --warning: #f5c454;
+    --on-warning: #3f2e00;
+    --warning-container: #5c4300;
+    --on-warning-container: #ffe08a;
+
+    --surface: #121412;
+    --surface-container-low: #1a1d1b;
+    --surface-container: #202421;
+    --surface-container-high: #2a2e2b;
+    --surface-container-highest: #353936;
+    --on-surface: #e4e3df;
+    --on-surface-variant: #bec8c1;
+    --outline: #89938c;
+    --outline-variant: #414a44;
+    --inverse-surface: #e4e3df;
+    --inverse-on-surface: #1a1c1a;
+    --inverse-primary: #a83b32;
+
+    --surface-canvas: #121412;
+    --surface-panel: #1a1d1b;
+    --surface-elevated: #2a2e2b;
+    --surface-muted: #202421;
+    --surface-overlay: #e4e3df;
+    --backdrop-overlay: rgb(0 0 0 / 0.6);
+    --ink-primary: #e4e3df;
+    --ink-secondary: #bec8c1;
+    --ink-faint: #a7b1aa;
+    --ink-on-brand: #5f120d;
+    --ink-on-overlay: #1a1c1a;
+    --brand-ink: #e4e3df;
+    --brand-vermilion: #ffb4a9;
+    --brand-vermilion-strong: #ffc7be;
+    --brand-paper: #81251d;
+    --brand-violet: #b1ccc3;
+    --brand-cyan: #b1ccc3;
+    --state-success: #7ad7aa;
+    --state-warning: #f5c454;
+    --state-danger: #f2b8b5;
+    --tag-ns-artist-bg: #1f4e38;
+    --tag-ns-artist-ink: #cdebdC;
+    --tag-ns-group-bg: #3a5220;
+    --tag-ns-group-ink: #dcefc6;
+    --tag-ns-parody-bg: #6b2419;
+    --tag-ns-parody-ink: #ffdad5;
+    --tag-ns-character-bg: #5e2444;
+    --tag-ns-character-ink: #f8d8e8;
+    --tag-ns-female-bg: #6b4a1e;
+    --tag-ns-female-ink: #ffe0b8;
+    --tag-ns-male-bg: #1e4a55;
+    --tag-ns-male-ink: #c9e9f2;
+    --tag-ns-mixed-bg: #4a3a6b;
+    --tag-ns-mixed-ink: #e4d9f5;
+    --tag-ns-cosplayer-bg: #463459;
+    --tag-ns-cosplayer-ink: #e6dcf2;
+    --tag-ns-language-bg: #274268;
+    --tag-ns-language-ink: #d6e2f5;
+    --tag-ns-category-bg: #5c4300;
+    --tag-ns-category-ink: #ffe9b8;
+    --tag-ns-uploader-bg: #4a2a50;
+    --tag-ns-uploader-ink: #eadbec;
+    --tag-ns-date_added-bg: #2e3357;
+    --tag-ns-date_added-ink: #d9ddf2;
+    --tag-ns-timestamp-bg: #2e3357;
+    --tag-ns-timestamp-ink: #d9ddf2;
+    --tag-ns-source-bg: #274a45;
+    --tag-ns-source-ink: #d4ebe6;
+    --tag-ns-other-bg: #34352f;
+    --tag-ns-other-ink: #e2e2df;
+    --hairline: #414a44;
+    --hairline-strong: #89938c;
+    --focus-ring: #ffb4a9;
+    --focus-shadow: 0 0 0 3px color-mix(in srgb, #ffb4a9 34%, transparent);
+    --selection-background: color-mix(in srgb, #ffb4a9 26%, transparent);
+    --selection-ink: #e4e3df;
+    --control-background: #1a1d1b;
+    --control-background-hover: #202421;
+    --control-border: #89938c;
+    --control-text: #e4e3df;
+    --control-placeholder: #a7b1aa;
+    --control-selected-background: #ffb4a9;
+    --control-selected-text: #5f120d;
+    --shadow-menu: 0 8px 24px rgb(0 0 0 / 0.46);
+    --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.52);
+    --shadow-tooltip: 0 6px 16px rgb(0 0 0 / 0.42);
+    --shadow-card: 0 4px 12px rgb(0 0 0 / 0.34);
   }
 }

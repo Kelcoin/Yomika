@@ -5,7 +5,6 @@ import {
   BookmarkX,
   BookOpen,
   Heart,
-  Images,
   MessageCircle,
   Pencil,
   Sparkles,
@@ -14,8 +13,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
-import { categorizeSearchableTags, parseArchiveTagString } from '../lib/tags';
+import { categorizeSearchableTags, parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
 import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
+import { normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
@@ -34,6 +34,7 @@ import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { TagSearchLink } from './TagSearchLink';
+import { useEhMyTags } from './useEhMyTags';
 
 const repository = new NativeLibraryRepository();
 const ehRepository = new NativeEhRepository();
@@ -45,6 +46,16 @@ const LONG_PRESS_MS = 500;
  * fresh metadata. It revalidates either way; this only decides whether the page
  * shows a loading state first. */
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
+
+function DetailGlyph() {
+  return (
+    <svg className="detail-panel-glyph" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+      <path d="M7 16.5 10.5 13l2.5 2.5 2.5-3 2.5 4" />
+      <circle cx="9" cy="8.5" r="1.25" />
+    </svg>
+  );
+}
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   // The server scope is only known after listServers IPC. Keep a second,
@@ -206,6 +217,14 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     };
   }, [archiveId, navigate, showToast]);
 
+  // 我的标签开启时，每个命名空间组内把账户标记过的标签排到最前（排序发生在
+  // 分组之前，分组保持稳定顺序），并把这些芯片染成账户预设的颜色。挂钩必须
+  // 全部在早退分支之前。
+  const myTags = useEhMyTags();
+  const metadataTags = metadata ? parseArchiveTagString(metadata.tags) : [];
+  const tagGroups = useMemo(() => categorizeSearchableTags(prioritizeByMyTags(metadataTags, myTags)), [metadataTags, myTags]);
+  const myTagColorFor = useCallback((query: string) => myTags.colors.get(normalizeMyTagKey(query.replace(/\$$/, ''))), [myTags.colors]);
+
   if (error && !metadata && !serverId) {
     return (
       <main className="archive-detail-route">
@@ -226,14 +245,18 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   }
 
   const title = metadata?.title || archiveId;
-  const tags = metadata ? parseArchiveTagString(metadata.tags) : [];
-  const tagGroups = categorizeSearchableTags(tags);
+  const tags = metadataTags;
   const ehGallery = ehGalleryFromTags(tags);
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        <div><h1 id="archive-detail-route-title">{title}</h1></div>
+        {/* While the metadata is in flight the title keeps a skeleton of its own
+            size — it used to show the raw archive id at full title weight while
+            a fake title line sat in the copy column below. */}
+        {metadataLoading && !metadata
+          ? <h1 id="archive-detail-route-title" className="archive-detail-title-loading" role="status" aria-label="正在加载档案详情"><span className="skeleton-line" /></h1>
+          : <h1 id="archive-detail-route-title">{title}</h1>}
       </header>
 
       <div className="archive-detail-overview">
@@ -245,7 +268,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
-          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-title" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /></div>}
+          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
           {tags.length > 0 && (
             <div className="archive-detail-tags" aria-label="档案标签">
               {tagGroups.map((group, groupIndex) => (
@@ -253,7 +276,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
                   <h2>{group.label}</h2>
                   <div className={`archive-detail-tag-row${groupIndex === tagGroups.length - 1 && metadata ? ' has-meta' : ''}`}>
                     <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}
+                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
                     </span>
                     {groupIndex === tagGroups.length - 1 && metadata && <span className="archive-detail-meta archive-detail-meta-inline"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></span>}
                   </div>
@@ -261,7 +284,10 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
               ))}
             </div>
           )}
-          {tags.length === 0 && <div className="archive-detail-meta archive-detail-meta-footer">{metadata ? <><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></> : <span className="metadata-chip skeleton-line skeleton-line-short" role="status" aria-label="正在加载档案详情" />}</div>}
+          {/* The footer meta appears once the metadata exists; while it loads
+              the copy skeleton above is the loading indicator — a second
+              skeleton chip under it read as one squeezed blob. */}
+          {tags.length === 0 && metadata && <div className="archive-detail-meta archive-detail-meta-footer"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></div>}
         </div>
       </div>
 
@@ -297,6 +323,18 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {
             if (result.ok) setFavorite(!result.value.deleted);
             else setMessage(result.error.message);
+            // 收藏夹 reads the LANraragi 🔖 Favorites category, so the heart
+            // mirrors the write there too — best effort, the local row stays
+            // as the offline mirror and for WebDAV sync either way.
+            if (!serverId) return;
+            void repository.listCategories(serverId).then((categories) => {
+              const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
+              if (!favorites) return;
+              const mirrored = !favorite
+                ? repository.addArchiveToCategory(serverId, favorites.id, archiveId)
+                : repository.removeArchiveFromCategory(serverId, favorites.id, archiveId);
+              void mirrored.then((mirrorResult) => { if (!mirrorResult.ok) setMessage('未能同步到服务器收藏夹'); });
+            });
           });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>
         <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
@@ -333,7 +371,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       )}
 
       <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容">
-        <button type="button" role="tab" aria-selected={detailPanel === 'media'} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => setDetailPanel('media')}><Images aria-hidden="true" /><Sparkles aria-hidden="true" /><span>详情</span></button>
+        <button type="button" role="tab" aria-selected={detailPanel === 'media'} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => setDetailPanel('media')}><DetailGlyph /><span>详情</span></button>
         <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
@@ -433,8 +471,8 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
         if (!result.ok) continue;
         const normalizedSeed = seed.trim().toLowerCase();
         for (const archive of result.value.items) {
-          // LANraragi's text search is a substring match. Readoshi's `$`
-          // suffix means an exact tag, so enforce that part here after the
+          // LANraragi's text search is a substring match; a `$` suffix in
+          // the seed means an exact tag, so enforce that part here after the
           // broad server query to prevent `artist:foo` matching
           // `artist:foobar` (and the same issue for taste tags).
           const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
@@ -496,7 +534,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   // A skeleton while the searches run, rather than nothing at all: the section
   // used to pop into existence and shove the page thumbnails down.
   if (loading && similar.length === 0 && sameCreator.length === 0) {
-    return <ArchiveThumbnailRail title="猜你喜欢" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} />;
+    return <ArchiveThumbnailRail title="猜你喜欢" headingIcon={<Sparkles aria-hidden="true" />} archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} />;
   }
   if (similar.length === 0 && sameCreator.length === 0) return null;
 
@@ -504,6 +542,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
     <>
     <ArchiveThumbnailRail
       title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'}
+      headingIcon={<Sparkles aria-hidden="true" />}
       archives={visible}
       scopeId={scopeId}
       serverId={serverId}

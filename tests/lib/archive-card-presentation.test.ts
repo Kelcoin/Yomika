@@ -5,6 +5,7 @@ import {
   formatArchiveDate,
   formatArchivePageMeta,
   distributeCardTags,
+  isArchiveFinished,
   isWideCoverRatio,
   pickCardTags,
   pickRandomSample,
@@ -30,7 +31,7 @@ describe('archive card presentation', () => {
     expect(archiveCategoryKey({ tags: ['category:something-new'] })).toBe('');
   });
 
-  it('uses the Readoshi wide-card threshold', () => {
+  it('uses the wide-card threshold', () => {
     expect(isWideCoverRatio(1)).toBe(false);
     expect(isWideCoverRatio(1.01)).toBe(true);
     expect(isWideCoverRatio(null)).toBe(false);
@@ -109,5 +110,44 @@ describe('archive card presentation', () => {
       ['g', 'h'],
     ]);
     expect(distributeCardTags(['a', 'b'], 3)).toEqual([['a'], ['b']]);
+  });
+
+  it('leans watched tags left inside their namespace without hoisting rows', () => {
+    const tags = ['language:chinese', 'artist:someone', 'female:big breasts', 'group:circle', 'artist:other'];
+    // 命名空间次序仍是显示主键：watched 只在自己的命名空间里靠左，不抢第一排。
+    expect(pickCardTags(tags, 5, new Set(['artist:someone', 'group:z']))).toEqual([
+      'female:big breasts',
+      'artist:someone',
+      'artist:other',
+      'group:circle',
+      'language:chinese',
+    ]);
+    // 无优先集合时行为与原来一致。
+    expect(pickCardTags(tags, 3)).toEqual(['female:big breasts', 'artist:someone', 'artist:other']);
+  });
+
+  it('reserves card slots for watched tags so they always survive the slice', () => {
+    // 低优先命名空间的 watched 标签优先保留席位：低优先的未 watched 让位。
+    const tags = ['female:a', 'female:b', 'female:c', 'language:watched-me'];
+    expect(pickCardTags(tags, 3, new Set(['language:watched-me']))).toEqual([
+      'female:a',
+      'female:b',
+      'language:watched-me',
+    ]);
+    // 席位满额时 watched 全保留、其余截断；卡片不显示的命名空间（category）
+    // 即便被 watched 也不占席位。
+    expect(pickCardTags(['category:manga', 'female:a', 'female:b'], 2, new Set(['category:manga']))).toEqual([
+      'female:a',
+      'female:b',
+    ]);
+  });
+
+  it('counts a record finished past 95% of its pages', () => {
+    expect(isArchiveFinished(259, 259)).toBe(true);
+    expect(isArchiveFinished(259, 247)).toBe(true); // 95.4% —— 双页尾页可能丢一次保存
+    expect(isArchiveFinished(259, 246)).toBe(false);
+    expect(isArchiveFinished(259, 0)).toBe(false);
+    expect(isArchiveFinished(0, 10)).toBe(false);
+    expect(isArchiveFinished(20, null)).toBe(false);
   });
 });

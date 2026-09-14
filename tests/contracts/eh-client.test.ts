@@ -142,6 +142,18 @@ describe('EH HTTP boundary', () => {
     expect(JSON.stringify(comments)).not.toContain('<script>');
   });
 
+  it('reads the live comment markup: score block, by-colon line, PM link', () => {
+    // Mirrors the markup a real gallery page serves: the header line ends in
+    // `by:` and carries a PM image link after the name, the score sits in
+    // a `c5 nosel` block prefixed by the word "Score", and ONLY the uploader's
+    // comment carries the `ulcomment` anchor — every poster links /uploader/.
+    const comments = parseEhComments(`<div class="c1"><div class="c2"><div class="c3">Posted on 12 September 2026, 12:23 by: &nbsp; <a href="https://e-hentai.org/uploader/Mika">Mika</a>&nbsp; &nbsp; <a href="https://forums.e-hentai.org/index.php?showuser=3039608"><img class="ygm" src="https://ehgt.org/g/ygm.png" alt="PM" /></a></div><div class="c4 nosel"><a name="ulcomment"></a>Uploader Comment</div><div class="c5 nosel">Score <span id="comment_score_8549599" style="opacity:1.0">+28</span></div><div class="c"></div></div><div class="c6" id="comment_8549599">Source links</div><div class="c7" id="cvotes_8549599" style="display:none">Base +28</div></div><div class="c1"><div class="c2"><div class="c3">Posted on 21 October 2023, 15:12 by: &nbsp; <a href="https://e-hentai.org/uploader/dxf19971218">dxf19971218</a>&nbsp; &nbsp; <a href="https://forums.e-hentai.org/index.php?showuser=4256894"><img class="ygm" src="https://ehgt.org/g/ygm.png" alt="PM" /></a></div><div class="c5 nosel">Score <span id="comment_score_8549600">+1</span></div><div class="c"></div></div><div class="c6" id="comment_8549600">Nice</div></div>`);
+    expect(comments).toEqual([
+      { id: '8549599', author: 'Mika', body: 'Source links', score: 28, postedAt: '2026-09-12 12:23', isUploader: true, isEditable: false, myVote: 0 },
+      { id: '8549600', author: 'dxf19971218', body: 'Nice', score: 1, postedAt: '2023-10-21 15:12', isUploader: false, isEditable: false, myVote: 0 },
+    ]);
+  });
+
   it('posts favorite changes only to scoped EH host', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new EhHttpClient({ baseUrl: 'https://e-hentai.org', cookieJar: new EhCookieJar(), fetcher: async (url, init) => { calls.push({ url: String(url), ...(init ? { init } : {}) }); return new Response('OK', { status: 200 }); } });

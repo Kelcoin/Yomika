@@ -19,12 +19,69 @@ body::-webkit-scrollbar,
 
 .app-shell {
   display: grid;
+  /* Windows: the app-drawn title bar spans the full width above the two
+     columns; elsewhere the grid is just the columns. */
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "titlebar titlebar"
+    "sidebar main";
   grid-template-columns: 248px minmax(0, 1fr);
-  height: 100vh;
   height: 100dvh;
   overflow: hidden;
   transition: grid-template-columns var(--motion-standard);
 }
+
+/* The app-drawn title bar (Windows): a themed drag surface with the brand
+   mark and the three window controls, in the Material 3 top-app-bar shape. */
+.titlebar {
+  grid-area: titlebar;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 44px;
+  padding-left: var(--space-3);
+  background: var(--surface-container);
+  border-bottom: 1px solid var(--hairline);
+  user-select: none;
+}
+
+.titlebar-mark {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: var(--on-surface);
+}
+
+.titlebar-name {
+  color: var(--on-surface);
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-self: stretch;
+  margin-left: auto;
+}
+
+.titlebar-control {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  align-self: stretch;
+  border: 0;
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
+}
+
+.titlebar-control svg { width: 12px; height: 12px; }
+
+.titlebar-control:active { background: color-mix(in srgb, var(--on-surface) 12%, transparent); }
+.titlebar-control.is-close:hover { background: color-mix(in srgb, var(--state-danger) 85%, transparent); color: var(--on-error); }
 
 .app-shell.is-sidebar-collapsed {
   /* 44px target + 10px breathing room on both sides + the 1px divider. */
@@ -48,12 +105,13 @@ body::-webkit-scrollbar,
 }
 
 .sidebar {
+  grid-area: sidebar;
   position: sticky;
   top: 0;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  height: 100vh;
-  height: 100dvh;
+  min-height: 0;
+  height: 100%;
   padding: var(--space-6) var(--space-4) var(--space-4);
   border-right: 1px solid var(--hairline);
   background: var(--surface-panel);
@@ -78,14 +136,37 @@ body::-webkit-scrollbar,
   min-height: 44px;
   margin: 0 var(--space-2) var(--space-10);
   font-family: var(--font-display);
-  font-size: 19px;
-  font-weight: 720;
+  font-size: var(--text-lg);
+  font-weight: 700;
 }
 
-.brand img {
+/* Chrome hover tier: the neutral surface step plus the ink step, shared by
+   every quiet control in the shell's frame. No geometry here — a previous
+   merge fused the brand mark's 38px sizing into this rule, which shrank
+   titlebar buttons on hover and collapsed the settings nav's rows into
+   one-character columns. */
+.titlebar-control:hover,
+.nav-link:hover,
+.sidebar-toggle:hover,
+.icon-button:hover,
+.settings-nav a:hover {
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+}
+
+.brand .yomika-mark {
   width: 38px;
   height: 38px;
-  object-fit: contain;
+  /* The mark's strokes ride on currentColor and the plate on
+     --yomika-mark-plate, so the logo tints with the theme and the colour
+     scheme like any other icon. */
+  color: var(--on-surface);
+}
+
+.settings-about .settings-row-icon .yomika-mark {
+  width: 20px;
+  height: 20px;
+  color: var(--on-surface);
 }
 
 .side-nav {
@@ -104,8 +185,8 @@ body::-webkit-scrollbar,
   overflow: hidden;
   border-radius: var(--radius-control);
   color: var(--ink-secondary);
-  font-size: 14px;
-  font-weight: 590;
+  font-size: var(--text-md);
+  font-weight: 500;
   transition: color var(--motion-standard), background-color var(--motion-standard);
 }
 
@@ -123,14 +204,14 @@ body::-webkit-scrollbar,
   transition: opacity var(--motion-standard), transform var(--motion-standard);
 }
 
-.nav-link:hover {
-  background: color-mix(in srgb, var(--brand-paper) 72%, transparent);
-  color: var(--ink-primary);
-}
 
-.nav-link.is-active {
-  background: var(--brand-paper);
-  color: var(--brand-ink);
+.nav-link.is-active,
+.settings-nav a.is-active,
+.settings-nav button.is-active,
+.settings-choice-option.is-active,
+.library-select-toggle[aria-pressed='true'] {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
 }
 
 .nav-link.is-active::before {
@@ -142,29 +223,19 @@ body::-webkit-scrollbar,
   flex: 0 0 auto;
   width: 19px;
   height: 19px;
-  stroke-width: 1.8;
-}
-
-.sidebar-footnote,
-.context-label,
-.workspace-kicker,
-.eyebrow {
+}.eyebrow {
   color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 11px;
-  font-weight: 650;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 600;
   letter-spacing: 0;
   text-transform: uppercase;
-}
-
-.sidebar-footnote {
-  margin: 0 var(--space-3);
 }
 
 .sidebar-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: var(--space-2);
 }
 
@@ -175,16 +246,15 @@ body::-webkit-scrollbar,
   height: var(--icon-button-size);
   min-width: var(--icon-button-size);
   place-items: center;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--ink-secondary);
   cursor: pointer;
+  /* Same hover treatment as the nav links above: one surface step, not a
+     different shade — the toggle is the footer's nav link. */
+  transition: color var(--motion-standard), background-color var(--motion-standard);
 }
 
-.sidebar-toggle:hover {
-  background: var(--surface-elevated);
-  color: var(--ink-primary);
-}
 
 .sidebar-toggle svg {
   width: 19px;
@@ -199,11 +269,8 @@ body::-webkit-scrollbar,
   justify-content: center;
   width: 44px;
   margin-inline: 0;
-}
-
-.is-sidebar-collapsed .brand span,
-.is-sidebar-collapsed .side-nav .nav-link span,
-.is-sidebar-collapsed .sidebar-footnote {
+}.is-sidebar-collapsed .brand span,
+  .is-sidebar-collapsed .side-nav .nav-link span {
   display: none;
 }
 
@@ -219,12 +286,21 @@ body::-webkit-scrollbar,
   justify-content: center;
 }
 
+/* The spacer is gone, so the button is the footer's only child — but the footer
+   is a grid item whose min-content width must not exceed the 45px rail interior,
+   or the whole centered strip overflows to the right. Auto margins centre the
+   button inside whatever the footer measures. */
+.is-sidebar-collapsed .sidebar-toggle {
+  margin-inline: auto;
+}
+
 .app-main {
+  grid-area: main;
+  min-height: 0;
   display: grid;
   /* workspace + status bar; the context bar above them is gone. */
   grid-template-rows: minmax(0, 1fr) 28px;
   min-width: 0;
-  height: 100vh;
   height: 100dvh;
   overflow: hidden;
   /* Every route can be shorter than the viewport. The workspace itself is
@@ -242,17 +318,13 @@ body::-webkit-scrollbar,
   width: var(--icon-button-size);
   height: var(--icon-button-size);
   min-width: var(--icon-button-size);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--ink-secondary);
   cursor: pointer;
   transition: color var(--motion-standard), background-color var(--motion-standard);
 }
 
-.icon-button:hover {
-  background: var(--surface-elevated);
-  color: var(--ink-primary);
-}
 
 .icon-button svg {
   width: 19px;
@@ -262,30 +334,43 @@ body::-webkit-scrollbar,
 /* A bare icon control for content areas — smaller than the shell's .icon-button
    and with a visible edge, so it still reads as a button when it sits on a panel
    rather than in the chrome. */
+/* Material 3 filled tonal icon button: a circular 40px target with a
+   secondary-container fill and no outline. */
 .icon-action {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 24%, transparent);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  color: var(--ink-secondary);
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
   cursor: pointer;
-  transition: color var(--motion-standard), background-color var(--motion-standard), border-color var(--motion-standard);
+  transition: color var(--motion-standard), background-color var(--motion-standard);
 }
 
-.icon-action:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--brand-vermilion) 55%, transparent);
-  color: var(--brand-vermilion);
+.icon-action:hover:not(:disabled),
+.eh-comment-votes-actions button:hover:not(:disabled),
+.secondary-action:hover:not(:disabled),
+.settings-action:hover:not(:disabled) {
+  background: var(--secondary-container-hover);
+  color: var(--on-secondary-container);
 }
 
-.icon-action:disabled { opacity: 0.55; cursor: default; }
-.icon-action svg { width: 16px; height: 16px; }
-.icon-action svg.is-spinning { animation: icon-spin 900ms linear infinite; }
+.icon-action:disabled,
+.eh-comment-votes-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.icon-action svg { width: 18px; height: 18px; }
+
+.icon-action svg.is-spinning,
+.library-pull-disc.is-spinning svg {
+  animation: icon-spin 900ms linear infinite;
+}
+
 @keyframes icon-spin { to { transform: rotate(360deg); } }
-.tooltip-content { z-index: var(--z-tooltip); padding: 6px 9px; border-radius: var(--radius-control); background: var(--surface-overlay); color: var(--ink-on-overlay); font-size: 11px; line-height: 1; box-shadow: var(--shadow-tooltip); user-select: none; }
-.tooltip-arrow { fill: var(--surface-overlay); }
 
 .workspace {
   width: min(100%, 1320px);
@@ -351,6 +436,13 @@ body::-webkit-scrollbar,
 .skeleton-line-title { width: 72%; height: 34px; }
 .skeleton-line-short { width: 46%; }
 .skeleton-line.is-chip { width: 52px; height: 20px; border-radius: var(--radius-control); }
+/* The inline metadata-loading skeleton mirrors the real column it stands in:
+   tag-group rows (a short label over a full chip row) with real gaps — it was
+   an unstyled div, so every line collapsed onto the next one. The min-height
+   keeps the page from jumping when the tag groups replace it. */
+.archive-detail-copy-skeleton { display: grid; align-content: start; gap: var(--space-3); padding-top: var(--space-2); min-height: 320px; }
+.archive-detail-title-loading { display: block; }
+.archive-detail-title-loading .skeleton-line { width: 60%; height: clamp(1.25rem, 2vw, 1.8rem); }
 /* Holds a select's footprint while its options load, so the toolbar does not
    reflow when they arrive. */
 .select-placeholder { width: 132px; height: var(--control-height); border-radius: var(--radius-control); }
@@ -377,8 +469,6 @@ body::-webkit-scrollbar,
 .loading-indicator.is-lg svg { width: 72px; height: 72px; }
 .loading-indicator.is-sm { padding: var(--space-4) 0; }
 
-
-
 /* Three leaves of a turning page, each a third of the cycle behind the last, so
    the motion reads as paging rather than as a generic spinner. */
 .loading-leaf {
@@ -402,14 +492,18 @@ body::-webkit-scrollbar,
 }
 
 .toast-stack { position: fixed; z-index: var(--z-overlay); right: var(--space-5); bottom: calc(28px + var(--space-6)); display: grid; gap: var(--space-2); width: min(420px, calc(100vw - 32px)); pointer-events: none; }
-.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: 12px 14px; border: 1px solid var(--hairline); border-left: 3px solid var(--brand-cyan); border-radius: var(--radius-control); background: var(--surface-overlay); color: var(--ink-on-overlay); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter 220ms var(--ease-standard) both; }
-.toast-card.is-success { border-left-color: var(--state-success); }
-.toast-card.is-error { border-left-color: var(--state-danger); }
+/* Material 3 snackbar on the theme's own tonal scale: the highest container
+   surface with on-surface text, so a dark theme gets a dark toast and a light
+   theme a light one — no inverted white card. The state rides on the icon's
+   shape plus the state role, both readable on the container in either theme. */
+.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter 220ms var(--ease-standard) both; }
 .toast-card.is-closing { animation: toast-exit 220ms var(--ease-standard) both; }
-.toast-icon { display: grid; place-items: center; }
+.toast-icon { display: grid; place-items: center; color: var(--primary); }
+.toast-card.is-success .toast-icon { color: var(--success); }
+.toast-card.is-error .toast-icon { color: var(--error); }
 .toast-icon svg { width: 18px; height: 18px; }
 .toast-text { min-width: 0; font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
-.toast-close { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.toast-close { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-pill); background: transparent; color: inherit; cursor: pointer; }
 .toast-close svg { width: 16px; height: 16px; }
 @keyframes toast-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-exit { to { opacity: 0; transform: translateY(8px); } }
@@ -428,21 +522,25 @@ body::-webkit-scrollbar,
   gap: clamp(var(--space-6), 4vw, var(--space-10));
 }
 
-.settings-sidebar {
-  position: sticky;
-  top: var(--space-6);
+/* The slot is the grid item and stretches to the row's height; the sidebar inside
+   it is what sticks. As a direct grid item the sidebar's containing block was the
+   section's height, and Chromium offsets a sticky element by its `top` inside a
+   containing block taller than itself — the nav sat 24px lower on every section
+   whose content was taller than the nav list. */
+.settings-sidebar-slot {
+  align-self: stretch;
   min-width: 0;
-  padding-top: var(--space-2);
 }
 
-.settings-sidebar-title {
-  margin: 0 0 var(--space-3);
-  color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.settings-sidebar {
+  position: sticky;
+  /* Zero, not a 24px inset: the sticky offset is measured from the scrollport's
+     content edge — which already sits 32px below the top — so any non-zero value
+     pushed the list down on exactly those sections whose content was taller than
+     the nav, and the list jumped 24px on every switch between them. */
+  top: 0;
+  min-width: 0;
+  padding-top: var(--space-2);
 }
 
 .settings-nav {
@@ -451,31 +549,46 @@ body::-webkit-scrollbar,
 }
 
 .settings-nav a {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   min-height: 40px;
   padding: 0 var(--space-3);
-  border-left: 2px solid transparent;
   border-radius: var(--radius-control);
   color: var(--ink-secondary);
-  font-size: 13px;
-  font-weight: 620;
+  font-size: var(--text-sm);
+  font-weight: 600;
   transition: color var(--motion-standard), background-color var(--motion-standard), border-color var(--motion-standard);
 }
 
-.settings-nav a:hover {
-  background: var(--surface-elevated);
-  color: var(--ink-primary);
+
+
+/* Same left indicator as the main navigation, so both active states read as one
+   component. */
+.settings-nav a::before,
+.settings-nav button::before {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--primary);
+  content: "";
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity var(--motion-standard), transform var(--motion-standard);
 }
 
-.settings-nav a.is-active {
-  border-left-color: var(--brand-vermilion);
-  background: color-mix(in srgb, var(--brand-paper) 60%, transparent);
-  color: var(--brand-ink);
+.settings-nav a.is-active::before,
+.settings-nav button.is-active::before {
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .settings-nav button {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -483,30 +596,19 @@ body::-webkit-scrollbar,
   min-height: 40px;
   padding: 0 var(--space-3);
   border: 0;
-  border-left: 2px solid transparent;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--ink-secondary);
   font: inherit;
-  font-size: 13px;
-  font-weight: 620;
+  font-size: var(--text-sm);
+  font-weight: 600;
   text-align: left;
   cursor: pointer;
 }
-.settings-nav button:hover { background: var(--surface-elevated); color: var(--ink-primary); }
-.settings-nav button.is-active { border-left-color: var(--brand-vermilion); background: color-mix(in srgb, var(--brand-paper) 60%, transparent); color: var(--brand-ink); }
+.settings-nav button:hover { background: var(--surface-container-high); color: var(--on-surface); }
 
 .settings-content {
   min-width: 0;
-}
-
-.settings-content > :first-child {
-  border-top: 0;
-}
-
-.settings-section-subsection {
-  padding-top: var(--space-6);
-  padding-bottom: var(--space-6);
 }
 
 .settings-content [id] {
@@ -517,21 +619,35 @@ body::-webkit-scrollbar,
   display: none;
 }
 
+/* Page titles are structural, not decorative. The h1 stays in the accessibility
+   tree; pages whose heading held nothing else render a bare .visually-hidden h1
+   instead of this block. */
+.workspace-heading h1,
+.metadata-edit-header h1 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .workspace-heading {
-  margin-bottom: var(--space-8);
+  margin-bottom: var(--space-4);
 }
 
 .workspace-heading h1 {
   max-width: 100%;
   margin: 0;
   font-size: clamp(32px, 3vw, var(--text-page-title));
-  font-weight: 720;
+  font-weight: 700;
   line-height: 1.08;
   text-wrap: balance;
-}
-
-.workspace-kicker,
-.eyebrow {
+}.eyebrow {
   margin-bottom: var(--space-3);
   color: var(--brand-vermilion);
 }
@@ -555,20 +671,9 @@ body::-webkit-scrollbar,
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: var(--space-5);
+  gap: var(--space-6);
   min-width: 0;
   padding: var(--space-8) 0;
-  border-top: 1px solid var(--hairline);
-}
-
-/* The 服务器 header: copy on the left, the add action opposite it and centred
-   against the whole block instead of pinned to its first line. */
-.settings-section-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
 }
 
 .settings-section > *,
@@ -584,6 +689,166 @@ body::-webkit-scrollbar,
   max-width: 100%;
 }
 
+/* ---- Settings groups and rows --------------------------------------------- */
+/* One group frame per section, one row shape per setting: an icon, the name and
+   its hint on the left, the current value on the right. The row hosts no control
+   — it opens the floating menu where the value is actually changed, so every
+   kind of setting keeps the same two-level rhythm. */
+.settings-group {
+  overflow: hidden;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-card);
+  background: var(--surface-container);
+}
+
+.settings-group > * {
+  min-width: 0;
+}
+
+.settings-group .server-list-message {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+}
+
+.settings-item {
+  min-width: 0;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  min-height: 60px;
+  padding: var(--space-2) var(--space-4);
+}
+
+.settings-row-icon,
+.sync-account-glyph,
+.settings-menu-account-glyph {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: var(--on-surface-variant);
+}
+
+.settings-row-icon svg { width: 20px; height: 20px; }
+.settings-row-icon img { width: 20px; height: 20px; border-radius: var(--radius-control); }
+
+.settings-row-copy,
+.settings-choice-list,
+.eh-account-summary,
+.sync-account-row > div,
+.settings-menu-account-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-row-label,
+.sync-account-row h2,
+.settings-menu-account-copy strong {
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: normal;
+}
+
+.settings-row-hint {
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.settings-row-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The whole row is the hit target, and hover fills it edge to edge inside the
+   group's rounded corners. No per-row borders: height and the hover fill are
+   what separate rows, so a section still reads as one list. */
+.settings-row-button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast);
+}
+
+/* 中性 hover 家族（统一为 --surface-container-high）：toast、设置行、选项、
+   tag 建议、卡片/列表行、任务行、日期、菜单勾选、方案卡、preset 应用、
+   「更多」菜单项——同一层表面，一处定义。 */
+.settings-row-button:hover:not(:disabled),
+.toast-close:hover,
+.settings-choice-option-main:hover,
+.tag-suggest-option:hover,
+.archive-list.is-thumbnail .archive-thumb-card:hover,
+.archive-list.is-wide .archive-row:hover,
+.archive-row:hover,
+.task-row:hover,
+.date-picker-days button:hover,
+.settings-menu-check:hover:not(:disabled),
+.custom-scheme-card:hover,
+.search-preset-apply:hover,
+.nav-more-menu .nav-link:hover:not(.is-active) {
+  background: var(--surface-container-high);
+}
+
+.settings-row-button:focus-visible,
+.settings-choice-option-main:focus-visible,
+.segmented-control input:focus-visible + span,
+.segmented-control button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.settings-row-value {
+  justify-self: end;
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-row-value svg { width: 16px; height: 16px; }
+
+/* A plain switch keeps to its row: the drawn switch is the trailing control
+   and the only hit target, so nothing here opens a second level. */
+.settings-switch-row .switch-control { flex: none; }
+.settings-switch-row.is-disabled .settings-row-label,
+.settings-switch-row.is-disabled .settings-row-hint { color: var(--ink-faint); }
+
+
+.settings-choice-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-control);
+}
+
+.settings-choice-option-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-choice-option.is-active .settings-choice-option-main:hover { background: color-mix(in srgb, var(--on-primary-container) 8%, transparent); }
+
+.settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
+
 .first-run-copy {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -595,7 +860,6 @@ body::-webkit-scrollbar,
   width: 40px;
   height: 40px;
   color: var(--brand-cyan);
-  stroke-width: 1.4;
   align-self: center;
 }
 
@@ -610,8 +874,8 @@ body::-webkit-scrollbar,
 .settings-section h2,
 .empty-state h2 {
   margin-bottom: var(--space-2);
-  font-size: 20px;
-  font-weight: 680;
+  font-size: var(--text-lg);
+  font-weight: 700;
 }
 
 .first-run p:not(.eyebrow),
@@ -620,24 +884,17 @@ body::-webkit-scrollbar,
   max-width: 62ch;
   margin-bottom: 0;
   color: var(--ink-secondary);
-  font-size: 14px;
+  font-size: var(--text-md);
   line-height: 1.7;
 }
 
-/* One list of servers, then the button that adds another. No heading row above
-   it, so no divider either — the section's own top border is the separation. */
-.server-settings {
-  justify-items: start;
-}
-
-.server-list {
+/* The server region is a group of rows inside the general section. A list that
+   is still loading keeps one row's height, so nothing under it drops when the
+   servers arrive. */
+.server-region > .server-list-message:only-child {
   display: grid;
-  gap: var(--space-3);
-  width: 100%;
-}
-
-.server-list:empty {
-  display: none;
+  align-content: center;
+  min-height: 88px;
 }
 
 /* Everything in the column is the column's width. It used to be
@@ -650,24 +907,6 @@ body::-webkit-scrollbar,
   justify-items: stretch;
 }
 
-.cache-settings {
-  display: grid;
-  width: 100%;
-  gap: var(--space-3);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--hairline);
-}
-
-/* The clear button is the first item in a start-aligned row, so the total that
-   follows it can shrink after a clear without moving the button. */
-.cache-settings-heading {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
 .cache-breakdown {
   display: flex;
   align-items: center;
@@ -675,28 +914,7 @@ body::-webkit-scrollbar,
   gap: var(--space-3);
   flex-wrap: wrap;
   color: var(--ink-secondary);
-  font-size: 13px;
-}
-
-.cache-settings-heading strong {
-  font-size: 18px;
-  font-variant-numeric: tabular-nums;
-}
-
-.preferences-form fieldset {
-  width: 100%;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.preferences-form legend,
-.preference-select {
-  margin-bottom: var(--space-2);
-  color: var(--ink-secondary);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--text-sm);
 }
 
 .segmented-control {
@@ -729,20 +947,39 @@ body::-webkit-scrollbar,
   cursor: pointer;
 }
 
-.segmented-control input:checked + span {
+.segmented-control input:checked + span,
+.segmented-control button.is-active {
   background: var(--control-selected-background);
   color: var(--control-selected-text);
 }
 
-.segmented-control input:focus-visible + span {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+
+/* The button flavour of the same control (the upload page's tabs): identical
+   chrome to the radio flavour, so a segmented group reads as one thing
+   wherever it is rendered. */
+.segmented-control button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 0;
+  background: var(--surface-elevated);
+  color: var(--ink-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
 }
 
-.preference-select {
-  display: grid;
-  gap: var(--space-2);
-  width: 100%;
+.segmented-control button:hover:not(.is-active),
+.archive-detail-panel-tabs button:hover { background: var(--surface-container-high); color: var(--ink-primary); }
+
+
+.segmented-control button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .legacy-import-form {
@@ -754,8 +991,8 @@ body::-webkit-scrollbar,
 
 .legacy-import-form label {
   color: var(--ink-secondary);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .legacy-import-form textarea {
@@ -771,9 +1008,7 @@ body::-webkit-scrollbar,
 
 /* Dialogs and standalone pages keep the reading-width cap; the settings column is
    already narrow, and a second cap inside it only produced a second width. */
-.server-form,
-.metadata-form,
-.category-controls {
+.server-form, .metadata-form {
   width: 100%;
   max-width: 680px;
 }
@@ -783,16 +1018,10 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
-.form-success {
-  margin: 0;
-  color: var(--state-success);
-  font-size: 13px;
-}
-
 .server-list-message {
   margin: 0;
   color: var(--ink-secondary);
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .server-list-error {
@@ -800,62 +1029,17 @@ body::-webkit-scrollbar,
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
 }
 
 .server-list-error .form-error {
   flex: 1 1 240px;
 }
 
-.server-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-4);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  transition: border-color var(--motion-standard), background-color var(--motion-standard);
-}
-
-.server-row:hover {
-  border-color: color-mix(in srgb, var(--ink-secondary) 35%, transparent);
-}
-
-.server-row-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--space-3);
-}
-
 .server-edit-action {
   min-height: 36px;
   padding-inline: var(--space-3);
-  font-size: 12px;
-}
-
-.server-row h3,
-.server-row p {
-  margin: 0;
-}
-
-.server-row h3 {
-  font-size: 15px;
-}
-
-.server-row p {
-  overflow-wrap: anywhere;
-  color: var(--ink-secondary);
-  font-size: 13px;
-}
-
-.server-state {
-  flex: 0 0 auto;
-  color: var(--state-success);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--text-xs);
 }
 
 .primary-action {
@@ -865,74 +1049,35 @@ body::-webkit-scrollbar,
   gap: var(--space-2);
   min-height: 44px;
   padding: 0 var(--space-5);
-  border-radius: var(--radius-control);
-  background: var(--brand-vermilion);
-  color: var(--ink-on-brand);
-  font-weight: 650;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-family: var(--font-body);
+  font-weight: 600;
+  line-height: 1;
   cursor: pointer;
-  transition: background-color var(--motion-standard), transform var(--motion-standard);
+  transition: background-color var(--motion-standard), border-color var(--motion-standard), color var(--motion-standard), transform var(--motion-fast);
 }
 
-.primary-action:hover {
-  background: var(--brand-vermilion-strong);
+.primary-action:hover:not(:disabled) {
+  background: var(--primary-hover);
   transform: translateY(-1px);
 }
 
-.primary-action:active {
+.primary-action:active:not(:disabled) {
   transform: translateY(0);
+}
+
+.primary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
 }
 
 .primary-action svg {
   width: 17px;
   height: 17px;
-}
-
-.state-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.state-list li {
-  border-bottom: 1px solid var(--hairline);
-}
-
-.state-list a {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 20px;
-  align-items: center;
-  gap: var(--space-4);
-  min-height: 64px;
-  color: var(--ink-primary);
-  transition: background-color var(--motion-fast);
-}
-
-.state-list a:hover {
-  background: color-mix(in srgb, var(--surface-elevated) 72%, transparent);
-}
-
-.state-list strong {
-  overflow: hidden;
-  font-size: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.state-list span {
-  color: var(--ink-secondary);
-  font-size: 12px;
-}
-
-.state-list svg {
-  width: 16px;
-  height: 16px;
-  color: var(--ink-faint);
-  transition: color var(--motion-standard), transform var(--motion-standard);
-}
-
-.state-list a:hover svg {
-  color: var(--brand-vermilion);
-  transform: translateX(3px);
 }
 
 .empty-state {
@@ -950,7 +1095,6 @@ body::-webkit-scrollbar,
   width: 34px;
   height: 34px;
   color: var(--ink-faint);
-  stroke-width: 1.4;
 }
 
 .empty-state h2 { margin: 0; }
@@ -970,13 +1114,6 @@ body::-webkit-scrollbar,
   align-self: start;
 }
 
-.library-heading {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-
 .library-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -988,9 +1125,19 @@ body::-webkit-scrollbar,
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
-/* Keep both archive panes on ordinary desktop windows. The outer shell already
-   has a proper single-pane rule at 900px below; collapsing at 1280px used to
-   hide the list on a window that still had enough room for the split view. */
+/* The detail route needs about 520px for its cover, tag groups and action row.
+   The split used to fold into a single detail pane at 1180px — which hid the
+   library list on ordinary desktop windows and read as "the left library cannot
+   scroll". The single pane is now the app's compact width (900px) and below,
+   where the split would genuinely not fit; between the two the detail column
+   stays resizable down to its 24% floor. Target the panel itself so no empty
+   flex track remains behind it. */
+@container app-main (max-width: 900px) {
+  .library-shell.has-detail { display: block !important; height: 100%; }
+  .library-shell.has-detail > [data-panel]:has(.library-shell-list) { display: none !important; }
+  .library-shell.has-detail > [data-panel]:has(.library-shell-detail) { display: block !important; width: 100% !important; height: 100% !important; flex: none !important; }
+  .library-shell-detail { border-left: 0; width: 100%; min-width: 0; }
+}
 
 /* Six labelled actions need roughly this much room. Below it they keep their
    icons and lose the words rather than folding onto a second row. */
@@ -1011,21 +1158,6 @@ body::-webkit-scrollbar,
   padding: var(--space-4) var(--space-4) 0;
 }
 
-/* The loading state keeps the route's own heading — it is the same 32px 档案库
-   the workspace draws, so the list appearing under it is not a jump — and puts
-   the indicator in the middle of what is still empty. */
-.library-shell-loading {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  place-items: center;
-  min-height: 320px;
-  height: 100%;
-  padding: var(--space-4);
-}
-
-.library-shell-loading .workspace-heading { justify-self: start; }
-.library-shell-loading .loading-indicator { align-self: center; }
-
 .library-shell-list {
   position: relative;
   z-index: 2;
@@ -1038,6 +1170,7 @@ body::-webkit-scrollbar,
 .library-shell-detail::-webkit-scrollbar { display: none; }
 
 .library-shell-detail {
+  padding-bottom: var(--space-4);
   border-left: 1px solid var(--hairline);
 }
 
@@ -1047,6 +1180,7 @@ body::-webkit-scrollbar,
 
 .archive-detail-route {
   min-height: 100%;
+  padding-bottom: var(--space-6);
   font-family: var(--font-body);
   color: var(--ink-primary);
 }
@@ -1094,6 +1228,13 @@ body::-webkit-scrollbar,
   min-height: 0;
 }
 
+/* Flow routes (home and the shelves) grow with their content: the 100% clamp
+   pins the panel to the scrollport and the overflow tail that passes through
+   the overflow-visible panel never reaches the scroll container's scrollable
+   area — the last rail stays ~44px below the last scroll position for good.
+   The library keeps the clamp: its panes scroll independently. */
+.route-cache-panel.is-flow { height: auto; }
+
 .route-cache-panel[hidden] { display: none; }
 
 .archive-detail-cover-trigger {
@@ -1101,7 +1242,7 @@ body::-webkit-scrollbar,
   width: 210px;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
   background: transparent;
   color: inherit;
   cursor: zoom-in;
@@ -1110,7 +1251,7 @@ body::-webkit-scrollbar,
 }
 
 .archive-detail-cover-trigger:focus-visible {
-  outline: 2px solid var(--brand-cyan);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 4px;
 }
 
@@ -1127,7 +1268,7 @@ body::-webkit-scrollbar,
   /* No frame. A border plus a filled background drew a box around covers whose
      own aspect ratio differs from 3:4, so the padding read as part of the art.
      A soft drop shadow lifts the image off the page instead. */
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
   box-shadow: none;
 }
 
@@ -1136,13 +1277,15 @@ body::-webkit-scrollbar,
   place-items: center;
   width: 210px;
   aspect-ratio: 3 / 4;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  color: var(--ink-faint);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-card);
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
 }
 .archive-detail-cover-placeholder.is-skeleton,
-.archive-row-thumb.is-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 220% 100%; animation: skeleton-shimmer 1.25s ease-in-out infinite; }
+.archive-row-thumb.is-skeleton,
+.archive-page-thumbnail.is-skeleton,
+.archive-thumb-card-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 220% 100%; animation: skeleton-shimmer 1.25s ease-in-out infinite; }
 
 .archive-detail-overview {
   display: grid;
@@ -1186,13 +1329,13 @@ body::-webkit-scrollbar,
   min-width: 0;
   overflow: hidden;
   padding: 0 var(--space-2);
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  color: var(--ink-secondary);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-pill);
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
@@ -1201,9 +1344,9 @@ body::-webkit-scrollbar,
 .archive-action-button svg { flex: none; }
 
 .archive-action-button:hover {
-  border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
-  background: var(--brand-paper);
-  color: var(--ink-primary);
+  border-color: var(--outline);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
 }
 
 .archive-action-button svg {
@@ -1224,121 +1367,86 @@ body::-webkit-scrollbar,
 }
 
 .archive-detail-panel-tabs {
-  position: relative;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
-  gap: 0;
+  gap: var(--space-2);
   width: 100%;
   max-width: 100%;
   margin-top: var(--space-4);
   padding: 0;
-  border: 1px solid var(--hairline-strong);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
+  border: 0;
+  background: transparent;
 }
 .archive-detail-panel-tabs button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  min-height: 34px;
+  min-height: 40px;
   width: 100%;
   padding: 0 var(--space-4);
-  border-radius: var(--radius-control);
-  color: var(--ink-secondary);
-  font-size: var(--text-sm);
-  font-weight: 650;
-  cursor: pointer;
-}
-.archive-detail-panel-tabs::before { position: absolute; top: 8px; bottom: -8px; left: 50%; width: 1px; background: var(--hairline-strong); content: ""; pointer-events: none; }
-.archive-detail-panel-tabs::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 1px; background: var(--hairline-strong); content: ""; pointer-events: none; }
-.archive-detail-panel-tabs:has(button:only-child)::before { display: none; }
-.archive-detail-panel-tabs button:hover { background: var(--surface-muted); color: var(--ink-primary); }
-.archive-detail-panel-tabs button.is-active { background: var(--brand-vermilion); color: var(--ink-on-brand); }
-.archive-detail-panel-tabs svg { width: 16px; height: 16px; }
-.archive-detail-panel-tabs button:only-child { grid-column: 1 / -1; }
-
-.archive-action-danger,
-.archive-confirm-delete { color: var(--state-danger); }
-.archive-confirm-delete {
-  border-color: color-mix(in srgb, var(--state-danger) 55%, var(--control-border));
-  background: color-mix(in srgb, var(--state-danger) 12%, var(--surface-elevated));
-}
-
-.archive-category-dialog > [data-radix-dialog-description] {
-  color: var(--ink-secondary);
-}
-
-.archive-category-list {
-  display: grid;
-  gap: var(--space-2);
-  max-height: min(48vh, 420px);
-  margin: var(--space-5) 0;
-  overflow-y: auto;
-}
-
-.archive-category-option {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-height: var(--control-height);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--control-border);
+  border: 1px solid var(--hairline-strong);
   border-radius: var(--radius-control);
   background: var(--surface-elevated);
-  color: var(--ink-primary);
-  font-family: var(--font-body);
+  color: var(--ink-secondary);
   font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
 }
 
-.archive-category-option:has(input:checked) {
-  border-color: var(--brand-vermilion);
-  background: var(--brand-paper);
-}
-
-.archive-category-option input {
-  flex: 0 0 auto;
-  width: 18px;
-  min-height: 18px;
-  margin: 0;
-  box-shadow: none;
-}
+.archive-detail-panel-tabs button.is-active { background: var(--brand-vermilion); color: var(--ink-on-brand); }
+.archive-detail-panel-tabs svg { width: 16px; height: 16px; }
+.archive-detail-panel-tabs button:only-child { grid-column: 1 / -1; }
+.detail-panel-glyph { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.75; }
 
 .archive-detail-summary { white-space: pre-wrap; line-height: 1.65; }
 
-.eh-comments { display: grid; gap: var(--space-3); margin: var(--space-6) 0; padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); }
-.eh-comments-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.eh-comments { display: grid; gap: var(--space-3); margin: var(--space-6) 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+.eh-comments-heading,
+.library-controls,
+.library-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .eh-comments-heading h2 { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); }
 .eh-comments-heading h2 svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
 .eh-comments-list { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
-.eh-comments-list li { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-panel); }
+.eh-comments-list li { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
 .eh-comments-list li.is-uploader { border-left: 3px solid var(--brand-vermilion); }
-.eh-comment-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); color: var(--ink-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
-.eh-comment-meta > span { display: inline-flex; align-items: center; gap: var(--space-2); }
-.eh-comment-meta time { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.eh-comment-meta time svg { width: 13px; height: 13px; }
-.eh-comment-meta strong { color: var(--ink-primary); }
-.eh-comment-meta small { padding: 2px 5px; border-radius: var(--radius-control); background: var(--brand-paper); color: var(--brand-ink); }
+.eh-comment-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.eh-comment-meta > span { display: inline-flex; align-items: center; min-width: 0; gap: var(--space-2); }
+/* The score reads as plain signed text in the header's right corner — it used
+   to sit in a boxed chip on the votes row. */
+.eh-comment-score { color: var(--state-success); font-weight: 700; }
+.eh-comment-score.is-negative,
+.archive-context-menu-item.is-danger,
+.eh-comment-meta time, .eh-comment-votes time { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eh-comment-meta time svg, .eh-comment-votes time svg { width: 13px; height: 13px; }
+.eh-comment-meta strong { overflow: hidden; color: var(--ink-primary); text-overflow: ellipsis; white-space: nowrap; }
+.eh-comment-meta small { padding: 2px 5px; border-radius: var(--radius-control); background: var(--primary-container); color: var(--on-primary-container); }
 .eh-comments-list p { margin: 0; white-space: pre-wrap; line-height: 1.6; }
 .eh-comments-empty { margin: 0; color: var(--ink-secondary); }
-.eh-comments-error { display: grid; gap: var(--space-1); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--state-danger) 45%, var(--hairline)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--state-danger) 9%, var(--surface-panel)); color: var(--state-danger); }
-.eh-comments-error span { color: var(--ink-secondary); font-size: var(--text-sm); }
-.eh-comment-votes { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); color: var(--state-success); font-size: var(--text-sm); font-weight: 700; }
-.eh-comment-votes::before { margin-right: auto; color: var(--ink-faint); content: "评分"; font-size: 11px; font-weight: 600; }
-.eh-comment-votes > span { display: grid; place-items: center; min-width: 42px; height: 30px; border-block: 1px solid var(--hairline); background: var(--surface-elevated); text-align: center; font-variant-numeric: tabular-nums; }
-.eh-comment-votes > span.is-negative { color: var(--state-danger); }
-.eh-comment-votes button { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-elevated); color: var(--ink-secondary); cursor: pointer; }
-.eh-comment-votes button:hover { border-color: color-mix(in srgb, var(--brand-vermilion) 48%, var(--hairline)); color: var(--ink-primary); }
-.eh-comment-votes button[aria-pressed='true'] { border-color: var(--brand-vermilion); background: color-mix(in srgb, var(--brand-vermilion) 12%, var(--surface-elevated)); color: var(--brand-vermilion); }
-.eh-comment-votes svg { width: 15px; height: 15px; }
+/* Footer row: the timestamp on the left, the vote pair on the right. */
+.eh-comment-votes { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 32px; }
+.eh-comment-votes time { color: var(--ink-secondary); font-size: var(--text-xs); }
+.eh-comment-votes-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
+/* Both directions keep a persistent tonal circle and identical interactive
+   shape. A cast vote fills its circle with the solid primary — loud on purpose,
+   the quiet tonal mixes read as "slightly darker" rather than "voted". */
+.eh-comment-votes-actions button { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: var(--radius-pill); background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
+.eh-comment-votes-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.tag-group-character h2,
+.tag-group-character h3 { background: var(--primary); color: var(--on-primary); }
+.eh-comment-votes-actions button[aria-pressed='true'],
+.eh-comment-votes-actions button[aria-pressed='true']:hover:not(:disabled) { background: var(--primary); color: var(--on-primary); }
+.eh-comment-votes-actions button[aria-disabled='true'] { cursor: pointer; }
+.eh-comment-votes-actions button:active:not(:disabled) { transform: translateY(1px); }
+/* The arrows stay one colour in every state — the circle's tint is what
+   announces a cast vote, not the glyph changing hue under it. */
+.eh-comment-votes-actions svg { width: 15px; height: 15px; color: var(--on-secondary-container); }
+.eh-comment-votes-actions button[aria-pressed='true'] svg { color: var(--on-primary); }
 .eh-comment-composer { display: grid; justify-items: end; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--hairline); }
 .eh-comment-composer textarea { width: 100%; resize: vertical; }
 .eh-comment-composer button { min-width: 92px; }
 .eh-comment-composer button svg { width: 16px; height: 16px; }
-.about-inline-link { padding: 0; color: var(--brand-vermilion); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 
 .metadata-edit-page {
   width: min(100%, 900px);
@@ -1362,15 +1470,15 @@ body::-webkit-scrollbar,
   margin-bottom: var(--space-5);
 }
 .metadata-edit-header h1 { margin: 0; font-size: var(--text-title); }
-.metadata-edit-form { display: grid; gap: var(--space-4); }
-.metadata-edit-form label { display: grid; gap: var(--space-2); color: var(--ink-secondary); font-weight: 650; }
+.metadata-edit-form,
+.metadata-edit-form label { display: grid; gap: var(--space-2); color: var(--ink-secondary); font-weight: 600; }
 .metadata-edit-form input,
 .metadata-edit-form textarea,
 .metadata-edit-form select { width: 100%; box-sizing: border-box; }
 /* One editable tag list. There used to be a raw textarea plus a read-only run of
    translated chips underneath, with nothing tying them together. */
 .metadata-tag-field { display: grid; gap: var(--space-2); min-width: 0; }
-.metadata-tag-field-label { color: var(--ink-secondary); font-weight: 650; }
+.metadata-tag-field-label { color: var(--ink-secondary); font-weight: 600; }
 
 .metadata-tags-box {
   display: flex;
@@ -1381,14 +1489,14 @@ body::-webkit-scrollbar,
   padding: 8px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
-  background: var(--surface-elevated);
+  background: var(--control-background);
 }
 
 .metadata-tags-empty { align-self: center; color: var(--ink-faint); font-size: var(--text-sm); }
 .metadata-tag-rows { position: relative; display: grid; gap: 6px; min-width: 0; width: 100%; }
 .metadata-tag-row { display: flex; justify-content: center; align-items: center; gap: 6px; min-width: 0; }
 .metadata-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; }
-.metadata-tag-row-measure { display: inline-block; white-space: nowrap; font-family: var(--font-body); font-size: 12px; font-weight: 620; }
+.metadata-tag-row-measure { display: inline-block; white-space: nowrap; font-family: var(--font-body); font-size: var(--text-xs); font-weight: 600; }
 
 .metadata-tag {
   display: inline-flex;
@@ -1407,8 +1515,8 @@ body::-webkit-scrollbar,
   background: transparent;
   color: var(--ink-secondary);
   font-family: var(--font-body);
-  font-size: 12px;
-  font-weight: 620;
+  font-size: var(--text-xs);
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -1421,14 +1529,17 @@ body::-webkit-scrollbar,
   line-height: 26px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Both labels live on one grid cell; crossfading opacity inside the same box
+     means the chip grows to whichever label is longer without a width snap. */
   transition: opacity var(--motion-standard);
 }
-.metadata-tag-label.is-original { display: none; }
+.metadata-tag-label.is-original { opacity: 0; }
 .metadata-tag:hover .metadata-tag-label.is-translated,
-.metadata-tag.is-revealed .metadata-tag-label.is-translated { display: none; }
+.metadata-tag.is-revealed .metadata-tag-label.is-translated { opacity: 0; }
 .metadata-tag:hover .metadata-tag-label.is-original,
-.metadata-tag.is-revealed .metadata-tag-label.is-original { display: block; }
-.metadata-tag.is-untranslated .metadata-tag-label.is-translated { display: block; }
+.metadata-tag.is-revealed .metadata-tag-label.is-original { opacity: 1; }
+.metadata-tag.is-untranslated .metadata-tag-label.is-translated { opacity: 1; }
+.metadata-tag.is-untranslated .metadata-tag-label.is-original { opacity: 0; }
 
 .metadata-tag:hover { border-color: color-mix(in srgb, var(--brand-vermilion) 45%, transparent); }
 .metadata-tag:hover .metadata-tag-reveal { color: var(--ink-primary); }
@@ -1438,7 +1549,6 @@ body::-webkit-scrollbar,
   place-items: center;
   width: 22px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--ink-secondary) 16%, transparent);
   background: transparent;
   color: var(--ink-faint);
   cursor: pointer;
@@ -1451,26 +1561,8 @@ body::-webkit-scrollbar,
 
 .metadata-edit-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
 .metadata-edit-actions > * { justify-content: center; }
-.metadata-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; }
-
-.library-heading > span {
-  color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 12px;
-}
-
-.library-shell .library-heading {
-  align-items: center;
-  margin-bottom: var(--space-4);
-}
-
-.library-shell .library-heading h1 { font-size: var(--text-title); }
-.library-shell .library-heading .workspace-kicker { margin-bottom: var(--space-1); }
-
-.library-heading-actions,
-.library-controls,
-.library-toolbar,
-.task-heading {
+.metadata-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; }.library-controls,
+  .library-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1503,9 +1595,9 @@ body::-webkit-scrollbar,
   max-height: min(360px, calc(100dvh - 24px));
   overflow-y: auto;
   padding: 4px;
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--outline-variant);
   border-radius: var(--radius-card);
-  background: var(--surface-panel);
+  background: var(--surface-container-high);
   box-shadow: var(--shadow-overlay);
 }
 
@@ -1525,7 +1617,6 @@ body::-webkit-scrollbar,
   cursor: pointer;
 }
 
-.tag-suggest-option:hover,
 .tag-suggest-option.is-active,
 .tag-suggest-option[aria-selected='true'] {
   background: var(--surface-elevated);
@@ -1537,9 +1628,9 @@ body::-webkit-scrollbar,
   min-width: 42px;
   padding: 2px 6px;
   border-radius: var(--radius-pill);
-  background: var(--brand-paper);
-  color: var(--brand-ink);
-  font-size: 11px;
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  font-size: var(--text-xs);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -1548,7 +1639,7 @@ body::-webkit-scrollbar,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
@@ -1556,8 +1647,8 @@ body::-webkit-scrollbar,
   max-width: 30ch;
   overflow: hidden;
   color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 11px;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1580,12 +1671,7 @@ body::-webkit-scrollbar,
 /* Matches `.library-toolbar .select-field` exactly. The placeholder used a fixed
    132px while the real control flexes from a 160px floor, so the toolbar jumped
    sideways the moment the categories arrived. */
-.library-toolbar .select-placeholder {
-  flex: 1 1 0;
-  width: 100%;
-  min-width: 160px;
-}
-
+.library-toolbar .select-placeholder,
 .library-toolbar .select-field {
   flex: 1 1 0;
   width: 100%;
@@ -1596,8 +1682,12 @@ body::-webkit-scrollbar,
   width: var(--control-height);
   padding: 0;
 }
+
+/* The refresh action leads the row and keeps its own circular size. */
+.library-toolbar > .icon-action {
+  flex: 0 0 auto;
+}
 .library-display-cycle,
-.library-sort-direction { flex-basis: var(--control-height); }
 .select-compat-radios { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
 .library-controls .secondary-action {
@@ -1618,9 +1708,18 @@ body::-webkit-scrollbar,
   border-top: 1px solid var(--hairline);
 }
 
+.library-panels-list-only > [data-panel] {
+  width: 100% !important;
+  flex: 1 1 100% !important;
+  min-width: 0;
+}
+
 .archive-list {
   height: 100%;
   overflow: auto;
+  /* The pull drags the list down by hand; the browser must not add its own
+     overscroll glow or hand the gesture to an ancestor. */
+  overscroll-behavior: contain;
   background: var(--surface-panel);
   /* The global :focus-visible ring is drawn outside the element, and a scroll
      container clips whatever leaves its padding box — without this, a
@@ -1629,7 +1728,7 @@ body::-webkit-scrollbar,
      panel around it, it was a strip of bare canvas between the last card and the
      status bar — which is the dark band that kept getting reported. Here it
      scrolls away with the content and the list reaches the panel's edge. */
-  padding: 4px 4px var(--space-6);
+  padding: 4px 4px calc(var(--space-8) + var(--chrome-bottom));
   scrollbar-width: none;
 }
 
@@ -1645,54 +1744,113 @@ body::-webkit-scrollbar,
 .archive-list.is-thumbnail { padding: var(--space-3); }
 
 .archive-list-skeleton { padding: var(--space-2); }
-.archive-list-skeleton.is-wide { display: grid; gap: 0; }
-.archive-list-skeleton.is-thumbnail { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
-.archive-row-skeleton { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-3); box-sizing: border-box; height: 158px; min-height: 158px; padding: var(--space-2); border-bottom: 1px solid var(--hairline); }
-.archive-list-skeleton.is-thumbnail .archive-row-skeleton { grid-template-columns: 1fr; grid-template-rows: 220px 106px; gap: 8px; flex: 0 0 180px; width: 180px; min-width: 180px; height: 350px; min-height: 350px; padding: var(--space-2); overflow: hidden; border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-panel); }
+.archive-list-skeleton.is-wide { display: grid; gap: var(--card-gap); }
+.archive-list-skeleton.is-thumbnail { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--card-gap); }
+.archive-row-skeleton { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-3); box-sizing: border-box; height: 158px; min-height: 158px; padding: var(--space-2); border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); }
+.archive-list-skeleton.is-thumbnail .archive-thumb-card.is-skeleton { flex: 0 0 180px; width: 180px; min-width: 180px; height: 350px; grid-template-rows: 220px 1fr; }
+.archive-list-skeleton.is-thumbnail .archive-thumb-card.is-skeleton .archive-thumb-card-media { height: 220px; }
 .archive-row-skeleton-cover { width: 100%; height: 100%; min-height: 0; border-radius: var(--radius-control); }
-.archive-list-skeleton.is-thumbnail .archive-row-skeleton-copy { height: 106px; box-sizing: border-box; gap: 4px; }
 .archive-row-skeleton-copy { display: grid; align-content: center; gap: var(--space-3); }
 .archive-row-skeleton-copy .skeleton-line:nth-child(2) { width: 72%; }
 .archive-row-skeleton-copy .skeleton-line:nth-child(3) { width: 46%; }
 .archive-load-more-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); padding: var(--space-3); }
 
+/* Overscroll: past either end of the list the content is dragged by hand and
+   springs back on release. Touch tracks the finger exactly, a wheel eases
+   between its notches, and the release always takes the long curve back. */
+.archive-list-pull { position: relative; transition: transform var(--motion-standard); }
+.archive-list-pull[data-overscroll='wheel'] { transition: transform 90ms linear; }
+.archive-list-pull[data-overscroll='touch'] { transition: none; }
+
+/* The refresh disc, pinned over the list instead of carried by it: it answers
+   the pull with its rotation, then stays put, spinning, while the request runs.
+   Sticky rather than absolute so scrolling during the request cannot take it
+   away. */
+.library-pull-indicator {
+  position: sticky;
+  z-index: var(--z-sticky);
+  top: var(--space-2);
+  display: block;
+  height: 0;
+  pointer-events: none;
+}
+
+.library-pull-disc {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-highest);
+  color: var(--on-surface-variant);
+  box-shadow: var(--shadow-menu);
+  opacity: 0;
+  transform: translate(-50%, -6px) scale(0.85);
+  transition: opacity var(--motion-fast), transform var(--motion-fast);
+}
+
+.library-pull-indicator.is-visible .library-pull-disc { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.library-pull-arrow { display: grid; transition: transform var(--motion-fast); }
+.library-pull-disc svg { width: 18px; height: 18px; }
+.library-pull-disc.is-spinning svg { animation: icon-spin 900ms linear infinite; }
+
 /* A timeline down the right of the list: one time per row, on a rail so a run of
    rows reads as a sequence. Only the history has a time worth showing. */
 .archive-list.is-wide .archive-row-wrap:has(.archive-row-timeline) { display: grid; grid-template-columns: minmax(0, 1fr) 82px; }
 .archive-list.is-wide .archive-row-wrap:has(.archive-row-timeline) .archive-row { min-width: 0; }
+.archive-list.is-wide .archive-row-wrap:not(:has(.archive-row-timeline)),
+.archive-list.is-wide .archive-row-wrap:not(:has(.archive-row-timeline)) .archive-row { width: 100%; }
 
 .archive-row-timeline {
+  /* The line is 12..14 and the 8px node is 9..17: both centre on this axis, so
+     the node always sits on the line. */
+  --timeline-rail-center: 13px;
   position: relative;
   align-self: stretch;
   display: grid;
   align-content: start;
   justify-items: start;
-  padding: var(--space-2) 0 0 28px;
-  color: var(--ink-faint);
-  font-family: var(--font-utility);
-  font-size: 11px;
+  gap: 2px;
+  padding: var(--space-3) 0 0 28px;
+  color: var(--on-surface-variant);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.archive-row-timeline::before {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 12px;
-  width: 2px;
-  background: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
-  content: "";
+/* The rail itself is the scroller's own background, not per-row segments. The
+   per-row line used to overshoot past the last row (`bottom: -190px`) to cover
+   the bounce — but an absolutely positioned tail extends the scroller's
+   scrollable area, which bought ~190px of dead scroll ("the bounce needs two
+   flicks") and left the line dangling in mid-air. Painted on the scroller the
+   rail reaches both edges at rest and never moves during a pull or bounce. */
+.archive-list.has-timeline {
+  /* 82px timeline column, node centre 13px in, plus the scroller's 4px side
+     padding: the rail sits 73px from the padding box's right edge. */
+  background: linear-gradient(var(--outline-variant), var(--outline-variant)) no-repeat right 73px top / 2px 100%;
 }
+
+/* The rail line and the per-row segments are gone: the right column keeps only
+   the day/time text and the row node, and the day grouping reads from the
+   dated section bars instead of a running line. */
+
+.archive-row-timeline-day { color: var(--on-surface); font-weight: 600; }
+.archive-row-timeline-time { color: var(--on-surface-variant); }
 
 .archive-row-timeline::after {
   position: absolute;
   top: 12px;
-  left: 8px;
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--surface-panel);
+  left: var(--timeline-rail-center);
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%);
+  border: 2px solid var(--surface-container-high);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--brand-vermilion) 70%, var(--surface-panel));
+  background: var(--primary);
   content: "";
 }
 
@@ -1701,10 +1859,6 @@ body::-webkit-scrollbar,
   display: none;
 }
 
-.archive-list.is-thumbnail .archive-list-inner {
-  position: relative;
-  width: 100%;
-}
 
 /* Fixed 180px columns (wide covers span exactly two columns plus the gap) keep
    the column count computable in JS, which is what lets the grid virtualize by
@@ -1714,7 +1868,7 @@ body::-webkit-scrollbar,
   top: 0;
   left: 0;
   display: flex;
-  gap: 12px;
+  gap: var(--card-gap);
   align-items: flex-start;
   justify-content: center;
   width: 100%;
@@ -1729,24 +1883,50 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail .archive-row-wrap.is-cover-wide {
-  flex-basis: 372px;
-  width: 372px;
+  flex-basis: 368px;
+  width: 368px;
 }
 
-.archive-list.is-thumbnail .archive-row {
-  display: grid;
-  /* Exact geometry: 220 cover + 8 gap + 106 copy + 2x8 padding = 350px, the row
-     height the virtualizer places cards at (src/lib/archiveGridLayout.ts). A
-     growable row let cards overlap the next one. */
-  grid-template-rows: 220px 106px;
-  align-content: start;
-  gap: 8px;
+/* The library grid card IS the recommendation rail's card: .archive-thumb-card
+   with the same media / body / title / tags / meta children. Only the geometry
+   differs — a fixed 350px cell the virtualizer can place. */
+.archive-list.is-thumbnail .archive-thumb-card {
   box-sizing: border-box;
+  width: 100%;
   height: 350px;
+  padding: 0;
+  border: 0;
+  outline: 1px solid var(--outline-variant);
+  outline-offset: -1px;
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
+  grid-template-rows: 220px 1fr;
+  font-family: var(--font-body);
+  color: var(--on-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.archive-list.is-thumbnail .archive-thumb-card[aria-pressed='true'] {
+  background: var(--surface-container-highest);
+  outline-color: var(--primary);
+}
+
+.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-media { height: 220px; }
+/* 34 title + 48 tags + 18 meta + 2x4 gap = 108 inside a 130px body. */
+.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-body {
+  grid-template-rows: 34px 48px 18px;
+  gap: 4px;
+  height: 130px;
   padding: var(--space-2);
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
+}
+/* LazyThumbnail keeps its own wrapper for the blob lifecycle; inside the shared
+   media frame it must not draw a second surface or radius. */
+.archive-list.is-thumbnail .archive-thumb-card-media .archive-row-thumb {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  background: transparent;
 }
 
 .archive-row-thumb {
@@ -1756,7 +1936,7 @@ body::-webkit-scrollbar,
   height: 220px;
   overflow: hidden;
   border-radius: var(--radius-control);
-  background: var(--surface-muted);
+  background: var(--surface-container);
 }
 
 .archive-row-thumb img {
@@ -1766,35 +1946,24 @@ body::-webkit-scrollbar,
   border-radius: inherit;
 }
 
-.archive-list.is-thumbnail .archive-row > svg { display: none; }
-/* Three fixed slots — 34 title + 48 tags + 16 footer + 2x4 gap = 106 — so two
-   rows of chips always land inside the card instead of being clipped. */
-.archive-list.is-thumbnail .archive-row-copy {
-  grid-template-rows: 34px 48px 16px;
-  gap: 4px !important;
-  height: 106px;
-  overflow: hidden;
-}
-.archive-list.is-thumbnail .archive-row strong {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  line-height: 17px;
-}
-
 /* A wide cover only takes two columns of width; its height stays identical to a
    narrow card so every card in a row is the same height. */
 
 /* The wide card has far more room than a thumbnail card, so it gets three tag
-   rows at the normal chip size. It used to run 10px chips capped at 12ch in a
-   two-row slot — the largest tag area in the app showing the smallest tags,
-   with most of it empty. */
-.archive-list.is-wide .archive-row-wrap { height: 158px !important; }
+   rows at the normal chip size and a two-line title. Each row is its own card:
+   an 8px gap, a full 12px radius and an independent border. Neighbouring rows
+   used to share one edge with a -1px margin and square inner corners, which read
+   as a continuous list rather than separate archives. */
+.archive-list.is-wide .archive-row-wrap {
+  box-sizing: border-box;
+  height: 166px;
+}
+
+/* Compact history folds the right-hand rail into a dated section bar above the
+   day's first card. 20px bar + 8px gap = ARCHIVE_DAY_DIVIDER_HEIGHT. */
+.archive-day-divider { display: none; }
 .archive-list.is-wide .archive-row {
+  margin-block: 4px;
   display: grid;
   /* No trailing chevron column: the whole row is the button, so the arrow only
      stole width from the tag area. */
@@ -1804,59 +1973,43 @@ body::-webkit-scrollbar,
   height: 158px;
   padding: var(--space-2);
   overflow: hidden;
-  /* A visible edge, not a hairline: the rows sit on the same surface as the
-     panel, so at 10% opacity the card had no boundary of its own. */
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 22%, transparent);
-  /* Square where a card meets another card. Rounding every corner made adjacent
-     rows read as overlapping tiles rather than one continuous list, so only the
-     outer edges of the run are rounded. The virtualizer positions rows
-     absolutely, so :first-child cannot tell which is which — the list marks the
-     ends with data attributes instead. */
-  border-radius: 0;
-  background: var(--surface-panel);
+  border: 0;
+  outline: 1px solid var(--outline-variant);
+  outline-offset: -1px;
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
 }
 
-.archive-list.is-wide .archive-row-wrap[data-first='true'] .archive-row {
-  border-top-left-radius: var(--radius-control);
-  border-top-right-radius: var(--radius-control);
-}
-
-.archive-list.is-wide .archive-row-wrap[data-last='true'] .archive-row {
-  border-bottom-left-radius: var(--radius-control);
-  border-bottom-right-radius: var(--radius-control);
-}
-
-/* One shared edge between neighbours instead of two stacked ones. Overlapping the
-   rows by a pixel rather than hiding the top border: a transparent top needed a
-   more specific selector than the hover rule, so it won, and a hovered or
-   selected row came out with three highlighted sides and a gap along the top. */
-.archive-list.is-wide .archive-row-wrap:not([data-first='true']) .archive-row {
-  margin-top: -1px;
-}
-.archive-list.is-wide .archive-row:hover,
 .archive-list.is-wide .archive-row[aria-pressed='true'] {
-  position: relative;
-  /* Above the neighbour, so the highlighted edge is the one that draws. */
-  z-index: 1;
-  border-color: color-mix(in srgb, var(--brand-vermilion) 55%, var(--hairline));
-  box-shadow: inset 3px 0 var(--brand-vermilion), inset 0 -1px color-mix(in srgb, var(--brand-vermilion) 55%, var(--hairline));
+  background: var(--surface-container-highest);
+  outline-color: var(--primary);
 }
 .archive-list.is-wide .archive-row-thumb { width: 100px; height: 142px; }
-/* Same three-slot copy block as a thumbnail card, just wider: title pinned to
-   the top, tags in the middle, category and stats on the footer line. */
+/* Same three-slot copy block as a thumbnail card, just wider: a two-line title,
+   three tag rows, then category and stats on the footer line. The title and tag
+   slots are fixed tracks, so a long title or a short tag list never moves the
+   footer or the row height. */
 .archive-list.is-wide .archive-row-copy {
-  grid-template-rows: 22px minmax(0, 1fr) 18px;
-  gap: 6px !important;
+  grid-template-rows: 34px minmax(0, 1fr) 18px;
+  gap: 4px !important;
   height: 142px;
   overflow: hidden;
 }
 .archive-list.is-wide .archive-row strong {
+  /* Centred in its two-line track: a one-line title used to leave all of the
+     slack below itself, which read as a bigger gap above the tags than below. */
+  align-self: center;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  line-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  line-height: 17px;
 }
 
+.archive-list.is-thumbnail .archive-list-inner,
 .archive-list-inner {
   position: relative;
   width: 100%;
@@ -1869,51 +2022,135 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
-/* Selection lives on the card itself (watchlist bulk removal). */
-.archive-row-select {
+/* Multi-select. The card itself is the checkbox — role, state and the tick all
+   live on it — so the mark only has to say which state it is in. The outer
+   shadow keeps the disc readable on bright cover art; the ring does the state
+   when unchecked. */
+.archive-card-check {
   position: absolute;
   z-index: 2;
-  top: 10px;
-  left: 10px;
-  width: 18px;
-  height: 18px;
-  appearance: none;
   display: grid;
   place-items: center;
-  margin: 0;
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 60%, var(--hairline));
-  border-radius: 4px;
-  background: var(--surface-elevated);
-  color: var(--surface-panel);
-  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-highest);
+  box-shadow: var(--shadow-check), inset 0 0 0 1.5px var(--outline);
+  color: transparent;
+  transition: background-color var(--motion-fast), color var(--motion-fast), box-shadow var(--motion-fast), transform var(--motion-fast);
 }
-.archive-row-select:hover { border-color: var(--brand-vermilion); }
-.archive-row-select:checked { border-color: var(--brand-vermilion); background: var(--brand-vermilion); }
-.archive-row-select:checked::after { content: "\2713"; font-family: var(--font-utility); font-size: 13px; font-weight: 800; line-height: 1; }
-.archive-row-select:focus-visible { outline: 2px solid var(--brand-vermilion); outline-offset: 2px; }
+
+/* A stroke-drawn tick, not a filled dot: the old solid centre read as a black
+   blob over cover art. The drop shadow separates the stroke from the fill. */
+.archive-card-check::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  border-radius: 1px;
+  transform: rotate(-45deg) scale(0.4);
+  transform-origin: center;
+  filter: var(--shadow-check-ink);
+  transition: opacity var(--motion-fast), transform var(--motion-fast);
+  opacity: 0;
+}
+
+.archive-row > .archive-card-check { top: 10px; left: 10px; }
+.archive-thumb-card-media > .archive-card-check { top: 10px; right: 10px; }
+
+/* Scoped to the list that draws the card, or the display-mode rule that sets the
+   card's own surface wins on specificity and a selected row looks unselected. */
+.archive-list.is-wide .archive-row.is-selected,
+.archive-list.is-wide .archive-row[aria-checked='true'],
+.archive-list.is-thumbnail .archive-thumb-card.is-selected,
+.archive-list.is-thumbnail .archive-thumb-card[aria-checked='true'] {
+  outline-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 18%, var(--surface-container-high));
+}
+
+.archive-row.is-selected .archive-card-check,
+.archive-row[aria-checked='true'] .archive-card-check,
+.archive-thumb-card.is-selected .archive-card-check,
+.archive-thumb-card[aria-checked='true'] .archive-card-check {
+  background: var(--primary);
+  box-shadow: inset 0 0 0 1.5px var(--primary);
+  color: var(--on-primary);
+}
+
+.archive-row.is-selected .archive-card-check::after,
+.archive-row[aria-checked='true'] .archive-card-check::after,
+.archive-thumb-card.is-selected .archive-card-check::after,
+.archive-thumb-card[aria-checked='true'] .archive-card-check::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* The selection bar: a strip of its own above the list, because the actions in
+   it act on rows the list is still showing. The slot around it animates from
+   zero height, so the bar grows in and the list below is pushed down by the
+   same motion instead of teleporting. */
+.archive-selection-slot {
+  display: grid;
+  grid-template-rows: 0fr;
+  animation: selection-slot-in var(--motion-standard) both;
+}
+
+@keyframes selection-slot-in {
+  from { grid-template-rows: 0fr; opacity: 0; }
+  to { grid-template-rows: 1fr; opacity: 1; }
+}
+
+.archive-selection-slot > .archive-selection-bar {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.archive-selection-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-1);
+  margin-bottom: var(--space-2);
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
+}
+
+.archive-selection-count {
+  margin-right: auto;
+  padding-inline: var(--space-2);
+  color: var(--on-surface);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 
 .archive-row {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
   height: 100%;
   padding: 0 var(--space-4);
-  border-bottom: 1px solid var(--hairline);
-  background: var(--surface-panel);
-  color: var(--ink-primary);
+  overflow: hidden;
+  border: 0;
+  outline: 1px solid var(--outline-variant);
+  outline-offset: -1px;
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
 }
 
-.archive-row:hover,
 .archive-row[aria-pressed="true"] {
-  background: var(--surface-elevated);
+  background: var(--surface-container-highest);
+  outline-color: var(--primary);
 }
-.archive-row:hover { box-shadow: inset 3px 0 var(--brand-vermilion); }
-.archive-row-wrap[data-first="true"] .archive-row { border-radius: var(--radius-control) var(--radius-control) 0 0; }
-.archive-row-wrap[data-last="true"] .archive-row { border-radius: 0 0 var(--radius-control) var(--radius-control); }
-.archive-row-wrap[data-first="true"][data-last="true"] .archive-row { border-radius: var(--radius-control); }
 
 .archive-row > span {
   display: grid;
@@ -1922,16 +2159,8 @@ body::-webkit-scrollbar,
 }
 
 .archive-row-copy {
-  gap: 6px !important;
+  gap: 4px !important;
 }
-
-.archive-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-.archive-row-classification { justify-content: flex-start; }
 
 .archive-row-tags {
   display: flex;
@@ -1941,36 +2170,24 @@ body::-webkit-scrollbar,
   min-width: 0;
   overflow: hidden;
   color: var(--ink-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 1.35;
-}
-
-/* Chip size follows the space the card actually has. The thumbnail card gets two
-   compact rows; the wide card, which is more than twice as roomy, used to run the
-   *smallest* chips in the app and looked empty as a result. */
-.archive-list.is-thumbnail .archive-row-tags .metadata-chip {
-  min-height: 20px;
-  max-width: 15ch;
-  padding: 0 5px;
-  border-radius: var(--radius-control);
-  font-size: 11px;
-  line-height: 18px;
 }
 
 .archive-list.is-wide .archive-row-tags .metadata-chip {
   min-height: 22px;
   max-width: 24ch;
-  padding: 0 7px;
+  padding: 0 6px;
   border-radius: var(--radius-control);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 20px;
 }
 
 .archive-list.is-wide .archive-row-tags {
   display: grid;
   grid-template-rows: repeat(3, 22px);
-  align-content: space-between;
-  gap: 2px;
+  align-content: start;
+  gap: 4px;
 }
 
 .archive-row-tag-line {
@@ -1991,10 +2208,10 @@ body::-webkit-scrollbar,
   gap: 6px;
   min-width: 0;
   color: var(--ink-secondary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   /* These are the smallest strings on the card, so they carry weight instead of
      relying on size alone to stay legible. */
-  font-weight: 620;
+  font-weight: 600;
   line-height: 16px;
 }
 
@@ -2003,36 +2220,40 @@ body::-webkit-scrollbar,
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .archive-row-category {
   min-height: 18px;
   padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--category-default) 54%, transparent);
+  border: 0;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--category-default) 10%, transparent);
-  color: var(--ink-primary);
-  font-weight: 680;
+  background: var(--tag-ns-category-bg);
+  color: var(--tag-ns-category-ink);
+  font-weight: 700;
   line-height: 16px;
 }
+
 .archive-row-category:empty { visibility: hidden; }
-.archive-row-category[data-category='Manga'] { border-color: color-mix(in srgb, var(--category-manga) 68%, var(--hairline)); background: color-mix(in srgb, var(--category-manga) 13%, transparent); }
-.archive-row-category[data-category='Doujinshi'] { border-color: color-mix(in srgb, var(--category-doujinshi) 68%, var(--hairline)); background: color-mix(in srgb, var(--category-doujinshi) 12%, transparent); }
-.archive-row-category[data-category='Artist CG'] { border-color: color-mix(in srgb, var(--category-artist-cg) 68%, var(--hairline)); background: color-mix(in srgb, var(--category-artist-cg) 12%, transparent); }
-.archive-row-category[data-category='Game CG'] { border-color: color-mix(in srgb, var(--category-game-cg) 58%, var(--hairline)); background: color-mix(in srgb, var(--category-game-cg) 11%, transparent); }
-.archive-row-category[data-category='Image Set'] { border-color: color-mix(in srgb, var(--category-image-set) 64%, var(--hairline)); background: color-mix(in srgb, var(--category-image-set) 11%, transparent); }
-.archive-row-category[data-category='Western'] { border-color: color-mix(in srgb, var(--category-western) 66%, var(--hairline)); background: color-mix(in srgb, var(--category-western) 12%, transparent); }
-.archive-row-category[data-category='Non-H'] { border-color: color-mix(in srgb, var(--category-non-h) 66%, var(--hairline)); background: color-mix(in srgb, var(--category-non-h) 11%, transparent); }
-.archive-row-category[data-category='Cosplay'] { border-color: color-mix(in srgb, var(--category-cosplay) 66%, var(--hairline)); background: color-mix(in srgb, var(--category-cosplay) 11%, transparent); }
-.archive-row-category[data-category='Asian Porn'] { border-color: color-mix(in srgb, var(--category-asian-porn) 66%, var(--hairline)); background: color-mix(in srgb, var(--category-asian-porn) 11%, transparent); }
-.archive-row-category[data-category='Misc'] { border-color: color-mix(in srgb, var(--category-misc) 66%, var(--hairline)); background: color-mix(in srgb, var(--category-misc) 12%, transparent); }
-.archive-row-stats { flex: none; font-variant-numeric: tabular-nums; }
+.archive-row-category[data-category='Manga'] { background: color-mix(in srgb, var(--category-manga) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Doujinshi'] { background: color-mix(in srgb, var(--category-doujinshi) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Artist CG'] { background: color-mix(in srgb, var(--category-artist-cg) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Game CG'] { background: color-mix(in srgb, var(--category-game-cg) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Image Set'] { background: color-mix(in srgb, var(--category-image-set) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Western'] { background: color-mix(in srgb, var(--category-western) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Non-H'] { background: color-mix(in srgb, var(--category-non-h) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Cosplay'] { background: color-mix(in srgb, var(--category-cosplay) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Asian Porn'] { background: color-mix(in srgb, var(--category-asian-porn) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-category[data-category='Misc'] { background: color-mix(in srgb, var(--category-misc) 58%, var(--surface-container)); color: var(--on-surface); }
+.archive-row-stats { font-variant-numeric: tabular-nums; }
 
 .archive-detail-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  margin: calc(-1 * var(--space-2)) 0 var(--space-5);
 }
 
 .archive-detail-tags {
@@ -2084,14 +2305,19 @@ body::-webkit-scrollbar,
   align-items: center;
   min-height: 22px;
   max-width: 24ch;
-  padding: 0 7px;
+  padding: 0 6px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--surface-elevated) 82%, var(--brand-paper));
-  color: var(--ink-secondary);
+  border: 0;
+  border-radius: var(--radius-control);
+  /* A tonal fill one step deeper than --secondary-container: the container
+     roles mix out of the same panel colour the card behind them uses, and in
+     the derived colour schemes chip and card collapsed into one shade. The
+     deeper mix keeps the chip readable on every surface and scheme; no border
+     — two-colour surfaces only, per the JHenTai chip model. */
+  background: var(--chip-background);
+  color: var(--chip-ink);
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   line-height: 1;
   text-overflow: ellipsis;
@@ -2158,12 +2384,12 @@ body::-webkit-scrollbar,
   background: color-mix(in srgb, var(--surface-overlay) 72%, transparent);
   color: var(--ink-on-overlay);
   font-family: var(--font-utility);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 13px;
   text-align: center;
 }
 
-.archive-page-thumbnail-placeholder { font-size: 11px; }
+.archive-page-thumbnail-placeholder { font-size: var(--text-xs); }
 
 /* Card context menu (cards only; other elements keep the platform default). */
 .archive-context-menu {
@@ -2192,10 +2418,9 @@ body::-webkit-scrollbar,
 }
 
 .archive-context-menu-item[data-highlighted] { background: var(--surface-muted); }
-.archive-context-menu-item.is-danger { color: var(--state-danger); }
 .archive-context-menu-item svg { width: 16px; height: 16px; }
 .archive-context-menu-separator { height: 1px; margin: 4px 2px; background: var(--hairline); }
-.archive-context-menu-item[data-disabled] { color: var(--ink-muted); cursor: default; }
+.archive-context-menu-item[data-disabled] { color: var(--on-surface-variant); cursor: default; }
 /* The category group: a label row, then the targets indented under it. */
 .archive-context-menu-label {
   display: flex;
@@ -2203,7 +2428,7 @@ body::-webkit-scrollbar,
   gap: var(--space-2);
   min-height: 28px;
   padding: 0 var(--space-2);
-  color: var(--ink-muted);
+  color: var(--on-surface-variant);
   font-size: var(--text-xs);
 }
 .archive-context-menu-label svg { width: 14px; height: 14px; }
@@ -2230,7 +2455,7 @@ body::-webkit-scrollbar,
   background: transparent;
   color: var(--ink-secondary);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
   transition: background-color var(--motion-standard), color var(--motion-standard);
 }
@@ -2239,37 +2464,25 @@ body::-webkit-scrollbar,
   color: var(--ink-primary);
 }
 
-.archive-recommendations-tabs button.is-active {
-  background: var(--brand-vermilion);
-  color: var(--ink-on-brand);
-}
 
 /* One loading treatment across every image slot: the library cover shimmer. */
-.archive-page-thumbnail.is-skeleton,
-.archive-thumb-card-skeleton {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)));
-  background-size: 220% 100%;
-  animation: skeleton-shimmer 1.25s ease-in-out infinite;
-}
 
-.metadata-chip-page {
-  border-color: color-mix(in srgb, var(--brand-cyan) 42%, transparent);
-  background: color-mix(in srgb, var(--brand-cyan) 12%, var(--surface-elevated));
-  color: var(--ink-primary);
-}
-
+/* Page count and size are one kind of fact — the archive's own numbers — so they
+   share one shape instead of two different container colours. */
+.metadata-chip-page,
 .metadata-chip-size {
-  border-color: color-mix(in srgb, var(--state-success) 42%, transparent);
-  background: color-mix(in srgb, var(--state-success) 10%, var(--surface-elevated));
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
+  font-variant-numeric: tabular-nums;
 }
 
 .archive-detail-meta-footer { justify-content: flex-end; margin-top: var(--space-2); }
 .archive-detail-meta-inline { justify-content: flex-end; margin: 0 0 0 auto !important; flex: 0 0 auto; }
 
-.metadata-chip[data-category='Manga'] { border-color: color-mix(in srgb, var(--category-manga) 58%, transparent); color: color-mix(in srgb, var(--category-manga) 70%, var(--ink-primary)); }
-.metadata-chip[data-category='Doujinshi'] { border-color: color-mix(in srgb, var(--category-doujinshi) 58%, transparent); color: color-mix(in srgb, var(--category-doujinshi) 70%, var(--ink-primary)); }
-.metadata-chip[data-category='Game CG'] { border-color: color-mix(in srgb, var(--category-game-cg) 58%, transparent); color: color-mix(in srgb, var(--category-game-cg) 70%, var(--ink-primary)); }
-.metadata-chip[data-category='Image Set'] { border-color: color-mix(in srgb, var(--category-image-set) 58%, transparent); color: color-mix(in srgb, var(--category-image-set) 70%, var(--ink-primary)); }
+.metadata-chip[data-category='Manga'] { background: color-mix(in srgb, var(--category-manga) 24%, var(--surface-container-highest)); color: var(--on-surface); }
+.metadata-chip[data-category='Doujinshi'] { background: color-mix(in srgb, var(--category-doujinshi) 24%, var(--surface-container-highest)); color: var(--on-surface); }
+.metadata-chip[data-category='Game CG'] { background: color-mix(in srgb, var(--category-game-cg) 24%, var(--surface-container-highest)); color: var(--on-surface); }
+.metadata-chip[data-category='Image Set'] { background: color-mix(in srgb, var(--category-image-set) 24%, var(--surface-container-highest)); color: var(--on-surface); }
 
 .tag-search-link {
   cursor: pointer;
@@ -2277,7 +2490,7 @@ body::-webkit-scrollbar,
   transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
 }
 .tag-search-link:hover { border-color: var(--brand-vermilion); color: var(--ink-primary); }
-.tag-search-link:focus-visible { outline: 2px solid var(--brand-cyan); outline-offset: 2px; }
+.tag-search-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .status-chip {
   display: inline-flex;
@@ -2287,8 +2500,8 @@ body::-webkit-scrollbar,
   padding: 0 7px;
   border: 1px solid currentColor;
   border-radius: var(--radius-pill);
-  font-family: var(--font-utility);
-  font-size: 10px;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1;
 }
@@ -2301,7 +2514,7 @@ body::-webkit-scrollbar,
 
 .archive-row strong {
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--text-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2310,7 +2523,7 @@ body::-webkit-scrollbar,
 .archive-detail dt {
   color: var(--ink-faint);
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 .archive-row svg {
@@ -2338,12 +2551,8 @@ body::-webkit-scrollbar,
 }
 
 .archive-detail h2 {
-  font-size: 24px;
+  font-size: var(--text-heading);
   overflow-wrap: anywhere;
-}
-
-.archive-detail-meta {
-  margin: calc(-1 * var(--space-2)) 0 var(--space-5);
 }
 
 .archive-cover {
@@ -2364,40 +2573,68 @@ body::-webkit-scrollbar,
   margin: var(--space-5) 0;
 }
 
-.tag-group { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: start; gap: var(--space-2); width: 100%; }
+.tag-group { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: start; gap: var(--space-2); width: 100%; }
 .tag-group h2,
-.tag-group h3 { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; margin: 0; border-radius: var(--radius-control); background: var(--brand-paper); color: var(--brand-ink); font-size: 11px; font-weight: 700; }
-.tag-group > div { display: flex; flex-wrap: wrap; gap: 6px; }
-.tag-group > div { min-width: 0; }
-.tag-group-female .metadata-chip { border-color: color-mix(in srgb, var(--state-warning) 42%, transparent); background: color-mix(in srgb, var(--state-warning) 12%, var(--surface-elevated)); }
-.tag-group-male .metadata-chip { border-color: color-mix(in srgb, var(--brand-cyan) 48%, transparent); background: color-mix(in srgb, var(--brand-cyan) 13%, var(--surface-elevated)); }
-.tag-group-artist .metadata-chip,
-.tag-group-group .metadata-chip { border-color: color-mix(in srgb, var(--state-success) 40%, transparent); background: color-mix(in srgb, var(--state-success) 11%, var(--surface-elevated)); }
-.tag-group-character .metadata-chip,
-.tag-group-parody .metadata-chip { border-color: color-mix(in srgb, var(--brand-vermilion) 38%, transparent); background: color-mix(in srgb, var(--brand-vermilion) 10%, var(--surface-elevated)); }
-.tag-group-female h2, .tag-group-female h3 { background: color-mix(in srgb, var(--state-warning) 24%, var(--surface-elevated)); }
-.tag-group-male h2, .tag-group-male h3 { background: color-mix(in srgb, var(--brand-cyan) 24%, var(--surface-elevated)); }
-.tag-group-artist h2, .tag-group-artist h3 { background: color-mix(in srgb, var(--state-success) 22%, var(--surface-elevated)); }
-.tag-group-character h2, .tag-group-character h3 { background: color-mix(in srgb, var(--brand-vermilion) 20%, var(--surface-elevated)); }
+.tag-group h3 {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  margin: 0;
+  width: 100%;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--tag-ns-bg, var(--surface-container-highest));
+  color: var(--tag-ns-ink, var(--on-surface));
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* JHenTai's model: the namespace label carries the hue, every tag inside it is
+   the same neutral chip, and neither draws a border — background and text only. */
+.tag-group-artist { --tag-ns-bg: var(--tag-ns-artist-bg); --tag-ns-ink: var(--tag-ns-artist-ink); }
+.tag-group-group { --tag-ns-bg: var(--tag-ns-group-bg); --tag-ns-ink: var(--tag-ns-group-ink); }
+.tag-group-parody { --tag-ns-bg: var(--tag-ns-parody-bg); --tag-ns-ink: var(--tag-ns-parody-ink); }
+.tag-group-character { --tag-ns-bg: var(--tag-ns-character-bg); --tag-ns-ink: var(--tag-ns-character-ink); }
+.tag-group-female { --tag-ns-bg: var(--tag-ns-female-bg); --tag-ns-ink: var(--tag-ns-female-ink); }
+.tag-group-male { --tag-ns-bg: var(--tag-ns-male-bg); --tag-ns-ink: var(--tag-ns-male-ink); }
+.tag-group-mixed { --tag-ns-bg: var(--tag-ns-mixed-bg); --tag-ns-ink: var(--tag-ns-mixed-ink); }
+.tag-group-cosplayer { --tag-ns-bg: var(--tag-ns-cosplayer-bg); --tag-ns-ink: var(--tag-ns-cosplayer-ink); }
+.tag-group-language { --tag-ns-bg: var(--tag-ns-language-bg); --tag-ns-ink: var(--tag-ns-language-ink); }
+.tag-group-category { --tag-ns-bg: var(--tag-ns-category-bg); --tag-ns-ink: var(--tag-ns-category-ink); }
+.tag-group-uploader { --tag-ns-bg: var(--tag-ns-uploader-bg); --tag-ns-ink: var(--tag-ns-uploader-ink); }
+.tag-group-date_added { --tag-ns-bg: var(--tag-ns-date_added-bg); --tag-ns-ink: var(--tag-ns-date_added-ink); }
+.tag-group-timestamp { --tag-ns-bg: var(--tag-ns-timestamp-bg); --tag-ns-ink: var(--tag-ns-timestamp-ink); }
+.tag-group-source { --tag-ns-bg: var(--tag-ns-source-bg); --tag-ns-ink: var(--tag-ns-source-ink); }
+.tag-group-other { --tag-ns-bg: var(--tag-ns-other-bg); --tag-ns-ink: var(--tag-ns-other-ink); }
+.tag-group > div { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.tag-group .metadata-chip {
+  background: var(--chip-background);
+  color: var(--chip-ink);
+  border: 0;
+}
+.tag-group-female h2, .tag-group-female h3 { background: var(--tertiary); color: var(--on-tertiary); }
+.tag-group-male h2, .tag-group-male h3 { background: var(--secondary); color: var(--on-secondary); }
+.tag-group-artist h2, .tag-group-artist h3 { background: var(--success); color: var(--on-success); }
 .tag-group-uploader,
 .tag-group-date_added,
 .tag-group-timestamp,
 .tag-group-source { order: 20; }
 
-.metadata-form,
-.category-controls {
+.metadata-form {
   display: grid;
   gap: var(--space-3);
   margin: var(--space-4) 0;
-}
-
-.metadata-form label,
-.category-controls label {
+}.metadata-form label {
   display: grid;
   gap: var(--space-2);
   color: var(--ink-secondary);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .archive-detail dl div {
@@ -2431,9 +2668,9 @@ body::-webkit-scrollbar,
   padding: var(--space-6);
   overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-card);
-  background: var(--surface-panel);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-overlay);
+  background: var(--surface-container-high);
   box-shadow: var(--shadow-overlay);
   transform: translate(-50%, -50%);
 }
@@ -2470,13 +2707,13 @@ body::-webkit-scrollbar,
 
 .dialog-heading h2 {
   margin-bottom: var(--space-2);
-  font-size: 22px;
+  font-size: var(--text-lg);
 }
 
 .dialog-heading p {
   margin-bottom: var(--space-6);
   color: var(--ink-secondary);
-  font-size: 13px;
+  font-size: var(--text-sm);
   line-height: 1.6;
 }
 
@@ -2489,27 +2726,29 @@ body::-webkit-scrollbar,
   display: grid;
   gap: var(--space-2);
   color: var(--ink-secondary);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .server-form input {
   width: 100%;
   min-height: 44px;
   padding: 0 var(--space-3);
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
-  background: var(--surface-canvas);
-  color: var(--ink-primary);
+  background: var(--control-background);
+  color: var(--control-text);
 }
 
 .form-error {
   margin: 0;
   padding: var(--space-3);
-  border-left: 3px solid var(--state-danger);
-  background: color-mix(in srgb, var(--state-danger) 10%, transparent);
-  color: var(--state-danger);
-  font-size: 13px;
+  border: 1px solid var(--error);
+  border-left-width: 3px;
+  border-radius: var(--radius-control);
+  background: var(--error-container);
+  color: var(--on-error-container);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -2525,32 +2764,35 @@ body::-webkit-scrollbar,
 .workspace-alert .form-error {
   flex: 1 1 320px;
   width: 100%;
-}
-
-.eh-account-panel,
-.eh-search-section,
-.task-list {
+}.task-list {
   border-top: 1px solid var(--hairline);
 }
 
+/* The account panel is the E-Hentai section's one group frame — the same
+   container the settings rows sit in, on /settings and on the /eh deep link
+   alike. */
 .eh-account-panel {
-  margin-bottom: var(--space-8);
+  margin-bottom: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-card);
+  background: var(--surface-container);
 }
 
 .eh-account-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
-  padding: var(--space-5) 0;
-  border-bottom: 1px solid var(--hairline);
+  padding: var(--space-4) 0 0;
+  border-bottom: 0;
 }
 
 .eh-account-form label {
   display: grid;
   gap: var(--space-2);
   color: var(--ink-secondary);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .eh-account-form label:has(textarea),
@@ -2563,7 +2805,7 @@ body::-webkit-scrollbar,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
-  padding-top: var(--space-4);
+  padding-top: 0;
 }
 .eh-login-tabs .secondary-action { width: 100%; min-width: 0; padding-inline: var(--space-2); }
 
@@ -2583,22 +2825,16 @@ body::-webkit-scrollbar,
   margin: 0;
   max-width: 62ch;
   color: var(--ink-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 1.7;
-}
-
-.eh-account-panel ul,
-.eh-results-list,
-.task-list {
+}.eh-account-panel ul,
+  .task-list {
   display: grid;
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.eh-account-panel li,
-.eh-results-list li,
-.task-row {
+}.eh-account-panel li,
+  .task-row {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -2608,11 +2844,6 @@ body::-webkit-scrollbar,
   position: relative;
   overflow: hidden;
   touch-action: pan-y;
-}
-
-.eh-results-list li:hover,
-.task-row:hover {
-  background: color-mix(in srgb, var(--surface-elevated) 72%, transparent);
 }
 
 .task-summary {
@@ -2625,19 +2856,13 @@ body::-webkit-scrollbar,
 .eh-account-panel li.active {
   border-left: 3px solid var(--state-success);
   padding-left: var(--space-3);
-}
-
-.eh-account-panel span,
-.eh-account-panel small,
-.task-summary small,
-.eh-results-list span {
+}.eh-account-panel span,
+  .eh-account-panel small,
+  .task-summary small {
   color: var(--ink-secondary);
-  font-size: 12px;
-}
-
-.task-summary .status-chip,
-.eh-results-list .metadata-chip {
-  font-size: 10px;
+  font-size: var(--text-xs);
+}.task-summary .status-chip {
+  font-size: var(--text-xs);
 }
 
 .task-summary .status-chip-neutral { color: var(--ink-secondary); }
@@ -2646,131 +2871,148 @@ body::-webkit-scrollbar,
 .task-summary .status-chip-warning { color: var(--state-warning); }
 .task-summary .status-chip-danger { color: var(--state-danger); }
 
-.eh-results-list .metadata-chip-page {
-  color: var(--ink-primary);
-}
-
-.account-actions,
 .task-actions {
   display: flex;
   flex: 0 0 auto;
   gap: var(--space-2);
 }
 
-.eh-account-panel .eh-account-swipe-row {
-  display: block;
-  min-height: 92px;
-  padding: 0;
-  border-left: 0;
-  overflow: hidden;
-  border-radius: var(--radius-control);
-}
-
-.eh-account-panel .eh-account-swipe-row.active {
-  padding-left: 0;
-  border-left: 0;
-}
-
-.eh-account-swipe-actions {
-  position: absolute;
-  z-index: 0;
-  inset: 0 0 0 auto;
+/* Account info sits straight in the menu body — no inner card — and each
+   account's actions are one row of the standard pill buttons, the same shape
+   every other menu action uses. The full selector weight is required: the
+   shared `.eh-account-panel li` rule above would flatten this block back into
+   a horizontal flex row otherwise. */
+.eh-account-panel ul {
   display: grid;
-  width: 112px;
-  grid-template-columns: repeat(2, 56px);
-  place-items: center;
-  background: var(--surface-elevated);
-  border-radius: var(--radius-control);
-}
-
-.eh-account-swipe-actions[aria-hidden="true"] {
-  pointer-events: none;
-}
-
-.eh-account-swipe-actions .danger {
-  color: var(--state-danger);
-}
-
-.eh-account-swipe-surface {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  min-height: 92px;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-4) 0;
-  background: var(--surface-panel);
-  border-radius: var(--radius-control);
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-  will-change: transform;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.eh-account-swipe-surface:active {
-  cursor: grabbing;
-  transition: none;
-}
-.eh-account-swipe-surface:hover { background: var(--surface-elevated); }
-
-.eh-account-swipe-row.active .eh-account-swipe-surface {
-  box-shadow: inset 3px 0 0 var(--state-success);
-  padding-left: var(--space-3);
-}
-
-.eh-account-summary {
-  display: grid;
-  flex: 1 1 auto;
-  gap: 3px;
-  min-width: 0;
-}
-
-.eh-cookie-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: var(--space-5); background: var(--backdrop-overlay); backdrop-filter: blur(4px); }
-.eh-cookie-dialog { width: min(680px, 100%); max-height: min(78vh, 720px); overflow: auto; display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-elevated); box-shadow: var(--shadow-overlay); }
-.eh-cookie-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); position: sticky; top: 0; padding-bottom: var(--space-2); background: var(--surface-elevated); }
-.eh-cookie-dialog-actions { display: flex; align-items: center; gap: var(--space-1); }
-.eh-cookie-fields { display: grid; gap: var(--space-2); }
-.eh-cookie-field { display: grid; grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr) 32px; align-items: center; gap: var(--space-2); min-width: 0; height: 40px; padding: 4px var(--space-2); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-panel); }
-.eh-cookie-field span { overflow-x: auto; overflow-y: hidden; text-overflow: clip; white-space: nowrap; color: var(--ink-secondary); font-family: var(--font-utility); font-size: 12px; scrollbar-width: thin; }
-.eh-cookie-field .icon-button { width: 32px; min-width: 32px; height: 32px; min-height: 32px; }
-
-.eh-search-section {
-  padding-top: var(--space-5);
-}
-
-.eh-search-form {
-  display: flex;
   gap: var(--space-3);
 }
 
-.eh-search-input {
-  position: relative;
-  flex: 1 1 auto;
-}
-
-.eh-search-input svg {
-  position: absolute;
-  top: 50%;
-  left: var(--space-3);
-  width: 18px;
-  height: 18px;
-  color: var(--ink-faint);
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-
-.eh-search-input input {
-  padding-left: 40px;
-}
-
-.eh-results-list li {
+.eh-account-panel li.eh-account {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) repeat(3, minmax(80px, auto));
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: visible;
 }
 
-.task-heading {
-  align-items: end;
+.eh-account-panel li.eh-account + li.eh-account {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--hairline);
+}
+
+.eh-account-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.eh-account-glyph {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--surface-container-highest);
+  color: var(--primary);
+}
+
+.eh-account-glyph svg { width: 30px; height: 30px; }
+
+
+/* EX access rides the name line as a status dot + short label; the full
+   "EXHENTAI 可访问" sentence used to take a whole row of its own. */
+
+.eh-access-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: var(--space-2);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+
+.eh-access-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.eh-access-badge.is-ok { background: color-mix(in srgb, var(--state-success) 14%, transparent); color: var(--state-success); }
+.eh-access-badge.is-off { background: color-mix(in srgb, var(--state-danger) 14%, transparent); color: var(--state-danger); }
+.eh-access-badge.is-unknown { background: var(--surface-container-highest); color: var(--on-surface-variant); }
+
+.eh-name-edit {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+}
+
+.eh-name-edit:hover { background: var(--secondary-container); color: var(--on-secondary-container); }
+.eh-name-edit svg { width: 13px; height: 13px; }
+
+.eh-name-input {
+  min-width: 0;
+  width: 150px;
+  padding: 2px 8px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: normal;
+}
+
+.eh-name-input:focus { border-color: var(--primary); outline: none; }
+
+.eh-account-summary strong {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: normal;
+}
+
+.eh-account-summary span,
+.eh-account-summary small {
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* An account's actions read as one row of the standard pill buttons, shared
+   across the width; the danger one takes the error container tone. */
+.eh-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.eh-account-actions .settings-action {
+  flex: 1 1 0;
+  justify-content: center;
+  min-width: 0;
+  font-size: var(--text-xs);
 }
 
 .task-row progress {
@@ -2795,52 +3037,80 @@ body::-webkit-scrollbar,
   min-width: 4ch;
   color: var(--ink-secondary);
   font-family: var(--font-utility);
-  font-size: 12px;
+  font-size: var(--text-xs);
   text-align: right;
 }
 
+/* Sync joins the settings group language: the account list is one group of rows
+   in the same shape as every settings row, and the setup form sits in a padded
+   group instead of a hairline-topped section. An empty account area is the same
+   group with the shared empty state inside it, so the section never shows a
+   loose floating block. */
 .sync-account-list {
   display: grid;
-  margin-bottom: var(--space-10);
-  border-top: 1px solid var(--hairline);
+}
+
+.sync-empty {
+  display: grid;
+  justify-items: center;
+  padding: var(--space-6) var(--space-4);
+}
+
+/* The shared empty state brings its own page-scale height and padding; inside
+   the group those are the group's job. */
+.sync-empty .empty-state {
+  min-height: 0;
+  width: auto;
+  padding: 0;
+}
+
+.sync-empty .empty-state > svg {
+  color: var(--on-surface-variant);
+}
+
+.sync-empty .server-list-message,
+.sync-account-list .server-list-message {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-2);
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  text-align: center;
 }
 
 .sync-account-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-6);
-  padding: var(--space-5) 0;
-  border-bottom: 1px solid var(--hairline);
+  gap: var(--space-4);
+  min-height: 68px;
+  padding: var(--space-2) var(--space-4);
 }
 
-.sync-account-row > div {
-  min-width: 0;
-}
+
+.sync-account-glyph svg { width: 20px; height: 20px; }
+
 
 .sync-account-row h2,
 .sync-account-row p {
   margin: 0;
 }
 
-.sync-account-row h2 {
-  font-size: 18px;
-}
 
 .sync-account-row p,
 .sync-account-row small {
   overflow-wrap: anywhere;
-  color: var(--ink-secondary);
-  font-size: 12px;
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .sync-setup {
   /* Heading above the fields instead of a narrow side column: the form was
-     squeezed into a third of the width and every field wrapped. */
+     squeezed into a third of the width and every field wrapped. The group frame
+     comes from .settings-group; this only pads its interior. */
   display: grid;
   gap: var(--space-4);
-  padding: var(--space-8) 0;
-  border-top: 1px solid var(--hairline);
+  padding: var(--space-4);
 }
 
 .sync-setup-heading {
@@ -2849,10 +3119,18 @@ body::-webkit-scrollbar,
   gap: var(--space-4);
 }
 
+.sync-setup-heading svg {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--on-surface-variant);
+}
+
 .sync-setup-heading p {
   margin: 4px 0 0;
-  color: var(--ink-secondary);
-  font-size: 12px;
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
 }
 
 .sync-form {
@@ -2870,17 +3148,9 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
-.sync-setup-heading > svg {
-  flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  color: var(--brand-cyan);
-  stroke-width: 1.5;
-}
-
 .sync-setup h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--text-lg);
 }
 
 .sync-form {
@@ -2889,23 +3159,29 @@ body::-webkit-scrollbar,
   gap: var(--space-4);
 }
 
-/* Sync is embedded below the migration panel. It used to inherit the width of
-   its inner workspace while the surrounding preference controls used the full
-   settings column, which made adjacent controls visibly misalign. */
-.settings-sync-content,
-.settings-sync-content .sync-workspace,
-.settings-sync-content .sync-setup,
-.settings-sync-content .sync-form {
-  width: 100%;
-  max-width: none;
+/* Account group and setup group are two blocks of one section, spaced like the
+   settings sections above them. */
+.sync-workspace {
+  display: grid;
+  align-content: start;
+  gap: var(--space-6);
+}
+
+/* The account area keeps the height of the empty state it can show, so the form
+   under it does not move when the accounts finish loading — or turn out to be
+   none at all. More accounts than this grow the slot downward. */
+.sync-account-slot {
+  display: grid;
+  align-content: start;
+  min-height: 320px;
 }
 
 .sync-form label {
   display: grid;
   gap: var(--space-2);
   color: var(--ink-secondary);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .sync-form label:nth-child(3),
@@ -2927,25 +3203,54 @@ body::-webkit-scrollbar,
   gap: var(--space-2);
   min-height: 44px;
   padding: 0 var(--space-4);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  color: var(--ink-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+  font-family: var(--font-body);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color var(--motion-standard), color var(--motion-standard);
+  transition: background-color var(--motion-standard), border-color var(--motion-standard), color var(--motion-standard), transform var(--motion-fast);
 }
 
-.secondary-action:hover {
-  background: var(--brand-paper);
-  color: var(--ink-primary);
+
+.secondary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
-.primary-action:disabled {
-  cursor: wait;
-  opacity: 0.58;
+.danger-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--error);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-standard), border-color var(--motion-standard), color var(--motion-standard), transform var(--motion-fast);
+}
+
+.danger-action:hover:not(:disabled) {
+  border-color: var(--error);
+  background: var(--error-container);
+  color: var(--on-error-container);
+}
+
+.danger-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .status-bar {
@@ -2956,7 +3261,7 @@ body::-webkit-scrollbar,
   padding: 0 clamp(20px, 3vw, 48px);
   overflow: hidden;
   border-top: 1px solid var(--hairline);
-  background: color-mix(in srgb, var(--surface-panel) 55%, var(--surface-canvas));
+  background: var(--surface-container);
 }
 
 .status-item {
@@ -2987,62 +3292,84 @@ body::-webkit-scrollbar,
 
 /* Rails are their own surface. Sitting flush on the canvas with nothing but a
    heading, they ran into each other and into the page below. */
-.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid color-mix(in srgb, var(--ink-secondary) 16%, transparent); border-radius: var(--radius-card); background: var(--surface-panel); }
+.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.archive-rail-heading h2 { margin: 0; font-size: var(--text-lg); font-weight: 720; letter-spacing: -0.01em; }
+.archive-rail-heading h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); font-weight: 700; letter-spacing: -0.01em; }
+/* One icon per rail, in the accent the heading already carries. */
+.archive-rail-heading h2 svg { width: 20px; height: 20px; color: var(--primary); }
 /* 6px of padding, not 2: the global :focus-visible ring extends outside the card
    and a horizontal scroll container clips anything past its padding box, so a
    keyboard-focused rail card had its ring sliced off. */
 .archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
-.archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); color: inherit; scroll-snap-align: start; transition: transform var(--motion-standard), border-color var(--motion-standard), box-shadow var(--motion-standard); }
+.archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
-.archive-thumb-card:hover { border-color: var(--brand-vermilion); box-shadow: var(--shadow-card); transform: translateY(-2px); }
-.archive-thumb-card.is-skeleton { flex-basis: 150px; width: 150px; min-width: 150px; pointer-events: none; border-color: color-mix(in srgb, var(--ink-secondary) 14%, transparent); }
+.archive-thumb-card:hover { border-color: var(--primary); background: var(--surface-container-high); transform: translateY(-2px); }
+.archive-thumb-card.is-skeleton { flex-basis: 150px; width: 150px; min-width: 150px; pointer-events: none; border-color: var(--outline-variant); }
 .archive-thumb-card.is-skeleton:hover { transform: none; box-shadow: none; }
 .archive-thumb-card.is-skeleton .archive-thumb-card-title .skeleton-line { height: 100%; }
 .archive-thumb-card.is-skeleton .archive-thumb-card-meta .skeleton-line { width: 60%; height: 100%; }
-.archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-elevated); }
+.archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
-.archive-thumb-card-body { position: relative; display: grid; grid-template-rows: 40px 44px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
+.archive-thumb-card-body { position: relative; display: grid; grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
-.archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: 680; line-height: 1.35; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: 700; line-height: 1.35; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .archive-thumb-card-title svg { flex: 0 0 auto; width: 15px; height: 15px; color: var(--brand-vermilion); }
-.archive-thumb-card-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-secondary); font-size: var(--text-xs); font-weight: 620; font-variant-numeric: tabular-nums; }
+.archive-thumb-card-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-secondary); font-size: var(--text-xs); font-weight: 600; font-variant-numeric: tabular-nums; }
 .archive-thumb-card-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.archive-thumb-card-tags { display: flex; align-items: flex-start; align-content: flex-start; flex-wrap: wrap; gap: var(--space-1); max-height: 44px; overflow: hidden; }
+.archive-thumb-card-tags { display: flex; align-items: flex-start; align-content: flex-start; flex-wrap: wrap; gap: var(--space-1); height: 48px; max-height: 48px; overflow: hidden; }
 /* Two rows at the same compact size the library grid uses: a 150px card cannot
    carry 12px chips, and running them at full size fitted barely two tags. */
-.archive-thumb-card-tags .metadata-chip { max-width: 100%; min-height: 20px; padding: 0 5px; overflow: hidden; border-radius: var(--radius-pill); font-size: 11px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.archive-thumb-card-tags .metadata-chip { max-width: 100%; min-height: 20px; padding: 0 6px; overflow: hidden; border-radius: var(--radius-control); font-size: var(--text-xs); line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 640px) { .archive-thumb-card-body { padding: 10px; } }
 @media (max-width: 420px) { .archive-list.is-thumbnail .archive-row-wrap.is-cover-wide { flex-basis: 180px; width: 180px; } }
 
 .dedup-workspace { max-width: 1180px; margin: 0 auto; }
 .dedup-workspace .toolbar-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto; align-items: end; gap: var(--space-3); }
-.dedup-workspace .toolbar-row label { display: grid; gap: 6px; min-width: 0; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 650; }
+.dedup-workspace .toolbar-row label { display: grid; gap: 6px; min-width: 0; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
 .dedup-workspace .toolbar-row select,
 .dedup-workspace .toolbar-row input { width: 100%; min-width: 0; }
 .dedup-workspace .progress-line { padding: var(--space-3) 0; color: var(--ink-secondary); font-size: var(--text-sm); }
-.dedup-workspace .toolbar-row { padding: var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); }
+.dedup-workspace .toolbar-row { padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .dedup-workspace .dedup-filters { margin-top: var(--space-3); background: var(--surface-muted); }
-.dedup-workspace .panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); }
-.dedup-import { grid-template-columns: 1fr auto; align-items: end; }
-.dedup-import .section-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; }
-.dedup-import textarea { width: 100%; resize: vertical; }
+.dedup-workspace .panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .dedup-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
-.dedup-group { position: relative; padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-panel); }
-.dedup-group-heading { display: flex; justify-content: space-between; margin-bottom: var(--space-2); }
+.dedup-group { position: relative; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
+.dedup-group.is-selected { border-color: var(--state-warning); background: color-mix(in srgb, var(--state-warning) 10%, var(--surface-container-high)); }
+.dedup-group.is-page-gap-warning { border-color: var(--state-danger); background: color-mix(in srgb, var(--state-danger) 10%, var(--surface-container-high)); }
+.dedup-group-heading { display: flex; justify-content: space-between; width: 100%; margin-bottom: var(--space-2); border: 0; background: transparent; color: inherit; cursor: pointer; text-align: inherit; }
 .dedup-group > ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .dedup-group > ul > li { display: flex; align-items: center; justify-content: space-between; min-height: 42px; border-top: 1px solid var(--hairline); }
 .dedup-group > ul label { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .dedup-group > ul label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dedup-group > ul small { display: block; color: var(--ink-faint); font-size: var(--text-xs); }
 .dedup-group > .icon-button { margin-top: var(--space-3); }
+.dedup-card-size-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: 2px; }
+.dedup-card-size { color: var(--ink-faint); font-size: var(--text-xs); }
+.dedup-smart-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.dedup-smart-tag { padding: 0 6px; min-height: 20px; line-height: 20px; border-radius: var(--radius-pill); font-size: var(--text-xs); font-weight: 600; background: var(--secondary-container); color: var(--on-secondary-container); }
+.dedup-smart-tag.is-warning { background: color-mix(in srgb, var(--state-warning) 16%, var(--surface-container-high)); color: var(--on-surface); }
+.dedup-smart-tag.is-positive { background: color-mix(in srgb, var(--state-success) 16%, var(--surface-container-high)); color: var(--on-surface); }
+.dedup-chain { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-muted); }
+.dedup-chain .dedup-groups { grid-template-columns: 1fr; }
+.dedup-confirm { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
+.dedup-confirm label { display: flex; align-items: center; gap: var(--space-2); }
+.dedup-confirm-actions { display: flex; gap: var(--space-2); }
+/* 不重复关系面板：持久化对直接列出，含导入的与手动标记的。 */
+.dedup-relations { display: grid; gap: var(--space-2); justify-items: start; }
+.dedup-relations-search { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); color: var(--on-surface); font-size: var(--text-sm); }
+.dedup-relations-search:focus { border-color: var(--brand); outline: none; }
+.dedup-relations-list { display: grid; gap: var(--space-1); width: 100%; max-height: 320px; overflow: auto; }
+.dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-1) var(--space-2); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
+.dedup-relations-list code { font-size: var(--text-xs); word-break: break-all; }
+.dedup-relations-list li.is-tombstoned code { opacity: 0.55; text-decoration: line-through; }
+.dedup-relations-list .secondary-action { flex: none; }
+.dedup-workspace .progress-line.is-warning { color: var(--state-danger); }
+.dedup-workspace .progress-line .icon-button { vertical-align: middle; }
 @media (max-width: 780px) {
   .dedup-workspace .toolbar-row { grid-template-columns: 1fr 1fr; }
   .dedup-workspace .toolbar-row .primary-action,
   .dedup-workspace .toolbar-row .secondary-action,
   .dedup-workspace .toolbar-row .danger-action { grid-column: span 2; }
-  .dedup-import { grid-template-columns: 1fr; }
 }
 
 .dedup-panel ul {
@@ -3080,7 +3407,7 @@ body::-webkit-scrollbar,
 
 .status-item strong {
   color: var(--ink-secondary);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .status-warning svg {
@@ -3108,6 +3435,14 @@ body::-webkit-scrollbar,
     overflow-x: hidden;
     overflow-y: auto;
   }
+  /* Shelves scroll with the page on compact: every wrapper grows with the list
+     so its tail stays reachable instead of being clamped behind the nav. */
+  .shelf-workspace,
+  .shelf-workspace .library-workspace {
+    height: auto;
+    min-height: 100%;
+  }
+
   .library-shell,
   .library-shell.has-detail { display: block; height: auto; min-height: 100%; }
   /* react-resizable-panels writes flex basis/height inline styles. On a phone
@@ -3137,8 +3472,6 @@ body::-webkit-scrollbar,
     gap: var(--space-2);
     flex-wrap: wrap;
   }
-  .library-shell .library-heading { align-items: stretch; }
-  .library-heading-actions { width: 100%; }
   .library-toolbar > .select-field { min-width: 140px; }
   .archive-detail-overview { grid-template-columns: 1fr; }
   .archive-detail-route-cover { justify-content: center; }
@@ -3171,16 +3504,7 @@ body::-webkit-scrollbar,
        workspace is the only row. Reserving 60px for a removed element squeezed
        the whole page into that strip. */
     grid-template-rows: minmax(0, 1fr);
-    height: calc(100vh - (64px + env(safe-area-inset-bottom)));
     height: calc(100dvh - (64px + env(safe-area-inset-bottom)));
-  }
-
-  .context-bar {
-    padding: 0 var(--space-4);
-  }
-
-  .context-label {
-    display: none;
   }
 
   .workspace {
@@ -3194,7 +3518,7 @@ body::-webkit-scrollbar,
   }
 
   .workspace-heading h1 {
-    font-size: 32px;
+    font-size: var(--text-title);
   }
 
   .settings-layout {
@@ -3207,37 +3531,10 @@ body::-webkit-scrollbar,
     padding: 0;
   }
 
-  .settings-sidebar-title {
-    display: none;
-  }
-
-  /* A list that drills into one section, not a scrolling strip of eight tabs
-     above squeezed content. */
-  .settings-nav {
-    display: grid;
-    gap: 0;
-    border-top: 1px solid var(--hairline);
-  }
-
-  .settings-nav a {
-    min-height: 52px;
-    padding: 0 var(--space-2);
-    border: 0;
-    border-bottom: 1px solid var(--hairline);
-    border-radius: 0;
-    color: var(--ink-primary);
-    font-size: 15px;
-  }
-
-  .settings-nav a svg {
-    width: 18px;
-    height: 18px;
-    margin-left: auto;
-    color: var(--ink-faint);
-  }
-
-  .settings-nav a.is-active {
-    background: transparent;
+  /* 移动端分类列表直接复用 preferences-form > settings-group 的渲染路径，
+     不需要任何专属规则；这里唯一的差异是面板底部的收边。 */
+  .settings-sidebar .settings-group {
+    margin-bottom: var(--space-6);
   }
 
   /* The section's own title, since the sidebar that named it is off screen. */
@@ -3250,8 +3547,8 @@ body::-webkit-scrollbar,
 
   .settings-compact-heading h2 {
     margin: 0;
-    font-size: 20px;
-    font-weight: 680;
+    font-size: var(--text-lg);
+    font-weight: 700;
   }
 
   .settings-nav button {
@@ -3263,11 +3560,6 @@ body::-webkit-scrollbar,
     border-left-width: 1px;
   }
 
-  .settings-nav a.is-active {
-    border-color: var(--brand-vermilion);
-    background: color-mix(in srgb, var(--brand-paper) 60%, transparent);
-  }
-  .settings-nav button.is-active { border-color: var(--brand-vermilion); }
 
   .first-run,
   .settings-section,
@@ -3276,26 +3568,6 @@ body::-webkit-scrollbar,
     align-items: start;
     gap: var(--space-5);
     padding: var(--space-6) 0;
-  }
-
-  /* The 服务器 row: the add action goes under the copy rather than beside it. */
-  .settings-section-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .about-hero {
-    grid-template-columns: 56px minmax(0, 1fr);
-    gap: var(--space-3);
-  }
-
-  .about-mark { width: 56px; height: 56px; border-radius: var(--radius-control); }
-  .about-hero h2 { font-size: 20px; }
-  .about-version { grid-column: 2; justify-self: start; }
-
-  .settings-about-list > div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
   }
 
   .first-run-copy {
@@ -3315,33 +3587,10 @@ body::-webkit-scrollbar,
 
   .primary-action {
     width: 100%;
-  }
-
-  .library-heading,
-  .task-heading,
-  .eh-search-form,
-  .task-row,
-  .server-row,
+  }.task-row,
   .sync-account-row {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .server-row-actions {
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  .library-heading-actions {
-    align-items: stretch;
-  }
-
-  .library-heading-actions .secondary-action {
-    width: auto;
-  }
-
-  .eh-results-list li {
-    grid-template-columns: 1fr 1fr;
   }
 
   .eh-account-form {
@@ -3372,14 +3621,23 @@ body::-webkit-scrollbar,
     grid-column: auto;
   }
 
+  /* react-resizable-panels writes `height: 100%; overflow: hidden` inline on the
+     group and the panel. Compact scrolls the page instead of a panel, so those
+     have to be beaten with !important: left in place, the group clipped the list
+     at the viewport height and the page had nothing to scroll, which is why the
+     last card stayed behind the bottom nav. */
   .library-panels {
     display: block !important;
-    height: auto;
+    height: auto !important;
     min-height: 0;
+    overflow: visible !important;
   }
 
   .library-panels > [data-panel] {
     width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
   }
 
   .archive-list {
@@ -3390,6 +3648,33 @@ body::-webkit-scrollbar,
   .panel-separator {
     display: none;
   }
+
+  .archive-list.is-wide .archive-row-wrap:has(.archive-row-timeline) {
+    display: block;
+  }
+
+  .archive-row-timeline {
+    display: none;
+  }
+
+  /* 桌面右侧的轨线是 scroller 背景画的整条竖线；移动端改为日期条分组，这里必须
+     显式抹掉，否则那条线会泄漏进手机屏幕。 */
+  .archive-list.has-timeline {
+    background: none;
+  }
+
+  .archive-day-divider {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 20px;
+    margin-bottom: var(--space-2);
+    color: var(--on-surface-variant);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+
+  /* 只留日期文字：卡片自带描边，再画一条分隔线就是两条平行线，顶部看起来线太多。 */
 
   .archive-detail {
     height: auto;
@@ -3403,12 +3688,54 @@ body::-webkit-scrollbar,
     bottom: 0;
     left: 0;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* 项目数量是偏好：auto-fit 让 2–7 个条目平分整行。 */
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
     min-height: calc(64px + env(safe-area-inset-bottom));
     padding: var(--space-1) var(--space-2) env(safe-area-inset-bottom);
     border-top: 1px solid var(--hairline);
-    background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
+    background: var(--surface-container);
     backdrop-filter: blur(16px);
+    transition: transform var(--motion-standard), opacity var(--motion-standard), visibility var(--motion-standard);
+  }
+
+  /* 滚动方向驱动的显隐：向下滚动把整条底栏送出屏幕（含安全区），向上滚动或
+     回到顶部时滑回。visibility 随过渡离散翻转，键盘焦点也随之移出。 */
+  .compact-nav.is-hidden {
+    transform: translateY(calc(100% + env(safe-area-inset-bottom)));
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  /* 悬浮底栏：胶囊造型浮在内容之上，不再占一行高度——内容直接通到屏幕底，
+     底栏盖在上面，随滚动让位。激活项照旧用 primary-container 胶囊。 */
+  .app-shell.is-floating-nav .app-main {
+    height: 100%;
+  }
+
+  .compact-nav.is-floating {
+    right: var(--space-4);
+    bottom: calc(env(safe-area-inset-bottom) + var(--space-3));
+    left: var(--space-4);
+    min-height: 64px;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-menu);
+  }
+
+  .compact-nav.is-floating.is-hidden {
+    transform: translateY(calc(100% + env(safe-area-inset-bottom) + var(--space-3)));
+  }
+
+  .compact-nav.is-floating .nav-link {
+    min-height: 52px;
+    border-radius: var(--radius-pill);
+  }
+
+  /* 胶囊里激活项本身就是填充，不再需要顶边指示条。 */
+  .compact-nav.is-floating .nav-link::before {
+    display: none;
   }
 
   .compact-nav .nav-link {
@@ -3418,7 +3745,7 @@ body::-webkit-scrollbar,
     min-width: 0;
     min-height: 56px;
     padding: var(--space-1) 2px;
-    font-size: 10px;
+    font-size: var(--text-xs);
   }
 
   .compact-nav .nav-link::before {
@@ -3438,142 +3765,102 @@ body::-webkit-scrollbar,
 
   .compact-nav .nav-link:hover:not(.is-active) {
     transform: none;
-    background: var(--surface-elevated);
+    background: var(--surface-container-high);
+  }
+
+  /* 「更多」是按钮不是链接：UA 的按钮底色必须显式抹掉，否则常驻一块浅灰。 */
+  .compact-nav .nav-more {
+    background: transparent;
   }
 
   /* The active link keeps its own background; hover must not paint a second one
      over it, which read as two overlapping states on the same tab. */
   .compact-nav .nav-link.is-active:hover {
-    background: var(--brand-paper);
-    color: var(--brand-ink);
+    background: var(--primary-container);
+    color: var(--on-primary-container);
   }
 
-  .workspace.is-library-workspace .archive-list { padding-bottom: var(--space-6); }
   .workspace.is-library-workspace .library-shell-detail { padding-bottom: var(--space-6); }
+
+  /* 悬浮底栏浮在内容之上：给滚动容器补出底栏高度的呼吸空间，首页才能滚到
+     最后一张卡片；回到顶部圆钮也抬到底栏上方，不再贴在一起。 */
+  /* 底栏两种模式（整条 fixed 与悬浮胶囊）都盖在内容上，滚动容器统一补出
+     底栏高度的安全区，最后一屏内容才能完整滚出——首页、书架、档案库通用。 */
+  .workspace,
+  .workspace.is-library-workspace {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 80px);
+  }
+
+  /* ≤900 一切路由都是页面滚动：缓存面板的 height:100% 钳制必须全部放开，
+     否则每个路由的溢出尾都会在面板处被吃掉（同桌面首页丢 44px 的问题）。 */
+  .route-cache-panel {
+    height: auto;
+  }
+
+  .app-shell.is-floating-nav .scroll-to-top {
+    bottom: calc(env(safe-area-inset-bottom) + var(--space-3) + 64px + var(--space-3));
+  }
+
+  /* 底栏「更多」面板：悬浮在更多按钮上方，只列底栏放不下的页面。 */
+  .nav-more-layer {
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-compact-nav) + 1);
+  }
+
+  .nav-more-backdrop {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .nav-more-menu {
+    position: fixed;
+    display: grid;
+    gap: 2px;
+    right: var(--space-4);
+    bottom: calc(env(safe-area-inset-bottom) + 64px + var(--space-2));
+    width: max-content;
+    padding: var(--space-2);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--radius-card);
+    background: var(--surface-container-high);
+    box-shadow: var(--shadow-menu);
+  }
+
+  /* 悬浮底栏底边再抬高一点，面板仍贴着更多按钮的上方。 */
+  .app-shell.is-floating-nav .nav-more-menu {
+    bottom: calc(env(safe-area-inset-bottom) + var(--space-3) + 64px + var(--space-2));
+  }
+
+  .nav-more-menu .nav-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 48px;
+    padding: 0 var(--space-4);
+    border-radius: var(--radius-control);
+    color: var(--ink-secondary);
+    font-size: var(--text-md);
+    font-weight: 600;
+  }
+
+  .nav-more-menu .nav-link svg { flex: none; }
+
+
+.nav-link.is-active,
+.settings-nav a.is-active,
+.settings-nav button.is-active,
+.settings-choice-option.is-active,
+.library-select-toggle[aria-pressed='true'] {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
 }
 
-.settings-tools-panels {
-  display: grid;
-  gap: var(--space-6);
-  min-width: 0;
-}
-
-/* Tools section is an index; the workspaces themselves are routes. Cards rather
-   than bare buttons: two lone buttons on an empty panel said nothing about what
-   they open. */
-.settings-tools-links {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  min-width: 0;
-}
-
-.tool-card {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  align-content: start;
-  gap: 4px var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 20%, transparent);
-  border-radius: var(--radius-card);
-  background: var(--surface-panel);
-  color: inherit;
-  transition: border-color var(--motion-standard), transform var(--motion-standard);
-}
-
-.tool-card:hover {
-  border-color: color-mix(in srgb, var(--brand-vermilion) 55%, transparent);
-  transform: translateY(-1px);
-}
-
-.tool-card svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
-.tool-card strong { font-size: 14px; font-weight: 680; }
-.tool-card span { grid-column: 2; color: var(--ink-secondary); font-size: 12px; line-height: 1.6; }
-
-.settings-eh-content { min-width: 0; }
-
-/* About is the app's own page, so it introduces itself instead of being three
-   rows of a definition list. */
-.about-hero {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-4);
-  padding-bottom: var(--space-5);
-  border-bottom: 1px solid var(--hairline);
-}
-
-/* The mark is artwork with its own rounded-square ground, so it is shown as-is
-   rather than set as a glyph on a coloured tile. */
-.about-mark {
-  width: 72px;
-  height: 72px;
-  border-radius: var(--radius-control);
-  box-shadow: var(--shadow-tooltip);
-}
-
-.about-hero-copy {
-  display: grid;
-  gap: 6px;
-}
-
-.about-hero h2 { margin: 0; font-size: 24px; font-weight: 700; }
-
-/* Rows the same shape as the rest of the page: a quiet label, a secondary-ink
-   value. Unstyled, this list inherited the browser's dd indent and printed
-   every value in primary ink beside secondary-ink copy, which is what made the
-   page look like three different pages. */
-.settings-about-list {
-  display: grid;
-  gap: var(--space-3);
-  margin: 0;
-}
-
-.settings-about-list > div {
-  display: grid;
-  grid-template-columns: minmax(0, 132px) minmax(0, 1fr);
-  align-items: baseline;
-  gap: var(--space-4);
-}
-
-.settings-about-list dt {
-  color: var(--ink-faint);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.settings-about-list dd {
-  margin: 0;
-  color: var(--ink-secondary);
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.settings-about-list code {
-  font-family: var(--font-utility);
-  font-size: 12px;
-}
-
-.about-version {
-  padding: 3px 9px;
-  border: 1px solid color-mix(in srgb, var(--ink-secondary) 24%, transparent);
-  border-radius: var(--radius-pill);
-  color: var(--ink-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.about-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  padding-top: var(--space-2);
-}
-
-/* Cache breakdown as proportions, with the clear action beside the number. */
-.cache-clear-button { flex: none; width: 32px; height: 32px; min-width: 32px; }
-.cache-clear-button svg { width: 16px; height: 16px; }
-
+/* Cache proportions: a 10px stacked bar, one slice per rendition. */
 .cache-bar {
   display: flex;
   gap: 2px;
@@ -3604,10 +3891,10 @@ body::-webkit-scrollbar,
 .cache-swatch.is-other { background: var(--ink-faint); }
 .cache-bar-slice.is-enhanced, .cache-swatch.is-enhanced { background: var(--brand-vermilion); opacity: 0.65; }
 .cache-bar-slice.is-decensored, .cache-swatch.is-decensored { background: var(--brand-cyan); opacity: 0.65; }
-.cache-bar-slice.is-inference, .cache-swatch.is-inference { background: var(--ink-muted); }
+.cache-bar-slice.is-inference, .cache-swatch.is-inference { background: var(--on-surface-variant); }
 
 .date-picker { position: relative; display: grid; gap: 6px; min-width: 0; }
-.date-picker-label { color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 650; }
+.date-picker-label { color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
 .date-picker-trigger { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: var(--control-height); padding: 0 var(--space-3); border: 1px solid var(--control-border); border-radius: var(--radius-control); background: var(--control-background); color: var(--ink-primary); font: inherit; cursor: pointer; }
 .date-picker-trigger svg { width: 16px; height: 16px; color: var(--ink-faint); }
 .date-picker-trigger svg:first-child { color: var(--brand-vermilion); }
@@ -3618,50 +3905,355 @@ body::-webkit-scrollbar,
 .date-picker-header .icon-button { width: 28px; height: 28px; }
 .date-picker-weekdays, .date-picker-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; text-align: center; }
 .date-picker-weekdays { color: var(--ink-faint); font-size: var(--text-xs); }
-.date-picker-days button { min-height: 30px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--ink-primary); cursor: pointer; }
-.date-picker-days button:hover { background: var(--surface-muted); }
-.date-picker-days button.is-selected { background: var(--brand-vermilion); color: var(--ink-on-brand); font-weight: 700; }
+.date-picker-days button { min-height: 36px; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--on-surface); cursor: pointer; }
+.date-picker-days button.is-selected { background: var(--primary); color: var(--on-primary); font-weight: 700; }
 .date-picker-footer { justify-content: flex-end; padding-top: var(--space-1); border-top: 1px solid var(--hairline); }
 
-/* Saved searches sit beside the search box as removable chips. */
-.search-presets {
+/* Preset menu: a floating panel over a mask, the same shape as a dialog. A
+   popover anchored in the control row pushed the row around and had to invent
+   its own surface; this reuses the dialog's radius, elevation and scroll rules. */
+/* The one floating panel: the preset menu and every settings choice open in the
+   same masked sheet, so the two read as the same kind of thing. */
+.search-preset-overlay,
+.settings-choice-overlay {
+  position: fixed;
+  z-index: var(--z-overlay);
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: var(--backdrop-overlay);
+  backdrop-filter: blur(4px);
+}
+
+.search-preset-panel {
+  display: grid;
+  gap: 2px;
+  width: min(100%, 420px);
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: var(--space-4);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-overlay);
+  background: var(--surface-container-high);
+  box-shadow: var(--shadow-overlay);
+}
+
+/* A settings menu can hold a whole workspace (E-Hentai accounts, the WebDAV
+   form), so it is allowed more height than a preset list — and only its body
+   scrolls, keeping the title and description pinned while the content moves. */
+.settings-choice-panel {
+  display: grid;
+  gap: 2px;
+  width: min(100%, 420px);
+  max-height: min(85vh, 760px);
+  overflow: hidden;
+  padding: var(--space-4);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-overlay);
+  background: var(--surface-container-high);
+  box-shadow: var(--shadow-overlay);
+}
+
+.search-preset-title,
+.settings-choice-title {
+  margin: 0 0 var(--space-2);
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+/* ---- Menu content: the second level every setting opens -------------------- */
+.settings-menu-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  /* Room for the focus ring without it being clipped by the panel edge. */
+  padding: 2px;
+  margin: -2px;
+}
+
+.settings-menu-desc {
+  margin: 0;
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.settings-menu-strong {
+  color: var(--on-surface);
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-menu-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.settings-menu-stepper .settings-number {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 96px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-menu-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-2);
+  width: 100%;
   min-width: 0;
 }
 
-.search-preset {
-  display: inline-flex;
+.settings-menu-path {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-control);
+  background: var(--control-background);
+  color: var(--on-surface-variant);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* Account rows inside a menu: the same three-column anatomy as a settings row,
+   with the sync action sitting where the value would. */
+.settings-menu-account {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
+  gap: var(--space-3);
+  min-height: 56px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+}
+
+.settings-menu-account-glyph {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: var(--on-surface-variant);
+}
+
+.settings-menu-account-glyph svg { width: 20px; height: 20px; }
+
+.settings-menu-account-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-menu-account-copy strong {
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: normal;
+}
+
+.settings-menu-account-copy span,
+.settings-menu-account-copy small {
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-menu-account .settings-action {
+  flex: 0 0 auto;
+}
+
+/* 多选菜单行（底栏项目）：整行是复选框，尾部图标表达勾选/固定。 */
+.settings-menu-checks {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-menu-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast);
+}
+
+.settings-menu-check:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.settings-menu-check svg { flex: none; width: 18px; height: 18px; color: var(--primary); }
+/* 固定项（档案库/设置）可读性不打折：保持全不透明，仅以锁形与禁用光标示意。 */
+.settings-menu-check.is-pinned svg { color: var(--on-surface-variant); }
+.settings-menu-check:disabled { cursor: default; opacity: 1; }
+.settings-menu-check:disabled:hover { background: transparent; }
+
+/* 自定义菜单的层级切换（基础/高级）：M3 分段按钮。 */
+.settings-menu-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.settings-menu-mode-button {
+  min-height: 40px;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background-color var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
+}
+
+.settings-menu-mode-button.is-active {
+  border-color: transparent;
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
+
+/* 基础配色卡片：三色预览条 + 名称，点选即套用。 */
+.custom-scheme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.custom-scheme-card {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+  min-width: 0;
+  min-height: 76px;
+  padding: var(--space-2) var(--space-1);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--on-surface);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+
+
+.custom-scheme-card.is-active {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.custom-scheme-swatch {
+  display: flex;
+  width: 100%;
+  height: 16px;
   overflow: hidden;
-  border: 1px solid var(--hairline);
   border-radius: var(--radius-pill);
-  background: var(--surface-elevated);
+}
+
+.custom-scheme-swatch i { flex: 1 1 0; }
+
+/* The WebDAV form reads as one column inside the 420px menu; the /sync route
+   keeps its two columns. */
+.settings-choice-panel .sync-form {
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+.settings-choice-panel .sync-form .sync-form-wide,
+.settings-choice-panel .sync-form .sync-form-actions {
+  grid-column: auto;
+}
+
+/* The E-Hentai workspace loses its own group frame inside the menu — the menu
+   panel is the frame there. */
+.settings-choice-panel .eh-account-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.search-preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 2px;
 }
 
 .search-preset-apply {
-  min-height: 28px;
-  padding: 0 var(--space-2) 0 var(--space-3);
-  background: transparent;
-  color: var(--ink-secondary);
-  font-size: 12px;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  color: var(--on-surface);
+  font-size: var(--text-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.search-preset-apply:hover { color: var(--ink-primary); }
 
-.search-preset-remove {
-  min-height: 28px;
-  padding: 0 8px 0 4px;
+.search-preset-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--radius-pill);
   background: transparent;
-  color: var(--ink-faint);
-  font-size: 14px;
-  line-height: 1;
+  color: var(--on-surface-variant);
   cursor: pointer;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
 }
 
-.search-preset-remove:hover { color: var(--state-danger); }
+.search-preset-icon:hover { background: var(--surface-container-highest); color: var(--on-surface); }
+.search-preset-icon.is-danger:hover { background: var(--error-container); color: var(--on-error-container); }
+.search-preset-icon svg { width: 16px; height: 16px; }
+
+.search-preset-empty {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+}
+
+.search-preset-separator {
+  height: 1px;
+  margin: var(--space-2) 0;
+  background: var(--outline-variant);
+}
+
+.search-preset-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--motion-standard);
+}
+
+.search-preset-add:hover { background: var(--secondary-container-hover); }
+.search-preset-add svg { width: 16px; height: 16px; }
 /* Matches the search input's height exactly: the button was 30px against a 44px
    field, so it floated in the middle of the row. */
 .search-preset-save {
@@ -3674,27 +4266,13 @@ body::-webkit-scrollbar,
   display: grid;
   gap: var(--space-2);
   color: var(--ink-secondary);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .text-input-dialog-field input { width: 100%; }
 
-/* Custom CSS editor: preset cards, a monospace box, and a length readout. */
-.custom-css-editor {
-  display: grid;
-  gap: var(--space-3);
-  width: 100%;
-  padding: 0;
-  border: 0;
-}
-
-.custom-css-hint { margin: 0; color: var(--ink-secondary); font-size: 12px; }
-
-/* One row of controls sharing the width, the same shape as the archive detail
-   page's action row. As two-line cards they each carried a description, which
-   said less than the preview the button itself gives when pressed — and made the
-   row three times taller than the control it sits above. The description is the
-   tooltip now. */
+/* Custom CSS editor: preset cards, a monospace box, and a length readout, opened
+   from the 自定义 CSS row's floating menu. */
 .custom-css-presets {
   display: flex;
   align-items: stretch;
@@ -3718,7 +4296,7 @@ body::-webkit-scrollbar,
   color: var(--ink-secondary);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -3738,10 +4316,10 @@ body::-webkit-scrollbar,
   color: var(--ink-on-brand);
 }
 
-.custom-css-editor textarea {
+.settings-choice-panel textarea {
   width: 100%;
   font-family: var(--font-utility);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 1.55;
   resize: vertical;
 }
@@ -3750,152 +4328,42 @@ body::-webkit-scrollbar,
   margin: 0;
   color: var(--ink-faint);
   font-family: var(--font-utility);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-align: right;
 }
 
-.settings-tool-panel {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-card);
-  background: var(--surface-panel);
-}
-
-.settings-tool-panel .section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.settings-tool-panel h3 {
-  margin: 0;
-  font-size: var(--text-md);
-  font-weight: 700;
-}
-
-/* A feature switch: the legend names the feature, the checkbox turns it on, and
-   whatever configures it appears below only once it is on. */
-.preference-switch {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.model-feature-block {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--hairline-strong);
-  border-radius: var(--radius-card);
-  background: var(--surface-panel);
-}
-.model-feature-block legend { padding: 0 var(--space-2); font-weight: 720; }
-.model-feature-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: var(--control-height); font-weight: 650; }
-.model-choice-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--control-height); align-items: center; gap: var(--space-2); min-width: 0; }
-.model-choice-row .icon-action { width: var(--control-height); height: var(--control-height); }
-.model-install-state { color: var(--ink-secondary); font-size: var(--text-xs); }
-.model-stage-list {
-  display: grid;
-  gap: var(--space-1);
-  padding-top: var(--space-1);
-}
-.model-stage-row {
-  display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.2fr);
-  gap: var(--space-3);
-  align-items: center;
-  min-height: 32px;
-  padding: 0 var(--space-2);
-  border-bottom: 1px solid var(--hairline);
-  color: var(--ink-secondary);
-  font-size: var(--text-xs);
-}
-.model-stage-row strong {
-  overflow: hidden;
-  color: var(--ink-primary);
-  font-weight: 620;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.model-stage-row .select-field { min-width: 0; width: 100%; }
-.model-import-row { display: flex; justify-content: flex-end; min-width: 0; min-height: var(--control-height); margin-bottom: calc(-1 * var(--space-3)); }
-.model-import-button { width: 32px; height: 32px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--ink-secondary); }
-.model-import-button:hover { background: var(--surface-muted); color: var(--brand-vermilion); }
-
-.preference-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-height: var(--control-height);
-  color: var(--ink-primary);
-  font-size: var(--text-sm);
-  font-weight: 620;
-  cursor: pointer;
-}
-
-.preference-toggle input {
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  accent-color: var(--brand-vermilion);
-  cursor: pointer;
-}
-
-.enhancement-settings {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-5);
-}
-.enhancement-settings .preference-switch {
-  grid-column: 1 / -1;
-  border-top: 1px solid var(--hairline-strong);
-  padding-top: var(--space-5);
-}
-.enhancement-settings .preference-toggle { justify-content: space-between; width: 100%; }
-.enhancement-settings .preference-toggle span { order: -1; }
-.enhancement-settings .switch-control { flex-shrink: 0; }
-.enhancement-settings .settings-tool-hint { margin: 0; color: var(--ink-secondary); font-size: 13px; line-height: 1.7; }
-.model-settings .model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-.model-settings .model-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--hairline-strong); border-radius: var(--radius-control); }
-.model-list li > div { display: grid; gap: var(--space-2); min-width: 0; }
-.model-list strong { font-size: 14px; overflow-wrap: anywhere; }
-.model-list small, .model-status { color: var(--ink-secondary); font-size: 12px; }
-.model-status { white-space: nowrap; }
-.switch-control[role="switch"]:focus-visible { outline: 2px solid var(--brand-vermilion); outline-offset: 3px; }
-@media (max-width: 720px) {
-  .model-stage-row { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); padding: var(--space-2) 0; }
-}
-
+.switch-control[role="switch"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+/* Material 3 expressive switch: a 52x30 track; the handle grows and slides
+   flush against the track edge on check (no lip left over), in the accent
+   colour. The handle moves with transform, so the travel animates smoothly —
+   the old left/right property swap jumped instead of transitioning. */
 .switch-control[role="switch"] {
   position: relative;
-  flex: 0 0 44px;
-  width: 44px;
-  min-width: 44px;
-  height: 24px;
-  min-height: 24px;
+  flex: 0 0 52px;
+  width: 52px;
+  min-width: 52px;
+  height: 30px;
+  min-height: 30px;
   padding: 0;
-  border: 1px solid var(--hairline-strong);
+  border: 1px solid var(--outline);
   border-radius: var(--radius-pill);
-  background: var(--surface-muted);
+  background: var(--surface-container-highest);
   cursor: pointer;
   transition: background-color var(--motion-standard), border-color var(--motion-standard), transform var(--motion-fast);
 }
 .switch-control[role="switch"]::after {
   content: '';
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--ink-secondary);
-  transition: transform var(--motion-standard), background-color var(--motion-standard);
+  top: 0;
+  left: 0;
+  width: 22px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  transition: transform var(--motion-standard), width var(--motion-standard), background-color var(--motion-standard);
 }
-.switch-control[role="switch"][aria-checked="true"] { background: var(--brand-vermilion); border-color: var(--brand-vermilion); }
-.switch-control[role="switch"][aria-checked="true"]::after { left: auto; right: 3px; background: var(--ink-on-brand); }
+.switch-control[role="switch"][aria-checked="true"] { background: var(--primary-container); border-color: var(--primary); }
+.switch-control[role="switch"][aria-checked="true"]::after { transform: translateX(22px); width: 28px; background: var(--primary); }
 .switch-control[role="switch"]:active:not(:disabled) { transform: translateY(1px); }
 .switch-control[role="switch"]:disabled { opacity: .5; cursor: not-allowed; }
 
@@ -3911,43 +4379,11 @@ body::-webkit-scrollbar,
   border: 0;
 }
 
-.preference-toggle input:disabled,
-.preference-toggle:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.settings-tool-hint {
-  margin: 0;
-  color: var(--ink-secondary);
-  font-size: var(--text-sm);
-}
-
-.settings-tool-panel .primary-action {
-  justify-self: start;
-}
-
-/* One row of controls sharing its width, each one dynamic — the same shape as the
-   archive detail page's action row. Deliberately a parallel set of declarations
-   rather than a shared class: the detail row's exact CSS is pinned by the design
-   system contract test, and reaching for its class name here would tie a settings
-   layout to an archive card's.
-
-   This is the one button shape the settings page uses. It had a primary action, a
-   secondary action, a 32px icon button and a 44px icon button, all in the same
-   column, sized by whatever each one's own class happened to say. */
-.settings-actions {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-2);
-  width: 100%;
-  min-width: 0;
-}
-
-/* Geometry for whatever is in the row, so a group that still needs a
-   `.primary-action` skin is at least the same size and shape as its neighbour. */
-.settings-actions > button,
-.settings-actions > a {
+/* The one button shape the settings page uses, inside menus and error rows alike.
+   It had a primary action, a secondary action, a 32px icon button and a 44px icon
+   button, all in the same column, sized by whatever each one's own class happened
+   to say. */
+.settings-action {
   display: inline-flex;
   flex: 1 1 0;
   align-items: center;
@@ -3957,42 +4393,45 @@ body::-webkit-scrollbar,
   min-height: var(--control-height);
   overflow: hidden;
   padding: 0 var(--space-3);
-  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
   font-family: var(--font-body);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-}
-
-.settings-action {
-  border: 1px solid var(--control-border);
-  background: var(--surface-elevated);
-  color: var(--ink-secondary);
   transition: border-color var(--motion-standard), background-color var(--motion-standard), color var(--motion-standard);
 }
 
-.settings-action:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
-  background: var(--brand-paper);
-  color: var(--ink-primary);
-}
 
 .settings-action.is-primary {
-  border-color: var(--brand-vermilion);
-  background: var(--brand-vermilion);
-  color: var(--ink-on-brand);
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
 }
 
 .settings-action.is-primary:hover:not(:disabled) {
-  background: var(--brand-vermilion-strong);
-  color: var(--ink-on-brand);
+  background: var(--primary-hover);
+  color: var(--on-primary);
+}
+
+.settings-action.is-danger {
+  background: var(--error-container);
+  color: var(--on-error-container);
+}
+
+.settings-action.is-danger:hover:not(:disabled),
+.secondary-action.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-container) 85%, var(--error));
+  color: var(--on-error-container);
 }
 
 .settings-action:disabled { opacity: 0.55; cursor: not-allowed; }
 .settings-action svg { flex: none; width: 17px; height: 17px; }
-
+.model-import-glyph { width: 16px; height: 16px; }
 
 /* Archive intake: two ways in, one queue. */
 .upload-panel {
@@ -4003,12 +4442,19 @@ body::-webkit-scrollbar,
   margin: 0 auto;
 }
 
+/* The two ways in share the panel width equally — the same full-width thirds
+   rhythm the login tabs use, instead of a chip floating on the left. */
 .upload-mode-tabs {
-  justify-self: start;
+  width: 100%;
+  justify-self: stretch;
 }
 
 .upload-mode-tabs button {
+  flex: 1 1 0;
+  justify-content: center;
   gap: 6px;
+  min-width: 0;
+  min-height: var(--control-height);
   padding: 0 var(--space-4);
 }
 
@@ -4018,38 +4464,42 @@ body::-webkit-scrollbar,
 }
 
 /* Drops are handled by the webview, so the whole window is the target; this is
-   the affordance for it rather than a hit area of its own. */
+   the affordance for it rather than a hit area of its own. A large dashed tonal
+   target — the outline used to be flattened by the shared card rule below it. */
 .upload-dropzone {
   display: grid;
   justify-items: center;
   gap: var(--space-2);
   padding: var(--space-10) var(--space-6);
-  border: 2px dashed color-mix(in srgb, var(--ink-secondary) 28%, transparent);
-  border-radius: var(--radius-card);
-  background: var(--surface-panel);
+  border: 1.5px dashed color-mix(in srgb, var(--outline) 90%, transparent);
+  border-radius: var(--radius-overlay);
+  background: var(--surface-container-low);
   text-align: center;
   transition: border-color var(--motion-standard), background-color var(--motion-standard);
 }
-.upload-dropzone, .upload-url-form, .upload-queue {
+
+.upload-url-form, .upload-queue {
   padding: var(--space-4);
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--outline-variant);
   border-radius: var(--radius-card);
-  background: var(--surface-panel);
+  background: var(--surface-container);
 }
 
 .upload-dropzone.is-dragging {
-  border-color: var(--brand-vermilion);
-  background: color-mix(in srgb, var(--brand-vermilion) 8%, var(--surface-panel));
+  border-color: var(--primary);
+  background: var(--primary-container);
 }
 
 .upload-dropzone > svg {
-  width: 30px;
-  height: 30px;
-  color: var(--brand-vermilion);
-  stroke-width: 1.5;
+  width: 60px;
+  height: 60px;
+  padding: var(--space-4);
+  border-radius: 50%;
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
 }
 
-.upload-dropzone strong { font-size: var(--text-md); font-weight: 680; }
+.upload-dropzone strong { font-size: var(--text-md); font-weight: 700; }
 .upload-dropzone span { color: var(--ink-faint); font-size: var(--text-xs); }
 .upload-dropzone .secondary-action { margin-top: var(--space-2); }
 
@@ -4061,13 +4511,13 @@ body::-webkit-scrollbar,
 .upload-url-label {
   color: var(--ink-secondary);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .upload-url-form textarea {
   width: 100%;
   font-family: var(--font-utility);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 1.55;
   resize: vertical;
 }
@@ -4084,11 +4534,11 @@ body::-webkit-scrollbar,
 .upload-url-summary .secondary-action { margin-left: auto; }
 .upload-hint { margin: 0; color: var(--ink-faint); font-size: var(--text-xs); }
 
+/* The queue reads as one M3 list: borderless tonal rows with a status dot,
+   instead of a box inside the card inside the panel. */
 .upload-queue {
   display: grid;
-  gap: var(--space-3);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--hairline);
+  gap: var(--space-2);
 }
 
 .upload-queue-heading {
@@ -4104,7 +4554,7 @@ body::-webkit-scrollbar,
 
 .upload-queue-list {
   display: grid;
-  gap: 2px;
+  gap: var(--space-1);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -4115,13 +4565,25 @@ body::-webkit-scrollbar,
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  min-height: 42px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-control);
-  background: var(--surface-panel);
+  min-height: 48px;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
   font-size: var(--text-sm);
 }
+
+.upload-queue-row::before {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--outline);
+}
+
+.upload-queue-row.is-running::before { background: var(--brand-cyan); }
+.upload-queue-row.is-done::before { background: var(--state-success); }
+.upload-queue-row.is-failed::before { background: var(--state-danger); }
 
 .upload-queue-label {
   min-width: 0;
@@ -4130,14 +4592,8 @@ body::-webkit-scrollbar,
   white-space: nowrap;
 }
 
-.upload-queue-status { flex: none; color: var(--ink-faint); font-size: var(--text-xs); }
-.upload-queue-row.is-running { border-color: color-mix(in srgb, var(--brand-cyan) 55%, transparent); }
+.upload-queue-status { flex: none; color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .upload-queue-row.is-done .upload-queue-status { color: var(--state-success); }
-.upload-queue-row.is-failed { border-color: color-mix(in srgb, var(--state-danger) 55%, transparent); }
 .upload-queue-row.is-failed .upload-queue-status { color: var(--state-danger); }
-.download-directory-setting { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.download-directory-setting > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.download-directory-setting > button { flex: none; padding: 8px; }
-.download-directory-setting svg { width: 18px; height: 18px; }
 .archive-delete-dialog { overflow-wrap: anywhere; }
 .archive-delete-dialog .switch-control { flex: none; }

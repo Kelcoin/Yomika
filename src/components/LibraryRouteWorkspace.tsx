@@ -4,9 +4,10 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
+import { useArchiveSelection } from './useArchiveSelection';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
+import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
@@ -118,17 +119,23 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
   const [reloadToken, setReloadToken] = useState(0);
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  /** Set when the dialog was opened from a preset's rename action. */
+  const [presetEditTarget, setPresetEditTarget] = useState<import('../repositories/nativeLibraryRepository').SearchPreset>();
   /** Card style lives in preferences: the shelves render the same cards, and as
    * component state the choice reset on every navigation. */
   const { cardStyle, setCardStyle } = useCardStyle();
   const navigate = useNavigate();
+  /** One place that knows what deleting does to everything derived from the
+   * list, whether it was one card or a selection. */
+  const removeArchives = useCallback((archiveIds: string[]) => {
+    const dropped = new Set(archiveIds);
+    setArchives((current) => current.filter((archive) => !dropped.has(archive.archiveId)));
+    setTotalArchives((current) => Math.max(0, current - dropped.size));
+    setCategories((current) => current.map((category) => ({ ...category, archives: category.archives.filter((id) => !dropped.has(id)) })));
+    setMetadata(undefined);
+  }, []);
   const { open: openContextMenu, menu: contextMenu, requestDelete } = useArchiveContextMenu({
-    onDeleted: (archiveId) => {
-      setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
-      setTotalArchives((current) => Math.max(0, current - 1));
-      setCategories((current) => current.map((category) => ({ ...category, archives: category.archives.filter((id) => id !== archiveId) })));
-      setMetadata(undefined);
-    },
+    onDeleted: (archiveId) => removeArchives([archiveId]),
     inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
     categories: assignableCategories(categories),
     onAddCategory: (archive, categoryId) => {
@@ -153,6 +160,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         showToast(next ? '已加入待看' : '已移出待看', 'success');
       });
     },
+  });
+  const selection = useArchiveSelection({
+    archives,
+    scopeId,
+    onRemoved: removeArchives,
   });
   const detailRequest = useRef(0);
   const detailThumbnailHandle = useRef<ImageHandle>();
@@ -342,7 +354,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setCategoryFilter('');
   }, [requestedQuery]);
 
-  const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean } = {}) => {
+  const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean; silent?: boolean } = {}) => {
     const request = ++pageRequest.current;
     // Keep the existing input/list mounted while a filter request is in flight.
     // Unmounting the workspace here loses focus after the first typed character.
@@ -356,8 +368,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     const result = await fetchArchivePage(currentServerId, 0);
     if (request !== pageRequest.current) return false;
     if (!result.ok) {
-      setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
-      setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
+      // A silent load is the pull's refresh: the list stays exactly as it is,
+      // and the failure is a toast rather than the whole page.
+      if (options.silent) setRefreshError(result.error.message);
+      else {
+        setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
+        setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
+      }
       setLoading(false);
       setPageLoading(false);
       return false;
@@ -375,18 +392,18 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     return true;
   }, [fetchArchivePage]);
 
-  const syncRemoteIndex = useCallback(async (currentServerId: string) => {
-    // Rebuilds the offline mirror. The list itself no longer waits on this — it
-    // reads LANraragi directly — so this is the user asking for the local copy to
-    // be brought up to date, plus a re-resolution of the dynamic categories.
-    const synced = await repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
-    if (!synced.ok) return synced;
-    void repository.listCategories(currentServerId, true).then((categoryResult) => {
-      if (categoryResult.ok) setCategories(categoryResult.value);
-      else setCategoryError(categoryResult.error.message);
+  const refreshVisiblePage = useCallback(async (currentServerId: string) => {
+    // A refresh re-reads the page on screen: one LANraragi request, list in
+    // place until it lands. Rebuilding the offline mirror is a whole-library
+    // walk — minutes of it against a big library — and doing that inside the
+    // gesture is what made the pull look hung.
+    await loadFirstPage(currentServerId, { silent: true });
+    // The mirror is only worth rebuilding when LANraragi actually has archives
+    // it does not know yet, which one probe page answers. That happens behind
+    // the gesture, so nothing on screen waits for it.
+    void repository.probeNewArchives(currentServerId).then((probe) => {
+      if (probe.ok && probe.value) void repository.refreshArchives(currentServerId, { sortby: 'date_added', order: 'desc' });
     });
-    await loadFirstPage(currentServerId);
-    return synced;
   }, [loadFirstPage]);
 
   useEffect(() => {
@@ -413,8 +430,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // `force` skips that snapshot outright: the effective interval was therefore
     // five minutes, not six hours, and every lapse re-ran one unpaged
     // whole-library search per dynamic category. Reading a chapter takes longer
-    // than five minutes, so coming back from the reader always paid it. The
-    // refresh button still forces, which is the one place a user asks for it.
+    // than five minutes, so coming back from the reader always paid it. A pull
+    // does not force it either any more: it re-reads the page on screen, and the
+    // six-hour snapshot is exactly what keeps that one request.
     if (categoriesFromSnapshot.current) {
       categoriesFromSnapshot.current = false;
       setCategoriesLoading(false);
@@ -460,7 +478,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   if (error) {
     return (
       <div>
-        <header className="workspace-heading"><h1>档案库</h1></header>
+        <h1 className="visually-hidden">档案库</h1>
         <div className="workspace-alert" role="alert">
           <p className="form-error">{error}</p>
           {needsCredentials && <Link className="secondary-action" to="/settings">打开设置重新保存 API Key</Link>}
@@ -483,9 +501,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           if (!serverId) return;
           setRefreshError(undefined);
           setRefreshing(true);
-          void syncRemoteIndex(serverId).then((result) => {
-            if (!result.ok) setRefreshError(result.error.message);
-          }).catch((cause: unknown) => {
+          void refreshVisiblePage(serverId).catch((cause: unknown) => {
             setRefreshError(cause instanceof Error ? cause.message : '刷新档案库失败');
           }).finally(() => setRefreshing(false));
         }}
@@ -509,11 +525,19 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         onToggleFavorite={async () => {
           if (!serverId || !selectedArchiveId) return;
           if (!scopeId) return;
-          const result = await repository.setWatchlist(
-            scopeId, selectedArchiveId,
-            !watchlist.some((item) => item.archiveId === selectedArchiveId && !item.deleted),
-          );
+          const next = !watchlist.some((item) => item.archiveId === selectedArchiveId && !item.deleted);
+          const result = await repository.setWatchlist(scopeId, selectedArchiveId, next);
           if (result.ok) setWatchlist((current) => [...current.filter((item) => item.archiveId !== selectedArchiveId), result.value]);
+          // 收藏夹 shelf reads the LANraragi 🔖 Favorites category, so the heart
+          // mirrors the write there too — best effort, the local row is kept for
+          // the offline mirror and WebDAV sync either way.
+          const categories = await repository.listCategories(serverId);
+          const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
+          if (!favorites) return;
+          const mirrored = next
+            ? await repository.addArchiveToCategory(serverId, favorites.id, selectedArchiveId)
+            : await repository.removeArchiveFromCategory(serverId, favorites.id, selectedArchiveId);
+          if (!mirrored.ok) showToast('未能同步到服务器收藏夹', 'error');
         }}
         onLoadThumbnail={loadThumbnail}
         onReleaseThumbnail={releaseThumbnail}
@@ -545,7 +569,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         setSortOrder(preset.sortOrder);
         setCategoryFilter(preset.categoryId ?? '');
       }}
-      onSavePreset={() => setPresetDialogOpen(true)}
+      onSavePreset={() => { setPresetEditTarget(undefined); setPresetDialogOpen(true); }}
+      onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
       onDeletePreset={(preset) => {
         if (!scopeId) return;
         void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
@@ -553,19 +578,22 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
         });
       }}
+      {...selection.props}
+      selectionActions={selection.actions}
       />
       {contextMenu}
+      {selection.dialogs}
       {/* Drawn, not `window.prompt`: the native one is unstyled, unpositioned and
           on Windows renders as browser chrome, and it cannot refuse a value. A
           preset with no complete tag is not saveable. */}
       <TextInputDialog
         open={presetDialogOpen}
         onOpenChange={setPresetDialogOpen}
-        title="存为预设"
-        description="预设会记住当前的搜索、排序与分类。"
+        title={presetEditTarget ? '重命名预设' : '存为预设'}
+        description={presetEditTarget ? '只改名字，搜索与排序条件保持不变。' : '预设会记住当前的搜索、排序与分类。'}
         label="预设名称"
-        confirmLabel="保存预设"
-        defaultValue={searchQuery || '全部档案'}
+        confirmLabel={presetEditTarget ? '保存名称' : '保存预设'}
+        defaultValue={presetEditTarget ? presetEditTarget.name : (searchQuery || '全部档案')}
         validate={(value) => {
           if (!value.trim()) return '请填写预设名称';
           if (searchQuery.trim() && !isCommittableSearchQuery(searchQuery)) return '搜索框里的标签还不完整，补完后再存为预设';
@@ -575,16 +603,17 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           if (!scopeId) return;
           void repository.saveSearchPreset({
             scopeId,
-            presetId: `preset-${Date.now()}`,
+            presetId: presetEditTarget?.presetId ?? `preset-${Date.now()}`,
             name,
-            query: searchQuery,
-            sortBy: sortMode,
-            sortOrder,
-            categoryId: categoryFilter || null,
+            query: presetEditTarget?.query ?? searchQuery,
+            sortBy: presetEditTarget?.sortBy ?? sortMode,
+            sortOrder: presetEditTarget?.sortOrder ?? sortOrder,
+            categoryId: presetEditTarget ? (presetEditTarget.categoryId ?? null) : (categoryFilter || null),
           }).then((result) => {
             if (!result.ok) { showToast(result.error.message, 'error'); return; }
             setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
-            showToast('预设已保存', 'success');
+            showToast(presetEditTarget ? '预设已重命名' : '预设已保存', 'success');
+            setPresetEditTarget(undefined);
           });
         }}
       />

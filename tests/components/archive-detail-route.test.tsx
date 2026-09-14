@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -171,9 +171,13 @@ describe('archive detail route', () => {
 
     renderDetail();
 
-    expect(await screen.findByRole('heading', { name: 'archive-a' })).toBeInTheDocument();
-    // Loading is a shimmer placeholder, not a spinner with text.
-    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line');
+    // Two loading phases: the whole-page skeleton paints until the server scope
+    // is known, then the inline skeleton takes over in the real layout — the
+    // title slot holds a skeleton of its own size (it used to show the raw
+    // archive id), and the copy column mirrors the tag rows it will hold.
+    expect(await screen.findByRole('status', { name: '正在加载档案详情' })).toHaveClass('archive-detail-skeleton');
+    await waitFor(() => expect(document.querySelector('.archive-detail-copy-skeleton')).not.toBeNull());
+    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('archive-detail-title-loading');
     expect(screen.queryByText('正在加载档案详情…')).not.toBeInTheDocument();
   });
 

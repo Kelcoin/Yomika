@@ -1,0 +1,186 @@
+name: Build Packages and Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag of the app release to publish (e.g. app-v0.1.0). Leave empty to only publish Actions artifacts.'
+        required: false
+        type: string
+      draft:
+        description: 'Create a draft release instead of publishing right away'
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    # Model releases own the v* tags; app releases use the app-v* prefix.
+    tags: ['app-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --no-audit --no-fund
+      # build.ps1 carries the Windows-specific packaging work: it strips the
+      # non-Windows ONNX dylibs ort drops next to the exe, resolves the
+      # DirectML.dll symlink into a real file, and stages the bundled model
+      # under data/models where the app expects it.
+      - name: Build portable executable
+        shell: pwsh
+        run: ./tools/windows/build.ps1 -Release -UseHostTools
+      - name: Package Windows zip
+        shell: pwsh
+        run: |
+          $target = 'src-tauri/target/release'
+          $exe = Join-Path $target 'yomika.exe'
+          $directMl = Join-Path $target 'DirectML.dll'
+          $model = Join-Path $target 'data/models/waifu2x-upconv7'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing portable executable: $exe" }
+          if (-not (Test-Path -LiteralPath $directMl)) { throw "Missing runtime library: $directMl" }
+          if (-not (Test-Path -LiteralPath $model -PathType Container)) { throw "Missing bundled model: $model" }
+          $stage = 'artifacts/yomika-windows'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath $exe -Destination $stage -Force
+          Copy-Item -LiteralPath $directMl -Destination $stage -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
+          Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yomika-windows
+          path: artifacts/yomika-windows.zip
+          # Staging copies for the publish-release job; the final home of the
+          # packages is the release, so the artifact only needs to live a day.
+          retention-days: 1
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+      - run: npm ci --no-audit --no-fund
+      - run: npx tauri android init --ci --skip-targets-install
+      - name: Configure Android signing
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > src-tauri/gen/android/release.keystore
+          keytool -list -keystore src-tauri/gen/android/release.keystore -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
+      - name: Build signed Android packages
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: npx tauri android build --ci --apk --aab --target aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yomika-android
+          path: src-tauri/gen/android/app/build/outputs/**/*
+          retention-days: 1
+          if-no-files-found: error
+
+  ios-unsigned:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - run: npm ci --no-audit --no-fund
+      # tauri ios init shells out to xcodegen to render the .xcodeproj; the
+      # runner image does not preinstall it.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - run: npx tauri ios init --ci
+      - run: npm run build
+      - name: Build unsigned iOS app
+        run: |
+          project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
+          scheme=$(xcodebuild -list -project "$project" | awk '/Schemes:/{getline; gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}')
+          test -n "$scheme"
+          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+          app=$(find "$RUNNER_TEMP/yomika-ios/Build/Products" -type d -name '*.app' -path '*iphoneos*' -print -quit)
+          test -d "$app"
+          mkdir -p artifacts/Payload
+          cp -R "$app" artifacts/Payload/Yomika.app
+          (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yomika-ios-unsigned
+          path: artifacts/Yomika-unsigned.ipa
+          retention-days: 1
+          if-no-files-found: error
+
+  # Runs after all three builds: downloads the artifacts and, when the run was
+  # started with a release tag (manual input or an app-v* tag push), attaches
+  # them to a GitHub release — draft by default so it can be reviewed in the
+  # web UI before publishing.
+  publish-release:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+      || startsWith(github.ref, 'refs/tags/app-v')
+    needs: [windows, android, ios-unsigned]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag || github.ref_name }}"
+          draft="${{ inputs.draft }}"
+          if [ "${{ github.event_name }}" = "push" ]; then draft=false; fi
+          # Give the Android packages release-friendly names.
+          apk=$(find artifacts/yomika-android -name '*.apk' -print -quit 2>/dev/null || true)
+          if [ -n "$apk" ]; then cp "$apk" artifacts/yomika-arm64-v8a.apk; fi
+          aab=$(find artifacts/yomika-android -name '*.aab' -print -quit 2>/dev/null || true)
+          if [ -n "$aab" ]; then cp "$aab" artifacts/yomika-arm64-v8a.aab; fi
+          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.ipa' -o -name '*.apk' -o -name '*.aab' \))
+          if [ "${#assets[@]}" -eq 0 ]; then echo 'No release assets found' >&2; exit 1; fi
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag exists; replacing its assets."
+            gh release upload "$tag" --clobber "${assets[@]}"
+          else
+            args=("$tag" --title "Yomika $tag" --generate-notes --target "$GITHUB_SHA")
+            if [ "$draft" = "true" ]; then args+=(--draft); fi
+            gh release create "${args[@]}"
+            gh release upload "$tag" "${assets[@]}"
+          fi

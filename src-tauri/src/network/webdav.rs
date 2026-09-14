@@ -124,6 +124,24 @@ mod tests {
             .to_ascii_lowercase()
             .contains("if-match: etag-new"));
     }
+
+    #[tokio::test]
+    async fn segment_download_gets_the_immutable_file() {
+        let (base_url, requests) = mock_server(vec!["200 OK", "404 Not Found"]).await;
+        let client = WebdavClient::new(&base_url, "user", "password").expect("client");
+        let bytes = client
+            .download_segment("account-a", "device-b", 5, 9)
+            .await
+            .expect("download");
+        assert_eq!(bytes, b"ciphertext");
+        assert!(client
+            .download_segment("account-a", "device-b", 5, 9)
+            .await
+            .is_err());
+        let requests = requests.lock().expect("requests");
+        assert!(requests[0]
+            .starts_with("GET /Yomika/v1/account-a/changes/device-b/5-9.jsonl.enc"));
+    }
 }
 use reqwest::{Client, StatusCode};
 
@@ -254,6 +272,41 @@ impl WebdavClient {
             return Err(WebdavError::Http(moved.status()));
         }
         Ok(final_path)
+    }
+
+    /// Fetches another device's immutable change segment for local merge. The
+    /// file is content-addressed by its name, so a plain GET is enough — no
+    /// verification round trip like the upload's temporary file needs.
+    pub async fn download_segment(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<u8>, WebdavError> {
+        let response = self
+            .request(
+                reqwest::Method::GET,
+                self.endpoint(&format!(
+                    "/Yomika/v1/{account_id}/changes/{device_id}/{start}-{end}.jsonl.enc"
+                ))?,
+            )
+            .send()
+            .await
+            .map_err(|error| WebdavError::Request(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(WebdavError::Http(response.status()));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| WebdavError::Request(error.to_string()))?;
+        if bytes.is_empty() {
+            return Err(WebdavError::Verification(
+                "remote change segment is empty".to_string(),
+            ));
+        }
+        Ok(bytes.to_vec())
     }
 
     pub async fn put_manifest(

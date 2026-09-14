@@ -20,6 +20,10 @@ const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
 const DOWNLOAD_DIRECTORY_KEY: &str = "preferences.download_directory";
 const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
+const CONTINUE_READING_SHOW_FINISHED_KEY: &str = "preferences.continue_reading_show_finished";
+const EH_MY_TAGS_PRIORITY_KEY: &str = "preferences.eh_my_tags_priority";
+const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
+const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -92,16 +96,34 @@ pub struct PreferenceSnapshot {
     pub eh_favorite_delete_sync: bool,
     #[serde(default = "default_true")]
     pub confirm_eh_favorite_delete: bool,
+    /// Whether the home continue-reading rail keeps records read past 95% of
+    /// their pages. Off hides them: there is nothing left to continue.
+    #[serde(default = "default_true")]
+    pub continue_reading_show_finished: bool,
+    /// Prioritise the E-Hentai account's own tag list ("My Tags") on archive
+    /// cards and detail pages, colouring those chips with the account's preset
+    /// colours. Needs a signed-in account and one mytags fetch.
+    #[serde(default)]
+    pub eh_my_tags_priority: bool,
     /// Free-form CSS appended after the design tokens. This is the whole
     /// customisation surface: it superseded a single accent-colour preference,
     /// which could not express the themes people actually want and became one
     /// more thing to keep in step once this existed.
     #[serde(default)]
     pub custom_css: String,
+    /// Compact bottom navigation drawn as a floating capsule that hides on
+    /// scroll-down and returns on scroll-up. Off keeps the full-width bar.
+    #[serde(default)]
+    pub floating_nav: bool,
+    /// Which entries the compact bottom bar shows, in the app's canonical
+    /// order. 档案库 and 设置 are enforced by the UI and re-added here so a
+    /// hand-edited row cannot leave the bar without them.
+    #[serde(default = "default_bottom_nav_items")]
+    pub bottom_nav_items: Vec<String>,
 }
 
 fn default_prefetch_pages() -> u8 {
-    1
+    2
 }
 fn default_true() -> bool {
     true
@@ -117,6 +139,13 @@ fn default_card_style() -> String {
 }
 fn default_upscale_backend() -> String {
     "off".to_string()
+}
+/// The historical five mobile entries.
+fn default_bottom_nav_items() -> Vec<String> {
+    ["home", "library", "history", "watchlist", "settings"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 impl Default for PreferenceSnapshot {
@@ -136,7 +165,11 @@ impl Default for PreferenceSnapshot {
             download_directory: String::new(),
             eh_favorite_delete_sync: false,
             confirm_eh_favorite_delete: true,
+            continue_reading_show_finished: true,
+            eh_my_tags_priority: false,
             custom_css: String::new(),
+            floating_nav: false,
+            bottom_nav_items: default_bottom_nav_items(),
         }
     }
 }
@@ -148,7 +181,9 @@ pub struct LegacyPreferenceImport {
     pub imported_count: u8,
 }
 
-fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
+/// Validates the snapshot and returns it with the bottom-bar entries
+/// normalized (canonical order, deduped, 档案库/设置 pinned).
+fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot, String> {
     if !matches!(value.theme.as_str(), "system" | "light" | "dark")
         || !matches!(value.default_layout.as_str(), "auto" | "single" | "double" | "webtoon")
         || !matches!(value.default_direction.as_str(), "ltr" | "rtl")
@@ -165,10 +200,39 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<(), String> {
         || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
         || value.custom_css.len() > 20_000
+        || value.bottom_nav_items.iter().any(|item| {
+            !matches!(
+                item.as_str(),
+                "home" | "library" | "history" | "watchlist" | "to-read" | "downloads" | "settings"
+            )
+        })
+        || value.bottom_nav_items.len() > 7
     {
         return Err("Invalid preference snapshot".into());
     }
-    Ok(())
+    // The two load-bearing entries survive even a hand-edited settings row.
+    let normalized = normalize_bottom_nav_items(&value.bottom_nav_items);
+    Ok(PreferenceSnapshot {
+        bottom_nav_items: normalized,
+        ..value.clone()
+    })
+}
+
+/// Dedupe, keep the canonical order, and pin 档案库/设置 so the bar can never
+/// lose them regardless of what was stored.
+fn normalize_bottom_nav_items(items: &[String]) -> Vec<String> {
+    let order = ["home", "library", "history", "watchlist", "to-read", "downloads", "settings"];
+    let mut normalized: Vec<String> = order
+        .iter()
+        .filter(|key| items.iter().any(|item| item == *key))
+        .map(|key| (*key).to_string())
+        .collect();
+    for required in ["library", "settings"] {
+        if !normalized.iter().any(|item| item == required) {
+            normalized.push(required.to_string());
+        }
+    }
+    normalized
 }
 
 fn load_value<T: serde::de::DeserializeOwned>(
@@ -223,17 +287,28 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             CONFIRM_EH_FAVORITE_DELETE_KEY,
             defaults.confirm_eh_favorite_delete,
         )?,
+        continue_reading_show_finished: load_value(
+            connection,
+            CONTINUE_READING_SHOW_FINISHED_KEY,
+            defaults.continue_reading_show_finished,
+        )?,
+        eh_my_tags_priority: load_value(
+            connection,
+            EH_MY_TAGS_PRIORITY_KEY,
+            defaults.eh_my_tags_priority,
+        )?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
+        floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
+        bottom_nav_items: load_value(connection, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
     };
-    validate_preferences(&value)?;
-    Ok(value)
+    validate_preferences(&value)
 }
 
 pub fn save_preferences_to(
     connection: &mut Connection,
     value: PreferenceSnapshot,
 ) -> Result<PreferenceSnapshot, String> {
-    validate_preferences(&value)?;
+    let value = validate_preferences(&value)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -285,7 +360,20 @@ pub fn save_preferences_to(
             CONFIRM_EH_FAVORITE_DELETE_KEY,
             serde_json::to_string(&value.confirm_eh_favorite_delete),
         ),
+        (
+            CONTINUE_READING_SHOW_FINISHED_KEY,
+            serde_json::to_string(&value.continue_reading_show_finished),
+        ),
+        (
+            EH_MY_TAGS_PRIORITY_KEY,
+            serde_json::to_string(&value.eh_my_tags_priority),
+        ),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
+        (FLOATING_NAV_KEY, serde_json::to_string(&value.floating_nav)),
+        (
+            BOTTOM_NAV_ITEMS_KEY,
+            serde_json::to_string(&value.bottom_nav_items),
+        ),
     ] {
         transaction
             .execute(
@@ -455,6 +543,15 @@ mod tests {
             download_directory: std::env::temp_dir().to_string_lossy().into_owned(),
             eh_favorite_delete_sync: true,
             confirm_eh_favorite_delete: false,
+            continue_reading_show_finished: false,
+            eh_my_tags_priority: true,
+            floating_nav: true,
+            bottom_nav_items: vec![
+                "home".into(),
+                "library".into(),
+                "to-read".into(),
+                "settings".into(),
+            ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
-import { EhAccountSchema, EhAccountStatusSchema, type EhAccount, type EhAccountStatus, type SaveEhAccountInput } from '../domain/eh';
+import { EhAccountSchema, EhAccountStatusSchema, EhMyTagSchema, type EhAccount, type EhAccountStatus, type EhMyTag, type SaveEhAccountInput } from '../domain/eh';
 
 const EhSearchResultSchema = z.object({
   galleryKey: z.string(),
@@ -65,8 +65,8 @@ export class NativeEhRepository {
   removeFavorite(accountId: string, galleryId: string, token: string): Promise<CommandResult<void>> {
     return invokeCommand('remove_eh_favorite', { accountId, galleryId, token }, VoidResponseSchema);
   }
-  voteComment(accountId: string, galleryId: string, token: string, commentId: string, vote: number): Promise<CommandResult<void>> {
-    return invokeCommand('vote_eh_comment', { accountId, galleryId, token, commentId, vote }, VoidResponseSchema);
+  voteComment(accountId: string, galleryId: string, token: string, commentId: string, vote: number): Promise<CommandResult<number>> {
+    return invokeCommand('vote_eh_comment', { accountId, galleryId, token, commentId, vote }, z.number());
   }
   getComments(accountId: string, galleryId: string, token: string): Promise<CommandResult<z.infer<typeof EhCommentSchema>[]>> {
     return invokeCommand('get_eh_comments', { accountId, galleryId, token }, z.array(EhCommentSchema));
@@ -77,7 +77,21 @@ export class NativeEhRepository {
   checkLoginHealth(accountId: string): Promise<CommandResult<EhAccountStatus>> {
     return invokeCommand('check_eh_login_health', { accountId }, EhAccountStatusSchema);
   }
-  setActiveAccount(accountId: string): Promise<CommandResult<void>> {
-    return invokeCommand('set_active_eh_account', { accountId }, VoidResponseSchema);
+  /** One plain HTTP attempt at the profile page; usually Cloudflare blocks it
+   * and the UI falls back to manual entry. Persists the name on success. */
+  fetchForumUsername(accountId: string): Promise<CommandResult<string | null>> {
+    return invokeCommand('fetch_eh_forum_username', { accountId }, z.string().nullable());
+  }
+  /** 手动设定账户显示名（抓取失败或非网页登录时用户自行填写）。 */
+  setUsernameHint(accountId: string, username: string): Promise<CommandResult<void>> {
+    return invokeCommand('set_eh_username_hint', { accountId, username }, VoidResponseSchema);
+  }
+  /** 拉取并整表替换该账户的「我的标签」（e-hentai.org/mytags）。 */
+  fetchMyTags(accountId: string): Promise<CommandResult<EhMyTag[]>> {
+    return invokeCommand('fetch_eh_my_tags', { accountId }, z.array(EhMyTagSchema));
+  }
+  /** 读取上次拉取缓存的本机「我的标签」。 */
+  listMyTags(accountId: string): Promise<CommandResult<EhMyTag[]>> {
+    return invokeCommand('list_eh_my_tags', { accountId }, z.array(EhMyTagSchema));
   }
 }

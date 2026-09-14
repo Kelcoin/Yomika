@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { EhAccountPanel } from '../../src/components/EhAccountPanel';
 import { ToastProvider } from '../../src/components/Toast';
@@ -11,21 +11,15 @@ describe('EhAccountPanel', () => {
     { id: 'eh-b', label: 'EX Account', host: 'exhentai.org', cookieRef: 'ref-b', isActive: false, status: 'unverified', createdAt: '2026-02-01', updatedAt: '2026-02-01' },
   ];
 
-  it('renders a list of EH accounts with labels and hosts', () => {
+  it('renders a list of EH accounts with hosts and the generic fallback name', () => {
     render(<EhAccountPanel accounts={sampleAccounts} />);
     const items = screen.getAllByRole('listitem');
     expect(items).toHaveLength(2);
-    expect(within(items[0]!).getByText('EH Main')).toBeDefined();
-    expect(within(items[0]!).getByText('正在检测 EXHENTAI 访问权限…')).toBeDefined();
+    // 未记录显示名时默认显示「E 站用户」。
+    expect(within(items[0]!).getByText('E 站用户')).toBeDefined();
+    expect(within(items[0]!).getByText('检测 EX 中…')).toBeDefined();
     expect(within(items[0]!).getByText('正在更新资产…')).toBeDefined();
-    expect(within(items[1]!).getByText('EX Account')).toBeDefined();
-  });
-
-  it('marks the active account', () => {
-    render(<EhAccountPanel accounts={sampleAccounts} />);
-    const items = screen.getAllByRole('listitem');
-    expect(items[0]!.className).toContain('active');
-    expect(items[1]!.className).not.toContain('active');
+    expect(within(items[1]!).getByText('E 站用户')).toBeDefined();
   });
 
   it('does not display verification labels in the account row', () => {
@@ -34,20 +28,11 @@ describe('EhAccountPanel', () => {
     expect(screen.queryByText('未验证')).toBeNull();
   });
 
-  it('calls onSwitch with account id when switch button clicked', async () => {
-    const onSwitch = vi.fn();
-    const user = userEvent.setup();
-    render(<EhAccountPanel accounts={sampleAccounts} onSwitch={onSwitch} />);
-    const switchButton = screen.getByRole('button', { name: /切换到EX Account/ });
-    await user.click(switchButton);
-    expect(onSwitch).toHaveBeenCalledWith('eh-b');
-  });
-
   it('calls onCheckHealth with account id when check button clicked', async () => {
     const onCheckHealth = vi.fn();
     const user = userEvent.setup();
     render(<EhAccountPanel accounts={sampleAccounts} onCheckHealth={onCheckHealth} />);
-    const checkButtons = screen.getAllByRole('button', { name: /检查/ });
+    const checkButtons = screen.getAllByRole('button', { name: '检查登录状态' });
     await user.click(checkButtons[0]!);
     expect(onCheckHealth).toHaveBeenCalledWith('eh-a');
   });
@@ -103,52 +88,90 @@ describe('EhAccountPanel', () => {
     await vi.waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   });
 
-  it('keeps the igneous refresh action available before ExHentai cookie exists', async () => {
+  it('exports the account cookie to the clipboard as a header string', async () => {
     const user = userEvent.setup();
-    const onReadCookie = vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
-    const onCheckHealth = vi.fn(async () => undefined);
-    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={onReadCookie} onCheckHealth={onCheckHealth} />);
-    const surface = screen.getByTestId('eh-account-surface-eh-a');
-    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
-    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
-    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
-    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
-    expect((await screen.findAllByText('未获取')).length).toBeGreaterThan(0);
-    await user.click(screen.getByRole('button', { name: '刷新 igneous' }));
-    expect(onCheckHealth).toHaveBeenCalledWith('eh-a');
-  });
-
-  it('shows every stored cookie in a popup with one copy-all action', async () => {
-    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     const cookie = 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90; sl=dm_2; sk=abc123';
-    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => cookie)} />);
-    const surface = screen.getByTestId('eh-account-surface-eh-a');
-    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
-    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
-    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
-    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
-
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('sl')).toBeInTheDocument();
-    expect(within(dialog).getByText('dm_2')).toBeInTheDocument();
-    expect(within(dialog).getByText('sk')).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: '复制全部 Cookie' })).toBeInTheDocument();
-    expect(within(dialog).queryByRole('button', { name: /复制 ipb_member_id/ })).toBeNull();
+    render(
+      <ToastProvider>
+        <EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => cookie)} />
+      </ToastProvider>,
+    );
+    // 导出没有弹窗：点击即把整段 Cookie 以 header string 格式放进剪贴板。
+    const items = screen.getAllByRole('listitem');
+    await user.click(within(items[0]!).getByRole('button', { name: '导出 Cookie' }));
+    expect(await screen.findByText('Cookie 已复制到剪贴板')).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(cookie);
   });
 
-  it('lists the standard EH cookie fields even before a legacy account has refreshed them', async () => {
+  it('reports a failed cookie export instead of copying nothing', async () => {
     const user = userEvent.setup();
-    render(<EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90')} />);
-    const surface = screen.getByTestId('eh-account-surface-eh-a');
-    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
-    fireEvent.touchMove(surface, { touches: [{ clientX: 120 }] });
-    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 120 }] });
-    await user.click(screen.getByRole('button', { name: '导出EH Main Cookie' }));
+    render(
+      <ToastProvider>
+        <EhAccountPanel accounts={sampleAccounts} onReadCookie={vi.fn(async () => undefined)} />
+      </ToastProvider>,
+    );
+    const items = screen.getAllByRole('listitem');
+    await user.click(within(items[0]!).getByRole('button', { name: '导出 Cookie' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('未能读取 Cookie');
+  });
 
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('nw')).toBeInTheDocument();
-    expect(within(dialog).getByText('datatags')).toBeInTheDocument();
-    expect(within(dialog).getByText('ipb_session_id')).toBeInTheDocument();
-    expect(within(dialog).getByText('hath_perks')).toBeInTheDocument();
+  it('turns the name inline-editable from the edit button and saves on Enter', async () => {
+    const user = userEvent.setup();
+    const onEditUsername = vi.fn(async () => undefined);
+    render(
+      <ToastProvider>
+        <EhAccountPanel accounts={sampleAccounts} onEditUsername={onEditUsername} />
+      </ToastProvider>,
+    );
+    const items = screen.getAllByRole('listitem');
+    // 点铅笔 → 用户名原地变输入框；「E 站用户」回退不带进草稿（应为空）。
+    await user.click(within(items[0]!).getByRole('button', { name: /编辑 / }));
+    const input = await screen.findByRole('textbox', { name: '账户名' });
+    expect(input).toHaveValue('');
+
+    await user.type(input, 'Kelcoin');
+    await user.keyboard('{Enter}');
+    await vi.waitFor(() => expect(onEditUsername).toHaveBeenCalledWith('eh-a', 'Kelcoin'));
+    // 保存后退出编辑态。
+    expect(screen.queryByRole('textbox', { name: '账户名' })).toBeNull();
+  });
+
+  it('cancels inline editing with Escape without saving', async () => {
+    const user = userEvent.setup();
+    const onEditUsername = vi.fn(async () => undefined);
+    const named: EhAccount[] = [{ ...sampleAccounts[0]!, username: 'Kelcoin' }];
+    render(
+      <ToastProvider>
+        <EhAccountPanel accounts={named} onEditUsername={onEditUsername} />
+      </ToastProvider>,
+    );
+    const items = screen.getAllByRole('listitem');
+    await user.click(within(items[0]!).getByRole('button', { name: /编辑 / }));
+    const input = await screen.findByRole('textbox', { name: '账户名' });
+    // 已记录的名字带入草稿。
+    expect(input).toHaveValue('Kelcoin');
+    await user.clear(input);
+    await user.type(input, '被改了');
+    await user.keyboard('{Escape}');
+    expect(onEditUsername).not.toHaveBeenCalled();
+  });
+
+  it('treats an unchanged or empty commit as a cancel', async () => {
+    const user = userEvent.setup();
+    const onEditUsername = vi.fn(async () => undefined);
+    render(
+      <ToastProvider>
+        <EhAccountPanel accounts={sampleAccounts} onEditUsername={onEditUsername} />
+      </ToastProvider>,
+    );
+    const items = screen.getAllByRole('listitem');
+    await user.click(within(items[0]!).getByRole('button', { name: /编辑 / }));
+    const input = await screen.findByRole('textbox', { name: '账户名' });
+    // 空白提交：视为取消，不保存。
+    await user.click(within(items[1]!).getByText('E 站用户'));
+    await user.keyboard('{Enter}');
+    expect(onEditUsername).not.toHaveBeenCalled();
   });
 });

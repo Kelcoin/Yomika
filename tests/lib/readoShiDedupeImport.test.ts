@@ -25,4 +25,14 @@ describe('Readoshi non-duplicate import', () => {
     expect(compareDedupSyncVersion(tombstone, base)).toBeGreaterThan(0);
     expect(mergeDedupSyncRecords([base, tombstone])).toEqual([tombstone]);
   });
+
+  it('reads the worker dedupe KV of normalized a|b pair strings', () => {
+    const report = parseReadoshiNonDuplicateExport(JSON.stringify(['aaa|bbb', 'bbb|aaa', 'a|a', 'x']), 'server-a');
+    // Reversed duplicates collapse into one pair; the surviving orientation
+    // follows the last occurrence, so only compare the halves as a set.
+    expect(report.pairs).toHaveLength(1);
+    expect([report.pairs[0]?.leftArchiveId, report.pairs[0]?.rightArchiveId].sort()).toEqual(['aaa', 'bbb']);
+    expect(report.pairs[0]?.source).toBe('readoshi');
+    expect(report.skipped).toBe(2);
+  });
 });

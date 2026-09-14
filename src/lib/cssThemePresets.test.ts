@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import postcss from 'postcss';
-import { CSS_THEME_PRESETS, upgradeCssThemePreset } from './cssThemePresets';
+import { COLOR_SCHEMES, CSS_THEME_PRESETS, upgradeCssThemePreset } from './cssThemePresets';
 import { CSS_THEME_PRESETS as legacyPresets } from './legacyCssThemePresets';
 
 function luminance(hex: string): number {
@@ -12,7 +12,15 @@ function luminance(hex: string): number {
 describe('preset theme modes', () => {
   it('upgrades saved presets without replacing user edits or clearing the default', () => {
     for (const old of legacyPresets) {
-      expect(upgradeCssThemePreset(old.css)).toBe(CSS_THEME_PRESETS.find((p) => p.id === old.id)!.css);
+      const upgraded = upgradeCssThemePreset(old.css);
+      const current = CSS_THEME_PRESETS.find((preset) => preset.id === old.id);
+      if (current) {
+        // 仍存在的预设：精确升级到新 CSS。
+        expect(upgraded).toBe(current.css);
+      } else {
+        // 已移除的纯配色预设：原样保留，不动用户已保存的数据。
+        expect(upgraded).toBe(old.css);
+      }
       const edited = `${old.css}\n/* user customization */`;
       expect(upgradeCssThemePreset(edited)).toBe(edited);
     }
@@ -20,8 +28,11 @@ describe('preset theme modes', () => {
     for (const current of CSS_THEME_PRESETS) {
       expect(upgradeCssThemePreset(current.css)).toBe(current.css);
     }
+    for (const scheme of COLOR_SCHEMES) {
+      expect(upgradeCssThemePreset(scheme.css)).toBe(scheme.css);
+    }
   });
-  for (const preset of CSS_THEME_PRESETS.filter((p) => p.css)) {
+  for (const preset of [...CSS_THEME_PRESETS, ...COLOR_SCHEMES].filter((p) => p.css)) {
     for (const mode of ['light', 'dark', 'system'] as const) {
       for (const systemDark of [false, true]) {
         it(`${preset.id}: ${mode}, system dark=${systemDark}`, () => {

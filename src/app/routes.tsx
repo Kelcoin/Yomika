@@ -1,10 +1,10 @@
-import { ArrowRight, FolderHeart, RefreshCw, Server } from 'lucide-react';
+import { ArrowRight, Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
 import { LibraryShell } from '../components/LibraryShell';
-import { LibraryWorkspace } from '../components/LibraryWorkspace';
+import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
 import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
 import { SettingsWorkspace } from '../components/SettingsWorkspace';
 import { TaskCenter } from '../components/TaskCenter';
@@ -12,17 +12,22 @@ import { UploadPanel } from '../components/UploadPanel';
 import { EhRouteWorkspace } from '../components/EhRouteWorkspace';
 import { SyncWorkspace } from '../components/SyncWorkspace';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
 import { MetadataEditRoute } from '../components/MetadataEditRoute';
 import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
+import { useArchiveSelection } from '../components/useArchiveSelection';
+import { TextInputDialog } from '../components/TextInputDialog';
 import { findMissingArchives } from '../lib/archiveExistence';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
-import { useCardStyle } from './preferences';
+import { isArchiveFinished } from '../lib/archiveCardPresentation';
+import { useCardStyle, usePreferences } from './preferences';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
+import type { SearchPreset } from '../repositories/nativeLibraryRepository';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
 const workspaces = {
@@ -33,16 +38,22 @@ const workspaces = {
   toRead: ['待看档案', '加入待看的档案会排在这里，读完可以移出。'],
 } as const;
 
-/** Timeline label for a shelf row: the date, plus the time when it was today, so
- * a day's reading reads as a sequence rather than as one repeated date. */
-function formatShelfTime(iso: string): string {
+/** Timeline facts for a shelf row: the day it belongs to (for grouping), a short
+ * day label for the day's first row, and the clock time for the row itself. The
+ * history rail reads as a sequence instead of one repeated date. */
+function formatShelfTimeline(iso: string): ShelfTimelineEntry {
   const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return '';
-  const today = new Date();
-  const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
-  return sameDay
-    ? at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  if (Number.isNaN(at.getTime())) return { date: '', dayLabel: '', time: '' };
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const date = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+  const startOfDay = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const dayDelta = Math.round((startOfDay(new Date()) - startOfDay(at)) / 86_400_000);
+  const dayLabel = dayDelta === 0
+    ? '今天'
+    : dayDelta === 1
+      ? '昨天'
+      : at.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
+  return { date, dayLabel, time: at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) };
 }
 
 const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list: switching tabs and coming back should not
@@ -52,17 +63,16 @@ const HOME_SNAPSHOT_FRESH_MS = 90_000;
 interface HomeSnapshot {
   servers: Awaited<ReturnType<NativeLibraryRepository['listServers']>>;
   history: ReadingHistoryRecord[];
-  watchlist: WatchlistRecord[];
   readingList: WatchlistRecord[];
   archives: ArchiveRecord[];
   randomArchives: ArchiveRecord[];
 }
 
 function HomeWorkspace() {
+  const { preferences } = usePreferences();
   const snapshot = readRouteCache<HomeSnapshot>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS);
   const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>> | undefined>(snapshot?.servers);
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
-  const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [readingList, setReadingList] = useState<WatchlistRecord[]>(snapshot?.readingList ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
   const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>(snapshot?.randomArchives ?? []);
@@ -113,26 +123,22 @@ function HomeWorkspace() {
         setRandomLoading(false);
         return;
       }
-      const [historyResult, watchlistResult, readingListResult] = await Promise.all([
+      const [historyResult, readingListResult] = await Promise.all([
         repository.listHistory(server.scopeId),
-        repository.listWatchlist(server.scopeId),
         repository.listReadingList(server.scopeId),
       ]);
       if (!active) return;
       // Every early exit clears both flags: a rail left on `loading` shimmers
       // forever instead of admitting it has nothing.
       if (!historyResult.ok) { setRecentError(historyResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
-      if (!watchlistResult.ok) { setRecentError(watchlistResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
       if (!readingListResult.ok) { setRecentError(readingListResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
       setHistory(historyResult.value);
-      setWatchlist(watchlistResult.value);
       setReadingList(readingListResult.value);
       // Resolve only the ids the rails can show. The window is wider than the
       // rails so an id the local index has not seen yet gets backfilled by the
       // next one instead of leaving a hole.
       const shelfIds = [...new Set([
         ...historyResult.value.slice(0, 6).map((item) => item.archiveId),
-        ...watchlistResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
         ...readingListResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
       ])];
       const archiveResult = await repository.listArchivesByIds(server.id, shelfIds);
@@ -162,17 +168,22 @@ function HomeWorkspace() {
   });
   const recent = useMemo(() => history.slice(0, 6), [history]);
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
-  const continueReading = useMemo(
-    () => recent.map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)),
-    [archiveById, recent],
-  );
-  /** 收藏夹, which is what `listWatchlist` holds. This rail was labelled 待看档案
-   * while reading from the watchlist, so the home page and the /to-read shelf
-   * disagreed about what 待看 meant. */
-  const favourites = useMemo(
-    () => watchlist.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
-    [archiveById, watchlist],
-  );
+  /** 「继续阅读」的已读完开关：关闭时把进度超过 95% 的记录从 rail 里隐藏，
+   * 其余照旧。历史页面固定显示已读完，不受这个开关影响。 */
+  const continueReading = useMemo(() => {
+    const showFinished = preferences.continueReadingShowFinished;
+    return recent
+      .filter((item) => {
+        if (showFinished) return true;
+        const archive = archiveById.get(item.archiveId);
+        return !(archive && isArchiveFinished(archive.pageCount, item.pageIndex + 1));
+      })
+      .map((item) => archiveById.get(item.archiveId))
+      .filter((item): item is ArchiveRecord => Boolean(item));
+  }, [archiveById, preferences.continueReadingShowFinished, recent]);
+  /** 收藏夹 rail 已移除：watchlist 表里的数据（含从 Readoshi 导入的待看记录）
+   * 曾在首页与 /to-read 书架两边同时出现，语义上互相打架。收藏操作本身不受
+   * 影响，档案详情页与右键菜单照常读写 watchlist。 */
   const toRead = useMemo(
     () => readingList.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
     [archiveById, readingList],
@@ -185,8 +196,8 @@ function HomeWorkspace() {
   // Snapshot for the next visit, so switching tabs and coming back is free.
   useEffect(() => {
     if (!servers) return;
-    writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, watchlist, readingList, archives, randomArchives } satisfies HomeSnapshot);
-  }, [archives, history, randomArchives, readingList, servers, watchlist]);
+    writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, readingList, archives, randomArchives } satisfies HomeSnapshot);
+  }, [archives, history, randomArchives, readingList, servers]);
   return (
     <div className="workspace-home">
       {connectionError ? (
@@ -225,14 +236,15 @@ function HomeWorkspace() {
         </section>
       )}
       {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="待看档案" archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="收藏夹" archives={favourites} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="随机漫游" archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
-      {!recentLoading && !recentError && connected && continueReading.length === 0 && toRead.length === 0 && favourites.length === 0 && (
+      {/* 已读完被隐藏导致的空继续阅读不算「书架是空的」——那只是这个开关的
+          正常结果，页面还剩待看与随机漫游。 */}
+      {!recentLoading && !recentError && connected && continueReading.length === 0 && toRead.length === 0 && (history.length === 0 || preferences.continueReadingShowFinished) && (
         <EmptyState
           icon={FolderHeart}
           title="书架还是空的"
@@ -253,6 +265,9 @@ interface ShelfSnapshot {
   serverId: string;
   scopeId: string;
   query: string;
+  /** The 🔖 Favorites category's ids, cached so a snapshot restore still shows
+   * the server favorites before the next category read. */
+  favoritesIds?: string[];
 }
 
 function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) {
@@ -262,11 +277,18 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  /** The LANraragi 🔖 Favorites category's archive ids. 收藏夹 IS that
+   * category: when it exists the shelf renders it instead of the local
+   * watchlist, which only mirrors what this device hearted. */
+  const [favoritesIds, setFavoritesIds] = useState<string[] | undefined>(snapshot?.favoritesIds);
   const [serverId, setServerId] = useState<string | undefined>(snapshot?.serverId);
   const [scopeId, setScopeId] = useState<string | undefined>(snapshot?.scopeId);
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(!snapshot);
   const [hasServer, setHasServer] = useState(true);
+  /** A pull re-reads the shelf in place: `loading` stays false so the list on
+   * screen is not swapped for skeletons, and this only drives the spinner. */
+  const [pulling, setPulling] = useState(false);
   /** Filters this shelf's own records in the browser. The bar is the library's,
    * the scope is not: a shelf holds a few dozen entries it already has titles
    * for, so there is nothing to ask the server. */
@@ -284,21 +306,30 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   // Removing an entry is here rather than in a toolbar: the multi-select bar that
   // used to do it was the only control on the page, and one card at a time is
   // what a right click already addresses.
+  /** One place that knows what removing entries does to a shelf, for the context
+   * menu and for a whole selection. */
+  const removeShelfArchives = useCallback((archiveIds: string[]) => {
+    const dropped = new Set(archiveIds);
+    setWatchlist((current) => current.filter((item) => !dropped.has(item.archiveId)));
+    setArchives((current) => current.filter((archive) => !dropped.has(archive.archiveId)));
+  }, []);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onMembershipChange: (archiveId, list, next) => {
       if (!next && ((name === 'toRead' && list === 'reading') || (name === 'watchlist' && list === 'favorites'))) {
-        setWatchlist((current) => current.filter((item) => item.archiveId !== archiveId));
-        setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
+        removeShelfArchives([archiveId]);
       }
     },
-    onDeleted: (archiveId) => setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId)),
+    onDeleted: (archiveId) => removeShelfArchives([archiveId]),
   });
   useEffect(() => {
     const handleInvalidation = (event: Event) => {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
       if (!prefix || prefix === 'state:') {
-        setLoading(true);
+        // In-place re-read, same contract as the pull: the list on screen is
+        // the data the user is looking at, so a membership change or a delete
+        // elsewhere refreshes under it instead of swapping it for skeletons.
         setError(undefined);
+        setPulling(true);
         setReloadToken((value) => value + 1);
       }
     };
@@ -327,11 +358,21 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       if (!result.ok) { setError(result.error.message); setLoading(false); return; }
       if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setWatchlist(result.value as WatchlistRecord[]);
-      // This shelf's own ids, not the whole library: the page shows every entry
-      // it holds, so the id list is already the bound.
-      const shelfIds = name === 'history'
+      // 收藏夹 reads the LANraragi 🔖 Favorites category; the local table only
+      // stands in when the category does not exist (or the read failed).
+      let shelfIds = name === 'history'
         ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
         : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
+      if (name === 'watchlist') {
+        const categories = await repository.listCategories(server.id);
+        if (active && categories.ok) {
+          const favorites = categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME);
+          if (favorites) {
+            setFavoritesIds(favorites.archives);
+            shelfIds = favorites.archives;
+          }
+        }
+      }
       const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
@@ -342,14 +383,18 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
       if (!active || missing.size === 0) return;
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
-    })();
+    })().finally(() => { if (active) setPulling(false); });
     return () => { active = false; };
   }, [name, reloadToken, snapshot]);
   useEffect(() => {
     if (loading || error || !serverId || !scopeId) return;
-    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query } satisfies ShelfSnapshot);
-  }, [archives, cacheKey, error, history, loading, query, scopeId, serverId, watchlist]);
+    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds ? { favoritesIds } : {}) } satisfies ShelfSnapshot);
+  }, [archives, cacheKey, error, favoritesIds, history, loading, name, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
+  // Saved searches work on every shelf, not just the library.
+  const [presets, setPresets] = useState<SearchPreset[]>([]);
+  const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  const [presetEditTarget, setPresetEditTarget] = useState<SearchPreset>();
   const sortedHistory = useMemo(
     () => [...history].sort((left, right) => right.visitedAt.localeCompare(left.visitedAt)),
     [history],
@@ -364,14 +409,32 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   );
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   const shelfArchives = useMemo(() => {
-    const ids = name === 'history' ? sortedHistory.map((item) => item.archiveId) : sortedWatchlist.map((item) => item.archiveId);
+    // 收藏夹 renders the server category's ids in the server's own order when
+    // they are known; otherwise it falls back to the local watchlist.
+    const ids = name === 'history'
+      ? sortedHistory.map((item) => item.archiveId)
+      : name === 'watchlist' && favoritesIds
+        ? favoritesIds
+        : sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
-  }, [archiveById, name, sortedHistory, sortedWatchlist]);
+  }, [archiveById, favoritesIds, name, sortedHistory, sortedWatchlist]);
   const visibleArchives = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return shelfArchives;
     return shelfArchives.filter((archive) => archive.title.toLocaleLowerCase().includes(needle));
   }, [query, shelfArchives]);
+  /** The shelf a selection acts on: 待看 and 收藏夹 hold one membership each, so
+   * their bulk action takes entries off the shelf; the history has none, so it
+   * offers the favourite instead. */
+  const selection = useArchiveSelection({
+    archives: visibleArchives,
+    scopeId,
+    serverId,
+    membership: name === 'history'
+      ? undefined
+      : { list: name === 'toRead' ? 'reading' : 'favorites', label: name === 'toRead' ? '待看' : '收藏夹', present: true },
+    onRemoved: removeShelfArchives,
+  });
   const progressByArchiveId = useMemo(
     () => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])),
     [history],
@@ -380,9 +443,29 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
    * the list. Only the history has a meaningful time per row. */
   const timelineByArchiveId = useMemo(() => (
     name === 'history'
-      ? new Map(history.map((item) => [item.archiveId, formatShelfTime(item.visitedAt)]))
+      ? new Map<string, ShelfTimelineEntry>(history.map((item) => [item.archiveId, formatShelfTimeline(item.visitedAt)]))
       : undefined
   ), [history, name]);
+  /** 已读完（进度超过 95%）的档案 id，供多选的「全选已读完」；只对历史有意义，
+   * 其它书架没有进度可言。 */
+  const finishedArchiveIds = useMemo(() => {
+    if (name !== 'history') return undefined;
+    const ids = new Set<string>();
+    for (const item of history) {
+      const archive = archiveById.get(item.archiveId);
+      if (archive && isArchiveFinished(archive.pageCount, item.pageIndex + 1)) ids.add(item.archiveId);
+    }
+    return ids;
+  }, [archiveById, history, name]);
+  useEffect(() => {
+    if (!scopeId) return undefined;
+    let active = true;
+    void repository.listSearchPresets(scopeId).then((result) => {
+      if (active && result.ok) setPresets(result.value);
+    });
+    return () => { active = false; };
+  }, [scopeId]);
+
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!scopeId || !serverId) return undefined;
     try {
@@ -402,17 +485,24 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
           above an empty state was most of what the page showed. No control bar
           either — the order is fixed and the card style follows the library. */}
       {loading && (
-        <LibraryWorkspace
-          archives={[]}
-          listLoading
-          showDetail={false}
-          heading={null}
-          showToolbar={false}
-          cardStyle={shelfCardStyle}
-          searchQuery={query}
-          onSearchQueryChange={setQuery}
-          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
-        />
+        /* Same shell as the library route: the `.library-shell-list` panel is
+           what carries the 16px side padding, so without it the shelf's cards
+           sat nearly flush against the sidebar. */
+        <div className="library-shell">
+          <section className="library-shell-list">
+            <LibraryWorkspace
+              archives={[]}
+              listLoading
+              showDetail={false}
+              heading={null}
+              showToolbar={false}
+              cardStyle={shelfCardStyle}
+              searchQuery={query}
+              onSearchQueryChange={setQuery}
+              searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+            />
+          </section>
+        </div>
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
       {shelfMessage && <p className="server-list-message" role="status">{shelfMessage}</p>}
@@ -429,24 +519,77 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       )}
       {!loading && !error && hasServer && shelfArchives.length > 0 && (
         // Same list and card system as the library, and the same search bar, so
-        // the only difference is what it searches.
-        <LibraryWorkspace
-          archives={visibleArchives}
-          heading={null}
-          showToolbar={false}
-          showDetail={false}
-          cardStyle={shelfCardStyle}
-          {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
-          searchQuery={query}
-          onSearchQueryChange={setQuery}
-          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
-          readingProgressByArchiveId={progressByArchiveId}
-          onArchiveContextMenu={openContextMenu}
-          {...(timelineByArchiveId ? { timelineByArchiveId } : {})}
-          {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
-        />
+        // the only difference is what it searches — including the same
+        // `.library-shell-list` panel that sets the cards' side padding.
+        <div className="library-shell">
+          <section className="library-shell-list">
+            <LibraryWorkspace
+              archives={visibleArchives}
+              heading={null}
+              showToolbar={false}
+              showDetail={false}
+              cardStyle={shelfCardStyle}
+              {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
+              searchQuery={query}
+              onSearchQueryChange={setQuery}
+              searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+              readingProgressByArchiveId={progressByArchiveId}
+              onArchiveContextMenu={openContextMenu}
+              presets={presets}
+              onApplyPreset={(preset) => setQuery(preset.query)}
+              onSavePreset={() => { setPresetEditTarget(undefined); setPresetDialogOpen(true); }}
+              onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
+              onDeletePreset={(preset) => {
+                if (!scopeId) return;
+                void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
+                  if (result.ok) setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
+                });
+              }}
+              {...(timelineByArchiveId ? { timelineByArchiveId } : {})}
+              {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
+              /* Pulling a shelf re-reads the shelf, in place — same gesture, same
+                 disc, as the library. */
+              refreshing={pulling}
+              onRefresh={() => { setPulling(true); setReloadToken((value) => value + 1); }}
+              {...selection.props}
+              selectionActions={selection.actions}
+              {...(finishedArchiveIds && selection.props.onSelectionChange ? {
+                onSelectAllFinished: () => selection.props.onSelectionChange?.(
+                  new Set(visibleArchives.filter((archive) => finishedArchiveIds.has(archive.archiveId)).map((archive) => archive.archiveId)),
+                ),
+                finishedSelectableCount: visibleArchives.reduce((count, archive) => count + (finishedArchiveIds.has(archive.archiveId) ? 1 : 0), 0),
+              } : {})}
+            />
+          </section>
+        </div>
       )}
       {contextMenu}
+      {selection.dialogs}
+      <TextInputDialog
+        open={presetDialogOpen}
+        onOpenChange={setPresetDialogOpen}
+        title={presetEditTarget ? '重命名预设' : '存为预设'}
+        description={presetEditTarget ? '只改名字，搜索条件保持不变。' : `保存当前的${title}搜索条件，之后一键恢复。`}
+        label="预设名称"
+        confirmLabel={presetEditTarget ? '保存名称' : '保存预设'}
+        validate={(value) => (value.trim() ? undefined : '请填写预设名称')}
+        onConfirm={(value) => {
+          if (!scopeId) return;
+          void repository.saveSearchPreset({
+            scopeId,
+            presetId: presetEditTarget?.presetId ?? `preset-${Date.now()}`,
+            name: value.trim(),
+            query: presetEditTarget?.query ?? query,
+            sortBy: 'added',
+            sortOrder: 'desc',
+            categoryId: null,
+          }).then((result) => {
+            if (!result.ok) return;
+            setPresetEditTarget(undefined);
+            setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
+          });
+        }}
+      />
     </div>
   );
 }
@@ -478,7 +621,15 @@ export function WorkspaceRoutes() {
   const libraryArchiveId = routeKey === 'library' ? pathname.match(/^\/library\/([^/]+)$/)?.[1] : undefined;
   return (
     <>
-      {isMounted('home') && <section className="route-cache-panel" hidden={routeKey !== 'home'}><HomeWorkspace /></section>}
+      {/* 流式路由的面板必须随内容生长（is-flow）：height:100% 会把面板钉在
+          滚动容器高度，溢出穿过 overflow:visible 中间层时 scrollHeight 丢尾，
+          最后一条 rail 永远滚不出视口。is-flow 只用于首页：它的 workspace 自己
+          是滚动容器。档案库与三个书架走 is-library-workspace（桌面端
+          overflow:hidden、页面不滚动），面板保持 height:100%，由面板内的
+          .archive-list（data-scroll-region）自己滚动——面板一旦 height:auto，
+          .archive-list 的百分比链就断了，桌面端没有任何滚动容器。≤900 时媒体
+          块统一放开面板高度，改为页面滚动。 */}
+      {isMounted('home') && <section className="route-cache-panel is-flow" hidden={routeKey !== 'home'}><HomeWorkspace /></section>}
       {isMounted('library') && <section className="route-cache-panel" hidden={routeKey !== 'library'}><LibraryShell archiveId={libraryArchiveId} /></section>}
       {isMounted('history') && <section className="route-cache-panel" hidden={routeKey !== 'history'}><StateWorkspace name="history" /></section>}
       {isMounted('watchlist') && <section className="route-cache-panel" hidden={routeKey !== 'watchlist'}><StateWorkspace name="watchlist" /></section>}

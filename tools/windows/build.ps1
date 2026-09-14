@@ -46,6 +46,15 @@ try {
         & $npm run build
         if ($LASTEXITCODE -ne 0) { throw "Frontend build failed with exit code $LASTEXITCODE." }
     }
+    # tauri-build embeds the frontend assets during build.rs; cargo's incremental
+    # cache does NOT rerun it when only `dist/` changed, so a stale asset snapshot
+    # used to ship in otherwise fresh exes (rebuilding looked successful but the
+    # embedded frontend lagged behind). Touching the config forces build.rs to
+    # rerun and re-embed whatever `dist/` currently holds.
+    $tauriConfig = Join-Path $repoRoot "src-tauri\tauri.conf.json"
+    if (Test-Path -LiteralPath $tauriConfig -PathType Leaf) {
+        (Get-Item -LiteralPath $tauriConfig -Force).LastWriteTime = Get-Date
+    }
     $tauriArgs = @("run", "tauri", "build", "--", "--ci")
     if (-not $Release) {
         $tauriArgs += "--debug"

@@ -1,4 +1,4 @@
-import { CircleDot, Database, ListTodo, RefreshCw } from 'lucide-react';
+import { CircleDot, Database, ListTodo, LibraryBig, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -22,6 +22,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function StatusBar() {
+  const [archiveTotal, setArchiveTotal] = useState<number>();
   const [serverName, setServerName] = useState<string>();
   const [serverConnection, setServerConnection] = useState<'none' | 'online' | 'offline'>('none');
   const [taskCount, setTaskCount] = useState(0);
@@ -51,6 +52,15 @@ export function StatusBar() {
         }
         if (tasks?.ok) setTaskCount(tasks.value.length);
         if (syncAccounts?.ok) setSyncConfigured(syncAccounts.value.length > 0);
+        // The archive total comes from the local mirror's own index — one SQL
+        // count, no LANraragi page request. It used to be published by whichever
+        // LibraryWorkspace rendered last: the watchlist shelf (five rows)
+        // overwrote the library's ten-thousand with its own size.
+        if (configuredServer) {
+          void repository.listArchivesPage(configuredServer.id, 0, 1).then((page) => {
+            if (active && page.ok) setArchiveTotal(page.value.total);
+          }).catch(() => {});
+        }
       });
     };
     refresh();
@@ -89,9 +99,21 @@ export function StatusBar() {
     { label: '缓存状态', icon: Database, name: '缓存', value: formatBytes(cacheBytes ?? 0), tone: cacheBytes ? 'active' : 'muted' },
   ] as const;
 
+  // Not gated on the library route: the count belongs with the server it was
+  // read from, the same as tasks and cache.
+  const showArchiveTotal = archiveTotal !== undefined;
+  const items = statuses.flatMap((status) => {
+    const entries: Array<{ label: string; icon: typeof CircleDot; name: string; value: string; tone: string }> = [{ ...status }];
+    // The archive count sits beside the server it was read from.
+    if (status.label === '连接状态' && showArchiveTotal) {
+      entries.push({ label: '档案数量', icon: LibraryBig, name: '档案', value: `${archiveTotal} 项`, tone: 'muted' });
+    }
+    return entries;
+  });
+
   return (
     <footer className="status-bar" aria-label="系统状态">
-      {statuses.map(({ label, icon: Icon, name, value, tone }) => (
+      {items.map(({ label, icon: Icon, name, value, tone }) => (
         <div className={`status-item status-${tone}`} role="status" aria-label={label} key={label}>
           <Icon aria-hidden="true" />
           <span>{name}</span>

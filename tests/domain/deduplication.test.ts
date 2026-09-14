@@ -109,7 +109,7 @@ describe('deduplication domain', () => {
     expect(normalizeDuplicateSelection([[{ arcid: '', id: 'B' }, { arcid: 'C' }]], ['B'])).toEqual(['B']);
   });
 
-  it('chooses deletion candidates using the Readoshi quality ordering', () => {
+  it('chooses deletion candidates using the predefined quality ordering', () => {
     expect(selectDuplicateDeletionIds([
       { arcid: 'no-chinese', tags: '', size: 100 },
       { arcid: 'chinese-rough', tags: 'language:chinese, other:rough translation', size: 1 },

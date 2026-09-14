@@ -15,13 +15,8 @@ use cache::{
     cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats,
     cache_store_image,
 };
-use commands::eh::{
-    capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, get_eh_comments,
-    list_eh_accounts, login_eh_account, open_eh_login_window, post_eh_comment,
-    read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account,
-    search_eh_galleries, set_active_eh_account, vote_eh_comment,
-};
-use commands::legacy::import_legacy_export;
+use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
+use commands::legacy::{import_legacy_export, import_worker_export};
 use commands::library::{
     add_archive_to_category, check_server_status, create_task, delete_archive,
     delete_search_preset, download_archive, download_url, list_archives, list_archives_by_ids,
@@ -29,12 +24,13 @@ use commands::library::{
     list_reading_list, list_search_presets, list_servers, list_tasks, list_watchlist,
     load_archive_metadata, load_archive_page_thumbnail, load_archive_thumbnail,
     load_reader_manifest, load_reader_page, load_reading_progress, probe_new_archives,
-    refresh_archives, replace_archives, retry_task, save_reading_progress, save_search_preset,
-    save_server, search_archives_page, search_random_archives, set_reading_list, set_watchlist,
-    update_archive_metadata, update_task, upload_archive, use_metadata_plugin,
-    verify_archives_exist,
+    read_server_api_key, refresh_archives, remove_archive_from_category, replace_archives,
+    retry_task, save_reading_progress, save_search_preset, save_server, search_archives_page,
+    search_random_archives,
+    set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
+    use_metadata_plugin, verify_archives_exist,
 };
-use commands::platform::{open_external_url, platform_capabilities};
+use commands::platform::{open_external_url, platform_capabilities, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, build_sync_segment, claim_sync_journal, create_sync_key,
     decrypt_sync_manifest, encrypt_sync_manifest, list_sync_journal, list_webdav_accounts,
@@ -43,7 +39,8 @@ use commands::sync::{
 use db::Database;
 use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact,
-    dedup_import_readoshi, dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan,
+    dedup_import_readoshi, dedup_list_non_duplicates, dedup_load_result, dedup_remove_non_duplicate,
+    dedup_resume_scan,
     dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan,
 };
 use inference::{
@@ -78,6 +75,9 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
             let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+            // Windows draws its own themed title bar (TitleBar.tsx); other
+            // platforms keep their native window chrome.
+            let builder = builder.decorations(cfg!(not(target_os = "windows")));
             #[cfg(target_os = "windows")]
             let builder =
                 builder.data_directory(data_paths::data_dir(app.handle())?.join("webview"));
@@ -87,6 +87,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             platform_capabilities,
             open_external_url,
+            write_clipboard_text,
             load_preferences,
             save_preferences,
             import_legacy_preferences,
@@ -99,6 +100,7 @@ pub fn run() {
             list_servers,
             check_server_status,
             save_server,
+            read_server_api_key,
             replace_archives,
             refresh_archives,
             probe_new_archives,
@@ -123,6 +125,7 @@ pub fn run() {
             download_url,
             list_categories,
             add_archive_to_category,
+            remove_archive_from_category,
             update_archive_metadata,
             list_metadata_plugins,
             use_metadata_plugin,
@@ -189,7 +192,10 @@ pub fn run() {
             get_eh_comments,
             post_eh_comment,
             check_eh_login_health,
-            set_active_eh_account,
+            fetch_eh_forum_username,
+            set_eh_username_hint,
+            fetch_eh_my_tags,
+            list_eh_my_tags,
             dedup_check_file,
             dedup_save_feature,
             dedup_find_exact,
@@ -203,7 +209,9 @@ pub fn run() {
             dedup_remove_non_duplicate,
             dedup_delete_selected,
             dedup_import_readoshi,
-            import_legacy_export
+            dedup_list_non_duplicates,
+            import_legacy_export,
+            import_worker_export
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yomika");

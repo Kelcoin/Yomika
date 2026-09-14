@@ -211,8 +211,8 @@ pub fn save_eh_account_record(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     };
-    // The cookie has already passed the same structural validation used by
-    // JHenTai (member id + pass hash). A network health probe is deliberately
+    // The cookie has already passed the same structural validation as a login
+    // (member id + pass hash). A network health probe is deliberately
     // not part of saving: Cloudflare can reject that probe while the browser
     // session itself is valid.
     let result = transaction.execute("INSERT INTO eh_accounts (id,label,host,username_hint,cookie_ref,status) VALUES (?1,?2,?3,?4,?5,'verified') ON CONFLICT(id) DO UPDATE SET label=excluded.label,host=excluded.host,username_hint=excluded.username_hint,cookie_ref=excluded.cookie_ref,is_active=1,status='verified',updated_at=CURRENT_TIMESTAMP", params![input.id, input.label.trim(), input.host, input.username_hint, cookie_ref]);
@@ -382,10 +382,16 @@ fn build_search_url(
     Ok(url)
 }
 
+/// The user agent every E-Hentai HTTP client and both webview windows (login,
+/// username probe) present. Cloudflare binds a solved clearance cookie to the
+/// agent it was issued for, so one shared value lets a clearance solved inside
+/// either window replay from the plain HTTP clients.
+const EH_CLIENT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
 fn eh_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .user_agent(EH_CLIENT_UA)
         .build()
         .map_err(|error| error.to_string())
 }
@@ -444,7 +450,7 @@ fn cookie_header_from_all_pairs<'a>(
     })
 }
 
-/// JHenTai's login state is based on the two authentication cookies, not on a
+/// The login state is based on the two authentication cookies, not on a
 /// page's wording. Keep the same structural check here so a Cloudflare page
 /// cannot turn a valid browser session into a false negative.
 fn has_valid_authentication_cookie(cookie: &str) -> bool {
@@ -477,7 +483,7 @@ fn cookie_value(cookie: &str, wanted: &str) -> Option<String> {
 
 /// ExHentai issues `igneous` from the EH authentication pair. Sending an old
 /// `igneous` makes it answer with `mystery`, so the refresh request deliberately
-/// omits every optional cookie, matching JHenTai's refresh flow.
+/// omits every optional cookie, matching the site's own refresh flow.
 fn eh_auth_cookie_for_ex_probe(cookie: &str) -> String {
     let member_id = cookie_value(cookie, "ipb_member_id").unwrap_or_default();
     let pass_hash = cookie_value(cookie, "ipb_pass_hash").unwrap_or_default();
@@ -747,7 +753,7 @@ async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<Eh
 // A Cloudflare challenge is a browser check. No credential makes a reqwest POST
 // pass it, so `login_eh_account` had nothing to offer but "try again later" and
 // the only way in was pasting cookies copied out of another browser by hand.
-// JHenTai's answer is to show E-Hentai's own page, let the person clear the
+// The answer is to show E-Hentai's own page, let the person clear the
 // challenge and sign in there, and then read the cookies out of the webview —
 // which is what these three commands are.
 
@@ -781,7 +787,10 @@ pub async fn open_eh_login_window(app: tauri::AppHandle) -> Result<CommandResult
         tauri::WebviewUrl::External(url),
     )
     .title("登录 E-Hentai")
-    .inner_size(980.0, 780.0);
+    .inner_size(980.0, 780.0)
+    // Same agent as the username probe and the HTTP replay clients: a
+    // clearance solved in here is bound to this agent and stays replayable.
+    .user_agent(EH_CLIENT_UA);
     // Keep this store across login attempts so a solved Cloudflare challenge
     // remains available, but isolate it from the application's own WebView
     // profile. Sharing `data/webview` made unrelated navigation and stale
@@ -1079,19 +1088,43 @@ pub async fn remove_eh_favorite(
 
 // ── vote_eh_comment ───────────────────────────────────────────────────────
 
-fn vote_eh_comment_form(
-    gallery_id: &str,
-    token: &str,
-    comment_id: &str,
-    vote: i32,
-) -> [(String, String); 5] {
-    [
-        ("gid".to_string(), gallery_id.to_string()),
-        ("t".to_string(), token.to_string()),
-        ("act".to_string(), "votecomment".to_string()),
-        ("comment_id".to_string(), comment_id.to_string()),
-        ("comment_vote".to_string(), vote.to_string()),
-    ]
+/// Comment votes go through the api.php JSON endpoint, not
+/// the gallerypopups.php form — the form page needs a browser context and the
+/// vote silently did nothing without one. Both requests need the `apikey`
+/// embedded in the gallery page and the member id carried by the cookie.
+fn api_endpoint_for_host(host: &str) -> &'static str {
+    if host.eq_ignore_ascii_case("exhentai.org") {
+        "https://exhentai.org/api.php"
+    } else {
+        "https://api.e-hentai.org/api.php"
+    }
+}
+
+fn apikey_from_page(body: &str) -> Option<&str> {
+    let start = body.find(r#"var apikey = ""#)? + r#"var apikey = ""#.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    let key = &rest[..end];
+    (!key.is_empty()).then_some(key)
+}
+
+fn apiuid_from_cookie(cookie: &str) -> Option<&str> {
+    for part in cookie.split(';') {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("ipb_member_id=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CommentVoteResponse {
+    #[serde(default)]
+    comment_score: Option<i32>,
 }
 
 async fn vote_eh_comment_request(
@@ -1101,22 +1134,69 @@ async fn vote_eh_comment_request(
     token: &str,
     comment_id: &str,
     vote: i32,
-) -> CommandResult<()> {
-    let url = format!("https://{host}/gallerypopups.php");
+) -> CommandResult<i32> {
+    // The apikey lives in the gallery page itself, so the vote is: fetch the
+    // page, read the key, then call the JSON API with it and the member id.
     let client = match eh_http_client() {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
     };
-    let form = vote_eh_comment_form(gallery_id, token, comment_id, vote);
-    let (status, body) =
-        match read_http_response(client.post(url).header("Cookie", cookie).form(&form)).await {
-            Ok(value) => value,
-            Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
-        };
+    let page_url = format!("https://{host}/g/{gallery_id}/{token}/");
+    let (page_status, page_body) = match read_http_response(client.get(&page_url).header("Cookie", cookie)).await {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
+    };
+    if let Some((code, message, retryable)) = classify_eh_status(page_status, &page_body) {
+        return CommandResult::failure(code, message, retryable);
+    }
+    let Some(apikey) = apikey_from_page(&page_body) else {
+        return CommandResult::failure(
+            "EH_UNAVAILABLE",
+            "Could not find the vote key on the gallery page",
+            true,
+        );
+    };
+    let Some(apiuid) = apiuid_from_cookie(cookie) else {
+        return CommandResult::failure(
+            "EH_UNAVAILABLE",
+            "The account cookie carries no member id; sign in again",
+            false,
+        );
+    };
+
+    let payload = serde_json::json!({
+        "apikey": apikey,
+        "apiuid": apiuid.parse::<i64>().unwrap_or(0),
+        "gid": gallery_id.parse::<i64>().unwrap_or(0),
+        "method": "votecomment",
+        "token": token,
+        "comment_id": comment_id.parse::<i64>().unwrap_or(0),
+        "comment_vote": vote,
+    });
+    let (status, body) = match read_http_response(
+        client
+            .post(api_endpoint_for_host(host))
+            .header("Cookie", cookie)
+            .json(&payload),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
+    };
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    CommandResult::success(())
+    match serde_json::from_str::<CommentVoteResponse>(&body) {
+        Ok(response) if response.comment_score.is_some() => {
+            CommandResult::success(response.comment_score.unwrap_or_default())
+        }
+        _ => CommandResult::failure(
+            "EH_UNAVAILABLE",
+            "The vote was not accepted; the comment score did not change",
+            true,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1128,7 +1208,7 @@ async fn vote_eh_comment_impl(
     token: &str,
     comment_id: &str,
     vote: i32,
-) -> CommandResult<()> {
+) -> CommandResult<i32> {
     if !gallery_id.chars().all(|c| c.is_ascii_digit())
         || !token.chars().all(|c| c.is_ascii_hexdigit())
         || !comment_id.chars().all(|c| c.is_ascii_digit())
@@ -1151,7 +1231,7 @@ pub async fn vote_eh_comment(
     comment_id: String,
     vote: i32,
     database: State<'_, Database>,
-) -> Result<CommandResult<()>, String> {
+) -> Result<CommandResult<i32>, String> {
     if !gallery_id.chars().all(|c| c.is_ascii_digit())
         || !token.chars().all(|c| c.is_ascii_hexdigit())
         || !comment_id.chars().all(|c| c.is_ascii_digit())
@@ -1302,25 +1382,69 @@ fn parse_forum_username(html: &str) -> Option<String> {
     None
 }
 
+/// JHenTai 的 exchangePage2Assets 语义：`#buyform`/`#sellform` 各自所在
+/// `<div>` 的**下一个兄弟元素**的文本里带当前市场的 "Available: X Credits /
+/// X kGP"——表单内部的 "GP"/"Credits" 字样和输入框默认值不是余额，必须
+/// 跳过（这正是旧实现抓错 GP 的原因）。
+fn exchange_segment_after_form(html: &str, form_marker: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let Some(form_start) = lower.find(&form_marker.to_ascii_lowercase()) else {
+        return String::new();
+    };
+    let Some(form_end) = lower[form_start..].find("</form>").map(|offset| form_start + offset) else {
+        return String::new();
+    };
+    // form 所在 div 的收口（</form> 后第一个 </div>），其后即兄弟元素。
+    let Some(parent_end) = lower[form_end..].find("</div>").map(|offset| form_end + offset) else {
+        return String::new();
+    };
+    let end = (parent_end + 400).min(html.len());
+    let end = (form_end..=end)
+        .rev()
+        .find(|index| html.is_char_boundary(*index))
+        .unwrap_or(form_end);
+    decode_html_text(&strip_tags(&html[parent_end..end]))
+}
+
+/// JHenTai 的正则 `([\d,k ]+)LABEL`：标签前按数字/逗号/k/空格回扫的金额串。
+fn jhentai_amount_before_label(text: &str, label: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let Some(label_start) = lower.find(&label.to_ascii_lowercase()) else {
+        return String::new();
+    };
+    let bytes = text.as_bytes();
+    let mut start = label_start;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_digit() || byte == b',' || byte == b'k' || byte == b' ' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    text[start..label_start].trim().to_string()
+}
+
 fn parse_exchange_assets(html: &str) -> EhAccountAssets {
     let plain = decode_html_text(&strip_tags(html));
-    let credits_text = text_after_marker(html, "id=\"buyform\"", 1400);
-    let credits_text = if credits_text.is_empty() {
-        text_after_marker(html, "id='buyform'", 1400)
+    // 表单内部（sellform 的 "Sell 5000 GP" 按钮、输入框默认值等）不是余额；
+    // 取 form 结束后兄弟元素里的市场 "Available" 行，与 JHenTai 同源。
+    let credit_desc = exchange_segment_after_form(html, "id=\"buyform\"");
+    let credit_desc = if credit_desc.is_empty() {
+        exchange_segment_after_form(html, "id='buyform'")
     } else {
-        credits_text
+        credit_desc
     };
-    let gp_text = text_after_marker(html, "id=\"sellform\"", 1400);
-    let gp_text = if gp_text.is_empty() {
-        text_after_marker(html, "id='sellform'", 1400)
+    let gp_desc = exchange_segment_after_form(html, "id=\"sellform\"");
+    let gp_desc = if gp_desc.is_empty() {
+        exchange_segment_after_form(html, "id='sellform'")
     } else {
-        gp_text
+        gp_desc
     };
-    let gp = amount_before_label(&gp_text, "GP");
-    let credits = amount_before_label(&credits_text, "Credits");
-    EhAccountAssets {
+    let credits = jhentai_amount_before_label(&credit_desc, "Credits");
+    let gp = jhentai_amount_before_label(&gp_desc, "GP");    EhAccountAssets {
         gp: if gp.is_empty() {
-            amount_near_label(&plain, "GP")
+            amount_near_label(&plain, "kGP")
         } else {
             gp
         },
@@ -1333,7 +1457,27 @@ fn parse_exchange_assets(html: &str) -> EhAccountAssets {
     }
 }
 
+/// JHenTai 的 hathperks 语义：首个 `.stuffbox` 的第 4 个 `<p>` 携带
+/// "You currently have X Hath."。
 fn parse_hath_assets(html: &str) -> String {
+    let stuffbox_index = html.to_ascii_lowercase().find("class=\"stuffbox\"");
+    if let Some(stuffbox_start) = stuffbox_index {
+        let segment = &html[stuffbox_start..];
+        let p_positions: Vec<usize> = segment
+            .match_indices("<p")
+            .take(4)
+            .map(|(index, _)| index)
+            .collect();
+        if let Some(&fourth) = p_positions.get(3) {
+            let fourth_text = decode_html_text(&strip_tags(&segment[fourth..]));
+            if fourth_text.to_ascii_lowercase().contains("you currently have") {
+                let value = amount_before_label(&fourth_text, "Hath");
+                if !value.is_empty() {
+                    return value;
+                }
+            }
+        }
+    }
     let lower = html.to_ascii_lowercase();
     if let Some(start) = lower.find("you currently have") {
         let value = amount_before_label(&decode_html_text(&strip_tags(&html[start..])), "Hath");
@@ -1383,7 +1527,7 @@ async fn probe_exhentai(cookie: &str) -> (Option<bool>, Option<String>) {
     let auth_cookie = eh_auth_cookie_for_ex_probe(cookie);
     let probe_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .user_agent(EH_CLIENT_UA)
         .redirect(reqwest::redirect::Policy::none())
         .build()
     {
@@ -1457,7 +1601,7 @@ async fn check_eh_login_health_request(
     // intentionally treats phrases such as "not logged in" as an error for
     // gallery/search requests, but those phrases also occur in navigation,
     // help text, and Cloudflare interstitials. With a structurally valid
-    // JHenTai cookie only an actual 401 or an unmistakable login page can
+    // structurally valid cookie only an actual 401 or an unmistakable login page can
     // disprove the session; every other response keeps the account verified.
     if let Some((code, message, retryable)) = classify_eh_login_health(status, &body) {
         return (CommandResult::failure(code, message, retryable), None);
@@ -1551,13 +1695,127 @@ fn div_inner_at(value: &str, start: usize) -> Option<(&str, usize)> {
     None
 }
 
-fn comment_field<'a>(chunk: &'a str, class_name: &str) -> Option<&'a str> {
-    let marker = format!("class=\"{class_name}\"");
-    let start = chunk.find(&marker)?;
-    let div_start = chunk[..start].rfind("<div")?;
-    div_inner_at(chunk, div_start).map(|(inner, _)| inner)
+fn open_tag_has_class(open_tag: &str, class_name: &str) -> bool {
+    let Some(start) = open_tag.find("class=\"") else {
+        return false;
+    };
+    let rest = &open_tag[start + "class=\"".len()..];
+    let Some(end) = rest.find('"') else {
+        return false;
+    };
+    rest[..end].split_whitespace().any(|token| token == class_name)
 }
 
+/// The first `<div>` or `<span>` in the chunk whose class attribute carries the
+/// token, and its inner HTML. E-Hentai renders these header fields as either
+/// element flavour (and the score block is `class="c5 nosel"`, which the old
+/// exact-string marker never matched), so the lookup matches the class token on
+/// both. Spans end at their first close — their content here never nests one.
+fn comment_field<'a>(chunk: &'a str, class_name: &str) -> Option<&'a str> {
+    let mut cursor = 0;
+    while let Some(offset) = chunk[cursor..].find('<') {
+        let tag_start = cursor + offset;
+        let rest = &chunk[tag_start..];
+        let is_div = rest.starts_with("<div");
+        let is_span = !is_div && rest.starts_with("<span");
+        if !is_div && !is_span {
+            cursor = tag_start + 1;
+            continue;
+        }
+        let Some(open_end) = chunk[tag_start..].find('>').map(|value| tag_start + value) else {
+            break;
+        };
+        if !open_tag_has_class(&chunk[tag_start..=open_end], class_name) {
+            cursor = open_end + 1;
+            continue;
+        }
+        if is_span {
+            let inner_start = open_end + 1;
+            let Some(close) = chunk[inner_start..].find("</span>") else {
+                break;
+            };
+            return Some(&chunk[inner_start..inner_start + close]);
+        }
+        return div_inner_at(chunk, tag_start).map(|(inner, _)| inner);
+    }
+    None
+}
+
+/// The site renders the score as `Score <span …>+28</span>`; the first signed
+/// number in the stripped text is the score, and an empty vote shows as 0.
+/// Thousands separators are tolerated and dropped.
+fn parse_comment_score(block: &str) -> i32 {
+    let text = strip_tags(block);
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        let character = bytes[start] as char;
+        if character == '+' || character == '-' || character.is_ascii_digit() {
+            let mut end = start + 1;
+            while end < bytes.len()
+                && ((bytes[end] as char).is_ascii_digit() || bytes[end] == b',')
+            {
+                end += 1;
+            }
+            let digits: String = text[start..end].chars().filter(|c| *c != ',').collect();
+            return digits.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// "11 August 2026, 09:44" (`dd MMMM yyyy, HH:mm`, en_US) →
+/// "2026-08-11 09:44". Relative or unparseable lines keep their raw text.
+fn normalize_eh_date(raw: &str) -> Option<String> {
+    let (date, time) = raw.split_once(',')?;
+    let mut parts = date.split_whitespace();
+    let day: u32 = parts.next()?.parse().ok()?;
+    if day == 0 || day > 31 {
+        return None;
+    }
+    let month = match parts.next()?.get(0..3)?.to_ascii_lowercase().as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    };
+    let year: i32 = parts.next()?.parse().ok()?;
+    let (hour, minute) = time.trim().split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"))
+}
+
+/// The header line reads `Posted on 11 August 2026, 09:44 by:&nbsp;…` — the
+/// "by" carries a colon, which the old `… by ` split never matched.
+fn normalize_eh_posted_time(block: &str) -> String {
+    let text = strip_comment_tags(block);
+    let Some(rest) = text.trim().strip_prefix("Posted on") else {
+        return String::new();
+    };
+    let rest = rest.trim_start();
+    let cut = rest
+        .find(" by:")
+        .or_else(|| rest.find(" by "))
+        .unwrap_or(rest.len());
+    let raw = rest[..cut].trim();
+    normalize_eh_date(raw).unwrap_or_else(|| raw.to_string())
+}
+
+/// A vote link the account has cast carries `style="color:blue"` (the site's
+/// selector); every uncast link has a style attribute too, so matching bare
+/// `style=` marked every comment as up-voted.
 fn comment_vote(chunk: &str, id: &str) -> i32 {
     for (suffix, vote) in [("up", 1), ("down", -1)] {
         let marker = format!("id=\"comment_vote_{suffix}_{id}\"");
@@ -1568,7 +1826,8 @@ fn comment_vote(chunk: &str, id: &str) -> i32 {
                 .map(|offset| position + offset)
                 .unwrap_or(position);
             let tag = &chunk[tag_start..=tag_end];
-            if tag.contains("style=") || tag.contains("class=\"c2") || tag.contains("class=\"cv") {
+            let flat = tag.replace(' ', "").to_ascii_lowercase();
+            if flat.contains("color:blue") {
                 return vote;
             }
         }
@@ -1604,30 +1863,18 @@ fn parse_eh_comments(body: &str) -> Vec<EhCommentRecord> {
         let chunk_start = body[..c1_marker].rfind("<div").unwrap_or(c1_marker);
         let chunk = &body[chunk_start..comment_end];
         let c3 = comment_field(chunk, "c3").unwrap_or_default();
-        let c3_text = strip_comment_tags(c3);
+        // The header links the poster's name first; a PM link with an image
+        // follows it, so the anchor search has to take the first match.
         let author = c3
-            .rfind("<a")
+            .find("<a")
             .and_then(|start| {
                 let content_start = c3[start..].find('>')? + start + 1;
                 let content_end = c3[content_start..].find("</a>")? + content_start;
                 Some(strip_comment_tags(&c3[content_start..content_end]))
             })
             .unwrap_or_default();
-        let posted_at = c3_text
-            .strip_prefix("Posted on ")
-            .and_then(|value| {
-                value
-                    .rsplit_once(" by ")
-                    .map(|(date, _)| date.trim().to_string())
-            })
-            .unwrap_or_default();
-        let score_text = comment_field(chunk, "c5").unwrap_or_default();
-        let score = score_text
-            .chars()
-            .filter(|c| c.is_ascii_digit() || *c == '-')
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
+        let posted_at = normalize_eh_posted_time(c3);
+        let score = parse_comment_score(comment_field(chunk, "c5").unwrap_or_default());
         let comment_body = strip_comment_tags(comment_html);
         if !id.is_empty() && !comment_body.is_empty() {
             let my_vote = comment_vote(chunk, &id);
@@ -1637,6 +1884,9 @@ fn parse_eh_comments(body: &str) -> Vec<EhCommentRecord> {
                 body: comment_body,
                 score,
                 posted_at,
+                // The real marker is the `ulcomment` anchor inside the comment's
+                // own c4 block ("Uploader Comment"); the poster link itself is
+                // /uploader/<name> for EVERY commenter, so it proves nothing.
                 is_uploader: chunk.contains("name=\"ulcomment\"")
                     || chunk.contains("name='ulcomment'"),
                 is_editable: chunk.contains("edit_comment(") || chunk.contains("editcomment"),
@@ -1877,53 +2127,308 @@ pub async fn check_eh_login_health(
     Ok(result)
 }
 
-// ── set_active_eh_account ─────────────────────────────────────────────────
+// ── fetch_eh_forum_username ───────────────────────────────────────────────
 
-pub fn set_active_eh_account_impl(
-    connection: &mut Connection,
-    account_id: &str,
-) -> CommandResult<()> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT COUNT(*) FROM eh_accounts WHERE id=?1",
-            params![account_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|v| v > 0)
-        .unwrap_or(false);
-    if !exists {
-        return CommandResult::failure("UNKNOWN", "Account not found", false);
+// ── fetch_eh_forum_username ───────────────────────────────────────────────
+
+/// 解析资料页的 `<h1 id="profilename">Name</h1>`；失败时回退导航链接。
+fn parse_profilename(html: &str) -> Option<String> {
+    let marker = html.find(r#"id="profilename""#).or_else(|| html.find("id=profilename"))?;
+    let after = &html[marker..];
+    let gt = after.find('>')? + marker;
+    let text_start = gt + 1;
+    let text_end = html[text_start..].find('<')? + text_start;
+    let name = decode_html_text(&html[text_start..text_end]).trim().to_string();
+    (!name.is_empty()).then_some(name).or_else(|| parse_forum_username(html))
+}
+
+/// Resolves the account's forum username with a single plain HTTP fetch of the
+/// profile page. Cloudflare challenges every non-browser client on that
+/// subdomain, so this usually fails — that is fine: the UI falls back to
+/// manual entry. No webview, no clearance machinery.
+#[tauri::command]
+pub async fn fetch_eh_forum_username(
+    account_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Option<String>>, String> {
+    if !matches!(database.connection.lock().map(|c| c.query_row("SELECT COUNT(*) FROM eh_accounts WHERE id=?1", params![account_id], |row| row.get::<_, i64>(0)).unwrap_or(0) > 0), Ok(true)) {
+        return Ok(CommandResult::failure("UNKNOWN", "Account not found", false));
     }
-    let transaction = match connection.transaction() {
-        Ok(tx) => tx,
-        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    let cookie = {
+        let connection = match database.connection.lock() {
+            Ok(value) => value,
+            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+        };
+        match read_account_cookie(&connection, &SystemEhCookieReader, &account_id) {
+            Ok((cookie, _, _)) => cookie,
+            Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+        }
     };
-    if let Err(error) = transaction.execute("UPDATE eh_accounts SET is_active=0", []) {
-        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    let member_id = cookie_value(&cookie, "ipb_member_id").unwrap_or_default();
+    if member_id.is_empty() || !member_id.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "The account cookie carries no member id",
+            false,
+        ));
     }
-    if let Err(error) = transaction.execute(
-        "UPDATE eh_accounts SET is_active=1, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
-        params![account_id],
+    let client = match eh_http_client() {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+    };
+    let profile_url = format!("https://forums.e-hentai.org/index.php?showuser={member_id}");
+    let (_status, body) = match read_http_response(client.get(&profile_url).header("Cookie", &cookie)).await {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+    };
+    let Some(username) = parse_profilename(&body) else {
+        return Ok(CommandResult::success(None));
+    };
+    if let Ok(connection) = database.connection.lock() {
+        let _ = connection.execute(
+            "UPDATE eh_accounts SET username_hint=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+            params![username, account_id],
+        );
+    }
+    Ok(CommandResult::success(Some(username)))
+}
+
+/// 手动设定账户显示名（网页登录抓取失败或用其它方式登录时，用户自行填写）。
+#[tauri::command]
+pub fn set_eh_username_hint(
+    account_id: String,
+    username: String,
+    database: State<'_, Database>,
+) -> CommandResult<()> {
+    let name = username.trim().to_string();
+    if name.is_empty() {
+        return CommandResult::failure("INVALID_RESPONSE", "Username must not be empty", false);
+    }
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match connection.execute(
+        "UPDATE eh_accounts SET username_hint=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+        params![name, account_id],
     ) {
-        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        Ok(_) => CommandResult::success(()),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
-    if let Err(error) = transaction.commit() {
-        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+}
+
+// ── My Tags (https://e-hentai.org/mytags) ─────────────────────────────────
+
+/// One entry of the account's own tag list. `watched` is what ranks a tag
+/// first on cards and detail pages; `color` is the preset the account gave it
+/// on the site, painted onto the chip as-is (an opaque `#RRGGBB`).
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EhMyTagRecord {
+    pub tag_id: i64,
+    pub namespace: String,
+    pub tag_key: String,
+    pub watched: bool,
+    pub hidden: bool,
+    pub weight: i32,
+    pub color: Option<String>,
+}
+
+/// The value of `attr` inside the element that carries `id="<marker>"`.
+///
+/// The mytags page emits one flat control per tag with fixed ids
+/// (`tagpreview_<n>`, `tagwatch_<n>`, `tagcolor_<n>`, `tagweight_<n>`), so
+/// locating the element by its id and reading the attribute inside the same
+/// tag is the whole parser — no HTML dependency, same approach as the comment
+/// parser below.
+fn element_attribute_around(body: &str, marker: &str, attr: &str) -> Option<String> {
+    let id_pattern = format!("id=\"{marker}\"");
+    let start = body.find(&id_pattern)?;
+    let element_start = body[..start].rfind('<')? + 1;
+    let element_end = start + body[start..].find('>')?;
+    let element = &body[element_start..element_end];
+    let attr_pattern = format!("{attr}=\"");
+    let attr_start = element.find(&attr_pattern)?;
+    let value_start = attr_start + attr_pattern.len();
+    let value_end = element[value_start..].find('"')? + value_start;
+    Some(decode_html_text(&element[value_start..value_end]))
+}
+
+fn element_has_flag_around(body: &str, marker: &str, flag: &str) -> bool {
+    let id_pattern = format!("id=\"{marker}\"");
+    let Some(start) = body.find(&id_pattern) else {
+        return false;
+    };
+    let Some(element_start) = body[..start].rfind('<') else {
+        return false;
+    };
+    let Some(element_end) = body[start..].find('>') else {
+        return false;
+    };
+    body[element_start..start + element_end].contains(flag)
+}
+
+/// Parses the signed-in account's mytags page. Only the currently selected tag
+/// set is on the page, which is the set JHenTai reads too; the other sets stay
+/// on the site until the user switches and re-fetches.
+fn parse_eh_my_tags(body: &str) -> Vec<EhMyTagRecord> {
+    let mut tags = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = body[cursor..].find("id=\"usertag_") {
+        let id_position = cursor + relative + "id=\"usertag_".len();
+        let Some(id_end) = body[id_position..].find('"').map(|offset| id_position + offset) else {
+            break;
+        };
+        let raw_id = &body[id_position..id_end];
+        cursor = id_end + 1;
+        let Ok(tag_id) = raw_id.parse::<i64>() else {
+            continue;
+        };
+        // `usertag_0` is the page's "you have no tags" placeholder div.
+        if tag_id == 0 {
+            continue;
+        }
+        let title = element_attribute_around(body, &format!("tagpreview_{tag_id}"), "title")
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let (namespace, tag_key) = match title.split_once(':') {
+            Some((namespace, key)) if !namespace.trim().is_empty() && !key.trim().is_empty() => {
+                (namespace.trim().to_lowercase(), key.trim().to_string())
+            }
+            // A bare tag has no namespace; the app's catch-all is `general`,
+            // same bucket `categorizeSearchableTags` puts non-namespaced tags in.
+            _ => ("general".to_string(), title.trim().to_string()),
+        };
+        let weight = element_attribute_around(body, &format!("tagweight_{tag_id}"), "value")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(0);
+        let color = element_attribute_around(body, &format!("tagcolor_{tag_id}"), "value")
+            .map(|value| {
+                let hex = value.trim().trim_start_matches('#');
+                // EH hands back `#RRGGBB`; accept an alpha-prefixed 8-digit form
+                // the way JHenTai's parser does and keep the opaque colour.
+                if hex.len() == 8 {
+                    format!("#{}", &hex[2..])
+                } else if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    format!("#{hex}")
+                } else {
+                    String::new()
+                }
+            })
+            .filter(|color| !color.is_empty());
+        tags.push(EhMyTagRecord {
+            tag_id,
+            namespace,
+            tag_key,
+            watched: element_has_flag_around(body, &format!("tagwatch_{tag_id}"), "checked"),
+            hidden: element_has_flag_around(body, &format!("taghide_{tag_id}"), "checked"),
+            weight,
+            color,
+        });
     }
-    CommandResult::success(())
+    tags
+}
+
+/// Replaces the account's cached tag list wholesale: the site's list is the
+/// source of truth and there is no sync story for it.
+fn store_eh_my_tags(connection: &mut Connection, account_id: &str, tags: &[EhMyTagRecord]) -> Result<(), String> {
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM eh_my_tags WHERE account_id=?1", params![account_id])
+        .map_err(|error| error.to_string())?;
+    for tag in tags {
+        transaction
+            .execute(
+                "INSERT INTO eh_my_tags (account_id,tag_id,namespace,tag_key,watched,hidden,weight,color,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,datetime('now'))",
+                params![account_id, tag.tag_id, tag.namespace, tag.tag_key, tag.watched, tag.hidden, tag.weight, tag.color],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn read_eh_my_tags(connection: &Connection, account_id: &str) -> Result<Vec<EhMyTagRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT tag_id,namespace,tag_key,watched,hidden,weight,color FROM eh_my_tags
+             WHERE account_id=?1 ORDER BY weight DESC, tag_id ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![account_id], |row| {
+            Ok(EhMyTagRecord {
+                tag_id: row.get(0)?,
+                namespace: row.get(1)?,
+                tag_key: row.get(2)?,
+                watched: row.get::<_, i64>(3)? != 0,
+                hidden: row.get::<_, i64>(4)? != 0,
+                weight: row.get(5)?,
+                color: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
 }
 
 #[tauri::command]
-pub fn set_active_eh_account(
+pub async fn fetch_eh_my_tags(
     account_id: String,
     database: State<'_, Database>,
-) -> CommandResult<()> {
+) -> Result<CommandResult<Vec<EhMyTagRecord>>, String> {
+    let (cookie, host, _) = {
+        let connection = match database.connection.lock() {
+            Ok(value) => value,
+            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+        };
+        match read_account_cookie(&connection, &SystemEhCookieReader, &account_id) {
+            Ok(value) => value,
+            Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+        }
+    };
+    let client = match eh_http_client() {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+    };
+    let url = format!("https://{host}/mytags");
+    let (status, body) = match read_http_response(client.get(url).header("Cookie", cookie)).await {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("EH_UNAVAILABLE", error, true)),
+    };
+    if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
+        return Ok(CommandResult::failure(code, message, retryable));
+    }
+    let tags = parse_eh_my_tags(&body);
     let mut connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+    };
+    match store_eh_my_tags(&mut connection, &account_id, &tags) {
+        Ok(()) => Ok(CommandResult::success(tags)),
+        Err(error) => Ok(CommandResult::failure("UNKNOWN", error, true)),
+    }
+}
+
+#[tauri::command]
+pub fn list_eh_my_tags(
+    account_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<EhMyTagRecord>> {
+    let connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    set_active_eh_account_impl(&mut connection, &account_id)
+    match read_eh_my_tags(&connection, &account_id) {
+        Ok(tags) => CommandResult::success(tags),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1954,6 +2459,10 @@ mod tests {
         assert_eq!(extract_login_cookie(&headers), None);
         assert_eq!(extract_login_cookie(&[]), None);
     }
+
+
+
+
 
     #[test]
     fn login_cookie_extraction_drops_the_mystery_igneous() {
@@ -1991,6 +2500,109 @@ mod tests {
     }
 
     #[test]
+    fn my_tags_parser_reads_jhentai_page_shapes() {
+        // 与 JHenTai 的解析目标一致：每个 usertag 块携带 preview/watch/hide/
+        // color/weight 五个控件，id 共用同一个数字。checked 是布尔属性，
+        // 颜色与权重是 value 属性，标题带命名空间。
+        let html = r##"
+          <div id="usertags_outer">
+            <div id="usertag_0">You have no tags.</div>
+            <div id="usertag_15">
+              <div id="tagpreview_15" title="artist:some_one">…</div>
+              <input type="checkbox" id="tagwatch_15" checked="checked" />
+              <input type="checkbox" id="taghide_15" />
+              <input type="color" id="tagcolor_15" value="#ff8800" />
+              <input type="text" id="tagweight_15" value="2" />
+            </div>
+            <div id="usertag_23">
+              <div id="tagpreview_23" title="female:glasses">…</div>
+              <input type="checkbox" id="tagwatch_23" />
+              <input type="checkbox" id="taghide_23" checked="checked" />
+              <input type="color" id="tagcolor_23" value="#00aabb" />
+              <input type="text" id="tagweight_23" value="-1" />
+            </div>
+            <div id="usertag_31">
+              <div id="tagpreview_31" title="plain_tag">…</div>
+              <input type="checkbox" id="tagwatch_31" checked />
+              <input type="color" id="tagcolor_31" value="#AABBCCDD" />
+            </div>
+          </div>
+        "##;
+        let tags = parse_eh_my_tags(html);
+        assert_eq!(tags.len(), 3);
+        assert_eq!(
+            tags[0],
+            EhMyTagRecord {
+                tag_id: 15,
+                namespace: "artist".into(),
+                tag_key: "some_one".into(),
+                watched: true,
+                hidden: false,
+                weight: 2,
+                color: Some("#ff8800".into()),
+            }
+        );
+        assert_eq!(tags[1].namespace, "female");
+        assert_eq!(tags[1].tag_key, "glasses");
+        assert!(!tags[1].watched);
+        assert!(tags[1].hidden);
+        assert_eq!(tags[1].weight, -1);
+        // 无命名空间的裸标签进 general；8 位 AARRGGBB 去掉 alpha 前两位。
+        assert_eq!(tags[2].namespace, "general");
+        assert_eq!(tags[2].tag_key, "plain_tag");
+        assert!(tags[2].watched);
+        assert_eq!(tags[2].weight, 0);
+        assert_eq!(tags[2].color.as_deref(), Some("#BBCCDD"));
+    }
+
+    #[test]
+    fn my_tags_store_replaces_the_accounts_list_wholesale() {
+        let mut c = db();
+        let first = vec![EhMyTagRecord {
+            tag_id: 1,
+            namespace: "artist".into(),
+            tag_key: "a".into(),
+            watched: true,
+            hidden: false,
+            weight: 3,
+            color: Some("#112233".into()),
+        }];
+        store_eh_my_tags(&mut c, "acc-1", &first).unwrap();
+        let second = vec![
+            EhMyTagRecord {
+                tag_id: 2,
+                namespace: "female".into(),
+                tag_key: "glasses".into(),
+                watched: false,
+                hidden: false,
+                weight: 0,
+                color: None,
+            },
+            EhMyTagRecord {
+                tag_id: 3,
+                namespace: "general".into(),
+                tag_key: "plain".into(),
+                watched: true,
+                hidden: false,
+                weight: 9,
+                color: None,
+            },
+        ];
+        store_eh_my_tags(&mut c, "acc-1", &second).unwrap();
+        // 另一个账户的缓存互不影响。
+        store_eh_my_tags(&mut c, "acc-2", &first).unwrap();
+        let rows = read_eh_my_tags(&c, "acc-1").unwrap();
+        // 权重降序：weight 9 的裸标签排在最前。
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tag_id, 3);
+        assert_eq!(rows[1].tag_id, 2);
+        assert!(rows[0].watched);
+        let other = read_eh_my_tags(&c, "acc-2").unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].tag_id, 1);
+    }
+
+    #[test]
     fn account_profile_parser_reads_username_link_without_home_wrapper() {
         let html = r#"<div id="userlinks"><a href="index.php?act=Login">Log in</a><a href="index.php?showuser=42" class="member-link"><span>Reader</span> &amp; Owner</a></div>"#;
         assert_eq!(
@@ -2001,26 +2613,55 @@ mod tests {
 
     #[test]
     fn account_asset_parsers_follow_jhentai_pages() {
-        let exchange = r#"
-          <form id="buyform"></form><div></div><p>You currently have 6,789 Credits.</p>
-          <form id="sellform"></form><div></div><p>You currently have 12,345 GP.</p>
-        "#;
-        let hath = r#"<div class="stuffbox"><div><p>a</p><p>b</p><p>c</p><p>You currently have 42 Hath available.</p></div></div>"#;
+        // 真实页面结构（实测 exchange.php?t=gp / hathperks.php）：
+        // 表单之后的兄弟元素携带市场 "Available" 行；JHenTai 用 nextElementSibling
+        // 取它，绕开表单内部的 "GP"/"Credits" 字样与输入框。
+        let exchange = r##"
+          <div class="outer">
+            <div>
+              <h2>Buy GP</h2>
+              <div>
+                <form id="buyform" action="" method="post">
+                  Count: <input type="text" id="bid_count" value="0" /> kGP &nbsp;
+                  Bid Price per kGP: <input type="text" id="bid_price" value="0" /> C &nbsp;
+                  <a href="#">Buy GP!</a>
+                </form>
+              </div>
+              <div style="margin-top:5px; font-weight:bold">Available: 6,859,678 Credits</div>
+            </div>
+            <div>
+              <h2>Sell GP</h2>
+              <div>
+                <form id="sellform" action="" method="post">
+                  Count: <input type="text" id="ask_count" value="0" /> kGP &nbsp;
+                  Ask Price per kGP: <input type="text" id="ask_price" value="0" /> C &nbsp;
+                  <a href="#">Sell GP!</a>
+                </form>
+              </div>
+              <div style="margin-top:5px; font-weight:bold">Available: 323,844 kGP</div>
+            </div>
+          </div>
+        "##;
+        let hath = r#"<div class="stuffbox"><h1>Hath Perks</h1><div style="font-size:9pt">
+          <p>By running the Hentai@Home client, you will over time gain special bonus points known as Hath.</p>
+          <p>If running H@H is not an option, you can exchange Credits for Hath at the Hath Exchange.</p>
+          <p>While the Hath Perks for the HentaiVerse cannot be obtained in any other way, most of the ones that are specific for Galleries will also get unlocked there.</p>
+          <p style="margin-top:5px; text-align:center">You currently have <span style="font-weight:bold">0.6</span> Hath.</p>
+        </div></div>"#;
         let assets = parse_exchange_assets(exchange);
-        assert_eq!(assets.gp, "12,345");
-        assert_eq!(assets.credits, "6,789");
-        assert_eq!(parse_hath_assets(hath), "42");
+        assert_eq!(assets.gp, "323,844 k");
+        assert_eq!(assets.credits, "6,859,678");
+        assert_eq!(parse_hath_assets(hath), "0.6");
     }
 
     #[test]
-    fn account_asset_parsers_accept_amount_after_currency_label() {
-        let exchange =
-            r#"<div>GP: <strong>12,345</strong></div><div>Credits: <strong>6,789</strong></div>"#;
-        let hath = r#"<div>Hath balance: <strong>42</strong></div>"#;
+    fn account_asset_parsers_survive_quoted_and_missing_forms() {
+        // 单引号形式与缺表单：解析降级而不是崩。
+        let exchange = r#"<form id='buyform'></form><div>Available: 1,234 Credits</div>"#;
         let assets = parse_exchange_assets(exchange);
-        assert_eq!(assets.gp, "12,345");
-        assert_eq!(assets.credits, "6,789");
-        assert_eq!(parse_hath_assets(hath), "42");
+        assert_eq!(assets.credits, "1,234");
+        assert_eq!(parse_exchange_assets("<div>nothing here</div>").gp, "");
+        assert_eq!(parse_hath_assets("<p>no hath here</p>"), "");
     }
 
     #[test]
@@ -2184,6 +2825,8 @@ mod tests {
         c.execute_batch(include_str!("../../migrations/0007_eh_accounts.sql"))
             .unwrap();
         c.execute_batch(include_str!("../../migrations/0020_eh_health_cache.sql"))
+            .unwrap();
+        c.execute_batch(include_str!("../../migrations/0022_eh_my_tags.sql"))
             .unwrap();
         c
     }
@@ -2411,60 +3054,6 @@ mod tests {
         }
     }
 
-    // ── set_active_eh_account tests ───────────────────────────────────────
-
-    #[test]
-    fn set_active_rejects_nonexistent_account() {
-        let mut c = db();
-        let result = set_active_eh_account_impl(&mut c, "nonexistent");
-        match result {
-            CommandResult::Failure { ok: false, error } => {
-                assert_eq!(error.code, "UNKNOWN");
-                assert_eq!(error.message, "Account not found");
-            }
-            _ => panic!("expected failure"),
-        }
-    }
-
-    #[test]
-    fn set_active_deactivates_others_and_activates_target() {
-        let mut c = db();
-        insert_account(&c, "eh-a", "ref-a", "e-hentai.org", true);
-        insert_account(&c, "eh-b", "ref-b", "exhentai.org", false);
-        insert_account(&c, "eh-c", "ref-c", "e-hentai.org", true);
-        let result = set_active_eh_account_impl(&mut c, "eh-b");
-        match result {
-            CommandResult::Success { .. } => {}
-            _ => panic!("expected success"),
-        }
-        let a_active: bool = c
-            .query_row(
-                "SELECT is_active FROM eh_accounts WHERE id='eh-a'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            != 0;
-        let b_active: bool = c
-            .query_row(
-                "SELECT is_active FROM eh_accounts WHERE id='eh-b'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            != 0;
-        let c_active: bool = c
-            .query_row(
-                "SELECT is_active FROM eh_accounts WHERE id='eh-c'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            != 0;
-        assert!(!a_active);
-        assert!(b_active);
-        assert!(!c_active);
-    }
 
     // ── classify_eh_status tests ──────────────────────────────────────────
 
@@ -2594,14 +3183,21 @@ mod tests {
 
     #[test]
     fn parse_comments_reads_real_gallery_markup() {
+        // Mirrors the live page: header fields are divs/spans with compound
+        // classes (`c5 nosel`), the poster line ends in `by:` and carries a PM
+        // image link after the name, and the score text is prefixed by "Score ".
         let html = r#"
           <div id="cdiv">
             <a name="c777"></a>
             <div class="c1">
-              <div class="c3">Posted on 07 September 2026, 10:30 by <a href="/u/1">Reader</a></div>
-              <div class="c4"><a id="comment_vote_up_777" style="color: green">+</a><a id="comment_vote_down_777">-</a></div>
-              <div class="c5"><span>+4</span></div>
+              <div class="c2">
+                <div class="c4 nosel"><a id="comment_vote_up_777" style="color: blue"></a><a id="comment_vote_down_777"></a></div>
+                <div class="c3">Posted on 07 September 2026, 10:30 by: &nbsp; <a href="https://forums.e-hentai.org/index.php?showuser=1234">Reader</a>&nbsp; &nbsp; <a href="https://forums.e-hentai.org/index.php?showuser=1234"><img class="ygm" src="https://ehgt.org/g/ygm.png" alt="PM" title="Contact Poster" /></a></div>
+                <div class="c5 nosel" onmouseover="document.getElementById('cvotes_777').style.display=''">Score <span id="comment_score_777" style="opacity:1.0">+4</span></div>
+                <div class="c"></div>
+              </div>
               <div class="c6" id="comment_777">Useful<br>comment</div>
+              <div class="c7" id="cvotes_777" style="display:none">Base +4</div>
             </div>
           </div>"#;
         let comments = parse_eh_comments(html);
@@ -2610,34 +3206,69 @@ mod tests {
         assert_eq!(comments[0].author, "Reader");
         assert_eq!(comments[0].body, "Useful\ncomment");
         assert_eq!(comments[0].score, 4);
-        assert_eq!(comments[0].posted_at, "07 September 2026, 10:30");
+        assert_eq!(comments[0].posted_at, "2026-09-07 10:30");
         assert_eq!(comments[0].my_vote, 1);
+        assert!(!comments[0].is_uploader);
+        assert!(!comments[0].is_editable);
+    }
+
+    #[test]
+    fn parse_comments_do_not_inherit_a_vote_from_any_style_attribute() {
+        // Real vote links carry a style attribute whether or not the account
+        // voted — only `color:blue` marks a cast vote. Bare `style=` matching
+        // once marked every comment in the list as up-voted.
+        let html = r#"<div class="c1"><div class="c4 nosel"><a id="comment_vote_up_9" style="display:none"></a><a id="comment_vote_down_9" style="display:none"></a></div><div class="c3">Posted on 21 October 2023, 15:12 by: <a>x</a></div><div class="c6" id="comment_9">Body</div></div>"#;
+        let comments = parse_eh_comments(html);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].my_vote, 0);
     }
 
     #[test]
     fn parse_comments_marks_uploader_and_editable_comment() {
-        let html = r#"<a name="c8"></a><div class="c1"><a name="ulcomment"></a><div class="c3">Posted on Today by <a>Uploader</a></div><div class="c4"><a onclick="edit_comment(8)">Edit</a></div><div class="c5"><span>0</span></div><div class="c6" id="comment_8">Mine</div></div>"#;
+        // The real uploader marker is the `ulcomment` anchor inside the c4
+        // block ("Uploader Comment"), and an own comment carries Edit there.
+        let html = r#"<div class="c1"><div class="c2"><div class="c4 nosel"><a name="ulcomment"></a>Uploader Comment <a onclick="edit_comment(8)">Edit</a></div><div class="c3">Posted on Today by: &nbsp; <a href="https://e-hentai.org/uploader/Uploader">Uploader</a></div><div class="c5 nosel">Score <span id="comment_score_8"></span></div><div class="c"></div></div><div class="c6" id="comment_8">Mine</div></div>"#;
         let comments = parse_eh_comments(html);
         assert_eq!(comments.len(), 1);
         assert!(comments[0].is_uploader);
         assert!(comments[0].is_editable);
+        assert_eq!(comments[0].score, 0);
+        assert_eq!(comments[0].posted_at, "Today");
     }
 
     #[test]
-    fn comment_vote_form_uses_eh_field_names() {
-        let form = vote_eh_comment_form("123", "a1b2", "777", -1);
-        assert_eq!(
-            form,
-            [
-                ("gid".to_string(), "123".to_string()),
-                ("t".to_string(), "a1b2".to_string()),
-                ("act".to_string(), "votecomment".to_string()),
-                ("comment_id".to_string(), "777".to_string()),
-                ("comment_vote".to_string(), "-1".to_string()),
-            ]
-        );
+    fn parse_comments_does_not_mark_every_poster_as_uploader() {
+        // Every commenter's name links to /uploader/<name> — it is just the
+        // profile link and must not imply the gallery uploader.
+        let html = r#"<div class="c1"><div class="c2"><div class="c3">Posted on 21 October 2023, 15:12 by: &nbsp; <a href="https://e-hentai.org/uploader/dxf19971218">dxf19971218</a></div><div class="c5 nosel">Score <span id="comment_score_9">+1</span></div><div class="c"></div></div><div class="c6" id="comment_9">Hello</div></div>"#;
+        let comments = parse_eh_comments(html);
+        assert_eq!(comments.len(), 1);
+        assert!(!comments[0].is_uploader);
+        assert_eq!(comments[0].score, 1);
     }
 
+    #[test]
+    fn comment_scores_handle_signed_and_grouped_numbers() {
+        assert_eq!(parse_comment_score("Score <span id=\"comment_score_1\" style=\"opacity:1.0\">+1,337</span>"), 1337);
+        assert_eq!(parse_comment_score("Score <span id=\"comment_score_2\">-3</span>"), -3);
+        assert_eq!(parse_comment_score("Score <span id=\"comment_score_3\"></span>"), 0);
+    }
+
+    #[test]
+    fn posted_times_normalize_to_sortable_format() {
+        assert_eq!(normalize_eh_posted_time("Posted on 11 August 2026, 09:44 by: &nbsp; <a>cirrostratus</a>"), "2026-08-11 09:44");
+        assert_eq!(normalize_eh_posted_time("Posted on 1 January 2025, 00:05 by: <a>x</a>"), "2025-01-01 00:05");
+        assert_eq!(normalize_eh_posted_time("Posted on Yesterday 13:00 by: <a>x</a>"), "Yesterday 13:00");
+        assert_eq!(normalize_eh_posted_time(""), "");
+    }
+
+    #[test]
+    fn comment_vote_key_material_comes_from_page_and_cookie() {
+        assert_eq!(apikey_from_page("<script>var apikey = \"a1b2c3d4e5\";</script>"), Some("a1b2c3d4e5"));
+        assert_eq!(apikey_from_page("<p>no key here</p>"), None);
+        assert_eq!(apiuid_from_cookie("ipb_member_id=3670848; ipb_pass_hash=abc"), Some("3670848"));
+        assert_eq!(apiuid_from_cookie("ipb_pass_hash=abc"), None);
+    }
     #[test]
     fn search_url_uses_standard_form_encoding() {
         let url = build_search_url(

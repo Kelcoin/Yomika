@@ -20,6 +20,9 @@ val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 
 android {
     compileSdk = 36
+    // Pinned to the NDK the mobile-build workflow installs; without this AGP
+    // falls back to its own default NDK and auto-downloads it on CI.
+    ndkVersion = "28.2.13676358"
     namespace = "app.yomika.reader"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"

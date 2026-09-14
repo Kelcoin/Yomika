@@ -1,5 +1,4 @@
-/** Similar-archive recommendation rules, ported from Readoshi's
- * `src/components/Recommendations.jsx`.
+/** Similar-archive recommendation rules.
  *
  * A tag shared with the source archive scores its weight; namespaces that say
  * nothing about taste (language, uploader, source, timestamps) score zero, and
@@ -134,7 +133,7 @@ export function sameCreatorTags(tags: readonly string[]): { namespace: 'cosplaye
   return { namespace: 'artist', tags: tags.filter((tag) => ['artist', 'group'].includes(namespaceOf(tag))) };
 }
 
-/** Readoshi keeps creator matches easy to scan: unfinished work first, then
+/** Creator matches stay easy to scan: unfinished work first, then
  * completed work, with archive title as the only user-facing ordering key. */
 export function sortSameCreatorRecommendations<T extends RecommendationCandidate>(candidates: readonly T[]): T[] {
   return [...candidates].sort((left, right) => {

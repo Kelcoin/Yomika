@@ -59,22 +59,46 @@ export interface EhSearchResponse {
   galleries: EhSearchResult[];
 }
 
+const EH_MONTHS: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/** "07 September 2026, 10:30" (`dd MMMM yyyy, HH:mm`, en_US) →
+ * "2026-09-07 10:30". Relative or unparseable lines keep their raw text. */
+export function normalizeEhPostedDate(raw: string): string {
+  const parsed = raw.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4}),\s*(\d{1,2}):(\d{2})$/);
+  const [day, monthName, year, hour, minute] = parsed?.slice(1) ?? [];
+  if (!day || !monthName || !year || !hour || !minute) return raw;
+  const month = EH_MONTHS[monthName.slice(0, 3).toLowerCase()];
+  if (!month) return raw;
+  const hours = Number(hour);
+  const minutes = Number(minute);
+  const days = Number(day);
+  if (days === 0 || days > 31 || hours > 23 || minutes > 59) return raw;
+  return `${year}-${String(month).padStart(2, '0')}-${String(days).padStart(2, '0')} ${hour.padStart(2, '0')}:${minute}`;
+}
+
 export function parseEhComments(html: string): EhComment[] {
   const document = new DOMParser().parseFromString(html, 'text/html');
   return [...document.querySelectorAll<HTMLElement>('.c6[id^="comment_"], .c1[id^="c"]')].map((candidate) => {
     const bodyNode = candidate.matches('.c6') ? candidate : candidate.querySelector<HTMLElement>('.c6');
     const node = candidate.matches('.c1') ? candidate : candidate.closest('.c1') ?? candidate.parentElement;
     const id = candidate.matches('.c6') ? candidate.id.replace(/^comment_/, '') : candidate.id.replace(/^c/, '');
-    const metadata = node?.querySelector('.c3')?.textContent?.trim() ?? '';
-    const scoreText = node?.querySelector('.c5')?.textContent?.trim() ?? '0';
+    const metadata = node?.querySelector('.c3')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    // The real header line ends in `by:` (colon), and the score block is
+    // `class="c5 nosel"` with its number prefixed by the word "Score" —
+    // `.c5` matches the class token, so only the line split needs care here.
+    const postedRaw = metadata.match(/^(?:Posted on|发表于)\s+(.+?)(?:\s+by:|\s+by\s+|$)/i)?.[1]?.trim() ?? '';
     const up = document.getElementById(`comment_vote_up_${id}`);
     const down = document.getElementById(`comment_vote_down_${id}`);
     return {
       id,
-      author: node?.querySelector('.c3 a:last-of-type')?.textContent?.trim() ?? '',
+      // The name anchor comes first; a PM link with an image follows it.
+      author: node?.querySelector('.c3 a')?.textContent?.trim() ?? '',
       body: bodyNode?.textContent?.trim() ?? '',
-      score: Number(scoreText.match(/[+-]?\d+/)?.[0] ?? 0),
-      postedAt: metadata.match(/^Posted on (.*?) by /)?.[1]?.trim() ?? '',
+      score: Number((node?.querySelector('.c5')?.textContent ?? '0').match(/[+-]?\d+/)?.[0] ?? 0),
+      postedAt: normalizeEhPostedDate(postedRaw),
       isUploader: Boolean(node?.querySelector('[name="ulcomment"]')),
       isEditable: Boolean(node?.querySelector('[onclick*="edit_comment"]')),
       myVote: up?.hasAttribute('style') ? 1 : down?.hasAttribute('style') ? -1 : 0,

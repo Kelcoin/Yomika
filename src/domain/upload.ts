@@ -1,7 +1,7 @@
 /** Upload queue rules, kept out of the component so the parsing and the
  * de-duplication can be tested without a DOM.
  *
- * Two ways in, as in Readoshi: local archives, or URLs the server downloads for
+ * Two ways in: local archives, or URLs the server downloads for
  * itself. Both end up as items in one queue with one status each, because the
  * failure that matters ("this one did not go through") is per item.
  */

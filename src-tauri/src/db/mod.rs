@@ -18,13 +18,14 @@ impl Database {
         Self::open_path(path)
     }
 
-    fn open_path(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub(crate) fn open_path(path: impl AsRef<Path>) -> Result<Self, String> {
         let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .map_err(|error| error.to_string())?;
         run_migrations(&mut connection)?;
         crate::commands::library::recover_interrupted_tasks(&connection)?;
+        crate::commands::sync::recover_stuck_sync_journal(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -74,6 +75,11 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             20,
             include_str!("../../migrations/0020_eh_health_cache.sql"),
         ),
+        (
+            21,
+            include_str!("../../migrations/0021_sync_pull_state.sql"),
+        ),
+        (22, include_str!("../../migrations/0022_eh_my_tags.sql")),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -197,7 +203,7 @@ mod tests {
                     eh_health_columns,
                 ),
                 (
-                    20,
+                    22,
                     1,
                     "servers",
                     "webdav_accounts",
@@ -225,7 +231,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 19);
+        assert_eq!(migration_count, 21);
         let recovered_status: String = reopened
             .connection
             .lock()

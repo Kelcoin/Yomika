@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { writeClipboardText } from '../bridge/clipboard';
 import { ArchiveContextMenu, type ArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { useToast } from './Toast';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository, type Category } from '../repositories/nativeLibraryRepository';
+import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
 
 const repository = new NativeLibraryRepository();
 
@@ -65,6 +67,19 @@ export function useArchiveContextMenu(options: {
       if (!result.ok) { showToast(result.error.message, 'error'); return; }
       options.onMembershipChange?.(archive.archiveId, list, next);
       showToast(`${next ? '已加入' : '已移出'}${list === 'reading' ? '待看' : '收藏夹'}`, 'success');
+      // 收藏夹 reads the LANraragi 🔖 Favorites category, so the heart mirrors
+      // the write there too — best effort, the local row stays as the offline
+      // mirror and for WebDAV sync either way.
+      if (list === 'favorites') {
+        void repository.listCategories(archive.serverId).then((categories) => {
+          const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
+          if (!favorites) return;
+          const mirrored = next
+            ? repository.addArchiveToCategory(archive.serverId, favorites.id, archive.archiveId)
+            : repository.removeArchiveFromCategory(archive.serverId, favorites.id, archive.archiveId);
+          void mirrored.then((mirrorResult) => { if (!mirrorResult.ok) showToast('未能同步到服务器收藏夹', 'error'); });
+        });
+      }
     });
   };
   const open = useCallback(
@@ -81,7 +96,7 @@ export function useArchiveContextMenu(options: {
       onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1`)}
       onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`, { state: { returnTo: `${location.pathname}${location.search}` } })}
       onCopyId={(archive) => {
-        void navigator.clipboard?.writeText(archive.archiveId).then(
+        void writeClipboardText(archive.archiveId).then(
           () => showToast('档案 ID 已复制', 'success'),
           () => showToast('复制失败', 'error'),
         );

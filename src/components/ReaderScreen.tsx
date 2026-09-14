@@ -15,8 +15,7 @@ import { TagSearchLink } from './TagSearchLink';
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
 const PAGE_RETENTION_MARGIN = 3;
-/** Attempts before a page is left alone. Matches ComicReadScript's ceiling
- * (imageLoad/reactor.ts:22-29). */
+/** Attempts before a page is left alone. */
 const MAX_PAGE_LOAD_ATTEMPTS = 8;
 /** Height of the bands at the top and bottom of the canvas that summon the
  * chrome. A tap anywhere used to raise the bars over what was being read; the
@@ -406,9 +405,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
           return;
         }
-        // Exponential backoff with jitter, as ComicReadScript does
-        // (imageLoad/reactor.ts:22-29): a server that just refused is unlikely to
-        // answer differently a millisecond later, and hammering it makes it worse.
+        // Exponential backoff with jitter: a server that just refused is
+        // unlikely to answer differently a millisecond later, and hammering
+        // it makes it worse.
         const attempts = (failedPagesRef.current.get(index)?.attempts ?? 0) + 1;
         const delay = (2 ** attempts + Math.random() * 2) * 1000;
         failedPagesRef.current.set(index, { attempts, nextAt: Date.now() + delay });
@@ -792,7 +791,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const dy = event.clientY - start.y;
     // Anything past a few pixels was a drag, and a drag is not a tap on the page
     // — drag-scrolling in continuous mode used to toggle the chrome on release.
-    // The threshold matches ComicReadScript's (helper/useDrag.ts:101-130).
+    // The threshold sits just above a resting finger's jitter.
     gestureMovedRef.current = Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP;
     if (zoomScaleRef.current > 1 || layoutRef.current === 'webtoon') return;
     if (Math.abs(dx) <= Math.abs(dy)) { finishDrag(0, 0); return; }

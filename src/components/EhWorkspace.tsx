@@ -4,7 +4,6 @@ import { EhAccountPanel } from './EhAccountPanel';
 
 interface EhWorkspaceProps {
   accounts: EhAccount[];
-  onSwitchAccount?: ((accountId: string) => void) | undefined;
   onCheckHealth?: ((accountId: string) => Promise<void>) | undefined;
   searching?: boolean | undefined;
   searched?: boolean | undefined;
@@ -18,12 +17,13 @@ interface EhWorkspaceProps {
   savingAccount?: boolean | undefined;
   onReadCookie?: ((accountId: string) => Promise<string | undefined>) | undefined;
   onLogout?: ((accountId: string) => Promise<void>) | undefined;
+  onEditUsername?: ((accountId: string, username: string) => Promise<void>) | undefined;
 }
 
-export function EhWorkspace({ accounts, onSwitchAccount, onCheckHealth, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, savingAccount, onReadCookie, onLogout }: EhWorkspaceProps) {
+export function EhWorkspace({ accounts, onCheckHealth, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, savingAccount, onReadCookie, onLogout, onEditUsername }: EhWorkspaceProps) {
   return (
     <div>
-      <EhAccountPanel accounts={accounts} onSwitch={onSwitchAccount} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} />
+      <EhAccountPanel accounts={accounts} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} onEditUsername={onEditUsername} />
     </div>
   );
 }

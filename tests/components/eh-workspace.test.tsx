@@ -21,14 +21,11 @@ describe('EhWorkspace', () => {
     expect(screen.queryByRole('button', { name: /添加|收起|展开/ })).not.toBeInTheDocument();
   });
 
-  it('moves the account surface with the pointer and reveals its actions', () => {
-    render(<EhWorkspace accounts={sampleAccounts} onReadCookie={async () => 'ipb_member_id=1'} onLogout={async () => {}} />);
-    const surface = screen.getByTestId('eh-account-surface-eh-a');
-    fireEvent.touchStart(surface, { touches: [{ clientX: 240 }] });
-    fireEvent.touchMove(surface, { touches: [{ clientX: 140 }] });
-    expect(surface).toHaveStyle({ transform: 'translate3d(-100px, 0, 0)' });
-    fireEvent.touchEnd(surface, { changedTouches: [{ clientX: 140 }] });
-    expect(screen.getByRole('button', { name: '导出EH Main Cookie' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '登出EH Main' })).toBeVisible();
+  it('keeps every account action visible without a swipe', () => {
+    // 与其它设置逻辑一致：操作以文字按钮列在账户卡片底部，不再依赖滑动呼出。
+    render(<EhWorkspace accounts={sampleAccounts} onCheckHealth={async () => {}} onReadCookie={async () => 'ipb_member_id=1'} onLogout={async () => {}} />);
+    expect(screen.getByRole('button', { name: '导出 Cookie' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '退出登录' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '检查登录状态' })).toBeVisible();
   });
 });

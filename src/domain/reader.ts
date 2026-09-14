@@ -88,8 +88,7 @@ export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {
 
 /** Whether a page is narrow enough to sit beside another one.
  *
- * The threshold is half of a 16:9 viewport (`1920 / 2 / 1080`), taken from
- * ComicReadScript's `imageType.ts:13-22`: anything wider than the slot it would
+ * The threshold is half of a 16:9 viewport (`1920 / 2 / 1080`): anything wider than the slot it would
  * occupy in a spread is a full-width page. It draws a further distinction
  * between `wide` and `long` (past 16:9) that only affects its own scroll
  * heuristics — for pairing both mean the same thing, so this collapses them.
@@ -110,7 +109,7 @@ export function classifyPageShape(width: number, height: number): PageShape {
  * into half a slot beside an unrelated one, and every pair after it is off by
  * one for the rest of the archive.
  *
- * Following ComicReadScript's `handleComicData.ts:80-125`, a wide page takes a
+ * A wide page takes a
  * slot of its own and delimits the runs around it, so a mistake cannot propagate
  * past the spread that caused it. That is the whole rule now: a wide page falls
  * back to a single page and the pairing resumes after it.
@@ -155,7 +154,7 @@ function findSlot(slots: number[][], pageIndex: number): number {
 
 /** Whether a horizontal drag has earned a page turn.
  *
- * Adapted from ComicReadScript's `turnPage.ts:18-41`: viewport-relative distance,
+ * Viewport-relative distance,
  * or a directional flick. A fixed pixel threshold —
  * what this used before — is wrong at both ends: 50px is a twitch on a desktop
  * monitor and half the screen on a phone, and it ignored speed entirely, so a
@@ -356,8 +355,7 @@ export function webtoonWindow(input: {
 
 /** Pages to warm around the current one.
  *
- * Asymmetric on purpose, following ComicReadScript's split of the same budget
- * (`memo/img.ts:44-47`): reading runs forward, so pages behind are worth half as
+ * Asymmetric on purpose: reading runs forward, so pages behind are worth half as
  * many slots as pages ahead. A symmetric window spent half the budget on pages
  * the reader has already passed.
  */

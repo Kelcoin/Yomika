@@ -4,13 +4,13 @@ export interface DedupeArchive {
   arcid?: string | number;
   id?: string | number;
   title?: string;
-  tags?: string;
-  size?: number | string;
-  filesize?: number | string;
-  file_size?: number | string;
-  pagecount?: number | string;
-  total?: number | string;
-  date_added?: number | string;
+  tags?: string | readonly string[] | undefined;
+  size?: number | string | undefined;
+  filesize?: number | string | undefined;
+  file_size?: number | string | undefined;
+  pagecount?: number | string | undefined;
+  total?: number | string | undefined;
+  date_added?: number | string | undefined;
 }
 
 export interface DedupeSignature {
@@ -193,8 +193,28 @@ export function getDuplicateSelectionDisabledIds(groups: readonly (readonly unkn
   return new Set(model.ids.filter((id) => !selected.has(id) && !canAddDuplicateSelection(model, selected, id)));
 }
 
+export interface DedupeSmartSignals {
+  roughTranslation: boolean;
+  extraneousAds: boolean;
+  uncensored: boolean;
+  noChinese: boolean;
+}
+
+/** 智能选择信号（Readoshi 的 getDedupeSmartSelectionSignals）：渣翻/外部广告/
+ * 无修正/无汉语——工作区把它们作为卡片标签显示，保留评分使用同一套判定。 */
+export function getDedupeSmartSignals(archive: DedupeArchive): DedupeSmartSignals {
+  const tags = tagSet(archive);
+  return {
+    roughTranslation: tags.has('other:rough translation'),
+    extraneousAds: tags.has('other:extraneous ads'),
+    uncensored: tags.has('other:uncensored'),
+    noChinese: !tags.has('language:chinese'),
+  };
+}
+
 function tagSet(archive: DedupeArchive): Set<string> {
-  return new Set(String(archive.tags ?? '').split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean));
+  const raw = Array.isArray(archive.tags) ? archive.tags.join(',') : archive.tags;
+  return new Set(String(raw ?? '').split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean));
 }
 
 function archiveSize(archive: DedupeArchive): number {

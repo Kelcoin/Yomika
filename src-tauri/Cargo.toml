@@ -29,6 +29,15 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# NFKC normalization for dedup filename matching (Readoshi parity).
+unicode-normalization = "0.1"
 ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 
 [dev-dependencies]
+
+# Native clipboard write: the webview API prompts WebView2 users for clipboard
+# permission on every export, the OS board does not. arboard has no Android
+# backend, so mobile targets must compile without it; platform.rs reports the
+# clipboard as unavailable there.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+arboard = "3"

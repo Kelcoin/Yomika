@@ -237,6 +237,7 @@ describe('library route workspace', () => {
   });
 
   it('shows an actionable empty state when WebDAV is not configured', async () => {
+    const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
@@ -244,8 +245,10 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/sync']}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole('heading', { name: '同步尚未配置' })).toBeInTheDocument();
-    expect(screen.getByText('添加 WebDAV 账户后，本地阅读进度、历史和待看变更会以密文增量同步。')).toBeInTheDocument();
+    // 同步区是一行设置；未配置的空状态在「WebDAV 账户」行的悬浮菜单里。
+    await user.click(await screen.findByRole('button', { name: 'WebDAV 账户' }));
+    const accountsMenu = await screen.findByRole('dialog', { name: 'WebDAV 账户' });
+    expect(within(accountsMenu).getByText('尚未配置 WebDAV 账户，填写下方表单保存第一台设备。')).toBeInTheDocument();
   });
 
   it('loads archives from the first configured server scope', async () => {
@@ -532,9 +535,9 @@ describe('library route workspace', () => {
     expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
-  it('reads the list from the server and only rebuilds the offline index on demand', async () => {
-    const user = userEvent.setup();
+  it('answers a pull by re-reading the page on screen, not by rebuilding the whole index', async () => {
     let refreshCount = 0;
+    let probe = false;
     // The server owns the list, so what it answers on the first page is what the
     // user sees — no full-library pull stands between them.
     let served = [{ serverId: 'scope-a', archiveId: 'a1', title: 'Newest Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }];
@@ -542,9 +545,9 @@ describe('library route workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'search_archives_page') return { ok: true, value: { items: served, total: served.length, hasMore: false } };
+      if (command === 'probe_new_archives') return { ok: true, value: probe };
       if (command === 'refresh_archives') {
         refreshCount += 1;
-        served = [{ serverId: 'scope-a', archiveId: 'a2', title: 'Rebuilt Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' }];
         return { ok: true, value: served };
       }
       throw new Error(`Unexpected command: ${command}`);
@@ -561,13 +564,25 @@ describe('library route workspace', () => {
       input: { serverId: 'scope-a', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, start: 0 },
     });
 
-    await user.click(screen.getByRole('button', { name: '刷新档案库' }));
+    served = [{ serverId: 'scope-a', archiveId: 'a2', title: 'Fresh Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' }];
+    fireEvent.wheel(screen.getByRole('list', { name: '档案' }), { deltaY: -300 });
+
+    // One request, and the list is the new one — that is the whole refresh.
+    expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
+    // With nothing new to index, the offline mirror is left alone.
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('probe_new_archives', { serverId: 'scope-a' }));
+    expect(refreshCount).toBe(0);
+
+    // Something in LANraragi the local index has never seen: the mirror is
+    // rebuilt behind the gesture, without the list waiting on it.
+    probe = true;
+    fireEvent.wheel(screen.getByRole('list', { name: '档案' }), { deltaY: -300 });
 
     await waitFor(() => expect(refreshCount).toBe(1));
     expect(adapter).toHaveBeenCalledWith('refresh_archives', {
       input: { serverId: 'scope-a', params: { sortby: 'date_added', order: 'desc' } },
     });
-    expect(await screen.findByRole('button', { name: /^Rebuilt Archive\b/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
   });
 
   it('reuses a fresh list instead of refetching it on every visit', async () => {
@@ -723,7 +738,9 @@ describe('library route workspace', () => {
     renderLibrary();
 
     await screen.findByRole('button', { name: /^Preset me\b/ });
-    await user.click(screen.getByRole('button', { name: '存为预设' }));
+    // The add action is the last line of the preset menu.
+    await user.click(screen.getByRole('button', { name: '检索预设' }));
+    await user.click(await screen.findByRole('menuitem', { name: '新增预设' }));
 
     // A real dialog, not window.prompt: that one is unstyled, renders as browser
     // chrome on Windows, and cannot refuse a value.
@@ -759,17 +776,18 @@ describe('library route workspace', () => {
     expect(await screen.findByText('无法连接 LANraragi，正在显示本机上次同步的档案。')).toBeInTheDocument();
   });
 
-  it('keeps the archive list when rebuilding the offline index fails', async () => {
-    const user = userEvent.setup();
+  it('keeps the archive list when a refresh fails', async () => {
+    // A refresh that cannot reach the server is a toast, not an empty page: the
+    // list the user was reading stays exactly as it is.
+    let failing = false;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'search_archives_page') {
+        if (failing) return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'Network error', retryable: true } };
         return { ok: true, value: { items: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Stable Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }], total: 1, hasMore: false } };
       }
-      if (command === 'refresh_archives') {
-        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'Network error', retryable: true } };
-      }
+      if (command === 'probe_new_archives') return { ok: true, value: false };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -777,7 +795,8 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('button', { name: /^Stable Archive\b/ })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: '刷新档案库' }));
+    failing = true;
+    fireEvent.wheel(screen.getByRole('list', { name: '档案' }), { deltaY: -300 });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Network error');
     expect(screen.getByRole('button', { name: /^Stable Archive\b/ })).toBeInTheDocument();

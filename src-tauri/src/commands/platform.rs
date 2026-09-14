@@ -25,6 +25,33 @@ pub fn platform_capabilities() -> CommandResult<PlatformCapabilities> {
     })
 }
 
+/** The webview's own clipboard API makes WebView2 ask the user for clipboard
+ * permission on every write; the native side writes without any prompt, so
+ * text exports (cookies, archive ids, migration JSON) go through here. */
+#[tauri::command]
+pub fn write_clipboard_text(text: String) -> CommandResult<()> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = text;
+        return CommandResult::failure(
+            "PLATFORM_UNAVAILABLE",
+            "Native clipboard is not available on this platform",
+            false,
+        );
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false),
+        };
+        match clipboard.set_text(text) {
+            Ok(()) => CommandResult::success(()),
+            Err(error) => CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false),
+        }
+    }
+}
+
 #[tauri::command]
 pub fn open_external_url(url: String) -> CommandResult<()> {
     let parsed = match url::Url::parse(&url) {

@@ -372,7 +372,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [error, showToast]);
 
   if (error) {
-    // JHenTai-style: the canvas holds the message and a retry icon, and leaving
+    // The canvas holds the message and a retry icon, and leaving
     // is the top bar's job rather than a second competing button.
     return (
       <main className="reader-screen reader-screen-error">

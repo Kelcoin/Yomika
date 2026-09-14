@@ -60,6 +60,13 @@ export const DedupScanProgressSchema = z.object({
 });
 export type DedupScanProgress = z.infer<typeof DedupScanProgressSchema>;
 export type DedupPairInput = z.infer<typeof DedupPairSchema>;
+const DedupNonDuplicateRecordSchema = z.object({
+  pairKey: z.string().min(1),
+  leftArchiveId: z.string().min(1),
+  rightArchiveId: z.string().min(1),
+  tombstoned: z.boolean(),
+});
+export type DedupNonDuplicateRecord = z.infer<typeof DedupNonDuplicateRecordSchema>;
 export type DedupNonDuplicateInput = { scopeId: string; leftArchiveId: string; rightArchiveId: string };
 export type DedupDeletionOutcomeInput = z.infer<typeof DedupOutcomeSchema>;
 
@@ -92,6 +99,9 @@ export class NativeDedupRepository {
   saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema); }
   removeNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_remove_non_duplicate', { input }, VoidResponseSchema); }
   importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) { return invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema); }
+  listNonDuplicates(scopeId: string): Promise<CommandResult<DedupNonDuplicateRecord[]>> {
+    return invokeCommand('dedup_list_non_duplicates', { scopeId }, z.array(DedupNonDuplicateRecordSchema));
+  }
   importReadoshiExport(scopeId: string, input: unknown): Promise<CommandResult<ReadoshiImportReport>> {
     let report: ReadoshiImportReport;
     try { report = parseReadoshiNonDuplicateExport(input, scopeId); }

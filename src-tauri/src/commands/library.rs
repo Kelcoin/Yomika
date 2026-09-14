@@ -135,6 +135,7 @@ pub struct ArchiveRecord {
     archive_id: String,
     title: String,
     page_count: i64,
+    file_size: Option<i64>,
     summary: Option<String>,
     category: Option<String>,
     language: Option<String>,
@@ -841,6 +842,81 @@ pub async fn add_archive_to_category(
         // Best effort: the assignment already succeeded on the server, so a
         // failure to drop the local snapshot must not turn into a failed call.
         // The stale window is 6 hours at worst, not permanent.
+        let _ = invalidate_category_cache(&connection, &server_id);
+    }
+    Ok(CommandResult::success(record))
+}
+
+/// The removal twin of `add_archive_to_category` — the 收藏夹 shelf writes the
+/// LANraragi 🔖 Favorites category through these two.
+#[tauri::command]
+pub async fn remove_archive_from_category(
+    server_id: String,
+    category_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<OperationRecord>, String> {
+    if category_id.len() != 14 || archive_id.is_empty() {
+        return Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "Invalid category or archive ID",
+            false,
+        ));
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|c| server_connection(&c, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
+    };
+    let url = format!(
+        "{}/api/categories/{}/{}",
+        base_url.trim_end_matches('/'),
+        category_id,
+        archive_id
+    );
+    let response = match reader_request(reqwest::Method::DELETE, url, api_key).await {
+        Ok(response) => response,
+        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+    };
+    if !response.status().is_success() {
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            format!("LANraragi request failed ({})", response.status()),
+            response.status().is_server_error(),
+        ));
+    }
+    let record: OperationRecord = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "INVALID_RESPONSE",
+                error.to_string(),
+                false,
+            ))
+        }
+    };
+    if record.success != 1 {
+        return Ok(CommandResult::failure(
+            "REMOTE_CONFLICT",
+            "LANraragi rejected the category removal",
+            false,
+        ));
+    }
+    if let Ok(connection) = database.connection.lock() {
         let _ = invalidate_category_cache(&connection, &server_id);
     }
     Ok(CommandResult::success(record))
@@ -1788,7 +1864,7 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             ))
         }
     };
-    // Cover requests follow Readoshi's normal thumbnail endpoint. The
+    // Cover requests use the normal thumbnail endpoint. The
     // no_fallback flag is reserved for page thumbnails where extraction is
     // explicitly queued; cover requests should return an existing fallback
     // immediately instead of waiting for a Minion job.
@@ -2173,26 +2249,27 @@ fn query_archive_records(
     server_id: &str,
 ) -> Result<Vec<ArchiveRecord>, String> {
     let mut statement = connection.prepare(
-        "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+        "SELECT server_id, archive_id, title, page_count, file_size, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
          FROM archives WHERE server_id = ?1 AND is_deleted = 0
          ORDER BY COALESCE(added_at, first_seen_at, 0) DESC, archive_id ASC",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([server_id], |row| {
-            let tags = archive_tags(row.get::<_, String>(10)?);
+            let tags = archive_tags(row.get::<_, String>(11)?);
             Ok(ArchiveRecord {
                 server_id: row.get(0)?,
                 archive_id: row.get(1)?,
                 title: row.get(2)?,
                 page_count: row.get(3)?,
-                summary: row.get(4)?,
-                category: row.get(5)?,
-                language: row.get(6)?,
-                cover_page: row.get(7)?,
-                is_deleted: row.get::<_, i64>(8)? != 0,
-                updated_at: row.get(9)?,
+                file_size: row.get::<_, Option<i64>>(4)?,
+                summary: row.get(5)?,
+                category: row.get(6)?,
+                language: row.get(7)?,
+                cover_page: row.get(8)?,
+                is_deleted: row.get::<_, i64>(9)? != 0,
+                updated_at: row.get(10)?,
                 added_at: row
-                    .get::<_, Option<i64>>(11)?
+                    .get::<_, Option<i64>>(12)?
                     .or_else(|| archive_added_at(&tags)),
                 tags,
             })
@@ -2295,7 +2372,7 @@ fn query_archive_page(
         "COALESCE(a.added_at, a.first_seen_at, 0)"
     };
     let page_sql = format!(
-        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json, COALESCE(a.added_at, a.first_seen_at)
+        "SELECT a.server_id, a.archive_id, a.title, a.page_count, a.file_size, a.summary, a.category, a.language, a.cover_page, a.is_deleted, a.local_updated_at, a.tags_json, COALESCE(a.added_at, a.first_seen_at)
          FROM archives a WHERE {where_sql} ORDER BY {sort} {direction}, a.archive_id ASC LIMIT {safe_limit} OFFSET {safe_offset}"
     );
     let mut statement = connection
@@ -2303,20 +2380,21 @@ fn query_archive_page(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
-            let tags = archive_tags(row.get::<_, String>(10)?);
+            let tags = archive_tags(row.get::<_, String>(11)?);
             Ok(ArchiveRecord {
                 server_id: row.get(0)?,
                 archive_id: row.get(1)?,
                 title: row.get(2)?,
                 page_count: row.get(3)?,
-                summary: row.get(4)?,
-                category: row.get(5)?,
-                language: row.get(6)?,
-                cover_page: row.get(7)?,
-                is_deleted: row.get::<_, i64>(8)? != 0,
-                updated_at: row.get(9)?,
+                file_size: row.get::<_, Option<i64>>(4)?,
+                summary: row.get(5)?,
+                category: row.get(6)?,
+                language: row.get(7)?,
+                cover_page: row.get(8)?,
+                is_deleted: row.get::<_, i64>(9)? != 0,
+                updated_at: row.get(10)?,
                 added_at: row
-                    .get::<_, Option<i64>>(11)?
+                    .get::<_, Option<i64>>(12)?
                     .or_else(|| archive_added_at(&tags)),
                 tags,
             })
@@ -3076,7 +3154,7 @@ fn query_archive_records_by_ids(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT server_id, archive_id, title, page_count, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
+            "SELECT server_id, archive_id, title, page_count, file_size, summary, category, language, cover_page, is_deleted, local_updated_at, tags_json, COALESCE(added_at, first_seen_at)
              FROM archives WHERE server_id = ?1 AND is_deleted = 0 AND archive_id IN ({placeholders})"
         );
         let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
@@ -3089,20 +3167,21 @@ fn query_archive_records_by_ids(
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(values.as_slice(), |row| {
-                let tags = archive_tags(row.get::<_, String>(10)?);
+                let tags = archive_tags(row.get::<_, String>(11)?);
                 Ok(ArchiveRecord {
                     server_id: row.get(0)?,
                     archive_id: row.get(1)?,
                     title: row.get(2)?,
                     page_count: row.get(3)?,
-                    summary: row.get(4)?,
-                    category: row.get(5)?,
-                    language: row.get(6)?,
-                    cover_page: row.get(7)?,
-                    is_deleted: row.get::<_, i64>(8)? != 0,
-                    updated_at: row.get(9)?,
+                    file_size: row.get::<_, Option<i64>>(4)?,
+                    summary: row.get(5)?,
+                    category: row.get(6)?,
+                    language: row.get(7)?,
+                    cover_page: row.get(8)?,
+                    is_deleted: row.get::<_, i64>(9)? != 0,
+                    updated_at: row.get(10)?,
                     added_at: row
-                        .get::<_, Option<i64>>(11)?
+                        .get::<_, Option<i64>>(12)?
                         .or_else(|| archive_added_at(&tags)),
                     tags,
                 })
@@ -3411,6 +3490,20 @@ pub async fn save_server(
         server,
         api_key,
     ))
+}
+
+/// 编辑已配置的服务器时把系统安全存储里的 API Key 读回来，让用户能看见自己
+/// 之前配置的值。Key 只在本机弹窗中展示，不经过网络。
+#[tauri::command]
+pub fn read_server_api_key(scope_id: String) -> CommandResult<String> {
+    match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => CommandResult::success(value),
+        Err(error) => CommandResult::failure(
+            "PLATFORM_UNAVAILABLE",
+            credential_read_error(error),
+            false,
+        ),
+    }
 }
 
 #[tauri::command]

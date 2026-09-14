@@ -499,7 +499,7 @@ pub fn clear_image_cache(
         return Err("Invalid cache root".into());
     }
     let candidates = {
-        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page') AND pinned=0 GROUP BY path")
+        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0 GROUP BY path")
             .map_err(|error| error.to_string())?;
         let values = statement
             .query_map([], |row| {
@@ -515,7 +515,7 @@ pub fn clear_image_cache(
     let mut bytes_freed = 0_u64;
     for (relative, size) in candidates {
         let remaining: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(kind IN ('cover','page-thumbnail','reader-page') AND pinned=0)",
+            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0)",
             [&relative], |row| row.get(0),
         ).map_err(|error| error.to_string())?;
         let isolated = if remaining == 0 {
@@ -523,7 +523,7 @@ pub fn clear_image_cache(
         } else {
             None
         };
-        match connection.execute("DELETE FROM cache_entries WHERE path=?1 AND kind IN ('cover','page-thumbnail','reader-page') AND pinned=0", [&relative]) {
+        match connection.execute("DELETE FROM cache_entries WHERE path=?1 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0", [&relative]) {
             Ok(count) => removed_entries += count,
             Err(error) => {
                 let _ = finish_isolated_file(isolated, true);
@@ -536,7 +536,7 @@ pub fn clear_image_cache(
         }
     }
     let protected: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page') AND pinned=1 GROUP BY path)",
+        "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=1 GROUP BY path)",
         [], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
     Ok(CacheClearResult {
@@ -558,7 +558,7 @@ pub fn invalidate_archive_cache(
         return Err("Invalid archive cache identity".into());
     }
     let candidates = {
-        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page') GROUP BY path")
+        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') GROUP BY path")
             .map_err(|error| error.to_string())?;
         let values = statement
             .query_map(rusqlite::params![scope_id, archive_id], |row| {
@@ -574,7 +574,7 @@ pub fn invalidate_archive_cache(
     let mut bytes_freed = 0_u64;
     for (relative, size) in candidates {
         let remaining: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page'))",
+            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored'))",
             rusqlite::params![relative, scope_id, archive_id], |row| row.get(0),
         ).map_err(|error| error.to_string())?;
         let isolated = if remaining == 0 {
@@ -583,7 +583,7 @@ pub fn invalidate_archive_cache(
             None
         };
         match connection.execute(
-            "DELETE FROM cache_entries WHERE path=?1 AND source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page')",
+            "DELETE FROM cache_entries WHERE path=?1 AND source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored')",
             rusqlite::params![relative, scope_id, archive_id],
         ) {
             Ok(count) => removed_entries += count,
@@ -938,9 +938,13 @@ mod tests {
         let cache = app_data.join("cache/images");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("free.bin"), b"free").unwrap();
+        std::fs::write(cache.join("enhanced.bin"), b"enhanced").unwrap();
+        std::fs::write(cache.join("decensored.bin"), b"decensored").unwrap();
         std::fs::write(cache.join("pinned.bin"), b"pinned").unwrap();
         connection.execute_batch("INSERT INTO cache_entries (key,kind,path,size,source_scope,source_archive,content_hash,pinned) VALUES
           ('free','cover','cache/images/free.bin',4,'scope','a','free',0),
+          ('enhanced','enhanced','cache/images/enhanced.bin',8,'scope','a','enhanced',0),
+          ('decensored','decensored','cache/images/decensored.bin',9,'scope','a','decensored',0),
           ('pin','reader-page','cache/images/pinned.bin',6,'scope','a','pin',1)").unwrap();
 
         let result = clear_image_cache(&connection, &app_data).unwrap();
@@ -948,13 +952,15 @@ mod tests {
         assert_eq!(
             result,
             CacheClearResult {
-                removed_entries: 1,
-                removed_files: 1,
-                bytes_freed: 4,
+                removed_entries: 3,
+                removed_files: 3,
+                bytes_freed: 21,
                 protected_bytes: 6
             }
         );
         assert!(!cache.join("free.bin").exists());
+        assert!(!cache.join("enhanced.bin").exists());
+        assert!(!cache.join("decensored.bin").exists());
         assert!(cache.join("pinned.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
     }

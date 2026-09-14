@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 import type { CommandResult } from '../domain/result';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { setEhMyTagsPriorityEnabled } from '../lib/ehMyTags';
 import { upgradeCssThemePreset } from '../lib/cssThemePresets';
 import {
   DEFAULT_PREFERENCES,
@@ -38,10 +39,21 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
 function applyPreferences(preferences: PreferenceSnapshot) {
   applyTheme(preferences.theme);
   getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
+  setEhMyTagsPriorityEnabled(preferences.ehMyTagsPriority);
   applyCustomCss(preferences.customCss);
 }
 
 const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
+/** Mirror of the last applied custom CSS. Preferences arrive through IPC, so
+ * without this mirror the first frames of every launch painted the default
+ * scheme and then flipped — the mirror applies synchronously at import time. */
+const LAST_CUSTOM_CSS_KEY = 'yomika.last-custom-css';
+
+// Runs when the module is imported, before React renders anything.
+try {
+  const cached = window.localStorage.getItem(LAST_CUSTOM_CSS_KEY);
+  if (cached) applyCustomCss(cached);
+} catch { /* storage can be unavailable */ }
 
 /** User CSS goes into one managed <style> at the end of head, so it overrides
  * the design tokens without the app having to know what it contains. It is also
@@ -49,6 +61,9 @@ const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
  * it said less than `--brand-vermilion: …` does here. */
 function applyCustomCss(css: string) {
   if (typeof document === 'undefined') return;
+  try {
+    if (window.localStorage.getItem(LAST_CUSTOM_CSS_KEY) !== css) window.localStorage.setItem(LAST_CUSTOM_CSS_KEY, css);
+  } catch { /* storage can be unavailable */ }
   const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);
   if (!css.trim()) {
     existing?.remove();

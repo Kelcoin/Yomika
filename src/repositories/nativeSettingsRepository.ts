@@ -13,7 +13,7 @@ export const PreferenceSnapshotSchema = z.object({
   cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
   // Defaults keep an older native build (which does not send these yet) from
   // failing the whole snapshot.
-  prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).default(1),
+  prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).default(2),
   coverConcurrency: z.number().int().min(1).max(8).default(4),
   /** Which page opens at launch. Someone who lives in the library should not
    * have to step through the home page every time. */
@@ -30,11 +30,26 @@ export const PreferenceSnapshotSchema = z.object({
   downloadDirectory: z.string().max(4096).default(''),
   ehFavoriteDeleteSync: z.boolean().default(false),
   confirmEhFavoriteDelete: z.boolean().default(true),
+  /** Whether the home continue-reading rail keeps records read past 95% of
+   * their pages. Off hides them — there is nothing left to continue. */
+  continueReadingShowFinished: z.boolean().default(true),
+  /** Prioritise the E-Hentai account's own tag list ("My Tags") on archive
+   * cards and detail pages, colouring those chips with the account's preset
+   * colours. Needs a signed-in account and one mytags fetch. */
+  ehMyTagsPriority: z.boolean().default(false),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
    * it. */
   customCss: z.string().max(20_000).default(''),
+  /** Compact bottom navigation drawn as a floating capsule that hides on
+   * scroll-down and returns on scroll-up. */
+  floatingNav: z.boolean().default(false),
+  /** Which entries the compact bottom bar shows, in the app's canonical order.
+   * 档案库 and 设置 are pinned UI-side and re-pinned by the backend. */
+  bottomNavItems: z
+    .array(z.enum(['home', 'library', 'history', 'watchlist', 'to-read', 'downloads', 'settings']))
+    .default(['home', 'library', 'history', 'watchlist', 'settings']),
 }).strip();
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
@@ -55,7 +70,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   defaultLayout: 'auto',
   defaultDirection: 'ltr',
   cacheMaxBytes: 2_147_483_648,
-  prefetchPages: 1,
+  prefetchPages: 2,
   coverConcurrency: 4,
   startupRoute: 'home',
   cardStyle: 'wide',
@@ -65,7 +80,11 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   downloadDirectory: '',
   ehFavoriteDeleteSync: false,
   confirmEhFavoriteDelete: true,
+  continueReadingShowFinished: true,
+  ehMyTagsPriority: false,
   customCss: '',
+  floatingNav: false,
+  bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
 };
 
 export class NativeSettingsRepository {

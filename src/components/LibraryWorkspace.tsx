@@ -1,6 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, RefreshCw, Star, Grid2X2, Rows3 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, ListChecks, Pencil, Plus, RefreshCw, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type TouchEvent as ReactTouchEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
@@ -13,16 +13,42 @@ import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, distributeCardTags, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
-import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
+import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
+import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
 import { TagSearchLink } from './TagSearchLink';
+import { ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
+import { useEhMyTags } from './useEhMyTags';
 
-/** Chips a card offers. These were 8 and 12, low enough that the cap — not the
- * space — was what limited the list: the CSS slot clips the overflow anyway, so a
- * generous number costs a few unrendered nodes and lets a wide card fill its
- * rows. */
-const CARD_TAG_LIMIT_THUMBNAIL = 24;
+/** Chips a thumbnail card offers. The CSS slot shows two rows and clips the
+ * rest, so this matches the recommendation rail's pickCardTags(..., 6). */
+/** One search hint for every page that has a search box. */
+const SEARCH_PLACEHOLDER = '搜索档案…';
+
+const CARD_TAG_LIMIT_THUMBNAIL = 6;
 const CARD_TAG_LIMIT_WIDE = 36;
+
+/* Overscroll. Beyond the top the list can be pulled down to refresh, beyond the
+   bottom it bounces; both are damped, so the numbers are on-screen pixels and
+   the gesture has to travel twice as far. */
+const PULL_THRESHOLD = 64;
+const PULL_MAX = 104;
+const BOUNCE_MAX = 72;
+const PULL_DAMPING = 0.5;
+/** A wheel has no release event, so the gesture is over once it stops. */
+const PULL_SETTLE_MS = 140;
+
+/** One shared empty set, so the uncontrolled case does not allocate per render. */
+const EMPTY_SELECTION: ReadonlySet<string> = new Set();
+
+/** One row's timeline facts: the day it belongs to, the label for that day, and
+ * the clock time shown on the rail. */
+export interface ShelfTimelineEntry {
+  date: string;
+  dayLabel: string;
+  time: string;
+}
 
 interface LibraryWorkspaceProps {
   archives: ArchiveRecord[];
@@ -65,7 +91,19 @@ interface LibraryWorkspaceProps {
   showSearch?: boolean | undefined;
   /** Supplying a toggle turns each card into a selectable row. */
   selectedArchiveIds?: ReadonlySet<string> | undefined;
-  onToggleSelected?: ((archiveId: string, checked: boolean) => void) | undefined;
+  /** Multi-select. The workspace reads the gesture — a shift range needs the row
+   * order, which only it has — and hands back the whole next selection, so the
+   * page that owns the ids never has to know about anchors. */
+  selectionMode?: boolean | undefined;
+  onSelectionModeChange?: ((next: boolean) => void) | undefined;
+  onSelectionChange?: ((next: ReadonlySet<string>) => void) | undefined;
+  /** What the selection bar can do, drawn by the page that can actually do it. */
+  selectionActions?: ReactNode;
+  /** Selects the archive ids the page considers read to the end, e.g. the
+   * history's finished records. Supplied only where "finished" is meaningful;
+   * the count gates the button. */
+  onSelectAllFinished?: (() => void) | undefined;
+  finishedSelectableCount?: number | undefined;
   /** Opens the card context menu at the pointer; cards are the only elements
    * that answer a right click. */
   onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined;
@@ -73,6 +111,8 @@ interface LibraryWorkspaceProps {
   presets?: SearchPreset[] | undefined;
   onApplyPreset?: ((preset: SearchPreset) => void) | undefined;
   onSavePreset?: (() => void) | undefined;
+  /** Renames an existing preset; the menu offers it per row. */
+  onEditPreset?: ((preset: SearchPreset) => void) | undefined;
   onDeletePreset?: ((preset: SearchPreset) => void) | undefined;
   /** Names what the search bar filters. The shelves reuse the library's bar but
    * filter their own records in the browser, so their query commits on every
@@ -82,8 +122,9 @@ interface LibraryWorkspaceProps {
   /** The sort and display controls. The shelves decide their own order and follow
    * the library's card style, so the bar there was three inert controls. */
   showToolbar?: boolean | undefined;
-  /** Right-hand timeline entry per archive, e.g. when it was last read. */
-  timelineByArchiveId?: ReadonlyMap<string, string> | undefined;
+  /** Right-hand timeline entry per archive, e.g. when it was last read. The day
+   * key groups rows so a shelf can be split by day on compact layouts. */
+  timelineByArchiveId?: ReadonlyMap<string, ShelfTimelineEntry> | undefined;
   /** How cards are drawn. Controlled by the route from preferences, because the
    * shelves and the library have to agree and as component state it reset to the
    * default on every navigation. */
@@ -91,7 +132,10 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, onToggleSelected, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, onSelectAllFinished, finishedSelectableCount, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+  const myTags = useEhMyTags();
+  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
+  const myTagColorFor = useCallback((tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -108,6 +152,153 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const presetMenuRef = useRef<HTMLDivElement>(null);
+  /** How far the list is dragged past its ends, in on-screen pixels: positive
+   * below the top, negative past the bottom. */
+  const [overscroll, setOverscroll] = useState(0);
+  /** Which gesture is driving it: touch follows the finger exactly, a wheel
+   * eases between notches, and null is the spring back after a release. */
+  const [overscrollGesture, setOverscrollGesture] = useState<'touch' | 'wheel' | null>(null);
+  const overscrollRef = useRef(0);
+  /** Gesture travel before damping, signed like the offset. */
+  const overscrollTravel = useRef(0);
+  /** 1 beyond the top, -1 beyond the bottom; undefined between gestures. */
+  const overscrollDirection = useRef<1 | -1 | undefined>(undefined);
+  /** The end a touch started on, so the finger may not pull the other way. */
+  const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
+  const overscrollStartY = useRef<number | undefined>(undefined);
+  const overscrollSettleTimer = useRef<number | undefined>(undefined);
+  /** The non-passive touchmove listener lives outside React and can only read a
+   * flag, never a render. */
+  const overscrollBlockingRef = useRef(false);
+  const onRefreshRef = useRef(onRefresh);
+  const refreshingRef = useRef(refreshing);
+
+  const resetOverscroll = useCallback(() => {
+    overscrollTravel.current = 0;
+    overscrollRef.current = 0;
+    overscrollDirection.current = undefined;
+    overscrollBlockingRef.current = false;
+    setOverscroll(0);
+    setOverscrollGesture(null);
+  }, []);
+
+  const cancelOverscroll = useCallback(() => {
+    if (overscrollSettleTimer.current !== undefined) {
+      window.clearTimeout(overscrollSettleTimer.current);
+      overscrollSettleTimer.current = undefined;
+    }
+    resetOverscroll();
+  }, [resetOverscroll]);
+
+  /** Damped so the list cannot run away from the gesture: 100px of travel moves
+   * it 50px, and it stops at the cap however much more arrives. */
+  const applyOverscroll = useCallback((travel: number) => {
+    overscrollTravel.current = travel;
+    const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
+    overscrollRef.current = offset;
+    overscrollBlockingRef.current = offset !== 0;
+    setOverscroll(offset);
+  }, []);
+
+  /** The gesture is over: the list springs back either way, and a release past
+   * the top's threshold asks for the refresh the disc is waiting to show. */
+  const releaseOverscroll = useCallback(() => {
+    const offset = overscrollRef.current;
+    cancelOverscroll();
+    // A second pull while the first request still runs has nothing to ask for.
+    if (offset < PULL_THRESHOLD || !onRefreshRef.current || refreshingRef.current) return;
+    onRefreshRef.current();
+  }, [cancelOverscroll]);
+
+  useEffect(() => { onRefreshRef.current = onRefresh; }, [onRefresh]);
+  useEffect(() => { refreshingRef.current = refreshing; }, [refreshing]);
+
+  useEffect(() => () => {
+    if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
+  }, []);
+
+  // React's touchmove listener is passive, so it cannot stop the browser's own
+  // overscroll from fighting the gesture. This one is bound natively and can.
+  useEffect(() => {
+    const list = scrollRef.current;
+    if (!list) return;
+    const hold = (event: TouchEvent) => { if (overscrollBlockingRef.current) event.preventDefault(); };
+    list.addEventListener('touchmove', hold, { passive: false });
+    return () => list.removeEventListener('touchmove', hold);
+  }, []);
+
+  const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    // Only where the list itself scrolls. On the compact layout the page does,
+    // and swallowing its wheel would take scrolling away from the user.
+    if (compact) return;
+    const list = event.currentTarget;
+    // In the library shell the page scrolls and the list is full-content height
+    // — left alone, every wheel read as "beyond the bottom" and the bounce ate
+    // the scroll whole.
+    if (list.scrollHeight > 0 && list.scrollHeight <= list.clientHeight + 1) return;
+    // Deltas arrive in pixels, lines or pages; a line is about 16px.
+    const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+    const beyondTop = delta < 0 && list.scrollTop <= 0;
+    const beyondBottom = delta > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
+    if (!beyondTop && !beyondBottom) {
+      // Ordinary scrolling: a gesture in flight is abandoned, not fired.
+      if (overscrollRef.current !== 0 || overscrollSettleTimer.current !== undefined) cancelOverscroll();
+      return;
+    }
+    const direction = beyondTop ? 1 : -1;
+    // Reversing mid-gesture hands the list back before the other end takes it.
+    if (overscrollDirection.current !== undefined && overscrollDirection.current !== direction) cancelOverscroll();
+    overscrollDirection.current = direction;
+    setOverscrollGesture('wheel');
+    applyOverscroll(overscrollTravel.current + direction * Math.abs(delta));
+    if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
+    overscrollSettleTimer.current = window.setTimeout(() => {
+      overscrollSettleTimer.current = undefined;
+      releaseOverscroll();
+    }, PULL_SETTLE_MS);
+  };
+
+  const handleTouchStart = (event: ReactTouchEvent<HTMLDivElement>) => {
+    if (compact) return;
+    // Same rule as the wheel: the gestures belong to the list only when the
+    // list itself scrolls — in the shell the page does.
+    const list = event.currentTarget;
+    if (list.scrollHeight > 0 && list.scrollHeight <= list.clientHeight + 1) return;
+    // The end the finger lands on is the only one it may pull past; anywhere
+    // else the list needs the finger for its own scrolling.
+    const edge = list.scrollTop <= 0
+      ? 'top'
+      : list.scrollTop + list.clientHeight >= list.scrollHeight - 1 ? 'bottom' : undefined;
+    overscrollEdge.current = edge;
+    overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
+  };
+
+  const handleTouchMove = (event: ReactTouchEvent<HTMLDivElement>) => {
+    const edge = overscrollEdge.current;
+    const start = overscrollStartY.current;
+    if (!edge || start === undefined) return;
+    const y = event.touches[0]?.clientY ?? start;
+    const direction = edge === 'top' ? 1 : -1;
+    // Down past the top and up past the bottom are the two overscrolls; the
+    // way back is ordinary scrolling, which the list keeps.
+    if ((y - start) * direction <= 0) {
+      overscrollEdge.current = undefined;
+      overscrollStartY.current = undefined;
+      if (overscrollRef.current !== 0) cancelOverscroll();
+      return;
+    }
+    overscrollDirection.current = direction;
+    setOverscrollGesture('touch');
+    applyOverscroll(direction * Math.abs(y - start));
+  };
+
+  const handleTouchEnd = () => {
+    overscrollEdge.current = undefined;
+    overscrollStartY.current = undefined;
+    if (overscrollRef.current !== 0) releaseOverscroll();
+  };
   const savedPanelLayout = useDefaultLayout({
     id: 'library-detail-layout',
     panelIds: showDetail ? ['library-list', 'library-detail'] : ['library-list'],
@@ -117,13 +308,36 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const navigate = useNavigate();
   useTagTranslations();
 
+  // The preset popover closes the way the select fields do.
+  useEffect(() => {
+    const close = (event: PointerEvent) => { if (!presetMenuRef.current?.contains(event.target as Node)) setPresetMenuOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, []);
+
   const searchQuery = controlledSearchQuery ?? localSearchQuery;
   const sortOrder = controlledSortOrder ?? localSortOrder;
   const sortMode = controlledSortMode ?? localSortMode;
   const categoryFilter = controlledCategoryFilter ?? localCategoryFilter;
   const displayMode = controlledCardStyle ?? localCardStyle;
+  // Compact history folds the right-hand rail into a horizontal day divider.
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
   const displayCategories = useMemo(() => sortCategoriesForDisplay((categories ?? []).filter((category) => category.name !== FAVORITES_CATEGORY_NAME)), [categories]);
   const filteredArchives = archives;
+  /** Row index -> the day label to print above it. A day's first row starts a
+   * group; everything else inherits it. */
+  const dayStarts = useMemo(() => {
+    const starts = new Map<number, string>();
+    if (!timelineByArchiveId) return starts;
+    let previous = '';
+    filteredArchives.forEach((archive, index) => {
+      const entry = timelineByArchiveId.get(archive.archiveId);
+      if (!entry?.date || entry.date === previous) return;
+      previous = entry.date;
+      starts.set(index, entry.dayLabel || entry.date);
+    });
+    return starts;
+  }, [filteredArchives, timelineByArchiveId]);
   const updateSearchQuery = (value: string) => { setLocalSearchQuery(value); onSearchQueryChange?.(value); };
   // The draft is what the user sees; only committed values reach the server.
   useEffect(() => { setSearchDraft(searchQuery); }, [searchQuery]);
@@ -164,9 +378,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const rows = useVirtualizer({
     count: filteredArchives.length,
     getScrollElement: () => scrollRef.current,
-    // Keep in step with `.archive-list.is-wide .archive-row` in shell.css: the
-    // virtualizer positions rows, so a mismatch overlaps them.
-    estimateSize: () => displayMode === 'wide' ? 158 : 66,
+    // Keep in step with `.archive-list.is-wide .archive-row-wrap` in shell.css:
+    // the virtualizer positions rows, so a mismatch overlaps them. Each row is a
+    // 158px card inside a 166px stride, which is where the 8px gap comes from;
+    // on compact a day divider adds its own height to the day's first row.
+    estimateSize: (index) => ARCHIVE_LIST_ROW_STRIDE + (compact && dayStarts.has(index) ? ARCHIVE_DAY_DIVIDER_HEIGHT : 0),
     getItemKey: (index) => filteredArchives[index]?.archiveId ?? index,
     overscan: 6,
     initialRect: { width: 720, height: 560 },
@@ -200,61 +416,147 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     initialRect: { width: 720, height: 560 },
   });
 
-  const renderArchiveButton = (archive: ArchiveRecord, eager: boolean) => {
-    const cardTags = pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE);
+  /** What a shift click extends from: the last row the user touched. */
+  const selectionAnchor = useRef<string>();
+  const selectedIds = selectedArchiveIds ?? EMPTY_SELECTION;
+  const allVisibleSelected = archives.length > 0 && archives.every((archive) => selectedIds.has(archive.archiveId));
+
+  /** The ordinary conventions: a plain click toggles, shift takes the range
+   * back to the anchor, and ctrl (or shift) on a card outside the mode moves
+   * into it with that card held — the same as any file list. */
+  const selectArchive = (archive: ArchiveRecord, modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }) => {
+    const next = new Set(selectedIds);
+    const index = archives.findIndex((item) => item.archiveId === archive.archiveId);
+    const anchor = selectionAnchor.current === undefined ? -1 : archives.findIndex((item) => item.archiveId === selectionAnchor.current);
+    if (modifiers.shiftKey && anchor >= 0 && index >= 0) {
+      const [start, end] = anchor < index ? [anchor, index] : [index, anchor];
+      for (const item of archives.slice(start, end + 1)) next.add(item.archiveId);
+    } else if (next.has(archive.archiveId)) {
+      next.delete(archive.archiveId);
+    } else {
+      next.add(archive.archiveId);
+    }
+    selectionAnchor.current = archive.archiveId;
+    onSelectionChange?.(next);
+  };
+
+  const toggleAllVisible = () => {
+    const next = new Set(selectedIds);
+    for (const archive of archives) {
+      if (allVisibleSelected) next.delete(archive.archiveId);
+      else next.add(archive.archiveId);
+    }
+    selectionAnchor.current = archives[0]?.archiveId;
+    onSelectionChange?.(next);
+  };
+
+  const renderArchiveButton = (archive: ArchiveRecord, eager: boolean, dayLabel?: string) => {
+    const cardTags = pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE, myTagKeys);
     const tagRows = displayMode === 'wide' ? distributeCardTags(cardTags, 3) : [];
+    const isSelected = selectedIds.has(archive.archiveId);
+    const openArchive = (event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (selectionMode && onSelectionChange) {
+        selectArchive(archive, event);
+        return;
+      }
+      // Ctrl or shift on a card is a selection gesture even before the mode is
+      // on, so the two ways into it do not disagree.
+      if (onSelectionChange && onSelectionModeChange && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+        onSelectionModeChange(true);
+        onSelectionChange(new Set([archive.archiveId]));
+        selectionAnchor.current = archive.archiveId;
+        return;
+      }
+      setSelectedId(archive.archiveId);
+      onSelect?.(archive);
+      if (!showDetail) navigate(`/library/${archive.archiveId}`);
+    };
+    const openMenu = onArchiveContextMenu ? (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
+      // Cards are the only elements with a menu; everything else keeps the
+      // platform default (which Tauri suppresses anyway).
+      event.preventDefault();
+      event.stopPropagation();
+      onArchiveContextMenu(archive, { x: event.clientX, y: event.clientY });
+    } : undefined;
+    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
+      // Returning a fresh Set on every cover load would re-render the whole
+      // list once per thumbnail.
+      if (current.has(archive.archiveId) === isWideCoverRatio(ratio)) return current;
+      const next = new Set(current);
+      if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
+      else next.delete(archive.archiveId);
+      return next;
+    })} eager={eager} />;
+    const pressed = selectedId !== undefined && archive.archiveId === selectedId;
     return (
     <>
-    {onToggleSelected && (
-      <input
-        className="archive-row-select"
-        type="checkbox"
-        aria-label={`选择 ${archive.title}`}
-        checked={selectedArchiveIds?.has(archive.archiveId) ?? false}
-        onChange={(event) => onToggleSelected(archive.archiveId, event.target.checked)}
-      />
+    {dayLabel && (
+      /* Compact history: the right-hand rail is replaced by a dated section bar
+         above the day's first card. */
+      <div className="archive-day-divider"><span>{dayLabel}</span></div>
     )}
-    <button
-      aria-pressed={selectedId !== undefined && archive.archiveId === selectedId}
-      className="archive-row"
-      onClick={() => {
-        setSelectedId(archive.archiveId);
-        onSelect?.(archive);
-        if (!showDetail) navigate(`/library/${archive.archiveId}`);
-      }}
-      onContextMenu={onArchiveContextMenu ? (event) => {
-        // Cards are the only elements with a menu; everything else keeps the
-        // platform default (which Tauri suppresses anyway).
-        event.preventDefault();
-        event.stopPropagation();
-        onArchiveContextMenu(archive, { x: event.clientX, y: event.clientY });
-      } : undefined}
-      type="button"
-    >
-      {<LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
-        // Returning a fresh Set on every cover load would re-render the whole
-        // list once per thumbnail.
-        if (current.has(archive.archiveId) === isWideCoverRatio(ratio)) return current;
-        const next = new Set(current);
-        if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
-        else next.delete(archive.archiveId);
-        return next;
-      })} eager={eager} />}
-      <span className="archive-row-copy">
-        <strong>{archive.title}</strong>
-        {displayMode === 'wide'
-          ? <span className="archive-row-tags">{tagRows.map((row, rowIndex) => <span className="archive-row-tag-line" key={rowIndex}>{row.map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>)}</span>
-          : <span className="archive-row-tags">{cardTags.map((tag) => <small className="metadata-chip" key={tag}>{translateRawTag(tag)}</small>)}</span>}
-        <span className="archive-row-footer">
-          <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
-          <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
+    {displayMode === 'thumbnail' ? (
+      /* The grid card is the recommendation rail's card: same classes, same
+         media/body/title/tags/meta structure, only the root element differs
+         (a button here because the row is the click target). In selection mode
+         the card is a checkbox, which is what it behaves as. */
+      <button
+        {...(selectionMode && onSelectionChange
+          ? { role: 'checkbox', 'aria-checked': isSelected, 'aria-label': `选择 ${archive.title}` }
+          : { 'aria-pressed': pressed })}
+        className={`archive-thumb-card${isSelected ? ' is-selected' : ''}`}
+        onClick={openArchive}
+        onContextMenu={openMenu}
+        type="button"
+      >
+        <div className="archive-thumb-card-media">
+          {cover}
+          {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
+        </div>
+        <ArchiveThumbCardBody
+          title={archive.title}
+          tags={cardTags}
+          colorFor={myTagColorFor}
+          meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
+        />
+      </button>
+    ) : (
+      <button
+        {...(selectionMode && onSelectionChange
+          ? { role: 'checkbox', 'aria-checked': isSelected, 'aria-label': `选择 ${archive.title}` }
+          : { 'aria-pressed': pressed })}
+        className={`archive-row${isSelected ? ' is-selected' : ''}`}
+        onClick={openArchive}
+        onContextMenu={openMenu}
+        type="button"
+      >
+        {cover}
+        {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
+        <span className="archive-row-copy">
+          <strong>{archive.title}</strong>
+          {displayMode === 'wide'
+            ? <span className="archive-row-tags">{tagRows.map((row, rowIndex) => <span className="archive-row-tag-line" key={rowIndex}>{row.map((tag) => {
+              const color = myTagColorFor(tag);
+              return <small className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</small>;
+            })}</span>)}</span>
+            : <span className="archive-row-tags">{cardTags.map((tag) => {
+              const color = myTagColorFor(tag);
+              return <small className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</small>;
+            })}</span>}
+          <span className="archive-row-footer">
+            <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
+            <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+    )}
     {/* The timeline belongs to the list rail, so it sits outside the clickable
         card and connects continuously between neighbouring cards. */}
     {timelineByArchiveId?.get(archive.archiveId) && (
-      <span className="archive-row-timeline" aria-hidden="true">{timelineByArchiveId.get(archive.archiveId)}</span>
+      <span className="archive-row-timeline" aria-hidden="true">
+        {dayLabel && <span className="archive-row-timeline-day">{dayLabel}</span>}
+        <span className="archive-row-timeline-time">{timelineByArchiveId.get(archive.archiveId)?.time}</span>
+      </span>
     )}
     </>
     );
@@ -262,7 +564,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
 
   return (
     <div className="library-workspace">
-      {heading !== null && <LibraryHeading heading={heading} count={totalCount ?? filteredArchives.length} onRefresh={onRefresh} refreshing={refreshing} />}
+      {heading !== null && <h1 className="visually-hidden">{heading}</h1>}
+      {/* Pull to refresh is a gesture, so its state is announced, not drawn: the
+          list sliding down and the disc on its top edge are what the eye gets. */}
+      <span className="visually-hidden" role="status">{refreshing ? '正在刷新档案库…' : ''}</span>
       {showSearch && <div className="library-controls">
         <label className="search-label">
           <input
@@ -271,7 +576,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             name="archiveQuery"
             type="search"
             autoComplete="off"
-            placeholder={searchScope?.placeholder ?? '搜索档案，回车提交…'}
+            placeholder={SEARCH_PLACEHOLDER}
             value={searchDraft}
             onChange={(e) => editSearchDraft(e.target.value)}
             onKeyDown={(event) => {
@@ -282,26 +587,113 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           />
           {!searchScope && <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />}
         </label>
-        {presets && presets.length > 0 && (
-          /* Saved searches restore the whole toolbar state, not just the query. */
-          <div className="search-presets" role="group" aria-label="检索预设">
-            {presets.map((preset) => (
-              <span className="search-preset" key={preset.presetId}>
-                <button type="button" className="search-preset-apply" onClick={() => onApplyPreset?.(preset)}>{preset.name}</button>
-                {onDeletePreset && (
-                  <button type="button" className="search-preset-remove" aria-label={`删除预设 ${preset.name}`} onClick={() => onDeletePreset(preset)}>×</button>
-                )}
-              </span>
-            ))}
+        {onSavePreset && (
+          /* Every preset action lives in one menu: the button no longer grows a
+             row of chips beside itself, and each preset row carries its own
+             rename and delete actions. Same hand-rolled popover as the select
+             fields, so it closes on an outside pointer, Escape and scroll. */
+          <div className="search-preset-field" ref={presetMenuRef}>
+            <button
+              type="button"
+              className="icon-action search-preset-save"
+              aria-haspopup="menu"
+              aria-expanded={presetMenuOpen}
+              aria-label="检索预设"
+              title="检索预设"
+              onClick={() => setPresetMenuOpen((current) => !current)}
+              onKeyDown={(event) => { if (event.key === 'Escape') setPresetMenuOpen(false); }}
+            >
+              <BookmarkPlus aria-hidden="true" />
+            </button>
+            {presetMenuOpen && (
+              <div className="search-preset-overlay" role="presentation" onClick={() => setPresetMenuOpen(false)}>
+                <div
+                  className="search-preset-panel"
+                  role="menu"
+                  aria-label="检索预设"
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => { if (event.key === 'Escape') setPresetMenuOpen(false); }}
+                >
+                  <h2 className="search-preset-title">检索预设</h2>
+                  {presets && presets.length > 0
+                  ? presets.map((preset) => (
+                    <div className="search-preset-row" role="none" key={preset.presetId}>
+                      <button type="button" role="menuitem" className="search-preset-apply" onClick={() => { onApplyPreset?.(preset); setPresetMenuOpen(false); }}>
+                        {preset.name}
+                      </button>
+                      {onEditPreset && (
+                        <button type="button" className="search-preset-icon" aria-label={`重命名预设 ${preset.name}`} title="重命名预设" onClick={() => { onEditPreset(preset); setPresetMenuOpen(false); }}>
+                          <Pencil aria-hidden="true" />
+                        </button>
+                      )}
+                      {onDeletePreset && (
+                        <button type="button" className="search-preset-icon is-danger" aria-label={`删除预设 ${preset.name}`} title="删除预设" onClick={() => onDeletePreset(preset)}>
+                          <Trash2 aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                  ))
+                    : <p className="search-preset-empty">还没有预设</p>}
+                  <div className="search-preset-separator" role="none" />
+                  <button type="button" role="menuitem" className="search-preset-add" onClick={() => { setPresetMenuOpen(false); onSavePreset(); }}>
+                    <Plus aria-hidden="true" />
+                    <span>新增预设</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
-        {onSavePreset && (
-          <button type="button" className="icon-action search-preset-save" onClick={() => onSavePreset()} aria-label="存为预设" title="存为预设">
-            <BookmarkPlus aria-hidden="true" />
+        {!showToolbar && onSelectionModeChange && (
+          /* The shelves have no toolbar, so the toggle sits beside the preset
+             button in the search row — the same control, one row up. It is the
+             disc shape there, because that is what the preset button is. */
+          <button
+            className="icon-action library-select-toggle"
+            type="button"
+            aria-pressed={selectionMode}
+            aria-label={selectionMode ? '退出多选' : '多选'}
+            title={selectionMode ? '退出多选' : '多选'}
+            disabled={archives.length === 0}
+            onClick={() => onSelectionModeChange(!selectionMode)}
+          >
+            <ListChecks aria-hidden="true" />
           </button>
         )}
       </div>}
       {showToolbar && <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
+        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
+        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}
+        {/* The direction lives in the field itself: it shows which way the list
+            is sorted, and choosing the mode already selected flips it — a
+            separate button for two states was one control too many. */}
+        <SelectField
+          name="sortMode"
+          aria-label="排序字段"
+          value={sortMode}
+          options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]}
+          onChange={(value) => {
+            if (value === sortMode) updateSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+            else updateSortMode(value as 'title' | 'added');
+          }}
+          trailing={<span className="select-trailing" aria-hidden="true">{sortOrder === 'asc' ? <ArrowUp /> : <ArrowDown />}</span>}
+          optionTrailing={(option) => option.value === sortMode
+            ? <span className="select-option-trailing" aria-hidden="true">{sortOrder === 'asc' ? <ArrowUp /> : <ArrowDown />}</span>
+            : null}
+        />
+        {onSelectionModeChange && (
+          <button
+            className="secondary-action library-select-toggle"
+            type="button"
+            aria-pressed={selectionMode}
+            aria-label={selectionMode ? '退出多选' : '多选'}
+            title={selectionMode ? '退出多选' : '多选'}
+            disabled={archives.length === 0}
+            onClick={() => onSelectionModeChange(!selectionMode)}
+          >
+            <ListChecks aria-hidden="true" />
+          </button>
+        )}
         <button
           className="secondary-action library-display-cycle"
           type="button"
@@ -310,71 +702,122 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         >
           {displayMode === 'wide' ? <Rows3 aria-hidden="true" /> : <Grid2X2 aria-hidden="true" />}
         </button>
-        <button
-          className="secondary-action library-sort-direction"
-          type="button"
-          aria-label={sortMode === 'title' ? (sortOrder === 'asc' ? '按标题降序' : '按标题升序') : (sortOrder === 'asc' ? '按添加时间降序' : '按添加时间升序')}
-          onClick={() => updateSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-        >
-          {sortOrder === 'asc' ? <ArrowDown aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
-        </button>
-        <SelectField name="sortMode" aria-label="排序字段" value={sortMode} options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]} onChange={(value) => updateSortMode(value as 'title' | 'added')} />
-        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
-        {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}      </div>}
+      </div>}
+      {selectionMode && onSelectionChange && (
+        /* The slot animates from zero height, so the bar grows in and the list
+           below is pushed down by the same motion instead of teleporting. */
+        <div className="archive-selection-slot">
+          <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
+            <span className="archive-selection-count" role="status" aria-live="polite">已选 {selectedIds.size} 个</span>
+            <button className="secondary-action" type="button" onClick={toggleAllVisible} disabled={archives.length === 0}>
+              {allVisibleSelected ? '取消全选' : '全选当前'}
+            </button>
+            {onSelectAllFinished && (
+              <button className="secondary-action" type="button" onClick={onSelectAllFinished} disabled={(finishedSelectableCount ?? 0) === 0}>
+                全选已读完
+              </button>
+            )}
+            {selectionActions}
+            <button className="secondary-action archive-selection-done" type="button" onClick={() => onSelectionModeChange?.(false)}>完成</button>
+          </div>
+        </div>
+      )}
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={savedPanelLayout.defaultLayout} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
         <Panel id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
-          <div className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''}`} data-scroll-region ref={scrollRef} role="list" aria-label="档案" onScroll={(event) => {
-            const target = event.currentTarget;
-            if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
-          }}>
-            {/* An in-flight request is not an empty library. These shared one
-                branch, so arriving at the library flashed 暂无档案库 before the
-                first page landed. */}
-            {filteredArchives.length === 0 && (listLoading
-              ? <ArchiveListSkeleton mode={displayMode} />
-              : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
-            {displayMode === 'thumbnail' ? (
-              <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
-                {thumbnailRows.getVirtualItems().map((virtualRow) => (
-                  <div
-                    className="archive-thumb-grid-row"
-                    key={virtualRow.key}
-                    style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+          <div
+            className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''} ${timelineByArchiveId ? 'has-timeline' : ''}`}
+            data-scroll-region
+            ref={scrollRef}
+            role="list"
+            aria-label="档案"
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
+            }}
+            /* Overscroll: past either end the list is dragged by hand and
+               springs back. Past the top it can also refresh — there is no
+               refresh button any more — so the wheel and the finger are the only
+               way to ask for it. */
+            onWheel={handleWheel}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onTouchCancel={handleTouchEnd}
+          >
+            {/* The refresh's feedback, pinned over the list rather than carried
+                by it: the list springs back on release and this stays on top,
+                spinning, until the request ends. Compact layouts have no pull —
+                their page is the scroller — so there is nothing to pin it to. */}
+            {onRefresh && !compact && (
+              <span
+                className={`library-pull-indicator${refreshing || overscroll > 0 ? ' is-visible' : ''}`}
+                aria-hidden="true"
+              >
+                {/* The class is spelled out rather than appended: `? ' x' :
+                    undefined` inside a template is the string "undefined", which
+                    matches nothing and left the icon drawn raw in the corner. */}
+                <span className={refreshing ? 'library-pull-disc is-spinning' : 'library-pull-disc'}>
+                  <span
+                    className="library-pull-arrow"
+                    style={{ transform: `rotate(${refreshing ? 180 : Math.round(Math.min(1, Math.max(0, overscroll) / PULL_THRESHOLD) * 180)}deg)` }}
                   >
-                    {(gridRows[virtualRow.index] ?? []).map((archive) => (
-                      <div
-                        className={`archive-row-wrap ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
-                        key={archive.archiveId}
-                        role="listitem"
-                      >
-                        {renderArchiveButton(archive, virtualRow.index < 2)}
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            ) : (
-            <div className="archive-list-inner" style={{ height: rows.getTotalSize() }}>
-              {rows.getVirtualItems().map((row) => {
-                const archive = filteredArchives[row.index];
-                if (!archive) return null;
-                return (
-                  <div
-                    className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
-                    key={archive.archiveId}
-                    role="listitem"
-                    // Rows are absolutely positioned, so CSS cannot tell which is
-                    // first or last; only the ends of the run get rounded corners.
-                    data-first={row.index === 0}
-                    data-last={row.index === filteredArchives.length - 1}
-                    style={{ height: row.size, transform: `translateY(${row.start}px)` }}
-                  >
-                    {renderArchiveButton(archive, row.index < 8)}
-                  </div>
-                );
-              })}
-            </div>
+                    <RefreshCw />
+                  </span>
+                </span>
+              </span>
             )}
+            <div
+              className="archive-list-pull"
+              data-overscroll={overscrollGesture ?? undefined}
+              style={{ transform: `translateY(${overscroll}px)` }}
+            >
+              {/* An in-flight request is not an empty library. These shared one
+                  branch, so arriving at the library flashed 暂无档案库 before the
+                  first page landed. */}
+              {filteredArchives.length === 0 && (listLoading
+                ? <ArchiveListSkeleton mode={displayMode} />
+                : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
+              {displayMode === 'thumbnail' ? (
+                <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
+                  {thumbnailRows.getVirtualItems().map((virtualRow) => (
+                    <div
+                      className="archive-thumb-grid-row"
+                      key={virtualRow.key}
+                      style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                    >
+                      {(gridRows[virtualRow.index] ?? []).map((archive) => (
+                        <div
+                          className={`archive-row-wrap ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
+                          key={archive.archiveId}
+                          role="listitem"
+                        >
+                          {renderArchiveButton(archive, virtualRow.index < 2)}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+              <div className="archive-list-inner" style={{ height: rows.getTotalSize() }}>
+                {rows.getVirtualItems().map((row) => {
+                  const archive = filteredArchives[row.index];
+                  if (!archive) return null;
+                  return (
+                    <div
+                      className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
+                      key={archive.archiveId}
+                      role="listitem"
+                      // Every row is its own card; the wrap only carries the 8px
+                      // gap between rows, so no first/last rounding is needed.
+                      style={{ height: row.size, transform: `translateY(${row.start}px)` }}
+                    >
+                      {renderArchiveButton(archive, row.index < 8, dayStarts.get(row.index))}
+                    </div>
+                  );
+                })}
+              </div>
+              )}
+            </div>
           </div>
         </Panel>
         {showDetail && <><Separator className="panel-separator" />
@@ -449,12 +892,14 @@ function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
   const count = mode === 'thumbnail' ? 8 : 5;
   return (
     <div className={`archive-list-skeleton is-${mode}`} role="status" aria-label="正在读取档案">
-      {Array.from({ length: count }, (_, index) => (
-        <div className="archive-row-skeleton" key={index}>
-          <span className="skeleton-block archive-row-skeleton-cover" />
-          <span className="archive-row-skeleton-copy"><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line" /></span>
-        </div>
-      ))}
+      {mode === 'thumbnail'
+        ? Array.from({ length: count }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        : Array.from({ length: count }, (_, index) => (
+          <div className="archive-row-skeleton" key={index}>
+            <span className="skeleton-block archive-row-skeleton-cover" />
+            <span className="archive-row-skeleton-copy"><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line" /></span>
+          </div>
+        ))}
     </div>
   );
 }
@@ -518,30 +963,4 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
     const image = event.currentTarget;
     if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
   }} /> : <span aria-hidden="true" />}</div>;
-}
-
-function LibraryHeading({ heading, count, onRefresh, refreshing }: { heading: string; count: number; onRefresh?: (() => void) | undefined; refreshing?: boolean | undefined }) {
-  return (
-    <header className="workspace-heading library-heading">
-      <div>
-        <h1>{heading}</h1>
-      </div>
-      <span className="library-heading-actions">
-        <span>{count} 项</span>
-        {onRefresh && (
-          <button
-            className="icon-action"
-            type="button"
-            disabled={refreshing}
-            aria-busy={refreshing}
-            aria-label="刷新档案库"
-            title="刷新档案库"
-            onClick={onRefresh}
-          >
-            <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
-          </button>
-        )}
-      </span>
-    </header>
-  );
 }

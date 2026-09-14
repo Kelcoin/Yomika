@@ -1,4 +1,5 @@
 import { categoryTagLabel } from './tags';
+import { normalizeMyTagKey } from './ehMyTags';
 
 export function isWideCoverRatio(ratio: number | null | undefined): boolean {
   return ratio != null && Number.isFinite(ratio) && ratio > 1.0;
@@ -14,17 +15,31 @@ export const CARD_TAG_NAMESPACE_PRIORITY = [
 
 const HIDDEN_CARD_TAG_NAMESPACES = ['date_added', 'dateadded', 'timestamp', 'source', 'uploader', 'category'];
 
-export function pickCardTags(tags: readonly string[] = [], limit = 6): string[] {
+/** `priority` carries the E-Hentai account's watched tags ("My Tags"). 优先
+ * 显示 = 优先保留席位（watched 先占位，保证出现在卡片上）+ 组内靠左：
+ * 显示次序仍以命名空间为主键，watched 只在自己的命名空间里排到最前——不跨
+ * 命名空间抢占第一排。 */
+export function pickCardTags(tags: readonly string[] = [], limit = 6, priority?: ReadonlySet<string> | undefined): string[] {
   const rank = (tag: string) => {
     const namespace = tag.split(':', 1)[0]!.trim().toLowerCase();
     const index = CARD_TAG_NAMESPACE_PRIORITY.indexOf(namespace);
     return index < 0 ? CARD_TAG_NAMESPACE_PRIORITY.length : index;
   };
-  return tags
-    .filter((tag) => !HIDDEN_CARD_TAG_NAMESPACES.includes(tag.split(':', 1)[0]!.trim().toLowerCase()))
+  const watched = (tag: string) => Boolean(priority && priority.size > 0 && priority.has(normalizeMyTagKey(tag)));
+  const candidates = tags.filter((tag) => !HIDDEN_CARD_TAG_NAMESPACES.includes(tag.split(':', 1)[0]!.trim().toLowerCase()));
+  // 席位：watched 先占（保持原相对次序），其余按命名空间次序补足。
+  const reserved: string[] = [];
+  const rest: string[] = [];
+  for (const tag of candidates) (watched(tag) ? reserved : rest).push(tag);
+  const fill = rest
     .map((tag, index) => ({ tag, index, rank: rank(tag) }))
     .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.tag);
+  return [...reserved, ...fill]
     .slice(0, Math.max(0, limit))
+    // 显示次序：命名空间为主键，watched 在同命名空间内靠左。
+    .map((tag, index) => ({ tag, index, rank: rank(tag), preferred: watched(tag) ? 0 : 1 }))
+    .sort((left, right) => left.rank - right.rank || left.preferred - right.preferred || left.index - right.index)
     .map((entry) => entry.tag);
 }
 
@@ -137,6 +152,15 @@ export function formatArchivePageMeta(pageCount: number, progressPage?: number |
   if (pageCount <= 0) return '';
   const current = progressPage != null && progressPage > 0 ? Math.min(progressPage, pageCount) : 0;
   return current > 0 ? `${current}/${pageCount} 页` : `${pageCount} 页`;
+}
+
+/** "Read to the end" as the continue-reading rail draws the line: past 95% of
+ * the pages there is nothing meaningfully left to continue. 95% rather than
+ * 100% so a record saved one page short of the last still counts as finished —
+ * a double-page spread can lose the closing save. */
+export function isArchiveFinished(pageCount: number, progressPage?: number | null): boolean {
+  if (!(pageCount > 0) || progressPage == null || progressPage <= 0) return false;
+  return progressPage / pageCount > 0.95;
 }
 
 export function formatByteSize(value: number): string {

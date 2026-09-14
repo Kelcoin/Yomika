@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { EhWorkspace } from './EhWorkspace';
+import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { presentEhError, presentEhLoginError } from '../services/ehClient';
@@ -16,6 +17,13 @@ function mergeHealthAssets(previous: EhAccount['assets'], next: NonNullable<EhAc
     credits: next.credits.trim() || previous?.credits || '',
     hath: next.hath.trim() || previous?.hath || '',
   };
+}
+
+/** A health result without a name needs the profile-webview fallback: the
+ * forums page is the only place the account is named, and Cloudflare blocks
+ * plain HTTP clients from it. */
+function healthMissingName(account: EhAccount): boolean {
+  return !account.username && !account.usernameHint;
 }
 
 function hasHealthAssets(assets: EhAccount['assets']) {
@@ -71,11 +79,20 @@ const BROWSER_LOGIN_TIMEOUT_MS = 5 * 60 * 1_000;
  * workspace, and importing it from `app/routes` made the two files import each
  * other, which left the settings page rendering nothing. `/eh` still routes here
  * as a deep link. */
-export function EhRouteWorkspace() {
+export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountChange?: ((label: string | undefined) => void) | undefined } = {}) {
   const { showToast } = useToast();
   const [accounts, setAccounts] = useState<EhAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [savingAccount, setSavingAccount] = useState(false);
+
+  // The settings row reports the active account as its current value, so the
+  // list state has to surface one level. 收起的行也要能看到登录的是谁：用户名，
+  // 或 Cookie 登录时的会员编号——不是那条谁也认不出的通用标签。没有 isActive
+  // 标记时退回第一个账户：单账户场景下它就是当前账户，不应显示「未登录」。
+  useEffect(() => {
+    const active = accounts.find((account) => account.isActive) ?? accounts[0];
+    onActiveAccountChange?.(active ? accountDisplayName(active) : undefined);
+  }, [accounts, onActiveAccountChange]);
 
   useEffect(() => {
     let active = true;
@@ -114,6 +131,8 @@ export function EhRouteWorkspace() {
           const update = refreshed.find((item) => item.id === account.id);
           return update ? { ...update, isActive: account.isActive } : account;
         }));
+        // 用户名只在网页登录完成时抓取一次并落库；此后的健康检查与刷新不再
+        // 重新抓取——显示名以账户行里的 username_hint 为准（可手动编辑）。
       }
       if (active) setAccountsLoading(false);
     });
@@ -124,20 +143,6 @@ export function EhRouteWorkspace() {
     <EhWorkspace
       accounts={accounts}
       accountsLoading={accountsLoading}
-      onSwitchAccount={async (accountId) => {
-        const result = await ehRepository.setActiveAccount(accountId);
-        if (!result.ok) {
-          // Not a search error: it used to be reported in the search slot, which
-          // only renders when there is an active account — so a switch that left
-          // none reported itself nowhere at all.
-          showToast(presentEhError(result.error.code, result.error.message), 'error');
-          return;
-        }
-        setAccounts((current) => current.map((account) => ({
-          ...account,
-          isActive: account.id === accountId,
-        })));
-      }}
       onCheckHealth={async (accountId) => {
         const result = await ehRepository.checkLoginHealth(accountId);
         if (!result.ok) {
@@ -172,6 +177,11 @@ export function EhRouteWorkspace() {
           };
           writeHealthCache(cache);
         }
+        // 用户名不做刷新抓取；缺名时提示手动编辑。
+        const target = accounts.find((account) => account.id === accountId);
+        if (target && healthMissingName({ ...target, username: health.username ?? undefined, usernameHint: health.username ?? target.usernameHint })) {
+          showToast('未记录账户名，默认显示为「E 站用户」，可点编辑按钮修改', 'info');
+        }
         showToast('E-Hentai 账户信息已更新', 'success');
       }}
       onReadCookie={async (accountId) => {
@@ -186,17 +196,35 @@ export function EhRouteWorkspace() {
         showToast('已登出 E-Hentai 账户', 'info');
       }}
       savingAccount={savingAccount}
+      onEditUsername={async (accountId: string, username: string) => {
+        const result = await ehRepository.setUsernameHint(accountId, username);
+        if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
+        setAccounts((current) => current.map((account) => account.id === accountId
+          ? { ...account, username: username, usernameHint: username }
+          : account));
+      }}
       onSaveAccount={async (input: SaveEhAccountInput) => {
         setSavingAccount(true);
         const result = await ehRepository.saveAccount(input);
         setSavingAccount(false);
         if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
-        // JHenTai treats the presence of both authentication cookies as the
-        // result of a successful web login. Do not immediately perform a
-        // second HTTP health request here: Cloudflare may challenge that
-        // request even though the WebView login just succeeded, which used to
-        // overwrite a valid account with the misleading “错误” status.
+        // A web login that captured both authentication cookies counts as a
+        // success. Do not immediately perform a second HTTP health request
+        // here: Cloudflare may challenge that request even though the WebView
+        // login just succeeded, which used to overwrite a valid account with
+        // the misleading “错误” status.
         setAccounts((current) => [...current.filter((account) => account.id !== result.value.id), { ...result.value, status: 'verified' }]);
+        // 仅网页登录完成时抓一次用户名并落库（一次纯 HTTP 尝试，通常被
+        // Cloudflare 拦下）；抓不到就默认显示为「E 站用户」，用户要改就点
+        // 账户卡上的编辑按钮原地修改。
+        if (healthMissingName(result.value)) {
+          void ehRepository.fetchForumUsername(result.value.id).then((resolved) => {
+            if (!resolved.ok || !resolved.value) return;
+            setAccounts((current) => current.map((account) => account.id === result.value.id
+              ? { ...account, username: resolved.value ?? undefined, usernameHint: resolved.value ?? undefined }
+              : account));
+          });
+        }
       }}
       onPasswordLogin={async (username: string, password: string) => {
         setSavingAccount(true);

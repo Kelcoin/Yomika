@@ -18,6 +18,8 @@
         "title": "Yomika",
         "width": 1180,
         "height": 760,
+        "x": -2520,
+        "y": 420,
         "minWidth": 760,
         "minHeight": 560,
         "resizable": true

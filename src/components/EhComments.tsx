@@ -106,13 +106,26 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
   }, [error, showToast]);
 
   const vote = async (comment: EhComment, value: 1 | -1) => {
+    // Clicking the direction already voted sends the vote again — E-Hentai
+    // toggles it off, so the row flips back to an unvoted state.
+    const cancelling = comment.myVote === value;
     setVotingId(comment.id);
     setError(undefined);
+    // The API answers with the comment's new score, so the row updates in
+    // place instead of refetching the whole list.
     const result = await repository.voteComment(accountId, galleryId, token, comment.id, value);
     setVotingId(undefined);
     if (result.ok) {
-      invalidateComments(accountId, galleryId, token);
-      refresh();
+      const nextVote = cancelling ? 0 : value;
+      setComments((current) => current.map((item) => (
+        item.id === comment.id
+          ? { ...item, score: result.value, myVote: nextVote }
+          : item
+      )));
+      // Keep the persisted snapshot in step with the in-place update.
+      const key = commentsCacheKey(accountId, galleryId, token);
+      const cached = commentsCache.get(key);
+      if (cached) writePersistedComments(key, { comments: comments.map((item) => (item.id === comment.id ? { ...item, score: result.value, myVote: nextVote } : item)), cachedAt: cached.cachedAt });
     }
     else setError(presentEhError(result.error.code, result.error.message));
   };
@@ -142,9 +155,23 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
       {loading && comments.length === 0 ? <p role="status">正在读取评论…</p> : !error && comments.length === 0 ? <p className="eh-comments-empty">暂无评论</p> : null}
       {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
         <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
-          <div className="eh-comment-meta"><span><strong>{comment.author || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span><time><Clock3 aria-hidden="true" />{comment.postedAt}</time></div>
+          <div className="eh-comment-meta">
+            <span><strong>{comment.author || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span>
+            {!comment.isUploader && <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>}
+          </div>
           <p>{comment.body}</p>
-          {!comment.isUploader && <div className="eh-comment-votes"><button type="button" disabled={votingId === comment.id} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button><span className={comment.score < 0 ? 'is-negative' : undefined} aria-label={`评分 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span><button type="button" disabled={votingId === comment.id} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button></div>}
+          <div className="eh-comment-votes">
+            <time dateTime={comment.postedAt ? comment.postedAt.replace(' ', 'T') : undefined}><Clock3 aria-hidden="true" />{comment.postedAt || '时间未知'}</time>
+            {!comment.isUploader && (
+              <span className="eh-comment-votes-actions">
+                {/* Both buttons stay live and identical in shape; the cast
+                    direction is announced by the solid fill and aria-pressed,
+                    and clicking it again cancels the vote. */}
+                <button type="button" className="is-up" disabled={votingId === comment.id} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button>
+                <button type="button" className="is-down" disabled={votingId === comment.id} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button>
+              </span>
+            )}
+          </div>
         </li>
       ))}</ul>}
       <div className="eh-comment-composer">

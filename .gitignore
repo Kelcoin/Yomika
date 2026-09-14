@@ -6,6 +6,22 @@
 /.planning/
 /debug_outputs/
 
+# Local verification, packaging and one-off debug outputs
+/artifacts/
+/tools/test-*.mjs
+/tools/watch-probe.mjs
+*.log
+
+# AI agent tooling (local state only; negate a rule if one is ever meant to be shared)
+/.claude/
+/.cursor/
+/.cursorrules
+/.windsurf/
+/.windsurfrules
+/.gemini/
+/.zcode/
+CLAUDE.local.md
+
 # Local generated previews and skill work
 /.skill-archive/
 /.superpowers/

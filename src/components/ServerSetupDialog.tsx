@@ -1,17 +1,24 @@
 import * as Dialog from '@radix-ui/react-dialog';
+import { ChevronRight, Pencil, Server } from 'lucide-react';
 import { X } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
 import { createServerIdentity, type ServerIdentity } from '../domain/server';
 import type { ServerRecord } from '../domain/library';
+import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+
+const repository = new NativeLibraryRepository();
 
 interface ServerSetupDialogProps {
   onSave: (input: { identity: ServerIdentity; apiKey: string }) => Promise<CommandResult<ServerIdentity>>;
-  server?: Pick<ServerRecord, 'name' | 'baseUrl'>;
+  server?: Pick<ServerRecord, 'name' | 'baseUrl' | 'scopeId'>;
+  /** 'row' renders the trigger as a settings row (icon, name, address, state) so
+   * the whole strip opens the dialog; 'action' keeps the old compact trigger. */
+  variant?: 'action' | 'row';
 }
 
-export function ServerSetupDialog({ onSave, server }: ServerSetupDialogProps) {
+export function ServerSetupDialog({ onSave, server, variant = 'action' }: ServerSetupDialogProps) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
@@ -28,6 +35,18 @@ export function ServerSetupDialog({ onSave, server }: ServerSetupDialogProps) {
       setApiKey('');
     }
   }
+
+  // 编辑已配置的服务器时把安全存储里的 Key 读回来：用户应当能看到自己之前
+  // 配置的值，而不是面对一个必须凭记忆重填的空框。
+  useEffect(() => {
+    if (!open || !server) return undefined;
+    let active = true;
+    void repository.readServerApiKey(server.scopeId).then((result) => {
+      if (!active) return;
+      if (result.ok && result.value) setApiKey(result.value);
+    });
+    return () => { active = false; };
+  }, [open, server]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,14 +69,39 @@ export function ServerSetupDialog({ onSave, server }: ServerSetupDialogProps) {
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Trigger asChild><button className={server ? 'secondary-action server-edit-action' : 'primary-action'} type="button">{server ? `编辑 ${server.name}` : '添加服务器'}</button></Dialog.Trigger>
+      {variant === 'row' ? (
+        <Dialog.Trigger asChild><button
+          className="settings-row settings-row-button"
+          type="button"
+          aria-label={server ? `编辑 ${server.name}` : '添加服务器'}
+        >
+          <span className="settings-row-icon" aria-hidden="true"><Server aria-hidden="true" /></span>
+          <span className="settings-row-copy">
+            <span className="settings-row-label">{server ? server.name : '添加服务器'}</span>
+            <span className="settings-row-hint">{server ? server.baseUrl : '连接一台 LANraragi 服务器'}</span>
+          </span>
+          <span className="settings-row-control settings-row-value">
+            {server && <span>已配置</span>}
+            <ChevronRight aria-hidden="true" />
+          </span>
+        </button></Dialog.Trigger>
+      ) : (
+        <Dialog.Trigger asChild><button
+          className={server ? 'icon-action server-edit-action' : 'primary-action'}
+          type="button"
+          /* Icon only, like every other row action; the name stays on the label for
+             screen readers and tooltips. */
+          aria-label={server ? `编辑 ${server.name}` : '添加服务器'}
+          title={server ? '编辑服务器' : undefined}
+        >{server ? <Pencil aria-hidden="true" /> : '添加服务器'}</button></Dialog.Trigger>
+      )}
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
           <div className="dialog-heading">
             <div>
               <Dialog.Title>{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
-              <Dialog.Description>连接信息保存在此设备；API Key 仅进入系统安全存储。更新时请重新输入 API Key。</Dialog.Description>
+              <Dialog.Description>连接信息保存在此设备；API Key 存于系统安全存储，已自动读入，可直接查看或替换。</Dialog.Description>
             </div>
             <Dialog.Close asChild><button className="icon-button" type="button" aria-label="关闭"><X aria-hidden="true" /></button></Dialog.Close>
           </div>

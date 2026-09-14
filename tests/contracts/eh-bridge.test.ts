@@ -60,10 +60,11 @@ describe('native EH removeFavorite bridge', () => {
 
 describe('native EH voteComment bridge', () => {
   it('votes on a comment through the native bridge', async () => {
-    const adapter = vi.fn(async () => ({ ok: true, value: undefined }));
+    const adapter = vi.fn(async () => ({ ok: true, value: 5 }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
-    expect(await repository.voteComment('eh-a', '12345', 'abcdef', '777', 1)).toEqual({ ok: true, value: undefined });
+    // The API answers with the comment's new score.
+    expect(await repository.voteComment('eh-a', '12345', 'abcdef', '777', 1)).toEqual({ ok: true, value: 5 });
     expect(adapter).toHaveBeenCalledWith('vote_eh_comment', { accountId: 'eh-a', galleryId: '12345', token: 'abcdef', commentId: '777', vote: 1 });
   });
 
@@ -110,22 +111,5 @@ describe('native EH login health check bridge', () => {
     setInvokeAdapterForTests(adapter);
     const repository = new NativeEhRepository();
     expect(await repository.checkLoginHealth('eh-a')).toEqual({ ok: false, error: { code: 'EH_CLOUDFLARE', message: 'Cloudflare blocked', retryable: false } });
-  });
-});
-
-describe('native EH account switching bridge', () => {
-  it('sets an account as active through the native bridge', async () => {
-    const adapter = vi.fn(async () => ({ ok: true, value: undefined }));
-    setInvokeAdapterForTests(adapter);
-    const repository = new NativeEhRepository();
-    expect(await repository.setActiveAccount('eh-b')).toEqual({ ok: true, value: undefined });
-    expect(adapter).toHaveBeenCalledWith('set_active_eh_account', { accountId: 'eh-b' });
-  });
-
-  it('returns error result when account switching fails', async () => {
-    const adapter = vi.fn(async () => ({ ok: false, error: { code: 'UNKNOWN', message: 'Account not found', retryable: false } }));
-    setInvokeAdapterForTests(adapter);
-    const repository = new NativeEhRepository();
-    expect(await repository.setActiveAccount('nonexistent')).toEqual({ ok: false, error: { code: 'UNKNOWN', message: 'Account not found', retryable: false } });
   });
 });

@@ -24,10 +24,11 @@ const comment = {
 };
 
 describe('E-Hentai comments', () => {
-  it('renders comment metadata and refreshes after voting', async () => {
+  it('renders comment metadata and updates the score in place after voting', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'get_eh_comments') return { ok: true, value: [comment] };
-      if (command === 'vote_eh_comment') return { ok: true, value: null };
+      // The API answers with the comment's new score.
+      if (command === 'vote_eh_comment') return { ok: true, value: 6 };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -41,7 +42,9 @@ describe('E-Hentai comments', () => {
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('vote_eh_comment', {
       accountId: 'eh-a', galleryId: '12345', token: 'abc', commentId: '777', vote: 1,
     }));
-    await vi.waitFor(() => expect(adapter.mock.calls.filter(([name]) => name === 'get_eh_comments')).toHaveLength(2));
+    // The row shows the new score without a list refetch.
+    expect(await within(region).findByText('+6')).toBeInTheDocument();
+    expect(adapter.mock.calls.filter(([name]) => name === 'get_eh_comments')).toHaveLength(1);
   });
 
   it('posts a comment and reloads the list', async () => {

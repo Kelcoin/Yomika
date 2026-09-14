@@ -4,16 +4,37 @@ import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { translateRawTag } from '../lib/tags';
+import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
+import { useEhMyTags } from './useEhMyTags';
 
 const imageCache = getNativeImageCache();
+
+/** The thumbnail card's media + copy stack, shared by the recommendation rail
+ * and the library grid so both are literally the same card. The caller supplies
+ * the root element (an anchor in the rail, a button in the grid) and the meta
+ * line, which carries different facts in each place. `colorFor` recolours a
+ * chip when the E-Hentai account's My Tags holds a preset for the tag. */
+export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, colorFor }: { title: string; tags: string[]; meta: ReactNode; favorite?: boolean; colorFor?: ((tag: string) => string | undefined) | undefined }) {
+  return <div className="archive-thumb-card-body">
+    <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
+    <div className="archive-thumb-card-tags">{tags.map((tag) => {
+      const color = colorFor?.(tag);
+      return <span className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</span>;
+    })}</div>
+    <div className="archive-thumb-card-meta">{meta}</div>
+  </div>;
+}
 
 export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
   const [src, setSrc] = useState<string>();
   const [aspectRatio, setAspectRatio] = useState<number>();
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
-  const tags = useMemo(() => pickCardTags(archive.tags, 6), [archive.tags]);
+  const myTags = useEhMyTags();
+  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
+  const tags = useMemo(() => pickCardTags(archive.tags, 6, myTagKeys), [archive.tags, myTagKeys]);
+  const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const isWide = isWideCoverRatio(aspectRatio);
   useEffect(() => {
     if (!node) return undefined;
@@ -45,22 +66,28 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) setAspectRatio(image.naturalWidth / image.naturalHeight);
     }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}</div>
-    <div className="archive-thumb-card-body"><div className="archive-thumb-card-title"><strong>{archive.title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div><div className="archive-thumb-card-tags">{tags.map((tag) => <span className="metadata-chip" key={tag}>{translateRawTag(tag)}</span>)}</div><div className="archive-thumb-card-meta"><span>{formatArchiveDate(archive.addedAt)}</span><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span></div></div>
+    <ArchiveThumbCardBody
+      title={archive.title}
+      tags={tags}
+      favorite={favorite}
+      colorFor={colorFor}
+      meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
+    />
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
   const [railWidth, setRailWidth] = useState(0);
   useEffect(() => {
@@ -77,7 +104,7 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
     : skeletonCount;
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
-      {headingContent ?? <h2>{title}</h2>}
+      {headingContent ?? <h2>{headingIcon}<span>{title}</span></h2>}
       {onRefresh && <button className="icon-action" type="button" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing} aria-label={`刷新${title}`} title={`刷新${title}`}>
         <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
       </button>}
@@ -90,9 +117,9 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
   </section>;
 }
 
-/** The card's own shape while the rail waits on data, so the page does not jump
- * once the archives land. */
-function ArchiveThumbnailCardSkeleton() {
+/** The card's own shape while the rail or the grid waits on data, so the page
+ * does not jump once the archives land. */
+export function ArchiveThumbnailCardSkeleton() {
   return <div className="archive-thumb-card is-skeleton" aria-hidden="true">
     <div className="archive-thumb-card-media"><span className="archive-thumb-card-skeleton" /></div>
     <div className="archive-thumb-card-body">

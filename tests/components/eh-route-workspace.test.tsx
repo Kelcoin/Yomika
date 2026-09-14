@@ -31,6 +31,7 @@ describe('EH route workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'save_eh_account') return { ok: true, value: saved };
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: 'Forum Reader' };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -46,7 +47,10 @@ describe('EH route workspace', () => {
       id: 'eh-1234', label: 'E-Hentai 账户', host: 'exhentai.org',
       cookie: `ipb_member_id=1234; ipb_pass_hash=${hash}; igneous=abcdef1234`,
     } });
-    expect(await screen.findByText('E-Hentai 账户')).toBeInTheDocument();
+    // A fresh row has no display name yet, so the forums profile lookup runs
+    // right after the save and the card picks the name up in place.
+    expect(adapter).toHaveBeenCalledWith('fetch_eh_forum_username', { accountId: 'eh-1234' });
+    expect(await screen.findByText('Forum Reader')).toBeInTheDocument();
     expect(screen.queryByText(hash)).not.toBeInTheDocument();
     expect(screen.queryByText('已验证')).not.toBeInTheDocument();
     expect(screen.queryByText('未验证')).not.toBeInTheDocument();
@@ -60,6 +64,7 @@ describe('EH route workspace', () => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'login_eh_account') return { ok: true, value: `ipb_member_id=77; ipb_pass_hash=${hash}` };
       if (command === 'save_eh_account') return { ok: true, value: saved };
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -71,17 +76,22 @@ describe('EH route workspace', () => {
     await user.click(screen.getByRole('button', { name: '登录 E-Hentai' }));
 
     expect(adapter).toHaveBeenCalledWith('login_eh_account', { username: 'reader', password: 'secret-password' });
-    expect(await screen.findByText('E-Hentai 账户')).toBeInTheDocument();
+    // 未记录显示名时默认显示为「E 站用户」。
+    expect(await screen.findByText('E 站用户')).toBeInTheDocument();
     expect(screen.queryByText('secret-password')).not.toBeInTheDocument();
     expect(adapter.mock.calls.map(([command]) => command)).not.toContain('check_eh_login_health');
   });
 
-  it('does not probe a newly saved cookie before the normal settings-page health refresh', async () => {
+  it('fills the name after a save without ever running a health probe', async () => {
     const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
     const saved = { id: 'eh-88', label: 'E-Hentai 88', host: 'e-hentai.org', cookieRef: 'keyring://eh-88', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'save_eh_account') return { ok: true, value: saved };
+      // A web login stashes its clearance during the capture polls, so the
+      // lookup right after the save is a plain HTTP replay. When even that
+      // cannot name the account it degrades to null — never a health probe.
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: 'Named Later' };
       if (command === 'check_eh_login_health') throw new Error('save must not run a health probe');
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -93,7 +103,8 @@ describe('EH route workspace', () => {
     await user.type(screen.getByLabelText('Cookie'), `ipb_member_id=88; ipb_pass_hash=${hash}`);
     await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
 
-    expect(await screen.findByText('E-Hentai 账户')).toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('fetch_eh_forum_username', { accountId: 'eh-88' });
+    expect(await screen.findByText('Named Later')).toBeInTheDocument();
     expect(adapter.mock.calls.map(([command]) => command)).not.toContain('check_eh_login_health');
   });
 
@@ -120,24 +131,6 @@ describe('EH route workspace', () => {
     expect(screen.queryByText(/重新配置 Cookie/)).not.toBeInTheDocument();
   });
 
-  it('switches the active account in the visible account list', async () => {
-    const adapter = vi.fn(async (command: string) => {
-      if (command === 'list_eh_accounts') return { ok: true, value: accounts };
-      if (command === 'set_active_eh_account') return { ok: true, value: undefined };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    setInvokeAdapterForTests(adapter);
-    const user = userEvent.setup();
-    renderEhRoute();
-
-    await user.click(await screen.findByRole('button', { name: '切换到EH Backup' }));
-
-    expect(adapter).toHaveBeenCalledWith('set_active_eh_account', { accountId: 'eh-b' });
-    const backup = screen.getByRole('button', { name: '检查EH Backup' }).closest('li');
-    expect(backup).not.toBeNull();
-    expect(within(backup!).getByLabelText('当前活跃')).toBeInTheDocument();
-  });
-
   it('updates the target account status after a successful health check', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: accounts };
@@ -148,15 +141,17 @@ describe('EH route workspace', () => {
     const user = userEvent.setup();
     renderEhRoute();
 
-    await user.click(await screen.findByRole('button', { name: '检查EH Backup' }));
+    // 每个账户卡片底部都有自己的操作列表；第二张卡片属于 EH Backup。
+    const backupCheck = (await screen.findAllByRole('button', { name: '检查登录状态' }))[1]!;
+    await user.click(backupCheck);
 
     expect(adapter).toHaveBeenCalledWith('check_eh_login_health', { accountId: 'eh-b' });
-    const backup = screen.getByRole('button', { name: '检查EH Backup' }).closest('li');
+    const backup = backupCheck.closest('li');
     expect(backup).not.toBeNull();
     expect(within(backup!).queryByText('已验证')).not.toBeInTheDocument();
     expect(within(backup!).getByText('Reader')).toBeInTheDocument();
     expect(within(backup!).getByText(/GP 12,345/)).toBeInTheDocument();
-    expect(within(backup!).getByText(/EXHENTAI 可访问/)).toBeInTheDocument();
+    expect(within(backup!).getByText(/EX 可访问/)).toBeInTheDocument();
   });
 
   it('does not retain a stale negative ExHentai result when the fresh probe is unknown', async () => {
@@ -169,8 +164,8 @@ describe('EH route workspace', () => {
     renderEhRoute();
 
     expect(await screen.findByText('Reader')).toBeInTheDocument();
-    expect(screen.getByText('正在检测 EXHENTAI 访问权限…')).toBeInTheDocument();
-    expect(screen.queryByText('EXHENTAI 不可访问')).toBeNull();
+    expect(screen.getByText('检测 EX 中…')).toBeInTheDocument();
+    expect(screen.queryByText('EX 不可访问')).toBeNull();
   });
 
   it('uses cached health when SQLite only has empty default values', async () => {
@@ -199,6 +194,6 @@ describe('EH route workspace', () => {
 
     expect(await screen.findByText('Cached Reader')).toBeInTheDocument();
     expect(screen.getByText(/GP 12,345/)).toBeInTheDocument();
-    expect(screen.getByText(/EXHENTAI 可访问/)).toBeInTheDocument();
+    expect(screen.getByText(/EX 可访问/)).toBeInTheDocument();
   });
 });

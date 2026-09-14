@@ -1,0 +1,149 @@
+import { useCallback, useMemo, useState } from 'react';
+
+import type { ArchiveRecord } from '../domain/library';
+import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
+import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
+import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
+import { useToast } from './Toast';
+
+const repository = new NativeLibraryRepository();
+
+/** Multi-select for a list of archives: the ids, the bulk actions that list can
+ * actually perform, and the confirmation guarding the destructive one.
+ *
+ * The list keeps the selection, so the page can act on it; the range logic
+ * stays in the list, because only it knows the row order a shift click extends
+ * over. */
+export function useArchiveSelection(options: {
+  archives: ArchiveRecord[];
+  scopeId?: string | undefined;
+  /** A shelf that holds one membership: bulk-add or bulk-remove that one. */
+  membership?: { list: 'reading' | 'favorites'; label: string; present: boolean } | undefined;
+  /** 收藏夹 membership is the LANraragi 🔖 Favorites category, so shelf
+   * writes are mirrored to the server when the caller has a server. */
+  serverId?: string | undefined;
+  /** Called with the ids the list must stop showing. */
+  onRemoved: (archiveIds: string[]) => void;
+}): {
+  props: {
+    selectionMode: boolean;
+    onSelectionModeChange: (next: boolean) => void;
+    selectedArchiveIds: ReadonlySet<string>;
+    onSelectionChange: (next: ReadonlySet<string>) => void;
+  };
+  /** Buttons for the selection bar. */
+  actions: JSX.Element | null;
+  /** The delete confirmation, rendered once by the page. */
+  dialogs: JSX.Element | null;
+} {
+  const { archives, scopeId, membership, serverId, onRemoved } = options;
+  const { showToast } = useToast();
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedArchiveIds, setSelectedArchiveIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingDelete, setPendingDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const selected = useMemo(
+    () => archives.filter((archive) => selectedArchiveIds.has(archive.archiveId)),
+    [archives, selectedArchiveIds],
+  );
+
+  const changeMode = useCallback((next: boolean) => {
+    setSelectionMode(next);
+    // Leaving the mode drops the selection: a list still marked after the bar
+    // is gone has nothing to act on it.
+    if (!next) setSelectedArchiveIds(new Set());
+  }, []);
+
+  const changeMembership = useCallback(async (next: boolean) => {
+    if (!scopeId || selected.length === 0) return;
+    setBusy(true);
+    try {
+      const results = await Promise.all(selected.map((archive) => (
+        membership?.list === 'reading'
+          ? repository.setReadingList(scopeId, archive.archiveId, next)
+          : repository.setWatchlist(scopeId, archive.archiveId, next)
+      )));
+      // Mirror the favorites writes to the LANraragi 🔖 Favorites category: the
+      // 收藏夹 shelf reads the category, so a local-only write would never show.
+      if (membership?.list === 'favorites' && serverId) {
+        const categories = await repository.listCategories(serverId);
+        const favorites = categories.ok
+          ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME)
+          : undefined;
+        if (favorites) {
+          const ops = await Promise.all(selected.map((archive) => (
+            next
+              ? repository.addArchiveToCategory(serverId, favorites.id, archive.archiveId)
+              : repository.removeArchiveFromCategory(serverId, favorites.id, archive.archiveId)
+          )));
+          const mirrored = ops.filter((result) => !result.ok).length;
+          if (mirrored > 0) showToast(`${mirrored} 个档案未能同步到服务器收藏夹`, 'error');
+        }
+      }
+      const failed = results.filter((result) => !result.ok).length;
+      if (failed > 0) showToast(`${failed} 个档案未能更新`, 'error');
+      else showToast(next ? `已加入${membership?.label ?? '收藏夹'}` : `已移出${membership?.label ?? '收藏夹'}`, 'success');
+      // A shelf holds the membership it was built from, so leaving it means the
+      // rows go; the library only changes a flag and keeps them.
+      if (!next && membership) onRemoved(selected.map((archive) => archive.archiveId));
+      setSelectedArchiveIds(new Set());
+    } finally {
+      setBusy(false);
+    }
+  }, [membership, onRemoved, scopeId, selected, serverId, showToast]);
+
+  const actions = (
+    <>
+      {membership && (
+        <button className="secondary-action" type="button" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
+          {membership.present ? `移出${membership.label}` : `加入${membership.label}`}
+        </button>
+      )}
+      {!membership && (
+        <button className="secondary-action" type="button" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
+          加入收藏
+        </button>
+      )}
+      {/* 删除也用同一颗按钮的形状——危险只体现在色调上，底色加文字与其它
+          动作一致，不再是一圈红描边。 */}
+      <button className="secondary-action is-danger" type="button" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
+        删除所选
+      </button>
+    </>
+  );
+
+  const dialogs = pendingDelete ? (
+    <ArchiveDeletionConfirmation
+      description={`将永久删除选中的 ${selected.length} 个档案，此操作不可撤销。`}
+      onClose={() => setPendingDelete(false)}
+      onConfirm={async (syncFavorite) => {
+        setBusy(true);
+        try {
+          const removed: string[] = [];
+          for (const archive of selected) {
+            await deleteArchiveWithFavoriteSync(archive, syncFavorite);
+            removed.push(archive.archiveId);
+          }
+          onRemoved(removed);
+          setSelectedArchiveIds(new Set());
+          showToast(`已删除 ${removed.length} 个档案`, 'success');
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
+  ) : null;
+
+  return {
+    props: {
+      selectionMode,
+      onSelectionModeChange: changeMode,
+      selectedArchiveIds,
+      onSelectionChange: setSelectedArchiveIds,
+    },
+    actions,
+    dialogs,
+  };
+}

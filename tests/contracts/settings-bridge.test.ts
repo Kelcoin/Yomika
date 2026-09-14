@@ -19,7 +19,11 @@ const preferences = {
   downloadDirectory: '',
   ehFavoriteDeleteSync: false,
   confirmEhFavoriteDelete: true,
+  continueReadingShowFinished: true,
+  ehMyTagsPriority: false,
   customCss: '',
+  floatingNav: false,
+  bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,
 };
 
 describe('native settings bridge', () => {
