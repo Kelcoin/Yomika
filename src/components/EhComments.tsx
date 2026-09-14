@@ -77,6 +77,13 @@ export function clearEhCommentsCacheForTests(): void {
   } catch { /* storage unavailable */ }
 }
 
+function renderCommentBody(body: string) {
+  const parts = body.split(/(https?:\/\/[^\s]+)/g);
+  return parts.map((part, index) => /^https?:\/\//i.test(part)
+    ? <a key={index} href={part} target="_blank" rel="noreferrer" className="eh-comment-link">{part}</a>
+    : <span key={index}>{part}</span>);
+}
+
 export function EhComments({ accountId, galleryId, token, prefetch = false }: { accountId: string; galleryId: string; token: string; prefetch?: boolean }) {
   const { showToast } = useToast();
   const [comments, setComments] = useState<EhComment[]>([]);
@@ -159,7 +166,7 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
             <span><strong>{comment.author || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span>
             {!comment.isUploader && <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>}
           </div>
-          <p>{comment.body}</p>
+          <p>{renderCommentBody(comment.body)}</p>
           <div className="eh-comment-votes">
             <time dateTime={comment.postedAt ? comment.postedAt.replace(' ', 'T') : undefined}><Clock3 aria-hidden="true" />{comment.postedAt || '时间未知'}</time>
             {!comment.isUploader && (

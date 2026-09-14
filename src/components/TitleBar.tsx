@@ -33,7 +33,7 @@ export function TitleBar() {
 
   const onMouseDown = (event: React.MouseEvent) => {
     // Only the bare surface drags — buttons stop propagation on their own.
-    if (event.button === 0) void api?.startDragging().catch(() => {});
+    if (event.button === 0 && !(event.target as Element).closest('button')) void api?.startDragging().catch(() => {});
   };
 
   return (

@@ -16,7 +16,7 @@ export const CARD_TAG_NAMESPACE_PRIORITY = [
 const HIDDEN_CARD_TAG_NAMESPACES = ['date_added', 'dateadded', 'timestamp', 'source', 'uploader', 'category'];
 
 /** Watched tags take the leftmost waterfall slots across all namespaces. */
-export function pickCardTags(tags: readonly string[] = [], limit = 6, priority?: ReadonlySet<string> | undefined): string[] {
+export function pickCardTags(tags: readonly string[] = [], limit = 10, priority?: ReadonlySet<string> | undefined): string[] {
   const rank = (tag: string) => {
     const namespace = tag.split(':', 1)[0]!.trim().toLowerCase();
     const index = CARD_TAG_NAMESPACE_PRIORITY.indexOf(namespace);

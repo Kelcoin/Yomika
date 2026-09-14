@@ -1055,7 +1055,8 @@ export function SettingsWorkspace() {
                   {DETAIL_ACTIONS.map((action) => {
                     const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
                     const included = preferenceDraft.detailActions.includes(action);
-                    return <button key={action} type="button" role="checkbox" aria-checked={included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${included ? ' is-checked' : ''}`} onClick={() => editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) })}><span>{labels[action]}</span>{included && <Check aria-hidden="true" />}</button>;
+                    const locked = action === 'read';
+                    return <button key={action} type="button" role="checkbox" disabled={locked} aria-checked={locked || included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${locked || included ? ' is-checked' : ''}${locked ? ' is-pinned' : ''}`} onClick={() => { if (!locked) editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) }); }}><span>{labels[action]}</span>{locked ? <span aria-hidden="true">锁定</span> : included && <Check aria-hidden="true" />}</button>;
                   })}
                 </div>
               </SettingsPanel>

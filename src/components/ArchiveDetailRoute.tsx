@@ -322,7 +322,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         </div>
         <div className="archive-detail-overview-copy">
           <div className="archive-detail-identity" aria-label="分类与发布者">
-            {identityGroups.flatMap((group) => group.values.map((tag) => <span className={`archive-detail-identity-chip tag-group-${group.namespace === 'reclass' ? 'category' : group.namespace}`} key={tag.query} title={group.label}>{tag.label}</span>))}
+            {identityGroups.filter((group) => ['category', 'reclass'].includes(group.namespace)).flatMap((group) => group.values.map((tag) => <span className={`archive-detail-identity-chip tag-group-${group.namespace === 'reclass' ? 'category' : group.namespace}`} key={tag.query} title={group.label}>{tag.label}</span>))}
           </div>
           <dl className="archive-detail-facts" aria-label="档案信息">
             {facts.map(({ kind, label, value }) => (
@@ -430,7 +430,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
           {tags.length > 0 && (
             <div className="archive-detail-tags" aria-label="档案标签">
-              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating', 'uploader'].includes(group.namespace)).map((group) => (
+              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace)).map((group) => (
                 <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
                   <h2>{group.label}</h2>
                   <div className="archive-detail-tag-row">
@@ -487,6 +487,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
   const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
   const [tab, setTab] = useState<'similar' | 'creator'>('similar');
+  const [reloadToken, setReloadToken] = useState(0);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
       setSimilar((current) => current.filter((archive) => archive.archiveId !== archiveId));
@@ -586,7 +587,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       } satisfies RecommendationSnapshot);
     })();
     return () => { active = false; };
-  }, [creator, currentArchiveId, scopeId, serverId, snapshotKey, tags]);
+  }, [creator, currentArchiveId, scopeId, serverId, snapshotKey, tags, reloadToken]);
 
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.
@@ -622,6 +623,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       scopeId={scopeId}
       serverId={serverId}
       headingContent={tabs}
+      onRefresh={() => { invalidateRouteCache(snapshotKey); setReloadToken((value) => value + 1); }}
       onArchiveContextMenu={openContextMenu}
     />
     {contextMenu}

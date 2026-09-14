@@ -104,8 +104,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     const derived = derivedHandlesRef.current.get(pageIndex);
     derivedHandlesRef.current.delete(pageIndex);
     if (derived) imageCache.release(derived);
-    derivedAttemptedRef.current.delete(pageIndex);
-    derivedQueueRef.current = derivedQueueRef.current.filter((job) => job.pageIndex !== pageIndex);
+    // Keep queued enhancement work alive when ReaderScreen evicts a page from
+    // the visual window; the worker may still finish it as a prefetch task.
+    // Only completed derived handles are released here.
     setDerivedPages((current) => {
       if (!current.has(pageIndex)) return current;
       const next = new Map(current);
@@ -228,7 +229,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (derivedBusyRef.current) return;
     derivedBusyRef.current = true;
     try {
-      while (pageActiveRef.current && derivedQueueRef.current.length > 0) {
+      while (derivedQueueRef.current.length > 0) {
         const job = derivedQueueRef.current.shift();
         if (!job) break;
         const { pageIndex } = job;
@@ -254,7 +255,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const derived = enhanced ?? censored;
         if (enhanced && censored) imageCache.release(censored);
         if (!derived) continue;
-        if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current || !pageHandlesRef.current.has(pageIndex)) {
+        if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
           imageCache.release(derived);
           continue;
         }
@@ -265,6 +266,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         }
         derivedHandlesRef.current.set(pageIndex, derived);
         setDerivedPages((current) => new Map(current).set(pageIndex, derived.url));
+        // Yield between pages so navigation/input can be serviced promptly on
+        // slower devices while the native inference worker continues.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     } finally {
       derivedBusyRef.current = false;
@@ -276,13 +280,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const requestDerived = useCallback((indexes: readonly number[]) => {
     if (!decensorEnabled && !upscaleEnabled) return;
     let queued = false;
-    for (const index of indexes) {
+    const context = contextRef.current;
+    const expanded = [...indexes, ...indexes.flatMap((index) => context ? getPrefetchPages(index, context.paths.length, prefetchDistance) : [])];
+    for (const index of expanded) {
       if (derivedAttemptedRef.current.has(index) || derivedQueueRef.current.some((job) => job.pageIndex === index)) continue;
       derivedQueueRef.current.push({ pageIndex: index, generation: derivedGenerationRef.current, decensorModel: decensorEnabled ? preferences.decensorModel : '', upscaleModel: upscaleEnabled ? preferences.upscaleModel : '' });
       queued = true;
     }
     if (queued) void runDerivedQueue();
-  }, [decensorEnabled, preferences.decensorModel, preferences.upscaleModel, runDerivedQueue, upscaleEnabled]);
+  }, [decensorEnabled, preferences.decensorModel, preferences.upscaleModel, runDerivedQueue, upscaleEnabled, prefetchDistance]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.

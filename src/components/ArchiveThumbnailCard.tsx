@@ -30,7 +30,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
   const myTags = useEhMyTags();
   const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
-  const tags = useMemo(() => pickCardTags(archive.tags, 6, myTagKeys), [archive.tags, myTagKeys]);
+  const tags = useMemo(() => pickCardTags(archive.tags, 10, myTagKeys), [archive.tags, myTagKeys]);
   const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const isWide = isWideCoverRatio(aspectRatio);
   useEffect(() => {
@@ -40,7 +40,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
     const load = () => void imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => undefined);
     if (typeof IntersectionObserver === 'undefined') load();
     else {
-      const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { observer.disconnect(); load(); } }, { rootMargin: '280px' });
+      const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { observer.disconnect(); load(); } }, { rootMargin: '480px' });
       observer.observe(node);
       return () => { observer.disconnect(); controller.abort(); if (handle) imageCache.release(handle); };
     }
