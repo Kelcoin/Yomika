@@ -1,3 +1,4 @@
+import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2, X } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
@@ -98,6 +99,7 @@ function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void 
 }
 
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, onVisiblePages }: ReaderScreenProps) {
+  const pageActive = usePageActive();
   const reduceMotion = useReducedMotion();
   const goBack = useReturnNavigation();
   // Built once. A different archive arrives as an unmount, not a prop change:
@@ -242,6 +244,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // The viewport is a live input, not a startup fact: `auto` reads it, and so do
   // the continuous-scroll slot heights.
   useEffect(() => {
+    if (!pageActive) return;
     const measure = () => {
       setViewport({ width: window.innerWidth, height: window.innerHeight });
       setWebtoonWidth(webtoonRef.current?.clientWidth ?? 0);
@@ -249,7 +252,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, [effectiveLayout]);
+  }, [effectiveLayout, pageActive]);
 
   // `auto` used to be decided once, by the first page to load, and then never
   // revisited — so narrowing the window kept the spread it had chosen and
@@ -298,20 +301,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // because that is a deliberate stop rather than a glance, and restarted by any
   // press inside them so a run of toolbar taps does not fight the timer.
   useEffect(() => {
-    if (state.phase !== 'chrome-visible' || thumbnailPanelOpen) return undefined;
+    if (!pageActive || state.phase !== 'chrome-visible' || thumbnailPanelOpen) return undefined;
     const timer = window.setTimeout(() => {
       setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current);
     }, CHROME_AUTO_HIDE_MS);
     return () => window.clearTimeout(timer);
-  }, [chromeKeepAlive, state.phase, thumbnailPanelOpen]);
+  }, [chromeKeepAlive, state.phase, thumbnailPanelOpen, pageActive]);
 
   // What is on screen right now, which is a different question from what the
   // prefetch window holds. Enhancement is expensive enough that it is worth
   // asking only about the pages someone is actually looking at.
   useEffect(() => {
-    if (!onVisiblePages) return;
+    if (!pageActive || !onVisiblePages) return;
     onVisiblePages(effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes);
-  }, [effectiveLayout, onVisiblePages, visibleIndexes, webtoonAnchor]);
+  }, [effectiveLayout, onVisiblePages, visibleIndexes, webtoonAnchor, pageActive]);
 
   // A switch above the canvas changed what `loadPage` answers with. Everything
   // already held is now the wrong rendition, so drop it and let the window
@@ -336,6 +339,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [releasePage, reloadToken]);
 
   useEffect(() => {
+    if (!pageActive) {
+      if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
+      return;
+    }
     const pageCount = loadedPages.length;
     const fetchSet = new Set<number>();
     const retainSet = new Set<number>();
@@ -420,7 +427,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(50, soonest - now));
     }
-  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast]);
+  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
 
   const retryPage = useCallback((index: number) => {
     failedPagesRef.current.delete(index);
@@ -512,13 +519,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   // Arrow keys are bound to the canvas, so it has to own focus from the start;
   // otherwise the user must click first, and that click toggles the chrome.
-  useEffect(() => { rootRef.current?.focus({ preventScroll: true }); }, []);
+  useEffect(() => { if (pageActive) rootRef.current?.focus({ preventScroll: true }); }, [pageActive]);
 
   useEffect(() => {
-    if (!autoPlay) return undefined;
-    const timer = window.setInterval(() => move('next'), 5000);
+    if (!pageActive || !autoPlay) return undefined;
+    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') move('next'); }, 5000);
     return () => window.clearInterval(timer);
-  }, [autoPlay, effectiveLayout, state.direction, state.layout]);
+  }, [autoPlay, effectiveLayout, state.direction, state.layout, pageActive]);
 
   function toggleFullscreen() {
     if (document.fullscreenElement) {

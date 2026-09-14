@@ -454,7 +454,8 @@ describe('library route workspace', () => {
     renderLibrary('/library/a1');
 
     await user.click(await screen.findByRole('button', { name: /^Delete me\b/ }));
-    await user.click(screen.getByRole('button', { name: '删除档案' }));
+    await user.click(screen.getByRole('button', { name: '档案菜单' }));
+    await user.click(screen.getByRole('menuitem', { name: '删除档案' }));
 
     expect(screen.getByRole('dialog', { name: '确认删除' })).toBeInTheDocument();
     expect(adapter).not.toHaveBeenCalledWith('delete_archive', expect.anything());
@@ -532,7 +533,8 @@ describe('library route workspace', () => {
     renderLibrary('/library/a1');
 
     await user.click(await screen.findByRole('button', { name: /^Original title\b/ }));
-    await user.click(await screen.findByRole('button', { name: '编辑元数据' }));
+    await user.click(await screen.findByRole('button', { name: '档案菜单' }));
+    await user.click(screen.getByRole('menuitem', { name: '编辑元数据' }));
     const titleInput = await screen.findByRole('textbox', { name: '标题' });
     expect(titleInput).toHaveValue('Original title');
     fireEvent.change(titleInput, { target: { value: 'Updated title' } });

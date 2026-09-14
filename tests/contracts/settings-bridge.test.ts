@@ -22,6 +22,7 @@ const preferences = {
   continueReadingShowFinished: true,
   ehMyTagsPriority: false,
   sfwMode: false,
+  detailActions: ['read', 'readingList', 'favorites', 'download'] as Array<'read' | 'readingList' | 'favorites' | 'download' | 'edit' | 'delete'>,
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,

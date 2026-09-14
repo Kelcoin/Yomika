@@ -43,6 +43,7 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   // SFW 模式走根属性：模糊与显隐是纯 CSS 合同，样式自定义无需知道开关。
   if (preferences.sfwMode) document.documentElement.dataset.sfw = 'true';
   else delete document.documentElement.dataset.sfw;
+  try { window.localStorage.setItem('yomika.last-sfw-mode', String(preferences.sfwMode)); } catch { /* storage unavailable */ }
   applyCustomCss(preferences.customCss);
 }
 
@@ -54,6 +55,7 @@ const LAST_CUSTOM_CSS_KEY = 'yomika.last-custom-css';
 
 // Runs when the module is imported, before React renders anything.
 try {
+  if (window.localStorage.getItem('yomika.last-sfw-mode') === 'true') document.documentElement.dataset.sfw = 'true';
   const cached = window.localStorage.getItem(LAST_CUSTOM_CSS_KEY);
   if (cached) applyCustomCss(cached);
 } catch { /* storage can be unavailable */ }
@@ -144,4 +146,9 @@ export function useCardStyle(): { cardStyle: PreferenceSnapshot['cardStyle']; se
     cardStyle: preferences.cardStyle,
     setCardStyle: (value) => { void save({ ...preferences, cardStyle: value }); },
   };
+}
+
+/** Standalone detail previews use the same defaults as the app provider. */
+export function useDetailActions() {
+  return useContext(PreferencesContext)?.preferences.detailActions ?? DEFAULT_PREFERENCES.detailActions;
 }

@@ -301,7 +301,7 @@ body::-webkit-scrollbar,
   /* workspace + status bar; the context bar above them is gone. */
   grid-template-rows: minmax(0, 1fr) 28px;
   min-width: 0;
-  height: 100dvh;
+  height: 100%;
   overflow: hidden;
   /* Every route can be shorter than the viewport. The workspace itself is
      intentionally transparent, so its parent must carry the content surface
@@ -1158,6 +1158,8 @@ body::-webkit-scrollbar,
   padding: var(--space-4) var(--space-4) 0;
 }
 
+.library-shell-panel-content > section { height: 100%; box-sizing: border-box; }
+
 .library-shell-list {
   position: relative;
   z-index: 2;
@@ -1212,6 +1214,7 @@ body::-webkit-scrollbar,
 }
 
 .archive-detail-route-header h1 {
+  flex: 1; min-width: 0;
   margin: 0;
   font-size: clamp(1.25rem, 2vw, 1.8rem);
   overflow-wrap: anywhere;
@@ -1294,12 +1297,14 @@ body::-webkit-scrollbar,
   gap: var(--space-6);
 }
 
+.archive-detail-identity { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.archive-detail-identity-chip { padding: 4px 10px; border-radius: var(--radius-pill); background: var(--tag-ns-bg, var(--surface-container-high)); color: var(--tag-ns-ink, var(--on-surface)); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .archive-detail-overview-copy { min-width: 0; display: flex; flex-direction: column; align-self: stretch; gap: 20px; }
 .archive-detail-overview-copy h1 { margin: 0; font-size: var(--text-lg); line-height: 1.45; overflow-wrap: anywhere; }
 .archive-detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; margin: auto 0 0; }
-.archive-detail-facts > div { min-width: 0; }
-.archive-detail-facts dt { color: var(--ink-secondary); font-size: var(--text-xs); margin-bottom: 4px; }
-.archive-detail-facts dd { margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+.archive-detail-facts > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.archive-detail-facts dt { display: flex; flex: 0 0 24px; color: var(--on-surface-variant); }
+.archive-detail-facts dd { min-width: 0; flex: 1; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .archive-detail-tag-section { width: 100%; min-width: 0; margin-top: 20px; }
 
 /* One row, always. This was `repeat(4, minmax(0, 1fr))` while the toolbar grew
@@ -1580,12 +1585,13 @@ body::-webkit-scrollbar,
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin-bottom: var(--space-4);
 }
 
 .search-label {
-  flex: 1 1 240px;
+  flex: 1 1 0;
+  min-width: 0;
   display: block;
   width: auto;
   max-width: none;
@@ -1634,8 +1640,8 @@ body::-webkit-scrollbar,
   min-width: 42px;
   padding: 2px 6px;
   border-radius: var(--radius-pill);
-  background: var(--primary-container);
-  color: var(--on-primary-container);
+  background: var(--tag-ns-bg, var(--surface-container-highest));
+  color: var(--tag-ns-ink, var(--on-surface));
   font-size: var(--text-xs);
   font-weight: 700;
   white-space: nowrap;
@@ -1681,7 +1687,7 @@ body::-webkit-scrollbar,
 .library-toolbar .select-field {
   flex: 1 1 0;
   width: 100%;
-  min-width: 160px;
+  min-width: 0;
 }
 .library-toolbar > .secondary-action {
   flex: 0 0 var(--control-height);
@@ -1952,38 +1958,28 @@ body::-webkit-scrollbar,
   border-radius: inherit;
 }
 
-/* SFW 模式：封面一律模糊；悬停封面本身、点击卡片（获得焦点）或按下时临时
-   显示那一枚，移开或失焦自动恢复——blur 走根属性 data-sfw，不触碰组件。
-   列表封面（archive-row-thumb）、rail/网格封面（archive-thumb-card-media）
-   与详情封面都参与。模糊↔清晰之间用统一的 220ms 过渡，三处封面共用。 */
+/* SFW: reveal only the image surface. Keep the established 24px blur and
+   scale; avoid permanent GPU layers for every virtualized cover. */
 :root[data-sfw='true'] .archive-row-thumb img,
 :root[data-sfw='true'] .archive-thumb-card-media img,
-:root[data-sfw='true'] .archive-detail-cover-trigger img {
+:root[data-sfw='true'] .archive-detail-cover-trigger img,
+:root[data-sfw='true'] .archive-page-thumbnail img {
   filter: blur(24px);
   transform: scale(1.12);
 }
-
-.archive-row-thumb img,
-.archive-thumb-card-media img,
-.archive-detail-cover-trigger img {
+:is(.archive-row-thumb, .archive-thumb-card-media, .archive-detail-cover-trigger, .archive-page-thumbnail) img {
   transition: filter var(--motion-standard), transform var(--motion-standard);
 }
-
 :root[data-sfw='true'] .archive-row-thumb:hover img,
 :root[data-sfw='true'] .archive-thumb-card-media:hover img,
-:root[data-sfw='true'] .archive-thumb-card:hover img,
-:root[data-sfw='true'] .archive-thumb-card:focus img,
-:root[data-sfw='true'] .archive-thumb-card:focus-visible img,
-:root[data-sfw='true'] .archive-thumb-card:active img,
-:root[data-sfw='true'] .archive-row:hover img,
-:root[data-sfw='true'] .archive-row:focus img,
-:root[data-sfw='true'] .archive-row:focus-visible img,
-:root[data-sfw='true'] .archive-row:active img,
 :root[data-sfw='true'] .archive-detail-cover-trigger:hover img,
-:root[data-sfw='true'] .archive-detail-cover-trigger:focus-visible img {
+:root[data-sfw='true'] .archive-page-thumbnail:hover img,
+:root[data-sfw='true'] .archive-detail-cover-trigger:focus-visible img,
+:root[data-sfw='true'] .archive-page-thumbnail:focus-visible img {
   filter: none;
   transform: none;
 }
+.archive-page-thumbnail { overflow: hidden; }
 
 /* A wide cover only takes two columns of width; its height stays identical to a
    narrow card so every card in a row is the same height. */
@@ -2675,9 +2671,9 @@ body::-webkit-scrollbar,
   color: var(--chip-ink);
   border: 0;
 }
-.tag-group-female h2, .tag-group-female h3 { background: var(--tertiary); color: var(--on-tertiary); }
-.tag-group-male h2, .tag-group-male h3 { background: var(--secondary); color: var(--on-secondary); }
-.tag-group-artist h2, .tag-group-artist h3 { background: var(--success); color: var(--on-success); }
+.tag-suggest-badge.tag-group-female, .tag-group-female h2, .tag-group-female h3 { background: var(--tertiary); color: var(--on-tertiary); }
+.tag-suggest-badge.tag-group-male, .tag-group-male h2, .tag-group-male h3 { background: var(--secondary); color: var(--on-secondary); }
+.tag-suggest-badge.tag-group-artist, .tag-group-artist h2, .tag-group-artist h3 { background: var(--success); color: var(--on-success); }
 .tag-group-uploader,
 .tag-group-date_added,
 .tag-group-timestamp,
@@ -3499,28 +3495,29 @@ body::-webkit-scrollbar,
   /* react-resizable-panels writes flex basis/height inline styles. On a phone
      the route is a single drilled-in surface, so those desktop sizing values
      must not leave an empty flex track below the visible panel. */
-  .library-shell.has-detail[data-panel-group] {
+  .library-shell[data-group] {
     display: block !important;
     height: auto !important;
     min-height: 100%;
   }
-  .library-shell.has-detail[data-panel-group] > [data-panel] {
+  .library-shell[data-group] > [data-panel] {
     display: block !important;
     width: 100% !important;
     height: auto !important;
     min-height: 0 !important;
     flex: none !important;
   }
-  .library-shell.has-detail[data-panel-group] > [data-panel]:has(.library-shell-list) {
+  .library-shell.has-detail[data-group] > [data-panel]:has(.library-shell-list) {
     display: none !important;
   }
+  .library-shell-panel-content > section { height: auto; min-height: 100%; }
   .library-shell-list,
   .library-shell-detail { padding: var(--space-4); border: 0; }
   .library-shell.has-detail .library-shell-list { display: none; }
   .library-shell:not(.has-detail) .library-shell-detail { display: none; }
   .library-shell-detail { overflow: visible; }
   .library-toolbar {
-    gap: var(--space-2);
+    gap: var(--space-3);
     flex-wrap: wrap;
   }
   .library-toolbar > .select-field { min-width: 140px; }
@@ -4701,3 +4698,30 @@ body::-webkit-scrollbar,
 .card-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; white-space: nowrap; }
 .card-tag-waterfall .card-tag-measure { display: inline-block; }
 .archive-detail-route-title { margin: 0; min-width: 0; font-size: var(--text-lg); line-height: 1.4; overflow-wrap: anywhere; }
+
+.library-controls .search-preset-field { flex: 0 0 var(--control-height); width: var(--control-height); min-width: var(--control-height); }
+.library-controls .search-preset-save { width: var(--control-height); height: var(--control-height); }
+@media (max-width: 900px) { .library-toolbar > .select-field { min-width: 0; } }
+[hidden] { display: none !important; }
+.route-cache-panel[hidden] * { animation-play-state: paused !important; }
+
+/* Panel v4 puts the scroll wrapper inside data-panel. Compact pages scroll in
+   the workspace instead of creating a second vertical scrollport. */
+@media (max-width: 900px) {
+  .library-shell-panel-content, .library-list-panel-content { height: auto !important; overflow: visible !important; }
+}
+
+.archive-detail-route { container: archive-detail / inline-size; }
+@container archive-detail (max-width: 520px) {
+  .archive-detail-overview { grid-template-columns: 140px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .archive-detail-route-cover { justify-content: flex-start; }
+  .archive-detail-cover-trigger, .archive-detail-route-cover img, .archive-detail-cover-placeholder { width: 140px; }
+  .archive-detail-route-cover img { height: 187px; }
+  .archive-detail-facts { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .archive-detail-overview-copy { gap: 12px; }
+}
+@container archive-detail (max-width: 340px) {
+  .archive-detail-overview { grid-template-columns: 104px minmax(0, 1fr); gap: 12px; }
+  .archive-detail-cover-trigger, .archive-detail-route-cover img, .archive-detail-cover-placeholder { width: 104px; }
+  .archive-detail-route-cover img { height: 139px; }
+}

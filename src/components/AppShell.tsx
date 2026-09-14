@@ -55,7 +55,6 @@ const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, la
 // DOM nodes are replaced when a route unmounts, but the user's reading position
 // belongs to the route. Keep it outside React so switching tabs does not turn a
 // scroll restoration into another render or request.
-const routeScrollPositions = new Map<string, number[]>();
 
 interface AppShellProps {
   children: ReactNode;
@@ -184,28 +183,6 @@ export function AppShell({ children }: AppShellProps) {
     return () => document.removeEventListener('scroll', handleScroll, true);
   }, [pathname]);
 
-  useEffect(() => {
-    const restore = () => {
-      const positions = routeScrollPositions.get(pathname);
-      const regions = [
-        workspaceRef.current,
-        ...Array.from(document.querySelectorAll<HTMLElement>('[data-scroll-region]')),
-      ].filter((region, index, all): region is HTMLElement => Boolean(region) && all.indexOf(region) === index);
-      if (positions) regions.forEach((region, index) => { region.scrollTop = positions[index] ?? 0; });
-      const save = () => routeScrollPositions.set(pathname, regions.map((region) => region.scrollTop));
-      regions.forEach((region) => region.addEventListener('scroll', save, { passive: true }));
-      return () => regions.forEach((region) => region.removeEventListener('scroll', save));
-    };
-    let cleanup: (() => void) | undefined;
-    const frame = window.requestAnimationFrame(() => { cleanup = restore(); });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      cleanup?.();
-      const regions = [workspaceRef.current, ...Array.from(document.querySelectorAll<HTMLElement>('[data-scroll-region]'))]
-        .filter((region, index, all): region is HTMLElement => Boolean(region) && all.indexOf(region) === index);
-      routeScrollPositions.set(pathname, regions.map((region) => region.scrollTop));
-    };
-  }, [pathname]);
 
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
@@ -253,7 +230,7 @@ export function AppShell({ children }: AppShellProps) {
         </motion.main>
         <button className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
           workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-          document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => region.scrollTo({ top: 0, behavior: 'smooth' }));
+          document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => !region.closest('[hidden]') && region.scrollTo({ top: 0, behavior: 'smooth' }));
           setShowScrollTop(false);
         }}><ArrowUp aria-hidden="true" /></button>
         <StatusBar />

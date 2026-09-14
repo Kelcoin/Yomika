@@ -1,7 +1,8 @@
 import { ArrowRight, Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
+import { RetainedPage } from './RetainedPage';
 import { EmptyState } from '../components/EmptyState';
 import { LibraryShell } from '../components/LibraryShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
@@ -634,51 +635,47 @@ function UploadRoute() {
 }
 
 export function WorkspaceRoutes() {
-  const { pathname } = useLocation();
-  const routeKey = pathname === '/' ? 'home'
-    : /^\/library(?:\/[^/]+)?$/.test(pathname) ? 'library'
-      : pathname === '/history' ? 'history'
-        : pathname === '/watchlist' ? 'watchlist'
-          : pathname === '/to-read' ? 'toRead'
-            : undefined;
-  const [mountedRoutes, setMountedRoutes] = useState<Set<string>>(() => new Set(routeKey ? [routeKey] : []));
+  const location = useLocation();
+  const navigate = useNavigate();
+  const keyFor = (path: string) => /^\/library(?:\/[^/]+)?$/.test(path) ? '/library' : path;
+  const routeKey = keyFor(location.pathname);
+  const visited = useRef(new Map<string, typeof location>());
+  const previousKey = useRef(routeKey);
+  const savedLibrary = visited.current.get('/library');
+  // A navigation entry to the library resumes its split pane. Explicit close,
+  // tag searches and server changes are real new destinations.
+  const resume = routeKey === '/library' && previousKey.current !== '/library'
+    && location.pathname === '/library' && !location.search
+    && savedLibrary?.pathname !== '/library' ? savedLibrary : undefined;
+  const current = resume ?? location;
+  visited.current.set(routeKey, current);
   useEffect(() => {
-    if (!routeKey) return;
-    setMountedRoutes((current) => current.has(routeKey) ? current : new Set(current).add(routeKey));
-  }, [routeKey]);
-  const isMounted = (key: string) => routeKey === key || mountedRoutes.has(key);
-  const libraryArchiveId = routeKey === 'library' ? pathname.match(/^\/library\/([^/]+)$/)?.[1] : undefined;
-  return (
-    <>
-      {/* 流式路由的面板必须随内容生长（is-flow）：height:100% 会把面板钉在
-          滚动容器高度，溢出穿过 overflow:visible 中间层时 scrollHeight 丢尾，
-          最后一条 rail 永远滚不出视口。is-flow 只用于首页：它的 workspace 自己
-          是滚动容器。档案库与三个书架走 is-library-workspace（桌面端
-          overflow:hidden、页面不滚动），面板保持 height:100%，由面板内的
-          .archive-list（data-scroll-region）自己滚动——面板一旦 height:auto，
-          .archive-list 的百分比链就断了，桌面端没有任何滚动容器。≤900 时媒体
-          块统一放开面板高度，改为页面滚动。 */}
-      {isMounted('home') && <section className="route-cache-panel is-flow" hidden={routeKey !== 'home'}><HomeWorkspace /></section>}
-      {isMounted('library') && <section className="route-cache-panel" hidden={routeKey !== 'library'}><LibraryShell archiveId={libraryArchiveId} /></section>}
-      {isMounted('history') && <section className="route-cache-panel" hidden={routeKey !== 'history'}><StateWorkspace name="history" /></section>}
-      {isMounted('watchlist') && <section className="route-cache-panel" hidden={routeKey !== 'watchlist'}><StateWorkspace name="watchlist" /></section>}
-      {isMounted('toRead') && <section className="route-cache-panel" hidden={routeKey !== 'toRead'}><StateWorkspace name="toRead" /></section>}
-      {!routeKey && <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
-      <Routes>
-      <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
-      <Route path="/eh" element={<EhRouteWorkspace />} />
-      <Route path="/downloads" element={<TaskCenter />} />
-      {/* Tools live on their own routes; the settings section is only an index. */}
-      <Route path="/tools/upload" element={<UploadRoute />} />
-      <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
-      <Route path="/dedup" element={<Navigate to="/tools/dedup" replace />} />
-      <Route path="/sync" element={<Navigate to="/settings?section=sync" replace />} />
-      <Route path="/settings" element={<SettingsWorkspace />} />
-      <Route path="*" element={<HomeWorkspace />} />
-      </Routes>
-      </Suspense>}
-    </>
-  );
+    previousKey.current = routeKey;
+    if (resume) navigate(`${resume.pathname}${resume.search}`, { replace: true, state: resume.state });
+  }, [navigate, resume, routeKey]);
+  return <>{[...visited.current].map(([key, saved]) => (
+    <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/history', '/watchlist', '/to-read'].includes(key)}>
+      <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
+        <Routes location={saved}>
+          <Route path="/" element={<HomeWorkspace />} />
+          <Route path="/library" element={<LibraryShell />} />
+          <Route path="/library/:archiveId" element={<LibraryShell />} />
+          <Route path="/history" element={<StateWorkspace name="history" />} />
+          <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
+          <Route path="/to-read" element={<StateWorkspace name="toRead" />} />
+          <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
+          <Route path="/eh" element={<EhRouteWorkspace />} />
+          <Route path="/downloads" element={<TaskCenter />} />
+          <Route path="/tools/upload" element={<UploadRoute />} />
+          <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
+          <Route path="/dedup" element={routeKey === key ? <Navigate to="/tools/dedup" replace /> : null} />
+          <Route path="/sync" element={routeKey === key ? <Navigate to="/settings?section=sync" replace /> : null} />
+          <Route path="/settings" element={<SettingsWorkspace />} />
+          <Route path="*" element={<HomeWorkspace />} />
+        </Routes>
+      </Suspense>
+    </RetainedPage>
+  ))}</>;
 }
 
 function MetadataEditRouteRoute() {

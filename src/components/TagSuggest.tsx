@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type RefObject } from 'react';
+import { usePageActive } from '../app/RetainedPage';
+import { useEffect, useId, useMemo, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { NS_CN_LABELS, searchTags, type TagSuggestion } from '../lib/tags';
 
@@ -8,10 +9,10 @@ interface TagSuggestProps {
   onSelect: (tag: string) => void;
 }
 
-const PANEL_ID = 'tag-suggest-panel';
-const optionId = (index: number) => `${PANEL_ID}-option-${index}`;
-
 export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps) {
+  const pageActive = usePageActive();
+  const panelId = useId();
+  const optionId = (index: number) => `${panelId}-option-${index}`;
   const [active, setActive] = useState(0);
   const [position, setPosition] = useState<{ left: number; top: number; width: number }>();
   const token = useMemo(() => inputValue.slice(inputValue.lastIndexOf(',') + 1).trim(), [inputValue]);
@@ -19,7 +20,7 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
 
   useEffect(() => setActive(0), [token]);
   useEffect(() => {
-    if (!suggestions.length || !anchorRef.current) { setPosition(undefined); return; }
+    if (!pageActive || !suggestions.length || !anchorRef.current) { setPosition(undefined); return; }
     const update = () => {
       const rect = anchorRef.current?.getBoundingClientRect();
       if (rect) setPosition({ left: rect.left, top: rect.bottom + 6, width: rect.width });
@@ -28,7 +29,7 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
     window.addEventListener('resize', update);
     window.addEventListener('scroll', update, true);
     return () => { window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); };
-  }, [anchorRef, suggestions.length]);
+  }, [anchorRef, suggestions.length, pageActive]);
   useEffect(() => {
     const input = anchorRef.current;
     if (!input) return;
@@ -50,7 +51,7 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
     const open = Boolean(position) && suggestions.length > 0;
     input.setAttribute('role', 'combobox');
     input.setAttribute('aria-autocomplete', 'list');
-    input.setAttribute('aria-controls', PANEL_ID);
+    input.setAttribute('aria-controls', panelId);
     input.setAttribute('aria-expanded', String(open));
     if (open) input.setAttribute('aria-activedescendant', optionId(active));
     else input.removeAttribute('aria-activedescendant');
@@ -59,9 +60,9 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
       input.removeAttribute('aria-activedescendant');
     };
   }, [active, anchorRef, position, suggestions.length]);
-  if (!position || !suggestions.length || typeof document === 'undefined') return null;
+  if (!pageActive || !position || !suggestions.length || typeof document === 'undefined') return null;
   return createPortal(
-    <div className="tag-suggest-panel" id={PANEL_ID} role="listbox" style={{ position: 'fixed', left: position.left, top: position.top, width: position.width }}>
+    <div className="tag-suggest-panel" id={panelId} role="listbox" style={{ position: 'fixed', left: position.left, top: position.top, width: position.width }}>
       {suggestions.map((suggestion, index) => (
         <button
           key={`${suggestion.namespace}:${suggestion.key}`}
@@ -73,7 +74,7 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
           onMouseEnter={() => setActive(index)}
           onMouseDown={(event) => { event.preventDefault(); onSelect(formatSuggestion(suggestion)); }}
         >
-          <span className="tag-suggest-badge">{NS_CN_LABELS[suggestion.namespace] ?? suggestion.namespace}</span>
+          <span className={`tag-suggest-badge tag-group-${suggestion.namespace}`}>{NS_CN_LABELS[suggestion.namespace] ?? suggestion.namespace}</span>
           <span className="tag-suggest-label">{suggestion.label}</span>
           <span className="tag-suggest-tag">{suggestion.namespace}:{suggestion.key}$</span>
         </button>

@@ -1,0 +1,36 @@
+import { createContext, useContext, useLayoutEffect, useRef, type ReactNode } from 'react';
+
+const PageActiveContext = createContext(true);
+export const usePageActive = () => useContext(PageActiveContext);
+
+/** Retain component state and scroll positions; hidden regions must never save
+ * their zero-sized layout over the last visible position. */
+export function RetainedPage({ active, flow = false, children }: { active: boolean; flow?: boolean; children: ReactNode }) {
+  const parentActive = usePageActive();
+  const visible = active && parentActive;
+  const root = useRef<HTMLElement>(null);
+  const positions = useRef(new Map<HTMLElement, number>());
+  useLayoutEffect(() => {
+    if (!visible || !root.current) return;
+    const panel = root.current;
+    const workspace = panel.closest<HTMLElement>('.workspace');
+    const restore = () => positions.current.forEach((top, region) => {
+      if (!region.isConnected) { positions.current.delete(region); return; }
+      if (region.isConnected && !region.closest('[hidden]')) region.scrollTop = top;
+    });
+    if (workspace) workspace.scrollTop = positions.current.get(workspace) ?? 0;
+    restore();
+    const frame = requestAnimationFrame(restore);
+    const save = (event: Event) => {
+      const region = event.target;
+      if (region instanceof HTMLElement && region.getClientRects().length > 0 && !region.closest('[hidden]') && (region === workspace || panel.contains(region))) {
+        positions.current.set(region, region.scrollTop);
+      }
+    };
+    document.addEventListener('scroll', save, true);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('scroll', save, true); };
+  }, [visible]);
+  return <PageActiveContext.Provider value={visible}>
+    <section ref={root} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>
+  </PageActiveContext.Provider>;
+}

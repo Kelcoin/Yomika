@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -957,4 +957,42 @@ describe('settings workspace', () => {
       expect(document.getElementById('yomika-custom-css')?.textContent).toBe(celadon.css);
     });
   });
+});
+
+it('saves the selected detail actions from the appearance settings container', async () => {
+  const user = userEvent.setup();
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => ({ ok: true, value: command === 'load_preferences' ? DEFAULT_PREFERENCES : command === 'save_preferences' ? args?.input : [] }));
+  setInvokeAdapterForTests(adapter);
+  renderSettings('appearance');
+  await user.click(await screen.findByRole('button', { name: '详情页功能按钮' }));
+  const panel = screen.getByRole('dialog', { name: '详情页功能按钮' });
+  expect(within(panel).getByRole('checkbox', { name: '详情页显示下载' })).toHaveAttribute('aria-checked', 'true');
+  expect(within(panel).getByRole('checkbox', { name: '详情页显示编辑' })).toHaveAttribute('aria-checked', 'false');
+  await user.click(within(panel).getByRole('checkbox', { name: '详情页显示编辑' }));
+  await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ detailActions: ['read', 'readingList', 'favorites', 'download', 'edit'] }) }));
+});
+
+it('does not overwrite newer detail action edits with an earlier save response', async () => {
+  const user = userEvent.setup();
+  let finishFirst!: (value: unknown) => void;
+  let firstInput: unknown;
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+    if (command === 'save_preferences') {
+      if (!firstInput) { firstInput = args?.input; return new Promise((resolve) => { finishFirst = resolve; }); }
+      return { ok: true, value: args?.input };
+    }
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderSettings('appearance');
+  await user.click(await screen.findByRole('button', { name: '详情页功能按钮' }));
+  await user.click(screen.getByRole('checkbox', { name: '详情页显示编辑' }));
+  await vi.waitFor(() => expect(firstInput).toBeDefined());
+  await user.click(screen.getByRole('checkbox', { name: '详情页显示下载' }));
+  await act(async () => { finishFirst({ ok: true, value: firstInput }); });
+  expect(screen.getByRole('checkbox', { name: '详情页显示下载' })).toHaveAttribute('aria-checked', 'false');
+  await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'save_preferences')).toHaveLength(2));
+  expect(screen.getByRole('checkbox', { name: '详情页显示下载' })).toHaveAttribute('aria-checked', 'false');
+  expect(screen.getByRole('checkbox', { name: '详情页显示编辑' })).toHaveAttribute('aria-checked', 'true');
 });

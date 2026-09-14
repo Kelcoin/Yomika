@@ -1,3 +1,4 @@
+import { usePageActive } from '../app/RetainedPage';
 import { CircleDot, Database, ListTodo, LibraryBig, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -22,6 +23,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function StatusBar() {
+  const pageActive = usePageActive();
   const [archiveTotal, setArchiveTotal] = useState<number>();
   const [serverName, setServerName] = useState<string>();
   const [serverConnection, setServerConnection] = useState<'none' | 'online' | 'offline'>('none');
@@ -30,8 +32,10 @@ export function StatusBar() {
   const [cacheBytes, setCacheBytes] = useState<number>();
 
   useEffect(() => {
+    if (!pageActive) return;
     let active = true;
     const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
       void Promise.allSettled([repository.listServers(), repository.checkServerStatus(), repository.listTasks(), syncRepository.listAccounts()]).then(([serversState, statusState, tasksState, syncState]) => {
         if (!active) return;
         const servers = serversState.status === 'fulfilled' ? serversState.value : undefined;
@@ -71,11 +75,13 @@ export function StatusBar() {
       window.clearInterval(timer);
       window.removeEventListener('focus', refresh);
     };
-  }, []);
+  }, [pageActive]);
 
   useEffect(() => {
+    if (!pageActive) return;
     let active = true;
     const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
       void cacheRepository.stats().then((result) => {
         if (active && result.ok) setCacheBytes(result.value.bytes);
       }).catch(() => {});
@@ -90,7 +96,7 @@ export function StatusBar() {
       window.removeEventListener('focus', refresh);
       window.removeEventListener('yomika:cache-changed', refresh);
     };
-  }, []);
+  }, [pageActive]);
 
   const statuses = [
     { label: '连接状态', icon: CircleDot, name: '连接', value: serverConnection === 'online' ? (serverName ?? '在线') : serverConnection === 'offline' ? '离线' : '未连接', tone: serverConnection === 'online' ? 'success' : 'warning' },

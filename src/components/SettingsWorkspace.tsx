@@ -34,7 +34,7 @@ import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCa
 import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
-import { MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
+import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { openExternalUrl } from '../bridge/externalUrl';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -436,6 +436,7 @@ export function SettingsWorkspace() {
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
+  const preferenceEditRevision = useRef(0);
 
   // Only failures interrupt: a save the user did not ask for should not announce
   // itself on every keystroke. The panel says when it last saved instead.
@@ -521,6 +522,7 @@ export function SettingsWorkspace() {
    * a toggle could look applied and silently not be. Rapid edits (typing in the
    * CSS box, holding a number spinner) collapse into one write. */
   function editPreferences(patch: Partial<PreferenceSnapshot>) {
+    preferenceEditRevision.current += 1;
     const next = { ...preferenceDraft, ...patch };
     setPreferenceDraft(next);
     pendingPreferences.current = next;
@@ -529,6 +531,7 @@ export function SettingsWorkspace() {
   }
 
   async function persistPreferences(next: PreferenceSnapshot) {
+    const revision = preferenceEditRevision.current;
     if (autosaveTimer.current !== undefined) window.clearTimeout(autosaveTimer.current);
     autosaveTimer.current = undefined;
     pendingPreferences.current = undefined;
@@ -538,6 +541,7 @@ export function SettingsWorkspace() {
     setPreferenceMessage(undefined);
     setPreferenceError(false);
     const result = await preferenceState.save(next);
+    if (revision !== preferenceEditRevision.current) return;
     if (result.ok) {
       setPreferenceDraft(result.value);
     } else {
@@ -1043,6 +1047,17 @@ export function SettingsWorkspace() {
                   })}
                 </div>
                 <p className="settings-menu-desc">带锁的档案库与设置固定显示，不受勾选影响。</p>
+              </SettingsPanel>
+            )}
+            {selectedSettingsSection === 'settings-appearance' && (
+              <SettingsPanel icon={<ListChecks />} label="详情页功能按钮" hint="选择详情页显示的操作；其他操作仍可从右上角菜单打开" ariaLabel="详情页功能按钮" value={`${preferenceDraft.detailActions.length} 项`}>
+                <div className="settings-menu-checks">
+                  {DETAIL_ACTIONS.map((action) => {
+                    const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
+                    const included = preferenceDraft.detailActions.includes(action);
+                    return <button key={action} type="button" role="checkbox" aria-checked={included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${included ? ' is-checked' : ''}`} onClick={() => editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) })}><span>{labels[action]}</span>{included && <Check aria-hidden="true" />}</button>;
+                  })}
+                </div>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-appearance' && (

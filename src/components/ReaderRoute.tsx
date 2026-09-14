@@ -1,3 +1,4 @@
+import { usePageActive } from '../app/RetainedPage';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
@@ -25,6 +26,9 @@ interface ReaderContext {
 }
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
+  const pageActive = usePageActive();
+  const pageActiveRef = useRef(pageActive);
+  pageActiveRef.current = pageActive;
   const [searchParams] = useSearchParams();
   const goBack = useReturnNavigation();
   const { showToast } = useToast();
@@ -224,7 +228,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (derivedBusyRef.current) return;
     derivedBusyRef.current = true;
     try {
-      while (derivedQueueRef.current.length > 0) {
+      while (pageActiveRef.current && derivedQueueRef.current.length > 0) {
         const job = derivedQueueRef.current.shift();
         if (!job) break;
         const { pageIndex } = job;
@@ -266,6 +270,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       derivedBusyRef.current = false;
     }
   }, [loadPage]);
+  useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
   /** Called by the reader with the pages actually on screen. */
   const requestDerived = useCallback((indexes: readonly number[]) => {

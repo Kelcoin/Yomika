@@ -6,6 +6,9 @@ import type { CommandResult } from '../domain/result';
 /** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
 export const MAX_PREFETCH_PAGES = 10;
 
+export const DETAIL_ACTIONS = ['read', 'readingList', 'favorites', 'download', 'edit', 'delete'] as const;
+export const DEFAULT_DETAIL_ACTIONS: (typeof DETAIL_ACTIONS)[number][] = ['read', 'readingList', 'favorites', 'download'];
+
 export const PreferenceSnapshotSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
   defaultLayout: z.enum(['auto', 'single', 'double', 'webtoon']),
@@ -39,6 +42,7 @@ export const PreferenceSnapshotSchema = z.object({
   ehMyTagsPriority: z.boolean().default(false),
   /** SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。 */
   sfwMode: z.boolean().default(false),
+  detailActions: z.array(z.enum(DETAIL_ACTIONS)).max(6).default(DEFAULT_DETAIL_ACTIONS),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
@@ -85,6 +89,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   continueReadingShowFinished: true,
   ehMyTagsPriority: false,
   sfwMode: false,
+  detailActions: [...DEFAULT_DETAIL_ACTIONS],
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],

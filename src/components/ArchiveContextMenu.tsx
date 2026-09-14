@@ -1,5 +1,8 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff } from 'lucide-react';
+import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff, ExternalLink } from 'lucide-react';
+import { archiveSourceUrl } from '../lib/archiveSource';
+import { openExternalUrl } from '../bridge/externalUrl';
+import { useToast } from './Toast';
 
 import { getCategoryDisplayName } from '../lib/tags';
 import type { ArchiveRecord } from '../domain/library';
@@ -59,8 +62,10 @@ export function ArchiveContextMenu({
   onAddCategory,
   onDelete,
 }: ArchiveContextMenuProps) {
+  const { showToast } = useToast();
   if (!target) return null;
   const archive = target.archive;
+  const galleryUrl = archiveSourceUrl(archive.tags);
   return (
     <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DropdownMenu.Trigger asChild>
@@ -90,6 +95,9 @@ export function ArchiveContextMenu({
           {onDownload && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onDownload(archive)}>
             <Download aria-hidden="true" />下载档案
           </DropdownMenu.Item>}
+          {galleryUrl && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => {
+            void openExternalUrl(galleryUrl).then((result) => { if (!result.ok) showToast(result.error.message, 'error'); });
+          }}><ExternalLink aria-hidden="true" />跳转画廊</DropdownMenu.Item>}
           {onEditMetadata && (
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onEditMetadata(archive)}>
               <Pencil aria-hidden="true" />编辑元数据

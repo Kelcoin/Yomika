@@ -416,6 +416,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     if (!element || typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver((entries) => {
       const measured = entries[0]?.contentRect.width ?? element.clientWidth;
+      if (measured <= 0) return;
       setGridWidth((current) => (Math.abs(current - measured) < 1 ? current : measured));
     });
     observer.observe(element);
@@ -734,7 +735,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         </div>
       )}
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={savedPanelLayout.defaultLayout} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
-        <Panel id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
+        <Panel className="library-list-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
           <div
             className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''} ${timelineByArchiveId ? 'has-timeline' : ''}`}
             data-scroll-region

@@ -138,13 +138,15 @@ describe('archive detail route', () => {
     expect(adapter).not.toHaveBeenCalledWith('load_archive_page_thumbnail', expect.anything());
   });
 
-  it('centers the initial loading state', () => {
+  it('uses the real detail structure for its initial skeleton', () => {
     setInvokeAdapterForTests(() => new Promise(() => undefined));
 
     renderDetail();
 
-    expect(screen.getByRole('status')).toHaveClass('archive-detail-loading-status');
-    expect(screen.getByRole('main')).toHaveClass('archive-detail-route-loading');
+    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line-title');
+    expect(screen.getByRole('toolbar', { name: '档案操作' })).toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: '详情内容' })).toBeInTheDocument();
+    expect(document.querySelectorAll('.archive-detail-facts svg')).toHaveLength(4);
   });
 
   it('renders metadata without waiting for secondary requests', async () => {
@@ -175,9 +177,9 @@ describe('archive detail route', () => {
     // is known, then the inline skeleton takes over in the real layout — the
     // title slot holds a skeleton of its own size (it used to show the raw
     // archive id), and the copy column mirrors the tag rows it will hold.
-    expect(await screen.findByRole('status', { name: '正在加载档案详情' })).toHaveClass('archive-detail-skeleton');
+    expect(await screen.findByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line-title');
     await waitFor(() => expect(document.querySelector('.archive-detail-copy-skeleton')).not.toBeNull());
-    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('archive-detail-title-loading');
+    expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line-title');
     expect(screen.queryByText('正在加载档案详情…')).not.toBeInTheDocument();
   });
 
@@ -255,7 +257,7 @@ describe('archive detail route', () => {
     expect(screen.queryByText('breasts')).not.toBeInTheDocument();
   });
 
-  it('places reading, favorite, editing and delete actions in one toolbar', async () => {
+  it('defaults to reading, reading list, favorites and download in the toolbar', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
@@ -270,9 +272,11 @@ describe('archive detail route', () => {
     const toolbar = await screen.findByRole('toolbar', { name: '档案操作' });
     expect(toolbar).toContainElement(screen.getByRole('link', { name: '阅读' }));
     expect(toolbar).toContainElement(screen.getByRole('button', { name: '收藏' }));
-    expect(toolbar).toContainElement(screen.getByRole('button', { name: '编辑元数据' }));
+    expect(toolbar).toContainElement(screen.getByRole('button', { name: '下载档案' }));
+    expect(toolbar).toContainElement(screen.getByRole('button', { name: '加入待看' }));
+    expect(within(toolbar).queryByRole('button', { name: '编辑元数据' })).not.toBeInTheDocument();
     expect(toolbar).not.toContainElement(screen.queryByRole('button', { name: '选择分类' }));
-    expect(toolbar).toContainElement(screen.getByRole('button', { name: '删除档案' }));
+    expect(within(toolbar).queryByRole('button', { name: '删除档案' })).not.toBeInTheDocument();
   });
 
   it('offers incognito by long-pressing 阅读 rather than a button of its own', async () => {
@@ -352,9 +356,11 @@ describe('archive detail route', () => {
     expect(screen.getByRole('region', { name: '同作者作品' })).toBeInTheDocument();
   });
 
-  it('preloads every thumbnail after selecting the panel without waiting for viewport intersection', async () => {
+  it('requests page thumbnails only when they approach the viewport', async () => {
     const OriginalObserver = window.IntersectionObserver;
+    const observed: Array<() => void> = [];
     window.IntersectionObserver = class {
+      constructor(callback: IntersectionObserverCallback) { observed.push(() => callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver)); }
       disconnect() {}
       observe() {}
       takeRecords() { return []; }
@@ -375,7 +381,9 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
     try {
       renderDetail();
-      await screen.findByRole('tab', { name: '详情' });
+      await screen.findByRole('button', { name: '查看第 4 页' });
+      expect(adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail')).toHaveLength(0);
+      observed.forEach((intersect) => intersect());
       await vi.waitFor(() => {
         expect(adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail')).toHaveLength(4);
       });
@@ -402,6 +410,11 @@ describe('archive detail route', () => {
     fireEvent.click(await screen.findByRole('tab', { name: '评论' }));
     expect(await screen.findByRole('region', { name: 'E-Hentai 评论' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '页面缩略图' })).not.toBeInTheDocument();
+    const comments = screen.getByRole('region', { name: 'E-Hentai 评论' });
+    fireEvent.click(screen.getByRole('tab', { name: '详情' }));
+    fireEvent.click(screen.getByRole('tab', { name: '评论' }));
+    expect(screen.getByRole('region', { name: 'E-Hentai 评论' })).toBe(comments);
+    expect(adapter.mock.calls.filter(([command]) => command === 'get_eh_comments')).toHaveLength(1);
   });
 
   it('keeps both detail tabs available when the E-Hentai account is not verified', async () => {
@@ -476,4 +489,67 @@ describe('archive detail route', () => {
     expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page')).toHaveLength(searches);
     second.unmount();
   });
+});
+
+it('retains detail DOM and thumbnail requests across repeated tab switches', async () => {
+  const adapter = vi.fn(async (command: string) => {
+    if (command === 'list_servers') return { ok: true, value: [server] };
+    if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'category:manga, uploader:sample, female:example', pageCount: 1 } };
+    if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+    if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderDetail();
+  const page = await screen.findByRole('button', { name: '查看第 1 页' });
+  await waitFor(() => expect(page.querySelector('img')).not.toBeNull());
+  const tags = screen.getByLabelText('档案标签');
+  expect(tags).not.toHaveTextContent('sample');
+  expect(screen.getByLabelText('分类与发布者')).toHaveTextContent('sample');
+  const requests = adapter.mock.calls.filter(([command]) => command === 'cache_read_image').length;
+  for (let i = 0; i < 3; i += 1) {
+    fireEvent.click(screen.getByRole('tab', { name: '评论' }));
+    expect(tags).not.toBeVisible();
+    expect(page).not.toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: '详情' }));
+    expect(screen.getByRole('button', { name: '查看第 1 页' })).toBe(page);
+    expect(tags).toBeVisible();
+  }
+  expect(adapter.mock.calls.filter(([command]) => command === 'cache_read_image')).toHaveLength(requests);
+});
+
+it('opens the shared menu from the header and downloads from the default toolbar', async () => {
+  const adapter = vi.fn(async (command: string) => {
+    if (command === 'list_servers') return { ok: true, value: [server] };
+    if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://example.com/gallery/1', pageCount: 0 } };
+    if (command === 'download_archive') return { ok: true, value: 'C:/Downloads/archive.cbz' };
+    if (command === 'open_external_url') return { ok: true, value: null };
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderDetail();
+  await screen.findByRole('heading', { name: 'Archive detail' });
+  fireEvent.click(screen.getByRole('button', { name: '下载档案' }));
+  expect(adapter).toHaveBeenCalledWith('download_archive', { serverId: 'server-a', archiveId: 'archive-a' });
+  fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
+  expect(await screen.findByRole('menuitem', { name: '编辑元数据' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('menuitem', { name: '跳转画廊' }));
+  expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://example.com/gallery/1' });
+});
+
+it('places recommendations between detail tags and page thumbnails', async () => {
+  setInvokeAdapterForTests(async (command: string) => {
+    if (command === 'list_servers') return { ok: true, value: [server] };
+    if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 1, tags: 'artist:sample' } };
+    if (command === 'cache_read_image') return { ok: true, value: null };
+    if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+    return { ok: true, value: [] };
+  });
+  renderDetail();
+  const tags = await screen.findByLabelText('档案标签');
+  const thumbnails = await screen.findByRole('region', { name: '页面缩略图' });
+  const detailPanel = screen.getByRole('tabpanel', { name: '详情' });
+  expect(detailPanel.contains(tags)).toBe(true);
+  expect(detailPanel.contains(thumbnails)).toBe(true);
+  expect(tags.compareDocumentPosition(thumbnails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

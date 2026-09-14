@@ -5,6 +5,8 @@ import {
   BookmarkX,
   BookOpen,
   Heart,
+  Download,
+  MoreVertical,
   MessageCircle,
   Pencil,
   Sparkles,
@@ -35,6 +37,7 @@ import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { TagSearchLink } from './TagSearchLink';
+import { useDetailActions } from '../app/preferences';
 import { useEhMyTags } from './useEhMyTags';
 
 const repository = new NativeLibraryRepository();
@@ -69,6 +72,16 @@ function DetailGlyph() {
   );
 }
 
+function DetailFactGlyph({ kind }: { kind: 'pages' | 'size' | 'added' | 'published' }) {
+  const paths = {
+    pages: 'M7 2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm0 2v12h10V4H7ZM3 6v14h12v2H3a2 2 0 0 1-2-2V6h2Z',
+    size: 'M4 3h16a2 2 0 0 1 2 2v4H2V5a2 2 0 0 1 2-2Zm0 2v2h16V5H4ZM3 11h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Zm2 2v7h14v-7H5Zm4 1h6v2H9v-2Z',
+    added: 'M7 1h2v2h6V1h2v2h3a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3V1ZM4 5v3h16V5H4Zm0 5v10h16V10H4Zm7 1h2v3h3v2h-3v3h-2v-3H8v-2h3v-3Z',
+    published: 'M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm-1 2h2v5.6l3.7 2.2-1 1.7-4.7-2.8V6Z',
+  };
+  return <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d={paths[kind]} /></svg>;
+}
+
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   /** The server this archive belongs to, carried by the linking card; without
    * one the first configured server is the default. */
@@ -78,7 +91,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   // archive-keyed pointer so a route remount can paint cached metadata on its
   // first render instead of flashing the loading shell while that lookup runs.
   const [metadata, setMetadata] = useState<ArchiveMetadata | undefined>(() => (
-    readRouteCache<ArchiveMetadata>(`archive-detail:last:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS)
+    readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS)
   ));
   const [cover, setCover] = useState<string>();
   const [coverLoading, setCoverLoading] = useState(true);
@@ -140,7 +153,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     let active = true;
     const coverController = new AbortController();
     let coverHandle: import('../lib/unifiedImageCache').ImageHandle | undefined;
-    const lastSnapshot = readRouteCache<ArchiveMetadata>(`archive-detail:last:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+    const lastSnapshot = readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
     setMetadata(lastSnapshot);
     setCover(undefined);
     setCoverLoading(true);
@@ -233,15 +246,44 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     };
   }, [archiveId, navigate, serverParam, showToast]);
 
+  // A retained detail does not remount after saving metadata in the editor.
+  // Refresh only its metadata on explicit invalidation, never on tab changes.
+  useEffect(() => {
+    if (!serverId) return;
+    let active = true;
+    let request = 0;
+    const refresh = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (prefix !== 'archive-detail:') return;
+      const current = ++request;
+      void repository.loadArchiveMetadata(serverId, archiveId).then((result) => {
+        if (!active || request !== current || !result.ok) return;
+        setMetadata(result.value);
+        writeRouteCache(`archive-detail:${serverId}:${archiveId}`, result.value);
+        writeRouteCache(`archive-detail:last:${serverId}:${archiveId}`, result.value);
+        writeRouteCache(`archive-detail:last:${archiveId}`, result.value);
+      });
+    };
+    window.addEventListener('yomika:route-cache-invalidated', refresh);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', refresh); };
+  }, [archiveId, serverId]);
+
   // 我的标签开启时，每个命名空间组内把账户标记过的标签排到最前（排序发生在
   // 分组之前，分组保持稳定顺序），并把这些芯片染成账户预设的颜色。挂钩必须
   // 全部在早退分支之前。
   const myTags = useEhMyTags();
-  const metadataTags = metadata ? parseArchiveTagString(metadata.tags) : [];
+  const metadataTags = useMemo(() => metadata ? parseArchiveTagString(metadata.tags) : [], [metadata?.tags]);
   const tagGroups = useMemo(() => categorizeSearchableTags(prioritizeByMyTags(metadataTags, myTags)), [metadataTags, myTags]);
   const myTagColorFor = useCallback((query: string) => myTags.colors.get(normalizeMyTagKey(query.replace(/\$$/, ''))), [myTags.colors]);
 
-  if (error && !metadata && !serverId) {
+  const detailActions = useDetailActions();
+  const [downloading, setDownloading] = useState(false);
+  const { open: openMenu, menu } = useArchiveContextMenu({
+    onMembershipChange: (_id, list, next) => list === 'reading' ? setInReadingList(next) : setFavorite(next),
+    onDeleted: () => navigate('/library', { replace: true }),
+  });
+
+  if (error && !metadata) {
     return (
       <main className="archive-detail-route">
         <button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button>
@@ -249,25 +291,27 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       </main>
     );
   }
-  if (!metadata && !serverId) {
-    return (
-      <main className="archive-detail-route archive-detail-route-loading">
-        <div className="archive-detail-skeleton archive-detail-loading-status" role="status" aria-label="正在加载档案详情">
-          <div className="skeleton-block skeleton-cover" />
-          <div className="skeleton-copy"><div className="skeleton-line skeleton-line-title" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /></div>
-        </div>
-      </main>
-    );
-  }
 
-  const title = metadata?.title || archiveId;
+  const title = metadata?.title || '';
+  const identityGroups = tagGroups.filter((group) => ['category', 'reclass', 'uploader'].includes(group.namespace));
   const tags = metadataTags;
   const ehGallery = ehGalleryFromTags(tags);
+  const facts = [
+    { kind: 'pages' as const, label: '页数', value: `${metadata?.pageCount ?? 0} 页` },
+    { kind: 'size' as const, label: '体积', value: formatBytes(metadata?.size ?? 0) },
+    { kind: 'added' as const, label: '添加时间', value: detailTagTime(tags, 'date_added') },
+    { kind: 'published' as const, label: '发布时间', value: detailTagTime(tags, 'timestamp') },
+  ];
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        <h1 id="archive-detail-route-title" className="archive-detail-route-title">{title}</h1>
+        <h1 id="archive-detail-route-title" className="archive-detail-route-title">{title || <span className="skeleton-line skeleton-line-title" aria-label="正在加载档案详情" role="status" />}</h1>
+        <button className="reader-icon-button" type="button" aria-label="档案菜单" aria-haspopup="menu" title="档案菜单" disabled={!metadata || !serverId} onClick={(event) => {
+          if (!metadata || !serverId) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          openMenu({ serverId, archiveId, title, pageCount: metadata.pageCount, fileSize: metadata.size, tags, updatedAt: '' }, { x: bounds.right, y: bounds.bottom });
+        }}><MoreVertical aria-hidden="true" /></button>
       </header>
 
       <div className="archive-detail-overview">
@@ -277,25 +321,26 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
-        {/* While the metadata is in flight the title keeps a skeleton of its own
-            size — it used to show the raw archive id at full title weight while
-            a fake title line sat in the copy column below. */}
-        {metadataLoading && !metadata && <div className="archive-detail-title-loading" role="status" aria-label="正在加载档案详情"><span className="skeleton-line" /></div>}
-          {metadata && <dl className="archive-detail-facts" aria-label="档案信息">
-            <div><dt>页数</dt><dd>{metadata.pageCount} 页</dd></div>
-            <div><dt>体积</dt><dd>{formatBytes(metadata.size)}</dd></div>
-            <div><dt>添加时间</dt><dd>{detailTagTime(tags, 'date_added')}</dd></div>
-            <div><dt>发布时间</dt><dd>{detailTagTime(tags, 'timestamp')}</dd></div>
-          </dl>}
+          <div className="archive-detail-identity" aria-label="分类与发布者">
+            {identityGroups.flatMap((group) => group.values.map((tag) => <span className={`archive-detail-identity-chip tag-group-${group.namespace === 'reclass' ? 'category' : group.namespace}`} key={tag.query} title={group.label}>{tag.label}</span>))}
+          </div>
+          <dl className="archive-detail-facts" aria-label="档案信息">
+            {facts.map(({ kind, label, value }) => (
+              <div key={kind} title={label}>
+                <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
+                <dd>{metadata ? value : <span className="skeleton-line" />}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
       </div>
 
 
-      <div className="archive-detail-route-actions" role="toolbar" aria-label="档案操作">
+      <div className="archive-detail-route-actions" role="toolbar" aria-label="档案操作" hidden={detailActions.length === 0}>
         {/* Long-press opens incognito. It used to be a button of its own beside
             阅读, which spent a permanent toolbar slot on a rare choice and put a
             second reading entry point next to the real one. */}
-        <Link
+        {detailActions.includes('read') && <Link
           className="archive-action-button archive-action-primary"
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
           aria-label="阅读"
@@ -306,8 +351,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           onPointerCancel={cancelIncognitoPress}
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
-        <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
+        {detailActions.includes('readingList') && <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
           if (!scopeId) return;
           void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
             if (result.ok) setInReadingList(!result.value.deleted);
@@ -316,8 +361,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
           {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
-        </button>
-        <button className="archive-action-button" type="button" aria-pressed={favorite} onClick={() => {
+        </button>}
+        {detailActions.includes('favorites') && <button className="archive-action-button" type="button" aria-pressed={favorite} onClick={() => {
           if (!scopeId) return;
           void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {
             if (result.ok) setFavorite(!result.value.deleted);
@@ -335,35 +380,20 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
               void mirrored.then((mirrorResult) => { if (!mirrorResult.ok) setMessage('未能同步到服务器收藏夹'); });
             });
           });
-        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>
-        <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
+        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
+        {detailActions.includes('download') && <button className="archive-action-button" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
+          if (!serverId || downloading) return;
+          setDownloading(true);
+          void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? `下载完成：${result.value}` : result.error.message, result.ok ? 'success' : 'error')).finally(() => setDownloading(false));
+        }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
+        {detailActions.includes('edit') && <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
-        {serverId && (
+        {serverId && detailActions.includes('delete') && (
           <><button className="archive-action-button" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}</>
         )}
       </div>
 
-        <div className="archive-detail-tag-section">
-          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
-          {tags.length > 0 && (
-            <div className="archive-detail-tags" aria-label="档案标签">
-              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace)).map((group) => (
-                <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
-                  <h2>{group.label}</h2>
-                  <div className="archive-detail-tag-row">
-                    <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
-                    </span>
-                  </div>
-                </section>
-              ))}
-            </div>
-          )}
-          {/* The footer meta appears once the metadata exists; while it loads
-              the copy skeleton above is the loading indicator — a second
-              skeleton chip under it read as one squeezed blob. */}
-        </div>
 
       {/* Confirms the long press. Incognito changes what the app records, so it
           says what it will not do rather than switching mode silently. */}
@@ -395,9 +425,30 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
-      {detailPanel === 'media' && serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+      <div role="tabpanel" aria-label="详情" hidden={detailPanel !== 'media'}>
+        <div className="archive-detail-tag-section">
+          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
+          {tags.length > 0 && (
+            <div className="archive-detail-tags" aria-label="档案标签">
+              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating', 'uploader'].includes(group.namespace)).map((group) => (
+                <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
+                  <h2>{group.label}</h2>
+                  <div className="archive-detail-tag-row">
+                    <span className="archive-detail-tag-values">
+                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
+                    </span>
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+          {/* The footer meta appears once the metadata exists; while it loads
+              the copy skeleton above is the loading indicator — a second
+              skeleton chip under it read as one squeezed blob. */}
+        </div>
+      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
 
-      {detailPanel === 'media' && metadata && metadata.pageCount > 0 && serverId && scopeId && (
+      {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
           <div className="archive-page-thumbnails-grid">
             {Array.from({ length: metadata.pageCount }, (_, index) => (
@@ -408,9 +459,13 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
+      </div>
+      <div role="tabpanel" aria-label="评论" hidden={detailPanel !== 'comments'}>
       {ehGallery && ehAccountId
-        ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} prefetch={detailPanel !== 'comments'} />
-        : detailPanel === 'comments' && <p className="archive-comments-unavailable">此档案没有可读取的 E-Hentai 评论。</p>}
+        ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} />
+        : <p className="archive-comments-unavailable">此档案没有可读取的 E-Hentai 评论。</p>}
+      </div>
+      {menu}
     </main>
   );
 }
@@ -531,7 +586,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       } satisfies RecommendationSnapshot);
     })();
     return () => { active = false; };
-  }, [creator, currentArchiveId, serverId, snapshotKey, tags]);
+  }, [creator, currentArchiveId, scopeId, serverId, snapshotKey, tags]);
 
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.
@@ -605,6 +660,7 @@ function ArchivePageThumbnail({
         rendition: 'page-thumbnail',
         pageIndex: page - 1,
       }, { signal: controller.signal }).then((loaded) => {
+        if (controller.signal.aborted) { getNativeImageCache().release(loaded); return; }
         handle = loaded;
         setSrc(loaded.url);
         setState('ready');
@@ -615,8 +671,17 @@ function ArchivePageThumbnail({
         }
       });
     };
-    load();
+    // Browser loading="lazy" only delays decoding an existing URL. Delay the
+    // native IPC request as well, so a long archive does not fetch every page.
+    const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer?.disconnect();
+      load();
+    }, { rootMargin: '300px' });
+    if (observer) observer.observe(node);
+    else load();
     return () => {
+      observer?.disconnect();
       controller.abort();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (handle) getNativeImageCache().release(handle);

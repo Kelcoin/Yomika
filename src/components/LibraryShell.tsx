@@ -13,14 +13,11 @@ export function LibraryShell({ archiveId: archiveIdProp }: { archiveId?: string 
     storage: window.localStorage,
     onlySaveAfterUserInteractions: true,
   });
-  if (!archiveId) {
-    return <div className="library-shell"><section className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></div>;
-  }
   return (
-    <Group className="library-shell has-detail" orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
-      <Panel id="library-shell-list" defaultSize="58" minSize="40"><section className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></Panel>
-      <Separator className="panel-separator" />
-      <Panel id="library-shell-detail" defaultSize="42" minSize="24"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} /></section></Panel>
+    <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
+      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-list" defaultSize="58" minSize="40"><section className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></Panel>
+      {archiveId && <Separator className="panel-separator" />}
+      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-detail" defaultSize="42" minSize="24"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} /></section></Panel>}
     </Group>
   );
 }

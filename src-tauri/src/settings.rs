@@ -22,6 +22,7 @@ const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
 const CONTINUE_READING_SHOW_FINISHED_KEY: &str = "preferences.continue_reading_show_finished";
 const EH_MY_TAGS_PRIORITY_KEY: &str = "preferences.eh_my_tags_priority";
+const DETAIL_ACTIONS_KEY: &str = "preferences.detail_actions";
 const SFW_MODE_KEY: &str = "preferences.sfw_mode";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
@@ -109,6 +110,8 @@ pub struct PreferenceSnapshot {
     /// SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。
     #[serde(default)]
     pub sfw_mode: bool,
+    #[serde(default = "default_detail_actions")]
+    pub detail_actions: Vec<String>,
     /// Free-form CSS appended after the design tokens. This is the whole
     /// customisation surface: it superseded a single accent-colour preference,
     /// which could not express the themes people actually want and became one
@@ -124,6 +127,10 @@ pub struct PreferenceSnapshot {
     /// hand-edited row cannot leave the bar without them.
     #[serde(default = "default_bottom_nav_items")]
     pub bottom_nav_items: Vec<String>,
+}
+
+fn default_detail_actions() -> Vec<String> {
+    ["read", "readingList", "favorites", "download"].into_iter().map(String::from).collect()
 }
 
 fn default_prefetch_pages() -> u8 {
@@ -172,6 +179,7 @@ impl Default for PreferenceSnapshot {
             continue_reading_show_finished: true,
             eh_my_tags_priority: false,
             sfw_mode: false,
+            detail_actions: default_detail_actions(),
             custom_css: String::new(),
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
@@ -212,12 +220,15 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
             )
         })
         || value.bottom_nav_items.len() > 7
+        || value.detail_actions.len() > 6
+        || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "delete"))
     {
         return Err("Invalid preference snapshot".into());
     }
     // The two load-bearing entries survive even a hand-edited settings row.
     let normalized = normalize_bottom_nav_items(&value.bottom_nav_items);
     Ok(PreferenceSnapshot {
+        detail_actions: ["read", "readingList", "favorites", "download", "edit", "delete"].into_iter().filter(|item| value.detail_actions.iter().any(|value| value == item)).map(String::from).collect(),
         bottom_nav_items: normalized,
         ..value.clone()
     })
@@ -303,6 +314,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             defaults.eh_my_tags_priority,
         )?,
         sfw_mode: load_value(connection, SFW_MODE_KEY, defaults.sfw_mode)?,
+        detail_actions: load_value(connection, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: load_value(connection, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
@@ -375,6 +387,7 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.eh_my_tags_priority),
         ),
         (SFW_MODE_KEY, serde_json::to_string(&value.sfw_mode)),
+        (DETAIL_ACTIONS_KEY, serde_json::to_string(&value.detail_actions)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
         (FLOATING_NAV_KEY, serde_json::to_string(&value.floating_nav)),
         (
@@ -553,6 +566,7 @@ mod tests {
             continue_reading_show_finished: false,
             eh_my_tags_priority: true,
             sfw_mode: true,
+            detail_actions: vec!["read".into(), "download".into()],
             floating_nav: true,
             bottom_nav_items: vec![
                 "home".into(),
@@ -575,6 +589,24 @@ mod tests {
             )
             .expect("unrelated setting preserved");
         assert_eq!(device_id, "\"secret-device\"");
+    }
+
+    #[test]
+    fn detail_actions_are_validated_deduplicated_and_can_all_be_hidden() {
+        let mut connection = settings_db();
+        let saved = save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_actions: vec!["download".into(), "read".into(), "read".into()],
+            ..PreferenceSnapshot::default()
+        }).expect("save actions");
+        assert_eq!(saved.detail_actions, vec!["read", "download"]);
+        assert_eq!(load_preferences_from(&connection).unwrap().detail_actions, saved.detail_actions);
+        save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_actions: vec![], ..PreferenceSnapshot::default()
+        }).expect("hide all actions");
+        assert!(load_preferences_from(&connection).unwrap().detail_actions.is_empty());
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_actions: vec!["invalid".into()], ..PreferenceSnapshot::default()
+        }).is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
+import { RetainedPage } from './RetainedPage';
 import { AppShell } from '../components/AppShell';
 import { useEffect, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ReaderRoutes, WorkspaceRoutes } from './routes';
 import { PreferencesProvider, usePreferences } from './preferences';
 import { startTagTranslationUpdates, stopTagTranslationUpdates } from '../lib/tagTranslationService';
@@ -23,7 +24,15 @@ function StartupRoute() {
 }
 
 export function App() {
-  const { pathname } = useLocation();
+  const location = useLocation();
+  const { pathname } = location;
+  const reading = pathname.startsWith('/reader/');
+  const workspaceLocation = useRef<typeof location | undefined>(reading ? undefined : location);
+  if (!reading) workspaceLocation.current = location;
+  const readers = useRef(new Map<string, typeof location>());
+  const readerParams = new URLSearchParams(location.search);
+  const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}`;
+  if (reading) readers.current.set(readerKey, location);
   useEffect(() => {
     const suppressNativeMenu = (event: Event) => event.preventDefault();
     document.addEventListener('contextmenu', suppressNativeMenu);
@@ -43,7 +52,12 @@ export function App() {
     <PreferencesProvider>
       <StartupRoute />
       <ToastProvider>
-        {pathname.startsWith('/reader/') ? <ReaderRoutes /> : <AppShell><WorkspaceRoutes /></AppShell>}
+        {workspaceLocation.current && <RetainedPage active={!reading}>
+          <Routes location={workspaceLocation.current}><Route path="*" element={<AppShell><WorkspaceRoutes /></AppShell>} /></Routes>
+        </RetainedPage>}
+        {[...readers.current].map(([key, saved]) => <RetainedPage key={key} active={reading && readerKey === key}>
+          <Routes location={saved}><Route path="*" element={<ReaderRoutes />} /></Routes>
+        </RetainedPage>)}
       </ToastProvider>
     </PreferencesProvider>
   );

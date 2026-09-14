@@ -477,7 +477,8 @@ describe('design system contract', () => {
     const routes = read('src/app/routes.tsx');
     // route-cache-panel 的 height:100% 钳制会把溢出尾困在面板外：首页与书架
     // 面板必须随内容生长（is-flow），≤900 则所有路由（含档案库页面滚动）放开。
-    expect(routes).toMatch(/route-cache-panel is-flow/);
+    expect(routes).toContain("flow={!['/library', '/history', '/watchlist', '/to-read'].includes(key)}");
+    expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
     expect(shell).toMatch(/\.route-cache-panel\.is-flow \{ height: auto; \}/);
     expect(shell).toMatch(/@media \(max-width: 900px\)/);
   });
@@ -583,7 +584,7 @@ describe('design system contract', () => {
     expect(workspace).toMatch(/modifiers.shiftKey && anchor >= 0/);
   });
 
-  it('blurs covers in SFW mode and reveals exactly one on hover, click or focus', () => {
+  it('blurs covers and thumbnails in SFW mode and reveals only the image surface', () => {
     const shell = read('src/styles/shell.css');
     const preferences = read('src/app/preferences.tsx');
     // 开关只翻转根属性：模糊与显隐是纯 CSS 合同，自定义 CSS 无需知道开关。
@@ -594,8 +595,9 @@ describe('design system contract', () => {
     expect(shell).toMatch(/:root\[data-sfw='true'\] \.archive-detail-cover-trigger img/);
     // 悬停封面本身与卡片焦点/按下都解除模糊。
     expect(shell).toMatch(/\.archive-row-thumb:hover img/);
-    expect(shell).toMatch(/\.archive-thumb-card:focus img/);
-    expect(shell).toMatch(/\.archive-row:focus-visible img/);
+    expect(shell).not.toMatch(/\.archive-thumb-card:(hover|focus|active) img/);
+    expect(shell).toMatch(/\.archive-page-thumbnail img/);
+    expect(shell).not.toMatch(/\.archive-row:(hover|focus-visible|active) img/);
     expect(shell).toMatch(/\.archive-detail-cover-trigger:focus-visible img/);
   });
 
