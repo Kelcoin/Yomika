@@ -115,7 +115,7 @@ describe('application shell', () => {
 
     // One rail only: the duplicate "最近阅读" list under it is gone.
     const rail = await screen.findByRole('region', { name: '继续阅读' });
-    expect(within(rail).getByRole('link', { name: /最近阅读档案/ })).toHaveAttribute('href', '/library/a1');
+    expect(within(rail).getByRole('link', { name: /最近阅读档案/ })).toHaveAttribute('href', '/library/a1?server=scope-a');
     expect(within(rail).getByText('5/12 页')).toBeInTheDocument();
     expect(screen.queryByRole('list', { name: '最近阅读' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '书架还是空的' })).not.toBeInTheDocument();

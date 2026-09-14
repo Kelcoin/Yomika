@@ -1,3 +1,4 @@
+import { CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, ListChecks, Pencil, Plus, RefreshCw, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type TouchEvent as ReactTouchEvent, type WheelEvent as ReactWheelEvent } from 'react';
@@ -12,7 +13,7 @@ import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, 
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, distributeCardTags, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -145,6 +146,25 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 鼠标悬在面板的左右留白（.library-shell-list 的 16px padding）或行间空隙上
+  // 时，滚轮的目标链不经过 .archive-list——桌面端页面级 overflow:hidden，链条
+  // 上没有任何可滚祖先，滚轮就整个作废。把这份手势转发给同面板的滚动区域。
+  useEffect(() => {
+    const region = scrollRef.current;
+    if (!region) return undefined;
+    const host = region.closest('.library-shell-list') ?? region.parentElement;
+    if (!host) return undefined;
+    const forward = (event: Event) => {
+      const wheel = event as WheelEvent;
+      const target = wheel.target;
+      if (target instanceof Element && target.closest('[data-scroll-region]')) return;
+      const scale = wheel.deltaMode === 1 ? 40 : wheel.deltaMode === 2 ? region.clientHeight : 1;
+      region.scrollTop += wheel.deltaY * scale;
+      region.scrollLeft += wheel.deltaX * scale;
+    };
+    host.addEventListener('wheel', forward, { passive: true });
+    return () => host.removeEventListener('wheel', forward);
+  }, []);
   /** Undefined until something is actually chosen. Seeding it with the first
    * archive made the top row render as pressed on every visit — including on the
    * shelves, which show no detail pane for it to be the subject of. */
@@ -452,7 +472,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
 
   const renderArchiveButton = (archive: ArchiveRecord, eager: boolean, dayLabel?: string) => {
     const cardTags = pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE, myTagKeys);
-    const tagRows = displayMode === 'wide' ? distributeCardTags(cardTags, 3) : [];
     const isSelected = selectedIds.has(archive.archiveId);
     const openArchive = (event: ReactMouseEvent<HTMLButtonElement>) => {
       if (selectionMode && onSelectionChange) {
@@ -469,7 +488,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       }
       setSelectedId(archive.archiveId);
       onSelect?.(archive);
-      if (!showDetail) navigate(`/library/${archive.archiveId}`);
+      if (!showDetail) navigate(`/library/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`);
     };
     const openMenu = onArchiveContextMenu ? (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
       // Cards are the only elements with a menu; everything else keeps the
@@ -534,15 +553,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         <span className="archive-row-copy">
           <strong>{archive.title}</strong>
-          {displayMode === 'wide'
-            ? <span className="archive-row-tags">{tagRows.map((row, rowIndex) => <span className="archive-row-tag-line" key={rowIndex}>{row.map((tag) => {
-              const color = myTagColorFor(tag);
-              return <small className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</small>;
-            })}</span>)}</span>
-            : <span className="archive-row-tags">{cardTags.map((tag) => {
-              const color = myTagColorFor(tag);
-              return <small className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</small>;
-            })}</span>}
+          <CardTagRows tags={cardTags} rowCount={3} className="archive-row-tags" colorFor={myTagColorFor} />
           <span className="archive-row-footer">
             <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
             <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
@@ -833,7 +844,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}
               {(selected.tags ?? []).length > 0 && <div className="archive-detail-tags" aria-label="档案标签">{categorizeSearchableTags(selected.tags ?? []).map((group) => <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}><h3>{group.label}</h3><div>{group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}</div></section>)}</div>}
               <div className="archive-detail-actions">
-                <Link className="primary-action" to={`/reader/${selected.archiveId}`} aria-label={`阅读 ${selected.title}`}>
+                <Link className="primary-action" to={`/reader/${selected.archiveId}?server=${encodeURIComponent(selected.serverId)}`} aria-label={`阅读 ${selected.title}`}>
                   <BookOpen aria-hidden="true" />
                   阅读
                 </Link>
@@ -888,8 +899,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
 }
 
-function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
-  const count = mode === 'thumbnail' ? 8 : 5;
+function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {  const count = mode === 'thumbnail' ? 8 : 5;
   return (
     <div className={`archive-list-skeleton is-${mode}`} role="status" aria-label="正在读取档案">
       {mode === 'thumbnail'

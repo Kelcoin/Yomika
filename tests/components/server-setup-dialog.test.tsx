@@ -70,4 +70,23 @@ describe('server setup dialog', () => {
     resolveSave(ok({ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
+
+  it('editing a server keeps its original identity instead of deriving a new one', async () => {
+    // The scope id keys every archive, progress and history row for the
+    // server; re-deriving it from a renamed profile would orphan all of that
+    // and pile a duplicate row into the server list.
+    const user = userEvent.setup();
+    const onSave = vi.fn(async ({ identity }: Parameters<NonNullable<React.ComponentProps<typeof ServerSetupDialog>['onSave']>>[0]) => ok(identity));
+    render(<ServerSetupDialog onSave={onSave} server={{ name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope_original', enabled: true }} />);
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    await user.clear(screen.getByLabelText('名称'));
+    await user.type(screen.getByLabelText('名称'), 'Home NAS');
+    await user.type(screen.getByLabelText('API Key'), 'secret-value');
+    await user.click(screen.getByRole('button', { name: '保存服务器' }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      identity: expect.objectContaining({ name: 'Home NAS', scopeId: 'scope_original' }),
+    }));
+  });
 });

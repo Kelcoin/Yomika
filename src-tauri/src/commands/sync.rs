@@ -557,15 +557,7 @@ fn valid_sync_key_encoding(encoded: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Creates the account's sync key exactly once. An existing, well-formed key is
-/// kept as-is — recreating it would orphan every ciphertext already on the
-/// remote. Only a missing or corrupt entry is (re)generated.
 fn ensure_sync_key(store: &dyn SyncKeyStore, account_id: &str) -> Result<(), String> {
-    if let Ok(encoded) = store.get(account_id) {
-        if valid_sync_key_encoding(&encoded) {
-            return Ok(());
-        }
-    }
     let mut key = [0_u8; 32];
     SystemRandom::new()
         .fill(&mut key)
@@ -573,8 +565,72 @@ fn ensure_sync_key(store: &dyn SyncKeyStore, account_id: &str) -> Result<(), Str
     store.set(account_id, &BASE64_STANDARD.encode(key))
 }
 
-#[tauri::command]
-pub fn create_sync_key(account_id: String) -> CommandResult<String> {
+/// Decodes a pasted key into its 32 raw bytes, or `None` when it is not a
+/// Base64 encoding of exactly 32 bytes.
+fn decode_imported_key(key: &str) -> Option<[u8; 32]> {
+    BASE64_STANDARD
+        .decode(key.trim())
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+}
+
+fn import_key_into_store(
+    store: &dyn SyncKeyStore,
+    account_id: &str,
+    key: &str,
+) -> Result<(), String> {
+    store.set(account_id, key.trim())
+}
+
+/// Short, human-comparable fingerprint of a sync key. Device A shows it after
+/// exporting; device B shows it after importing — matching digits prove both
+/// hold the same key without printing the key itself.
+fn sync_key_fingerprint(key: &[u8; 32]) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(key);
+    let fingerprint: String = digest.iter().take(8).map(|byte| format!("{byte:02X}")).collect();
+    fingerprint
+}
+
+/// What the account's remote looks like from this device.
+enum RemoteManifestProbe {
+    /// The remote manifest exists — some device already synced with a real key.
+    Present,
+    /// No remote manifest — this account has never synced from anywhere.
+    Missing,
+    /// The probe could not run (offline, bad credentials…).
+    Unavailable(String),
+}
+
+async fn probe_remote_manifest(
+    account: &WebdavAccountRecord,
+    credentials: &dyn WebdavCredentialStore,
+) -> RemoteManifestProbe {
+    let credential = match credentials.get_credential(&account.credential_ref) {
+        Ok(credential) => credential,
+        Err(error) => return RemoteManifestProbe::Unavailable(error),
+    };
+    let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
+        Ok(client) => client,
+        Err(error) => return RemoteManifestProbe::Unavailable(error.to_string()),
+    };
+    match client.get_manifest(&account.id).await {
+        Ok(Some(_)) => RemoteManifestProbe::Present,
+        Ok(None) => RemoteManifestProbe::Missing,
+        Err(error) => RemoteManifestProbe::Unavailable(error.to_string()),
+    }
+}
+
+/// Creates the account's sync key exactly once. An existing, well-formed key is
+/// kept as-is — recreating it would orphan every ciphertext already on the
+/// remote. A missing key is generated only when the remote proves empty: a
+/// manifest on the server means another device already holds the real key, and
+/// a locally generated one would be a second, incompatible key for the account.
+fn create_sync_key_result(
+    store: &dyn SyncKeyStore,
+    account_id: &str,
+    remote: RemoteManifestProbe,
+) -> CommandResult<String> {
     if account_id.is_empty()
         || !account_id
             .chars()
@@ -582,10 +638,174 @@ pub fn create_sync_key(account_id: String) -> CommandResult<String> {
     {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account ID", false);
     }
-    match ensure_sync_key(&SystemSyncKeyStore, &account_id) {
-        Ok(()) => CommandResult::success(account_id),
-        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    if let Ok(encoded) = store.get(account_id) {
+        if valid_sync_key_encoding(&encoded) {
+            return CommandResult::success(account_id.to_string());
+        }
     }
+    match remote {
+        RemoteManifestProbe::Present => CommandResult::failure(
+            "SYNC_KEY_MISSING",
+            "远端已有此账户的同步数据，密钥应从原设备导入：请先在原设备导出同步密钥，再在此设备导入。直接新建密钥会让原设备的数据无法解密。",
+            false,
+        ),
+        RemoteManifestProbe::Unavailable(error) => CommandResult::failure(
+            "NETWORK",
+            format!(
+                "无法确认远端是否已有此账户的同步数据（{error}）。已停止生成新密钥：如果其他设备已经在同步，新密钥会让它们无法解密。请联网后重试，或直接导入原设备的同步密钥。"
+            ),
+            true,
+        ),
+        RemoteManifestProbe::Missing => match ensure_sync_key(store, account_id) {
+            Ok(()) => CommandResult::success(account_id.to_string()),
+            Err(error) => CommandResult::failure("UNKNOWN", error, true),
+        },
+    }
+}
+
+#[tauri::command]
+pub fn create_sync_key(
+    account_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<String> {
+    tauri::async_runtime::block_on(async move {
+        let account = {
+            let connection = match database.connection.lock() {
+                Ok(connection) => connection,
+                Err(_) => {
+                    return create_sync_key_result(
+                        &SystemSyncKeyStore,
+                        &account_id,
+                        RemoteManifestProbe::Unavailable("数据库锁定失败".to_string()),
+                    );
+                }
+            };
+            read_webdav_account(&connection, &account_id).ok()
+        };
+        // No account row — the key can be created without any remote state to
+        // collide with. With one, the remote decides whether a new key is safe.
+        let remote = match account {
+            Some(account) => {
+                probe_remote_manifest(&account, &SystemWebdavCredentialStore).await
+            }
+            None => RemoteManifestProbe::Missing,
+        };
+        create_sync_key_result(&SystemSyncKeyStore, &account_id, remote)
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncKeyExport {
+    /// The account's master key, base64. This is the secret every device must
+    /// share to read the account's ciphertexts.
+    pub key: String,
+    /// Short fingerprint for comparing devices without trusting the copy.
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncKeyImport {
+    pub fingerprint: String,
+    /// Some(true) — the remote manifest decrypts with the imported key.
+    /// Some(false) — a remote manifest exists but rejects the key.
+    /// None — the remote had no manifest, or could not be reached.
+    pub verified: Option<bool>,
+}
+
+#[tauri::command]
+pub fn export_sync_key(account_id: String) -> CommandResult<SyncKeyExport> {
+    match load_sync_key(&account_id) {
+        Ok(key) => CommandResult::success(SyncKeyExport {
+            key: BASE64_STANDARD.encode(key),
+            fingerprint: sync_key_fingerprint(&key),
+        }),
+        Err(error) => CommandResult::failure(
+            "NOT_FOUND",
+            format!("尚未创建或导入此账户的同步密钥：{error}"),
+            false,
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn import_sync_key(
+    account_id: String,
+    key: String,
+    database: State<'_, Database>,
+) -> CommandResult<SyncKeyImport> {
+    if account_id.is_empty()
+        || !account_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account ID", false);
+    }
+    let key = key.trim().to_string();
+    let key_bytes = match decode_imported_key(&key) {
+        Some(bytes) => bytes,
+        None => {
+            return CommandResult::failure(
+                "INVALID_RESPONSE",
+                "同步密钥格式无效：应为原设备导出的 Base64 字符串",
+                false,
+            );
+        }
+    };
+    tauri::async_runtime::block_on(async move {
+        let account = {
+            let connection = match database.connection.lock() {
+                Ok(connection) => connection,
+                Err(_) => {
+                    return CommandResult::failure("UNKNOWN", "Database lock failed", true);
+                }
+            };
+            read_webdav_account(&connection, &account_id).ok()
+        };
+        // The remote is the authority on which keys exist. When it answers and
+        // rejects the pasted key, storing it would orphan every future upload
+        // from this device — refuse before writing.
+        let verified = match &account {
+            Some(account) => {
+                match verify_imported_key(account, &key_bytes, &SystemWebdavCredentialStore).await {
+                    Some(decrypts) => Some(decrypts),
+                    // No remote manifest (fresh account) or the remote is
+                    // unreachable — the user's explicit paste is accepted.
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        if verified == Some(false) {
+            return CommandResult::failure(
+                "INVALID_RESPONSE",
+                "导入的密钥无法解密远端数据，未保存。请确认复制的是同一账户在原设备导出的完整密钥。",
+                false,
+            );
+        }
+        if let Err(error) = import_key_into_store(&SystemSyncKeyStore, &account_id, &key) {
+            return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
+        }
+        CommandResult::success(SyncKeyImport {
+            fingerprint: sync_key_fingerprint(&key_bytes),
+            verified,
+        })
+    })
+}
+
+/// Some(true/false) — the imported key does / does not decrypt the remote
+/// manifest. None — no remote manifest, or the remote could not be reached.
+async fn verify_imported_key(
+    account: &WebdavAccountRecord,
+    key: &[u8; 32],
+    credentials: &dyn WebdavCredentialStore,
+) -> Option<bool> {
+    let credential = credentials.get_credential(&account.credential_ref).ok()?;
+    let client = WebdavClient::new(&account.base_url, &account.username, &credential)
+        .ok()?;
+    let remote = client.get_manifest(&account.id).await.ok()??;
+    Some(decode_encrypted_manifest(key, &remote.ciphertext).is_ok())
 }
 
 #[tauri::command]
@@ -632,19 +852,144 @@ fn sync_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-/// True when a remote change should overwrite the local row: a strictly higher
-/// logical clock wins, an equal clock falls back to the wall clock, and a
-/// lower clock is a cross-device progress regression that is refused.
+/// True when a remote change should overwrite the local row. The comparator is
+/// a strict total order — logical clock, then wall-clock instant, then device
+/// id — so two devices applying the same two changes in opposite orders both
+/// converge on the same winner instead of each keeping its local value.
 fn remote_change_wins(
     local_clock: i64,
     local_updated: &str,
+    local_device: &str,
     remote_clock: i64,
     remote_updated: &str,
+    remote_device: &str,
 ) -> bool {
     match remote_clock.cmp(&local_clock) {
         std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Equal => remote_updated > local_updated,
+        std::cmp::Ordering::Equal => match compare_instants(remote_updated, local_updated) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => remote_device > local_device,
+            std::cmp::Ordering::Less => false,
+        },
         std::cmp::Ordering::Less => false,
+    }
+}
+
+/// Reading progress carries one stricter rule than the generic clock race:
+/// across devices the page never goes backwards, whichever clock is newer —
+/// the same rule the frontend merge applies. Within one device the clock
+/// decides, so that device going back a page is a real user action.
+#[allow(clippy::too_many_arguments)]
+fn remote_progress_wins(
+    local_clock: i64,
+    local_updated: &str,
+    local_device: &str,
+    local_page: i64,
+    remote_clock: i64,
+    remote_updated: &str,
+    remote_device: &str,
+    remote_page: i64,
+) -> bool {
+    if local_device == remote_device {
+        return remote_change_wins(
+            local_clock,
+            local_updated,
+            local_device,
+            remote_clock,
+            remote_updated,
+            remote_device,
+        );
+    }
+    match remote_page.cmp(&local_page) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => remote_change_wins(
+            local_clock,
+            local_updated,
+            local_device,
+            remote_clock,
+            remote_updated,
+            remote_device,
+        ),
+        std::cmp::Ordering::Less => false,
+    }
+}
+
+/// Parses a timestamp into epoch milliseconds. Native writers emit SQLite's
+/// UTC `YYYY-MM-DD HH:MM:SS[.SSS]`, but imported history can carry any ISO
+/// 8601 shape — including explicit offsets, where printed digits stop
+/// matching time order. Unparseable strings fall back to lexical order so the
+/// comparison stays deterministic.
+fn instant_millis(timestamp: &str) -> Option<i64> {
+    let trimmed = timestamp.trim();
+    let (date_part, rest) = if let Some((date, time)) = trimmed.split_once('T') {
+        (date, time)
+    } else {
+        trimmed.split_once(' ')?
+    };
+    let (time_part, offset_millis) = if rest.ends_with('Z') || rest.ends_with('z') {
+        (&rest[..rest.len() - 1], 0_i64)
+    } else if let Some(position) = rest
+        .char_indices()
+        .skip(1)
+        .find(|(_, character)| *character == '+' || *character == '-')
+        .map(|(index, _)| index)
+    {
+        let (time, offset) = rest.split_at(position);
+        let sign = match offset.chars().next()? {
+            '+' => 1_i64,
+            '-' => -1_i64,
+            _ => return None,
+        };
+        let offset = &offset[1..];
+        let (hours, minutes) = match offset.split_once(':') {
+            Some((hours, minutes)) => (hours, minutes),
+            None => (offset, "0"),
+        };
+        let hours = hours.parse::<i64>().ok()?;
+        let minutes = minutes.parse::<i64>().ok()?;
+        (time, sign * (hours * 3600 + minutes * 60) * 1000)
+    } else {
+        (rest, 0_i64)
+    };
+    let mut date_parts = date_part.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<i64>().ok()?;
+    let day = date_parts.next()?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let mut time_parts = time_part.split(':');
+    let hour = time_parts.next()?.parse::<i64>().ok()?;
+    let minute = time_parts.next()?.parse::<i64>().ok()?;
+    let second_part = time_parts.next().unwrap_or("0");
+    let (second, fraction_millis) = match second_part.split_once('.') {
+        Some((second, fraction)) => {
+            let mut millis = fraction.chars().take(3).collect::<String>();
+            while millis.len() < 3 {
+                millis.push('0');
+            }
+            (second, millis)
+        }
+        None => (second_part, "0".to_string()),
+    };
+    let second = second.parse::<i64>().ok()?;
+    let fraction_millis = fraction_millis.parse::<i64>().ok()?;
+    // Days from the civil date to the Unix epoch (Howard Hinnant's algorithm).
+    let years = if month <= 2 { year - 1 } else { year };
+    let era = if years >= 0 { years } else { years - 399 } / 400;
+    let year_of_era = years - era * 400;
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) / 5) + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let epoch_days = era * 146_097 + day_of_era - 719_468;
+    let seconds = epoch_days * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(seconds * 1000 + fraction_millis - offset_millis)
+}
+
+fn compare_instants(left: &str, right: &str) -> std::cmp::Ordering {
+    match (instant_millis(left), instant_millis(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        _ => left.cmp(right),
     }
 }
 
@@ -711,20 +1056,22 @@ fn payload_bool(payload: &serde_json::Value, field: &str) -> Result<bool, String
         .ok_or_else(|| format!("Remote object payload is missing {field}"))
 }
 
-/// Reads `(clock, updated_at)` of the local row, `None` when it does not exist.
+/// Reads `(clock, updated_at, device_id)` of the local row, `None` when it
+/// does not exist. Tables without a device column store an empty id, which
+/// keeps the total-order tiebreak deterministic (ties keep the local row).
 fn local_row_state(
     transaction: &rusqlite::Transaction<'_>,
     table: &str,
     scope_id: &str,
     archive_id: &str,
-) -> Result<Option<(i64, String)>, String> {
+) -> Result<Option<(i64, String, String)>, String> {
     transaction
         .query_row(
             &format!(
-                "SELECT revision, updated_at FROM {table} WHERE scope_id = ?1 AND archive_id = ?2"
+                "SELECT revision, updated_at, COALESCE(device_id, '') FROM {table} WHERE scope_id = ?1 AND archive_id = ?2"
             ),
             params![scope_id, archive_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         )
         .optional()
         .map_err(|error| error.to_string())
@@ -748,9 +1095,33 @@ fn apply_remote_progress(
     let layout = payload_text(payload, "layout")?;
     let direction = payload_text(payload, "direction")?;
     let cover_alone = payload.get("coverAlone").and_then(|value| value.as_bool());
-    let gate = local_row_state(transaction, "reading_progress", scope_id, &archive_id)?
-        .map(|(clock, updated)| {
-            remote_change_wins(clock, &updated, object.logical_clock, &object.wall_clock)
+    let gate = transaction
+        .query_row(
+            "SELECT revision, updated_at, COALESCE(device_id, ''), page_index
+             FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
+            params![scope_id, archive_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .map(|(clock, updated, device, page)| {
+            remote_progress_wins(
+                clock,
+                &updated,
+                &device,
+                page,
+                object.logical_clock,
+                &object.wall_clock,
+                &object.device_id,
+                page_index,
+            )
         })
         .unwrap_or(true);
     if !gate {
@@ -784,7 +1155,9 @@ fn apply_remote_progress(
 }
 
 /// History is a union, not a clock race: the merged row keeps the highest read
-/// page and the latest visit, whatever device supplied them.
+/// page and the latest visit, whatever device supplied them. Visits compare as
+/// instants — an offset timestamp (`15:00+08:00`) prints after `08:00` but is
+/// the earlier visit.
 fn apply_remote_history(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
@@ -797,22 +1170,50 @@ fn apply_remote_history(
         .and_then(|value| value.as_i64())
         .ok_or_else(|| "Remote history payload is missing pageIndex".to_string())?;
     let visited_at = payload_text(payload, "visitedAt")?;
+    let local_row: Option<(i64, String, i64)> = transaction
+        .query_row(
+            "SELECT page_index, visited_at, revision FROM reading_history
+             WHERE scope_id = ?1 AND archive_id = ?2",
+            params![scope_id, archive_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((local_page, local_visit, local_revision)) = local_row else {
+        transaction
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    scope_id,
+                    archive_id,
+                    page_index,
+                    visited_at,
+                    object.device_id,
+                    object.logical_clock,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        return Ok(true);
+    };
+    let keep_remote_visit = compare_instants(&visited_at, &local_visit) == std::cmp::Ordering::Greater;
+    let next_visit = if keep_remote_visit {
+        visited_at
+    } else {
+        local_visit
+    };
     transaction
         .execute(
-            "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(scope_id, archive_id) DO UPDATE SET
-               page_index = MAX(reading_history.page_index, excluded.page_index),
-               visited_at = MAX(reading_history.visited_at, excluded.visited_at),
-               device_id = excluded.device_id,
-               revision = MAX(reading_history.revision, excluded.revision)",
+            "UPDATE reading_history SET
+               page_index = ?3, visited_at = ?4, device_id = ?5, revision = ?6
+             WHERE scope_id = ?1 AND archive_id = ?2",
             params![
                 scope_id,
                 archive_id,
-                page_index,
-                visited_at,
+                local_page.max(page_index),
+                next_visit,
                 object.device_id,
-                object.logical_clock,
+                local_revision.max(object.logical_clock),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -834,8 +1235,15 @@ fn apply_remote_list_entry(
     let archive_id = payload_text(payload, "archiveId")?;
     let deleted = payload_bool(payload, "deleted")?;
     let gate = local_row_state(transaction, table, scope_id, &archive_id)?
-        .map(|(clock, updated)| {
-            remote_change_wins(clock, &updated, object.logical_clock, &object.wall_clock)
+        .map(|(clock, updated, device)| {
+            remote_change_wins(
+                clock,
+                &updated,
+                &device,
+                object.logical_clock,
+                &object.wall_clock,
+                &object.device_id,
+            )
         })
         .unwrap_or(true);
     if !gate {
@@ -879,14 +1287,21 @@ fn apply_remote_search_preset(
     let deleted = payload_bool(payload, "deleted").unwrap_or(false);
     let gate = transaction
         .query_row(
-            "SELECT revision, updated_at FROM search_presets WHERE scope_id = ?1 AND preset_id = ?2",
+            "SELECT revision, updated_at, COALESCE(device_id, '') FROM search_presets WHERE scope_id = ?1 AND preset_id = ?2",
             params![scope_id, preset_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .map(|(clock, updated)| {
-            remote_change_wins(clock, &updated, object.logical_clock, &object.wall_clock)
+        .map(|(clock, updated, device)| {
+            remote_change_wins(
+                clock,
+                &updated,
+                &device,
+                object.logical_clock,
+                &object.wall_clock,
+                &object.device_id,
+            )
         })
         .unwrap_or(true);
     if !gate {
@@ -941,7 +1356,16 @@ fn apply_remote_dedup_relation(
         .map_err(|error| error.to_string())?;
     let wins = gate
         .map(|(clock, updated)| {
-            remote_change_wins(clock, &updated, object.logical_clock, &object.wall_clock)
+            // The dedup table has no device column, so the tiebreak keeps the
+            // local row — deterministic, and unchanged from before.
+            remote_change_wins(
+                clock,
+                &updated,
+                "",
+                object.logical_clock,
+                &object.wall_clock,
+                "",
+            )
         })
         .unwrap_or(true);
     if !wins {
@@ -1249,16 +1673,24 @@ async fn sync_scope_impl(
     drop(connection);
     }
 
-    // Pull phase: every manifest segment this device has not merged yet.
+    // Pull phase: every manifest segment this device has not merged yet. A
+    // failed pull is a failed sync: the pushed half stays pushed, but the
+    // command reports the failure instead of a success that never landed.
+    // Segments that did merge keep their applied mark; failed ones stay
+    // unrecorded, so the next sync pulls them again.
     let uploaded_hash = segment.as_ref().map(|segment| segment.hash.clone());
-    let mut candidates = match client.get_manifest(&account.id).await {
+    let mut pull_errors: Vec<(String, bool)> = Vec::new();
+    let mut candidates = Vec::new();
+    match client.get_manifest(&account.id).await {
         Ok(Some(remote)) => match decode_encrypted_manifest(key, &remote.ciphertext) {
             Ok(remote_manifest) => {
                 let connection = match database.connection.lock() {
                     Ok(connection) => connection,
-                    Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+                    Err(_) => {
+                        return CommandResult::failure("UNKNOWN", "Database lock failed", true);
+                    }
                 };
-                remote_manifest
+                candidates = remote_manifest
                     .segments
                     .iter()
                     .filter(|segment| Some(&segment.hash) != uploaded_hash.as_ref())
@@ -1267,37 +1699,65 @@ async fn sync_scope_impl(
                             .unwrap_or(true)
                     })
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
             }
-            Err(_) => Vec::new(),
+            // A manifest that does not decrypt with this account's key means a
+            // key mismatch — retrying without importing the right key cannot
+            // fix it.
+            Err(error) => pull_errors.push((
+                format!("远端清单无法用当前同步密钥解密：{error}"),
+                false,
+            )),
         },
-        _ => Vec::new(),
+        Ok(None) => {}
+        Err(error) => pull_errors.push((format!("读取远端同步清单失败：{error}"), true)),
     };
     candidates.sort_by_key(|segment| segment.sequence_start);
     let mut pulled = 0usize;
     for segment in candidates {
         let Some(device) = segment.device_id.as_deref() else {
+            // Manifests written before the pull phase lack the writer's device
+            // id; those segments are undownloadable until a newer manifest
+            // replaces them. Skip, don't fail.
             continue;
         };
-        let bytes = match client
-            .download_segment(&account.id, device, segment.sequence_start, segment.sequence_end)
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        let envelope = match decode_encrypted_segment(key, &bytes) {
-            Ok(envelope) => envelope,
-            Err(_) => continue,
-        };
-        let mut connection = match database.connection.lock() {
-            Ok(connection) => connection,
-            Err(_) => continue,
-        };
-        if let Ok(applied) = apply_remote_objects(&mut connection, &envelope) {
+        let outcome = async {
+            let bytes = client
+                .download_segment(&account.id, device, segment.sequence_start, segment.sequence_end)
+                .await
+                .map_err(|error| (format!("下载远端变更失败：{error}"), true))?;
+            let envelope = decode_encrypted_segment(key, &bytes)
+                .map_err(|error| (format!("远端变更无法用当前同步密钥解密：{error}"), false))?;
+            let mut connection = database
+                .connection
+                .lock()
+                .map_err(|_| ("数据库锁定失败".to_string(), true))?;
+            let applied = apply_remote_objects(&mut connection, &envelope)
+                .map_err(|error| (error, true))?;
             let _ = record_applied_segment(&mut connection, &account.id, &segment.hash);
-            pulled += applied;
+            Ok::<usize, (String, bool)>(applied)
         }
+        .await;
+        match outcome {
+            Ok(applied) => pulled += applied,
+            Err((error, retryable)) => pull_errors.push((error, retryable)),
+        }
+    }
+    if let Some((first_error, _)) = pull_errors.first() {
+        let message = if pull_errors.len() == 1 {
+            format!("推送已完成，但拉取远端变更失败：{first_error}")
+        } else {
+            format!(
+                "推送已完成，但拉取远端变更失败：{first_error}（另有 {} 个来源同样失败）",
+                pull_errors.len() - 1
+            )
+        };
+        let retryable = pull_errors.iter().any(|(_, retryable)| *retryable);
+        return CommandResult::failure(
+            if retryable { "NETWORK" } else { "INVALID_RESPONSE" },
+            message,
+            retryable,
+        );
     }
     CommandResult::success(claimed.len() + pulled)
 }
@@ -1782,9 +2242,15 @@ mod tests {
         // Re-saving the same account must not rotate the key: a rotated key
         // would leave every ciphertext already on the remote undecryptable.
         let store = MemorySyncKeyStore::new();
-        ensure_sync_key(&store, "account-a").expect("first key");
+        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("first key: {}", error.message),
+        }
         let first = store.stored("account-a").expect("stored key");
-        ensure_sync_key(&store, "account-a").expect("second key");
+        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("second key: {}", error.message),
+        }
         assert_eq!(store.stored("account-a").as_deref(), Some(first.as_str()));
     }
 
@@ -1796,6 +2262,77 @@ mod tests {
         let repaired = store.stored("account-a").expect("repaired key");
         assert!(valid_sync_key_encoding(&repaired));
         assert_ne!(repaired, "not-a-key");
+    }
+
+    #[test]
+    fn a_key_exported_on_one_device_imports_on_another() {
+        // Two devices that each generated their own key can never decrypt each
+        // other. The export/import path is the pairing: device B must refuse
+        // to mint a key while the remote holds data, and import A's instead.
+        let device_a = MemorySyncKeyStore::new();
+        let device_b = MemorySyncKeyStore::new();
+        match create_sync_key_result(&device_a, "same-account", RemoteManifestProbe::Missing) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("device a key: {}", error.message),
+        }
+        let refused = create_sync_key_result(&device_b, "same-account", RemoteManifestProbe::Present);
+        assert!(matches!(refused, CommandResult::Failure { .. }));
+        assert!(device_b.stored("same-account").is_none(), "device b generated a second key for an account that already has one");
+        let exported = device_a.stored("same-account").expect("exported key");
+        match import_key_into_store(&device_b, "same-account", &exported) {
+            Ok(()) => {}
+            Err(error) => panic!("imported key: {error}"),
+        }
+        let key_a: [u8; 32] = BASE64_STANDARD
+            .decode(&exported)
+            .expect("decode export")
+            .try_into()
+            .expect("32 byte key");
+        let key_b: [u8; 32] = BASE64_STANDARD
+            .decode(&device_b.stored("same-account").expect("imported key"))
+            .expect("decode import")
+            .try_into()
+            .expect("32 byte key");
+        assert!(
+            decrypt_bytes(&key_b, &encrypt_bytes(&key_a, b"sync data").expect("encrypt")).is_ok(),
+            "independent stores generated incompatible master keys; no pairing/import path exists"
+        );
+    }
+
+    #[test]
+    fn import_rejects_keys_that_are_not_32_bytes_of_base64() {
+        let store = MemorySyncKeyStore::new();
+        assert!(decode_imported_key("not-a-key").is_none());
+        assert!(decode_imported_key(&BASE64_STANDARD.encode([0_u8; 16])).is_none());
+        assert!(decode_imported_key(&BASE64_STANDARD.encode([0_u8; 32])).is_some());
+        let _ = &store;
+    }
+
+    #[test]
+    fn an_unreachable_remote_stops_key_generation_instead_of_silently_minting_one() {
+        let store = MemorySyncKeyStore::new();
+        let result =
+            create_sync_key_result(&store, "account-a", RemoteManifestProbe::Unavailable("503".into()));
+        assert!(matches!(result, CommandResult::Failure { .. }));
+        assert!(
+            store.stored("account-a").is_none(),
+            "an uncertain remote silently minted a key that may strand the other device"
+        );
+    }
+
+    #[test]
+    fn an_existing_valid_key_is_kept_even_when_the_remote_holds_data() {
+        let store = MemorySyncKeyStore::new();
+        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("first key: {}", error.message),
+        }
+        let first = store.stored("account-a").expect("stored key");
+        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Present) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("re-creation is a no-op: {}", error.message),
+        }
+        assert_eq!(store.stored("account-a").as_deref(), Some(first.as_str()));
     }
 
     #[test]
@@ -2374,6 +2911,121 @@ mod tests {
     }
 
     #[test]
+    fn cross_device_progress_never_regresses_to_a_lower_page() {
+        // The frontend merge keeps the higher page across devices; the native
+        // merge must agree, even when the low-page device carries the newer
+        // clock — otherwise a device that jumped back drags the other one with
+        // it on the next pull.
+        let mut connection = migrated_connection();
+        let first = remote_envelope(
+            "scope-a",
+            vec![remote_object(
+                "reading_progress",
+                "scope-a/archive-a",
+                5,
+                "2026-09-14 10:00:00",
+                serde_json::json!({"archiveId": "archive-a", "pageIndex": 80, "pageCount": 100, "layout": "paged", "direction": "ltr", "coverAlone": null}),
+            )],
+        );
+        let mut second = remote_object(
+            "reading_progress",
+            "scope-a/archive-a",
+            6,
+            "2026-09-14 10:01:00",
+            serde_json::json!({"archiveId": "archive-a", "pageIndex": 10, "pageCount": 100, "layout": "paged", "direction": "ltr", "coverAlone": null}),
+        );
+        second.device_id = "device-c".to_string();
+        let second = remote_envelope("scope-a", vec![second]);
+        assert_eq!(apply_remote_objects(&mut connection, &first).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut connection, &second).expect("apply"), 0);
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_progress WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("kept page");
+        assert_eq!(page, 80, "a newer clock from another device dragged the page backwards");
+    }
+
+    #[test]
+    fn equal_clocks_converge_on_the_same_winner_on_every_device() {
+        // Equal clocks and equal second-resolution timestamps previously left
+        // each device keeping whatever it applied last. The device-id
+        // tiebreak makes the comparator a strict total order, so both
+        // application orders end on the same winner.
+        fn progress(device_id: &str, page: i64) -> SyncWireObject {
+            let mut object = remote_object(
+                "reading_progress",
+                "scope-a/archive-a",
+                1,
+                "2026-09-14 10:00:00",
+                serde_json::json!({"archiveId": "archive-a", "pageIndex": page, "pageCount": 100, "layout": "paged", "direction": "ltr", "coverAlone": null}),
+            );
+            object.device_id = device_id.to_string();
+            object
+        }
+        fn page_of(connection: &mut Connection) -> i64 {
+            connection
+                .query_row(
+                    "SELECT page_index FROM reading_progress WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("merged page")
+        }
+        let mut device_a = migrated_connection();
+        let mut device_b = migrated_connection();
+        // Device A applies A's change then B's; device B the reverse.
+        assert_eq!(apply_remote_objects(&mut device_a, &remote_envelope("scope-a", vec![progress("device-a", 10)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_a, &remote_envelope("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_b, &remote_envelope("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_b, &remote_envelope("scope-a", vec![progress("device-a", 10)])).expect("apply"), 0);
+        assert_eq!(
+            page_of(&mut device_a),
+            page_of(&mut device_b),
+            "equal revision and second-resolution timestamp kept different local winners forever"
+        );
+    }
+
+    #[test]
+    fn history_visited_at_compares_instants_not_printed_digits() {
+        // An offset timestamp ("15:00+08:00" = 07:00 UTC) prints after
+        // "08:00", so a string MAX adopts it even though it is the earlier
+        // instant.
+        let mut connection = migrated_connection();
+        connection
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                 VALUES ('scope-a', 'archive-a', 3, '2026-09-01 08:00:00', 'device-a', 4)",
+                [],
+            )
+            .expect("local history");
+        let remote = remote_envelope(
+            "scope-a",
+            vec![remote_object(
+                "history",
+                "scope-a/archive-a",
+                1,
+                "2026-09-01 15:00:00",
+                serde_json::json!({"archiveId": "archive-a", "pageIndex": 5, "visitedAt": "2026-09-01T15:00:00+08:00"}),
+            )],
+        );
+        assert_eq!(apply_remote_objects(&mut connection, &remote).expect("apply"), 1);
+        let visited_at: String = connection
+            .query_row(
+                "SELECT visited_at FROM reading_history WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("merged visit");
+        assert_eq!(
+            visited_at, "2026-09-01 08:00:00",
+            "visited_at merged by printed digits instead of instants"
+        );
+    }
+
+    #[test]
     fn remote_history_keeps_the_max_page_and_latest_visit() {
         let mut connection = migrated_connection();
         connection
@@ -2579,6 +3231,135 @@ mod tests {
             )],
         );
         assert_eq!(apply_remote_objects(&mut connection, &future).expect("apply"), 0);
+    }
+
+    /// A one-shot WebDAV mock that answers each request with the next fixed
+    /// status from the list (empty body except for 200s).
+    async fn scripted_dav_server(
+        statuses: Vec<&'static str>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            for status in statuses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0_u8; 16_384];
+                let read = stream.read(&mut buffer).await.expect("read request");
+                let _ = read;
+                let body: &[u8] = if status.starts_with("200") {
+                    b"ciphertext"
+                } else {
+                    b""
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.expect("status");
+                stream.write_all(body).await.expect("body");
+            }
+        });
+        format!("http://{address}")
+    }
+
+    /// Pull failures used to be swallowed: a 503 manifest fetch merged zero
+    /// segments and still reported success, so the UI claimed a clean sync
+    /// while remote changes never landed.
+    #[tokio::test]
+    async fn a_failing_manifest_fetch_is_reported_as_a_failed_sync() {
+        let base_url = scripted_dav_server(vec!["503 Service Unavailable"]).await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let mut connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
+                    params![base_url],
+                )
+                .expect("webdav account");
+            read_webdav_account(&connection, "account-a").expect("account record")
+        };
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &[7_u8; 32],
+            "scope-a",
+            "device-a",
+            Vec::new(),
+            None,
+            &credentials,
+        )
+        .await;
+        assert!(
+            matches!(result, CommandResult::Failure { .. }),
+            "a 503 manifest fetch returned a successful zero-change pull"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_segment_that_cannot_be_downloaded_fails_the_pull() {
+        // The manifest lists one unapplied segment, but the segment file is
+        // missing (404): the sync must fail, not quietly report zero changes.
+        let (base_url, store) = stateful_dav_server().await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let manifest = SyncManifest {
+            version: 1,
+            epoch: 0,
+            segments: vec![SyncManifestSegment {
+                hash: "abc".to_string(),
+                size: 4,
+                sequence_start: 1,
+                sequence_end: 2,
+                device_id: Some("device-x".to_string()),
+            }],
+            device_cursors: Default::default(),
+        };
+        let ciphertext = encode_encrypted_manifest(&[7_u8; 32], &manifest).expect("manifest");
+        store
+            .lock()
+            .expect("store")
+            .insert("/Yomika/v1/account-a/manifest.json.enc".to_string(), ciphertext);
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let mut connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
+                    params![base_url],
+                )
+                .expect("webdav account");
+            read_webdav_account(&connection, "account-a").expect("account record")
+        };
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &[7_u8; 32],
+            "scope-a",
+            "device-a",
+            Vec::new(),
+            None,
+            &credentials,
+        )
+        .await;
+        assert!(
+            matches!(result, CommandResult::Failure { .. }),
+            "a missing remote segment returned a successful pull"
+        );
     }
 
     /// A tiny stateful WebDAV server: PUT stores the body, GET serves it back

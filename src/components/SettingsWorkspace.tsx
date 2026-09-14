@@ -24,6 +24,7 @@ import type { CommandResult } from '../domain/result';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
+import { TextInputDialog } from './TextInputDialog';
 import { usePreferences } from '../app/preferences';
 import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
 import { readoshiServerScope } from '../lib/readoshiScope';
@@ -767,6 +768,20 @@ export function SettingsWorkspace() {
     return result;
   }
 
+  /** 切换启用的服务器。仓库层会失效书架与首页的路由缓存，面板上的行就地更新。 */
+  async function enableServer(server: ServerRecord) {
+    if (server.enabled) return;
+    const result = await repository.setServerEnabled(server.id);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      return;
+    }
+    setServers((current) => current.map((item) => (
+      item.id === result.value.id ? result.value : { ...item, enabled: false }
+    )).sort((left, right) => Number(right.enabled) - Number(left.enabled) || left.name.localeCompare(right.name)));
+    showToast(`已启用服务器 ${result.value.name}，书架与首页将读取它`, 'success');
+  }
+
   return (
     <div className="settings-page" ref={pageRef}>
       <h1 className="visually-hidden">设置</h1>
@@ -1128,6 +1143,8 @@ export function SettingsWorkspace() {
                           <span>{account.baseUrl}</span>
                           <small>{account.username || '无用户名'} · {account.status === 'unverified' ? '待首次同步验证' : account.status}</small>
                         </div>
+                        <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => void sync.exportKey(account)}>导出密钥</button>
+                        <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.beginKeyImport(account)}>导入密钥</button>
                         <button className="settings-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
                           <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
                         </button>
@@ -1138,6 +1155,16 @@ export function SettingsWorkspace() {
                 {!sync.loading && sync.accounts.length > 0 && sync.servers.length === 0 && (
                   <p className="settings-menu-desc">需要先在「通用」中添加 LANraragi 服务器，才能确定本地同步范围。</p>
                 )}
+                <TextInputDialog
+                  open={sync.keyImportAccount !== undefined}
+                  onOpenChange={(open) => { if (!open) sync.closeKeyImport(); }}
+                  title={`导入同步密钥 · ${sync.keyImportAccount?.label ?? ''}`}
+                  description="粘贴原设备「导出密钥」复制的内容。远端已有数据时，导入前会先验证这把密钥能否解密它。"
+                  label="同步密钥"
+                  confirmLabel="导入密钥"
+                  validate={(value) => (value.trim() ? undefined : '请粘贴导出的同步密钥')}
+                  onConfirm={(value) => void sync.confirmKeyImport(value)}
+                />
                 {/* 账户管理与添加在同一个菜单里完成，不再分成两行。
                     账户 ID 由名称自动派生，不再让用户填写。 */}
                 <p className="settings-menu-divider">添加或更新账户</p>
@@ -1328,8 +1355,20 @@ export function SettingsWorkspace() {
                   </div>
                 )}
                 {servers.map((server) => (
-                  <div className="settings-item" key={server.id}>
+                  <div className="settings-item server-row" key={server.id}>
                     <ServerSetupDialog variant="row" onSave={saveServer} server={server} />
+                    {/* 一次只允许启用一台：首页、书架与档案库的数据源就是它
+                        （当前标记跟在名字旁）。已启用的行不可再关（停用最后一
+                        台会让应用没有数据源），所以只有未启用的行有启用按钮。 */}
+                    {!server.enabled && (
+                      <button
+                        className="server-current-toggle"
+                        type="button"
+                        aria-pressed={false}
+                        title="设为启用的服务器"
+                        onClick={() => void enableServer(server)}
+                      >启用</button>
+                    )}
                   </div>
                 ))}
                 {/* The add row stays through a failed load: re-entering the

@@ -39,7 +39,8 @@ describe('sync workspace', () => {
     renderSync();
 
     // 同步区与其它设置同构：行报告当前状态，账户在行的悬浮菜单里。
-    const row = await screen.findByRole('button', { name: 'WebDAV 账户' });
+    // 设置页按路由懒加载，全量并行跑时首个转换会超过默认 1s 等待。
+    const row = await screen.findByRole('button', { name: 'WebDAV 账户' }, { timeout: 10_000 });
     await user.click(row);
     const accountsMenu = await screen.findByRole('dialog', { name: 'WebDAV 账户' });
     expect(await within(accountsMenu).findByText('Personal WebDAV')).toBeInTheDocument();

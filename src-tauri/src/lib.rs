@@ -26,6 +26,7 @@ use commands::library::{
     load_reader_manifest, load_reader_page, load_reading_progress, probe_new_archives,
     read_server_api_key, refresh_archives, remove_archive_from_category, replace_archives,
     retry_task, save_reading_progress, save_search_preset, save_server, search_archives_page,
+    set_server_enabled,
     search_random_archives,
     set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
     use_metadata_plugin, verify_archives_exist,
@@ -33,8 +34,9 @@ use commands::library::{
 use commands::platform::{open_external_url, platform_capabilities, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, build_sync_segment, claim_sync_journal, create_sync_key,
-    decrypt_sync_manifest, encrypt_sync_manifest, list_sync_journal, list_webdav_accounts,
-    merge_sync_manifests, save_webdav_account, set_sync_journal_state, sync_webdav_scope,
+    decrypt_sync_manifest, encrypt_sync_manifest, export_sync_key, import_sync_key,
+    list_sync_journal, list_webdav_accounts, merge_sync_manifests, save_webdav_account,
+    set_sync_journal_state, sync_webdav_scope,
 };
 use db::Database;
 use dedup::{
@@ -100,6 +102,7 @@ pub fn run() {
             list_servers,
             check_server_status,
             save_server,
+            set_server_enabled,
             read_server_api_key,
             replace_archives,
             refresh_archives,
@@ -144,6 +147,8 @@ pub fn run() {
             list_sync_journal,
             set_sync_journal_state,
             create_sync_key,
+            export_sync_key,
+            import_sync_key,
             build_sync_segment,
             encrypt_sync_manifest,
             decrypt_sync_manifest,

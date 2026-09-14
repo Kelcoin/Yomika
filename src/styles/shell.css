@@ -2216,20 +2216,39 @@ body::-webkit-scrollbar,
   line-height: 20px;
 }
 
+/* Three physical rows, filled horizontally from the shortest row. */
 .archive-list.is-wide .archive-row-tags {
-  display: grid;
-  grid-template-rows: repeat(3, 22px);
-  align-content: start;
-  gap: 4px;
+  flex-wrap: nowrap;
+  flex-direction: column;
 }
 
 .archive-row-tag-line {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: flex-start;
-  gap: var(--space-1);
+  gap: 4px;
   min-width: 0;
   overflow: hidden;
+}
+
+/* 分组标签（女性/作者/社团…）：中性的组头芯片，让每行读得出归属。 */
+.metadata-chip-ns {
+  flex: none;
+  background: var(--surface-container-high);
+  color: var(--ink-secondary);
+}
+
+.wide-tag-measures {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  height: 0;
+  overflow: hidden;
+}
+
+.wide-tag-measure {
+  display: inline-block;
+  white-space: nowrap;
 }
 
 /* Fixed footer: category bottom-left, page count and added date bottom-right,
@@ -2942,18 +2961,11 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
-.eh-account-glyph {
-  display: grid;
-  place-items: center;
+.eh-account-glyph-mark {
   flex: none;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: var(--surface-container-highest);
-  color: var(--primary);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
 }
-
-.eh-account-glyph svg { width: 30px; height: 30px; }
 
 
 /* EX access rides the name line as a status dot + short label; the full
@@ -4630,3 +4642,55 @@ body::-webkit-scrollbar,
 .upload-queue-row.is-failed .upload-queue-status { color: var(--state-danger); }
 .archive-delete-dialog { overflow-wrap: anywhere; }
 .archive-delete-dialog .switch-control { flex: none; }
+
+/* 服务器行的启用控件：一次只允许启用一台。当前标记是一枚跟在服务器名字
+   后的小徽章；行尾只留未启用行的「启用」按钮（停用最后一台会让应用没有
+   数据源，所以已启用的行没有开关可关）。 */
+.settings-item.server-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-item.server-row > .settings-row.settings-row-button {
+  flex: 1;
+  min-width: 0;
+}
+
+.server-current-badge {
+  margin-left: 8px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 1px;
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
+.server-current-toggle {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  height: 28px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  background: var(--surface-container);
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.server-current-toggle:hover {
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+}
+
+/* Horizontal waterfall rows share a left edge; each chip keeps its measured width. */
+.card-tag-waterfall { position: relative; display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; justify-content: flex-start; gap: 4px; }
+.card-tag-waterfall .archive-row-tag-line { flex: none; justify-content: flex-start; }
+.card-tag-waterfall .metadata-chip { flex: none; }
+.card-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; white-space: nowrap; }
+.card-tag-waterfall .card-tag-measure { display: inline-block; }

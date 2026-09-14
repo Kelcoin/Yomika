@@ -1,8 +1,9 @@
 import { ArrowLeft, BookOpen, LoaderCircle, Play, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { parseArchiveTagString } from '../lib/tags';
+import { pickServer } from '../domain/server';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -20,6 +21,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const navigate = useNavigate();
   const goBack = useReturnNavigation();
   useTagTranslations();
+  const [searchParams] = useSearchParams();
+  const serverParam = searchParams.get('server');
   const [serverId, setServerId] = useState<string>();
   const [title, setTitle] = useState('');
   const [tags, setTags] = useState('');
@@ -48,7 +51,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     let active = true;
     void (async () => {
       const servers = await repository.listServers();
-      const server = servers.ok ? servers.value[0] : undefined;
+      const server = servers.ok ? pickServer(servers.value, serverParam) : undefined;
       if (!active) return;
       if (!server) { setError(servers.ok ? '尚未配置服务器' : servers.error.message); setLoading(false); return; }
       setServerId(server.id);
@@ -77,7 +80,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
       setLoading(false);
     })();
     return () => { active = false; };
-  }, [archiveId]);
+  }, [archiveId, serverParam]);
 
   const tagList = useMemo(() => parseArchiveTagString(tags), [tags]);
   const setTagList = (next: readonly string[]) => {
@@ -175,7 +178,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
           toast is where events are reported. */}
         <div className="metadata-edit-actions">
           <button className="primary-action" type="submit" aria-label="保存元数据" disabled={!!busy}><Save aria-hidden="true" />{busy === 'save' ? '保存中…' : '保存元数据'}</button>
-          <Link className="secondary-action" to={`/reader/${archiveId}`}><BookOpen aria-hidden="true" />阅读</Link>
+          <Link className="secondary-action" to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}><BookOpen aria-hidden="true" />阅读</Link>
           <button className="secondary-action" type="button" disabled={!!busy} onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" />删除</button>
         </div>
       </form>

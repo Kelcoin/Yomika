@@ -4,8 +4,8 @@ import { InMemoryLibraryRepository } from '../../src/repositories/inMemoryLibrar
 describe('local library repository contract', () => {
   it('isolates archives by server scope', async () => {
     const repo = new InMemoryLibraryRepository();
-    await repo.upsertServer({ id: 's1', name: 'A', baseUrl: 'https://a.test', scopeId: 'scope-a' });
-    await repo.upsertServer({ id: 's2', name: 'B', baseUrl: 'https://b.test', scopeId: 'scope-b' });
+    await repo.upsertServer({ id: 's1', name: 'A', baseUrl: 'https://a.test', scopeId: 'scope-a', enabled: true });
+    await repo.upsertServer({ id: 's2', name: 'B', baseUrl: 'https://b.test', scopeId: 'scope-b', enabled: false });
     await repo.upsertArchive({ serverId: 's1', archiveId: 'same', title: 'A title', pageCount: 2 });
     await repo.upsertArchive({ serverId: 's2', archiveId: 'same', title: 'B title', pageCount: 3 });
 

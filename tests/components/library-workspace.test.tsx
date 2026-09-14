@@ -167,15 +167,13 @@ describe('library workspace', () => {
     expect(screen.queryByText('暂无档案库')).not.toBeInTheDocument();
   });
 
-  it('balances wide-card tags across three rendered rows', () => {
-    renderWorkspace({ archives: [{
-      ...archives[0]!,
-      tags: ['female:a', 'female:b', 'male:c', 'other:d', 'artist:e', 'cosplayer:f', 'language:g'],
-    }] });
-
-    const lines = document.querySelectorAll('.archive-row-tag-line');
-    expect(lines).toHaveLength(3);
-    expect([...lines].map((line) => line.children.length)).toEqual([3, 2, 2]);
+  it('distributes wide-card tags across three left-starting rows', () => {
+    const tags = ['female:ta', 'female:tb', 'female:tc', 'female:td', 'female:te', 'female:tf'];
+    renderWorkspace({ archives: [{ ...archives[0]!, tags }] });
+    const rows = [...document.querySelectorAll('.archive-row-tag-line')];
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => [...row.querySelectorAll('.metadata-chip')].map((chip) => chip.textContent)))
+      .toEqual([['ta', 'td'], ['tb', 'te'], ['tc', 'tf']]);
   });
 
   it('renders history time on the connected rail outside the archive button', () => {
@@ -280,6 +278,29 @@ describe('library workspace', () => {
     fireEvent.wheel(list, { deltaY: -200 });
     expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
     expect(list.querySelector('.library-pull-indicator')).toBeNull();
+  });
+
+  it('forwards wheel gestures from the panel gutters to the list', () => {
+    // 桌面端书架页面不滚动，唯一滚动容器是 .archive-list：鼠标悬在面板的
+    // 左右留白上时，滚轮目标链不经过它，什么都不动。转发给同面板的列表。
+    const { container } = render(
+      <MemoryRouter>
+        <div className="library-shell-list"><LibraryWorkspace archives={archives.slice(0, 20)} /></div>
+      </MemoryRouter>,
+    );
+    const list = container.querySelector('[data-scroll-region]') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 600, scrollHeight: 4000 });
+    const host = list.closest('.library-shell-list') as HTMLElement;
+
+    // 留白上的滚轮：转发给列表。
+    fireEvent.wheel(host, { deltaY: 120 });
+    expect(list.scrollTop).toBe(120);
+    fireEvent.wheel(host, { deltaY: -40 });
+    expect(list.scrollTop).toBe(80);
+
+    // 鼠标在列表内：浏览器原生滚动负责，转发不得叠加。
+    fireEvent.wheel(list, { deltaY: 100 });
+    expect(list.scrollTop).toBe(80);
   });
 
   it('pulls with a finger and refreshes on lift', () => {
@@ -433,6 +454,6 @@ describe('library workspace', () => {
   it('opens the selected archive in the reader from the primary detail action', () => {
     renderWorkspace({ archives: archives.slice(0, 1) });
 
-    expect(screen.getByRole('link', { name: '阅读 Archive 0' })).toHaveAttribute('href', '/reader/archive-0');
+    expect(screen.getByRole('link', { name: '阅读 Archive 0' })).toHaveAttribute('href', '/reader/archive-0?server=local');
   });
 });

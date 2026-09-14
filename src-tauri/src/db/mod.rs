@@ -80,6 +80,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             include_str!("../../migrations/0021_sync_pull_state.sql"),
         ),
         (22, include_str!("../../migrations/0022_eh_my_tags.sql")),
+        (23, include_str!("../../migrations/0023_servers_enabled.sql")),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -200,10 +201,10 @@ mod tests {
                     archive_categories_fk_count,
                     cache_archive_column.as_str(),
                     cache_archive_index.as_str(),
-                    eh_health_columns,
+                    eh_health_columns
                 ),
                 (
-                    22,
+                    23,
                     1,
                     "servers",
                     "webdav_accounts",
@@ -231,7 +232,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 21);
+        assert_eq!(migration_count, 22);
         let recovered_status: String = reopened
             .connection
             .lock()

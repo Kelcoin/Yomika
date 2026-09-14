@@ -236,6 +236,56 @@ describe('library route workspace', () => {
     }));
   });
 
+  it('hydrates the category dropdown from the mirror instead of flashing a skeleton', async () => {
+    // 应用重启或路由快照过期后，原生六小时快照也能立刻回答分类：下拉用上
+    // 一次的镜像同步注水，骨架只留给一无所知的首次加载。
+    window.localStorage.setItem('yomika:library-categories:default', JSON.stringify([
+      { id: 'SET_1613080290', name: 'Reading', pinned: false, search: null, archives: [] },
+    ]));
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Hydrated', pageCount: 1, updatedAt: '2026-09-01T00:00:00Z' }]);
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      // 分类请求永不返回：下拉仍然立即出现，证明它来自镜像。
+      if (command === 'list_categories') return new Promise(() => undefined);
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    const dropdown = await screen.findByRole('combobox', { name: '分类筛选' });
+    expect(dropdown).toHaveTextContent('Reading');
+    expect(screen.queryByText('正在读取分类')).toBeNull();
+  });
+
+  it('refreshes categories silently while the cached dropdown is on screen', async () => {
+    const user = userEvent.setup();
+    let categoryRequests = 0;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') {
+        categoryRequests += 1;
+        return { ok: true, value: [{ id: 'SET_1613080290', name: 'Reading', pinned: false, search: null, archives: [] }] };
+      }
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Cached Refresh', pageCount: 1, updatedAt: '2026-09-02T00:00:00Z' }]);
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderLibrary();
+
+    await screen.findByRole('button', { name: /^Cached Refresh\b/ });
+    expect(screen.getByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
+    const requestsBefore = categoryRequests;
+
+    // 全量失效广播（启用服务器切换的形状）重跑分类加载：下拉保持显示，
+    // 不进骨架。
+    window.dispatchEvent(new CustomEvent('yomika:route-cache-invalidated', { detail: {} }));
+    await vi.waitFor(() => expect(categoryRequests).toBeGreaterThan(requestsBefore));
+    expect(screen.queryByText('正在读取分类')).toBeNull();
+    expect(screen.getByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
+  });
+
   it('shows an actionable empty state when WebDAV is not configured', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
@@ -385,7 +435,7 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('heading', { name: 'First archive' })).toBeInTheDocument();
     expect(screen.queryByText('first.cbz')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', '/reader/first');
+    expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', '/reader/first?server=scope-a');
     expect(adapter).toHaveBeenCalledWith('load_archive_metadata', { serverId: 'scope-a', archiveId: 'first' });
   });
 
@@ -483,7 +533,7 @@ describe('library route workspace', () => {
 
     await user.click(await screen.findByRole('button', { name: /^Original title\b/ }));
     await user.click(await screen.findByRole('button', { name: '编辑元数据' }));
-    const titleInput = screen.getByRole('textbox', { name: '标题' });
+    const titleInput = await screen.findByRole('textbox', { name: '标题' });
     expect(titleInput).toHaveValue('Original title');
     fireEvent.change(titleInput, { target: { value: 'Updated title' } });
     expect(titleInput).toHaveValue('Updated title');

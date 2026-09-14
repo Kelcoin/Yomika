@@ -38,10 +38,10 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('about');
 
-    await user.click(screen.getByRole('button', { name: 'LANraragi 文档' }));
+    await user.click(await screen.findByRole('button', { name: 'LANraragi 文档' }));
     expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://sugoi.gitbook.io/lanraragi' });
     // The repository row names the repo and opens it through the same command.
-    await user.click(screen.getByRole('button', { name: '仓库地址' }));
+    await user.click(await screen.findByRole('button', { name: '仓库地址' }));
     expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Kelcoin/Yomika' });
   });
 
@@ -248,6 +248,39 @@ describe('settings workspace', () => {
     expect(await screen.findByText('Home')).toBeInTheDocument();
     expect(screen.getByText('https://example.com')).toBeInTheDocument();
     expect(screen.getByText('已配置')).toBeInTheDocument();
+  });
+
+  it('switches the enabled server and updates the rows in place', async () => {
+    // 一次只允许启用一台：启用另一台会把当前那台停掉，书架与首页随之改读
+    // 新启用的服务器。当前标记是名字旁的小徽章；已启用的行没有开关可关。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [
+        { id: 'scope-a', name: 'Home', baseUrl: 'https://a.example.com', scopeId: 'scope-a', enabled: true },
+        { id: 'scope-b', name: 'Office', baseUrl: 'https://b.example.com', scopeId: 'scope-b', enabled: false },
+      ] };
+      if (command === 'set_server_enabled') {
+        expect(args).toEqual({ serverId: 'scope-b', enabled: true });
+        return { ok: true, value: { id: 'scope-b', name: 'Office', baseUrl: 'https://b.example.com', scopeId: 'scope-b', enabled: true } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderSettings();
+
+    await user.click(await screen.findByRole('link', { name: /通用/ }));
+    // Home 的名字旁挂着「当前」徽章，且没有可关的开关。
+    expect(await screen.findByText('当前')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '当前' })).toBeNull();
+    const officeToggle = await screen.findByRole('button', { name: '启用' });
+    await user.click(officeToggle);
+
+    expect(adapter).toHaveBeenCalledWith('set_server_enabled', { serverId: 'scope-b', enabled: true });
+    // The rows swap in place: Office now carries the badge, Home offers 启用.
+    expect(await screen.findByText('当前')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启用' })).toBeInTheDocument();
   });
 
   it('shows a newly saved server without reloading the page', async () => {

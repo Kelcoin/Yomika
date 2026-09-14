@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import type { ArchiveRecord } from '../domain/library';
+import { pickServer } from '../domain/server';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { useArchiveSelection } from './useArchiveSelection';
@@ -18,7 +19,12 @@ import { useCardStyle } from '../app/preferences';
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 
-const LIBRARY_SNAPSHOT_KEY = 'library:workspace';
+/** The library cache is per server: two configured servers keep two lists, and
+ * a snapshot restored across them would paint one server's rows under the
+ * other's name for a beat. */
+function librarySnapshotKey(requestedServer: string | null): string {
+  return `library:workspace:${requestedServer ?? 'default'}`;
+}
 
 /** How long a restored list is trusted without a re-fetch. Long enough that
  * switching to settings and back is free; short enough that an archive added on
@@ -64,9 +70,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const { showToast } = useToast();
   const [urlSearchParams] = useSearchParams();
   const requestedQuery = urlSearchParams.has('q') ? (urlSearchParams.get('q') ?? '').trim() : undefined;
+  /** Which server the library browses: the linking `?server=` id wins over the
+   * default (first configured) server. */
+  const serverParam = urlSearchParams.get('server');
   // Snapshot from the last visit: switching to another route and back used to
   // start from an empty list and a closed detail pane.
-  const snapshot = readRouteCache<LibrarySnapshot>(LIBRARY_SNAPSHOT_KEY);
+  const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam));
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
   const [loading, setLoading] = useState(!snapshot);
   /** True while any first-page request is outstanding. Separate from `loading`,
@@ -80,12 +89,23 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [metadata, setMetadata] = useState<import('../repositories/nativeLibraryRepository').ArchiveMetadata>();
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
-  const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? []);
-  const [categoriesLoading, setCategoriesLoading] = useState(!snapshot?.categories?.length);
-  /** The snapshot already carries the categories, so the first mount does not need
-   * to ask for them again: every membership crosses IPC and is re-validated, and
-   * the list they feed is already on screen. */
-  const categoriesFromSnapshot = useRef(Boolean(snapshot?.categories?.length));
+  /** 分类在会话之间也保持可见：路由快照过期或应用重启后，用上一次的
+   * localStorage 镜像同步注水，下拉不再闪骨架——原生六小时快照随后静默
+   * 校正。镜像按服务器分开（?server= 未指定时归入 default）。 */
+  const persistedCategories = (() => {
+    try {
+      const raw = window.localStorage.getItem(`yomika:library-categories:${serverParam ?? 'default'}`);
+      const parsed = raw ? JSON.parse(raw) as import('../repositories/nativeLibraryRepository').Category[] : undefined;
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? persistedCategories ?? []);
+  const [categoriesLoading, setCategoriesLoading] = useState(!(snapshot?.categories?.length || persistedCategories?.length));
+  /** 只要下拉上有可显示的分类，本 effect 的每一次重跑（刷新、换服务器）都
+   * 静默进行；骨架只保留给第一无所知的加载。 */
+  const categoriesOnScreen = useRef(Boolean(snapshot?.categories?.length || persistedCategories?.length));
   const [categoryError, setCategoryError] = useState<string>();
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
@@ -111,7 +131,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const snapshotIsFresh = useRef(
     Boolean(snapshot?.archives.length)
       && (requestedQuery === undefined || requestedQuery === snapshot?.searchQuery)
-      && (routeCacheAge(LIBRARY_SNAPSHOT_KEY) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
+      && (routeCacheAge(librarySnapshotKey(serverParam)) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
   );
   const [searchQuery, setSearchQuery] = useState(requestedQuery ?? snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
@@ -241,7 +261,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       setLoading(false);
       return;
     }
-    const server = servers.value[0];
+    const server = pickServer(servers.value, serverParam);
     if (!server) {
       setServerId(undefined);
       setLoading(false);
@@ -265,7 +285,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       if (result.ok) setPresets(result.value);
     });
     setLoading(false);
-  }, []);
+  }, [serverParam]);
 
   // One page of the list. LANraragi is the source of truth: it owns ordering,
   // filtering and paging, so an archive added on the server shows up the moment
@@ -346,6 +366,20 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   useEffect(() => {
     void loadLibrary();
+  }, [loadLibrary]);
+
+  // 启用服务器切换以全量失效广播（prefix 为空）：档案库就地整页重读（解析到
+  // 新启用的服务器、重读书架作用域与首页），列表留在屏幕上直到新数据到位。
+  useEffect(() => {
+    const handleInvalidation = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix) {
+        setError(undefined);
+        void loadLibrary().then(() => setReloadToken((value) => value + 1));
+      }
+    };
+    window.addEventListener('yomika:route-cache-invalidated', handleInvalidation);
+    return () => window.removeEventListener('yomika:route-cache-invalidated', handleInvalidation);
   }, [loadLibrary]);
 
   useEffect(() => {
@@ -433,15 +467,24 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // than five minutes, so coming back from the reader always paid it. A pull
     // does not force it either any more: it re-reads the page on screen, and the
     // six-hour snapshot is exactly what keeps that one request.
-    if (categoriesFromSnapshot.current) {
-      categoriesFromSnapshot.current = false;
-      setCategoriesLoading(false);
+    //
+    // 缓存已在屏（快照恢复或上一轮结果还在）时静默刷新：下拉保持显示，绝不
+    // 因刷新回到骨架；骨架只在分类一无所知时出现。
+    if (categoriesOnScreen.current) {
+      void repository.listCategories(serverId).then((categoryResult) => {
+        if (categoryResult.ok) {
+          categoriesOnScreen.current = true;
+          setCategories(categoryResult.value);
+        } else setCategoryError(categoryResult.error.message);
+      });
       return;
     }
     setCategoriesLoading(true);
     void repository.listCategories(serverId).then((categoryResult) => {
-      if (categoryResult.ok) setCategories(categoryResult.value);
-      else setCategoryError(categoryResult.error.message);
+      if (categoryResult.ok) {
+        categoriesOnScreen.current = true;
+        setCategories(categoryResult.value);
+      } else setCategoryError(categoryResult.error.message);
     }).finally(() => setCategoriesLoading(false));
   }, [reloadToken, serverId]);
 
@@ -461,7 +504,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   // Keep the snapshot current so the next visit renders instantly.
   useEffect(() => {
     if (archives.length === 0) return;
-    writeRouteCache(LIBRARY_SNAPSHOT_KEY, {
+    writeRouteCache(librarySnapshotKey(serverParam), {
       archives,
       fetchedCount: fetchedCount.current,
       categories,
@@ -473,7 +516,20 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       sortOrder,
       categoryFilter,
     } satisfies LibrarySnapshot);
-  }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, sortMode, sortOrder, totalArchives]);
+  }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, serverParam, sortMode, sortOrder, totalArchives]);
+
+  // The categories' own durable mirror: the route snapshot lives in memory and
+  // dies with the app, while the dropdown is the one control that must not
+  // flash a skeleton over data the native snapshot would answer instantly.
+  useEffect(() => {
+    if (categories.length === 0) return;
+    try {
+      window.localStorage.setItem(`yomika:library-categories:${serverParam ?? 'default'}`, JSON.stringify(categories));
+    } catch {
+      // Storage full or unavailable: the mirror is an optimization, never a
+      // source of truth — the native snapshot re-answers in milliseconds.
+    }
+  }, [categories, serverParam]);
 
   if (error) {
     return (

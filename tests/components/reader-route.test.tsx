@@ -256,6 +256,49 @@ describe('reader route', () => {
     expect(await screen.findByRole('region', { name: '连续阅读' })).toBeInTheDocument();
   });
 
+  it('opens page 1 when the URL explicitly asks for page=0, even with saved progress', async () => {
+    // A missing page param restores the saved progress; a PRESENT `page=0` is
+    // an explicit request for the first page (the detail page's thumbnail
+    // grid), and it used to be mistaken for "no page requested".
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg', '3.jpg', '4.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a1', pageIndex: 3, pageCount: 5, layout: 'paged', direction: 'ltr', updatedAt: '2026-08-26T00:00:00Z', revision: 1 } };
+      if (command === 'load_reader_page') return { ok: true, value: [1] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1?page=0']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('reads against the server the linking card carried, not the first one', async () => {
+    // Two configured servers with the same archive id: without `?server=` the
+    // reader always opened server 1's copy and wrote progress there too.
+    const requestedServers: string[] = [];
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [
+        { id: 'server-a', name: 'First', baseUrl: 'https://first.example.com', scopeId: 'scope-first' },
+        { id: 'server-b', name: 'Second', baseUrl: 'https://second.example.com', scopeId: 'scope-second' },
+      ] };
+      if (command === 'load_reader_manifest') {
+        requestedServers.push(String(args?.serverId));
+        return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      }
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'load_reader_page') return { ok: true, value: [1] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1?server=server-b']}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(requestedServers).toEqual(['server-b']);
+  });
+
   it('serves the upscaled page when a model is selected, and falls back when it fails', async () => {
     const commands: string[] = [];
     let upscaleWorks = true;

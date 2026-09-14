@@ -4,7 +4,7 @@ import {
   archiveCategoryLabel,
   formatArchiveDate,
   formatArchivePageMeta,
-  distributeCardTags,
+  groupCardTagLines,
   isArchiveFinished,
   isWideCoverRatio,
   pickCardTags,
@@ -103,21 +103,12 @@ describe('archive card presentation', () => {
     ]);
   });
 
-  it('distributes list-card tags evenly across the available rows', () => {
-    expect(distributeCardTags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], 3)).toEqual([
-      ['a', 'b', 'c'],
-      ['d', 'e', 'f'],
-      ['g', 'h'],
-    ]);
-    expect(distributeCardTags(['a', 'b'], 3)).toEqual([['a'], ['b']]);
-  });
-
-  it('leans watched tags left inside their namespace without hoisting rows', () => {
+  it('ranks watched tags before ordinary tags for waterfall placement', () => {
+    // Watched tags lead the input; shortest-row placement spreads them across rows.
     const tags = ['language:chinese', 'artist:someone', 'female:big breasts', 'group:circle', 'artist:other'];
-    // 命名空间次序仍是显示主键：watched 只在自己的命名空间里靠左，不抢第一排。
     expect(pickCardTags(tags, 5, new Set(['artist:someone', 'group:z']))).toEqual([
-      'female:big breasts',
       'artist:someone',
+      'female:big breasts',
       'artist:other',
       'group:circle',
       'language:chinese',
@@ -128,18 +119,31 @@ describe('archive card presentation', () => {
 
   it('reserves card slots for watched tags so they always survive the slice', () => {
     // 低优先命名空间的 watched 标签优先保留席位：低优先的未 watched 让位。
+    // Watched tags occupy the leftmost waterfall slots.
     const tags = ['female:a', 'female:b', 'female:c', 'language:watched-me'];
     expect(pickCardTags(tags, 3, new Set(['language:watched-me']))).toEqual([
+      'language:watched-me',
       'female:a',
       'female:b',
-      'language:watched-me',
     ]);
-    // 席位满额时 watched 全保留、其余截断；卡片不显示的命名空间（category）
-    // 即便被 watched 也不占席位。
+    // 卡片不显示的命名空间（category）即便被 watched 也不占席位。
     expect(pickCardTags(['category:manga', 'female:a', 'female:b'], 2, new Set(['category:manga']))).toEqual([
       'female:a',
       'female:b',
     ]);
+  });
+
+  it('splits the ranked line into contiguous namespace groups for the wide card', () => {
+    expect(groupCardTagLines(['female:a', 'female:b', 'male:c', 'artist:d'])).toEqual([
+      { namespace: 'female', label: '女性', tags: ['female:a', 'female:b'] },
+      { namespace: 'male', label: '男性', tags: ['male:c'] },
+      { namespace: 'artist', label: '作者', tags: ['artist:d'] },
+    ]);
+    // 无命名空间的标签归入通用组。
+    expect(groupCardTagLines(['plain'])).toEqual([
+      { namespace: 'general', label: '通用', tags: ['plain'] },
+    ]);
+    expect(groupCardTagLines([])).toEqual([]);
   });
 
   it('counts a record finished past 95% of its pages', () => {

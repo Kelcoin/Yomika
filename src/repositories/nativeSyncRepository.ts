@@ -4,10 +4,14 @@ import { invokeCommand } from '../bridge/invoke';
 import { SyncJournalRecordSchema, type SyncJournalRecord } from '../domain/library';
 import {
   BuiltSyncSegmentSchema,
+  SyncKeyExportSchema,
+  SyncKeyImportSchema,
   SyncManifestSchema,
   WebdavAccountSchema,
   type BuiltSyncSegment,
   type SaveWebdavAccountInput,
+  type SyncKeyExport,
+  type SyncKeyImport,
   type SyncManifest,
   type WebdavAccount,
 } from '../domain/syncWire';
@@ -16,6 +20,14 @@ import type { CommandResult } from '../domain/result';
 export class NativeSyncRepository {
   createKey(accountId: string): Promise<CommandResult<string>> {
     return invokeCommand('create_sync_key', { accountId }, z.string().min(1));
+  }
+
+  exportKey(accountId: string): Promise<CommandResult<SyncKeyExport>> {
+    return invokeCommand('export_sync_key', { accountId }, SyncKeyExportSchema);
+  }
+
+  importKey(accountId: string, key: string): Promise<CommandResult<SyncKeyImport>> {
+    return invokeCommand('import_sync_key', { accountId, key }, SyncKeyImportSchema);
   }
 
   buildSegment(accountId: string, scopeId: string): Promise<CommandResult<BuiltSyncSegment | null>> {

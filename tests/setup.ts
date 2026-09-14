@@ -4,8 +4,30 @@ import { afterEach } from 'vitest';
 import { resetRouteCacheForTests } from '../src/lib/routeCache';
 
 // Cross-route snapshots are module-level, so one test's library state would
-// otherwise seed the next test's first render.
-afterEach(resetRouteCacheForTests);
+// otherwise seed the next test's first render. The categories' localStorage
+// mirror leaks the same way.
+afterEach(() => {
+  resetRouteCacheForTests();
+  for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+    const key = window.localStorage.key(index);
+    if (key?.startsWith('yomika:library-categories:')) window.localStorage.removeItem(key);
+  }
+});
+
+// The standalone pages load through React.lazy dynamic imports; under full
+// parallel runs the first vite-node transform can outrun a findBy's default
+// one-second wait (an occasional-flake class, not a behavior). Preloading the
+// modules once here makes every dynamic import resolve from cache; awaiting
+// keeps the work inside the environment's lifetime.
+await Promise.all([
+  import('../src/components/ReaderRoute'),
+  import('../src/components/SettingsWorkspace'),
+  import('../src/components/TaskCenter'),
+  import('../src/components/UploadPanel'),
+  import('../src/components/EhRouteWorkspace'),
+  import('../src/components/MetadataEditRoute'),
+  import('../src/components/DeduplicationWorkspace'),
+]);
 
 class TestResizeObserver implements ResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}

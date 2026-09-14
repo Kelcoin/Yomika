@@ -64,6 +64,9 @@ pub struct ServerRecord {
     name: String,
     base_url: String,
     scope_id: String,
+    /// The one server the home shelves, the library and every default-server
+    /// fallback read from. At most one server is enabled at a time.
+    enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3348,8 +3351,19 @@ pub fn save_server_record(
         Ok(transaction) => transaction,
         Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
     };
-    const UPSERT: &str = "INSERT INTO servers (id, name, base_url, api_key_ref, scope_id)
-        VALUES (?1, ?2, ?3, ?4, ?1)
+    // A brand-new server starts enabled only when nothing is enabled yet;
+    // otherwise it would silently steal the shelves from the current one.
+    // Edits keep the row's existing flag (the UPDATE never touches it).
+    let any_other_enabled = match transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM servers WHERE enabled = 1 AND id != ?1)",
+        params![server.scope_id],
+        |row| row.get::<_, bool>(0),
+    ) {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    const UPSERT: &str = "INSERT INTO servers (id, name, base_url, api_key_ref, scope_id, enabled)
+        VALUES (?1, ?2, ?3, ?4, ?1, ?5)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name, base_url = excluded.base_url, api_key_ref = excluded.api_key_ref,
           scope_id = excluded.scope_id, updated_at = CURRENT_TIMESTAMP";
@@ -3359,13 +3373,14 @@ pub fn save_server_record(
             server.scope_id,
             server.name.trim(),
             parsed_url.as_str().trim_end_matches('/'),
-            api_key_ref
+            api_key_ref,
+            !any_other_enabled,
         ],
     ) {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
     let record = match transaction.query_row(
-        "SELECT id, name, base_url, scope_id FROM servers WHERE id = ?1",
+        "SELECT id, name, base_url, scope_id, enabled FROM servers WHERE id = ?1",
         params![server.scope_id],
         |row| {
             Ok(ServerRecord {
@@ -3373,6 +3388,7 @@ pub fn save_server_record(
                 name: row.get(1)?,
                 base_url: row.get(2)?,
                 scope_id: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
             })
         },
     ) {
@@ -3383,6 +3399,89 @@ pub fn save_server_record(
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
     CommandResult::success(record)
+}
+
+/// Flips the enabled flag with the one-at-a-time invariant: enabling a server
+/// disables every other, and the last enabled server cannot be disabled (the
+/// app would be left without a data source).
+pub fn set_server_enabled_record(
+    connection: &mut rusqlite::Connection,
+    server_id: &str,
+    enabled: bool,
+) -> CommandResult<ServerRecord> {
+    let transaction = match connection.transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    let exists: bool = match transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM servers WHERE id = ?1)",
+        params![server_id],
+        |row| row.get(0),
+    ) {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    if !exists {
+        return CommandResult::failure("NOT_FOUND", "服务器不存在", false);
+    }
+    // Stopping the only enabled server would leave the app without a data
+    // source: switch to another server instead of turning the last one off.
+    if !enabled {
+        let enabled_count: i64 = match transaction.query_row(
+            "SELECT COUNT(*) FROM servers WHERE enabled = 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(count) => count,
+            Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+        };
+        if enabled_count <= 1 {
+            return CommandResult::failure(
+                "INVALID_RESPONSE",
+                "至少需要启用一台服务器；请先启用另一台",
+                false,
+            );
+        }
+    }
+    if let Err(error) = transaction.execute(
+        "UPDATE servers SET enabled = CASE WHEN id = ?1 THEN ?2 ELSE 0 END, updated_at = CURRENT_TIMESTAMP",
+        params![server_id, i64::from(enabled)],
+    ) {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    let record = match transaction.query_row(
+        "SELECT id, name, base_url, scope_id, enabled FROM servers WHERE id = ?1",
+        params![server_id],
+        |row| {
+            Ok(ServerRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                scope_id: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+            })
+        },
+    ) {
+        Ok(record) => record,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    if let Err(error) = transaction.commit() {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    CommandResult::success(record)
+}
+
+#[tauri::command]
+pub fn set_server_enabled(
+    server_id: String,
+    enabled: bool,
+    database: State<'_, Database>,
+) -> CommandResult<ServerRecord> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    set_server_enabled_record(&mut connection, &server_id, enabled)
 }
 
 #[tauri::command]
@@ -3513,7 +3612,8 @@ pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRe
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
     let mut statement = match connection.prepare(
-        "SELECT id, name, base_url, scope_id FROM servers ORDER BY name COLLATE NOCASE, id",
+        "SELECT id, name, base_url, scope_id, enabled FROM servers
+         ORDER BY enabled DESC, name COLLATE NOCASE, id",
     ) {
         Ok(statement) => statement,
         Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
@@ -3524,6 +3624,7 @@ pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRe
             name: row.get(1)?,
             base_url: row.get(2)?,
             scope_id: row.get(3)?,
+            enabled: row.get::<_, i64>(4)? != 0,
         })
     }) {
         Ok(rows) => rows,
@@ -5065,6 +5166,9 @@ mod tests {
             ))
             .expect("reading progress cover_alone migration");
         connection
+            .execute_batch(include_str!("../../migrations/0023_servers_enabled.sql"))
+            .expect("servers enabled migration");
+        connection
     }
 
     #[test]
@@ -5295,6 +5399,113 @@ mod tests {
             )
             .expect("visible server text");
         assert!(!visible_text.contains("secret"));
+    }
+
+    fn enabled_flags(connection: &Connection) -> Vec<(String, i64)> {
+        let mut statement = connection
+            .prepare("SELECT id, enabled FROM servers ORDER BY id")
+            .expect("flags query");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("flags rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("flags")
+    }
+
+    #[test]
+    fn a_second_saved_server_starts_disabled_and_edits_keep_the_flag() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+
+        let first = match save_server_record(&mut connection, &credentials, server_input(), "secret".into()) {
+            CommandResult::Success { value, .. } => value,
+            CommandResult::Failure { error, .. } => panic!("first save: {}", error.message),
+        };
+        assert!(first.enabled, "the first configured server is the enabled one");
+
+        let mut second = server_input();
+        second.name = "Office".to_string();
+        second.scope_id = "scope-b".to_string();
+        let second_record = match save_server_record(&mut connection, &credentials, second, "secret-b".into()) {
+            CommandResult::Success { value, .. } => value,
+            CommandResult::Failure { error, .. } => panic!("second save: {}", error.message),
+        };
+        assert!(
+            !second_record.enabled,
+            "a new server must not steal the shelves from the enabled one"
+        );
+
+        // Re-saving the same identity (edit) keeps each row's own flag.
+        match save_server_record(&mut connection, &credentials, server_input(), "secret".into()) {
+            CommandResult::Success { value, .. } => assert!(value.enabled),
+            CommandResult::Failure { error, .. } => panic!("edit first: {}", error.message),
+        }
+        let mut second_again = server_input();
+        second_again.name = "Office".to_string();
+        second_again.scope_id = "scope-b".to_string();
+        match save_server_record(&mut connection, &credentials, second_again, "secret-b".into()) {
+            CommandResult::Success { value, .. } => assert!(!value.enabled),
+            CommandResult::Failure { error, .. } => panic!("edit second: {}", error.message),
+        }
+    }
+
+    #[test]
+    fn enabling_a_server_disables_the_previous_one() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        save_server_record(&mut connection, &credentials, server_input(), "secret".into());
+        let mut second = server_input();
+        second.name = "Office".to_string();
+        second.scope_id = "scope-b".to_string();
+        save_server_record(&mut connection, &credentials, second, "secret-b".into());
+
+        let switched = match set_server_enabled_record(&mut connection, "scope-b", true) {
+            CommandResult::Success { value, .. } => value,
+            CommandResult::Failure { error, .. } => panic!("switch: {}", error.message),
+        };
+        assert!(switched.enabled);
+        assert_eq!(
+            enabled_flags(&connection),
+            vec![
+                ("scope-a".to_string(), 0),
+                ("scope-b".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_last_enabled_server_cannot_be_disabled() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        save_server_record(&mut connection, &credentials, server_input(), "secret".into());
+
+        let refused = set_server_enabled_record(&mut connection, "scope-a", false);
+        assert!(
+            matches!(refused, CommandResult::Failure { .. }),
+            "stopping the only enabled server left the app without a data source"
+        );
+        assert_eq!(
+            enabled_flags(&connection),
+            vec![("scope-a".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_server_cannot_be_enabled() {
+        let mut connection = migrated_connection();
+        assert!(matches!(
+            set_server_enabled_record(&mut connection, "scope-gone", true),
+            CommandResult::Failure { .. }
+        ));
     }
 
     #[test]

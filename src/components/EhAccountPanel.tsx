@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { writeClipboardText } from '../bridge/clipboard';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '../lib/ehCookie';
+import { EhMark } from './EhMark';
 import { useToast } from './Toast';
 
 /** What the account is called anywhere it is shown: the username when one has
@@ -226,7 +227,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
           return (
           <li key={account.id} className="eh-account">
             <div className="eh-account-status">
-              <EhRoundel className="eh-account-glyph" aria-hidden="true" />
+              <EhMark size={34} className="eh-account-glyph-mark" aria-hidden="true" />
               <div className="eh-account-summary">
                 <strong>
                   {editingAccountId === account.id ? (
@@ -282,16 +283,5 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
       </ul>
       )}
     </section>
-  );
-}
-
-/** E-Hentai 的品牌标识：站点标志性的深红圆盘 + 白色 "E"（沿用站点 favicon
- * 的形态），红盘走品牌变量、盘上字形走固定白，深浅主题下都一眼可辨。 */
-function EhRoundel({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="11" fill="var(--eh-brand, #5C0D12)" />
-      <path d="M8.2 6.6h8v2.6h-5.4v2.5h5v2.5h-5v2.7h5.6v2.6h-8.2z" fill="#fff" />
-    </svg>
   );
 }

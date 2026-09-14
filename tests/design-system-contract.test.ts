@@ -295,7 +295,12 @@ describe('design system contract', () => {
     // The wide card has the biggest tag area in the app, so it gets full-size
     // chips: it used to pair the largest area with the smallest chips.
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{[\s\S]*font-size:\s*var\(--text-xs\)/);
-    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags\s*\{[\s\S]*grid-template-rows:\s*repeat\(3,/);
+    // 宽行卡的标签区是 JHenTai 画廊详情的分组行形态：分组行纵向堆叠，行内
+    // 不折行，前三条完整物理行由 JS 打包（WideTagRows）——像素封顶会把组内
+    // 续行拦腰切掉半枚芯片。
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags\s*\{[\s\S]*flex-direction:\s*column/);
+    expect(shell).toMatch(/\.archive-row-tag-line\s*\{[\s\S]*flex-wrap:\s*nowrap/);
+    expect(shell).toMatch(/\.card-tag-measures\s*\{[\s\S]*visibility:\s*hidden/);
     expect(shell).not.toMatch(/\.is-cover-wide \.archive-row-thumb\s*\{[\s\S]*aspect-ratio/);
     expect(shell).toMatch(/\.archive-row-thumb\s*\{[\s\S]*overflow:\s*hidden[\s\S]*border-radius:\s*var\(--radius-control\)/);
     expect(shell).toMatch(/\.archive-row-thumb img\s*\{[\s\S]*border-radius:\s*inherit/);

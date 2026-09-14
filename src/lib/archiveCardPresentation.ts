@@ -1,4 +1,4 @@
-import { categoryTagLabel } from './tags';
+import { TAG_NAMESPACE_LABELS, categoryTagLabel } from './tags';
 import { normalizeMyTagKey } from './ehMyTags';
 
 export function isWideCoverRatio(ratio: number | null | undefined): boolean {
@@ -15,10 +15,7 @@ export const CARD_TAG_NAMESPACE_PRIORITY = [
 
 const HIDDEN_CARD_TAG_NAMESPACES = ['date_added', 'dateadded', 'timestamp', 'source', 'uploader', 'category'];
 
-/** `priority` carries the E-Hentai account's watched tags ("My Tags"). 优先
- * 显示 = 优先保留席位（watched 先占位，保证出现在卡片上）+ 组内靠左：
- * 显示次序仍以命名空间为主键，watched 只在自己的命名空间里排到最前——不跨
- * 命名空间抢占第一排。 */
+/** Watched tags take the leftmost waterfall slots across all namespaces. */
 export function pickCardTags(tags: readonly string[] = [], limit = 6, priority?: ReadonlySet<string> | undefined): string[] {
   const rank = (tag: string) => {
     const namespace = tag.split(':', 1)[0]!.trim().toLowerCase();
@@ -27,7 +24,8 @@ export function pickCardTags(tags: readonly string[] = [], limit = 6, priority?:
   };
   const watched = (tag: string) => Boolean(priority && priority.size > 0 && priority.has(normalizeMyTagKey(tag)));
   const candidates = tags.filter((tag) => !HIDDEN_CARD_TAG_NAMESPACES.includes(tag.split(':', 1)[0]!.trim().toLowerCase()));
-  // 席位：watched 先占（保持原相对次序），其余按命名空间次序补足。
+  // 席位：watched 先占（保持原相对次序），其余按命名空间次序补足；截断
+  // 发生在排列之前——排列只重排显示次序，不得改写谁被选中。
   const reserved: string[] = [];
   const rest: string[] = [];
   for (const tag of candidates) (watched(tag) ? reserved : rest).push(tag);
@@ -37,26 +35,30 @@ export function pickCardTags(tags: readonly string[] = [], limit = 6, priority?:
     .map((entry) => entry.tag);
   return [...reserved, ...fill]
     .slice(0, Math.max(0, limit))
-    // 显示次序：命名空间为主键，watched 在同命名空间内靠左。
     .map((tag, index) => ({ tag, index, rank: rank(tag), preferred: watched(tag) ? 0 : 1 }))
-    .sort((left, right) => left.rank - right.rank || left.preferred - right.preferred || left.index - right.index)
+    .sort((left, right) => left.preferred - right.preferred || left.rank - right.rank || left.index - right.index)
     .map((entry) => entry.tag);
 }
 
-/** Splits chosen tags into contiguous, balanced rows. */
-export function distributeCardTags(tags: readonly string[], rowCount: number): string[][] {
-  const rows = Math.max(0, Math.min(Math.floor(rowCount), tags.length));
-  if (rows === 0) return [];
-  const baseSize = Math.floor(tags.length / rows);
-  const remainder = tags.length % rows;
-  const result: string[][] = [];
-  let offset = 0;
-  for (let row = 0; row < rows; row += 1) {
-    const size = baseSize + (row < remainder ? 1 : 0);
-    result.push(tags.slice(offset, offset + size));
-    offset += size;
+export interface CardTagGroup {
+  namespace: string;
+  label: string;
+  tags: string[];
+}
+
+/** Splits the ranked tag line into contiguous namespace groups for the wide
+ * card's JHenTai-style rows: one group per row, the namespace label leading
+ * it, watched tags already first within the group by the rank above. */
+export function groupCardTagLines(tags: readonly string[] = []): CardTagGroup[] {
+  const groups: CardTagGroup[] = [];
+  for (const tag of tags) {
+    const separator = tag.indexOf(':');
+    const namespace = separator > 0 ? tag.slice(0, separator).trim().toLowerCase() : 'general';
+    const last = groups[groups.length - 1];
+    if (last && last.namespace === namespace) last.tags.push(tag);
+    else groups.push({ namespace, label: TAG_NAMESPACE_LABELS[namespace] ?? namespace, tags: [tag] });
   }
-  return result;
+  return groups;
 }
 
 /** Uniform sample without replacement. `sort(() => Math.random() - 0.5)` is not

@@ -1,20 +1,27 @@
 import { ArrowRight, Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
 import { EmptyState } from '../components/EmptyState';
 import { LibraryShell } from '../components/LibraryShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
-import { ReaderRoute as ReaderRouteScreen } from '../components/ReaderRoute';
-import { SettingsWorkspace } from '../components/SettingsWorkspace';
-import { TaskCenter } from '../components/TaskCenter';
-import { UploadPanel } from '../components/UploadPanel';
-import { EhRouteWorkspace } from '../components/EhRouteWorkspace';
-import { SyncWorkspace } from '../components/SyncWorkspace';
+import { LoadingIndicator } from '../components/LoadingIndicator';
+import { pickServer } from '../domain/server';
+
+/** The standalone pages load on first entry. Everything else — home, library
+ * and the three shelves — stays in the main chunk: those five panels are the
+ * app's shell, are kept mounted across visits, and would pay a Suspense flash
+ * on every return for no further savings. The leaves were the bulk of the
+ * parsed bytes on boot even though they are one route deep. */
+const ReaderRouteScreen = lazy(() => import('../components/ReaderRoute').then((module) => ({ default: module.ReaderRoute })));
+const SettingsWorkspace = lazy(() => import('../components/SettingsWorkspace').then((module) => ({ default: module.SettingsWorkspace })));
+const TaskCenter = lazy(() => import('../components/TaskCenter').then((module) => ({ default: module.TaskCenter })));
+const UploadPanel = lazy(() => import('../components/UploadPanel').then((module) => ({ default: module.UploadPanel })));
+const EhRouteWorkspace = lazy(() => import('../components/EhRouteWorkspace').then((module) => ({ default: module.EhRouteWorkspace })));
+const MetadataEditRoute = lazy(() => import('../components/MetadataEditRoute').then((module) => ({ default: module.MetadataEditRoute })));
+const DeduplicationWorkspace = lazy(() => import('../components/DeduplicationWorkspace').then((module) => ({ default: module.DeduplicationWorkspace })));
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
-import { MetadataEditRoute } from '../components/MetadataEditRoute';
-import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
 import { useArchiveSelection } from '../components/useArchiveSelection';
@@ -117,7 +124,7 @@ function HomeWorkspace() {
         setRandomLoading(false);
         return;
       }
-      const server = result.value[0];
+      const server = pickServer(result.value, null);
       if (!server) {
         setRecentLoading(false);
         setRandomLoading(false);
@@ -160,6 +167,24 @@ function HomeWorkspace() {
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
+  /** 书架与首页的数据源：当前启用的服务器（设置里一次只允许启用一台）。 */
+  const homeServer = servers?.ok ? pickServer(servers.value, null) : undefined;
+  useEffect(() => {
+    const handleInvalidation = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'home:') {
+        // In-place re-read, same contract as the shelf pull: the rails on
+        // screen refresh under the user instead of swapping for skeletons.
+        // 启用服务器切换会广播全量失效，书架必须改读新启用的那台。
+        setRecentLoading(true);
+        setRandomLoading(true);
+        restoredFromSnapshot.current = false;
+        setServerLoadAttempt((attempt) => attempt + 1);
+      }
+    };
+    window.addEventListener('yomika:route-cache-invalidated', handleInvalidation);
+    return () => window.removeEventListener('yomika:route-cache-invalidated', handleInvalidation);
+  }, []);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
       setArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
@@ -235,10 +260,10 @@ function HomeWorkspace() {
         </Link>
         </section>
       )}
-      {connected && servers.value?.[0] && <>
-      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={servers.value[0].scopeId} serverId={servers.value[0].id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { const id = servers.value?.[0]?.id; if (id) void loadRandom(id); }} onArchiveContextMenu={openContextMenu} />
+      {connected && homeServer && <>
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { void loadRandom(homeServer.id); }} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
@@ -271,7 +296,11 @@ interface ShelfSnapshot {
 }
 
 function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) {
-  const cacheKey = `state:${name}`;
+  const [searchParams] = useSearchParams();
+  const serverParam = searchParams.get('server');
+  // Per-server cache: two servers keep two shelves, and a snapshot restored
+  // across them would paint one server's records under the other's shelf.
+  const cacheKey = `state:${name}:${serverParam ?? 'default'}`;
   const snapshot = useRef(readRouteCache<ShelfSnapshot>(cacheKey)).current;
   const [reloadToken, setReloadToken] = useState(0);
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
@@ -345,7 +374,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       const servers = await repository.listServers();
       if (!active) return;
       if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
-      const server = servers.value[0];
+      const server = pickServer(servers.value, serverParam);
       if (!server) { setHasServer(false); setLoading(false); return; }
       setServerId(server.id);
       setScopeId(server.scopeId);
@@ -385,7 +414,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })().finally(() => { if (active) setPulling(false); });
     return () => { active = false; };
-  }, [name, reloadToken, snapshot]);
+  }, [name, reloadToken, serverParam, snapshot]);
   useEffect(() => {
     if (loading || error || !serverId || !scopeId) return;
     writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds ? { favoritesIds } : {}) } satisfies ShelfSnapshot);
@@ -634,7 +663,8 @@ export function WorkspaceRoutes() {
       {isMounted('history') && <section className="route-cache-panel" hidden={routeKey !== 'history'}><StateWorkspace name="history" /></section>}
       {isMounted('watchlist') && <section className="route-cache-panel" hidden={routeKey !== 'watchlist'}><StateWorkspace name="watchlist" /></section>}
       {isMounted('toRead') && <section className="route-cache-panel" hidden={routeKey !== 'toRead'}><StateWorkspace name="toRead" /></section>}
-      {!routeKey && <Routes>
+      {!routeKey && <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
+      <Routes>
       <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
       <Route path="/eh" element={<EhRouteWorkspace />} />
       <Route path="/downloads" element={<TaskCenter />} />
@@ -645,7 +675,8 @@ export function WorkspaceRoutes() {
       <Route path="/sync" element={<Navigate to="/settings?section=sync" replace />} />
       <Route path="/settings" element={<SettingsWorkspace />} />
       <Route path="*" element={<HomeWorkspace />} />
-      </Routes>}
+      </Routes>
+      </Suspense>}
     </>
   );
 }
@@ -657,9 +688,11 @@ function MetadataEditRouteRoute() {
 
 export function ReaderRoutes() {
   return (
-    <Routes>
-      <Route path="/reader/:archiveId" element={<ReaderRoute />} />
-    </Routes>
+    <Suspense fallback={<LoadingIndicator size="lg" label="正在加载页面" />}>
+      <Routes>
+        <Route path="/reader/:archiveId" element={<ReaderRoute />} />
+      </Routes>
+    </Suspense>
   );
 }
 

@@ -34,4 +34,32 @@ describe('archive thumbnail card', () => {
     expect(screen.getByText('169 页')).toBeInTheDocument();
     expect(container.querySelector('.archive-thumb-card-body > svg')).toBeNull();
   });
+
+  it('links to the detail page on the server the archive came from', () => {
+    // Two configured servers: a card must carry its own source server, or the
+    // detail page (and from it the reader) opens the archive against the
+    // first one — the wrong content when archive ids collide.
+    render(
+      <MemoryRouter>
+        <ArchiveThumbnailCard
+          archive={{
+            serverId: 'server-b',
+            archiveId: 'archive-b',
+            title: 'Archive B',
+            pageCount: 12,
+            updatedAt: '2026-09-02T00:00:00Z',
+            addedAt: 1_760_742_000,
+            tags: [],
+          }}
+          scopeId="scope-b"
+          serverId="server-b"
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('link', { name: /Archive B/ })).toHaveAttribute(
+      'href',
+      '/library/archive-b?server=server-b',
+    );
+  });
 });

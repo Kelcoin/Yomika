@@ -1,10 +1,10 @@
+import { CardTagRows } from './CardTagRows';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { translateRawTag } from '../lib/tags';
-import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
+import { normalizeMyTagKey } from '../lib/ehMyTags';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { useEhMyTags } from './useEhMyTags';
@@ -19,10 +19,7 @@ const imageCache = getNativeImageCache();
 export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, colorFor }: { title: string; tags: string[]; meta: ReactNode; favorite?: boolean; colorFor?: ((tag: string) => string | undefined) | undefined }) {
   return <div className="archive-thumb-card-body">
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
-    <div className="archive-thumb-card-tags">{tags.map((tag) => {
-      const color = colorFor?.(tag);
-      return <span className="metadata-chip" key={tag} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{translateRawTag(tag)}</span>;
-    })}</div>
+    <CardTagRows tags={tags} rowCount={2} className="archive-thumb-card-tags" colorFor={colorFor} />
     <div className="archive-thumb-card-meta">{meta}</div>
   </div>;
 }
@@ -52,7 +49,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   return <Link
     ref={setNode}
     className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
-    to={`/library/${archive.archiveId}`}
+    to={`/library/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`}
     onClick={onOpen}
     // The same menu the library list opens. Without this a right click on a rail
     // card did nothing, which is what "the app still has no context menu" was.

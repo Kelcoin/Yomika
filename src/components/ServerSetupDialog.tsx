@@ -4,7 +4,7 @@ import { X } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
-import { createServerIdentity, type ServerIdentity } from '../domain/server';
+import { createServerIdentity, normalizeServerUrl, type ServerIdentity } from '../domain/server';
 import type { ServerRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 
@@ -12,7 +12,7 @@ const repository = new NativeLibraryRepository();
 
 interface ServerSetupDialogProps {
   onSave: (input: { identity: ServerIdentity; apiKey: string }) => Promise<CommandResult<ServerIdentity>>;
-  server?: Pick<ServerRecord, 'name' | 'baseUrl' | 'scopeId'>;
+  server?: Pick<ServerRecord, 'name' | 'baseUrl' | 'scopeId' | 'enabled'>;
   /** 'row' renders the trigger as a settings row (icon, name, address, state) so
    * the whole strip opens the dialog; 'action' keeps the old compact trigger. */
   variant?: 'action' | 'row';
@@ -53,10 +53,13 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
     setError(undefined);
       setPending(true);
     try {
-      const identity = await createServerIdentity({
-        name,
-        baseUrl,
-      });
+      // Editing keeps the server's original identity: the scope id keys every
+      // archive, progress and history row for this server, so re-deriving it
+      // from a renamed or re-addressed profile would orphan all of that and
+      // pile a duplicate row into the server list.
+      const identity: ServerIdentity = server
+        ? { name, baseUrl: normalizeServerUrl(baseUrl), scopeId: server.scopeId }
+        : await createServerIdentity({ name, baseUrl });
       const result = await onSave({ identity, apiKey });
       if (result.ok) setOpen(false);
       else setError(result.error.message);
@@ -77,7 +80,12 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
         >
           <span className="settings-row-icon" aria-hidden="true"><Server aria-hidden="true" /></span>
           <span className="settings-row-copy">
-            <span className="settings-row-label">{server ? server.name : '添加服务器'}</span>
+            <span className="settings-row-label">
+              {server ? server.name : '添加服务器'}
+              {/* 当前启用的服务器：书架、首页与档案库都读它。标记跟在名字
+                  后面，一眼可辨又不占行尾的空间。 */}
+              {server?.enabled && <span className="server-current-badge">当前</span>}
+            </span>
             <span className="settings-row-hint">{server ? server.baseUrl : '连接一台 LANraragi 服务器'}</span>
           </span>
           <span className="settings-row-control settings-row-value">

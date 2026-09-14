@@ -91,10 +91,10 @@ export function useArchiveContextMenu(options: {
     <ArchiveContextMenu
       target={target}
       onClose={() => setTarget(undefined)}
-      onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}`)}
+      onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)}
       onDelete={setDeleteTarget}
-      onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1`)}
-      onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit`, { state: { returnTo: `${location.pathname}${location.search}` } })}
+      onReadIncognito={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?incognito=1&server=${encodeURIComponent(archive.serverId)}`)}
+      onEditMetadata={(archive) => navigate(`/library/${encodeURIComponent(archive.archiveId)}/edit?server=${encodeURIComponent(archive.serverId)}`, { state: { returnTo: `${location.pathname}${location.search}` } })}
       onCopyId={(archive) => {
         void writeClipboardText(archive.archiveId).then(
           () => showToast('档案 ID 已复制', 'success'),

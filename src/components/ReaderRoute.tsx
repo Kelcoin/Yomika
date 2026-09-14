@@ -6,6 +6,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { ReaderScreen } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
+import { pickServer } from '../domain/server';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
@@ -52,7 +53,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** Bumped whenever a switch flips, so the reader drops the renditions it is
    * holding instead of showing the previous answer until the next page turn. */
   const [enhancementToken, setEnhancementToken] = useState(0);
-  const requestedPage = Math.max(0, Number(searchParams.get('page') ?? '0') || 0);
+  // The page param is absent only when the key itself is missing: `?page=0`
+  // is an explicit request for the first page (from the detail page's
+  // thumbnail grid), not "no page requested".
+  const pageParam = searchParams.get('page');
+  const requestedPage = pageParam === null
+    ? undefined
+    : Math.max(0, Number(pageParam) || 0);
+  /** Which server this reader session is bound to: an explicit `?server=` id
+   * from the linking card wins over the default (first configured) server. */
+  const serverParam = searchParams.get('server');
   /** Incognito reading: no progress, no history. The reader shows a marker so it
    * is obvious the session is not being recorded. */
   const incognito = searchParams.get('incognito') === '1';
@@ -288,11 +298,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
 
     void (async () => {
       const servers = await repository.listServers();
-      if (!mountedRef.current || !servers.ok || !servers.value[0]) {
+      if (!mountedRef.current || !servers.ok || !servers.value.length) {
         if (mountedRef.current) setError(servers.ok ? '尚未配置服务器' : servers.error.message);
         return;
       }
-      const server = servers.value[0];
+      const server = pickServer(servers.value, serverParam);
+      if (!server) {
+        if (mountedRef.current) setError('尚未配置服务器');
+        return;
+      }
       const manifest = await repository.loadReaderManifest(server.id, archiveId);
       if (!mountedRef.current || !manifest.ok) {
         if (mountedRef.current && !manifest.ok) setError(manifest.error.message);
@@ -330,7 +344,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         .catch(() => undefined);
       const progress = await repository.loadProgress(server.scopeId, archiveId);
       if (!mountedRef.current || contextRef.current !== context) return;
-      const firstPage = requestedPage > 0
+      const firstPage = requestedPage !== undefined
         ? Math.min(requestedPage, Math.max(0, manifest.value.pages.length - 1))
         : progress.ok && progress.value
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
@@ -363,7 +377,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       if (contextRef.current?.generation === generation) contextRef.current = undefined;
       releaseAllPages();
     };
-  }, [archiveId, loadPage, prefetchDistance, preferences.defaultDirection, preferences.defaultLayout, releaseAllPages, requestedPage, retryToken]);
+  }, [archiveId, loadPage, prefetchDistance, preferences.defaultDirection, preferences.defaultLayout, releaseAllPages, requestedPage, serverParam, retryToken]);
 
   // Reader failures used to render as inline text only, on a shell-free route
   // with no way out. Surface them through the shared toast as well.

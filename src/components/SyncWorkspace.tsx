@@ -2,11 +2,14 @@ import { KeyRound, RefreshCw, Waypoints } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { ServerRecord } from '../domain/library';
+import { pickServer } from '../domain/server';
 import type { WebdavAccount } from '../domain/syncWire';
+import { writeClipboardText } from '../bridge/clipboard';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
 import { EmptyState } from './EmptyState';
 import { LoadingIndicator } from './LoadingIndicator';
+import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 
 const libraryRepository = new NativeLibraryRepository();
@@ -98,7 +101,7 @@ export function useSyncSettings(enabled = true) {
   }
 
   async function runSync(account: WebdavAccount) {
-    const server = servers[0];
+    const server = pickServer(servers, null);
     if (!server) {
       setError('请先在设置中添加 LANraragi 服务器');
       return;
@@ -115,7 +118,44 @@ export function useSyncSettings(enabled = true) {
     }
   }
 
-  return { accounts, servers, loading, error, message, saving, syncingId, saveAccount, runSync };
+  /** 密钥是账户的主密钥：每台设备必须持有同一把才能互相解密。导出把它复制
+   * 到剪贴板（附指纹），导入接收原设备复制来的密钥，远端能回答时会先验证。 */
+  const [keyImportAccount, setKeyImportAccount] = useState<WebdavAccount>();
+
+  async function exportKey(account: WebdavAccount) {
+    const result = await syncRepository.exportKey(account.id);
+    if (!result.ok) {
+      setError(result.error.message);
+      return;
+    }
+    try {
+      await writeClipboardText(result.value.key);
+      setMessage(`同步密钥已复制到剪贴板（指纹 ${result.value.fingerprint}）。在另一台设备导入它，即可解密此账户的同步数据。`);
+    } catch {
+      setError(`同步密钥已生成（指纹 ${result.value.fingerprint}），但无法访问剪贴板`);
+    }
+  }
+
+  function beginKeyImport(account: WebdavAccount) {
+    setError(undefined);
+    setMessage(undefined);
+    setKeyImportAccount(account);
+  }
+
+  async function confirmKeyImport(key: string) {
+    const account = keyImportAccount;
+    if (!account) return;
+    const result = await syncRepository.importKey(account.id, key);
+    if (!result.ok) {
+      setError(result.error.message);
+      return;
+    }
+    const verifiedNote = result.value.verified === true ? '，已通过远端数据验证' : '，联网后将自动验证';
+    setMessage(`同步密钥已导入（指纹 ${result.value.fingerprint}${verifiedNote}）。`);
+    setKeyImportAccount(undefined);
+  }
+
+  return { accounts, servers, loading, error, message, saving, syncingId, saveAccount, runSync, exportKey, beginKeyImport, confirmKeyImport, keyImportAccount, closeKeyImport: () => setKeyImportAccount(undefined) };
 }
 
 /** The /sync deep link keeps the full workspace: accounts with their sync
@@ -148,15 +188,29 @@ export function SyncWorkspace() {
                     <p>{account.baseUrl}</p>
                     <small>{account.username || '无用户名'} · {account.status === 'unverified' ? '待首次同步验证' : account.status}</small>
                   </div>
-                  <button className="primary-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
-                    <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
-                  </button>
+                  <div className="sync-account-actions">
+                    <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => void sync.exportKey(account)}>导出密钥</button>
+                    <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.beginKeyImport(account)}>导入密钥</button>
+                    <button className="primary-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
+                      <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
+                    </button>
+                  </div>
                 </article>
               ))}
             {sync.servers.length === 0 && <p className="server-list-message">需要先添加 LANraragi 服务器，才能确定本地同步范围。</p>}
           </section>
         )}
       </div>
+      <TextInputDialog
+        open={sync.keyImportAccount !== undefined}
+        onOpenChange={(open) => { if (!open) sync.closeKeyImport(); }}
+        title={`导入同步密钥 · ${sync.keyImportAccount?.label ?? ''}`}
+        description="粘贴原设备「导出密钥」复制的内容。远端已有数据时，导入前会先验证这把密钥能否解密它。"
+        label="同步密钥"
+        confirmLabel="导入密钥"
+        validate={(value) => (value.trim() ? undefined : '请粘贴导出的同步密钥')}
+        onConfirm={(value) => void sync.confirmKeyImport(value)}
+      />
       <section className="sync-setup settings-group" aria-labelledby="sync-setup-title">
         <div className="sync-setup-heading">
           <KeyRound aria-hidden="true" />

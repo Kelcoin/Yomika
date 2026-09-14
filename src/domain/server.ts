@@ -27,3 +27,18 @@ export async function createServerIdentity(input: ServerIdentityInput): Promise<
   const scopeId = `scope_${[...new Uint8Array(digest)].slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
   return { name, baseUrl, scopeId };
 }
+
+/** The server a route works against: an explicit `?server=` id wins, and the
+ * enabled server is the documented default when the link carries none. Every
+ * workspace used to hardcode `servers[0]`, so an archive opened from the
+ * second server was read — and its progress written — against the first. */
+export function pickServer<T extends { id: string; enabled?: boolean | undefined }>(
+  servers: readonly T[],
+  requestedId: string | null | undefined,
+): T | undefined {
+  if (requestedId) {
+    const requested = servers.find((server) => server.id === requestedId);
+    if (requested) return requested;
+  }
+  return servers.find((server) => server.enabled) ?? servers[0];
+}

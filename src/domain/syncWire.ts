@@ -40,6 +40,20 @@ export const WebdavAccountSchema = z.object({
 
 export type WebdavAccount = z.infer<typeof WebdavAccountSchema>;
 
+export const SyncKeyExportSchema = z.object({
+  key: z.string().min(1),
+  fingerprint: z.string().min(1),
+});
+
+export type SyncKeyExport = z.infer<typeof SyncKeyExportSchema>;
+
+export const SyncKeyImportSchema = z.object({
+  fingerprint: z.string().min(1),
+  verified: z.boolean().nullable(),
+});
+
+export type SyncKeyImport = z.infer<typeof SyncKeyImportSchema>;
+
 export type SaveWebdavAccountInput = {
   id: string;
   label: string;

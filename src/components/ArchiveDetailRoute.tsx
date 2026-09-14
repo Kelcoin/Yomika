@@ -11,10 +11,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { categorizeSearchableTags, parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
 import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
+import { pickServer } from '../domain/server';
 import { normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -58,6 +59,10 @@ function DetailGlyph() {
 }
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
+  /** The server this archive belongs to, carried by the linking card; without
+   * one the first configured server is the default. */
+  const [searchParams] = useSearchParams();
+  const serverParam = searchParams.get('server');
   // The server scope is only known after listServers IPC. Keep a second,
   // archive-keyed pointer so a route remount can paint cached metadata on its
   // first render instead of flashing the loading shell while that lookup runs.
@@ -139,7 +144,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
     void repository.listServers().then((servers) => {
       if (!active) return;
-      const server = servers.ok ? servers.value[0] : undefined;
+      const server = servers.ok ? pickServer(servers.value, serverParam) : undefined;
       if (!server) {
         setCoverLoading(false);
         setError(servers.ok ? '尚未配置服务器' : servers.error.message);
@@ -215,7 +220,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       coverController.abort();
       if (coverHandle) getNativeImageCache().release(coverHandle);
     };
-  }, [archiveId, navigate, showToast]);
+  }, [archiveId, navigate, serverParam, showToast]);
 
   // 我的标签开启时，每个命名空间组内把账户标记过的标签排到最前（排序发生在
   // 分组之前，分组保持稳定顺序），并把这些芯片染成账户预设的颜色。挂钩必须
@@ -298,7 +303,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             second reading entry point next to the real one. */}
         <Link
           className="archive-action-button archive-action-primary"
-          to={`/reader/${archiveId}`}
+          to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
           aria-label="阅读"
           title="阅读（长按进入无痕阅读）"
           onPointerDown={startIncognitoPress}
@@ -337,7 +342,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             });
           });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>
-        <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
+        <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>
 
         {serverId && (
           <><button className="archive-action-button" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
@@ -357,7 +362,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
               <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
               <button className="primary-action" type="button" onClick={() => {
                 setIncognitoAsk(false);
-                navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1`);
+                navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1${serverId ? `&server=${encodeURIComponent(serverId)}` : ''}`);
               }}>无痕阅读</button>
             </div>
           </Dialog.Content>
@@ -381,7 +386,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
           <div className="archive-page-thumbnails-grid">
             {Array.from({ length: metadata.pageCount }, (_, index) => (
-              <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}`)} />
+              <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
             ))}
           </div>
         </section>

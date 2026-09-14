@@ -1,8 +1,10 @@
 import { CloudDownload, FolderOpen, Play, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { onFileDrop } from '../bridge/fileDrop';
 import { pickArchiveFiles } from '../bridge/filePicker';
+import { pickServer } from '../domain/server';
 import {
   appendUploadItems,
   parseUploadUrls,
@@ -30,6 +32,8 @@ function statusLabel(status: UploadQueueItem['status']): string {
  */
 export function UploadPanel() {
   const { showToast } = useToast();
+  const [searchParams] = useSearchParams();
+  const serverParam = searchParams.get('server');
   const [mode, setMode] = useState<'local' | 'url'>('local');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [urlText, setUrlText] = useState('');
@@ -92,7 +96,7 @@ export function UploadPanel() {
     setRunning(true);
     try {
       const servers = await repository.listServers();
-      const server = servers.ok ? servers.value[0] : undefined;
+      const server = servers.ok ? pickServer(servers.value, serverParam) : undefined;
       if (!server) {
         showToast(servers.ok ? '尚未配置服务器' : servers.error.message, 'error');
         return;

@@ -282,6 +282,16 @@ export class NativeLibraryRepository {
     }, ServerRecordSchema);
   }
 
+  /** 切换当前启用的服务器：启用一台即停用其余，书架与首页随之改读它。
+   * 切换是罕见且全局的动作，直接全量失效——所有按服务器缓存的快照
+   * （首页/书架/档案库/详情）都不该在切换后闪现旧服务器的数据。 */
+  setServerEnabled(serverId: string): Promise<CommandResult<ServerRecord>> {
+    return invokeCommand('set_server_enabled', { serverId, enabled: true }, ServerRecordSchema).then((result) => {
+      if (result.ok) invalidateRouteCache();
+      return result;
+    });
+  }
+
   /** 编辑已配置服务器时读回系统安全存储中的 API Key，供弹窗展示与预填。 */
   readServerApiKey(scopeId: string): Promise<CommandResult<string>> {
     return invokeCommand('read_server_api_key', { scopeId }, z.string());

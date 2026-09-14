@@ -5,6 +5,10 @@ export const ServerRecordSchema = z.object({
   name: z.string(),
   baseUrl: z.string().url(),
   scopeId: z.string().min(1),
+  /** The one server the home shelves, the library and every default-server
+   * fallback read from. `.default(true)` keeps older invocations and test
+   * fixtures valid; the database always writes the flag. */
+  enabled: z.boolean().default(true),
 });
 
 export type ServerRecord = z.infer<typeof ServerRecordSchema>;

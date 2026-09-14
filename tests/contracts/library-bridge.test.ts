@@ -243,7 +243,7 @@ describe('native library repository bridge', () => {
   });
 
   it('lists schema-validated server records', async () => {
-    const value = [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }];
+    const value = [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a', enabled: true }];
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
 
@@ -427,7 +427,7 @@ describe('native library repository bridge', () => {
   });
 
   it('saves server identity and passes the key only to the native command', async () => {
-    const value = { id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' };
+    const value = { id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a', enabled: true };
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
 
