@@ -978,15 +978,6 @@ export function SettingsWorkspace() {
               />
             )}
             {selectedSettingsSection === 'settings-appearance' && (
-              <SettingsSwitch
-                icon={<EyeOff />}
-                label="SFW 模式"
-                hint="所有封面模糊显示；悬停封面或点击卡片才临时显示那一枚，移开或失焦自动恢复"
-                checked={preferenceDraft.sfwMode}
-                onToggle={() => editPreferences({ sfwMode: !preferenceDraft.sfwMode })}
-              />
-            )}
-            {selectedSettingsSection === 'settings-appearance' && (
               <SettingsChoice
                 icon={<Palette />}
                 label="主题"
@@ -1221,6 +1212,18 @@ export function SettingsWorkspace() {
               </SettingsPanel>
             )}
             </div>
+            {/* SFW 单独成组：内容保护开关不与外观微调混在一起，置底独立可辨。 */}
+            {selectedSettingsSection === 'settings-appearance' && (
+              <div className="settings-group">
+                <SettingsSwitch
+                  icon={<EyeOff />}
+                  label="SFW 模式"
+                  hint="所有封面模糊显示；悬停封面或点击卡片才临时显示那一枚，移开或失焦自动恢复"
+                  checked={preferenceDraft.sfwMode}
+                  onToggle={() => editPreferences({ sfwMode: !preferenceDraft.sfwMode })}
+                />
+              </div>
+            )}
             {/* 高级区拆成三组：超分、去码各自独立，模型导入单独置底。 */}
             {selectedSettingsSection === 'settings-advanced' && (
               <div className="settings-group">
