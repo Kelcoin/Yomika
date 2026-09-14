@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$Tag = 'v1',
-  [string]$Repository = 'Kelcoin/Yomika',
+  [string]$Tag = 'models-v1',
+  [string]$Repository = 'Kelcoin/Yomika-Models',
   [string]$ModelRoot = 'docs/Aletheia-Lens/_internal/models'
 )
 

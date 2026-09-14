@@ -111,16 +111,39 @@ fn aletheia_direct_url(asset: &ReleaseAsset) -> Option<String> {
     ))
 }
 
+/// The standalone repository that carries the model releases. Its body keeps
+/// the current `manifest.json` and its Release holds the flat model assets;
+/// the main application repository carries no model files.
+pub const MODEL_RELEASE_REPO: &str = "Kelcoin/Yomika-Models";
+pub const MODEL_RELEASE_TAG: &str = "models-v1";
+
+fn manifest_urls(owner_repo: &str, tag: &str) -> Vec<String> {
+    let raw = format!("https://raw.githubusercontent.com/{owner_repo}/main/manifest.json");
+    let mut urls = vec![raw.clone()];
+    for (_, prefix) in MIRROR_PRESETS.iter().filter(|(id, _)| *id != "direct") {
+        urls.push(format!("{prefix}{raw}"));
+    }
+    for url in candidate_urls(owner_repo, tag, &format!("{tag}.manifest.json")) {
+        urls.push(url);
+    }
+    urls
+}
+
 fn fetch_manifest_with_fallback(
     owner_repo: &str,
     tag: &str,
 ) -> Result<ModelReleaseManifest, String> {
-    let path = format!("{tag}.manifest.json");
     let mut errors = Vec::new();
-    for url in candidate_urls(owner_repo, tag, &path) {
+    for url in manifest_urls(owner_repo, tag) {
         match reqwest::blocking::get(&url).and_then(|response| response.error_for_status()) {
             Ok(response) => match response.json::<ModelReleaseManifest>() {
-                Ok(manifest) => return Ok(manifest),
+                Ok(manifest) => {
+                    if let Err(error) = validate_manifest(&manifest) {
+                        errors.push(format!("{url}: {error}"));
+                    } else {
+                        return Ok(manifest);
+                    }
+                }
                 Err(error) => errors.push(format!("{url}: {error}")),
             },
             Err(error) => errors.push(format!("{url}: {error}")),
@@ -198,6 +221,54 @@ pub fn verify_bytes(asset: &ReleaseAsset, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows 检索/杀软的实时扫描会在刚写完的文件上短暂保持句柄，改名撞上扫描
+/// 就回答"拒绝访问"（os error 5）或共享冲突（32/33）。退避重试几次再放弃。
+/// 把装好资产的暂存目录就位。优先整体改名；数据目录常位于 OneDrive 一类的
+/// 云同步目录里，同步过滤器会长时间钉住含新写入大文件的目录（Pinned 属性），
+/// 整目录改名可以持续数分钟失败——此时退回逐文件移动（同一卷上的文件改名
+/// 不受影响），最后清空暂存目录，安装结果与整体改名完全一致。
+fn install_staging_dir(staging: &std::path::Path, root: &std::path::Path) -> Result<(), String> {
+    if rename_with_retry(staging, root).is_ok() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    move_dir_contents(staging, root)?;
+    std::fs::remove_dir_all(staging).map_err(|e| e.to_string())
+}
+
+fn move_dir_contents(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let target = to.join(entry.file_name());
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            move_dir_contents(&entry.path(), &target)?;
+        } else {
+            rename_with_retry(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    let mut delay = 500_u64;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) if delay <= 8000 && matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33)) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay *= 2;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "rename {} -> {}: {error}",
+                    from.display(),
+                    to.display()
+                ));
+            }
+        }
+    }
+}
+
 pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
     url: &str,
     asset: &ReleaseAsset,
@@ -216,7 +287,7 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = destination.with_extension("part");
     let result = (|| {
-        let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+        let mut file = std::fs::File::create(&temp).map_err(|e| format!("create {}: {e}", temp.display()))?;
         let mut hasher = Sha256::new();
         let mut total = 0u64;
         let mut buffer = [0u8; 1024 * 128];
@@ -225,11 +296,11 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
             if cancelled().lock().unwrap().contains(&key) {
                 return Err("download cancelled".into());
             }
-            let read = response.read(&mut buffer).map_err(|e| e.to_string())?;
+            let read = response.read(&mut buffer).map_err(|e| format!("read {url}: {e}"))?;
             if read == 0 {
                 break;
             }
-            file.write_all(&buffer[..read]).map_err(|e| e.to_string())?;
+            file.write_all(&buffer[..read]).map_err(|e| format!("write {}: {e}", temp.display()))?;
             hasher.update(&buffer[..read]);
             total += read as u64;
             progress(total, length);
@@ -240,7 +311,7 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
         if format!("{:x}", hasher.finalize()) != asset.sha256.to_ascii_lowercase() {
             return Err(format!("sha256 mismatch for {}", asset.path));
         }
-        std::fs::rename(&temp, destination).map_err(|e| e.to_string())
+        rename_with_retry(&temp, destination)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -483,7 +554,7 @@ pub fn model_release_download_bundle(
                 ));
             }
         }
-        std::fs::rename(&staging, &root).map_err(|e| e.to_string())
+        install_staging_dir(&staging, &root)
     })();
     match result {
         Ok(()) => crate::domain::result::CommandResult::success(()),
@@ -510,7 +581,7 @@ pub fn model_release_download_default(
             // but it never performs a network request or writes outside data/.
             "waifu2x-upconv7" => crate::bundled_models::prepare(&data).map_err(|e| e.to_string()),
             "aletheia-lens" => {
-                let manifest = fetch_manifest_with_fallback("Kelcoin/Yomika", "v1")?;
+                let manifest = fetch_manifest_with_fallback(MODEL_RELEASE_REPO, MODEL_RELEASE_TAG)?;
                 let root = data.join("models").join("aletheia-lens").join("1");
                 if crate::inference::decensor::bundle_in(&root).is_some() {
                     return Ok(());
@@ -537,7 +608,7 @@ pub fn model_release_download_default(
                             .clone()
                             .or_else(|| aletheia_direct_url(asset));
                         download_asset_with_fallback(
-                            "Kelcoin/Yomika",
+                            MODEL_RELEASE_REPO,
                             &manifest.tag,
                             &configured_asset,
                             &target,
@@ -548,7 +619,7 @@ pub fn model_release_download_default(
                         serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
                     )
                     .map_err(|e| e.to_string())?;
-                    std::fs::rename(&staging, &root).map_err(|e| e.to_string())
+                    install_staging_dir(&staging, &root)
                 })();
                 if result.is_err() {
                     let _ = std::fs::remove_dir_all(&staging);
@@ -800,6 +871,24 @@ mod tests {
             asset_url("https://gh-proxy.com/", "o/r", "v1", "m.onnx"),
             "https://gh-proxy.com/https://github.com/o/r/releases/download/v1/m.onnx"
         );
+    }
+    #[test]
+    fn the_default_model_source_is_the_standalone_repository() {
+        assert_eq!(MODEL_RELEASE_REPO, "Kelcoin/Yomika-Models");
+        assert_eq!(MODEL_RELEASE_TAG, "models-v1");
+    }
+    #[test]
+    fn manifest_urls_try_the_repo_body_before_release_assets() {
+        let urls = manifest_urls("Kelcoin/Yomika-Models", "models-v1");
+        assert_eq!(
+            urls[0],
+            "https://raw.githubusercontent.com/Kelcoin/Yomika-Models/main/manifest.json"
+        );
+        // Mirror prefixes ride on the raw body URL, then the release asset with
+        // its own mirror chain.
+        assert!(urls.iter().any(|url| url.starts_with("https://gh-proxy.com/https://raw.githubusercontent.com/")));
+        assert!(urls.iter().any(|url| url.ends_with("/releases/download/models-v1/models-v1.manifest.json")));
+        assert!(urls.iter().any(|url| url.starts_with("https://ghfast.top/https://github.com/")));
     }
     #[test]
     fn verifies_size_and_digest() {
