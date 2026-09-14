@@ -48,6 +48,17 @@ const LONG_PRESS_MS = 500;
  * shows a loading state first. */
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
+function detailTagTime(tags: readonly string[], namespace: string): string {
+  const tag = tags.find((value) => value.split(':', 1)[0]?.trim().toLowerCase() === namespace);
+  const raw = tag?.slice(tag.indexOf(':') + 1).trim();
+  if (!raw) return '未知';
+  const numeric = Number(raw);
+  const date = new Date(Number.isFinite(numeric) ? numeric * (numeric > 1e12 ? 1 : 1000) : raw);
+  if (Number.isNaN(date.getTime()) || (Number.isFinite(numeric) && numeric <= 0)) return '未知';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function DetailGlyph() {
   return (
     <svg className="detail-panel-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -256,43 +267,26 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        {/* While the metadata is in flight the title keeps a skeleton of its own
-            size — it used to show the raw archive id at full title weight while
-            a fake title line sat in the copy column below. */}
-        {metadataLoading && !metadata
-          ? <h1 id="archive-detail-route-title" className="archive-detail-title-loading" role="status" aria-label="正在加载档案详情"><span className="skeleton-line" /></h1>
-          : <h1 id="archive-detail-route-title">{title}</h1>}
+        <h1 id="archive-detail-route-title" className="archive-detail-route-title">{title}</h1>
       </header>
 
       <div className="archive-detail-overview">
         <div className="archive-detail-route-cover">
           {cover
-            ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setCoverPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图">
-                <img src={cover} alt={`${title} 封面`} />
-              </button>
+            ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setCoverPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图"><img src={cover} alt={`${title} 封面`} /></button>
             : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
-          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
-          {tags.length > 0 && (
-            <div className="archive-detail-tags" aria-label="档案标签">
-              {tagGroups.map((group, groupIndex) => (
-                <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
-                  <h2>{group.label}</h2>
-                  <div className={`archive-detail-tag-row${groupIndex === tagGroups.length - 1 && metadata ? ' has-meta' : ''}`}>
-                    <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
-                    </span>
-                    {groupIndex === tagGroups.length - 1 && metadata && <span className="archive-detail-meta archive-detail-meta-inline"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></span>}
-                  </div>
-                </section>
-              ))}
-            </div>
-          )}
-          {/* The footer meta appears once the metadata exists; while it loads
-              the copy skeleton above is the loading indicator — a second
-              skeleton chip under it read as one squeezed blob. */}
-          {tags.length === 0 && metadata && <div className="archive-detail-meta archive-detail-meta-footer"><span className="metadata-chip metadata-chip-page">{metadata.pageCount} 页</span><span className="metadata-chip metadata-chip-size">{formatBytes(metadata.size)}</span></div>}
+        {/* While the metadata is in flight the title keeps a skeleton of its own
+            size — it used to show the raw archive id at full title weight while
+            a fake title line sat in the copy column below. */}
+        {metadataLoading && !metadata && <div className="archive-detail-title-loading" role="status" aria-label="正在加载档案详情"><span className="skeleton-line" /></div>}
+          {metadata && <dl className="archive-detail-facts" aria-label="档案信息">
+            <div><dt>页数</dt><dd>{metadata.pageCount} 页</dd></div>
+            <div><dt>体积</dt><dd>{formatBytes(metadata.size)}</dd></div>
+            <div><dt>添加时间</dt><dd>{detailTagTime(tags, 'date_added')}</dd></div>
+            <div><dt>发布时间</dt><dd>{detailTagTime(tags, 'timestamp')}</dd></div>
+          </dl>}
         </div>
       </div>
 
@@ -349,6 +343,27 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}</>
         )}
       </div>
+
+        <div className="archive-detail-tag-section">
+          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
+          {tags.length > 0 && (
+            <div className="archive-detail-tags" aria-label="档案标签">
+              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace)).map((group) => (
+                <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
+                  <h2>{group.label}</h2>
+                  <div className="archive-detail-tag-row">
+                    <span className="archive-detail-tag-values">
+                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
+                    </span>
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+          {/* The footer meta appears once the metadata exists; while it loads
+              the copy skeleton above is the loading indicator — a second
+              skeleton chip under it read as one squeezed blob. */}
+        </div>
 
       {/* Confirms the long press. Incognito changes what the app records, so it
           says what it will not do rather than switching mode silently. */}
