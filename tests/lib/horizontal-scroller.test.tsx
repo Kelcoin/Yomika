@@ -59,6 +59,28 @@ describe('horizontal scroller', () => {
     expect(onOuterWheel).toHaveBeenCalledTimes(1);
   });
 
+  it('hands the wheel to the page once the rail has reached either end', () => {
+    const onOuterWheel = vi.fn();
+    render(<HorizontalScrollerHarness onOuterWheel={onOuterWheel} />);
+    const rail = screen.getByTestId('rail');
+    setOverflow(rail, 800, 200);
+    Object.defineProperty(rail, 'scrollLeft', { configurable: true, writable: true, value: 599 });
+
+    // Already at the right end: further downward wheel belongs to the page.
+    fireEvent.wheel(rail, { deltaY: 50 });
+    expect(onOuterWheel).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(rail, 'scrollLeft', { configurable: true, writable: true, value: 0 });
+    // Back at the start: an upward wheel passes through instead of sticking.
+    fireEvent.wheel(rail, { deltaY: -50 });
+    expect(onOuterWheel).toHaveBeenCalledTimes(2);
+
+    // Mid-rail the rail still owns the wheel.
+    fireEvent.wheel(rail, { deltaY: 50 });
+    expect(rail.scrollLeft).toBe(120);
+    expect(onOuterWheel).toHaveBeenCalledTimes(2);
+  });
+
   it('swallows the click that ends a drag', () => {
     render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
     const rail = screen.getByTestId('rail');

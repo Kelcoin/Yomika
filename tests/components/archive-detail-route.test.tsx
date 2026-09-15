@@ -504,9 +504,11 @@ it('retains detail DOM and thumbnail requests across repeated tab switches', asy
   const page = await screen.findByRole('button', { name: '查看第 1 页' });
   await waitFor(() => expect(page.querySelector('img')).not.toBeNull());
   const tags = screen.getByLabelText('档案标签');
-  // 分类/重分类以芯片留在概览列；上传者已回到标签分组区里。
+  // 上传者回到标签分组区里；分类不再是芯片，而是信息栅格的第三项。
   expect(tags).toHaveTextContent('sample');
-  expect(screen.getByLabelText('分类与发布者')).not.toHaveTextContent('sample');
+  const facts = screen.getByLabelText('档案信息');
+  expect(facts).toHaveTextContent('分类');
+  expect(facts).not.toHaveTextContent('sample');
   const requests = adapter.mock.calls.filter(([command]) => command === 'cache_read_image').length;
   for (let i = 0; i < 3; i += 1) {
     fireEvent.click(screen.getByRole('tab', { name: '评论' }));

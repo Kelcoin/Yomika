@@ -46,9 +46,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * page in front of you. */
   const [upscaleWanted, setUpscaleWanted] = useState(false);
   const [decensorWanted, setDecensorWanted] = useState(false);
+  /** Whether the user has already chosen this sitting's upscale state. Once
+   * they touch the toggle, the auto-enable must not flip it back behind them
+   * when the metadata (size) arrives later. */
+  const upscaleChosenRef = useRef(false);
   useLayoutEffect(() => {
     setUpscaleWanted(false);
     setDecensorWanted(false);
+    upscaleChosenRef.current = false;
   }, [archiveId]);
   useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
   useEffect(() => { if (!decensorConfigured) setDecensorWanted(false); }, [decensorConfigured]);
@@ -84,6 +89,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** Cover, tags and byte size for the overview panel. Fetched once alongside
    * the manifest; the panel is the only consumer. */
   const [info, setInfo] = useState<{ cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined }>();
+  // Readoshi's auto rule: an archive whose pages average at or above the
+  // threshold starts this sitting already upscaled — small covers gain nothing
+  // from upscaling, dense pages do. The size loads with the optional overview
+  // facts, so this runs whenever that lands, and only before a manual choice.
+  useEffect(() => {
+    if (!upscaleConfigured || !preferences.upscaleAutoEnable || upscaleChosenRef.current) return;
+    const sizeBytes = info?.sizeBytes ?? 0;
+    if (!sizeBytes || pages.length === 0) return;
+    if (sizeBytes / pages.length >= preferences.upscaleAutoThresholdBytes) setUpscaleWanted(true);
+  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoThresholdBytes, info?.sizeBytes, pages.length]);
   const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
@@ -435,7 +450,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       upscale={{
         configured: upscaleConfigured,
         active: upscaleEnabled,
-        toggle: () => { setUpscaleWanted((value) => !value); setEnhancementToken((value) => value + 1); },
+        toggle: () => { upscaleChosenRef.current = true; setUpscaleWanted((value) => !value); setEnhancementToken((value) => value + 1); },
       }}
       decensor={{
         configured: decensorConfigured,

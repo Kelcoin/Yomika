@@ -22,12 +22,14 @@ import { TagSearchLink } from './TagSearchLink';
 import { ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
 import { useEhMyTags } from './useEhMyTags';
 
-/** Chips a thumbnail card offers. The CSS slot shows two rows and clips the
- * rest, so this matches the recommendation rail's pickCardTags(..., 6). */
+/** Chips a thumbnail card offers. Generous on purpose: the fill waterfall drops
+ * whatever the two visible rows cannot hold, so the limit only has to exceed
+ * what the widest card can show — the measured rows decide, not a fixed count
+ * per standard or wide card. */
 /** One search hint for every page that has a search box. */
 const SEARCH_PLACEHOLDER = '搜索档案…';
 
-const CARD_TAG_LIMIT_THUMBNAIL = 6;
+const CARD_TAG_LIMIT_THUMBNAIL = 24;
 const CARD_TAG_LIMIT_WIDE = 36;
 
 /* Overscroll. Beyond the top the list can be pulled down to refresh, beyond the
@@ -833,7 +835,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </div>
         </Panel>
         {showDetail && <><Separator className="panel-separator" />
-        <Panel id="library-detail" defaultSize="36" minSize="24">
+        <Panel id="library-detail" defaultSize="36" minSize="30">
           {selected && (
             <section className="archive-detail" aria-labelledby="archive-detail-title">
               <h2 id="archive-detail-title">{selected.title}</h2>
@@ -900,7 +902,19 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
 }
 
-function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {  const count = mode === 'thumbnail' ? 8 : 5;
+function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
+  /* A fixed count left tall windows with a strip of bare canvas under the last
+     card. Count from the viewport instead: row heights mirror the CSS (158px
+     wide rows, 350px thumbnail cards, plus one gap), and the old counts stay
+     as the floor so short windows look exactly as before. */
+  const count = (() => {
+    const minimum = mode === 'thumbnail' ? 8 : 5;
+    if (typeof window === 'undefined') return minimum;
+    const available = window.innerHeight - 240;
+    const rowHeight = mode === 'thumbnail' ? 350 + 12 : 158 + 12;
+    if (available <= 0) return minimum;
+    return Math.max(minimum, Math.ceil(available / rowHeight));
+  })();
   return (
     <div className={`archive-list-skeleton is-${mode}`} role="status" aria-label="正在读取档案">
       {mode === 'thumbnail'

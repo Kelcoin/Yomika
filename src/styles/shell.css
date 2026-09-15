@@ -78,7 +78,7 @@ body::-webkit-scrollbar,
   transition: background-color var(--motion-fast), color var(--motion-fast);
 }
 
-.titlebar-control svg { width: 12px; height: 12px; }
+.titlebar-control svg { width: 16px; height: 16px; }
 
 .titlebar-control:active { background: color-mix(in srgb, var(--on-surface) 12%, transparent); }
 .titlebar-control.is-close:hover { background: color-mix(in srgb, var(--state-danger) 85%, transparent); color: var(--on-error); }
@@ -353,7 +353,11 @@ body::-webkit-scrollbar,
 .eh-comment-votes-actions button:hover:not(:disabled),
 .secondary-action:hover:not(:disabled),
 .settings-action:hover:not(:disabled) {
-  background: var(--secondary-container-hover);
+  /* Derived, not a fixed token: theme presets redefine the container pair but
+     used to leave the hover token at the base theme's literal value, so a
+     purple theme flashed green on hover. MD3 hover is a state layer over the
+     same container colour. */
+  background: color-mix(in srgb, var(--on-secondary-container) 10%, var(--secondary-container));
   color: var(--on-secondary-container);
 }
 
@@ -393,6 +397,10 @@ body::-webkit-scrollbar,
   padding: 0;
   overflow: hidden;
 }
+
+/* Home draws rails, which want the room: a maximized window fit 8 cards with
+   a strip of rail left over. Other shelf pages keep the 1320px measure. */
+.workspace:has(.workspace-home) { width: min(100%, 1680px); }
 
 .scroll-to-top {
   position: fixed;
@@ -787,9 +795,6 @@ body::-webkit-scrollbar,
 .toast-close:hover,
 .settings-choice-option-main:hover,
 .tag-suggest-option:hover,
-.archive-list.is-thumbnail .archive-thumb-card:hover,
-.archive-list.is-wide .archive-row:hover,
-.archive-row:hover,
 .task-row:hover,
 .date-picker-days button:hover,
 .settings-menu-check:hover:not(:disabled),
@@ -797,6 +802,15 @@ body::-webkit-scrollbar,
 .search-preset-apply:hover,
 .nav-more-menu .nav-link:hover:not(.is-active) {
   background: var(--surface-container-high);
+}
+
+/* The list cards rest on --surface-container-high already, so the shared hover
+   step was a no-op: a themed install showed no feedback at all. One tonal step
+   up keeps the MD3 state layer visible. */
+.archive-list.is-thumbnail .archive-thumb-card:hover:not([aria-pressed='true']),
+.archive-list.is-wide .archive-row:hover:not([aria-pressed='true']),
+.archive-row:hover:not([aria-pressed='true']) {
+  background: var(--surface-container-highest);
 }
 
 .settings-row-button:focus-visible,
@@ -1297,8 +1311,6 @@ body::-webkit-scrollbar,
   gap: var(--space-6);
 }
 
-.archive-detail-identity { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 8px; }
-.archive-detail-identity-chip { padding: 4px 10px; border-radius: var(--radius-pill); background: var(--tag-ns-bg, var(--surface-container-high)); color: var(--tag-ns-ink, var(--on-surface)); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .archive-detail-overview-copy { min-width: 0; display: flex; flex-direction: column; align-self: stretch; gap: 20px; }
 .archive-detail-overview-copy h1 { margin: 0; font-size: var(--text-lg); line-height: 1.45; overflow-wrap: anywhere; }
 .archive-detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; margin: auto 0 0; }
@@ -1321,9 +1333,8 @@ body::-webkit-scrollbar,
   width: 100%;
   min-width: 0;
   overflow: hidden;
-  padding: var(--space-4) 0 var(--space-1);
-  border-top: 1px solid var(--hairline);
-  border-bottom: 0;
+  padding: 0 0 var(--space-1);
+  border-top: 0;
   scrollbar-width: none;
 }
 
@@ -1385,9 +1396,9 @@ body::-webkit-scrollbar,
   gap: var(--space-2);
   width: 100%;
   max-width: 100%;
-  margin-top: var(--space-4);
-  padding: 0;
-  border: 0;
+  margin-top: var(--space-5);
+  padding: var(--space-4) 0 0;
+  border-top: 1px solid var(--hairline);
   background: transparent;
 }
 .archive-detail-panel-tabs button {
@@ -1533,6 +1544,17 @@ body::-webkit-scrollbar,
   font-size: var(--text-xs);
   font-weight: 600;
   cursor: pointer;
+}
+/* The chip rests at its translation's width and grows to the original's on
+   hover/press; the row wrapped on whichever label is wider, so the growth only
+   shoves neighbours inside the row. Unmeasured chips keep their natural size. */
+.metadata-tag.is-measured .metadata-tag-reveal {
+  width: calc(var(--tag-width-rest) + 16px);
+  transition: width var(--motion-standard);
+}
+.metadata-tag.is-measured:hover .metadata-tag-reveal,
+.metadata-tag.is-measured.is-revealed .metadata-tag-reveal {
+  width: calc(var(--tag-width-revealed) + 16px);
 }
 
 /* Hidden labels do not reserve width. Parent rows retain their original grouping. */
@@ -1962,13 +1984,14 @@ body::-webkit-scrollbar,
   border-radius: inherit;
 }
 
-/* SFW: reveal only the image surface. Keep the established 24px blur and
-   scale; avoid permanent GPU layers for every virtualized cover. */
+/* SFW: reveal only the image surface. A moderate blur keeps the silhouette
+   unreadable without flattening the cover into a solid block; avoid permanent
+   GPU layers for every virtualized cover. */
 :root[data-sfw='true'] .archive-row-thumb img,
 :root[data-sfw='true'] .archive-thumb-card-media img,
 :root[data-sfw='true'] .archive-detail-cover-trigger img,
 :root[data-sfw='true'] .archive-page-thumbnail img {
-  filter: blur(24px);
+  filter: blur(14px);
   transform: scale(1.12);
 }
 :is(.archive-row-thumb, .archive-thumb-card-media, .archive-detail-cover-trigger, .archive-page-thumbnail) img {
@@ -2519,7 +2542,15 @@ body::-webkit-scrollbar,
 }
 
 .archive-recommendations-tabs button:hover:not(.is-active) {
+  background: color-mix(in srgb, var(--ink-primary) 8%, transparent);
   color: var(--ink-primary);
+}
+
+/* Same selected treatment as the app's other segmented controls — without it
+   the chosen tab sat indistinguishable from the idle ones until hovered. */
+.archive-recommendations-tabs button.is-active {
+  background: var(--control-selected-background);
+  color: var(--control-selected-text);
 }
 
 
@@ -4304,7 +4335,7 @@ body::-webkit-scrollbar,
   transition: background-color var(--motion-standard);
 }
 
-.search-preset-add:hover { background: var(--secondary-container-hover); }
+.search-preset-add:hover { background: color-mix(in srgb, var(--on-secondary-container) 10%, var(--secondary-container)); }
 .search-preset-add svg { width: 16px; height: 16px; }
 /* Matches the search input's height exactly: the button was 30px against a 44px
    field, so it floated in the middle of the row. */
@@ -4406,16 +4437,18 @@ body::-webkit-scrollbar,
 .switch-control[role="switch"]::after {
   content: '';
   position: absolute;
-  top: 0;
-  left: 0;
+  /* The off handle is a circle resting inside the track: wider than tall drew
+     an oval, and top:0 pinned it over the border instead of centring it. */
+  top: 4px;
+  left: 4px;
   width: 22px;
-  height: 28px;
-  border-radius: var(--radius-pill);
+  height: 22px;
+  border-radius: 50%;
   background: var(--primary);
-  transition: transform var(--motion-standard), width var(--motion-standard), background-color var(--motion-standard);
+  transition: transform var(--motion-standard), width var(--motion-standard), height var(--motion-standard), top var(--motion-standard), background-color var(--motion-standard);
 }
 .switch-control[role="switch"][aria-checked="true"] { background: var(--primary-container); border-color: var(--primary); }
-.switch-control[role="switch"][aria-checked="true"]::after { transform: translateX(22px); width: 28px; background: var(--primary); }
+.switch-control[role="switch"][aria-checked="true"]::after { transform: translateX(18px); width: 28px; height: 28px; top: 1px; background: var(--primary); }
 .switch-control[role="switch"]:active:not(:disabled) { transform: translateY(1px); }
 .switch-control[role="switch"]:disabled { opacity: .5; cursor: not-allowed; }
 
@@ -4650,6 +4683,41 @@ body::-webkit-scrollbar,
 .archive-delete-dialog { overflow-wrap: anywhere; }
 .archive-delete-dialog .switch-control { flex: none; }
 
+/* MD3 dialog anatomy. Radix renders a bare Title/Description pair in dialogs
+   without a .dialog-heading wrapper — give those children the headline and
+   supporting-text roles directly, without UA default margins. */
+.dialog-content > h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1.4;
+}
+.dialog-content > p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+/* The sync option reads as an MD3 switch list item: its own tonal row between
+   the supporting text and the trailing actions, not a loose control floating
+   beside them. */
+.archive-delete-dialog .preference-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
+  border-radius: var(--radius-control);
+  background: var(--surface-container);
+}
+.archive-delete-dialog .preference-toggle > span:last-child {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.archive-delete-dialog .dialog-actions { margin-top: var(--space-6); }
+
 /* 服务器行的启用控件：一次只允许启用一台。当前标记是一枚跟在服务器名字
    后的小徽章；行尾只留未启用行的「启用」按钮（停用最后一台会让应用没有
    数据源，所以已启用的行没有开关可关）。 */
@@ -4701,7 +4769,20 @@ body::-webkit-scrollbar,
 .card-tag-waterfall .metadata-chip { flex: none; }
 .card-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; white-space: nowrap; }
 .card-tag-waterfall .card-tag-measure { display: inline-block; }
-.archive-detail-route-title { margin: 0; min-width: 0; font-size: var(--text-lg); line-height: 1.4; overflow-wrap: anywhere; }
+/* Two lines, no more: the fit hook steps the font down a notch at a time when
+   the text still overflows, and the clamp cuts whatever remains to an
+   ellipsis — the fallback only fires when even the smallest size cannot fit. */
+.archive-detail-route-title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--text-lg);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 
 .library-controls .search-preset-field { flex: 0 0 var(--control-height); width: var(--control-height); min-width: var(--control-height); }
 .library-controls .search-preset-save { width: var(--control-height); height: var(--control-height); }
@@ -4721,11 +4802,14 @@ body::-webkit-scrollbar,
   .archive-detail-route-cover { justify-content: flex-start; }
   .archive-detail-cover-trigger, .archive-detail-route-cover img, .archive-detail-cover-placeholder { width: 140px; }
   .archive-detail-route-cover img { height: 187px; }
-  .archive-detail-facts { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  /* Two columns still fit beside the 140px cover — the fact values are short —
+     so the overview keeps its compact 2×2 rhythm down to the 340px step. */
+  .archive-detail-facts { gap: 12px 16px; }
   .archive-detail-overview-copy { gap: 12px; }
 }
 @container archive-detail (max-width: 340px) {
   .archive-detail-overview { grid-template-columns: 104px minmax(0, 1fr); gap: 12px; }
   .archive-detail-cover-trigger, .archive-detail-route-cover img, .archive-detail-cover-placeholder { width: 104px; }
   .archive-detail-route-cover img { height: 139px; }
+  .archive-detail-facts { grid-template-columns: minmax(0, 1fr); gap: 10px; }
 }

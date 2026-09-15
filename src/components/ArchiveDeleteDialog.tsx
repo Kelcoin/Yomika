@@ -55,7 +55,12 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
         <Dialog.Title>确认删除</Dialog.Title>
         <Dialog.Description>{description}</Dialog.Description>
         {preferences?.ehFavoriteDeleteSync && (
-          <label className="preference-toggle"><button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={syncFavorite} disabled={busy} onClick={() => setSyncFavorite(!syncFavorite)}><span /></button><span>同步删除 E-Hentai 收藏</span></label>
+          /* The whole row toggles: a label cannot activate a button, so the
+             handler lives on the label and the switch is its visual control. */
+          <label className="preference-toggle" onClick={() => { if (!busy) setSyncFavorite(!syncFavorite); }}>
+            <button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={syncFavorite} disabled={busy} tabIndex={-1}><span /></button>
+            <span>同步删除 E-Hentai 收藏</span>
+          </label>
         )}
         <div className="dialog-actions">
           <button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button>

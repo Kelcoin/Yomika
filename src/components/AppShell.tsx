@@ -183,6 +183,42 @@ export function AppShell({ children }: AppShellProps) {
     return () => document.removeEventListener('scroll', handleScroll, true);
   }, [pathname]);
 
+  // Dead zones around and inside the workspace — the collapsed sidebar strip,
+  // the title bar, a rail whose horizontal scroll has run out — have no scroll
+  // chain that reaches the page scroller: Chromium latches the wheel onto the
+  // rail's own axis and chains along it, into the workspace's overflow-x:
+  // hidden, where the gesture dies. Walk the target chain and, when nothing
+  // could consume the wheel, hand it to the workspace the way the library
+  // panels forward to their list.
+  useEffect(() => {
+    // jsdom's ElementEventMap has no wheel entry; the runtime event is a WheelEvent.
+    const forward = (raw: Event) => {
+      const event = raw as WheelEvent;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      // Overlays and the reader own their scrolling.
+      if (target.closest('[role="dialog"], [role="menu"], .tag-suggest-panel, .reader-screen')) return;
+      for (let node: Element | null = target; node && !node.matches('.app-shell'); node = node.parentElement) {
+        const style = window.getComputedStyle(node);
+        if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
+        const atEdge = event.deltaY < 0
+          ? node.scrollTop <= 0
+          : node.scrollTop >= node.scrollHeight - node.clientHeight - 1;
+        // A box with room left in the wheel's direction consumes this event.
+        if (!atEdge) return;
+      }
+      const workspace = workspaceRef.current;
+      if (!workspace) return;
+      workspace.scrollTop += event.deltaY;
+      workspace.scrollLeft += event.deltaX;
+      if (event.cancelable) event.preventDefault();
+    };
+    const shell = document.querySelector('.app-shell');
+    if (!shell) return undefined;
+    shell.addEventListener('wheel', forward, { passive: false });
+    return () => shell.removeEventListener('wheel', forward);
+  }, []);
+
 
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>

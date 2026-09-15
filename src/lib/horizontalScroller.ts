@@ -52,6 +52,12 @@ export function useHorizontalScroller() {
     if (!element) return;
     const delta = getHorizontalWheelDelta(event, element.scrollWidth, element.clientWidth);
     if (delta === null) return;
+    // Chain to the page at either end: a rail with no room left must not keep
+    // swallowing the wheel — the home rails span nearly the whole viewport, and
+    // the page behind them would never scroll again.
+    const atStart = element.scrollLeft <= 0;
+    const atEnd = element.scrollLeft >= element.scrollWidth - element.clientWidth - 1;
+    if ((delta < 0 && atStart) || (delta > 0 && atEnd)) return;
     if (event.cancelable) event.preventDefault();
     event.stopPropagation();
     element.scrollLeft += delta * 2.4;

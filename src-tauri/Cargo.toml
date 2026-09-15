@@ -1,6 +1,6 @@
 [package]
 name = "yomika"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first reading and archive client"
 authors = ["Yomika contributors"]
 edition = "2021"

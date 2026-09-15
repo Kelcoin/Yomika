@@ -94,18 +94,45 @@ function HomeWorkspace() {
   const reloadShelves = useCallback(() => setServerLoadAttempt((attempt) => attempt + 1), []);
   // LANraragi picks the random set. Behind a callback so the rail's refresh
   // button can ask for another draw without reloading the whole page.
-  const loadRandom = useCallback(async (serverId: string) => {
+  // The draw keeps going until the rail's width is full: the caller says how
+  // many finished archives count as invisible, and a batch that comes back
+  // mostly finished asks the server again rather than leaving the rail short.
+  const loadRandom = useCallback(async (
+    serverId: string,
+    context: { showFinished: boolean; progress: ReadonlyMap<string, number> },
+  ) => {
     setRandomLoading(true);
-    const random = await repository.searchRandomArchives(serverId, 8);
-    if (random.ok) setRandomArchives(random.value);
+    // Rail step: a 150px card plus its 12px gap — the same measure the rail's
+    // skeleton uses. Counting the whole window and letting the rail scroll the
+    // spare overcosts nothing and never leaves a visible gap.
+    const needed = Math.max(8, Math.ceil(window.innerWidth / 150) + 2);
+    const accepted = (archive: ArchiveRecord) => context.showFinished
+      || !isArchiveFinished(archive.pageCount, context.progress.get(archive.archiveId) ?? 0);
+    const collected = new Map<string, ArchiveRecord>();
+    for (let draw = 0; draw < 3 && collected.size < needed; draw += 1) {
+      const random = await repository.searchRandomArchives(serverId, 24);
+      if (!random.ok) break;
+      for (const archive of random.value) {
+        if (accepted(archive)) collected.set(archive.archiveId, archive);
+      }
+    }
+    if (collected.size > 0) setRandomArchives([...collected.values()]);
     else {
       // Server could not answer. Sample the newest page from the local mirror
-      // rather than reading the whole index to pick eight cards.
+      // rather than reading the whole index to pick that many cards.
       const page = await repository.listArchivesPage(serverId, 0, 60, { sortBy: 'added', order: 'desc' });
-      if (page.ok) setRandomArchives(pickRandomSample(page.value.items, 8));
+      if (page.ok) {
+        const eligible = page.value.items.filter(accepted);
+        setRandomArchives(eligible.length > 0 ? pickRandomSample(eligible, needed) : []);
+      }
     }
     setRandomLoading(false);
   }, []);
+  // Preferences as of the latest render, for the load effect below: toggling a
+  // preference must not re-resolve the shelves, so the effect reads the ref
+  // instead of closing over state.
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
   useEffect(() => {
     // A fresh snapshot is already on screen; re-resolving the shelves would cost
     // a round trip and draw a different random set for no reason.
@@ -154,7 +181,12 @@ function HomeWorkspace() {
       if (!archiveResult.ok) setRecentError(archiveResult.error.message);
       else setArchives(archiveResult.value);
       setRecentLoading(false);
-      await loadRandom(server.id);
+      // Fresh history in hand — the finished-archive filter reads it here, not
+      // from whatever render happened to be current when the call started.
+      await loadRandom(server.id, {
+        showFinished: preferencesRef.current.randomRoamShowFinished,
+        progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
+      });
       // The mirror only learns about a deletion when something asks the server,
       // so confirm the handful of cards the rails are about to show rather than
       // letting the user discover a gone archive by clicking it.
@@ -214,11 +246,16 @@ function HomeWorkspace() {
     () => readingList.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
     [archiveById, readingList],
   );
+  const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
   // The effect already picked the random set (server first, newest page as the
   // fallback). Sampling `archives` here would just re-show the shelf, because
-  // `archives` now holds only the ids the shelves asked for.
-  const random = randomArchives;
-  const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
+  // `archives` now holds only the ids the shelves asked for. The finished
+  // filter lives here too — so a toggle (and a snapshot restored before the
+  // fresh draw lands) re-renders the rail instead of waiting for a refetch.
+  const random = useMemo(() => {
+    if (preferences.randomRoamShowFinished) return randomArchives;
+    return randomArchives.filter((archive) => !isArchiveFinished(archive.pageCount, progressByArchiveId.get(archive.archiveId) ?? 0));
+  }, [preferences.randomRoamShowFinished, randomArchives, progressByArchiveId]);
   // Snapshot for the next visit, so switching tabs and coming back is free.
   useEffect(() => {
     if (!servers) return;
@@ -264,7 +301,7 @@ function HomeWorkspace() {
       {connected && homeServer && <>
       <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
       <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { void loadRandom(homeServer.id); }} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); }} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}

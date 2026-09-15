@@ -19,7 +19,10 @@ const imageCache = getNativeImageCache();
 export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, colorFor }: { title: string; tags: string[]; meta: ReactNode; favorite?: boolean; colorFor?: ((tag: string) => string | undefined) | undefined }) {
   return <div className="archive-thumb-card-body">
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
-    <CardTagRows tags={tags} rowCount={2} className="archive-thumb-card-tags" colorFor={colorFor} />
+    {/* fill: the two rows pack top-down and the rest of the (deliberately
+        generous) tag list is dropped, so the slot reads full at any card
+        width — the list row's waterfall keeps its own spreading behaviour. */}
+    <CardTagRows tags={tags} rowCount={2} fill className="archive-thumb-card-tags" colorFor={colorFor} />
     <div className="archive-thumb-card-meta">{meta}</div>
   </div>;
 }
@@ -30,7 +33,9 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   const [node, setNode] = useState<HTMLAnchorElement | null>(null);
   const myTags = useEhMyTags();
   const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
-  const tags = useMemo(() => pickCardTags(archive.tags, 10, myTagKeys), [archive.tags, myTagKeys]);
+  // Generous on purpose: the fill waterfall drops whatever the two rows cannot
+  // hold, so the limit only has to exceed what the widest card can show.
+  const tags = useMemo(() => pickCardTags(archive.tags, 24, myTagKeys), [archive.tags, myTagKeys]);
   const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const isWide = isWideCoverRatio(aspectRatio);
   useEffect(() => {

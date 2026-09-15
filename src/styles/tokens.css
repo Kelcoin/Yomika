@@ -44,8 +44,7 @@
     --on-secondary: #ffffff;
     --secondary-container: #cde8de;
     --on-secondary-container: #073730;
-    --secondary-hover: #3d514c;
-    --secondary-container-hover: #bedbd0;
+        --secondary-hover: #3d514c;
 
     /* ---- M3 color roles: 琥珀 (tertiary) --------------------------------- */
     --tertiary: #795900;
@@ -297,7 +296,6 @@
       --secondary-container: #334b45;
       --on-secondary-container: #cde8de;
       --secondary-hover: #c9ded6;
-      --secondary-container-hover: #3c5650;
       --tertiary: #f5c454;
       --on-tertiary: #3f2e00;
       --tertiary-container: #5c4300;
@@ -420,7 +418,6 @@
     --secondary-container: #334b45;
     --on-secondary-container: #cde8de;
     --secondary-hover: #c9ded6;
-    --secondary-container-hover: #3c5650;
     --tertiary: #f5c454;
     --on-tertiary: #3f2e00;
     --tertiary-container: #5c4300;

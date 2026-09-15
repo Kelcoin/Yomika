@@ -145,7 +145,26 @@ describe('reader screen', () => {
     expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
-    expect(screen.getByText('1 / 3')).toBeInTheDocument();
+    expect(within(screen.getByRole('toolbar', { name: '阅读控制' })).getByText('1 / 3')).toBeInTheDocument();
+  });
+
+  it('pins the page indicator outside the auto-hiding chrome', async () => {
+    const user = userEvent.setup();
+    renderReader();
+
+    // The pill reads the on-screen pages and survives the chrome hiding again,
+    // unlike the toolbar counter that comes and goes with it.
+    expect(document.querySelector('.reader-page-indicator')?.textContent).toBe('1 / 3');
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
+    expect(document.querySelector('.reader-page-indicator')?.textContent).toBe('2 / 3');
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(document.querySelector('.reader-page-indicator')?.textContent).toBe('2 / 3');
+  });
+
+  it('does not mount window controls outside the tauri shell', () => {
+    renderReader();
+    expect(screen.queryByRole('button', { name: '最大化窗口' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '还原窗口' })).not.toBeInTheDocument();
   });
 
   it('supports keyboard paging without crossing bounds', () => {

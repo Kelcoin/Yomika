@@ -16,14 +16,18 @@ const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
 const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
+const UPSCALE_AUTO_ENABLE_KEY: &str = "preferences.upscale_auto_enable";
+const UPSCALE_AUTO_THRESHOLD_KEY: &str = "preferences.upscale_auto_threshold_bytes";
 const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
 const DOWNLOAD_DIRECTORY_KEY: &str = "preferences.download_directory";
 const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
 const CONTINUE_READING_SHOW_FINISHED_KEY: &str = "preferences.continue_reading_show_finished";
+const RANDOM_ROAM_SHOW_FINISHED_KEY: &str = "preferences.random_roam_show_finished";
 const EH_MY_TAGS_PRIORITY_KEY: &str = "preferences.eh_my_tags_priority";
 const DETAIL_ACTIONS_KEY: &str = "preferences.detail_actions";
 const SFW_MODE_KEY: &str = "preferences.sfw_mode";
+const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 pub const GIB_BYTES: u64 = 1_073_741_824;
@@ -87,6 +91,14 @@ pub struct PreferenceSnapshot {
     pub upscale_backend: String,
     #[serde(default)]
     pub upscale_model: String,
+    /// 自动开启超分：进入阅读器时按档案的每页平均体积决定本次会话是否直接
+    /// 开启超分（Readoshi 的做法——小图不吃超分，大图才需要）。需要模型已
+    /// 选择；关闭超分时该开关一并锁定。
+    #[serde(default)]
+    pub upscale_auto_enable: bool,
+    /// 自动开启的阈值：每页平均字节数（体积/页数），默认 500 KB。
+    #[serde(default = "default_upscale_auto_threshold")]
+    pub upscale_auto_threshold_bytes: u64,
     /// Installed de-censoring bundle to run on reader pages. Empty means off:
     /// there is no separate switch, because a bundle that is not chosen is the
     /// only sense in which the feature can be off.
@@ -102,6 +114,11 @@ pub struct PreferenceSnapshot {
     /// their pages. Off hides them: there is nothing left to continue.
     #[serde(default = "default_true")]
     pub continue_reading_show_finished: bool,
+    /// Whether the home random-roam rail keeps finished archives. Off hides
+    /// them there too, and the rail keeps drawing until it has enough
+    /// unfinished cards to fill its width.
+    #[serde(default = "default_true")]
+    pub random_roam_show_finished: bool,
     /// Prioritise the E-Hentai account's own tag list ("My Tags") on archive
     /// cards and detail pages, colouring those chips with the account's preset
     /// colours. Needs a signed-in account and one mytags fetch.
@@ -110,6 +127,9 @@ pub struct PreferenceSnapshot {
     /// SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。
     #[serde(default)]
     pub sfw_mode: bool,
+    /// 详情页第四项信息显示哪种时间：档案自身的发布时间（默认）或加入本库的时间。
+    #[serde(default = "default_detail_date_kind")]
+    pub detail_date_kind: String,
     #[serde(default = "default_detail_actions")]
     pub detail_actions: Vec<String>,
     /// Free-form CSS appended after the design tokens. This is the whole
@@ -133,6 +153,10 @@ fn default_detail_actions() -> Vec<String> {
     ["read", "readingList", "favorites", "download"].into_iter().map(String::from).collect()
 }
 
+fn default_detail_date_kind() -> String {
+    "published".into()
+}
+
 fn default_prefetch_pages() -> u8 {
     2
 }
@@ -150,6 +174,9 @@ fn default_card_style() -> String {
 }
 fn default_upscale_backend() -> String {
     "off".to_string()
+}
+fn default_upscale_auto_threshold() -> u64 {
+    500 * 1024
 }
 /// The historical five mobile entries.
 fn default_bottom_nav_items() -> Vec<String> {
@@ -172,13 +199,17 @@ impl Default for PreferenceSnapshot {
             card_style: default_card_style(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
+            upscale_auto_enable: false,
+            upscale_auto_threshold_bytes: default_upscale_auto_threshold(),
             decensor_model: String::new(),
             download_directory: String::new(),
             eh_favorite_delete_sync: false,
             confirm_eh_favorite_delete: true,
             continue_reading_show_finished: true,
+            random_roam_show_finished: true,
             eh_my_tags_priority: false,
             sfw_mode: false,
+            detail_date_kind: default_detail_date_kind(),
             detail_actions: default_detail_actions(),
             custom_css: String::new(),
             floating_nav: false,
@@ -208,6 +239,9 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || !matches!(value.card_style.as_str(), "wide" | "thumbnail")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
+        // 每页平均体积阈值：低于 64 KB 的封面图不值得判据，8 MB 以上整页
+        // 都会超分失去意义。与设置页步进器的范围一致。
+        || !(64 * 1024..=8 * 1024 * 1024).contains(&value.upscale_auto_threshold_bytes)
         || value.decensor_model.len() > 128
         || value.download_directory.len() > 4096
         || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
@@ -222,6 +256,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || value.bottom_nav_items.len() > 7
         || value.detail_actions.len() > 6
         || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "delete"))
+        || !matches!(value.detail_date_kind.as_str(), "added" | "published")
     {
         return Err("Invalid preference snapshot".into());
     }
@@ -287,6 +322,12 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         card_style: load_value(connection, CARD_STYLE_KEY, defaults.card_style)?,
         upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
+        upscale_auto_enable: load_value(connection, UPSCALE_AUTO_ENABLE_KEY, defaults.upscale_auto_enable)?,
+        upscale_auto_threshold_bytes: load_value(
+            connection,
+            UPSCALE_AUTO_THRESHOLD_KEY,
+            defaults.upscale_auto_threshold_bytes,
+        )?,
         decensor_model: load_value(connection, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
         download_directory: load_value(
             connection,
@@ -308,12 +349,18 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             CONTINUE_READING_SHOW_FINISHED_KEY,
             defaults.continue_reading_show_finished,
         )?,
+        random_roam_show_finished: load_value(
+            connection,
+            RANDOM_ROAM_SHOW_FINISHED_KEY,
+            defaults.random_roam_show_finished,
+        )?,
         eh_my_tags_priority: load_value(
             connection,
             EH_MY_TAGS_PRIORITY_KEY,
             defaults.eh_my_tags_priority,
         )?,
         sfw_mode: load_value(connection, SFW_MODE_KEY, defaults.sfw_mode)?,
+        detail_date_kind: load_value(connection, DETAIL_DATE_KIND_KEY, defaults.detail_date_kind)?,
         detail_actions: load_value(connection, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
@@ -363,6 +410,14 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.upscale_model),
         ),
         (
+            UPSCALE_AUTO_ENABLE_KEY,
+            serde_json::to_string(&value.upscale_auto_enable),
+        ),
+        (
+            UPSCALE_AUTO_THRESHOLD_KEY,
+            serde_json::to_string(&value.upscale_auto_threshold_bytes),
+        ),
+        (
             DECENSOR_MODEL_KEY,
             serde_json::to_string(&value.decensor_model),
         ),
@@ -383,10 +438,15 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.continue_reading_show_finished),
         ),
         (
+            RANDOM_ROAM_SHOW_FINISHED_KEY,
+            serde_json::to_string(&value.random_roam_show_finished),
+        ),
+        (
             EH_MY_TAGS_PRIORITY_KEY,
             serde_json::to_string(&value.eh_my_tags_priority),
         ),
         (SFW_MODE_KEY, serde_json::to_string(&value.sfw_mode)),
+        (DETAIL_DATE_KIND_KEY, serde_json::to_string(&value.detail_date_kind)),
         (DETAIL_ACTIONS_KEY, serde_json::to_string(&value.detail_actions)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
         (FLOATING_NAV_KEY, serde_json::to_string(&value.floating_nav)),
@@ -552,6 +612,7 @@ mod tests {
             theme: "dark".into(),
             default_layout: "double".into(),
             default_direction: "rtl".into(),
+            detail_date_kind: "added".into(),
             cache_max_bytes: 4_294_967_296,
             prefetch_pages: 3,
             cover_concurrency: 6,
@@ -559,11 +620,14 @@ mod tests {
             card_style: "thumbnail".into(),
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
+            upscale_auto_enable: true,
+            upscale_auto_threshold_bytes: 1024 * 1024,
             decensor_model: "aletheia-lens".into(),
             download_directory: std::env::temp_dir().to_string_lossy().into_owned(),
             eh_favorite_delete_sync: true,
             confirm_eh_favorite_delete: false,
             continue_reading_show_finished: false,
+            random_roam_show_finished: false,
             eh_my_tags_priority: true,
             sfw_mode: true,
             detail_actions: vec!["read".into(), "download".into()],
@@ -592,8 +656,24 @@ mod tests {
     }
 
     #[test]
-    fn detail_actions_are_validated_deduplicated_and_can_all_be_hidden() {
+    fn detail_date_kind_defaults_to_published_and_refuses_others() {
         let mut connection = settings_db();
+        let saved = save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_date_kind: "added".into(),
+            ..PreferenceSnapshot::default()
+        }).expect("save added kind");
+        assert_eq!(saved.detail_date_kind, "added");
+        assert_eq!(load_preferences_from(&connection).unwrap().detail_date_kind, "added");
+        assert!(save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_date_kind: "created".into(),
+            ..PreferenceSnapshot::default()
+        }).is_err());
+        // The rejected write leaves the last good value in place.
+        assert_eq!(load_preferences_from(&connection).unwrap().detail_date_kind, "added");
+    }
+
+    #[test]
+    fn detail_actions_are_validated_deduplicated_and_can_all_be_hidden() {        let mut connection = settings_db();
         let saved = save_preferences_to(&mut connection, PreferenceSnapshot {
             detail_actions: vec!["download".into(), "read".into(), "read".into()],
             ..PreferenceSnapshot::default()

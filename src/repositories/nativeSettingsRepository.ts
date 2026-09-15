@@ -27,6 +27,12 @@ export const PreferenceSnapshotSchema = z.object({
   cardStyle: z.enum(['wide', 'thumbnail']).default('wide'),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
+  /** Readoshi-style auto-enable: a session opens upscaled when the archive's
+   * average page size (bytes/page) reaches the threshold. Needs a model; the
+   * switch locks while upscale itself is off. */
+  upscaleAutoEnable: z.boolean().default(false),
+  /** The auto-enable threshold in bytes per page. Default 500 KB. */
+  upscaleAutoThresholdBytes: z.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512_000),
   /** Installed de-censoring bundle to run on reader pages. Empty means off:
    * a bundle that is not chosen is the only sense in which it can be off. */
   decensorModel: z.string().max(128).default(''),
@@ -36,6 +42,9 @@ export const PreferenceSnapshotSchema = z.object({
   /** Whether the home continue-reading rail keeps records read past 95% of
    * their pages. Off hides them — there is nothing left to continue. */
   continueReadingShowFinished: z.boolean().default(true),
+  /** Whether the home random-roam rail keeps finished archives. Off hides
+   * them there too, and the rail keeps drawing until its width is full. */
+  randomRoamShowFinished: z.boolean().default(true),
   /** Prioritise the E-Hentai account's own tag list ("My Tags") on archive
    * cards and detail pages, colouring those chips with the account's preset
    * colours. Needs a signed-in account and one mytags fetch. */
@@ -43,6 +52,9 @@ export const PreferenceSnapshotSchema = z.object({
   /** SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。 */
   sfwMode: z.boolean().default(false),
   detailActions: z.array(z.enum(DETAIL_ACTIONS)).max(6).default(DEFAULT_DETAIL_ACTIONS),
+  /** Which time the detail overview prints as its fourth fact: the archive's
+   * own publish date (default) or the moment this library added it. */
+  detailDateKind: z.enum(['added', 'published']).default('published'),
   /** Free-form CSS appended after the design tokens. This is the whole
    * customisation surface — it replaced a standalone accent-colour preference,
    * which said less than one line of CSS here and had to be kept in step with
@@ -82,14 +94,18 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   cardStyle: 'wide',
   upscaleBackend: 'off',
   upscaleModel: '',
+  upscaleAutoEnable: false,
+  upscaleAutoThresholdBytes: 512_000,
   decensorModel: '',
   downloadDirectory: '',
   ehFavoriteDeleteSync: false,
   confirmEhFavoriteDelete: true,
   continueReadingShowFinished: true,
+  randomRoamShowFinished: true,
   ehMyTagsPriority: false,
   sfwMode: false,
   detailActions: [...DEFAULT_DETAIL_ACTIONS],
+  detailDateKind: 'published',
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],

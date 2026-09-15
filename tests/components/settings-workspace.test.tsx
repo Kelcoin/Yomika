@@ -972,6 +972,18 @@ it('saves the selected detail actions from the appearance settings container', a
   await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ detailActions: ['read', 'readingList', 'favorites', 'download', 'edit'] }) }));
 });
 
+it('defaults the detail time fact to the publish date and saves the added-date choice', async () => {
+  const user = userEvent.setup();
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => ({ ok: true, value: command === 'load_preferences' ? DEFAULT_PREFERENCES : command === 'save_preferences' ? args?.input : [] }));
+  setInvokeAdapterForTests(adapter);
+  renderSettings('appearance');
+  await user.click(await screen.findByRole('button', { name: '详情页时间' }));
+  const panel = screen.getByRole('dialog', { name: '详情页时间' });
+  expect(within(panel).getByRole('button', { name: '发布时间' }).closest('.settings-choice-option')).toHaveClass('is-active');
+  await user.click(within(panel).getByRole('button', { name: '添加时间' }));
+  await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ detailDateKind: 'added' }) }));
+});
+
 it('does not overwrite newer detail action edits with an earlier save response', async () => {
   const user = userEvent.setup();
   let finishFirst!: (value: unknown) => void;

@@ -12,7 +12,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { categorizeSearchableTags, parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
@@ -37,7 +37,7 @@ import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { TagSearchLink } from './TagSearchLink';
-import { useDetailActions } from '../app/preferences';
+import { useDetailActions, useDetailDateKind } from '../app/preferences';
 import { useEhMyTags } from './useEhMyTags';
 
 const repository = new NativeLibraryRepository();
@@ -72,10 +72,11 @@ function DetailGlyph() {
   );
 }
 
-function DetailFactGlyph({ kind }: { kind: 'pages' | 'size' | 'added' | 'published' }) {
+function DetailFactGlyph({ kind }: { kind: 'pages' | 'size' | 'category' | 'added' | 'published' }) {
   const paths = {
     pages: 'M7 2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm0 2v12h10V4H7ZM3 6v14h12v2H3a2 2 0 0 1-2-2V6h2Z',
     size: 'M4 3h16a2 2 0 0 1 2 2v4H2V5a2 2 0 0 1 2-2Zm0 2v2h16V5H4ZM3 11h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Zm2 2v7h14v-7H5Zm4 1h6v2H9v-2Z',
+    category: 'M4 4h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v2h18V8H4Zm0 4v8h18v-8H4Z',
     added: 'M7 1h2v2h6V1h2v2h3a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3V1ZM4 5v3h16V5H4Zm0 5v10h16V10H4Zm7 1h2v3h3v2h-3v3h-2v-3H8v-2h3v-3Z',
     published: 'M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm-1 2h2v5.6l3.7 2.2-1 1.7-4.7-2.8V6Z',
   };
@@ -277,6 +278,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const myTagColorFor = useCallback((query: string) => myTags.colors.get(normalizeMyTagKey(query.replace(/\$$/, ''))), [myTags.colors]);
 
   const detailActions = useDetailActions();
+  const detailDateKind = useDetailDateKind();
   const [downloading, setDownloading] = useState(false);
   const { open: openMenu, menu } = useArchiveContextMenu({
     onMembershipChange: (_id, list, next) => list === 'reading' ? setInReadingList(next) : setFavorite(next),
@@ -293,20 +295,60 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   }
 
   const title = metadata?.title || '';
-  const identityGroups = tagGroups.filter((group) => ['category', 'reclass', 'uploader'].includes(group.namespace));
   const tags = metadataTags;
   const ehGallery = ehGalleryFromTags(tags);
+  // The category (and reclass, its override) moved down into the fact grid —
+  // the chip row above the facts duplicated it and styled it differently.
+  const categoryLabel = tagGroups
+    .filter((group) => ['category', 'reclass'].includes(group.namespace))
+    .flatMap((group) => group.values.map((tag) => tag.label))
+    .join(' · ');
+  const dateKind = detailDateKind;
   const facts = [
     { kind: 'pages' as const, label: '页数', value: `${metadata?.pageCount ?? 0} 页` },
     { kind: 'size' as const, label: '体积', value: formatBytes(metadata?.size ?? 0) },
-    { kind: 'added' as const, label: '添加时间', value: detailTagTime(tags, 'date_added') },
-    { kind: 'published' as const, label: '发布时间', value: detailTagTime(tags, 'timestamp') },
+    { kind: 'category' as const, label: '分类', value: categoryLabel },
+    dateKind === 'added'
+      ? { kind: 'added' as const, label: '添加时间', value: detailTagTime(tags, 'date_added') }
+      : { kind: 'published' as const, label: '发布时间', value: detailTagTime(tags, 'timestamp') },
   ];
+  /** Title fitting: at most two lines, stepping the font down a notch at a
+   * time when the text still overflows, and letting the CSS line-clamp cut the
+   * rest to an ellipsis only when even the smallest size cannot fit. */
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  useLayoutEffect(() => {
+    const element = titleRef.current;
+    if (!element) return undefined;
+    const sizes = ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)'];
+    const fit = () => {
+      // The stylesheet clamps the element to two lines, which pins scrollHeight
+      // to the clamped height — lift it for the measurement, restore after.
+      const previousDisplay = element.style.display;
+      element.style.display = 'block';
+      let step = 0;
+      element.style.fontSize = sizes[0]!;
+      while (step < sizes.length - 1) {
+        const style = window.getComputedStyle(element);
+        // line-height resolves to px already (1.4 × font-size); the two-line
+        // budget is just that height doubled.
+        const lineHeight = style.lineHeight === 'normal' ? parseFloat(style.fontSize) * 1.4 : parseFloat(style.lineHeight);
+        if (element.scrollHeight <= lineHeight * 2 + 2) break;
+        step += 1;
+        element.style.fontSize = sizes[step]!;
+      }
+      element.style.display = previousDisplay;
+    };
+    fit();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => fit());
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [title]);
+
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        <h1 id="archive-detail-route-title" className="archive-detail-route-title">{title || <span className="skeleton-line skeleton-line-title" aria-label="正在加载档案详情" role="status" />}</h1>
+        <h1 id="archive-detail-route-title" className="archive-detail-route-title" ref={titleRef}>{title || <span className="skeleton-line skeleton-line-title" aria-label="正在加载档案详情" role="status" />}</h1>
         <button className="reader-icon-button" type="button" aria-label="档案菜单" aria-haspopup="menu" title="档案菜单" disabled={!metadata || !serverId} onClick={(event) => {
           if (!metadata || !serverId) return;
           const bounds = event.currentTarget.getBoundingClientRect();
@@ -321,9 +363,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
         </div>
         <div className="archive-detail-overview-copy">
-          <div className="archive-detail-identity" aria-label="分类与发布者">
-            {identityGroups.filter((group) => ['category', 'reclass'].includes(group.namespace)).flatMap((group) => group.values.map((tag) => <span className={`archive-detail-identity-chip tag-group-${group.namespace === 'reclass' ? 'category' : group.namespace}`} key={tag.query} title={group.label}>{tag.label}</span>))}
-          </div>
           <dl className="archive-detail-facts" aria-label="档案信息">
             {facts.map(({ kind, label, value }) => (
               <div key={kind} title={label}>

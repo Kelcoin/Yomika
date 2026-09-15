@@ -167,6 +167,18 @@ describe('library workspace', () => {
     expect(screen.queryByText('暂无档案库')).not.toBeInTheDocument();
   });
 
+  it('adds skeleton rows on tall viewports so the loading shell fills the height', () => {
+    const original = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 1600 });
+    try {
+      renderWorkspace({ archives: [], listLoading: true, cardStyle: 'wide' });
+      // 1600px of viewport at a 158px row plus gap needs more than the 5-row floor.
+      expect(document.querySelectorAll('.archive-row-skeleton').length).toBeGreaterThan(5);
+    } finally {
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: original });
+    }
+  });
+
   it('distributes wide-card tags across three left-starting rows', () => {
     const tags = ['female:ta', 'female:tb', 'female:tc', 'female:td', 'female:te', 'female:tf'];
     renderWorkspace({ archives: [{ ...archives[0]!, tags }] });

@@ -321,11 +321,13 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     // Material 3 expressive switch: 52x30 track; the checked handle slides by
     // transform (animatable) to sit flush against the track edge, and both
-    // handle states ride the theme's primary colour.
+    // handle states ride the theme's primary colour. The off handle is a
+    // centred circle — a wider-than-tall thumb drew an oval instead.
     expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*flex:\s*0 0 52px[^}]*min-width:\s*52px/);
     expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*height:\s*30px[^}]*\}/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]::after\s*\{[^}]*width:\s*22px[^}]*height:\s*22px[^}]*border-radius:\s*50%/);
     expect(shell).toMatch(/\.switch-control\[role="switch"\]::after\s*\{[^}]*background:\s*var\(--primary\)/);
-    expect(shell).toMatch(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{[^}]*transform:\s*translateX\(22px\)[^}]*width:\s*28px/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{[^}]*transform:\s*translateX\(18px\)[^}]*width:\s*28px[^}]*height:\s*28px/);
   });
 
   it('defines the Material 3 color roles and shape scale', () => {

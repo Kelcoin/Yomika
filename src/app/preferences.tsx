@@ -152,3 +152,8 @@ export function useCardStyle(): { cardStyle: PreferenceSnapshot['cardStyle']; se
 export function useDetailActions() {
   return useContext(PreferencesContext)?.preferences.detailActions ?? DEFAULT_PREFERENCES.detailActions;
 }
+
+/** Which time fact the detail overview prints; same fallback as above. */
+export function useDetailDateKind() {
+  return useContext(PreferencesContext)?.preferences.detailDateKind ?? DEFAULT_PREFERENCES.detailDateKind;
+}

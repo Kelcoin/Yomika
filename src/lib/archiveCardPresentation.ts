@@ -116,6 +116,13 @@ export function archiveCategoryKey(archive: { tags?: readonly string[] | undefin
   return CATEGORY_ACCENT_KEYS[value] ?? '';
 }
 
+/** The accent key for a raw category/reclass tag value, e.g. `manga` → `Manga`.
+ * The detail overview chips share the card chips' colours by carrying this as
+ * their data-category attribute. */
+export function categoryAccentKey(value: string): string {
+  return CATEGORY_ACCENT_KEYS[value.trim().toLowerCase()] ?? '';
+}
+
 /** The category a card shows.
  *
  * LANraragi's own categories come first, because that is what the user actually

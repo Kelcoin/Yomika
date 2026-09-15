@@ -6,9 +6,9 @@ import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
 import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
-import { LoadingIndicator } from './LoadingIndicator';
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
 import { formatByteSize } from '../lib/archiveCardPresentation';
+import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
 import { categorizeSearchableTags } from '../lib/tags';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { TagSearchLink } from './TagSearchLink';
@@ -32,6 +32,9 @@ const WEBTOON_MAX_WIDTH = 900;
  * dismissing click was forgotten. Every press inside them starts the count
  * again. */
 const CHROME_AUTO_HIDE_MS = 4_500;
+/** Readoshi's page pill only borrows a moment over the artwork after a page
+ * turn; long enough to read "3–4 / 82" and short enough to get out of the way. */
+const INDICATOR_FLASH_MS = 1_800;
 
 /** One of the two derived renditions, as the reader sees it. */
 export interface EnhancementSwitch {
@@ -81,13 +84,23 @@ interface ReaderScreenProps {
  * These used to share a branch — anything not yet loaded rendered as "页面加载
  * 失败" — which is why turning a page announced a failure and then quietly
  * showed the page. They are now distinct, and a page is only called failed once
- * its retries are actually spent.
- *
- * Loading is the app's own indicator rather than a second animation invented for
- * the reader: two different spinners for the same idea, one of them a bare circle,
- * only raised the question of what the circle meant. */
+ * its retries are actually spent. */
+/** The reader's loading mark, drawn as the Material 3 circular indicator: a
+ * faint full track plus one active arc whose head sweeps out while its tail
+ * follows, on a steadily rotating container — rounded caps, primary ink. */
+function ReaderPageLoader() {
+  return (
+    <div className="reader-page-loader" role="status" aria-label="正在加载">
+      <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+        <circle className="reader-loader-track" cx="24" cy="24" r="20" />
+        <circle className="reader-loader-arc" cx="24" cy="24" r="20" />
+      </svg>
+    </div>
+  );
+}
+
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
-  if (!failed) return <div className="reader-page-status"><LoadingIndicator label="正在加载" /></div>;
+  if (!failed) return <div className="reader-page-status"><ReaderPageLoader /></div>;
   return (
     <div className="reader-page-status is-failed">
       <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
@@ -843,6 +856,89 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const chromeVisible = state.phase === 'chrome-visible';
   const topChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'top';
   const bottomChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'bottom';
+  // The reader route has no app title bar, so on Windows it carries its own
+  // window maximize control, top-right — rendered only inside the chrome
+  // header, so an unobstructed read never shows window chrome over the page.
+  const windowApi = useWindowControls();
+  const windowMaximized = useWindowMaximized(windowApi);
+  const renderWindowMaximize = () => windowApi ? (
+    <button
+      type="button"
+      className="reader-icon-button"
+      aria-label={windowMaximized ? '还原窗口' : '最大化窗口'}
+      title={windowMaximized ? '还原窗口' : '最大化窗口'}
+      onClick={(event) => { event.stopPropagation(); void windowApi.toggleMaximize().catch(() => {}); }}
+    ><WindowGlyph kind={windowMaximized ? 'restore' : 'maximize'} /></button>
+  ) : null;
+  /** The Readoshi page pill: what is on screen and out of how many, spread
+   * ranges joined with an en dash. It sits outside the auto-hiding chrome so
+   * the number survives immersive reading, and ignores the pointer entirely
+   * so a tap meant for the page never lands on it. */
+  const indicatorIndexes = effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes;
+  const shownIndexes = (indicatorIndexes.length > 0 ? indicatorIndexes : [state.pageIndex]).filter((index) => index >= 0 && index < pages.length);
+  const pageIndicator = pages.length === 0 ? '' : `${shownIndexes.map((index) => index + 1).join('–')} / ${pages.length}`;
+  /** The pill avoids the page the way Readoshi's did: it rests in the bottom
+   * letterbox when the image fills the width (top/bottom gaps), drops to the
+   * bottom-right corner when the image fills the height (side gaps), and fades
+   * out entirely in continuous mode or while zoomed — zooming back to 100%
+   * brings it back. Measured off the real images: object-fit means the drawn
+   * rect is the element's own.
+   *
+   * When even the corner still sits on the artwork (the image covers the
+   * bottom-right too), no placement can be clear — Readoshi's answer is
+   * overlap detection: the pill then only flashes after a page turn and goes
+   * quiet until the next one. */
+  const [indicatorPlacement, setIndicatorPlacement] = useState<'bottom' | 'corner'>('bottom');
+  const [indicatorOverlaps, setIndicatorOverlaps] = useState(false);
+  const [indicatorFlash, setIndicatorFlash] = useState(true);
+  useEffect(() => {
+    if (effectiveLayout === 'webtoon' || zoom.scale > 1 || pages.length === 0) return;
+    // Retained readers keep their panels mounted, so every query scopes to this
+    // screen's own root — document-level selectors would measure another
+    // reader's hidden pill and images.
+    const root = rootRef.current;
+    const measure = () => {
+      const images = Array.from(root?.querySelectorAll<HTMLElement>('.reader-frame[aria-label="分页阅读"] img') ?? []);
+      let union: DOMRect | undefined;
+      for (const image of images) {
+        const rect = image.getBoundingClientRect();
+        if (rect.width <= 0) continue;
+        union = union ? new DOMRect(Math.min(union.x, rect.x), Math.min(union.y, rect.y), Math.max(union.right, rect.right) - Math.min(union.x, rect.x), Math.max(union.bottom, rect.bottom) - Math.min(union.y, rect.y)) : rect;
+      }
+      if (!union) return;
+      const bottomGap = window.innerHeight - union.bottom;
+      setIndicatorPlacement(bottomGap >= 44 ? 'bottom' : 'corner');
+      // Overlap is the pill's own rect (whatever placement it settled into —
+      // the settle pass below runs after the placement transition) against the
+      // drawn image union.
+      const pill = root?.querySelector('.reader-page-indicator');
+      if (!pill) return;
+      const rect = pill.getBoundingClientRect();
+      setIndicatorOverlaps(rect.left < union.right && rect.right > union.left && rect.top < union.bottom && rect.bottom > union.top);
+    };
+    // Two passes: the zoom reset eases the image back over 140ms, so a single
+    // frame after the state flip still reads the shrinking rect, and the pill
+    // itself slides between placements over ~200ms. A third watch: pages grow
+    // to their real size as their images finish loading, which fires this
+    // observer — without it the first pass measured an empty slot and the
+    // placement stayed stale until the next turn.
+    const frame = requestAnimationFrame(measure);
+    const settle = window.setTimeout(measure, 240);
+    // The img element is what actually resizes when a page finishes loading
+    // (its box is the drawn object-fit rect; frames and the track stay
+    // viewport-sized), so the observer watches the page images themselves.
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    if (observer && root) for (const img of root.querySelectorAll('.reader-frame img')) observer.observe(img);
+    return () => { cancelAnimationFrame(frame); window.clearTimeout(settle); observer?.disconnect(); };
+  }, [effectiveLayout, pages.length, viewport.width, viewport.height, visibleIndexes, zoom.scale]);
+  // Every page turn re-shows the pill for a moment. Where it rests in a
+  // letterbox this changes nothing (it is persistent anyway); over the artwork
+  // it is exactly Readoshi's brief flash, after which the pill goes quiet.
+  useEffect(() => {
+    setIndicatorFlash(true);
+    const timer = window.setTimeout(() => setIndicatorFlash(false), INDICATOR_FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [state.pageIndex]);
   // One transform for the slots on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. It sits
   // *inside* the current frame rather than on the track that carries all three —
@@ -984,6 +1080,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                 <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
               <strong>{title}</strong>
               {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
+              {renderWindowMaximize()}
               <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
             </motion.header>
           )}
@@ -1095,6 +1192,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </aside>
         </div>
       )}
+      {pages.length > 0 && (() => {
+        // Overlapping artwork + flash expired → the pill goes quiet until the
+        // next page turn; letterbox placements stay persistent as before.
+        const placement = effectiveLayout === 'webtoon' || zoom.scale > 1 || (indicatorOverlaps && !indicatorFlash)
+          ? 'hidden'
+          : indicatorPlacement;
+        return (
+          <div
+            className={`reader-page-indicator${bottomChromeVisible ? ' is-raised' : ''}`}
+            data-placement={placement}
+            aria-hidden="true"
+          >{pageIndicator}</div>
+        );
+      })()}
     </main>
   );
 }

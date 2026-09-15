@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
-  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, ChevronDown, ChevronRight, Copy,
+  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, ChevronDown, ChevronRight, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Lock, Check, Minus,
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
-  SlidersHorizontal, Sparkles, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints,
+  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge,
 } from 'lucide-react';
 import { pickDirectory } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
@@ -194,7 +194,7 @@ function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle }: {
 /** A numeric setting, edited with a stepper around the same input the old rows
  * used. Half-typed values still pass through untouched: autosave, not the
  * stepper, decides what is valid. */
-function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, onChange }: {
+function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, onChange, disabled }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
@@ -204,12 +204,16 @@ function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, 
   step?: number;
   format?: ((value: number) => string) | undefined;
   onChange: (value: number) => void;
+  disabled?: boolean | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const clamp = (next: number) => Math.min(max, Math.max(min, next));
   return (
     <>
-      <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={() => setOpen(true)} ariaLabel={label} expanded={open} />
+      {/* A locked number keeps its row but not its affordance: no chevron
+          behaviour to press, the value simply sits there until the switch
+          above it unlocks. */}
+      <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
       {open && (
         <SettingsMenu title={label} description={hint} onClose={() => setOpen(false)}>
           <div className="settings-menu-stepper">
@@ -876,6 +880,15 @@ export function SettingsWorkspace() {
               />
             )}
             {selectedSettingsSection === 'settings-general' && (
+              <SettingsSwitch
+                icon={<Shuffle />}
+                label="随机漫游显示已读完"
+                hint="关闭后，首页随机漫游隐藏已读完的档案，并继续抽取直到占满一整排"
+                checked={preferenceDraft.randomRoamShowFinished}
+                onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-general' && (
               <SettingsPanel
                 icon={<FolderOpen />}
                 label="下载目录"
@@ -1047,18 +1060,6 @@ export function SettingsWorkspace() {
                   })}
                 </div>
                 <p className="settings-menu-desc">带锁的档案库与设置固定显示，不受勾选影响。</p>
-              </SettingsPanel>
-            )}
-            {selectedSettingsSection === 'settings-appearance' && (
-              <SettingsPanel icon={<ListChecks />} label="详情页功能按钮" hint="选择详情页显示的操作；其他操作仍可从右上角菜单打开" ariaLabel="详情页功能按钮" value={`${preferenceDraft.detailActions.length} 项`}>
-                <div className="settings-menu-checks">
-                  {DETAIL_ACTIONS.map((action) => {
-                    const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
-                    const included = preferenceDraft.detailActions.includes(action);
-                    const locked = action === 'read';
-                    return <button key={action} type="button" role="checkbox" disabled={locked} aria-checked={locked || included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${locked || included ? ' is-checked' : ''}${locked ? ' is-pinned' : ''}`} onClick={() => { if (!locked) editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) }); }}><span>{labels[action]}</span>{locked ? <span aria-hidden="true">锁定</span> : included && <Check aria-hidden="true" />}</button>;
-                  })}
-                </div>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-appearance' && (
@@ -1255,6 +1256,32 @@ export function SettingsWorkspace() {
               </SettingsPanel>
             )}
             </div>
+            {/* 详情页两项单独成组：功能按钮与时间格式都属于「详情页长什么样」，
+                与配色等外观微调分开摆放。 */}
+            {selectedSettingsSection === 'settings-appearance' && (
+              <div className="settings-group">
+                <SettingsPanel icon={<ListChecks />} label="详情页功能按钮" hint="选择详情页显示的操作；其他操作仍可从右上角菜单打开" ariaLabel="详情页功能按钮" value={`${preferenceDraft.detailActions.length} 项`}>
+                  <div className="settings-menu-checks">
+                    {DETAIL_ACTIONS.map((action) => {
+                      const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
+                      const included = preferenceDraft.detailActions.includes(action);
+                      const locked = action === 'read';
+                      return <button key={action} type="button" role="checkbox" disabled={locked} aria-checked={locked || included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${locked || included ? ' is-checked' : ''}${locked ? ' is-pinned' : ''}`} onClick={() => { if (!locked) editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) }); }}><span>{labels[action]}</span>{locked ? <Lock aria-hidden="true" /> : included && <Check aria-hidden="true" />}</button>;
+                    })}
+                  </div>
+                </SettingsPanel>
+                <SettingsChoice
+                  icon={<CalendarClock />}
+                  label="详情页时间"
+                  hint="详情页信息栏第四项显示的时间"
+                  value={preferenceDraft.detailDateKind}
+                  options={[{ value: 'published', label: '发布时间' }, { value: 'added', label: '添加时间' }]}
+                  onChange={(value) => editPreferences({ detailDateKind: value as PreferenceSnapshot['detailDateKind'] })}
+                >
+                  <PreferenceRadioFallback name="detail-date-kind" value={preferenceDraft.detailDateKind} options={[['published', '发布时间'], ['added', '添加时间']]} onChange={(value) => editPreferences({ detailDateKind: value as PreferenceSnapshot['detailDateKind'] })} />
+                </SettingsChoice>
+              </div>
+            )}
             {/* SFW 单独成组：内容保护开关不与外观微调混在一起，置底独立可辨。 */}
             {selectedSettingsSection === 'settings-appearance' && (
               <div className="settings-group">
@@ -1288,6 +1315,26 @@ export function SettingsWorkspace() {
                   options={upscaleModelOptions}
                   onChange={(value) => editPreferences({ upscaleModel: value })}
                   optionAction={(option) => runnableModels?.some((model) => model.id === option.value) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>}
+                />
+                <SettingsSwitch
+                  icon={<WandSparkles />}
+                  label="自动开启超分"
+                  hint="档案平均每页体积达到阈值时，进入阅读即自动开启本次的超分"
+                  disabled={!upscaleOn}
+                  checked={preferenceDraft.upscaleAutoEnable}
+                  onToggle={() => editPreferences({ upscaleAutoEnable: !preferenceDraft.upscaleAutoEnable })}
+                />
+                <SettingsNumber
+                  icon={<Gauge />}
+                  label="超分开启阈值"
+                  hint="平均每页体积（体积 ÷ 页数）达到该值时自动开启，单位 KB"
+                  value={Math.round(preferenceDraft.upscaleAutoThresholdBytes / 1024)}
+                  min={64}
+                  max={8192}
+                  step={64}
+                  format={(value) => `${value} KB`}
+                  disabled={!preferenceDraft.upscaleAutoEnable}
+                  onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
                 {!runnableModels?.length && (
                   <p className="server-list-message" role="status">{runnableModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</p>
