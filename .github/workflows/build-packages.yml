@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag of the app release to publish (e.g. app-v0.1.0). Leave empty to only publish Actions artifacts.'
+        description: 'Tag of the release to publish to: `app-test` is the rolling test draft, `app-v*` are real releases. Leave empty to build without publishing.'
         required: false
+        default: 'app-test'
         type: string
       draft:
         description: 'Create a draft release instead of publishing right away'
@@ -27,6 +28,12 @@ on:
 #   windows: artifacts/yomika-windows.zip
 #   android: src-tauri/gen/android/app/build/outputs/**/*
 #   ios:     artifacts/Yomika-unsigned.ipa
+#
+# 产物名与发布方式：每个包叫 yomika-<版本>-<平台>-<短commit>.<扩展名>（版本取自
+# src-tauri/tauri.conf.json），旁边放一个同名 .sha256，并且会把哈希写进 run 摘要。
+# 发布统一走 .github/scripts/publish-assets.sh，它只清掉**本平台**的旧产物，所以三个
+# 作业可以并发，而 release 里最终只剩最新一次构建。默认目标是滚动更新的测试草稿
+# release `app-test`；正式发布仍然由 app-v* 标签（或手动填 tag）指定。
 
 permissions:
   contents: read
@@ -72,15 +79,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
           Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
-      - name: Attach the Windows package to the release
+      - name: Publish the Windows package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          bash .github/scripts/ensure-release.sh "${{ needs.prepare-release.outputs.tag }}" "${{ needs.prepare-release.outputs.draft }}"
-          gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-windows.zip --clobber
+          bash .github/scripts/publish-assets.sh \
+            "${{ needs.prepare-release.outputs.tag }}" \
+            "${{ needs.prepare-release.outputs.draft }}" \
+            windows-x64 artifacts/yomika-windows.zip
 
   android:
     needs: [prepare-release]
@@ -138,7 +147,7 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: npx tauri android build --ci --apk --aab --target aarch64
-      - name: Attach the Android packages to the release
+      - name: Publish the Android packages to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,17 +155,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          tag="${{ needs.prepare-release.outputs.tag }}"
-          bash .github/scripts/ensure-release.sh "$tag" "${{ needs.prepare-release.outputs.draft }}"
           apk=$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -print -quit)
           test -n "$apk"
           cp "$apk" artifacts/yomika-arm64-v8a.apk
-          gh release upload "$tag" artifacts/yomika-arm64-v8a.apk --clobber
+          packages=(artifacts/yomika-arm64-v8a.apk)
           aab=$(find src-tauri/gen/android/app/build/outputs -name '*.aab' -print -quit || true)
           if [ -n "$aab" ]; then
             cp "$aab" artifacts/yomika-arm64-v8a.aab
-            gh release upload "$tag" artifacts/yomika-arm64-v8a.aab --clobber
+            packages+=(artifacts/yomika-arm64-v8a.aab)
           fi
+          bash .github/scripts/publish-assets.sh \
+            "${{ needs.prepare-release.outputs.tag }}" \
+            "${{ needs.prepare-release.outputs.draft }}" \
+            android-arm64-v8a "${packages[@]}"
 
   ios-unsigned:
     needs: [prepare-release]
@@ -234,17 +245,18 @@ jobs:
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app
           (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)
-      - name: Attach the iOS package to the release
+      - name: Publish the iOS package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ needs.prepare-release.outputs.tag }}"
-          bash .github/scripts/ensure-release.sh "$tag" "${{ needs.prepare-release.outputs.draft }}"
-          cp artifacts/Yomika-unsigned.ipa "artifacts/yomika-arm64-unsigned.ipa"
-          gh release upload "$tag" artifacts/yomika-arm64-unsigned.ipa --clobber
+          cp artifacts/Yomika-unsigned.ipa artifacts/yomika-arm64-unsigned.ipa
+          bash .github/scripts/publish-assets.sh \
+            "${{ needs.prepare-release.outputs.tag }}" \
+            "${{ needs.prepare-release.outputs.draft }}" \
+            ios-arm64-unsigned artifacts/yomika-arm64-unsigned.ipa
 
   # 先建好草稿 release（有 tag 输入或推了 app-v* 标签时），三个构建平台再把各自的
   # 包直接传进去。以前是各平台传 Actions artifact、最后由一个 job 汇总，但那一步

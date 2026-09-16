@@ -15,6 +15,8 @@ if gh release view "$tag" > /dev/null 2>&1; then
 fi
 
 echo "Release $tag is missing; recreating it."
-args=("$tag" --title "Yomika $tag" --generate-notes --target "${GITHUB_SHA:?}")
+# GITHUB_SHA is what CI has; falling back to HEAD keeps the script runnable by hand.
+sha="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+args=("$tag" --title "Yomika $tag" --generate-notes --target "$sha")
 if [ "$draft" = "true" ]; then args+=(--draft); fi
 gh release create "${args[@]}"
