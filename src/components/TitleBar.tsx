@@ -23,7 +23,15 @@ export function TitleBar() {
         <YomikaMark size={18} />
       </span>
       <span className="titlebar-name" data-tauri-drag-region>Yomika</span>
-      <div className="titlebar-controls">
+      {/* 按钮区显式退出拖拽区域（Tauri 的拖拽脚本认这个属性），并拦住 mousedown
+          与双击：落在标题栏上的手势处理不该盖过按钮本身的一次点击，否则表现
+          就是「有时要点两下」。 */}
+      <div
+        className="titlebar-controls"
+        data-tauri-drag-region="false"
+        onMouseDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+      >
         <button className="titlebar-control" type="button" aria-label="最小化" title="最小化" onClick={() => { void api?.minimize().catch(() => {}); }}>
           <WindowGlyph kind="minimize" />
         </button>

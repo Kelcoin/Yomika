@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 
 function parse(value: string): Date {
@@ -12,25 +12,76 @@ function format(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 const labels = ['日', '一', '二', '三', '四', '五', '六'];
+const monthLabels = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
+
+/** 年份跨度按当前选中年份分组排列，一次显示 12 年，翻页步长也是 12。 */
+const YEARS_PER_PAGE = 12;
 
 export function DatePicker({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   const selected = useMemo(() => parse(value), [value]);
   const [open, setOpen] = useState(false);
+  /** 'days' 是日期网格，另外两档是快速跳年份/月份：只能靠左右箭头一个月一个
+   * 月地挪，跨年份时要按几十下，等于没有导航。 */
+  const [pane, setPane] = useState<'days' | 'months' | 'years'>('days');
   const [month, setMonth] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
+  const [yearPage, setYearPage] = useState(() => Math.floor(selected.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE);
+  const rootRef = useRef<HTMLDivElement>(null);
   const days = useMemo(() => {
     const first = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
     const count = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
     return [...Array(first).fill(null), ...Array.from({ length: count }, (_, i) => i + 1)];
   }, [month]);
-  return <div className="date-picker">
+  const years = useMemo(() => Array.from({ length: YEARS_PER_PAGE }, (_, index) => yearPage + index), [yearPage]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutside);
+    return () => document.removeEventListener('pointerdown', closeOnOutside);
+  }, [open]);
+
+  const toggle = () => {
+    setMonth(new Date(selected.getFullYear(), selected.getMonth(), 1));
+    setYearPage(Math.floor(selected.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE);
+    setPane('days');
+    setOpen((current) => !current);
+  };
+  const shiftYears = (delta: number) => setMonth(new Date(month.getFullYear() + delta, month.getMonth(), 1));
+  const shiftMonths = (delta: number) => setMonth(new Date(month.getFullYear(), month.getMonth() + delta, 1));
+
+  return <div className="date-picker" ref={rootRef}>
     <span className="date-picker-label">{label}</span>
-    <button type="button" className="date-picker-trigger" aria-label={label} aria-expanded={open} onClick={() => { setMonth(new Date(selected.getFullYear(), selected.getMonth(), 1)); setOpen((v) => !v); }}>
+    <button type="button" className="date-picker-trigger" aria-label={label} aria-expanded={open} onClick={toggle}>
       <CalendarDays aria-hidden="true" />{value}<ChevronRight aria-hidden="true" />
     </button>
     {open && <div className="date-picker-popover" role="dialog" aria-label={`${label}选择器`}>
-      <div className="date-picker-header"><button type="button" className="icon-button" aria-label="上个月" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}><ChevronLeft /></button><strong>{month.getFullYear()}年 {month.getMonth() + 1}月</strong><button type="button" className="icon-button" aria-label="下个月" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}><ChevronRight /></button></div>
-      <div className="date-picker-weekdays">{labels.map((item) => <span key={item}>{item}</span>)}</div>
-      <div className="date-picker-days">{days.map((day, index) => day === null ? <span key={`empty-${index}`} /> : <button type="button" key={day} className={day === selected.getDate() && month.getMonth() === selected.getMonth() && month.getFullYear() === selected.getFullYear() ? 'is-selected' : ''} onClick={() => { onChange(format(new Date(month.getFullYear(), month.getMonth(), day))); setOpen(false); }}>{day}</button>)}</div>
+      {pane === 'days' && <>
+        <div className="date-picker-header">
+          <button type="button" className="icon-button" aria-label="上一年" onClick={() => shiftYears(-1)}><ChevronLeft /><ChevronLeft aria-hidden="true" className="is-second" /></button>
+          <button type="button" className="date-picker-heading" aria-label="选择年月" onClick={() => setPane('months')}>{month.getFullYear()}年 {month.getMonth() + 1}月</button>
+          <button type="button" className="icon-button" aria-label="下一年" onClick={() => shiftYears(1)}><ChevronRight /><ChevronRight aria-hidden="true" className="is-second" /></button>
+        </div>
+        <div className="date-picker-weekdays">{labels.map((item) => <span key={item}>{item}</span>)}</div>
+        <div className="date-picker-days">{days.map((day, index) => day === null ? <span key={`empty-${index}`} /> : <button type="button" key={day} className={day === selected.getDate() && month.getMonth() === selected.getMonth() && month.getFullYear() === selected.getFullYear() ? 'is-selected' : ''} onClick={() => { onChange(format(new Date(month.getFullYear(), month.getMonth(), day))); setOpen(false); }}>{day}</button>)}</div>
+      </>}
+      {pane === 'months' && <>
+        <div className="date-picker-header">
+          <button type="button" className="icon-button" aria-label="上一年" onClick={() => shiftYears(-1)}><ChevronLeft /></button>
+          <button type="button" className="date-picker-heading" aria-label="选择年份" onClick={() => { setYearPage(Math.floor(month.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE); setPane('years'); }}>{month.getFullYear()}年</button>
+          <button type="button" className="icon-button" aria-label="下一年" onClick={() => shiftYears(1)}><ChevronRight /></button>
+        </div>
+        <div className="date-picker-grid is-months">{monthLabels.map((item, index) => <button type="button" key={item} className={index === month.getMonth() ? 'is-selected' : ''} onClick={() => { setMonth(new Date(month.getFullYear(), index, 1)); setPane('days'); }}>{item}</button>)}</div>
+      </>}
+      {pane === 'years' && <>
+        <div className="date-picker-header">
+          <button type="button" className="icon-button" aria-label="上十二年" onClick={() => setYearPage(yearPage - YEARS_PER_PAGE)}><ChevronLeft /></button>
+          <strong>{yearPage} — {yearPage + YEARS_PER_PAGE - 1}</strong>
+          <button type="button" className="icon-button" aria-label="下十二年" onClick={() => setYearPage(yearPage + YEARS_PER_PAGE)}><ChevronRight /></button>
+        </div>
+        <div className="date-picker-grid is-years">{years.map((year) => <button type="button" key={year} className={year === month.getFullYear() ? 'is-selected' : ''} onClick={() => { setMonth(new Date(year, month.getMonth(), 1)); setPane('months'); }}>{year}</button>)}</div>
+      </>}
       <div className="date-picker-footer"><button type="button" className="secondary-action" onClick={() => { onChange(format(new Date())); setOpen(false); }}>今天</button><button type="button" className="secondary-action" onClick={() => setOpen(false)}>取消</button></div>
     </div>}
   </div>;

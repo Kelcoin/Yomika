@@ -66,6 +66,18 @@ const DedupNonDuplicateRecordSchema = z.object({
   rightArchiveId: z.string().min(1),
   tombstoned: z.boolean(),
 });
+const DedupSessionSummarySchema = z.object({
+  sessionId: z.string().min(1),
+  scopeId: z.string().min(1),
+  status: z.enum(['running', 'cancelled', 'completed']),
+  archiveCount: z.number().int().nonnegative(),
+  pairCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+/** 已落库的扫描结果（保存/读取扫描结果用）：会话本身一直是持久的，这份摘要
+ * 让工作区能把它们列出来重新载入。 */
+export type DedupSessionSummary = z.infer<typeof DedupSessionSummarySchema>;
 export type DedupNonDuplicateRecord = z.infer<typeof DedupNonDuplicateRecordSchema>;
 export type DedupNonDuplicateInput = { scopeId: string; leftArchiveId: string; rightArchiveId: string };
 export type DedupDeletionOutcomeInput = z.infer<typeof DedupOutcomeSchema>;
@@ -92,7 +104,21 @@ export class NativeDedupRepository {
   }
   startScan(input: DedupStartScanInput) { return invokeCommand('dedup_start_scan', { input }, DedupScanSessionSchema); }
   scanChunk(input: DedupScanChunkInput) { return invokeCommand('dedup_scan_chunk', { input }, DedupScanSessionSchema); }
+  /** 待删选择：走独立命令，已完成的会话也能改（scan_chunk 只收运行中的会话）。 */
+  saveSelection(sessionId: string, selectedArchiveIds: string[]) {
+    return invokeCommand('dedup_save_selection', { sessionId, selectedArchiveIds }, VoidResponseSchema);
+  }
   scan(input: DedupScanInput): Promise<CommandResult<DedupScanProgress>> { return invokeCommand('dedup_scan', { input }, DedupScanProgressSchema); }
+  /** 扫描期间画进度条用；会话没在跑时后端回 null。 */
+  scanProgress(sessionId: string): Promise<CommandResult<DedupScanProgress | null>> {
+    return invokeCommand('dedup_scan_progress', { sessionId }, DedupScanProgressSchema.nullable());
+  }
+  listSessions(scopeId: string): Promise<CommandResult<DedupSessionSummary[]>> {
+    return invokeCommand('dedup_list_sessions', { scopeId }, z.array(DedupSessionSummarySchema));
+  }
+  deleteSession(sessionId: string): Promise<CommandResult<void>> {
+    return invokeCommand('dedup_delete_session', { sessionId }, VoidResponseSchema);
+  }
   cancelScan(sessionId: string) { return invokeCommand('dedup_cancel_scan', { sessionId }, DedupScanSessionSchema); }
   resumeScan(sessionId: string) { return invokeCommand('dedup_resume_scan', { sessionId }, DedupScanSessionSchema); }
   loadResult(sessionId: string) { return invokeCommand('dedup_load_result', { sessionId }, DedupLoadResultSchema); }

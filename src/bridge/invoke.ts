@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { DomainErrorSchema } from '../domain/errors';
 import { err, ok, type CommandResult } from '../domain/result';
+import { logError } from '../lib/errorLog';
 
 type InvokeAdapter = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -40,18 +41,22 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
     const parsed = ResultEnvelopeSchema.safeParse(payload);
 
     if (!parsed.success) {
+      logError(`bridge/${name}`, 'Native command returned an invalid response', { request });
       return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
     }
 
     if (!parsed.data.ok) {
+      // 失败的命令都要留下现场：这是设置页那份错误日志的主要来源。
+      logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
 
     const value = schema.safeParse(parsed.data.value);
-    return value.success
-      ? ok(value.data)
-      : err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
-  } catch {
+    if (value.success) return ok(value.data);
+    logError(`bridge/${name}`, 'Native command answer did not match its schema', { request });
+    return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
+  } catch (error) {
+    logError(`bridge/${name}`, 'Native command failed', { request, error: error instanceof Error ? error.message : String(error) });
     return err('UNKNOWN', 'Native command failed', true);
   }
 }
@@ -71,12 +76,21 @@ export async function invokeBinaryCommand<TRequest extends Record<string, unknow
     if (direct) return ok(direct);
 
     const parsed = ResultEnvelopeSchema.safeParse(payload);
-    if (!parsed.success) return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
-    if (!parsed.data.ok) return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
+    if (!parsed.success) {
+      logError(`bridge/${name}`, 'Native command returned an invalid response', { request });
+      return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
+    }
+    if (!parsed.data.ok) {
+      logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+      return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
+    }
 
     const bytes = toArrayBuffer(parsed.data.value);
-    return bytes ? ok(bytes) : err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
-  } catch {
+    if (bytes) return ok(bytes);
+    logError(`bridge/${name}`, 'Native command answer did not match its schema', { request });
+    return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
+  } catch (error) {
+    logError(`bridge/${name}`, 'Native command failed', { request, error: error instanceof Error ? error.message : String(error) });
     return err('UNKNOWN', 'Native command failed', true);
   }
 }

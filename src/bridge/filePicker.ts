@@ -1,9 +1,11 @@
 type FilePicker = () => Promise<string | null>;
 type MultiFilePicker = () => Promise<string[]>;
+type SavePicker = (defaultName: string) => Promise<string | null>;
 
 let testPicker: FilePicker | undefined;
 let testMultiPicker: MultiFilePicker | undefined;
 let testDirectoryPicker: FilePicker | undefined;
+let testSavePicker: SavePicker | undefined;
 
 export function setFilePickerForTests(picker: FilePicker): void {
   testPicker = picker;
@@ -17,10 +19,24 @@ export function setDirectoryPickerForTests(picker: FilePicker): void {
   testDirectoryPicker = picker;
 }
 
+export function setSavePickerForTests(picker: SavePicker): void {
+  testSavePicker = picker;
+}
+
 export function resetFilePickerForTests(): void {
   testPicker = undefined;
   testMultiPicker = undefined;
   testDirectoryPicker = undefined;
+  testSavePicker = undefined;
+}
+
+/** 导出用：让用户挑一个保存位置，取消返回 null。 */
+export async function pickSavePath(defaultName: string): Promise<string | null> {
+  if (testSavePicker) return testSavePicker(defaultName);
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const selected = await save({ defaultPath: defaultName });
+  return typeof selected === 'string' ? selected : null;
 }
 
 /** A directory, for installing a model bundle that is far too large to hand over

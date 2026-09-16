@@ -5,12 +5,13 @@ import {
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Lock, Check, Minus,
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
-  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge,
+  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
 } from 'lucide-react';
 import { pickDirectory } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
 import { EhRouteWorkspace } from './EhRouteWorkspace';
+import { ErrorLogPanel, useErrorLog } from './ErrorLogPanel';
 import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { YomikaMark } from './YomikaMark';
@@ -236,6 +237,22 @@ function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, 
   );
 }
 
+/** 关于页里的错误日志：和其他设置项同一套「一行 + 菜单」——行上显示本次运行记
+ * 了几条，点开才读取列表并给出刷新、导出。 */
+function ErrorLogSetting() {
+  const errorLog = useErrorLog();
+  const count = errorLog.entries?.length;
+  return <SettingsPanel
+    icon={<ScrollText />}
+    label="错误日志"
+    hint="本次运行记录到的错误；每次启动重新记录"
+    value={count === undefined ? '读取中' : `${count} 条`}
+    ariaLabel="错误日志"
+  >
+    <ErrorLogPanel state={errorLog} />
+  </SettingsPanel>;
+}
+
 /** A setting edited through an arbitrary block of controls — text areas, file
  * pickers, cache reports. */
 function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children }: {
@@ -407,7 +424,8 @@ export function SettingsWorkspace() {
    * closed row would say 未登录 about an account that is signed in. */
   const [ehAccountName, setEhAccountName] = useState<string>();
   useEffect(() => {
-    if (selectedSettingsSection !== 'settings-eh') return;
+    // 同步一节也要它：收藏同步删除没有登录账户就开不了。
+    if (!['settings-eh', 'settings-sync'].includes(selectedSettingsSection)) return;
     let active = true;
     void new NativeEhRepository().listAccounts().then((result) => {
       if (!active || !result.ok) return;
@@ -1125,8 +1143,10 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<HeartOff />}
                 label="同步删除 E-Hentai 收藏"
-                hint="删除档案时一并删除对应的 E-Hentai 收藏"
+                hint={ehAccountName ? '删除档案时一并删除对应的 E-Hentai 收藏' : '需要先登录 E-Hentai 账户；没登录时删除档案不会动收藏'}
                 checked={preferenceDraft.ehFavoriteDeleteSync}
+                /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
+                disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
                 onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
               />
             )}
@@ -1486,6 +1506,20 @@ export function SettingsWorkspace() {
               missing row than a licence the app made up on its behalf. */}
           {APP_LICENSE && <SettingsRow icon={<Scale />} label="开源协议" value={APP_LICENSE} trailing="none" />}
           <SettingsRow icon={<Blocks />} label="构建于" value="Tauri 2 · React 18 · SQLite" trailing="none" />
+          <div className="settings-item">
+            <button className="settings-row settings-row-button" type="button" aria-label="LANraragi 文档" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')}>
+              <span className="settings-row-icon" aria-hidden="true"><BookOpenText /></span>
+              <span className="settings-row-copy">
+                <span className="settings-row-label">LANraragi 文档</span>
+                <span className="settings-row-hint">在浏览器中打开 LANraragi 的使用文档</span>
+              </span>
+              <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
+            </button>
+          </div>
+          {/* 错误日志是这一组里的一行（行上是状态，点开才是记录）：必须留在组框里，
+              挂到框外面它就没有容器了。 */}
+          <ErrorLogSetting />
+          {/* 仓库地址放在这一组的最后一行。 */}
           {APP_REPOSITORY && (
             <div className="settings-item">
               <button className="settings-row settings-row-button" type="button" aria-label="仓库地址" onClick={() => void openAboutLink(APP_REPOSITORY)}>
@@ -1498,16 +1532,6 @@ export function SettingsWorkspace() {
               </button>
             </div>
           )}
-          <div className="settings-item">
-            <button className="settings-row settings-row-button" type="button" aria-label="LANraragi 文档" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')}>
-              <span className="settings-row-icon" aria-hidden="true"><BookOpenText /></span>
-              <span className="settings-row-copy">
-                <span className="settings-row-label">LANraragi 文档</span>
-                <span className="settings-row-hint">在浏览器中打开 LANraragi 的使用文档</span>
-              </span>
-              <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
-            </button>
-          </div>
         </div>
       </section>
       )}

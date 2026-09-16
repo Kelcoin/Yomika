@@ -6,6 +6,7 @@ mod db;
 mod dedup;
 mod diagnostics;
 mod domain;
+mod error_log;
 mod inference;
 mod model_release;
 mod network;
@@ -17,6 +18,7 @@ use cache::{
 };
 use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
+use error_log::{error_log_append, error_log_export, error_log_read};
 use commands::library::{
     add_archive_to_category, check_server_status, create_task, delete_archive,
     delete_search_preset, download_archive, download_url, list_archives, list_archives_by_ids,
@@ -40,10 +42,12 @@ use commands::sync::{
 };
 use db::Database;
 use dedup::{
-    dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_find_exact,
-    dedup_import_readoshi, dedup_list_non_duplicates, dedup_load_result, dedup_remove_non_duplicate,
-    dedup_resume_scan,
-    dedup_save_feature, dedup_save_non_duplicate, dedup_scan, dedup_scan_chunk, dedup_start_scan,
+    dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
+    dedup_find_exact, dedup_import_readoshi, dedup_list_non_duplicates, dedup_list_sessions,
+    dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature,
+    dedup_save_non_duplicate, dedup_save_selection, dedup_scan, dedup_scan_chunk,
+    dedup_scan_progress, dedup_start_scan,
+    DedupScanRegistry,
 };
 use inference::{
     inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale,
@@ -67,8 +71,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             data_paths::prepare(app.handle()).map_err(std::io::Error::other)?;
+            // 错误日志描述的是这一次运行：先清空，再挂上 panic 钩子。
+            error_log::reset(app.handle());
+            error_log::install_panic_hook(app.handle());
             let database = Database::open(app.handle()).map_err(std::io::Error::other)?;
             app.manage(database);
+            app.manage(DedupScanRegistry::default());
             let config = app
                 .config()
                 .app
@@ -207,6 +215,10 @@ pub fn run() {
             dedup_start_scan,
             dedup_scan_chunk,
             dedup_scan,
+            dedup_scan_progress,
+            dedup_save_selection,
+            dedup_list_sessions,
+            dedup_delete_session,
             dedup_cancel_scan,
             dedup_resume_scan,
             dedup_load_result,
@@ -216,7 +228,10 @@ pub fn run() {
             dedup_import_readoshi,
             dedup_list_non_duplicates,
             import_legacy_export,
-            import_worker_export
+            import_worker_export,
+            error_log_append,
+            error_log_read,
+            error_log_export
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yomika");

@@ -459,45 +459,51 @@ body::-webkit-scrollbar,
 /* The app's one loading indicator. Routes used to invent their own — a bare
    "正在加载…" line in one place, an empty state claiming 没有档案 in another —
    and the second is a lie while a request is still in flight. */
+/* Material 3's circular indicator: a faint full track, one active arc (4dp
+   stroke, round caps) whose head grows while the tail follows, all on a
+   container rotating one turn per dash cycle. Drawn in currentColor, so a
+   surface that themes itself (the reader's dark canvas) only has to set a colour
+   — there is no second mark to keep in step. */
 .loading-indicator {
   display: grid;
   place-items: center;
-  gap: var(--space-3);
   padding: var(--space-8) 0;
-  color: var(--ink-secondary);
+  color: var(--brand-vermilion);
 }
 
 .loading-indicator svg {
   width: 48px;
   height: 48px;
-  stroke: var(--brand-vermilion);
+  animation: loading-indicator-spin 1.6s linear infinite;
 }
+
+.loading-indicator-track {
+  fill: none;
+  stroke: color-mix(in srgb, currentColor 24%, transparent);
+  stroke-width: 4;
+}
+
+.loading-indicator-arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 4;
+  stroke-linecap: round;
+  transform-origin: center;
+  animation: loading-indicator-dash 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes loading-indicator-dash {
+  0% { stroke-dasharray: 8 118; stroke-dashoffset: 0; }
+  35% { stroke-dasharray: 94 32; stroke-dashoffset: -18; }
+  70% { stroke-dasharray: 20 106; stroke-dashoffset: -100; }
+  100% { stroke-dasharray: 8 118; stroke-dashoffset: -126; }
+}
+
+@keyframes loading-indicator-spin { to { transform: rotate(360deg); } }
 
 .loading-indicator.is-sm svg { width: 28px; height: 28px; }
 .loading-indicator.is-lg svg { width: 72px; height: 72px; }
 .loading-indicator.is-sm { padding: var(--space-4) 0; }
-
-/* Three leaves of a turning page, each a third of the cycle behind the last, so
-   the motion reads as paging rather than as a generic spinner. */
-.loading-leaf {
-  transform-box: fill-box;
-  transform-origin: right center;
-  animation: page-leaf 1.4s ease-in-out infinite;
-}
-
-.loading-leaf:nth-of-type(2) {
-  transform-origin: left center;
-  animation-delay: 0.47s;
-}
-
-.loading-spine {
-  opacity: 0.45;
-}
-
-@keyframes page-leaf {
-  0%, 100% { transform: scaleX(1); opacity: 0.35; }
-  50% { transform: scaleX(0.1); opacity: 1; }
-}
 
 .toast-stack { position: fixed; z-index: var(--z-overlay); right: var(--space-5); bottom: calc(28px + var(--space-6)); display: grid; gap: var(--space-2); width: min(420px, calc(100vw - 32px)); pointer-events: none; }
 /* Material 3 snackbar on the theme's own tonal scale: the highest container
@@ -506,7 +512,8 @@ body::-webkit-scrollbar,
    shape plus the state role, both readable on the container in either theme. */
 .toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter 220ms var(--ease-standard) both; }
 .toast-card.is-closing { animation: toast-exit 220ms var(--ease-standard) both; }
-.toast-icon { display: grid; place-items: center; color: var(--primary); }
+/* 图标带一层语义色的圆底：三个标记长得像一组，而不是三个随便挑的图标。 */
+.toast-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 14%, transparent); color: var(--primary); }
 .toast-card.is-success .toast-icon { color: var(--success); }
 .toast-card.is-error .toast-icon { color: var(--error); }
 .toast-icon svg { width: 18px; height: 18px; }
@@ -518,6 +525,34 @@ body::-webkit-scrollbar,
 
 .scroll-to-top:hover { color: var(--brand-vermilion); transform: translateY(-2px); }
 .scroll-to-top svg { width: 19px; height: 19px; }
+
+/* 错误日志菜单里的内容：一行状态 + 刷新/导出，下面是本次运行的记录。菜单面板
+   （.settings-choice-panel）已经是这一块的框，所以这里只排内容。 */
+.error-log-panel { display: grid; gap: var(--space-3); min-width: 0; }
+.error-log-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.error-log-summary { margin: 0; min-width: 0; color: var(--ink-secondary); font-size: var(--text-sm); }
+.error-log-actions { display: flex; flex: none; gap: var(--space-2); }
+/* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */
+.error-log-list {
+  display: grid;
+  max-height: min(52vh, 460px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-container-low);
+  list-style: none;
+}
+/* 严重程度走左侧一条色带（inset 阴影，不占布局），行与行之间只留发丝线。 */
+.error-log-entry { display: grid; gap: 4px; padding: var(--space-3); border-bottom: 1px solid var(--hairline); box-shadow: inset 3px 0 0 var(--state-danger); }
+.error-log-entry:last-child { border-bottom: 0; }
+.error-log-entry.is-warn { box-shadow: inset 3px 0 0 var(--state-warning); }
+.error-log-meta { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; color: var(--ink-faint); font-size: var(--text-xs); }
+.error-log-time { flex: none; font-variant-numeric: tabular-nums; }
+.error-log-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.error-log-message { color: var(--on-surface); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.error-log-detail { color: var(--ink-secondary); font-family: var(--font-utility); font-size: var(--text-xs); line-height: 1.5; overflow-wrap: anywhere; }
 
 .settings-page {
   min-width: 0;
@@ -1068,6 +1103,9 @@ body::-webkit-scrollbar,
   background: var(--primary);
   color: var(--on-primary);
   font-family: var(--font-body);
+  /* 三个动作类别的字号一致：主按钮少了这一行，就按继承来的 16px 默认字号
+     渲染，和旁边 13px 的次级按钮并排时像是两套控件。 */
+  font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1;
   cursor: pointer;
@@ -2104,19 +2142,9 @@ body::-webkit-scrollbar,
 
 /* A stroke-drawn tick, not a filled dot: the old solid centre read as a black
    blob over cover art. The drop shadow separates the stroke from the fill. */
-.archive-card-check::after {
-  content: "";
-  width: 9px;
-  height: 5px;
-  border-left: 2px solid currentColor;
-  border-bottom: 2px solid currentColor;
-  border-radius: 1px;
-  transform: rotate(-45deg) scale(0.4);
-  transform-origin: center;
-  filter: var(--shadow-check-ink);
-  transition: opacity var(--motion-fast), transform var(--motion-fast);
-  opacity: 0;
-}
+/* 选中不再画对勾：实心圆 + 外阴影已经说明状态，勾在同色圆面上几乎看不见，
+   反而像脏点。阴影负责把圆盘从任意封面上托起来。 */
+.archive-card-check::after { content: none; }
 
 .archive-row > .archive-card-check { top: 10px; left: 10px; }
 .archive-thumb-card-media > .archive-card-check { top: 10px; right: 10px; }
@@ -2134,18 +2162,13 @@ body::-webkit-scrollbar,
 .archive-row.is-selected .archive-card-check,
 .archive-row[aria-checked='true'] .archive-card-check,
 .archive-thumb-card.is-selected .archive-card-check,
-.archive-thumb-card[aria-checked='true'] .archive-card-check {
+.archive-thumb-card[aria-checked='true'] .archive-card-check,
+/* 查重成员卡复用同一个标记：整张卡也是勾选框，勾选态就靠这一条。 */
+.dedup-member.is-selected .archive-card-check,
+.dedup-member[aria-checked='true'] .archive-card-check {
   background: var(--primary);
-  box-shadow: inset 0 0 0 1.5px var(--primary);
+  box-shadow: var(--shadow-check-selected), inset 0 0 0 1.5px var(--primary);
   color: var(--on-primary);
-}
-
-.archive-row.is-selected .archive-card-check::after,
-.archive-row[aria-checked='true'] .archive-card-check::after,
-.archive-thumb-card.is-selected .archive-card-check::after,
-.archive-thumb-card[aria-checked='true'] .archive-card-check::after {
-  opacity: 1;
-  transform: scale(1);
 }
 
 /* The selection bar: a strip of its own above the list, because the actions in
@@ -3405,53 +3428,257 @@ body::-webkit-scrollbar,
 @media (max-width: 640px) { .archive-thumb-card-body { padding: 10px; } }
 @media (max-width: 420px) { .archive-list.is-thumbnail .archive-row-wrap.is-cover-wide { flex-basis: 180px; width: 180px; } }
 
-.dedup-workspace { max-width: 1180px; margin: 0 auto; }
-.dedup-workspace .toolbar-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto; align-items: end; gap: var(--space-3); }
-.dedup-workspace .toolbar-row label { display: grid; gap: 6px; min-width: 0; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
-.dedup-workspace .toolbar-row select,
-.dedup-workspace .toolbar-row input { width: 100%; min-width: 0; }
-.dedup-workspace .progress-line { padding: var(--space-3) 0; color: var(--ink-secondary); font-size: var(--text-sm); }
-.dedup-workspace .toolbar-row { padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
-.dedup-workspace .dedup-filters { margin-top: var(--space-3); background: var(--surface-muted); }
+/* .workspace-stack 本身没有样式，区块之间就会贴在一起：这里把工作区变成
+   带行距的网格，每张卡片之间留出空隙。 */
+.dedup-workspace { display: grid; align-content: start; gap: var(--space-5); max-width: min(100%, 1680px); margin: 0 auto; }
+/* 顶部三段式：检测范围 → 进度 → 本次扫描统计。每段一张卡，标题行右侧放动作，
+   与 Readoshi 的「范围面板 / 进度面板 / 统计面板」一致；不再有页首小标题。 */
+.dedup-workspace .dedup-section { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+.dedup-workspace .dedup-section-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.dedup-workspace .dedup-section-heading > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.dedup-workspace .dedup-section-heading strong { font-size: var(--text-lg); }
+.dedup-workspace .dedup-section-heading span { color: var(--ink-secondary); font-size: var(--text-sm); line-height: 1.5; }
+.dedup-workspace .dedup-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.dedup-workspace .dedup-scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: var(--space-3); }
+/* 标题留出与控件内文一致的左内边距：控件的圆角让「贴着边框」的标题看起来
+   像在控件左侧外面。 */
+.dedup-workspace .dedup-scope-grid label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
+.dedup-workspace .dedup-scope-grid select,
+.dedup-workspace .dedup-scope-grid input { width: 100%; min-width: 0; }
+.dedup-workspace .dedup-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.dedup-workspace .dedup-progress-head > div { display: grid; gap: 4px; min-width: 0; }
+.dedup-workspace .dedup-progress-head strong { font-size: var(--text-md); }
+/* 进度明细用项目正文字体：等宽工具字体只给编号用，中文句子在那套字体下
+   字重字形都对不上，看起来像「没使用项目指定字体」。 */
+.dedup-workspace .dedup-progress-head span { color: var(--ink-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.dedup-workspace .dedup-progress-value { flex: none; padding: 4px 10px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); color: var(--on-surface); font-weight: 700; font-variant-numeric: tabular-nums; }
+/* MD3 线性进度条：4dp 圆头轨道 + primary 填充；没有总数（枚举阶段）时用
+   不定量扫光条，让人看出它还在动。 */
+.dedup-workspace .dedup-progress-track { position: relative; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-container-highest); }
+.dedup-workspace .dedup-progress-fill { height: 100%; border-radius: var(--radius-pill); background: var(--primary); transition: width var(--motion-standard); }
+.dedup-workspace .dedup-progress-fill.is-indeterminate { width: 40%; animation: dedup-progress-sweep 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+@keyframes dedup-progress-sweep {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(260%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 100%; animation: none; opacity: 0.6; }
+}
+/* 九格排一行：auto-fit+minmax 在窄一点时会把最后一格挤到第二行，改成等分的
+   单行网格，格子自己收缩。 */
+.dedup-workspace .dedup-stats { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: var(--space-2); margin: 0; }
+/* 移动端：九格排成 3×3，格与格依然等宽，不再随着宽度一格一格地跳。 */
+.dedup-workspace .dedup-stat { padding: 10px 12px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); min-width: 0; }
+.dedup-workspace .dedup-stat dt { color: var(--ink-secondary); font-size: var(--text-xs); }
+.dedup-workspace .dedup-stat dd { margin: 4px 0 0; color: var(--on-surface); font-size: var(--text-md); font-weight: 700; font-variant-numeric: tabular-nums; }
+.dedup-workspace .progress-line { padding: var(--space-2) 0 0; color: var(--ink-secondary); font-size: var(--text-sm); }
+.dedup-workspace .dedup-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; gap: var(--space-3); }
+.dedup-workspace .dedup-filters label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
+.dedup-history-dialog { width: min(560px, 92vw); }
+.dedup-history-list { display: grid; gap: var(--space-2); max-height: 46vh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; list-style: none; }
+.dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
+.dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
+.dedup-history-list strong { display: block; font-size: var(--text-sm); }
+.dedup-history-list span { display: block; margin-top: 2px; color: var(--ink-secondary); font-size: var(--text-xs); }
+.dedup-history-actions { display: flex; flex: none; gap: var(--space-2); }
 .dedup-workspace .panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
-.dedup-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
-.dedup-group { position: relative; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
+/* 一组重复档案一张卡；成员行要放得下 64px 封面加标题，所以列宽下限抬到 320px。
+   min-width: 0 是必需的：网格项默认可被内容撑大，长标题会把卡片顶出网格。 */
+/* 组卡片按行排：每行是独立的 flex 行（列数由组件实测后写进 --group-columns），
+   放不满的那一行 justify-content: center 整行居中；卡片宽度按「满行列数」算，
+   所以不满的行只是两边留白，卡片不会变胖。align-self 钉在 start：默认 stretch
+   会把同一行的卡片撑到最高邻居那么高（一条 3 组的链旁边会变成空壳）。 */
+.dedup-group-rows { display: grid; align-content: start; gap: var(--space-4); }
+.dedup-group-row { display: flex; flex-wrap: nowrap; justify-content: center; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.dedup-group-row > .dedup-group { flex: 0 1 calc((100% - (var(--group-columns, 3) - 1) * var(--space-4)) / var(--group-columns, 3)); }
+.dedup-group-row > .dedup-chain { flex: 0 1 100%; }
+.dedup-chain > .dedup-group-rows { gap: var(--space-3); }
+.dedup-group { position: relative; min-width: 0; align-self: start; padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
 .dedup-group.is-selected { border-color: var(--state-warning); background: color-mix(in srgb, var(--state-warning) 10%, var(--surface-container-high)); }
-.dedup-group.is-page-gap-warning { border-color: var(--state-danger); background: color-mix(in srgb, var(--state-danger) 10%, var(--surface-container-high)); }
-.dedup-group-heading { display: flex; justify-content: space-between; width: 100%; margin-bottom: var(--space-2); border: 0; background: transparent; color: inherit; cursor: pointer; text-align: inherit; }
-.dedup-group > ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.dedup-group > ul > li { display: flex; align-items: center; justify-content: space-between; min-height: 42px; border-top: 1px solid var(--hairline); }
-.dedup-group > ul label { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.dedup-group > ul label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dedup-group > ul small { display: block; color: var(--ink-faint); font-size: var(--text-xs); }
+/* 组标题是一个真按钮（点它整组标记为不重复）：序号居中，来源是紧随其后的一个
+   图标（文件名 / 封面相似），悬停走和项目其它控件同一个状态层。 */
+.dedup-group-heading {
+  display: flex;
+  /* 只占文字那么宽（整行宽的胶囊在一张卡里像第二个标题栏，序号本身很短）。 */
+  width: fit-content;
+  margin-inline: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-bottom: var(--space-2);
+  padding: 0 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-low);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+.dedup-group-heading:hover { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, var(--surface-container-low)); }
+.dedup-group-heading[aria-pressed='true'] { border-color: var(--primary); background: var(--primary-container); color: var(--on-primary-container); }
+.dedup-group-source { display: grid; color: var(--ink-secondary); }
+.dedup-group-source svg { width: 15px; height: 15px; }
+/* 组内成员：每张卡都是一行「封面 + 文案」，整张卡就是勾选框。 */
+.dedup-group > ul { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.dedup-group > ul > li { min-width: 0; }
 .dedup-group > .icon-button { margin-top: var(--space-3); }
-.dedup-card-size-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: 2px; }
-.dedup-card-size { color: var(--ink-faint); font-size: var(--text-xs); }
-.dedup-smart-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.dedup-smart-tag { padding: 0 6px; min-height: 20px; line-height: 20px; border-radius: var(--radius-pill); font-size: var(--text-xs); font-weight: 600; background: var(--secondary-container); color: var(--on-secondary-container); }
+/* 固定高度 + 更大的封面：卡片等高才好看，标签区也因此有稳定的三行可排。 */
+/* content-visibility: 离屏卡片不参与布局与绘制；固定高度给出内在尺寸，滚动条
+   与卡片间距保持稳定。402 张卡片的长列表靠它把滚动成本压下来。 */
+.dedup-member {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 176px;
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  /* center：封面固定高度时上下留白相等（padding 12 上下 + 封面 152 = 卡片 176）。 */
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  height: 176px;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-container-low);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+.dedup-member:hover { border-color: var(--primary); }
+.dedup-member.is-selected,
+.dedup-member[aria-checked='true'] {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, var(--surface-container-low));
+}
+.dedup-member-cover { position: relative; display: block; }
+.dedup-member-cover .archive-thumb-card-media { width: 100px; height: 150px; border-radius: var(--radius-control); }
+.dedup-member-cover .archive-card-check { top: 6px; left: 6px; }
+/* 三行：标题 / 标签（吃掉剩余高度）/ 元信息，元信息因此永远贴着卡片底部。 */
+.dedup-member-copy { display: grid; grid-template-rows: auto 1fr auto; align-content: start; gap: 8px; min-width: 0; height: 100%; }
+.dedup-member-title { overflow: hidden; font-size: var(--text-sm); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* 三行标签槽：判定胶囊（渣翻/无修正…）排在标签前面，一起参与行排布。 */
+.dedup-member-tags { height: auto; max-height: 78px; gap: 6px; }
+.dedup-member-meta { display: flex; justify-content: space-between; gap: var(--space-2); color: var(--ink-faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+/* 与同组档案页数差过大的档案：标记它自己的页数。提醒原来在组标题右上角，
+   但需要人工核对的是这张卡，标在数字上才找得到人。 */
+.dedup-member-pages.is-flagged { color: var(--state-warning); font-weight: 700; }
+/* 判定胶囊保留各自颜色，并和普通标签区分开（更实的底、更重的字）。 */
+/* 判定胶囊用实色底 + 高对比文字：之前 26% 的淡色和普通标签几乎没差别。 */
+.dedup-signal-chip { font-weight: 700; }
+.dedup-signal-chip.is-warning { background: var(--state-warning); color: var(--on-warning); }
+.dedup-signal-chip.is-positive { background: var(--state-success); color: var(--on-success); }
 .dedup-smart-tag.is-warning { background: color-mix(in srgb, var(--state-warning) 16%, var(--surface-container-high)); color: var(--on-surface); }
 .dedup-smart-tag.is-positive { background: color-mix(in srgb, var(--state-success) 16%, var(--surface-container-high)); color: var(--on-surface); }
-.dedup-chain { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--hairline); border-radius: var(--radius-card); background: var(--surface-muted); }
-.dedup-chain .dedup-groups { grid-template-columns: 1fr; }
+/* 关联重复链：一条重复关系链上的多个组围在同一个区块里，标题行说明它是什么、
+   并提供「整条链一起标记」的动作。 */
+/* 一条链占满整行、链内多组并排：以前它只是网格里的一个格子，3 组的链会竖成
+   一根又高又窄的柱子，和其它组挤在一起看不出来是一条链。 */
+.dedup-chain { grid-column: 1 / -1; display: grid; align-content: start; align-self: start; gap: var(--space-3); padding: var(--space-4); border: 1px dashed var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-muted); }
+/* 链标头只剩一个按钮：序号写在按钮文字里，后面那行「N 组重复 · 整条链一起
+   标记为不重复」是每个链区块都在复述同一件事。 */
+.dedup-chain-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+/* 链内同样是按行排的 .dedup-group-rows。 */
+.dedup-chains { display: grid; gap: var(--space-4); }
 .dedup-confirm { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
 .dedup-confirm label { display: flex; align-items: center; gap: var(--space-2); }
 .dedup-confirm-actions { display: flex; gap: var(--space-2); }
 /* 不重复关系面板：持久化对直接列出，含导入的与手动标记的。 */
 .dedup-relations { display: grid; gap: var(--space-2); justify-items: start; }
-.dedup-relations-search { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); color: var(--on-surface); font-size: var(--text-sm); }
-.dedup-relations-search:focus { border-color: var(--brand); outline: none; }
-.dedup-relations-list { display: grid; gap: var(--space-1); width: 100%; max-height: 320px; overflow: auto; }
-.dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-1) var(--space-2); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
-.dedup-relations-list code { font-size: var(--text-xs); word-break: break-all; }
-.dedup-relations-list li.is-tombstoned code { opacity: 0.55; text-decoration: line-through; }
+.dedup-relations-dialog { width: min(680px, 94vw); }
+/* 档案概览对话框：阅读器那面面板原样搬过来，外壳让出它的边框与底色（对话框
+   自己已经有了），只把宽度和高度算好。 */
+.archive-overview-dialog { width: min(960px, 94vw); }
+.archive-overview-dialog .reader-overview {
+  width: 100%;
+  max-height: min(76vh, 720px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+/* 搜索框按项目的控件规范来：产品字体、控件高度、控件配色，字号和档案库、设置
+   页的输入框一样走继承（16px）。之前它自带 6px padding 和 13px 字号，比全应用
+   的输入框小一号，看着像没套上项目字体的原生控件。 */
+.dedup-relations-search {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  margin-bottom: var(--space-3);
+  padding: 0 12px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--control-background);
+  color: var(--control-text);
+  font-family: var(--font-body);
+}
+.dedup-relations-search:focus { border-color: var(--focus-ring); box-shadow: var(--focus-shadow); outline: none; }
+/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */
+.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46vh; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
+.dedup-relation-pair { display: grid; grid-template-columns: 34px 34px minmax(0, 1fr); align-items: center; gap: var(--space-2); min-width: 0; }
+.dedup-relation-cover { display: block; }
+.dedup-relation-cover .archive-thumb-card-media { width: 34px; height: 46px; border-radius: var(--radius-control); }
+.dedup-relation-titles { display: grid; gap: 2px; min-width: 0; }
+/* 标题是打开档案概览的按钮：悬停按 M3 的做法给一层状态层，不再是「变色 +
+   下划线」。状态层跟着标题的长度走——网格项默认拉满整列宽，短标题会得到一整条
+   底色。 */
+.dedup-relation-title {
+  display: block;
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 6px;
+  margin-inline: -6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
+}
+.dedup-relation-title:hover { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+.dedup-relation-title:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.dedup-relation-titles > .is-missing { justify-self: start; max-width: 100%; overflow: hidden; padding: 1px 6px; margin-inline: -6px; font-size: var(--text-sm); color: var(--ink-faint); text-overflow: ellipsis; white-space: nowrap; }
+/* 取消过标记的行退到后面：按钮已经写着「恢复标记」，行本身再长得一样就分不出
+   哪些关系还在生效。 */
+.dedup-relations-list li.is-tombstoned .dedup-relation-titles { opacity: 0.55; }
 .dedup-relations-list .secondary-action { flex: none; }
 .dedup-workspace .progress-line.is-warning { color: var(--state-danger); }
 .dedup-workspace .progress-line .icon-button { vertical-align: middle; }
-@media (max-width: 780px) {
-  .dedup-workspace .toolbar-row { grid-template-columns: 1fr 1fr; }
-  .dedup-workspace .toolbar-row .primary-action,
-  .dedup-workspace .toolbar-row .secondary-action,
-  .dedup-workspace .toolbar-row .danger-action { grid-column: span 2; }
+/* 查重页只有两套布局：>900px 是桌面（与应用的紧凑模式断点一致），≤900px 是
+   移动。中间宽度不再出现「按钮换行位置不同」这类半吊子排布。 */
+.dedup-workspace .dedup-section-heading { flex-wrap: nowrap; }
+/* 动作行在桌面也不换行：按钮自己成一行会让「开始扫描」掉到第二行，正是要消灭
+   的中间态。宽度不够时压缩的是说明文字，不是动作排布。 */
+.dedup-workspace .dedup-section-actions { flex-wrap: nowrap; }
+/* 按钮文字不换行：压缩的应该是标题旁的说明文字，不是按钮里的两个字。 */
+.dedup-workspace .dedup-section-actions > button { white-space: nowrap; flex: none; }
+.dedup-workspace .dedup-section-heading > div:first-child { min-width: 0; }
+
+@media (max-width: 900px) {
+  /* 标题与动作各占一行。动作区：主按钮（开始扫描）独占一行，次级按钮按内容宽度
+     换行铺满——三个一排、有「恢复扫描」时两两一排，不再用固定三列把第四个挤成
+     孤零零的第二行。 */
+  .dedup-workspace .dedup-section-heading { display: grid; gap: var(--space-3); }
+  .dedup-workspace .dedup-section-actions { display: flex; flex-wrap: wrap; width: 100%; gap: var(--space-2); }
+  .dedup-workspace .dedup-section-actions > button { flex: 1 1 auto; min-width: 0; padding: 0 var(--space-3); }
+  .dedup-workspace .dedup-section-actions > .primary-action { flex: 1 1 100%; order: -1; }
+  /* 三列两行：封面质量这类诊断数字留给桌面，手机上看的是两份名单本身。 */
+  .dedup-workspace .dedup-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dedup-workspace .dedup-stat.is-desktop-only { display: none; }
+  .dedup-workspace .dedup-filters { grid-template-columns: minmax(0, 1fr); }
+  .dedup-workspace .dedup-scope-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dedup-workspace .dedup-scope-grid .date-picker { min-width: 0; }
+  .dedup-group-row > .dedup-group { min-width: 0; }
 }
 
 .dedup-panel ul {
@@ -3977,7 +4204,8 @@ body::-webkit-scrollbar,
 .cache-bar-slice.is-inference, .cache-swatch.is-inference { background: var(--on-surface-variant); }
 
 .date-picker { position: relative; display: grid; gap: 6px; min-width: 0; }
-.date-picker-label { color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
+.date-picker-label {
+  padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: 600; }
 .date-picker-trigger { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: var(--control-height); padding: 0 var(--space-3); border: 1px solid var(--control-border); border-radius: var(--radius-control); background: var(--control-background); color: var(--ink-primary); font: inherit; cursor: pointer; }
 .date-picker-trigger svg { width: 16px; height: 16px; color: var(--ink-faint); }
 .date-picker-trigger svg:first-child { color: var(--brand-vermilion); }
@@ -3986,6 +4214,17 @@ body::-webkit-scrollbar,
 .date-picker-header, .date-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .date-picker-header strong { font-size: var(--text-sm); }
 .date-picker-header .icon-button { width: 28px; height: 28px; }
+/* 中间的年月是一个按钮：点开是月份面板，再点年份是年份面板，跨年不用按几十下。 */
+.date-picker-heading { padding: 4px 10px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: inherit; font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+.date-picker-heading:hover { border-color: var(--outline-variant); background: var(--surface-container-high); }
+/* 双向箭头表示「一次跳一年」，和单箭头的月份按钮区分开。 */
+.date-picker-header .icon-button svg.is-second { margin-left: -8px; }
+.date-picker-grid { display: grid; gap: 4px; text-align: center; }
+.date-picker-grid.is-months { grid-template-columns: repeat(3, 1fr); }
+.date-picker-grid.is-years { grid-template-columns: repeat(4, 1fr); }
+.date-picker-grid button { min-height: 34px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--on-surface); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.date-picker-grid button:hover { background: var(--surface-container-high); }
+.date-picker-grid button.is-selected { background: var(--primary); color: var(--on-primary); font-weight: 700; }
 .date-picker-weekdays, .date-picker-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; text-align: center; }
 .date-picker-weekdays { color: var(--ink-faint); font-size: var(--text-xs); }
 .date-picker-days button { min-height: 36px; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--on-surface); cursor: pointer; }
@@ -4416,17 +4655,18 @@ body::-webkit-scrollbar,
 }
 
 .switch-control[role="switch"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
-/* Material 3 expressive switch: a 52x30 track; the handle grows and slides
-   flush against the track edge on check (no lip left over), in the accent
-   colour. The handle moves with transform, so the travel animates smoothly —
-   the old left/right property swap jumped instead of transitioning. */
+/* Material 3 switch: an unmoving 52x32 track and one 24dp handle that only
+   travels. Growing the handle on check made the two states read as different
+   sizes and left it flush right while sitting 4px off the left edge; the
+   handle now keeps its size and rests 4px from either end, so both states
+   look like the same control with equal margins. */
 .switch-control[role="switch"] {
   position: relative;
   flex: 0 0 52px;
   width: 52px;
   min-width: 52px;
-  height: 30px;
-  min-height: 30px;
+  height: 32px;
+  min-height: 32px;
   padding: 0;
   border: 1px solid var(--outline);
   border-radius: var(--radius-pill);
@@ -4437,18 +4677,19 @@ body::-webkit-scrollbar,
 .switch-control[role="switch"]::after {
   content: '';
   position: absolute;
-  /* The off handle is a circle resting inside the track: wider than tall drew
-     an oval, and top:0 pinned it over the border instead of centring it. */
-  top: 4px;
-  left: 4px;
-  width: 22px;
-  height: 22px;
+  /* Absolute offsets measure from the padding box, so 3px here is 4px inside
+     the visible track edge — the same inset the checked handle lands on.
+     Travel is 52 - 2 - 24 - 2*3 = 20px. */
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--primary);
-  transition: transform var(--motion-standard), width var(--motion-standard), height var(--motion-standard), top var(--motion-standard), background-color var(--motion-standard);
+  transition: transform var(--motion-standard), background-color var(--motion-standard);
 }
 .switch-control[role="switch"][aria-checked="true"] { background: var(--primary-container); border-color: var(--primary); }
-.switch-control[role="switch"][aria-checked="true"]::after { transform: translateX(18px); width: 28px; height: 28px; top: 1px; background: var(--primary); }
+.switch-control[role="switch"][aria-checked="true"]::after { transform: translateX(20px); background: var(--primary); }
 .switch-control[role="switch"]:active:not(:disabled) { transform: translateY(1px); }
 .switch-control[role="switch"]:disabled { opacity: .5; cursor: not-allowed; }
 
@@ -4732,17 +4973,19 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
+/* 名字旁的一盏亮点：没有底、没有框，只有主色的圆点与一圈光晕——行首的服务器
+   图标已经说明了「这是服务器」，这里只补一句「这台在用」。 */
 .server-current-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
   margin-left: 8px;
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  line-height: 1.5;
-  vertical-align: 1px;
-  background: var(--primary-container);
-  color: var(--on-primary-container);
+  color: var(--primary);
+  vertical-align: -2px;
 }
+
+.server-current-badge svg { width: 14px; height: 14px; }
 
 .server-current-toggle {
   flex: none;

@@ -1514,6 +1514,18 @@ pub async fn delete_archive(
     Ok(CommandResult::success(()))
 }
 
+/// 一次删除里每个网络动作最多试几次（Readoshi 同样是三次，间隔递增）。
+const DELETION_ATTEMPTS: usize = 3;
+/// 第一次重试前的等待，之后按次数递增。
+const DELETION_RETRY_DELAY_MS: u64 = 150;
+
+/// 删除一个档案，必要时先删它的 E-Hentai 收藏。
+///
+/// 顺序与 Readoshi 一致：先收藏、后档案。反过来的话，档案一旦删掉，就再也读不到
+/// 它标签里的画廊地址，收藏只能留在 E-Hentai 上变成孤儿。
+///
+/// 收藏删不掉就不删档案：设置里写的是「删除档案时一并删除对应的收藏」，做不到时
+/// 宁可让用户先处理登录（或关掉这次同步），也不留一个删不掉的收藏。
 pub(crate) async fn delete_archive_with_favorite_sync(
     server_id: String,
     archive_id: String,
@@ -1552,20 +1564,49 @@ pub(crate) async fn delete_archive_with_favorite_sync(
                     false,
                 ));
             };
-            match crate::commands::eh::remove_eh_favorite(
-                account_id,
-                gallery_id,
-                token,
-                database.clone(),
-            )
-            .await?
-            {
-                CommandResult::Success { .. } => (),
-                failure @ CommandResult::Failure { .. } => return Ok(failure),
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match crate::commands::eh::remove_eh_favorite(
+                    account_id.clone(),
+                    gallery_id.clone(),
+                    token.clone(),
+                    database.clone(),
+                )
+                .await?
+                {
+                    CommandResult::Success { .. } => break,
+                    failure => {
+                        // 只有网络抖动这类可重试的失败才重来；登录失效、画廊被删
+                        // 这些重试多少次都是同一个答案。
+                        if !retryable_failure(&failure) || attempt >= DELETION_ATTEMPTS {
+                            return Ok(failure);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    DELETION_RETRY_DELAY_MS * attempt as u64,
+                ))
+                .await;
             }
         }
     }
-    delete_archive(server_id, archive_id, database).await
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = delete_archive(server_id.clone(), archive_id.clone(), database.clone()).await?;
+        if !retryable_failure(&result) || attempt >= DELETION_ATTEMPTS {
+            return Ok(result);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            DELETION_RETRY_DELAY_MS * attempt as u64,
+        ))
+        .await;
+    }
+}
+
+fn retryable_failure<T>(result: &CommandResult<T>) -> bool {
+    matches!(result, CommandResult::Failure { error, .. } if error.retryable)
 }
 
 fn eh_gallery_from_tags(tags: &str) -> Option<(String, String)> {
@@ -1867,21 +1908,32 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             ))
         }
     };
-    // Cover requests use the normal thumbnail endpoint. The
-    // no_fallback flag is reserved for page thumbnails where extraction is
-    // explicitly queued; cover requests should return an existing fallback
-    // immediately instead of waiting for a Minion job.
+    // `no_fallback=true` 是必须的：不带它时，凡是缩略图尚未生成的档案都会拿到
+    // 同一张占位图（HTTP 200），而那张图会被逐字节缓存下来——查重按封面比对时，
+    // 所有待生成缩略图的档案封面完全相同，于是被判成一堆重复档案。带参数后
+    // LRR 改为回 202 + Minion 任务号（图像已存在时照样直接给图），于是这里等
+    // 任务完成再取真图，等不到就把该档案记作缺封面，而不是拿占位图去参与比对。
+    // 语义见 LANraragi API：GET /archives/{id}/thumbnail。
     let url = format!(
-        "{}/api/archives/{}/thumbnail",
+        "{}/api/archives/{}/thumbnail?no_fallback=true",
         base_url.trim_end_matches('/'),
         archive_id
     );
-    let response = match reader_request(reqwest::Method::GET, url.clone(), api_key.clone()).await {
-        Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
-    };
-    let response = if response.status().as_u16() == 202 {
-        let job_id = response
+    let mut response = None;
+    // 任务结束与文件落盘之间有窗口期，重取可能又拿到 202；最多轮 3 轮。
+    for _ in 0..3 {
+        let candidate =
+            match reader_request(reqwest::Method::GET, url.clone(), api_key.clone()).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true))
+                }
+            };
+        if candidate.status().as_u16() != 202 {
+            response = Some(candidate);
+            break;
+        }
+        let job_id = candidate
             .bytes()
             .await
             .ok()
@@ -1893,7 +1945,8 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             });
         if let Some(job_id) = job_id {
             let mut finished = false;
-            for _ in 0..60 {
+            // 2 分钟上限，和 Readoshi 等缩略图任务的口径一致。
+            for _ in 0..240 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let status_url =
                     format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
@@ -1931,10 +1984,6 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                     true,
                 ));
             }
-            match reader_request(reqwest::Method::GET, url, api_key).await {
-                Ok(value) => value,
-                Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
-            }
         } else {
             return Ok(CommandResult::failure(
                 "REMOTE_UNAVAILABLE",
@@ -1942,9 +1991,22 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                 true,
             ));
         }
-    } else {
-        response
+    }
+    let Some(response) = response else {
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            "LANraragi 缩略图生成超时",
+            true,
+        ));
     };
+    // 兜底：202 的 JSON 体不能当图片缓存下去（Readoshi 也为此专门清理过缓存）。
+    if response.status().as_u16() == 202 {
+        return Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            "LANraragi 缩略图仍在生成",
+            true,
+        ));
+    }
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
             "REMOTE_UNAVAILABLE",

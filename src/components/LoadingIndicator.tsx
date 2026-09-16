@@ -5,8 +5,12 @@
  * flight, and the pair is indistinguishable from "this archive really is empty".
  * A single component keeps the two states apart by construction.
  *
- * The mark is drawn rather than imported: a spinner made of the project's own
- * three page shapes, which is also what the favicon and the About page use.
+ * The mark is Material 3's circular indicator: a faint full track plus one
+ * active arc (4dp stroke, round caps) whose head grows while its tail follows,
+ * on a container turning one full turn per dash cycle. It replaced a mark built
+ * from three page shapes — the reader showed this one for its own pages while
+ * every route still showed the old one, and two loading marks in one app read as
+ * two different kinds of waiting.
  *
  * No caption. `label` is the accessible name only: the text under the animation
  * said what the animation already says, and repeated it in three sizes across
@@ -16,13 +20,10 @@ export function LoadingIndicator({ label = '正在加载', size = 'md' }: { labe
   return (
     <div className={`loading-indicator is-${size}`} role="status" aria-label={label}>
       <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-        {/* Three leaves of a turning page, each a third of the cycle behind the
-            last, so the motion reads as paging rather than spinning. */}
-        <g fill="none" strokeLinecap="round" strokeWidth="3">
-          <path className="loading-leaf" d="M24 6 L38 13 L38 35 L24 42 Z" />
-          <path className="loading-leaf" d="M24 6 L10 13 L10 35 L24 42 Z" />
-          <path className="loading-spine" d="M24 6 L24 42" />
-        </g>
+        {/* 2πr ≈ 125.7 for r=20; the dash cycle trims the arc the way the spec's
+            indicator does, and both cycles share one 1.6s period. */}
+        <circle className="loading-indicator-track" cx="24" cy="24" r="20" />
+        <circle className="loading-indicator-arc" cx="24" cy="24" r="20" />
       </svg>
     </div>
   );

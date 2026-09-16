@@ -5,6 +5,7 @@ import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ReaderRoutes, WorkspaceRoutes } from './routes';
 import { PreferencesProvider, usePreferences } from './preferences';
 import { startTagTranslationUpdates, stopTagTranslationUpdates } from '../lib/tagTranslationService';
+import { installErrorLogging } from '../lib/errorLog';
 import { ToastProvider } from '../components/Toast';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
@@ -34,6 +35,8 @@ export function App() {
   const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}`;
   if (reading) readers.current.set(readerKey, location);
   useEffect(() => {
+    // 没人接住的错误要有地方去：设置页的「错误日志」读的就是这里记下的内容。
+    const stopErrorLogging = installErrorLogging();
     const suppressNativeMenu = (event: Event) => event.preventDefault();
     document.addEventListener('contextmenu', suppressNativeMenu);
     const updateLifecycle = () => {
@@ -43,6 +46,7 @@ export function App() {
     updateLifecycle();
     document.addEventListener('visibilitychange', updateLifecycle);
     return () => {
+      stopErrorLogging();
       document.removeEventListener('contextmenu', suppressNativeMenu);
       document.removeEventListener('visibilitychange', updateLifecycle);
       stopTagTranslationUpdates();

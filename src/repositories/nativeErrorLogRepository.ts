@@ -1,0 +1,26 @@
+import { z } from 'zod';
+
+import { invokeCommand } from '../bridge/invoke';
+import type { CommandResult } from '../domain/result';
+
+export const ErrorLogEntrySchema = z.object({
+  /** ISO-8601，或 Rust 侧 panic 写的 `epoch:<毫秒>`。 */
+  at: z.string(),
+  level: z.string(),
+  source: z.string(),
+  message: z.string(),
+  detail: z.string().nullable().optional(),
+});
+export type ErrorLogEntry = z.infer<typeof ErrorLogEntrySchema>;
+
+/** 后端那份本次运行的错误日志：读取与导出。写入走 `src/lib/errorLog.ts`，
+ * 它不经过这层（否则 bridge 记日志要绕回 bridge 自己）。 */
+export class NativeErrorLogRepository {
+  list(): Promise<CommandResult<ErrorLogEntry[]>> {
+    return invokeCommand('error_log_read', {}, z.array(ErrorLogEntrySchema));
+  }
+
+  exportTo(path: string): Promise<CommandResult<string>> {
+    return invokeCommand('error_log_export', { path }, z.string());
+  }
+}

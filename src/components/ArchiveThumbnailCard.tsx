@@ -27,22 +27,24 @@ export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, colo
   </div>;
 }
 
-export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
+/** The cover box on its own: lazily loaded cover, a shimmer until it lands, and
+ * the slot the selection marker sits in (children). Every card that shows a
+ * cover uses this one, so the duplicate workspace's member cards get the same
+ * cache handling as the library grid instead of a second implementation. */
+export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio, children }: {
+  scopeId: string;
+  serverId: string;
+  archiveId: string;
+  onAspectRatio?: ((ratio: number) => void) | undefined;
+  children?: ReactNode;
+}) {
   const [src, setSrc] = useState<string>();
-  const [aspectRatio, setAspectRatio] = useState<number>();
-  const [node, setNode] = useState<HTMLAnchorElement | null>(null);
-  const myTags = useEhMyTags();
-  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
-  // Generous on purpose: the fill waterfall drops whatever the two rows cannot
-  // hold, so the limit only has to exceed what the widest card can show.
-  const tags = useMemo(() => pickCardTags(archive.tags, 24, myTagKeys), [archive.tags, myTagKeys]);
-  const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
-  const isWide = isWideCoverRatio(aspectRatio);
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!node) return undefined;
     const controller = new AbortController();
     let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
-    const load = () => void imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => undefined);
+    const load = () => void imageCache.load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => undefined);
     if (typeof IntersectionObserver === 'undefined') load();
     else {
       const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { observer.disconnect(); load(); } }, { rootMargin: '480px' });
@@ -50,9 +52,26 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       return () => { observer.disconnect(); controller.abort(); if (handle) imageCache.release(handle); };
     }
     return () => { controller.abort(); if (handle) imageCache.release(handle); };
-  }, [archive.archiveId, node, scopeId, serverId]);
+  }, [archiveId, node, scopeId, serverId]);
+  return <div className="archive-thumb-card-media" ref={setNode}>
+    {src ? <img src={src} alt="" loading="lazy" decoding="async" onLoad={(event) => {
+      const image = event.currentTarget;
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
+    }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
+    {children}
+  </div>;
+}
+
+export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
+  const [aspectRatio, setAspectRatio] = useState<number>();
+  const myTags = useEhMyTags();
+  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
+  // Generous on purpose: the fill waterfall drops whatever the two rows cannot
+  // hold, so the limit only has to exceed what the widest card can show.
+  const tags = useMemo(() => pickCardTags(archive.tags, 24, myTagKeys), [archive.tags, myTagKeys]);
+  const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
+  const isWide = isWideCoverRatio(aspectRatio);
   return <Link
-    ref={setNode}
     className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
     to={`/library/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`}
     onClick={onOpen}
@@ -64,10 +83,12 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       onContextMenu(archive, { x: event.clientX, y: event.clientY });
     } : undefined}
   >
-    <div className="archive-thumb-card-media">{src ? <img src={src} alt="" loading="lazy" onLoad={(event) => {
-      const image = event.currentTarget;
-      if (image.naturalWidth > 0 && image.naturalHeight > 0) setAspectRatio(image.naturalWidth / image.naturalHeight);
-    }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}</div>
+    <ArchiveThumbMedia
+      scopeId={scopeId}
+      serverId={serverId}
+      archiveId={archive.archiveId}
+      onAspectRatio={setAspectRatio}
+    />
     <ArchiveThumbCardBody
       title={archive.title}
       tags={tags}

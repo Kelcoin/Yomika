@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeSettingsRepository, type PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
+import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
 import { useToast } from './Toast';
 
@@ -26,21 +27,32 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
 }) {
   const { showToast } = useToast();
   const [preferences, setPreferences] = useState<PreferenceSnapshot>();
-  const [syncFavorite, setSyncFavorite] = useState(false);
+  const [syncFavorite, setSyncFavorite] = useState<boolean>();
+  /** 有没有可用的 E-Hentai 账户；undefined 表示还没读到（或读失败，按可用处理）。 */
+  const [ehReady, setEhReady] = useState<boolean>();
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let active = true;
-    void new NativeSettingsRepository().load().then((result) => {
+    void (async () => {
+      const [saved, accounts] = await Promise.all([
+        new NativeSettingsRepository().load(),
+        new NativeEhRepository().listAccounts(),
+      ]);
       if (!active) return;
-      if (!result.ok) { showToast(result.error.message, 'error'); return; }
-      setPreferences(result.value);
+      if (!saved.ok) { showToast(saved.error.message, 'error'); return; }
+      // 收藏同步需要一个已登录的账户：读不到列表就当没登录（先别勾上），读列表本身
+      // 失败则按可用处理——不因为一次读取失败把功能挡掉。
+      const ready = accounts.ok ? accounts.value.some((account) => account.isActive) : true;
+      setPreferences(saved.value);
+      setEhReady(ready);
       // 开关只是默认值：删除始终需要确认，这里决定的是它的初始勾选。
-      setSyncFavorite(result.value.ehFavoriteDeleteSync && result.value.confirmEhFavoriteDelete);
-    });
+      setSyncFavorite(saved.value.ehFavoriteDeleteSync && saved.value.confirmEhFavoriteDelete && ready);
+    })();
     return () => { active = false; };
   }, [showToast]);
+  const syncAvailable = Boolean(preferences?.ehFavoriteDeleteSync) && ehReady !== false;
   const remove = async () => {
-    if (!preferences || busy) return;
+    if (!preferences || syncFavorite === undefined || busy) return;
     setBusy(true);
     try {
       await onConfirm(syncFavorite);
@@ -54,17 +66,19 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
       <Dialog.Content className="dialog-content archive-delete-dialog">
         <Dialog.Title>确认删除</Dialog.Title>
         <Dialog.Description>{description}</Dialog.Description>
-        {preferences?.ehFavoriteDeleteSync && (
+        {/* 没登录 E-Hentai 就整行不出现（Readoshi 也这么做）：摆一个按不动的开关
+            只会让人以为功能坏了，而这次删除确实没有收藏可同步。 */}
+        {syncAvailable && (
           /* The whole row toggles: a label cannot activate a button, so the
              handler lives on the label and the switch is its visual control. */
           <label className="preference-toggle" onClick={() => { if (!busy) setSyncFavorite(!syncFavorite); }}>
-            <button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={syncFavorite} disabled={busy} tabIndex={-1}><span /></button>
+            <button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={Boolean(syncFavorite)} disabled={busy} tabIndex={-1}><span /></button>
             <span>同步删除 E-Hentai 收藏</span>
           </label>
         )}
         <div className="dialog-actions">
           <button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="primary-action" type="button" disabled={busy || !preferences} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
+          <button className="primary-action" type="button" disabled={busy || syncFavorite === undefined} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
         </div>
       </Dialog.Content>
     </Dialog.Portal>

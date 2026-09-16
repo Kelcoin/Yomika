@@ -51,6 +51,7 @@ describe('archive actions', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
     await waitFor(() => expect(deleted).toHaveBeenCalledTimes(1));
     expect(closed).toHaveBeenCalledTimes(1);
-    expect(adapter.mock.calls.map(([command]) => command)).toEqual(['load_preferences', 'delete_archive']);
+    // 打开时顺带读一次 E-Hentai 账户：这次关了开关，所以只有删除命令。
+    expect(adapter.mock.calls.map(([command]) => command)).toEqual(['load_preferences', 'list_eh_accounts', 'delete_archive']);
   });
 });

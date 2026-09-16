@@ -6,6 +6,7 @@ import {
   filterArchivesByDateRange,
   findDuplicatePairs,
   getDedupeGroupFilterData,
+  getDedupeSmartSignals,
   getDuplicateSelectionDisabledIds,
   groupDuplicatePairsByChain,
   mergeSmartDuplicateSelection,
@@ -164,6 +165,20 @@ describe('deduplication domain', () => {
     const dark = { width: 8, height: 8, ratio: 1, filename: '[Circle] Longer Work [DL版]', pixels: new Uint8ClampedArray(8 * 8 * 4) };
     const light = { ...dark, filename: '[Circle] Longer Work [中国翻訳]', pixels: new Uint8ClampedArray(8 * 8 * 4).fill(255) };
     expect(findDuplicatePairs(new Map([['A', dark], ['B', light]]))).toEqual([{ left: 'A', right: 'B' }]);
+  });
+
+  it('flags the censorship state from either side, so a card never reads as information-free', () => {
+    const archive = (tags: string[]) => ({ id: 'a', tags });
+    // 有码档案此前没有任何提示：无修正只认 other:uncensored，而库里最常见的是
+    // mosaic censorship。两者互斥，有码的那条只在没有无修正标记时点亮。
+    expect(getDedupeSmartSignals(archive(['other:mosaic censorship'])).censored).toBe(true);
+    expect(getDedupeSmartSignals(archive(['other:full censorship'])).censored).toBe(true);
+    expect(getDedupeSmartSignals(archive(['other:mosaic censorship'])).uncensored).toBe(false);
+    expect(getDedupeSmartSignals(archive(['other:uncensored'])).censored).toBe(false);
+    expect(getDedupeSmartSignals(archive(['other:uncensored'])).uncensored).toBe(true);
+    // 中文档案不算「无汉语」。
+    expect(getDedupeSmartSignals(archive(['language:chinese'])).noChinese).toBe(false);
+    expect(getDedupeSmartSignals(archive([])).noChinese).toBe(true);
   });
 
   it('reports filename provenance for an exact normalized filename-only match', () => {

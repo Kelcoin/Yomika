@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2, X } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -7,11 +7,10 @@ import { flushSync } from 'react-dom';
 
 import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
-import { formatByteSize } from '../lib/archiveCardPresentation';
+import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
+import { LoadingIndicator } from './LoadingIndicator';
 import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
-import { categorizeSearchableTags } from '../lib/tags';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
-import { TagSearchLink } from './TagSearchLink';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
@@ -85,22 +84,9 @@ interface ReaderScreenProps {
  * 失败" — which is why turning a page announced a failure and then quietly
  * showed the page. They are now distinct, and a page is only called failed once
  * its retries are actually spent. */
-/** The reader's loading mark, drawn as the Material 3 circular indicator: a
- * faint full track plus one active arc whose head sweeps out while its tail
- * follows, on a steadily rotating container — rounded caps, primary ink. */
-function ReaderPageLoader() {
-  return (
-    <div className="reader-page-loader" role="status" aria-label="正在加载">
-      <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-        <circle className="reader-loader-track" cx="24" cy="24" r="20" />
-        <circle className="reader-loader-arc" cx="24" cy="24" r="20" />
-      </svg>
-    </div>
-  );
-}
-
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
-  if (!failed) return <div className="reader-page-status"><ReaderPageLoader /></div>;
+  // 同一个 M3 指示器，全应用只此一个（它自己的深色画布由 .reader-page-status 上色）。
+  if (!failed) return <div className="reader-page-status"><LoadingIndicator /></div>;
   return (
     <div className="reader-page-status is-failed">
       <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
@@ -1145,51 +1131,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         /* Centred overlay rather than a side drawer: it doubles as the archive
            overview (cover, size, tags) plus the page grid. */
         <div className="reader-overview-backdrop" onClick={() => setThumbnailPanelOpen(false)}>
-          <aside className="reader-overview" aria-label="档案概览" onClick={stopChromeToggle}>
-            <header className="reader-overview-heading">
-              <strong>{title}</strong>
-              <button type="button" className="reader-icon-button" aria-label="关闭概览" onClick={() => setThumbnailPanelOpen(false)}><X aria-hidden="true" /></button>
-            </header>
-            <div className="reader-overview-summary">
-              {/* Page count and size sit under the cover rather than beside it:
-                  they belong to the cover, and putting them in the wide column
-                  pushed the tag groups down by a line for no reason. */}
-              <div className="reader-overview-identity">
-                {info?.cover && <img className="reader-overview-cover" src={info.cover} alt="" />}
-                <p className="reader-overview-stats">{[`${pages.length} 页`, info?.sizeBytes ? formatByteSize(info.sizeBytes) : ''].filter(Boolean).join(' · ')}</p>
-              </div>
-              <div className="reader-overview-facts">
-                {(info?.tags?.length ?? 0) > 0 && (
-                  /* Grouped by namespace, the way the detail page shows them: a
-                     flat run of chips gave no clue which were artists and which
-                     were content tags. */
-                  <div className="reader-overview-tags" aria-label="档案标签">
-                    {categorizeSearchableTags(info?.tags ?? []).map((group) => (
-                      <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
-                        <h3>{group.label}</h3>
-                        <div>{group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}</div>
-                      </section>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="reader-overview-thumbnails">
-              {pages.map((_, index) => {
-                const preview = thumbnails.get(index) ?? loadedPages[index];
-                return (
-                  <button key={index} type="button" aria-label={`跳转到第 ${index + 1} 页`} aria-current={state.pageIndex === index} onClick={(event) => {
-                    stopChromeToggle(event);
-                    jumpToPage(index);
-                    setThumbnailPanelOpen(false);
-                  }}>
-                    {preview ? <img src={preview} alt="" loading="lazy" /> : <span aria-hidden="true">{index + 1}</span>}
-                    <span className="reader-overview-page-number" aria-hidden="true">{index + 1}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </aside>
+          <ArchiveOverviewPanel
+            title={title}
+            pageCount={pages.length}
+            cover={info?.cover}
+            sizeBytes={info?.sizeBytes}
+            tags={info?.tags}
+            currentPage={state.pageIndex}
+            thumbnailAt={(index) => thumbnails.get(index) ?? loadedPages[index]}
+            onSelectPage={(index) => { jumpToPage(index); setThumbnailPanelOpen(false); }}
+            onClose={() => setThumbnailPanelOpen(false)}
+            onPanelClick={stopChromeToggle}
+          />
         </div>
       )}
       {pages.length > 0 && (() => {

@@ -1000,13 +1000,15 @@ mod tests {
         left.perceptual_hash = vec![0x00; 8];
         let mut right = signature_with_luminance(texture_luminance(77), 0.3);
         right.perceptual_hash = vec![0xff; 8];
-        let entry = |signature: StoredImageSignature| ScanEntry {
-            archive_id: "a".into(),
-            filename: String::new(),
-            page_count: Some(10),
-            size: Some(100),
-            content_hash: None,
-            signature: Some(signature),
+        let entry = |signature: StoredImageSignature| {
+            ScanEntry::new(
+                "a".into(),
+                String::new(),
+                Some(10),
+                Some(100),
+                None,
+                Some(signature),
+            )
         };
         assert_eq!(
             pair_image_match(&entry(left), &entry(right), FilenameEvidence::None, 0, &SignatureComparisonOptions::default()),
@@ -1094,6 +1096,261 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].source, "filename");
     }
+
+    /// 4k 档案 = 8 百万对。旧实现每对都跑一遍 normalized_filename 与
+    /// Levenshtein，比较阶段实际跑不完（还要攥着连接锁，界面一起卡死）；
+    /// 预筛前置后同样规模应在秒级完成。断言留了很宽的上限，它要拦住的是
+    /// 「又退回每对都算字符串相似度」这种回归。
+    #[test]
+    fn comparing_four_thousand_archives_stays_fast() {
+        // 真实的 dhash 之间汉明距离接近随机（64 位里 ~32 位不同），预筛会
+        // 淘汰绝大多数组合——用伪随机哈希复刻这个分布，别让测试落在「几乎
+        // 每对都过预筛」的人造最坏情况上。
+        let hashes: Vec<u8> = (0..4_000 * 8)
+            .scan(0x9E37_79B9_7F4A_7C15_u64, |state, _| {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                Some((*state & 0xff) as u8)
+            })
+            .collect();
+        let entries: Vec<ScanEntry> = (0..4_000)
+            .map(|index| {
+                let mut signature = solid_signature(30);
+                signature.perceptual_hash = hashes[index * 8..index * 8 + 8].to_vec();
+                ScanEntry::new(
+                    format!("archive-{index:05}"),
+                    format!("collection {index:05} — a distinctly titled volume, part {}", index % 97),
+                    Some(24),
+                    Some(1_000_000),
+                    None,
+                    Some(signature),
+                )
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let pairs = compare_scan_entries(
+            &entries,
+            &std::collections::HashMap::new(),
+            &std::collections::HashSet::new(),
+            "v1",
+            0,
+            |_, _| {},
+        )
+        .expect("comparison");
+        let elapsed = started.elapsed();
+        assert!(pairs.is_empty(), "unrelated covers must not pair");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "comparison took {elapsed:?}; the per-pair filename similarity is back in the hot path"
+        );
+    }
+
+    /// 同一张封面挂在页数/体积互相矛盾的档案上 = LRR 的占位图（缩略图还没
+    /// 生成时它回的 `no_thumbnail.png`）：这些档案不能因为「封面一模一样」被判
+    /// 重复，真重复不会同时相差 354 页和几百 MB。
+    #[test]
+    fn shared_cover_across_incompatible_shapes_is_treated_as_a_placeholder() {
+        let entry = |id: &str, pages: i64, size: i64| {
+            ScanEntry::new(
+                id.into(),
+                format!("{id} title"),
+                Some(pages),
+                Some(size),
+                Some("placeholder-hash".into()),
+                Some(solid_signature(30)),
+            )
+        };
+        let mut entries = vec![
+            entry("a", 354, 351_502_318),
+            entry("b", 39, 25_355_075),
+            entry("c", 60, 30_000_000),
+        ];
+        distrust_placeholder_covers(&mut entries);
+        // 整张图都不可信：同一张占位图的所有持有者一起退出封面比较。
+        assert!(entries.iter().all(|entry| !entry.cover_trusted));
+        assert!(compare_scan_entries(
+            &entries,
+            &std::collections::HashMap::new(),
+            &std::collections::HashSet::new(),
+            "v1",
+            0,
+            |_, _| {},
+        )
+        .expect("comparison")
+        .is_empty());
+
+        // 形状一致时共用封面是真重复，照样判重。
+        let mut twins = vec![entry("x", 24, 1_000_000), entry("y", 24, 1_000_000)];
+        distrust_placeholder_covers(&mut twins);
+        assert!(twins.iter().all(|entry| entry.cover_trusted));
+        assert_eq!(
+            compare_scan_entries(
+                &twins,
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                "v1",
+                0,
+                |_, _| {},
+            )
+            .expect("comparison")
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn comparison_reports_progress_every_batch() {
+        let entries: Vec<ScanEntry> = (0..20)
+            .map(|index| {
+                ScanEntry::new(
+                    format!("archive-{index:02}"),
+                    format!("title {index:02} with a long distinct name"),
+                    Some(10),
+                    Some(1000),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let mut seen = Vec::new();
+        compare_scan_entries(
+            &entries,
+            &std::collections::HashMap::new(),
+            &std::collections::HashSet::new(),
+            "v1",
+            5,
+            |processed, total| seen.push((processed, total)),
+        )
+        .expect("comparison");
+        // 每批一次，收尾再补一次 (20,20)：批次回调按批走，最后一批往往不满，
+        // 少了这次收尾进度条就停在 97% 之类的数字上。
+        assert_eq!(seen, vec![(5, 20), (10, 20), (15, 20), (20, 20), (20, 20)]);
+    }
+
+    /// 选择集必须能改已完成的会话：载入扫描结果后再勾选，以前会走
+    /// scan_chunk 的「运行中」门禁，界面只报一句 not running。
+    #[test]
+    fn selection_can_be_edited_after_the_session_completed() {
+        let mut connection = connection();
+        let mut input = scan_input("v1");
+        input.archive_count = 2;
+        start_scan(&mut connection, input).unwrap();
+        let snapshot = |archive_id: &str| DedupArchiveSnapshotInput {
+            archive_id: archive_id.into(),
+            path: format!("{archive_id}.cbz"),
+            title: Some(archive_id.into()),
+            page_count: Some(10),
+            size: Some(1_000_000),
+            feature_version: "v1".into(),
+        };
+        scan_chunk(
+            &mut connection,
+            DedupScanChunkInput {
+                session_id: "scan-1".into(),
+                algorithm_version: "v1".into(),
+                checkpoint: 2,
+                archives: vec![snapshot("a"), snapshot("b")],
+                pairs: vec![],
+                selected_archive_ids: vec![],
+            },
+        )
+        .unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM dedup_sessions WHERE id='scan-1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "completed");
+        // 已完成的会话照样能改选择。
+        save_selection(&mut connection, "scan-1", &["b".into()]).expect("selection saved");
+        let selected = load_result(&connection, "scan-1").unwrap().selected_archive_ids;
+        assert_eq!(selected, vec!["b".to_string()]);
+        // 不在快照里的档案（已删除）拒绝写入。
+        assert_eq!(
+            save_selection(&mut connection, "scan-1", &["ghost".into()]).unwrap_err(),
+            "Selected archive is absent from the persisted scan",
+        );
+        assert_eq!(
+            save_selection(&mut connection, "scan-2", &[]).unwrap_err(),
+            "Dedup session not found",
+        );
+    }
+
+    #[test]
+    fn sessions_are_listed_per_scope_and_deleted_with_their_rows() {
+        let mut connection = connection();
+        start_scan(&mut connection, scan_input("v1")).unwrap();
+        let snapshot = |archive_id: &str| DedupArchiveSnapshotInput {
+            archive_id: archive_id.into(),
+            path: format!("{archive_id}.cbz"),
+            title: Some(archive_id.into()),
+            page_count: Some(10),
+            size: Some(1_000_000),
+            feature_version: "v1".into(),
+        };
+        scan_chunk(
+            &mut connection,
+            DedupScanChunkInput {
+                session_id: "scan-1".into(),
+                algorithm_version: "v1".into(),
+                checkpoint: 2,
+                archives: vec![snapshot("a"), snapshot("b")],
+                pairs: vec![DedupPairInput {
+                    left_archive_id: "a".into(),
+                    right_archive_id: "b".into(),
+                    source: "image".into(),
+                    diagnostics: None,
+                }],
+                selected_archive_ids: vec![],
+            },
+        )
+        .unwrap();
+        let sessions = list_sessions(&connection, "server-a", 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "scan-1");
+        assert_eq!((sessions[0].archive_count, sessions[0].pair_count), (3, 1));
+        assert!(list_sessions(&connection, "server-b", 10).unwrap().is_empty());
+
+        delete_session(&connection, "scan-1").unwrap();
+        let rows: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM dedup_sessions),(SELECT COUNT(*) FROM dedup_pairs),(SELECT COUNT(*) FROM dedup_archive_snapshots)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, (0, 0, 0));
+        assert_eq!(delete_session(&connection, "scan-1").unwrap_err(), "Dedup session not found");
+    }
+
+    #[test]
+    fn scan_progress_registry_keeps_the_latest_snapshot_without_diagnostics() {
+        let registry = DedupScanRegistry::default();
+        let mut progress = DedupScanProgress {
+            session_id: "scan-1".into(),
+            scope_id: "server-a".into(),
+            status: "running".into(),
+            stage: "covers".into(),
+            processed: 4,
+            total: 10,
+            cache_hits: 0,
+            downloads: 0,
+            missing_covers: 0,
+            invalid_covers: 0,
+            pair_count: 0,
+            degraded: false,
+            checkpoint: 4,
+            diagnostics: vec!["a: cover missing".into()],
+            pairs: vec![],
+        };
+        registry.publish(&progress);
+        progress.processed = 9;
+        registry.publish(&progress);
+        let seen = registry.read("scan-1").expect("registered session");
+        assert_eq!((seen.processed, seen.total), (9, 10));
+        // 进度播报每批都发：诊断只留在最终返回值里，避免每批克隆一遍。
+        assert!(seen.diagnostics.is_empty());
+        assert!(registry.read("scan-2").is_none());
+    }
 }
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1141,6 +1398,89 @@ pub struct DedupScanProgress {
     pub checkpoint: i64,
     pub diagnostics: Vec<String>,
     pub pairs: Vec<DedupPairInput>,
+}
+
+/// 运行中的扫描进度：`dedup_scan` 边跑边更新，前端用 `dedup_scan_progress`
+/// 轮询它画进度条。它是运行期状态，不进数据库——数据库里只留会话检查点，
+/// 因此进程重启后进度线消失而会话仍可恢复。
+#[derive(Default)]
+pub struct DedupScanRegistry {
+    entries: std::sync::Mutex<std::collections::HashMap<String, DedupScanProgress>>,
+}
+
+impl DedupScanRegistry {
+    /// 诊断详情与命中对只留在最终返回值里：进度每批都会播报，带上它们等于
+    /// 每批克隆一遍可能上千行的列表。
+    fn publish(&self, progress: &DedupScanProgress) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        let mut snapshot = progress.clone();
+        snapshot.diagnostics = Vec::new();
+        snapshot.pairs = Vec::new();
+        entries.insert(snapshot.session_id.clone(), snapshot);
+    }
+
+    fn read(&self, session_id: &str) -> Option<DedupScanProgress> {
+        self.entries.lock().ok()?.get(session_id).cloned()
+    }
+}
+
+/// 会话列表行：保存过的扫描结果从数据库读回，供「扫描结果」对话框载入。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupSessionSummary {
+    pub session_id: String,
+    pub scope_id: String,
+    pub status: String,
+    pub archive_count: i64,
+    pub pair_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn list_sessions(
+    connection: &Connection,
+    scope_id: &str,
+    limit: i64,
+) -> Result<Vec<DedupSessionSummary>, String> {
+    required_text(scope_id)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT s.id,s.scope_id,s.status,s.archive_count,
+                    (SELECT COUNT(*) FROM dedup_pairs p WHERE p.session_id=s.id),
+                    s.created_at,s.updated_at
+             FROM dedup_sessions s WHERE s.scope_id=?1
+             ORDER BY s.updated_at DESC, s.id DESC LIMIT ?2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![scope_id, limit.clamp(1, 200)], |row| {
+            Ok(DedupSessionSummary {
+                session_id: row.get(0)?,
+                scope_id: row.get(1)?,
+                status: row.get(2)?,
+                archive_count: row.get(3)?,
+                pair_count: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+/// 删除一个会话：快照、命中对、选择与删除记录随外键级联一起清掉。
+pub fn delete_session(connection: &Connection, session_id: &str) -> Result<(), String> {
+    required_text(session_id)?;
+    let removed = connection
+        .execute("DELETE FROM dedup_sessions WHERE id=?1", [session_id])
+        .map_err(|error| error.to_string())?;
+    if removed == 0 {
+        return Err("Dedup session not found".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -1365,20 +1705,53 @@ enum FilenameEvidence {
     None,
 }
 
-fn filename_evidence(left: &str, right: &str) -> (FilenameEvidence, String) {
-    let left_name = normalized_filename(left);
-    let right_name = normalized_filename(right);
-    if !left_name.is_empty() && left_name == right_name {
-        if left_name.chars().count() >= 12 {
-            return (FilenameEvidence::Exact, left_name);
-        }
-        return (FilenameEvidence::None, left_name);
+/// 名字证据只吃装载时算好的归一化名：同名判定是一次字符串比较，相似度
+/// （Levenshtein）才是贵的那一步，所以调用点先过 dhash 预筛再调它。
+fn filename_evidence(left: &ScanEntry, right: &ScanEntry) -> FilenameEvidence {
+    if !left.normalized_name.is_empty() && left.normalized_name == right.normalized_name {
+        return if left.name_chars >= 12 {
+            FilenameEvidence::Exact
+        } else {
+            FilenameEvidence::None
+        };
     }
-    let similar = filename_similarity(&left_name, &right_name) >= 0.92;
-    (
-        if similar { FilenameEvidence::Similar } else { FilenameEvidence::None },
-        left_name,
-    )
+    if names_may_be_similar(&left.normalized_name, &right.normalized_name)
+        && filename_similarity(&left.normalized_name, &right.normalized_name) >= 0.92
+    {
+        FilenameEvidence::Similar
+    } else {
+        FilenameEvidence::None
+    }
+}
+
+/// `filename_similarity` 的前置门，跑在它分配字符向量之前：相似度本身要求
+/// 前四个或后四个字符相同，字节级判断是同一条件的必要条件（相同字符的
+/// UTF-8 编码相同），所以这里拒绝掉的组合，相似度一定也是 0。
+fn names_may_be_similar(left: &str, right: &str) -> bool {
+    if left.len() < 16 || right.len() < 16 {
+        return false;
+    }
+    let (left_bytes, right_bytes) = (left.as_bytes(), right.as_bytes());
+    left_bytes[..4] == right_bytes[..4]
+        || left_bytes[left_bytes.len() - 4..] == right_bytes[right_bytes.len() - 4..]
+}
+
+/// dhash 预筛：只有两侧都有签名且汉明距离在阈值内，这一对才可能判重。
+/// 预计算好的名字与哈希让它在循环里只做异或与位计数。
+fn signature_prescreen_passes(left: &ScanEntry, right: &ScanEntry) -> bool {
+    if !left.cover_trusted || !right.cover_trusted {
+        return false;
+    }
+    let (Some(left_signature), Some(right_signature)) = (left.signature.as_ref(), right.signature.as_ref()) else {
+        return false;
+    };
+    let hash_distance: u32 = left_signature
+        .perceptual_hash
+        .iter()
+        .zip(&right_signature.perceptual_hash)
+        .map(|(left, right)| u32::from((left ^ right).count_ones()))
+        .sum();
+    hash_distance <= DHASH_PRESCREEN_HAMMING
 }
 
 /// 页数/体积失配门槛（Readoshi 的 archiveShapeMismatch）：页数比 > limit 且
@@ -1786,10 +2159,42 @@ fn load_or_compute_feature(
 struct ScanEntry {
     archive_id: String,
     filename: String,
+    /// 封面是否可用作证据：命中占位图（同一张图挂在页数/体积互相矛盾的档案上）
+    /// 时置 false，比较层就此不再用封面判重。
+    cover_trusted: bool,
+    /// 归一化文件名与它的字符数在装载时算好：比较循环每个档案对都会用到，
+    /// 放在循环里等于每对都跑一遍 NFKC 与分配。
+    normalized_name: String,
+    name_chars: usize,
     page_count: Option<i64>,
     size: Option<i64>,
     content_hash: Option<String>,
     signature: Option<StoredImageSignature>,
+}
+
+impl ScanEntry {
+    fn new(
+        archive_id: String,
+        filename: String,
+        page_count: Option<i64>,
+        size: Option<i64>,
+        content_hash: Option<String>,
+        signature: Option<StoredImageSignature>,
+    ) -> Self {
+        let normalized_name = normalized_filename(&filename);
+        let name_chars = normalized_name.chars().count();
+        Self {
+            archive_id,
+            filename,
+            cover_trusted: true,
+            normalized_name,
+            name_chars,
+            page_count,
+            size,
+            content_hash,
+            signature,
+        }
+    }
 }
 
 fn load_scan_entries(
@@ -1818,14 +2223,14 @@ fn load_scan_entries(
                 },
                 _ => None,
             };
-            Ok(ScanEntry {
-                archive_id: row.get(0)?,
-                filename: row.get(1)?,
-                page_count: row.get(2)?,
-                size: row.get(3)?,
-                content_hash: exact_hash,
+            Ok(ScanEntry::new(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                exact_hash,
                 signature,
-            })
+            ))
         })
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
@@ -1864,6 +2269,10 @@ fn pair_image_match(
     name_count: i64,
     options: &SignatureComparisonOptions,
 ) -> Option<f64> {
+    // 占位图不是证据：命中它的档案在封面这条线上直接退出比较。
+    if !left.cover_trusted || !right.cover_trusted {
+        return None;
+    }
     let exact_hash_match = left
         .content_hash
         .as_ref()
@@ -1893,25 +2302,124 @@ fn pair_image_match(
     are_signatures_duplicate(left_signature, right_signature, shapes.0, shapes.1, &adjusted)
 }
 
-fn build_pairs_bounded(
-    connection: &mut Connection,
-    session_id: &str,
+/// 封面字节哈希被多个档案共用的档案集合。历史上不带 `no_fallback` 抓封面时，
+/// 缩略图尚未生成的档案都会拿到 LRR 的同一张占位图并被缓存——这些档案必须重新
+/// 取一次封面（现在会用 no_fallback 拿真图或排队生成），否则占位图会让它们继续
+/// 互相判重。真重复的封面相同也无妨：重取回来还是同一张图，代价只是每个共用
+/// 哈希的档案多一次下载。
+fn cover_hashes_shared_by_multiple(
+    connection: &Connection,
     scope_id: &str,
-    algorithm_version: &str,
-) -> Result<Vec<DedupPairInput>, String> {
-    connection
-        .execute("DELETE FROM dedup_pairs WHERE session_id=?1", [session_id])
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT path FROM dedup_features WHERE scope_id=?1 AND exact_hash IN (
+                 SELECT exact_hash FROM dedup_features WHERE scope_id=?1
+                 GROUP BY exact_hash HAVING COUNT(*) >= 2
+             )",
+        )
         .map_err(|error| error.to_string())?;
-    let name_counts = count_normalized_names(connection, session_id)?;
+    let rows = statement
+        .query_map([scope_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+/// LRR 在档案还没有缩略图时回的是同一张占位图，它会被逐字节缓存，于是完全
+/// 无关的档案看起来「封面一模一样」。只在封面哈希相同、而两边页数/体积互相
+/// 矛盾时才判定为占位图——真重复不会这样。命中的档案在比较里视为没有封面：
+/// 仍可靠文件名成对，但不会再因为共用一张图被判重。
+fn distrust_placeholder_covers(entries: &mut [ScanEntry]) {
+    let mut by_hash: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(hash) = entry.content_hash.as_deref().filter(|hash| !hash.is_empty()) {
+            by_hash.entry(hash).or_default().push(index);
+        }
+    }
+    let mut placeholders = std::collections::HashSet::new();
+    for (hash, indexes) in by_hash {
+        if indexes.len() < 2 {
+            continue;
+        }
+        let incompatible = indexes.iter().enumerate().any(|(offset, left)| {
+            indexes.iter().skip(offset + 1).any(|right| {
+                // 与判重同一道形状门槛（页数 1.65/8 + 体积 2.25/1MB）。
+                archive_shape_mismatch(
+                    (entries[*left].page_count, entries[*left].size),
+                    (entries[*right].page_count, entries[*right].size),
+                    1.65,
+                    8,
+                    2.25,
+                    1_000_000,
+                )
+            })
+        });
+        if incompatible {
+            placeholders.insert(hash.to_owned());
+        }
+    }
+    if placeholders.is_empty() {
+        return;
+    }
+    for entry in entries.iter_mut() {
+        if entry
+            .content_hash
+            .as_deref()
+            .is_some_and(|hash| placeholders.contains(hash))
+        {
+            entry.cover_trusted = false;
+        }
+    }
+}
+
+/// 某一端的全部不重复标记（含历史墓碑之外的有效标记），一次读进内存：
+/// 比较循环因此不需要数据库连接，长循环也就不用攥着全局连接锁。
+fn load_excluded_pair_keys(
+    connection: &Connection,
+    scope_id: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT pair_key FROM dedup_non_duplicates WHERE scope_id=?1 AND tombstoned=0")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([scope_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+/// 成对比较的核心，纯计算，不碰数据库，按左端批次回报进度。
+///
+/// 循环顺序是按代价排的：dhash 预筛（异或 + 位计数）先淘汰绝大多数组合，
+/// 只有可能命中的对才去算文件名证据里的 Levenshtein 相似度。此前每一对都
+/// 先跑 normalized_filename（NFKC + 去括号标记）再跑相似度，15k 档案就是
+/// 上亿次字符串分配，比较阶段实际永远跑不完。
+fn compare_scan_entries(
+    entries: &[ScanEntry],
+    name_counts: &std::collections::HashMap<String, i64>,
+    excluded: &std::collections::HashSet<String>,
+    algorithm_version: &str,
+    progress_batch: usize,
+    mut on_progress: impl FnMut(usize, usize),
+) -> Result<Vec<DedupPairInput>, String> {
     let base_options = SignatureComparisonOptions::default();
-    let entries = load_scan_entries(connection, session_id, scope_id, algorithm_version)?;
+    let name_count_of: Vec<i64> = entries
+        .iter()
+        .map(|entry| name_counts.get(&entry.normalized_name).copied().unwrap_or(0))
+        .collect();
     let mut pairs = Vec::new();
     for (left_index, left) in entries.iter().enumerate() {
+        let name_count = name_count_of[left_index];
         for right in entries.iter().skip(left_index + 1) {
-            // 文件名证据 + 全局同名计数（Readoshi 的 evidence/nameCounts）。
-            let (evidence, evidence_name) =
-                filename_evidence(&left.filename, &right.filename);
-            let name_count = name_counts.get(&evidence_name).copied().unwrap_or(0);
+            // 同名是唯一不依赖签名/哈希的判重路径，其余组合先过预筛。
+            let same_name = !left.normalized_name.is_empty()
+                && left.normalized_name == right.normalized_name;
+            if !same_name && !signature_prescreen_passes(left, right) {
+                continue;
+            }
+            let evidence = filename_evidence(left, right);
             // 精确同名：直接成对（同名数 ≤2 才允许，防模板名互配）。
             let exact_filename_pair = evidence == FilenameEvidence::Exact
                 && name_count <= 2
@@ -1929,11 +2437,7 @@ fn build_pairs_bounded(
             };
             let (key, normalized_left, normalized_right) =
                 pair_key(&left.archive_id, &right.archive_id)?;
-            let excluded: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM dedup_non_duplicates WHERE scope_id=?1 AND pair_key=?2 AND tombstoned=0)",
-                params![scope_id,key], |row| row.get(0),
-            ).map_err(|error| error.to_string())?;
-            if excluded {
+            if excluded.contains(&key) {
                 continue;
             }
             let diagnostics = serde_json::json!({
@@ -1943,10 +2447,6 @@ fn build_pairs_bounded(
                 "pageCountDelta": left.page_count.zip(right.page_count).map(|(a,b)| (a-b).abs()),
                 "sizeDelta": left.size.zip(right.size).map(|(a,b)| (a-b).abs()),
             });
-            connection.execute(
-                "INSERT OR REPLACE INTO dedup_pairs (session_id,pair_key,left_archive_id,right_archive_id,source,diagnostics) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![session_id,key,normalized_left,normalized_right,source,diagnostics.to_string()],
-            ).map_err(|error| error.to_string())?;
             pairs.push(DedupPairInput {
                 left_archive_id: normalized_left,
                 right_archive_id: normalized_right,
@@ -1954,7 +2454,71 @@ fn build_pairs_bounded(
                 diagnostics: Some(diagnostics),
             });
         }
+        if progress_batch > 0 && (left_index + 1) % progress_batch == 0 {
+            on_progress(left_index + 1, entries.len());
+        }
     }
+    // 批次回调按批走，最后一批通常不满：收尾补一次，进度条才会落到 100%。
+    on_progress(entries.len(), entries.len());
+    Ok(pairs)
+}
+
+/// 用本次比较的结果整体替换会话里的命中对，一个事务写完。
+fn replace_pairs(
+    connection: &mut Connection,
+    session_id: &str,
+    pairs: &[DedupPairInput],
+) -> Result<(), String> {
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM dedup_pairs WHERE session_id=?1", [session_id])
+        .map_err(|error| error.to_string())?;
+    persist_pairs(&transaction, session_id, pairs)?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+/// 把命中的对写进会话；主键是 (session_id, pair_key)，重复写入按替换处理。
+fn persist_pairs(
+    connection: &Connection,
+    session_id: &str,
+    pairs: &[DedupPairInput],
+) -> Result<(), String> {
+    for pair in pairs {
+        let (key, normalized_left, normalized_right) =
+            pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
+        let diagnostics = pair.diagnostics.as_ref().map(|value| value.to_string());
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO dedup_pairs (session_id,pair_key,left_archive_id,right_archive_id,source,diagnostics) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![session_id, key, normalized_left, normalized_right, pair.source, diagnostics],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// 同步入口：装载证据 → 比较 → 落库。扫描命令不用它（它在比较期间仍然握着
+/// 连接，正是要避免的做法），保留给测试当一行式的比较入口。
+#[cfg(test)]
+fn build_pairs_bounded(
+    connection: &mut Connection,
+    session_id: &str,
+    scope_id: &str,
+    algorithm_version: &str,
+) -> Result<Vec<DedupPairInput>, String> {
+    let name_counts = count_normalized_names(connection, session_id)?;
+    let mut entries = load_scan_entries(connection, session_id, scope_id, algorithm_version)?;
+    distrust_placeholder_covers(&mut entries);
+    let excluded = load_excluded_pair_keys(connection, scope_id)?;
+    let pairs = compare_scan_entries(
+        &entries,
+        &name_counts,
+        &excluded,
+        algorithm_version,
+        0,
+        |_, _| {},
+    )?;
+    replace_pairs(connection, session_id, &pairs)?;
     Ok(pairs)
 }
 
@@ -2067,49 +2631,36 @@ where
         }
         counts
     };
-    let base_options = SignatureComparisonOptions::default();
-    for (index, left) in archives.iter().enumerate() {
-        for right in archives.iter().skip(index + 1) {
-            let (evidence, evidence_name) = filename_evidence(&left.filename, &right.filename);
-            let name_count = name_counts.get(&evidence_name).copied().unwrap_or(0);
-            let exact_filename_pair = evidence == FilenameEvidence::Exact
-                && name_count <= 2
-                && !left.filename.trim().is_empty();
-            let pair_entry = |archive: &DedupScanArchive, feature: Option<&CoverFeature>| ScanEntry {
-                archive_id: archive.archive_id.clone(),
-                filename: archive.filename.clone(),
-                page_count: archive.page_count,
-                size: archive.size,
-                content_hash: feature.map(|feature| feature.content_hash.clone()),
-                signature: feature.and_then(|feature| serde_json::from_str(&feature.signature).ok()),
-            };
-            let left_entry = pair_entry(left, covers.get(&left.archive_id));
-            let right_entry = pair_entry(right, covers.get(&right.archive_id));
-            let source_name = match pair_image_match(
-                &left_entry,
-                &right_entry,
-                evidence,
-                name_count,
-                &base_options,
-            ) {
-                Some(_) => Some("image"),
-                None if exact_filename_pair => Some("filename"),
-                _ => None,
-            };
-            if let Some(source_name) = source_name {
-                let (key, left_id, right_id) =
-                    pair_key(&left.archive_id, &right.archive_id).unwrap_or_default();
-                if key.is_empty() {
-                    continue;
-                }
-                progress.pairs.push(DedupPairInput {
-                    left_archive_id: left_id,
-                    right_archive_id: right_id,
-                    source: source_name.into(),
-                    diagnostics: Some(serde_json::json!({ "algorithmVersion": algorithm_version, "scopeId": scope_id })),
-                });
-            }
-        }
+    let entries: Vec<ScanEntry> = archives
+        .iter()
+        .map(|archive| {
+            let feature = covers.get(&archive.archive_id);
+            ScanEntry::new(
+                archive.archive_id.clone(),
+                archive.filename.clone(),
+                archive.page_count,
+                archive.size,
+                feature.map(|feature| feature.content_hash.clone()),
+                feature.and_then(|feature| serde_json::from_str(&feature.signature).ok()),
+            )
+        })
+        .collect();
+    let mut entries = entries;
+    distrust_placeholder_covers(&mut entries);
+    let pairs = compare_scan_entries(
+        &entries,
+        &name_counts,
+        &std::collections::HashSet::new(),
+        algorithm_version,
+        0,
+        |_, _| {},
+    )
+    .unwrap_or_default();
+    for pair in pairs {
+        progress.pairs.push(DedupPairInput {
+            diagnostics: Some(serde_json::json!({ "algorithmVersion": algorithm_version, "scopeId": scope_id })),
+            ..pair
+        });
     }
     progress.pair_count = progress.pairs.len() as i64;
     progress.degraded = progress.missing_covers > 0 || progress.invalid_covers > 0;
@@ -2423,6 +2974,53 @@ pub fn scan_chunk(
     transaction.execute("UPDATE dedup_sessions SET checkpoint=?2,status=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![input.session_id, input.checkpoint, next_status]).map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     session(connection, &input.session_id)
+}
+
+/// 选择集不是扫描进度：已完成的会话也要能改待删列表，否则「载入扫描结果」之后
+/// 勾选任何档案都会被 scan_chunk 的「运行中」门禁拒掉（界面只弹一句
+/// "Dedup scan is not running"，勾选毫无反应）。
+pub fn save_selection(
+    connection: &mut Connection,
+    session_id: &str,
+    selected_archive_ids: &[String],
+) -> Result<(), String> {
+    required_text(session_id)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let known: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedup_sessions WHERE id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !known {
+        return Err("Dedup session not found".into());
+    }
+    transaction
+        .execute("DELETE FROM dedup_selection WHERE session_id=?1", [session_id])
+        .map_err(|error| error.to_string())?;
+    for selected_id in BTreeSet::<String>::from_iter(selected_archive_ids.iter().cloned()) {
+        archive_id(&selected_id)?;
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedup_archive_snapshots WHERE session_id=?1 AND archive_id=?2)",
+                params![session_id, selected_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !exists {
+            return Err("Selected archive is absent from the persisted scan".into());
+        }
+        transaction
+            .execute(
+                "INSERT INTO dedup_selection (session_id,archive_id) VALUES (?1,?2)",
+                params![session_id, selected_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 pub fn cancel_scan(
@@ -2935,6 +3533,7 @@ async fn dedup_scan_impl(
     input: DedupScanInput,
     app: tauri::AppHandle,
     database: tauri::State<'_, crate::db::Database>,
+    registry: tauri::State<'_, DedupScanRegistry>,
 ) -> crate::domain::result::CommandResult<DedupScanProgress> {
     if input.session_id.trim().is_empty()
         || input.scope_id.trim().is_empty()
@@ -3040,6 +3639,17 @@ async fn dedup_scan_impl(
         diagnostics: vec![],
         pairs: vec![],
     };
+    // 先播一次再干活：点击「开始扫描」后前端立刻就能画出进度条，而不是等到
+    // 第一个分块下载完才有反应。
+    registry.publish(&progress);
+    // 共用同一张封面的档案（历史占位图，或真重复）不信任本地缓存，本次重新抓：
+    // 真重复抓回来还是同一张图，占位图则会被真封面替换掉。集合只算一次。
+    let refetch_covers = database
+        .connection
+        .lock()
+        .ok()
+        .and_then(|connection| cover_hashes_shared_by_multiple(&connection, &scope_id).ok())
+        .unwrap_or_default();
     while checkpoint < total {
         let cancelled = database
             .connection
@@ -3051,6 +3661,7 @@ async fn dedup_scan_impl(
             progress.status = "cancelled".into();
             progress.stage = "cancelled".into();
             progress.checkpoint = checkpoint;
+            registry.publish(&progress);
             return crate::domain::result::CommandResult::success(progress);
         }
         let archives = {
@@ -3081,22 +3692,32 @@ async fn dedup_scan_impl(
         if archives.is_empty() {
             break;
         }
-        for archive in &archives {
+        for (index, archive) in archives.iter().enumerate() {
+            progress.processed = checkpoint + index as i64 + 1;
+            registry.publish(&progress);
             let identity =
                 crate::cache::CacheImageIdentity::new(&scope_id, &archive.archive_id, "cover", 0);
+            // 共用封面的档案跳过缓存：占位图藏在缓存里，只有重新抓才能换掉。
+            let trust_cache = !refetch_covers.contains(&archive.archive_id);
+            let trust_cache = !refetch_covers.contains(&archive.archive_id);
             let (had_cache_entry, cached) = match database.connection.lock() {
                 Ok(connection) => {
                     let key = crate::cache::image_cache_key(&identity);
-                    let existed = connection
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM cache_entries WHERE key=?1)",
-                            [key],
-                            |row| row.get::<_, bool>(0),
-                        )
-                        .unwrap_or(false);
+                    let existed = trust_cache
+                        && connection
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM cache_entries WHERE key=?1)",
+                                [key],
+                                |row| row.get::<_, bool>(0),
+                            )
+                            .unwrap_or(false);
                     (
                         existed,
-                        crate::cache::load_image_cache(&connection, &app_data, &identity),
+                        if trust_cache {
+                            crate::cache::load_image_cache(&connection, &app_data, &identity)
+                        } else {
+                            Ok(None)
+                        },
                     )
                 }
                 Err(_) => {
@@ -3237,36 +3858,144 @@ async fn dedup_scan_impl(
         }
     }
     progress.stage = "comparing".into();
-    let pairs = database
-        .connection
-        .lock()
-        .map_err(|_| "Database lock failed".to_string())
-        .and_then(|mut connection| {
-            build_pairs_bounded(
-                &mut connection,
+    progress.processed = 0;
+    // 比较阶段只需要三段数据，取完就放开连接：这个循环以前是攥着连接跑的
+    // O(n²)，主线程上的同步命令全被挡在锁外，表现就是整个窗口卡死。
+    let evidence = {
+        let connection = match database.connection.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                return crate::domain::result::CommandResult::failure(
+                    "UNKNOWN",
+                    "Database lock failed",
+                    true,
+                )
+            }
+        };
+        (
+            load_scan_entries(
+                &connection,
                 &input.session_id,
                 &scope_id,
                 &input.algorithm_version,
+            ),
+            count_normalized_names(&connection, &input.session_id),
+            load_excluded_pair_keys(&connection, &scope_id),
+        )
+    };
+    let pairs = match evidence {
+        (Ok(mut entries), Ok(name_counts), Ok(excluded)) => {
+            distrust_placeholder_covers(&mut entries);
+            progress.total = entries.len() as i64;
+            registry.publish(&progress);
+            compare_scan_entries(
+                &entries,
+                &name_counts,
+                &excluded,
+                &input.algorithm_version,
+                COMPARE_PROGRESS_BATCH,
+                |processed, total| {
+                    progress.processed = processed as i64;
+                    progress.total = total as i64;
+                    registry.publish(&progress);
+                },
             )
-        });
-    progress.pairs = match pairs {
+        }
+        (entries, name_counts, excluded) => Err(entries
+            .err()
+            .or(name_counts.err())
+            .or(excluded.err())
+            .unwrap_or_else(|| "Dedup evidence unavailable".into())),
+    };
+    let pairs = match pairs {
         Ok(value) => value,
         Err(error) => return crate::domain::result::CommandResult::failure("UNKNOWN", error, true),
     };
+    let persisted = database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|mut connection| replace_pairs(&mut connection, &input.session_id, &pairs));
+    if let Err(error) = persisted {
+        return crate::domain::result::CommandResult::failure("UNKNOWN", error, true);
+    }
+    progress.pairs = pairs;
     progress.pair_count = progress.pairs.len() as i64;
     progress.degraded = progress.missing_covers > 0 || progress.invalid_covers > 0;
+    progress.processed = progress.total;
+    progress.checkpoint = progress.total;
     progress.status = "completed".into();
     progress.stage = "completed".into();
+    registry.publish(&progress);
     crate::domain::result::CommandResult::success(progress)
 }
+
+/// 比较阶段每处理这么多条左端记录就播报一次进度：太小会频繁抢进度表的锁，
+/// 太大则进度条一跳一大格。
+const COMPARE_PROGRESS_BATCH: usize = 8;
 
 #[tauri::command]
 pub async fn dedup_scan(
     input: DedupScanInput,
     app: tauri::AppHandle,
     database: tauri::State<'_, crate::db::Database>,
+    registry: tauri::State<'_, DedupScanRegistry>,
 ) -> Result<crate::domain::result::CommandResult<DedupScanProgress>, String> {
-    Ok(dedup_scan_impl(input, app, database).await)
+    Ok(dedup_scan_impl(input, app, database, registry).await)
+}
+
+/// 前端画进度条用；没有登记（扫描已结束或进程刚重启）时返回 null。
+#[tauri::command]
+pub fn dedup_scan_progress(
+    session_id: String,
+    registry: tauri::State<'_, DedupScanRegistry>,
+) -> crate::domain::result::CommandResult<Option<DedupScanProgress>> {
+    command_error(Ok(registry.read(&session_id)))
+}
+
+#[tauri::command]
+pub fn dedup_list_sessions(
+    scope_id: String,
+    database: tauri::State<'_, crate::db::Database>,
+) -> crate::domain::result::CommandResult<Vec<DedupSessionSummary>> {
+    command_error(
+        database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|connection| list_sessions(&connection, &scope_id, 50)),
+    )
+}
+
+#[tauri::command]
+pub fn dedup_save_selection(
+    session_id: String,
+    selected_archive_ids: Vec<String>,
+    database: tauri::State<'_, crate::db::Database>,
+) -> crate::domain::result::CommandResult<()> {
+    command_error(
+        database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|mut connection| {
+                save_selection(&mut connection, &session_id, &selected_archive_ids)
+            }),
+    )
+}
+
+#[tauri::command]
+pub fn dedup_delete_session(
+    session_id: String,
+    database: tauri::State<'_, crate::db::Database>,
+) -> crate::domain::result::CommandResult<()> {
+    command_error(
+        database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())
+            .and_then(|connection| delete_session(&connection, &session_id)),
+    )
 }
 
 pub fn exact_hash(bytes: &[u8]) -> String {

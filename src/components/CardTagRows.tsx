@@ -7,16 +7,25 @@ import { distributeTagRows } from '../lib/tagWaterfall';
  * widths. With `fill` the rows pack top-down and the overflow is dropped, so a
  * card's tag slot is full rather than evenly spread; the caller keeps the tag
  * list generous and lets the measurement decide how many actually fit. */
-export function CardTagRows({ tags, rowCount, className, colorFor, fill = false }: {
+export interface CardTagLeadingChip { label: string; tone?: string; }
+
+export function CardTagRows({ tags, rowCount, className, colorFor, fill = false, leading = [] }: {
   tags: string[];
   rowCount: number;
   className: string;
   colorFor?: ((tag: string) => string | undefined) | undefined;
   fill?: boolean | undefined;
+  /** 排在最前面的固定胶囊（渣翻/无修正这类判定）：和标签一起参与行排布，
+   * 所以它们既优先显示，也不会单独占一整行。 */
+  leading?: readonly CardTagLeadingChip[] | undefined;
 }) {
   const root = useRef<HTMLSpanElement>(null);
   const [measured, setMeasured] = useState<{ tags: string[]; widths: number[]; containerWidth: number }>();
-  const labels = tags.map(translateRawTag);
+  const labels = [...leading.map((chip) => chip.label), ...tags.map(translateRawTag)];
+  // 判定胶囊按同样的类名渲染与测量，宽窄、字重才和实际显示一致。
+  const chipClass = (index: number) => index < leading.length
+    ? `metadata-chip dedup-signal-chip ${leading[index]?.tone ?? ''}`.trim()
+    : 'metadata-chip';
   const labelKey = JSON.stringify(labels);
   useLayoutEffect(() => {
     const element = root.current;
@@ -42,20 +51,21 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false 
     void document.fonts?.ready.then(measure);
     return () => { active = false; observer?.disconnect(); };
   }, [tags, labelKey, fill]);
-  const widths = measured?.tags === tags ? measured.widths : tags.map(() => 1);
+  // 测量层的顺序与 labels 一致（判定胶囊在前），所以宽度表也按 labels 兜底。
+  const widths = measured?.tags === tags ? measured.widths : labels.map(() => 1);
   const containerWidth = measured?.tags === tags ? measured.containerWidth : 0;
   const rows = fill
     ? distributeTagRows(widths, rowCount, { containerWidth })
     : distributeTagRows(widths, rowCount);
   return <span className={`${className} card-tag-waterfall`} style={fill ? { width: '100%' } : undefined} ref={root}>
     <span className="card-tag-measures" aria-hidden="true">
-      {labels.map((label, index) => <span className="metadata-chip card-tag-measure" key={index}>{label}</span>)}
+      {labels.map((label, index) => <span className={`${chipClass(index)} card-tag-measure`} key={index}>{label}</span>)}
     </span>
     {rows.map((row, index) => <span className="archive-row-tag-line" key={index}>
       {row.map((tagIndex) => {
-        const tag = tags[tagIndex]!;
-        const color = colorFor?.(tag);
-        return <span className="metadata-chip" key={tagIndex} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{labels[tagIndex]}</span>;
+        const tag = tags[tagIndex - leading.length];
+        const color = tag === undefined ? undefined : colorFor?.(tag);
+        return <span className={chipClass(tagIndex)} key={tagIndex} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{labels[tagIndex]}</span>;
       })}
     </span>)}
   </span>;

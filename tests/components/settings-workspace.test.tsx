@@ -1,11 +1,11 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { resetFilePickerForTests, setDirectoryPickerForTests } from '../../src/bridge/filePicker';
+import { resetFilePickerForTests, setDirectoryPickerForTests, setSavePickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { COLOR_SCHEMES } from '../../src/lib/cssThemePresets';
@@ -45,6 +45,41 @@ describe('settings workspace', () => {
     expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Kelcoin/Yomika' });
   });
 
+  it('shows this run\'s errors inside the About page and exports them', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'error_log_read') {
+        return {
+          ok: true,
+          value: [{ at: '2026-09-16T02:00:00.000Z', level: 'error', source: 'bridge/list_archives', message: 'LANraragi 不可达', detail: 'https://lrr.test/api/info' }],
+        };
+      }
+      if (command === 'error_log_export') return { ok: true, value: 'C:/tmp/yomika-error.log' };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    setSavePickerForTests(async () => 'C:/tmp/yomika-error.log');
+    renderSettings('about');
+
+    // 错误日志不再是一个设置分类，它长成关于页里普通的一行：行上是条数，
+    // 点开才是菜单——菜单里才读取列表并给出刷新、导出。
+    const about = await screen.findByRole('region', { name: '关于' });
+    const row = within(about).getByRole('button', { name: '错误日志' });
+    expect(row).toHaveTextContent('1 条');
+    expect(screen.queryByRole('dialog', { name: '错误日志' })).not.toBeInTheDocument();
+
+    await user.click(row);
+    const menu = await screen.findByRole('dialog', { name: '错误日志' });
+    expect(within(menu).getByText(/本次运行记录到 1 条/)).toBeInTheDocument();
+    expect(within(menu).getByText('bridge/list_archives')).toBeInTheDocument();
+    expect(within(menu).getByText('LANraragi 不可达')).toBeInTheDocument();
+
+    await user.click(within(menu).getByRole('button', { name: '导出' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_export', { path: 'C:/tmp/yomika-error.log' }));
+  });
+
   it('shows only upload and dedup in tools', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
@@ -81,6 +116,8 @@ describe('settings workspace', () => {
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
+      // 已登录的 E-Hentai 账户：收藏同步删除才开得起来。
+      if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-1', label: 'E-Hentai 账户', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'verified', createdAt: '2026-01-01', updatedAt: '2026-01-01' }] };
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
@@ -93,6 +130,24 @@ describe('settings workspace', () => {
     await user.click(toggle);
     await user.click(confirmation);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: true, confirmEhFavoriteDelete: false } }));
+  });
+
+  it('refuses to turn on favorite sync deletion while no E-Hentai account is signed in', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('sync');
+    // 没登录：开关按不动，行里说明原因（删除档案不会动收藏）。
+    const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
+    await waitFor(() => expect(toggle).toBeDisabled());
+    expect(screen.getByText(/需要先登录 E-Hentai 账户/)).toBeInTheDocument();
+    await user.click(toggle);
+    expect(adapter.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
   });
 
   it('persists the feature switches in general, appearance and eh sections', async () => {
@@ -271,15 +326,17 @@ describe('settings workspace', () => {
     renderSettings();
 
     await user.click(await screen.findByRole('link', { name: /通用/ }));
-    // Home 的名字旁挂着「当前」徽章，且没有可关的开关。
-    expect(await screen.findByText('当前')).toBeInTheDocument();
+    // Home 的名字旁挂着自绘的「当前」标记（不再是两个字），且没有可关的开关。
+    const badge = await screen.findByRole('img', { name: '当前服务器' });
+    expect(badge.querySelector('svg')).not.toBeNull();
+    expect(badge.closest('.settings-row-label')?.textContent).toContain('Home');
     expect(screen.queryByRole('button', { name: '当前' })).toBeNull();
     const officeToggle = await screen.findByRole('button', { name: '启用' });
     await user.click(officeToggle);
 
     expect(adapter).toHaveBeenCalledWith('set_server_enabled', { serverId: 'scope-b', enabled: true });
-    // The rows swap in place: Office now carries the badge, Home offers 启用.
-    expect(await screen.findByText('当前')).toBeInTheDocument();
+    // The rows swap in place: Office now carries the mark, Home offers 启用.
+    await waitFor(() => expect(screen.getByRole('img', { name: '当前服务器' }).closest('.settings-row-label')?.textContent).toContain('Office'));
     expect(screen.getByRole('button', { name: '启用' })).toBeInTheDocument();
   });
 

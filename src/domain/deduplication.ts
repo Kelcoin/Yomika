@@ -197,17 +197,23 @@ export interface DedupeSmartSignals {
   roughTranslation: boolean;
   extraneousAds: boolean;
   uncensored: boolean;
+  /** 有码：无修正的反面。库里 1727 条是 `other:mosaic censorship`、831 条
+   * `other:full censorship`，而 `other:uncensored` 只有 2924 条——只报无修正
+   * 的话，这些档案在卡片上什么提示都没有。 */
+  censored: boolean;
   noChinese: boolean;
 }
 
 /** 智能选择信号（Readoshi 的 getDedupeSmartSelectionSignals）：渣翻/外部广告/
- * 无修正/无汉语——工作区把它们作为卡片标签显示，保留评分使用同一套判定。 */
+ * 无修正/有码/无汉语——工作区把它们作为卡片标签显示，保留评分使用同一套判定。 */
 export function getDedupeSmartSignals(archive: DedupeArchive): DedupeSmartSignals {
   const tags = tagSet(archive);
+  const uncensored = tags.has('other:uncensored');
   return {
     roughTranslation: tags.has('other:rough translation'),
     extraneousAds: tags.has('other:extraneous ads'),
-    uncensored: tags.has('other:uncensored'),
+    uncensored,
+    censored: !uncensored && (tags.has('other:mosaic censorship') || tags.has('other:full censorship')),
     noChinese: !tags.has('language:chinese'),
   };
 }

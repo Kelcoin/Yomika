@@ -319,15 +319,17 @@ describe('design system contract', () => {
 
   it('anchors the enabled switch thumb to the track end even if its flex row shrinks', () => {
     const shell = read('src/styles/shell.css');
-    // Material 3 expressive switch: 52x30 track; the checked handle slides by
-    // transform (animatable) to sit flush against the track edge, and both
-    // handle states ride the theme's primary colour. The off handle is a
-    // centred circle — a wider-than-tall thumb drew an oval instead.
+    // Material 3 switch: a 52x32 track and one 24dp handle that only travels.
+    // Both states must use the same handle size and the same 4px end margin —
+    // a growing handle read as two different controls and touched one edge
+    // while floating away from the other.
     expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*flex:\s*0 0 52px[^}]*min-width:\s*52px/);
-    expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*height:\s*30px[^}]*\}/);
-    expect(shell).toMatch(/\.switch-control\[role="switch"\]::after\s*\{[^}]*width:\s*22px[^}]*height:\s*22px[^}]*border-radius:\s*50%/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]\s*\{[^}]*height:\s*32px[^}]*\}/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]::after\s*\{[^}]*top:\s*3px[^}]*left:\s*3px[^}]*width:\s*24px[^}]*height:\s*24px[^}]*border-radius:\s*50%/);
     expect(shell).toMatch(/\.switch-control\[role="switch"\]::after\s*\{[^}]*background:\s*var\(--primary\)/);
-    expect(shell).toMatch(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{[^}]*transform:\s*translateX\(18px\)[^}]*width:\s*28px[^}]*height:\s*28px/);
+    expect(shell).toMatch(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{[^}]*transform:\s*translateX\(20px\)[^}]*\}/);
+    const checked = shell.match(/\.switch-control\[role="switch"\]\[aria-checked="true"\]::after\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(checked).not.toMatch(/width|height|top|left/);
   });
 
   it('defines the Material 3 color roles and shape scale', () => {

@@ -141,35 +141,10 @@
 .reader-page-status .reader-retry-button { margin: 0; }
 .reader-page-status.is-failed p { color: var(--reader-ink); }
 
-/* The Material 3 circular indicator, drawn in the reader's own ink. Structure
-   per spec: a faint full track, one active arc (4dp stroke, round caps) whose
-   head grows while the tail follows, all on a container rotating one turn per
-   dash cycle. The dash offset makes the arc sweep forward rather than just
-   pulse, and both cycles share one period so the motion reads as one piece. */
-.reader-page-loader { display: grid; place-items: center; width: 56px; height: 56px; }
-.reader-page-loader svg { width: 100%; height: 100%; animation: reader-loader-spin 1.6s linear infinite; }
-.reader-loader-track { fill: none; stroke: color-mix(in srgb, var(--reader-muted) 28%, transparent); stroke-width: 4; }
-.reader-loader-arc {
-  fill: none;
-  stroke: var(--reader-ink);
-  stroke-width: 4;
-  stroke-linecap: round;
-  transform-origin: center;
-  /* 2πr ≈ 125.7 for r=20; 94.2 is the 270° upper trim M3 uses. */
-  animation: reader-loader-dash 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-
-@keyframes reader-loader-dash {
-  0% { stroke-dasharray: 8 118; stroke-dashoffset: 0; }
-  35% { stroke-dasharray: 94 32; stroke-dashoffset: -18; }
-  70% { stroke-dasharray: 20 106; stroke-dashoffset: -100; }
-  100% { stroke-dasharray: 8 118; stroke-dashoffset: -126; }
-}
-@keyframes reader-loader-spin { to { transform: rotate(360deg); } }
-
-/* The loading state keeps the reader's own dark canvas, so the indicator does not
-   flash against a light background before the first page arrives. */
-.reader-screen-loading .loading-indicator { color: var(--reader-muted); }
+/* 阅读器里的加载指示就是全应用那一个（M3 圆形指示器），只换颜色：它落在自己的
+   深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */
+.reader-screen-loading .loading-indicator,
+.reader-page-status .loading-indicator { color: var(--reader-ink); }
 .reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
 .reader-error {
@@ -463,11 +438,38 @@
   gap: var(--space-2);
 }
 
-.reader-overview-cover {
+/* 框负责尺寸与裁切，图片只负责填满：模糊与放大都发生在框里面。 */
+.reader-overview-cover-frame {
+  display: block;
   width: 120px;
   aspect-ratio: 3 / 4;
+  overflow: hidden;
   border-radius: var(--radius-control);
+}
+
+.reader-overview-cover {
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+}
+
+/* SFW 也覆盖这面概览：封面与页缩略图是浏览用的画面，和档案库的封面一样默认
+   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */
+:root[data-sfw='true'] .reader-overview-cover,
+:root[data-sfw='true'] .reader-overview-thumbnails img {
+  filter: blur(14px);
+  transform: scale(1.12);
+}
+.reader-overview-cover,
+.reader-overview-thumbnails img {
+  transition: filter var(--motion-standard), transform var(--motion-standard);
+}
+:root[data-sfw='true'] .reader-overview-cover:hover,
+:root[data-sfw='true'] .reader-overview-thumbnails button:hover img,
+:root[data-sfw='true'] .reader-overview-thumbnails button:focus-visible img {
+  filter: none;
+  transform: none;
 }
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
@@ -512,6 +514,9 @@
 }
 
 .reader-overview-thumbnails button[aria-current="true"] { border-color: var(--brand-cyan); }
+/* Preview mode (opened from the duplicate workspace): the grid is reference
+   only, and it must not look like a control that will turn the page. */
+.reader-overview-thumbnails.is-preview button { cursor: default; }
 .reader-overview-thumbnails img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 
 .reader-overview-page-number {
@@ -530,7 +535,7 @@
    shell's own media query. */
 @media (max-width: 900px) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
-  .reader-overview-cover { width: 88px; }
+  .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {
     justify-content: flex-start;
   }

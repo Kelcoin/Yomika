@@ -10,6 +10,18 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 
 const repository = new NativeLibraryRepository();
 
+/** 「当前服务器」的标记：一盏亮着的灯。
+ *
+ * 行首已经有一枚服务器图标，名字旁再画一台机箱是重复——标记只需要说状态：
+ * 这台在用。所以只剩实心圆点加一圈光晕，落在 24px 网格上、用 currentColor，
+ * 颜色由调用处决定。 */
+function ServerActiveMark() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <circle cx="12" cy="12" r="9.5" fill="currentColor" fillOpacity="0.2" />
+    <circle cx="12" cy="12" r="4.75" fill="currentColor" />
+  </svg>;
+}
+
 interface ServerSetupDialogProps {
   onSave: (input: { identity: ServerIdentity; apiKey: string }) => Promise<CommandResult<ServerIdentity>>;
   server?: Pick<ServerRecord, 'name' | 'baseUrl' | 'scopeId' | 'enabled'>;
@@ -83,8 +95,9 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
             <span className="settings-row-label">
               {server ? server.name : '添加服务器'}
               {/* 当前启用的服务器：书架、首页与档案库都读它。标记跟在名字
-                  后面，一眼可辨又不占行尾的空间。 */}
-              {server?.enabled && <span className="server-current-badge">当前</span>}
+                  后面，一眼可辨又不占行尾的空间；语义交给图标 + 名称，
+                  悬停有说明。 */}
+              {server?.enabled && <span className="server-current-badge" role="img" aria-label="当前服务器" title="当前启用的服务器"><ServerActiveMark /></span>}
             </span>
             <span className="settings-row-hint">{server ? server.baseUrl : '连接一台 LANraragi 服务器'}</span>
           </span>
