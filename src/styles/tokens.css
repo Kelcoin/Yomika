@@ -257,6 +257,14 @@
     --space-10: 40px;
     --space-12: 48px;
 
+    /* ---- Mobile safe areas. One source for both ends: every rule reads these
+       variables instead of env() directly, so a platform that hands the insets
+       over some other way (Android 由原生侧给 WebView 加内边距，Chromium 又不
+       把状态栏高度交给 env()) only has to override the variable. 桌面端
+       （Windows 没有刘海）两个值都是 0。 ---------------------------------- */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+
     /* ---- Shape scale (M3): control = inputs, chips and the toast; card =
        archive cards and detail blocks; overlay = dialogs and floating
        panels; pill = buttons, badges, switches and progress tracks. ------- */

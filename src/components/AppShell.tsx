@@ -15,10 +15,17 @@ import { motion, useReducedMotion } from 'motion/react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
+import { getPlatformCapabilities } from '../bridge/platform';
 import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
 import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
+
+/** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
+ * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
+function isMobileShell(): boolean {
+  return typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
 
 const navigation = [
   { to: '/', label: '首页', icon: Home },
@@ -150,6 +157,15 @@ export function AppShell({ children }: AppShellProps) {
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
   // top — brings it back.
   const [compactNavHidden, setCompactNavHidden] = useState(false);
+  /** 自绘标题栏是 Windows 专属：Windows 关了原生装饰、由应用自己画；macOS 有
+   * 自己的红绿灯，iOS/Android 根本没有窗口按钮可点。平台探测是异步命令，先用
+   * UA 判断一次，免得手机上一进应用先闪一条没有用的栏。 */
+  const [showTitleBar, setShowTitleBar] = useState(() => !isMobileShell());
+  useEffect(() => {
+    void getPlatformCapabilities().then((result) => {
+      if (result.ok) setShowTitleBar(result.value.platform === 'windows');
+    });
+  }, []);
 
   useEffect(() => {
     const previous = new Map<HTMLElement, number>();
@@ -222,7 +238,7 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
-      <TitleBar />
+      {showTitleBar && <TitleBar />}
       <a className="skip-link" href="#main-content">跳到主内容</a>
       <aside className="sidebar" aria-label="应用侧栏">
         <NavLink className="brand" to="/" aria-label="Yomika 首页">

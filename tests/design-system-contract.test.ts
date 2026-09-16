@@ -127,9 +127,30 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     const compactMain = shell.match(/@media \(max-width: 900px\)[\s\S]*?\.app-main\s*\{([\s\S]*?)\}/)?.[1] ?? '';
     const archiveList = ruleBody(shell, '.archive-list');
-    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ env\(safe-area-inset-bottom\)\)\)/);
+    // 底栏占位 + 两端安全区都要减掉：手机上顶部没有自绘标题栏，刘海由这一层的
+    // padding 让出来，不减就会把工作区顶出屏幕。
+    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ var\(--safe-bottom\) \+ var\(--safe-top\)\)\)/);
+    expect(compactMain).toMatch(/padding-top:\s*var\(--safe-top\)/);
     expect(archiveList).toMatch(/background:\s*var\(--surface-panel\)/);
     expect(shell).not.toMatch(/\.workspace\.is-library-workspace \.archive-list\s*\{[\s\S]*padding-bottom:\s*calc\(80px/);
+  });
+
+  it('routes every safe-area inset through the tokens, never through env() inline', () => {
+    // 一处来源：iOS 由 WebKit 提供 env()，Android 由原生侧给 WebView 加内边距
+    // （Chromium 不给状态栏高度）——组件样式只认变量，换平台时只动 tokens。
+    const tokens = read('src/styles/tokens.css');
+    expect(tokens).toMatch(/--safe-top:\s*env\(safe-area-inset-top,\s*0px\)/);
+    expect(tokens).toMatch(/--safe-bottom:\s*env\(safe-area-inset-bottom,\s*0px\)/);
+    for (const path of ['src/styles/shell.css', 'src/styles/reader.css']) {
+      expect(read(path)).not.toMatch(/env\(safe-area-inset/);
+    }
+    // 移动端要读出非零安全区，view 声明必须带 viewport-fit=cover。
+    expect(read('index.html')).toMatch(/viewport-fit=cover/);
+    // 自绘标题栏只属于 Windows，且自己吃掉顶部安全区。
+    const titlebar = ruleBody(read('src/styles/shell.css'), '.titlebar');
+    expect(titlebar).toMatch(/height:\s*calc\(44px \+ var\(--safe-top\)\)/);
+    expect(ruleBody(read('src/styles/shell.css'), '.app-main')).toMatch(/background:\s*var\(--surface-panel\)/);
+    expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
   });
 
   it('uses the content surface behind short workspaces instead of exposing canvas', () => {

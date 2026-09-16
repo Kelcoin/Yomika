@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
@@ -47,6 +47,36 @@ describe('application shell', () => {
 
     view.unmount();
     expect(translationLifecycle.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('draws the app-drawn title bar on Windows only', async () => {
+    // Windows 关了原生装饰，那条栏是应用自己画的；macOS 有自己的红绿灯，
+    // iOS/Android 没有窗口按钮可点——只有 Windows 该出现这排按钮。
+    const adapter = (platform: string) => vi.fn(async (command: string) => {
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'platform_capabilities') return { ok: true, value: { platform, native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    // 平台探测只在原生运行时里问命令（浏览器里直接答 browser），所以这里造一个
+    // 原生运行时标记，让这次探测真的走到适配器上。
+    // invoke 是自绘标题栏自己的窗口 API 走的通道（它不问应用适配器）。
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => false } });
+    try {
+      setInvokeAdapterForTests(adapter('windows'));
+      renderAt();
+      expect(await screen.findByRole('button', { name: '最小化' })).toBeInTheDocument();
+
+      cleanup();
+      setInvokeAdapterForTests(adapter('android'));
+      renderAt();
+      await waitFor(() => expect(screen.queryByRole('button', { name: '最小化' })).not.toBeInTheDocument());
+      expect(screen.queryByRole('button', { name: '关闭' })).not.toBeInTheDocument();
+    } finally {
+      delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
   });
 
   it('uses a single product label and provides global scroll-to-top', async () => {

@@ -32,13 +32,16 @@ body::-webkit-scrollbar,
 }
 
 /* The app-drawn title bar (Windows): a themed drag surface with the brand
-   mark and the three window controls, in the Material 3 top-app-bar shape. */
+   mark and the three window controls, in the Material 3 top-app-bar shape.
+   44px of chrome plus the top safe area, so the mark and the controls never sit
+   under a notch or a system status bar (0 on Windows, where there is neither). */
 .titlebar {
   grid-area: titlebar;
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  height: 44px;
+  height: calc(44px + var(--safe-top));
+  padding-top: var(--safe-top);
   padding-left: var(--space-3);
   background: var(--surface-container);
   border-bottom: 1px solid var(--hairline);
@@ -91,7 +94,8 @@ body::-webkit-scrollbar,
 .skip-link {
   position: fixed;
   z-index: var(--z-skip-link);
-  top: var(--space-2);
+  /* 键盘焦点时才出现，也要落在安全区里，别被刘海或状态栏挡住。 */
+  top: calc(var(--space-2) + var(--safe-top));
   left: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-control);
@@ -3796,7 +3800,7 @@ body::-webkit-scrollbar,
   .archive-detail-route-actions > a.archive-action-button {
     flex: 1 1 44px;
   }
-  .scroll-to-top { right: var(--space-4); bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .scroll-to-top { right: var(--space-4); bottom: calc(76px + var(--safe-bottom)); }
   /* 30px is a comfortable desktop icon button and a mean touch target. */
   .icon-action { width: 40px; height: 40px; }
   .icon-action svg { width: 18px; height: 18px; }
@@ -3814,7 +3818,10 @@ body::-webkit-scrollbar,
        workspace is the only row. Reserving 60px for a removed element squeezed
        the whole page into that strip. */
     grid-template-rows: minmax(0, 1fr);
-    height: calc(100dvh - (64px + env(safe-area-inset-bottom)));
+    /* 手机上没有自绘标题栏，顶部安全区（刘海 / 状态栏）由这一层让出来；下面
+       的底栏占位也一并减去，免得两者叠加把工作区顶出屏幕。 */
+    height: calc(100dvh - (64px + var(--safe-bottom) + var(--safe-top)));
+    padding-top: var(--safe-top);
   }
 
   .workspace {
@@ -4000,8 +4007,8 @@ body::-webkit-scrollbar,
     display: grid;
     /* 项目数量是偏好：auto-fit 让 2–7 个条目平分整行。 */
     grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
-    min-height: calc(64px + env(safe-area-inset-bottom));
-    padding: var(--space-1) var(--space-2) env(safe-area-inset-bottom);
+    min-height: calc(64px + var(--safe-bottom));
+    padding: var(--space-1) var(--space-2) var(--safe-bottom);
     border-top: 1px solid var(--hairline);
     background: var(--surface-container);
     backdrop-filter: blur(16px);
@@ -4011,7 +4018,7 @@ body::-webkit-scrollbar,
   /* 滚动方向驱动的显隐：向下滚动把整条底栏送出屏幕（含安全区），向上滚动或
      回到顶部时滑回。visibility 随过渡离散翻转，键盘焦点也随之移出。 */
   .compact-nav.is-hidden {
-    transform: translateY(calc(100% + env(safe-area-inset-bottom)));
+    transform: translateY(calc(100% + var(--safe-bottom)));
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
@@ -4025,7 +4032,7 @@ body::-webkit-scrollbar,
 
   .compact-nav.is-floating {
     right: var(--space-4);
-    bottom: calc(env(safe-area-inset-bottom) + var(--space-3));
+    bottom: calc(var(--safe-bottom) + var(--space-3));
     left: var(--space-4);
     min-height: 64px;
     padding: var(--space-1) var(--space-2);
@@ -4035,7 +4042,7 @@ body::-webkit-scrollbar,
   }
 
   .compact-nav.is-floating.is-hidden {
-    transform: translateY(calc(100% + env(safe-area-inset-bottom) + var(--space-3)));
+    transform: translateY(calc(100% + var(--safe-bottom) + var(--space-3)));
   }
 
   .compact-nav.is-floating .nav-link {
@@ -4098,7 +4105,7 @@ body::-webkit-scrollbar,
      底栏高度的安全区，最后一屏内容才能完整滚出——首页、书架、档案库通用。 */
   .workspace,
   .workspace.is-library-workspace {
-    padding-bottom: calc(env(safe-area-inset-bottom) + 80px);
+    padding-bottom: calc(var(--safe-bottom) + 80px);
   }
 
   /* ≤900 一切路由都是页面滚动：缓存面板的 height:100% 钳制必须全部放开，
@@ -4108,7 +4115,7 @@ body::-webkit-scrollbar,
   }
 
   .app-shell.is-floating-nav .scroll-to-top {
-    bottom: calc(env(safe-area-inset-bottom) + var(--space-3) + 64px + var(--space-3));
+    bottom: calc(var(--safe-bottom) + var(--space-3) + 64px + var(--space-3));
   }
 
   /* 底栏「更多」面板：悬浮在更多按钮上方，只列底栏放不下的页面。 */
@@ -4131,7 +4138,7 @@ body::-webkit-scrollbar,
     display: grid;
     gap: 2px;
     right: var(--space-4);
-    bottom: calc(env(safe-area-inset-bottom) + 64px + var(--space-2));
+    bottom: calc(var(--safe-bottom) + 64px + var(--space-2));
     width: max-content;
     padding: var(--space-2);
     border: 1px solid var(--outline-variant);
@@ -4142,7 +4149,7 @@ body::-webkit-scrollbar,
 
   /* 悬浮底栏底边再抬高一点，面板仍贴着更多按钮的上方。 */
   .app-shell.is-floating-nav .nav-more-menu {
-    bottom: calc(env(safe-area-inset-bottom) + var(--space-3) + 64px + var(--space-2));
+    bottom: calc(var(--safe-bottom) + var(--space-3) + 64px + var(--space-2));
   }
 
   .nav-more-menu .nav-link {

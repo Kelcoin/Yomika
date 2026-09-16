@@ -2,7 +2,9 @@
 <html lang="zh-Hans">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover 是移动端读到安全区的前提：没有它，iOS 会把布局视口
+         缩进安全区、env(safe-area-inset-*) 一律为 0，Android 也不会给出刘海值。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#f3eee4" />
     <title>Yomika</title>
   </head>
