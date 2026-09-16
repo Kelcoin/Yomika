@@ -23,6 +23,11 @@ permissions:
 
 jobs:
   windows:
+    needs: [prepare-release]
+    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
+    if: always()
+    permissions:
+      contents: write
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,16 +61,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
           Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yomika-windows
-          path: artifacts/yomika-windows.zip
-          # Staging copies for the publish-release job; the final home of the
-          # packages is the release, so the artifact only needs to live a day.
-          retention-days: 1
-          if-no-files-found: error
+      # 产物直接传给 release，不再经过 Actions artifacts：release 资产不占
+      # Actions 存储配额，而这个私有仓库的配额（500MB）早就被构建缓存顶满，
+      # `upload-artifact` 每次都被拒（"Artifact storage quota has been hit"）。
+      - name: Attach the Windows package to the release
+        if: needs.prepare-release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-windows.zip --clobber
 
   android:
+    needs: [prepare-release]
+    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
+    if: always()
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,14 +121,31 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: npx tauri android build --ci --apk --aab --target aarch64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yomika-android
-          path: src-tauri/gen/android/app/build/outputs/**/*
-          retention-days: 1
-          if-no-files-found: error
+      - name: Attach the Android packages to the release
+        if: needs.prepare-release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          tag="${{ needs.prepare-release.outputs.tag }}"
+          apk=$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -print -quit)
+          test -n "$apk"
+          cp "$apk" artifacts/yomika-arm64-v8a.apk
+          gh release upload "$tag" artifacts/yomika-arm64-v8a.apk --clobber
+          aab=$(find src-tauri/gen/android/app/build/outputs -name '*.aab' -print -quit || true)
+          if [ -n "$aab" ]; then
+            cp "$aab" artifacts/yomika-arm64-v8a.aab
+            gh release upload "$tag" artifacts/yomika-arm64-v8a.aab --clobber
+          fi
 
   ios-unsigned:
+    needs: [prepare-release]
+    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
+    if: always()
+    permissions:
+      contents: write
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +182,20 @@ jobs:
             echo 'Tauri xcode-script phase was not disabled' >&2
             exit 1
           fi
+      # Tauri 的构建阶段本来会把 iOS 的 Rust 静态库放进 gen/apple/Externals/<arch>/
+      # <config>/libapp.a —— Xcode 工程就是按 `-lapp` 去那里找的。阶段被禁用后
+      # 得自己放，否则链接阶段报 `ld: library 'app' not found`。
+      - name: Stage the Rust library where Xcode links it
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib=$(find src-tauri/target/aarch64-apple-ios -maxdepth 2 -name 'lib*.a' -print -quit)
+          test -n "$lib"
+          for config in debug release; do
+            mkdir -p "src-tauri/gen/apple/Externals/arm64/$config"
+            cp "$lib" "src-tauri/gen/apple/Externals/arm64/$config/libapp.a"
+          done
+          ls -l src-tauri/gen/apple/Externals/arm64/*/libapp.a
       - name: Build unsigned iOS app
         run: |
           project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
@@ -166,32 +207,30 @@ jobs:
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app
           (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yomika-ios-unsigned
-          path: artifacts/Yomika-unsigned.ipa
-          retention-days: 1
-          if-no-files-found: error
+      - name: Attach the iOS package to the release
+        if: needs.prepare-release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp artifacts/Yomika-unsigned.ipa "artifacts/yomika-arm64-unsigned.ipa"
+          gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-arm64-unsigned.ipa --clobber
 
-  # Runs after all three builds: downloads the artifacts and, when the run was
-  # started with a release tag (manual input or an app-v* tag push), attaches
-  # them to a GitHub release — draft by default so it can be reviewed in the
-  # web UI before publishing.
-  publish-release:
+  # 先建好草稿 release（有 tag 输入或推了 app-v* 标签时），三个构建平台再把各自的
+  # 包直接传进去。以前是各平台传 Actions artifact、最后由一个 job 汇总，但那一步
+  # 会撞上账号的 Actions 存储配额；release 资产不占这份配额，所以改成直传。
+  prepare-release:
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
       || startsWith(github.ref, 'refs/tags/app-v')
-    needs: [windows, android, ios-unsigned]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Publish release assets
-        shell: bash
+      - id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -199,19 +238,11 @@ jobs:
           tag="${{ inputs.release_tag || github.ref_name }}"
           draft="${{ inputs.draft }}"
           if [ "${{ github.event_name }}" = "push" ]; then draft=false; fi
-          # Give the Android packages release-friendly names.
-          apk=$(find artifacts/yomika-android -name '*.apk' -print -quit 2>/dev/null || true)
-          if [ -n "$apk" ]; then cp "$apk" artifacts/yomika-arm64-v8a.apk; fi
-          aab=$(find artifacts/yomika-android -name '*.aab' -print -quit 2>/dev/null || true)
-          if [ -n "$aab" ]; then cp "$aab" artifacts/yomika-arm64-v8a.aab; fi
-          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.ipa' -o -name '*.apk' -o -name '*.aab' \))
-          if [ "${#assets[@]}" -eq 0 ]; then echo 'No release assets found' >&2; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if gh release view "$tag" > /dev/null 2>&1; then
-            echo "Release $tag exists; replacing its assets."
-            gh release upload "$tag" --clobber "${assets[@]}"
-          else
-            args=("$tag" --title "Yomika $tag" --generate-notes --target "$GITHUB_SHA")
-            if [ "$draft" = "true" ]; then args+=(--draft); fi
-            gh release create "${args[@]}"
-            gh release upload "$tag" "${assets[@]}"
+            echo "Release $tag already exists; the builds will replace its assets."
+            exit 0
           fi
+          args=("$tag" --title "Yomika $tag" --generate-notes --target "$GITHUB_SHA")
+          if [ "$draft" = "true" ]; then args+=(--draft); fi
+          gh release create "${args[@]}"
