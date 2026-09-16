@@ -86,7 +86,11 @@ pub fn run() {
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
             let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
             // Windows draws its own themed title bar (TitleBar.tsx); other
-            // platforms keep their native window chrome.
+            // desktop platforms keep their native window chrome. `decorations`
+            // only exists in Tauri's desktop build — the mobile runtime has no
+            // window frame to decorate — so the call has to carry the same gate,
+            // or the iOS/Android targets fail to compile here.
+            #[cfg(desktop)]
             let builder = builder.decorations(cfg!(not(target_os = "windows")));
             #[cfg(target_os = "windows")]
             let builder =

@@ -1,8 +1,9 @@
 name: CI
 
+# 测试不再跟着每次 push 跑：一次提交本来会同时起 CI 和打包两个 run，白花两倍
+# 额度与时间。留着手动触发，需要时点一下（或开 PR）即可。
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
   pull_request:
     branches: [main]
 
@@ -10,6 +11,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # 两个 Node 版本各自报结果：之前 fail-fast 会把 22 的作业连带取消，只剩
+      # 20 那一条失败信息，看不出问题出在版本上还是代码上。
+      fail-fast: false
       matrix:
         node-version: [20, 22]
     steps:

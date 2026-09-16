@@ -3699,7 +3699,6 @@ async fn dedup_scan_impl(
                 crate::cache::CacheImageIdentity::new(&scope_id, &archive.archive_id, "cover", 0);
             // 共用封面的档案跳过缓存：占位图藏在缓存里，只有重新抓才能换掉。
             let trust_cache = !refetch_covers.contains(&archive.archive_id);
-            let trust_cache = !refetch_covers.contains(&archive.archive_id);
             let (had_cache_entry, cached) = match database.connection.lock() {
                 Ok(connection) => {
                     let key = crate::cache::image_cache_key(&identity);
