@@ -76,7 +76,11 @@ jobs:
         if: needs.prepare-release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-windows.zip --clobber
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-release.sh "${{ needs.prepare-release.outputs.tag }}" "${{ needs.prepare-release.outputs.draft }}"
+          gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-windows.zip --clobber
 
   android:
     needs: [prepare-release]
@@ -149,6 +153,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           tag="${{ needs.prepare-release.outputs.tag }}"
+          bash .github/scripts/ensure-release.sh "$tag" "${{ needs.prepare-release.outputs.draft }}"
           apk=$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -print -quit)
           test -n "$apk"
           cp "$apk" artifacts/yomika-arm64-v8a.apk
@@ -245,10 +250,13 @@ jobs:
         if: needs.prepare-release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
+          tag="${{ needs.prepare-release.outputs.tag }}"
+          bash .github/scripts/ensure-release.sh "$tag" "${{ needs.prepare-release.outputs.draft }}"
           cp artifacts/Yomika-unsigned.ipa "artifacts/yomika-arm64-unsigned.ipa"
-          gh release upload "${{ needs.prepare-release.outputs.tag }}" artifacts/yomika-arm64-unsigned.ipa --clobber
+          gh release upload "$tag" artifacts/yomika-arm64-unsigned.ipa --clobber
 
   # 先建好草稿 release（有 tag 输入或推了 app-v* 标签时），三个构建平台再把各自的
   # 包直接传进去。以前是各平台传 Actions artifact、最后由一个 job 汇总，但那一步
@@ -262,6 +270,9 @@ jobs:
       contents: write
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      # Whether the release is a draft, so a build job that has to recreate it
+      # keeps the same visibility the run asked for.
+      draft: ${{ steps.release.outputs.draft }}
     steps:
       - uses: actions/checkout@v4
       - id: release
@@ -273,6 +284,7 @@ jobs:
           draft="${{ inputs.draft }}"
           if [ "${{ github.event_name }}" = "push" ]; then draft=false; fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
           if gh release view "$tag" > /dev/null 2>&1; then
             echo "Release $tag already exists; the builds will replace its assets."
             exit 0

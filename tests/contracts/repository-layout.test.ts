@@ -42,4 +42,17 @@ describe('repository layout', () => {
     expect(exists('../../.github/scripts/build-windows.ps1')).toBe(true);
     expect(read('../../build_exe.bat')).toContain('.github\\scripts\\build-windows.ps1');
   });
+
+  it('lets every build job recreate the release it attaches to', () => {
+    const workflow = read('../../.github/workflows/build-packages.yml');
+
+    // prepare-release creates the draft up front, but it can be deleted while the
+    // run is going — that is exactly how the iOS package failed to attach once,
+    // with "release not found" at the end of an otherwise good build.
+    expect(exists('../../.github/scripts/ensure-release.sh')).toBe(true);
+    expect(read('../../.github/scripts/ensure-release.sh')).toContain('gh release create');
+    const calls = workflow.split('bash .github/scripts/ensure-release.sh').length - 1;
+    expect(calls).toBe(3);
+    expect(workflow).toContain('draft: ${{ steps.release.outputs.draft }}');
+  });
 });
