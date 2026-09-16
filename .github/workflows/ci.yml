@@ -45,10 +45,15 @@ jobs:
       - name: Use stable Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust build
+      # 只缓存 Cargo 的 registry/git 源码，不缓存 target/：这个仓库是私有的，
+      # Actions 存储配额只有 500MB（Free），而 target 缓存一份就 600MB——攒满之
+      # 后 `upload-artifact` 全线被拒（打包产物因此在 Actions 里看不到）。CI 现在
+      # 只在手动或 PR 时跑，重编一次换回配额是划算的。
+      - name: Cache Rust sources
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-targets: false
 
       - name: Run native tests
         run: cargo test --manifest-path src-tauri/Cargo.toml

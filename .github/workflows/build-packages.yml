@@ -61,9 +61,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
           Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
-      # 产物直接传给 release，不再经过 Actions artifacts：release 资产不占
-      # Actions 存储配额，而这个私有仓库的配额（500MB）早就被构建缓存顶满，
-      # `upload-artifact` 每次都被拒（"Artifact storage quota has been hit"）。
+      # 两份去处：run 页面的 Artifacts（方便随手下载）与草稿 release（正式交付，
+      # 且不占 Actions 存储配额）。Artifacts 这一步允许失败：私有仓库的 500MB 配额
+      # 一旦被缓存顶满，GitHub 会拒收（"Artifact storage quota has been hit"），
+      # 那种情况不该把整次发布判失败——release 里那份照样有。
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: yomika-windows
+          path: artifacts/yomika-windows.zip
+          retention-days: 1
       - name: Attach the Windows package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -121,6 +128,12 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: npx tauri android build --ci --apk --aab --target aarch64
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: yomika-android
+          path: src-tauri/gen/android/app/build/outputs/**/*
+          retention-days: 1
       - name: Attach the Android packages to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -207,6 +220,12 @@ jobs:
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app
           (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: yomika-ios-unsigned
+          path: artifacts/Yomika-unsigned.ipa
+          retention-days: 1
       - name: Attach the iOS package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
