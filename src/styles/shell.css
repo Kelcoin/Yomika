@@ -108,6 +108,12 @@ body::-webkit-scrollbar,
   transform: translateY(0);
 }
 
+/* 触屏上没有 Tab 键，这枚跳转链接本来就用不上；而它在 WebKit 里会被点按命中
+   :focus-visible，于是常驻成状态栏那一角的胶囊。触屏直接不画，桌面照旧。 */
+@media (hover: none) and (pointer: coarse) {
+  .skip-link { display: none; }
+}
+
 .sidebar {
   grid-area: sidebar;
   position: sticky;
@@ -4099,12 +4105,12 @@ body::-webkit-scrollbar,
 
   .workspace.is-library-workspace .library-shell-detail { padding-bottom: var(--space-6); }
 
-  /* 悬浮底栏浮在内容之上：给滚动容器补出底栏高度的呼吸空间，首页才能滚到
-     最后一张卡片；回到顶部圆钮也抬到底栏上方，不再贴在一起。 */
-  /* 底栏两种模式（整条 fixed 与悬浮胶囊）都盖在内容上，滚动容器统一补出
-     底栏高度的安全区，最后一屏内容才能完整滚出——首页、书架、档案库通用。 */
-  .workspace,
-  .workspace.is-library-workspace {
+  /* 悬浮底栏浮在内容之上，滚动容器得补出它的高度，最后一屏内容才能完整滚出
+     （首页、书架、档案库通用）。整条 fixed 的底栏本来就占一行——.app-main 的
+     高度里已经减掉了它——再补这 80px 只会在内容下方留一块同色空带，手机上就是
+     底栏之上那一大块「遮挡」。 */
+  .app-shell.is-floating-nav .workspace,
+  .app-shell.is-floating-nav .workspace.is-library-workspace {
     padding-bottom: calc(var(--safe-bottom) + 80px);
   }
 

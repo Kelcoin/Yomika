@@ -128,9 +128,16 @@ svg.lucide {
 .select-option-trailing { display: grid; flex: 0 0 28px; place-items: center; color: var(--ink-secondary); }
 .select-option-trailing svg { width: 15px; height: 15px; }
 .select-option-download { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; margin-right: 2px; border-radius: var(--radius-control); background: transparent; color: var(--ink-secondary); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast); }
-.select-option-download:hover:not(:disabled) { background: var(--surface-muted); color: var(--brand-vermilion); }
+.select-option-download:hover:not(:disabled) { color: var(--brand-vermilion); }
 .select-option-download:active:not(:disabled) { transform: translateY(1px); }
 .select-option-download svg { width: 15px; height: 15px; }
+
+/* 下载中的进度行：与下载按钮同属模型选择项，所以放在同一处。 */
+.model-download-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4) var(--space-2); }
+.model-download-status progress { width: 100%; height: 4px; overflow: hidden; border: 0; border-radius: var(--radius-pill); background: var(--surface-muted); accent-color: var(--primary); }
+.model-download-status progress::-webkit-progress-bar { background: var(--surface-muted); }
+.model-download-status progress::-webkit-progress-value { background: var(--primary); }
+.model-download-percent { min-width: 4ch; color: var(--ink-secondary); font-family: var(--font-utility); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-align: right; }
 
 select {
   appearance: none;

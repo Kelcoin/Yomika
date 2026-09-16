@@ -68,12 +68,17 @@ describe('application shell', () => {
       setInvokeAdapterForTests(adapter('windows'));
       renderAt();
       expect(await screen.findByRole('button', { name: '最小化' })).toBeInTheDocument();
+      // 跳过链接是给键盘用户的，桌面照旧保留。
+      expect(screen.getByRole('link', { name: '跳到主内容' })).toBeInTheDocument();
 
       cleanup();
       setInvokeAdapterForTests(adapter('android'));
       renderAt();
       await waitFor(() => expect(screen.queryByRole('button', { name: '最小化' })).not.toBeInTheDocument());
       expect(screen.queryByRole('button', { name: '关闭' })).not.toBeInTheDocument();
+      // 触屏上它没有用处，而 WebKit 会把点按命中成 :focus-visible，让它常驻在
+      // 状态栏那一角——平台上就不该渲染。
+      expect(screen.queryByRole('link', { name: '跳到主内容' })).not.toBeInTheDocument();
     } finally {
       delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     }
@@ -377,6 +382,55 @@ describe('application shell', () => {
       expect(within(menu).queryByRole('menuitem', { name: /历史/ })).not.toBeInTheDocument();
       await user.click(within(menu).getByRole('menuitem', { name: /待看/ }));
       expect(screen.queryByRole('menu', { name: '更多页面' })).not.toBeInTheDocument();
+    } finally {
+      window.matchMedia = original;
+    }
+  });
+
+  it('parks the compact bar out of the way only while it floats', async () => {
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === COMPACT_WIDTH_QUERY,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const mountWith = async (floatingNav: boolean) => {
+        setInvokeAdapterForTests(async (command) => {
+          if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, floatingNav } };
+          if (command === 'list_servers') return { ok: true, value: [] };
+          throw new Error(`Unexpected command: ${command}`);
+        });
+        renderAt('/');
+        const bar = await screen.findByRole('navigation', { name: '移动导航' });
+        const workspace = document.getElementById('main-content')!;
+        const scrollTo = (top: number) => {
+          workspace.scrollTop = top;
+          fireEvent.scroll(workspace);
+        };
+        return { bar, scrollTo };
+      };
+
+      // 没开悬浮：底栏占一行、不盖内容，滚动不该把它收走。
+      const docked = await mountWith(false);
+      docked.scrollTo(200);
+      docked.scrollTo(400);
+      expect(docked.bar).not.toHaveClass('is-hidden');
+      cleanup();
+
+      // 开了悬浮：向下滚把它送出屏幕，向上滚再回来。
+      const floating = await mountWith(true);
+      floating.scrollTo(200);
+      floating.scrollTo(400);
+      expect(floating.bar).toHaveClass('is-hidden');
+      floating.scrollTo(120);
+      expect(floating.bar).not.toHaveClass('is-hidden');
+      cleanup();
     } finally {
       window.matchMedia = original;
     }

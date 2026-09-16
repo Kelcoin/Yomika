@@ -161,9 +161,15 @@ export function AppShell({ children }: AppShellProps) {
    * 自己的红绿灯，iOS/Android 根本没有窗口按钮可点。平台探测是异步命令，先用
    * UA 判断一次，免得手机上一进应用先闪一条没有用的栏。 */
   const [showTitleBar, setShowTitleBar] = useState(() => !isMobileShell());
+  /** 跳过链接是给键盘用户准备的。触屏上它没有用处，而 WebKit 会被点按命中
+   * :focus-visible，把它常驻成状态栏那一角的胶囊；CSS 那边按 (hover/pointer)
+   * 挡了一层，这里再按平台挡一层——拿到的是原生探测结果，不依赖媒体特性。 */
+  const [showSkipLink, setShowSkipLink] = useState(() => !isMobileShell());
   useEffect(() => {
     void getPlatformCapabilities().then((result) => {
-      if (result.ok) setShowTitleBar(result.value.platform === 'windows');
+      if (!result.ok) return;
+      setShowTitleBar(result.value.platform === 'windows');
+      setShowSkipLink(result.value.platform !== 'android' && result.value.platform !== 'ios');
     });
   }, []);
 
@@ -183,11 +189,14 @@ export function AppShell({ children }: AppShellProps) {
         setShowScrollTop(true);
       }
       // Scroll direction drives the floating bar: down past the top hides it,
-      // up — or back at the top — restores it.
-      if (current > 8 && current > before) {
-        setCompactNavHidden(true);
-      } else if (current < before || current <= 8) {
-        setCompactNavHidden(false);
+      // up — or back at the top — restores it. Only the floating bar answers
+      // scrolling; the docked bar has its own row and stays put.
+      if (floatingNav) {
+        if (current > 8 && current > before) {
+          setCompactNavHidden(true);
+        } else if (current < before || current <= 8) {
+          setCompactNavHidden(false);
+        }
       }
     };
     const workspace = workspaceRef.current;
@@ -195,9 +204,11 @@ export function AppShell({ children }: AppShellProps) {
     // Capture scroll events so dynamically mounted library/detail regions are
     // covered without needing a second effect or a fragile mount ordering.
     document.addEventListener('scroll', handleScroll, { capture: true, passive: true });
+    // Turning the floating bar off mid-session must not leave it parked.
+    if (!floatingNav) setCompactNavHidden(false);
     setShowScrollTop(false);
     return () => document.removeEventListener('scroll', handleScroll, true);
-  }, [pathname]);
+  }, [pathname, floatingNav]);
 
   // Dead zones around and inside the workspace — the collapsed sidebar strip,
   // the title bar, a rail whose horizontal scroll has run out — have no scroll
@@ -239,7 +250,7 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
       {showTitleBar && <TitleBar />}
-      <a className="skip-link" href="#main-content">跳到主内容</a>
+      {showSkipLink && <a className="skip-link" href="#main-content">跳到主内容</a>}
       <aside className="sidebar" aria-label="应用侧栏">
         <NavLink className="brand" to="/" aria-label="Yomika 首页">
           <YomikaMark size={38} />

@@ -16,6 +16,7 @@ import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { YomikaMark } from './YomikaMark';
 import { EhMark } from './EhMark';
+import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { useSyncSettings } from './SyncWorkspace';
 
@@ -359,13 +360,25 @@ function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
   return DECENSOR_COMPONENT_IDS.every((id) => installed.has(id));
 }
 
+/** A model coming down: the backend reports bytes done out of a total, and falls
+ * back to an indeterminate bar when the source does not announce a length. */
+function ModelDownloadStatus({ label, progress }: { label: string; progress?: { completed: number; total?: number | undefined } | undefined }) {
+  const percent = progress?.total ? Math.round((progress.completed / progress.total) * 100) : undefined;
+  return (
+    <div className="model-download-status" role="status">
+      <progress max="100" value={percent} aria-label={`${label}下载进度`} />
+      <span className="model-download-percent">{percent === undefined ? '下载中…' : `${percent}%`}</span>
+    </div>
+  );
+}
+
 /** Settings are split by workflow so everyday controls stay separate from
  * visual preferences, synchronization, and model tooling. */
 const settingsSections = [
   { id: 'settings-general', label: '通用', hint: '启动页面、下载目录与缓存', icon: <SlidersHorizontal /> },
   { id: 'settings-reading', label: '阅读', hint: '布局、方向与翻页方式', icon: <BookOpen /> },
   { id: 'settings-appearance', label: '样式', hint: '主题、配色与自定义 CSS', icon: <Palette /> },
-  { id: 'settings-eh', label: 'E-Hentai', hint: '账户登录与 Cookie 管理', icon: <EhMark /> },
+  { id: 'settings-eh', label: 'E-Hentai', hint: '账户登录与 Cookie 管理', icon: <EhMark plate={false} /> },
   { id: 'settings-sync', label: '同步', hint: 'WebDAV 同步与数据迁移', icon: <RefreshCw /> },
   { id: 'settings-advanced', label: '高级', hint: '超分与去码模型', icon: <Sparkles /> },
   { id: 'settings-tools', label: '工具', hint: '上传、导入与查重工作台', icon: <Blocks /> },
@@ -414,6 +427,11 @@ export function SettingsWorkspace() {
     if (!result.ok) showToast(result.error.message, 'error');
   };
   const [modelPending, setModelPending] = useState(false);
+  /** The model being downloaded right now, plus how far along it is: the backend
+   * reports `model-download-progress` while a release bundle comes down, and only
+   * one download runs at a time. */
+  const [pendingModel, setPendingModel] = useState<{ id: string; label: string }>();
+  const [modelDownload, setModelDownload] = useState<{ completed: number; total?: number | undefined }>();
   const modelInputRef = useRef<HTMLInputElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   /** WebDAV state for the 同步 rows, loaded only while that section is shown. */
@@ -590,14 +608,32 @@ export function SettingsWorkspace() {
     } finally { setModelPending(false); }
   }
 
-  async function downloadModel(modelId: string) {
+  async function downloadModel(modelId: string, label: string) {
     setModelPending(true);
+    setPendingModel({ id: modelId, label });
+    setModelDownload(undefined);
     try {
       const result = await inferenceRepository.downloadDefaultModel(modelId);
       if (result.ok) { showToast('模型下载完成', 'success'); await refreshModels(); }
       else showToast(result.error.message, 'error');
-    } finally { setModelPending(false); }
+    } finally {
+      setModelPending(false);
+      setPendingModel(undefined);
+      setModelDownload(undefined);
+    }
   }
+
+  // Progress arrives as an event rather than from the awaited command, so the row
+  // can show a bar while the download runs. Only one model downloads at a time.
+  useEffect(() => {
+    if (!pendingModel) return undefined;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<{ completed: number; total?: number | null }>('model-download-progress', (event) => {
+      if (active) setModelDownload({ completed: event.payload.completed, total: event.payload.total ?? undefined });
+    }).then((detach) => { if (active) unlisten = detach; else detach(); }).catch(() => { /* no webview outside the app */ });
+    return () => { active = false; unlisten?.(); };
+  }, [pendingModel]);
 
   /** 默认下载目录的描述按运行平台给出准确位置（Windows 便携版在 exe 同目录）。 */
   const defaultDownloadHint = useMemo(() => {
@@ -1334,8 +1370,11 @@ export function SettingsWorkspace() {
                   value={preferenceDraft.upscaleModel || upscaleModelOptions[0]!.value}
                   options={upscaleModelOptions}
                   onChange={(value) => editPreferences({ upscaleModel: value })}
-                  optionAction={(option) => runnableModels?.some((model) => model.id === option.value) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>}
+                  optionAction={(option) => runnableModels?.some((model) => model.id === option.value) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value, option.label); }}><Download aria-hidden="true" /></button>}
                 />
+                {pendingModel && upscaleModelOptions.some((option) => option.value === pendingModel.id) && (
+                  <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
+                )}
                 <SettingsSwitch
                   icon={<WandSparkles />}
                   label="自动开启超分"
@@ -1388,10 +1427,13 @@ export function SettingsWorkspace() {
                       value={preferenceDraft.decensorModel || stageOptions[0]?.value || fallback.value}
                       options={stageOptions.length ? stageOptions : [fallback]}
                       onChange={(value) => { if (value) editPreferences({ decensorModel: value }); }}
-                      optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value); }}><Download aria-hidden="true" /></button>}
+                      optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value, option.label); }}><Download aria-hidden="true" /></button>}
                     />;
                   })}
                 </div>
+                {pendingModel && decensorBundles?.some((model) => model.id === pendingModel.id) && (
+                  <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
+                )}
                 {!decensorBundles?.length && (
                   <p className="server-list-message" role="status">{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</p>
                 )}
@@ -1471,7 +1513,7 @@ export function SettingsWorkspace() {
          floating menu holds the work. */
       <section className="settings-section" id="settings-eh" aria-label="E-Hentai">
         <div className="settings-group">
-          <SettingsPanel icon={<EhMark size={20} />} label="E-Hentai 账户" value={ehAccountName ?? '未登录'} ariaLabel="E-Hentai 账户">
+          <SettingsPanel icon={<EhMark size={20} plate={false} />} label="E-Hentai 账户" value={ehAccountName ?? '未登录'} ariaLabel="E-Hentai 账户">
             <EhRouteWorkspace onActiveAccountChange={setEhAccountName} />
           </SettingsPanel>
           <SettingsSwitch

@@ -153,6 +153,41 @@ describe('design system contract', () => {
     expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
   });
 
+  it('parks the compact bar only while it floats, and leaves the docked row empty', () => {
+    const shell = read('src/styles/shell.css');
+    const app = read('src/components/AppShell.tsx');
+    const base = read('src/styles/base.css');
+
+    // 悬浮胶囊盖在内容上，滚动容器才需要补出它那 80px；整条 fixed 的底栏本来就占
+    // 一行（.app-main 的高度里减掉了），再补出来的只是一块同色空带——手机上就是
+    // 底栏之上那一大块「遮挡」。
+    const [padded] = shell.split('padding-bottom: calc(var(--safe-bottom) + 80px)');
+    expect(padded!.trimEnd()).toMatch(/\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{$/);
+    // 收不收底栏由悬浮开关决定：没开悬浮时它有自己的行，不该被滚动带走。
+    expect(app).toMatch(/if \(floatingNav\) \{\s*if \(current > 8 && current > before\)/);
+    // 触屏没有 Tab 键，跳过链接用不上；它在 WebKit 里会被点按命中 :focus-visible，
+    // 常驻成状态栏那一角的胶囊。CSS 按媒体特性挡一层，AppShell 再按平台挡一层。
+    expect(shell).toMatch(/@media \(hover: none\) and \(pointer: coarse\) \{\s*\.skip-link \{ display: none; \}/);
+    expect(app).toContain('{showSkipLink && <a className="skip-link"');
+    // 模型下载按钮悬停只让字形变色，不铺一层底色。
+    expect(base).toMatch(/\.select-option-download:hover:not\(:disabled\) \{ color: var\(--brand-vermilion\); \}/);
+    expect(base).not.toMatch(/\.select-option-download:hover[^}]*background/);
+  });
+
+  it('draws the E-Hentai row like the other settings icons and reports download progress', () => {
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    const mark = read('src/components/EhMark.tsx');
+
+    // 设置项里其余图标都是 lucide 那样的描边字形，带 primary-container 底板的品牌
+    // 标记只有账户面板那种展示位才用。
+    expect(settings).toContain('<EhMark plate={false} />');
+    expect(settings).toContain('<EhMark size={20} plate={false} />');
+    expect(mark).toContain('scale(0.0909)');
+    // 模型下载的进度来自后端的 model-download-progress 事件，行内给进度条与百分比。
+    expect(settings).toContain('model-download-progress');
+    expect(settings).toContain('model-download-status');
+  });
+
   it('uses the content surface behind short workspaces instead of exposing canvas', () => {
     const shell = read('src/styles/shell.css');
     const appMain = ruleBody(shell, '.app-main');
