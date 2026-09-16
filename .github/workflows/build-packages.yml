@@ -37,13 +37,14 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci --no-audit --no-fund
-      # build.ps1 carries the Windows-specific packaging work: it strips the
-      # non-Windows ONNX dylibs ort drops next to the exe, resolves the
-      # DirectML.dll symlink into a real file, and stages the bundled model
-      # under data/models where the app expects it.
+      # The Windows build script carries the Windows-specific packaging work: it
+      # strips the non-Windows ONNX dylibs ort drops next to the exe, resolves the
+      # DirectML.dll symlink into a real file, and stages the bundled model under
+      # data/models where the app expects it. It lives under .github/scripts so
+      # that the local Windows build (build_exe.bat) runs the very same file.
       - name: Build portable executable
         shell: pwsh
-        run: ./tools/windows/build.ps1 -Release -UseHostTools
+        run: ./.github/scripts/build-windows.ps1 -Release -UseHostTools
       - name: Package Windows zip
         shell: pwsh
         run: |
@@ -111,6 +112,11 @@ jobs:
           "$sdkmanager" --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       - run: npm ci --no-audit --no-fund
       - run: npx tauri android init --ci --skip-targets-install
+      # `init` 生成的工程带的是模板默认图标，`tauri icon` 才会把项目图标写进去：
+      # 存在 gen/<平台> 工程时写进工程，否则退回 icons/<平台>。少了这一步，APK 的
+      # 启动图标一直是 Tauri 那套默认图。
+      - name: Write the project icons into the generated Android project
+        run: npx tauri icon src-tauri/icons/icon-manifest.json
       - name: Configure Android signing
         shell: bash
         env:
@@ -175,13 +181,22 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - run: npx tauri ios init --ci
+      # 与 Android 作业同理：init 生成的资产目录里是 Tauri 的默认图标，这一步用
+      # 项目图标（icon-manifest.json）覆盖 AppIcon.appiconset。
+      - name: Write the project icons into the generated Xcode project
+        run: npx tauri icon src-tauri/icons/icon-manifest.json
       - run: npm run build
       # Tauri 的 Xcode 脚本阶段（`tauri ios xcode-script`）要读 `tauri ios dev`
       # 写下的 dev-server 地址文件，没有它就 panic —— 未签名的发布构建用不上开发
       # 服务器，所以这里自己先编好 iOS 的 Rust 库，再把那个阶段改成空操作。
       # （这段 workaround 在 7c293b6 被删掉，此后 iOS 作业每次都挂在这一步。）
+      # `--features custom-protocol` 是「装完进不去界面」的原因：缺了它就等于开发
+      # 构建，运行时 tauri:// 协议会把每个资源请求代理到 devUrl（http://localhost:
+      # 27790），于是报 did you grant local network permissions?。CLI 自己跑 build
+      # 时会自动带上这个 feature，这里手写 cargo 必须显式给。顺便改成 release：
+      # 之前编的是 debug 库，只是当时没人注意链接进去的是什么。
       - name: Build Rust for iOS
-        run: cargo build --target aarch64-apple-ios --manifest-path src-tauri/Cargo.toml
+        run: cargo build --release --target aarch64-apple-ios --features custom-protocol --manifest-path src-tauri/Cargo.toml
       - name: Disable Tauri dev-server Xcode phase for unsigned release
         shell: bash
         run: |
@@ -202,7 +217,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          lib=$(find src-tauri/target/aarch64-apple-ios -maxdepth 2 -name 'lib*.a' -print -quit)
+          lib=$(find src-tauri/target/aarch64-apple-ios/release -maxdepth 1 -name 'lib*.a' -print -quit)
           test -n "$lib"
           for config in debug release; do
             mkdir -p "src-tauri/gen/apple/Externals/arm64/$config"

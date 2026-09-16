@@ -8,8 +8,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ToolchainRoot = if ($ToolchainRoot) { $ToolchainRoot } else { Join-Path $PSScriptRoot "toolchain" }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+# The portable toolchain stays a local-only directory (its layout is pinned by
+# tools/windows/toolchain-manifest.json). This script is the one piece of `tools/`
+# that is checked in, and it lives here so the packaging job and a local build run
+# the same file.
+$ToolchainRoot = if ($ToolchainRoot) { $ToolchainRoot } else { Join-Path $repoRoot "tools\windows\toolchain" }
 
 function Resolve-Tool([string]$RelativePath, [string]$Name) {
     $candidate = Join-Path $ToolchainRoot $RelativePath

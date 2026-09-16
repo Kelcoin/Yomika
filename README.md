@@ -107,3 +107,7 @@ Windows 便携包由 CI 产出：在仓库的 **Actions → Build Packages and R
 - 内置的 waifu2x-upconv7 模型源自 nihui/waifu2x-ncnn-vulkan（MIT，许可文本随模型安装到数据目录）；Anime4K 着色器取自 bloc97/Anime4K（MIT，文件头随资源保留）。
 - 去码模型包（Aletheia-Lens，GPL-3.0）不内嵌于应用，以独立 Release 分发并随包附带其许可证文本。
 - JHenTai（Apache-2.0）、LANreader（MIT）、ComicReadScript（AGPL-3.0）、imsearch（GPL-3.0）等仅作为本地行为参考，未复制源码、资源或文案。
+
+## 许可证
+
+Yomika 以 [MIT 许可证](LICENSE)发布，版权归 Yomika contributors 所有。上面「第三方」里列出的模型、着色器与社区数据各有自己的许可，随对应资源一并生效。

@@ -2,6 +2,7 @@
   "name": "yomika",
   "private": true,
   "version": "1.0.0",
+  "license": "MIT",
   "author": "Kelcoin",
   "repository": {
     "type": "git",

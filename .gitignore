@@ -8,8 +8,6 @@
 
 # Local verification, packaging and one-off debug outputs
 /artifacts/
-/tools/test-*.mjs
-/tools/watch-probe.mjs
 *.log
 
 # AI agent tooling (local state only; negate a rule if one is ever meant to be shared)
@@ -27,9 +25,12 @@ CLAUDE.local.md
 /.superpowers/
 /docs/superpowers/
 
-# Local build helpers
+# Local build helpers: entrypoint, one-off packaging, model pipeline, and the
+# portable toolchain under tools/windows/toolchain/. The Windows build script is
+# the one piece the repository needs, so it is checked in at
+# .github/scripts/build-windows.ps1; nothing else under tools/ is tracked.
 /build_exe.bat
-/tools/windows/
+/tools/
 
 # Secrets and local environment
 .env
@@ -44,7 +45,6 @@ CLAUDE.local.md
 /node_modules/
 /.npm-cache/
 src-tauri/.npm-cache/
-/tools/windows/toolchain/
 *.tsbuildinfo
 .codex-gh/
 /vite.config.js

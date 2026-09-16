@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Local-first reading and archive client"
 authors = ["Yomika contributors"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "yomika_lib"
@@ -32,6 +33,14 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # NFKC normalization for dedup filename matching (Readoshi parity).
 unicode-normalization = "0.1"
 ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
+
+[features]
+# Tauri tells production builds apart from development ones with this feature:
+# enabling it turns `cfg(dev)` off, and that is what makes the app serve the
+# frontend compiled into the binary instead of reaching for `devUrl`. The CLI
+# enables it on its own for `tauri build` and `tauri android/ios build`, but a
+# hand-rolled `cargo build` has to pass `--features custom-protocol` itself.
+custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 

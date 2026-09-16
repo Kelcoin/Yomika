@@ -18,3 +18,25 @@ scaled down, it simply fails to draw, which is how the hover preview lost its ic
 
 The order is therefore 32×32 first, then the rest largest to smallest. Re-exporting
 this file from a design tool will silently reorder it; put 32×32 back in front.
+
+## Mobile icons
+
+Android and iOS take their launcher art from `tauri icon`, which writes into the
+*generated* project when one exists (`gen/android/app/src/main/res`,
+`gen/apple/Assets.xcassets/AppIcon.appiconset`) and falls back to `icons/android`
+and `icons/ios` otherwise. It therefore has to run *after* `tauri android init` /
+`tauri ios init` — the packaging workflow does that, and a local run refreshes the
+fallback copies checked in here:
+
+    npx tauri icon src-tauri/icons/icon-manifest.json
+
+`icon-manifest.json` is the input: `assets/yomika-mark-print.svg` for the flat
+icons, `android-foreground.svg` (the mark without its rounded square) as the
+adaptive icon's foreground and monochrome layer, and `#0D0D0D` for the plate
+behind them. The separate foreground is what keeps Android from drawing the whole
+black square inside a white circle: the foreground is what gets scaled into the
+mask's safe area.
+
+A regeneration also rewrites the desktop set, `icon.ico` included. That one comes
+out with 32×32 still in front, so it keeps working — the warning above is about
+design-tool exports, not about this command.
