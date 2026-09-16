@@ -18,6 +18,16 @@ on:
     # Model releases own the v* tags; app releases use the app-v* prefix.
     tags: ['app-v*']
 
+# 产物只有一处去处：草稿 release（或 app-v* 标签推上来的正式 release）。三个平台
+# 本来还会各传一份 run artifact，但私有仓库的 Actions 存储配额是**按账号**算的，
+# 而这个账号的计数被早先删掉的构建缓存卡住了：实际占用只有 148MB（三个 npm 缓存），
+# GitHub 仍按 748MB 拒收，报 "Artifact storage quota has been hit"，官方说明是
+# 「每 6–12 小时重算一次」。所以那三步只是在每次 run 里留一个红色的失败记录，交付
+# 本来就靠 release。配额恢复正常后想加回来，路径分别是：
+#   windows: artifacts/yomika-windows.zip
+#   android: src-tauri/gen/android/app/build/outputs/**/*
+#   ios:     artifacts/Yomika-unsigned.ipa
+
 permissions:
   contents: read
 
@@ -62,16 +72,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
           Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
-      # 两份去处：run 页面的 Artifacts（方便随手下载）与草稿 release（正式交付，
-      # 且不占 Actions 存储配额）。Artifacts 这一步允许失败：私有仓库的 500MB 配额
-      # 一旦被缓存顶满，GitHub 会拒收（"Artifact storage quota has been hit"），
-      # 那种情况不该把整次发布判失败——release 里那份照样有。
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: yomika-windows
-          path: artifacts/yomika-windows.zip
-          retention-days: 1
       - name: Attach the Windows package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -138,12 +138,6 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: npx tauri android build --ci --apk --aab --target aarch64
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: yomika-android
-          path: src-tauri/gen/android/app/build/outputs/**/*
-          retention-days: 1
       - name: Attach the Android packages to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -240,12 +234,6 @@ jobs:
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app
           (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)
-      - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: yomika-ios-unsigned
-          path: artifacts/Yomika-unsigned.ipa
-          retention-days: 1
       - name: Attach the iOS package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
