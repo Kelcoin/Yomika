@@ -462,6 +462,15 @@ pub fn save_preferences_to(
             )
             .map_err(|error| error.to_string())?;
     }
+    // 偏好进同步日志（全局范围、单对象）：勾了「应用设置」的设备之间整份替换。
+    if let Ok(payload) = serde_json::to_value(&value) {
+        let _ = crate::commands::sync::journal_global_object(
+            &transaction,
+            "app_setting",
+            "preferences",
+            payload,
+        );
+    }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(value)
 }

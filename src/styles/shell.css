@@ -705,14 +705,19 @@ body::-webkit-scrollbar,
   color: var(--brand-vermilion);
 }
 
+/* 未配置服务器时各页共用的引导（ServerRequiredPrompt）：居中、上下各一条分割线，
+   两个入口在下方居中排开。首页原来自己画过一版（左文案右按钮），书架与档案库那两版
+   连分割线都没有——同一个状态三种长相。 */
 .first-run {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-8);
-  padding: var(--space-8) 0;
+  justify-items: center;
+  gap: var(--space-6);
+  width: min(100%, 560px);
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-4);
   border-top: 1px solid var(--hairline);
   border-bottom: 1px solid var(--hairline);
+  text-align: center;
 }
 
 /* One column, full width. This used to reserve a 240px label column for the
@@ -844,8 +849,7 @@ body::-webkit-scrollbar,
 .date-picker-days button:hover,
 .settings-menu-check:hover:not(:disabled),
 .custom-scheme-card:hover,
-.search-preset-apply:hover,
-.nav-more-menu .nav-link:hover:not(.is-active) {
+.search-preset-apply:hover {
   background: var(--surface-container-high);
 }
 
@@ -910,22 +914,20 @@ body::-webkit-scrollbar,
 
 .first-run-copy {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  column-gap: var(--space-5);
+  justify-items: center;
+  gap: var(--space-2);
 }
 
 .first-run-copy > svg {
-  grid-row: 1 / 4;
   width: 40px;
   height: 40px;
   color: var(--brand-cyan);
-  align-self: center;
 }
 
 .first-run-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: center;
   gap: var(--space-3);
 }
 
@@ -3192,13 +3194,110 @@ body::-webkit-scrollbar,
   text-align: center;
 }
 
+/* 图标 + 账号信息两列；动作在下面独占一行。挤在右列里时两个按钮会折行，折出来
+   的那个落到第一列，看起来「编辑」在右上、「立即同步」在左下，像两处不相干的按钮。 */
 .sync-account-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2) var(--space-4);
   min-height: 68px;
   padding: var(--space-2) var(--space-4);
+}
+
+/* 动作块/表单要跨满整个网格：只占第一列时它会撑宽那一列，把账号文字挤成细条。 */
+.sync-account-row > .sync-collapsible,
+.settings-menu-account > .sync-collapsible {
+  grid-column: 1 / -1;
+}
+
+/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 各占一份宽度，谁也不折行。 */
+.sync-account-actions,
+.settings-menu-account-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.sync-account-actions > button,
+.settings-menu-account-actions > .settings-action {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 收起/展开：0fr → 1fr 的网格行过渡，让「高度自动」的表单也能动画——按钮的显隐
+   与面板尺寸变化是同一个动作，不会突然跳一截。 */
+.sync-collapsible {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--motion-standard), opacity var(--motion-fast);
+}
+
+.sync-collapsible.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.sync-collapsible > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 保存与取消各占一半，一起铺满整行。 */
+.sync-form-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.sync-form-actions > button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 同步范围：勾选题按列自适应排开，下面一行小字说明默认项。 */
+.sync-scope {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-control);
+}
+
+.sync-scope legend {
+  padding: 0 var(--space-2);
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+}
+
+.sync-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.sync-scope-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* 勾选框自己定尺寸：默认尺寸在移动端表单里会跟着控件一起放大，一屏放不下八项。 */
+.sync-scope-option input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.sync-scope-hint {
+  margin: 0;
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 
@@ -3473,6 +3572,8 @@ body::-webkit-scrollbar,
 }
 @media (prefers-reduced-motion: reduce) {
   .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 100%; animation: none; opacity: 0.6; }
+  /* 减弱动效时收起/展开直接切换，不做过渡。 */
+  .sync-collapsible { transition: none; }
 }
 /* 九格排一行：auto-fit+minmax 在窄一点时会把最后一格挤到第二行，改成等分的
    单行网格，格子自己收缩。 */
@@ -3824,9 +3925,11 @@ body::-webkit-scrollbar,
        workspace is the only row. Reserving 60px for a removed element squeezed
        the whole page into that strip. */
     grid-template-rows: minmax(0, 1fr);
-    /* 手机上没有自绘标题栏，顶部安全区（刘海 / 状态栏）由这一层让出来；下面
-       的底栏占位也一并减去，免得两者叠加把工作区顶出屏幕。 */
-    height: calc(100dvh - (64px + var(--safe-bottom) + var(--safe-top)));
+    /* 手机上没有自绘标题栏，顶部安全区（刘海 / 状态栏）由这一层的 padding 让出来。
+       这里只能减掉底栏那一行：全局 box-sizing: border-box 之下 padding 已经算在
+       height 里，再减一次 safe-top，整个工作区就比可用高度矮了一个 safe-top，
+       底下露出 body 的深色底——也就是底栏上方那条黑带。 */
+    height: calc(100dvh - (64px + var(--safe-bottom)));
     padding-top: var(--safe-top);
   }
 
@@ -3893,9 +3996,18 @@ body::-webkit-scrollbar,
     padding: var(--space-6) 0;
   }
 
+  /* 引导在手机上不再是「图标 + 文案」两列：居中一列，图标小一号，两个入口
+     竖排、各自占满一行（.primary-action 在这层已经是 100% 宽）。 */
+  .first-run {
+    justify-items: center;
+    width: min(100%, 420px);
+    padding: var(--space-6) var(--space-4);
+    text-align: center;
+  }
+
   .first-run-copy {
-    grid-template-columns: 36px minmax(0, 1fr);
-    column-gap: var(--space-4);
+    justify-items: center;
+    gap: var(--space-1);
   }
 
   .first-run-copy > svg {
@@ -3906,6 +4018,7 @@ body::-webkit-scrollbar,
   .first-run-actions {
     flex-direction: column;
     align-items: stretch;
+    align-self: stretch;
   }
 
   .primary-action {
@@ -4091,11 +4204,6 @@ body::-webkit-scrollbar,
     background: var(--surface-container-high);
   }
 
-  /* 「更多」是按钮不是链接：UA 的按钮底色必须显式抹掉，否则常驻一块浅灰。 */
-  .compact-nav .nav-more {
-    background: transparent;
-  }
-
   /* The active link keeps its own background; hover must not paint a second one
      over it, which read as two overlapping states on the same tab. */
   .compact-nav .nav-link.is-active:hover {
@@ -4124,53 +4232,6 @@ body::-webkit-scrollbar,
     bottom: calc(var(--safe-bottom) + var(--space-3) + 64px + var(--space-3));
   }
 
-  /* 底栏「更多」面板：悬浮在更多按钮上方，只列底栏放不下的页面。 */
-  .nav-more-layer {
-    position: fixed;
-    inset: 0;
-    z-index: calc(var(--z-compact-nav) + 1);
-  }
-
-  .nav-more-backdrop {
-    position: absolute;
-    inset: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-  }
-
-  .nav-more-menu {
-    position: fixed;
-    display: grid;
-    gap: 2px;
-    right: var(--space-4);
-    bottom: calc(var(--safe-bottom) + 64px + var(--space-2));
-    width: max-content;
-    padding: var(--space-2);
-    border: 1px solid var(--outline-variant);
-    border-radius: var(--radius-card);
-    background: var(--surface-container-high);
-    box-shadow: var(--shadow-menu);
-  }
-
-  /* 悬浮底栏底边再抬高一点，面板仍贴着更多按钮的上方。 */
-  .app-shell.is-floating-nav .nav-more-menu {
-    bottom: calc(var(--safe-bottom) + var(--space-3) + 64px + var(--space-2));
-  }
-
-  .nav-more-menu .nav-link {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-height: 48px;
-    padding: 0 var(--space-4);
-    border-radius: var(--radius-control);
-    color: var(--ink-secondary);
-    font-size: var(--text-md);
-    font-weight: 600;
-  }
-
-  .nav-more-menu .nav-link svg { flex: none; }
 
 
 .nav-link.is-active,
@@ -4362,12 +4423,19 @@ body::-webkit-scrollbar,
    with the sync action sitting where the value would. */
 .settings-menu-account {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
   min-height: 56px;
-  padding: 0 var(--space-2);
+  padding: var(--space-2);
   border-radius: var(--radius-control);
+}
+
+/* 与 /sync 版一致：动作另起一行，免得多出来的按钮掉到第一列。 */
+.settings-menu-account > .settings-action {
+  grid-column: 1 / -1;
+  width: 100%;
+  justify-content: center;
 }
 
 .settings-menu-account-glyph {

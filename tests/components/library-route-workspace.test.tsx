@@ -95,8 +95,11 @@ describe('library route workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
 
-    expect(await screen.findByText('尚未连接 LANraragi')).toBeInTheDocument();
+    // 各页共用同一份引导（ServerRequiredPrompt）：同一个标题、同样的两个入口，
+    // 不再各画一版。
+    expect(await screen.findByRole('heading', { name: '添加你的 LANraragi' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
+    expect(screen.getByRole('link', { name: /从 WebDAV 同步/ })).toHaveAttribute('href', '/settings?section=sync');
   });
 
   it('resolves history records to archive titles and server context', async () => {
@@ -298,7 +301,7 @@ describe('library route workspace', () => {
     // 同步区是一行设置；未配置的空状态在「WebDAV 账户」行的悬浮菜单里。
     await user.click(await screen.findByRole('button', { name: 'WebDAV 账户' }));
     const accountsMenu = await screen.findByRole('dialog', { name: 'WebDAV 账户' });
-    expect(within(accountsMenu).getByText('尚未配置 WebDAV 账户，填写下方表单保存第一台设备。')).toBeInTheDocument();
+    expect(within(accountsMenu).getByText('尚未配置 WebDAV 账户，填写下方表单即可开始同步。')).toBeInTheDocument();
   });
 
   it('loads archives from the first configured server scope', async () => {

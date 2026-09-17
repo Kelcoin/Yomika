@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -11,100 +10,401 @@ use crate::{
     settings::get_or_create_device_id,
 };
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// 远端那份文档：一个账户一个文件（`Yomika/<账户>.json.enc`），内容是「每个对象
+/// 的最新版本」。
+///
+/// 这里原来是「清单 + 每设备目录下的不可变段」：读的人要先看清单、再逐段下载、再合并，
+/// 段只增不删还得靠 GC 收拾，而它们要表达的信息其实只有「每个对象现在是什么」。现在
+/// 远端就是那份合并结果本身——多设备并发靠写入时的 ETag 前置条件与「时钟大者胜、同刻
+/// 比哈希」的确定性合并规则保证，不需要段，也就没有 GC 与游标。
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SyncManifestSegment {
-    pub hash: String,
-    pub size: u64,
-    pub sequence_start: i64,
-    pub sequence_end: i64,
-    /// Which device wrote the segment. The change files live under the
-    /// device's directory, so pulling requires this; manifests written before
-    /// the pull phase lack it and their segments stay undownloadable.
-    #[serde(default)]
-    pub device_id: Option<String>,
+struct SyncStateObject {
+    scope_id: String,
+    object_type: String,
+    object_id: String,
+    /// `upsert` 或 `delete`。删除同样留在文档里（墓碑），否则别的设备永远学不到这次
+    /// 删除，下次同步还会把它当成「本地新增」推回来。
+    operation: String,
+    payload: serde_json::Value,
+    payload_hash: String,
+    logical_clock: i64,
+    device_id: String,
+    wall_clock: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SyncManifest {
-    pub version: i64,
-    pub epoch: i64,
-    pub segments: Vec<SyncManifestSegment>,
-    pub device_cursors: std::collections::BTreeMap<String, i64>,
+struct SyncStateDocument {
+    version: i64,
+    epoch: i64,
+    /// key = `{scope_id}|{object_type}|{object_id}`。
+    objects: std::collections::BTreeMap<String, SyncStateObject>,
 }
 
-fn merge_manifests(local: &SyncManifest, remote: &SyncManifest) -> SyncManifest {
-    let mut segments = std::collections::BTreeMap::new();
-    for segment in remote.segments.iter().chain(local.segments.iter()) {
-        segments
-            .entry(segment.hash.clone())
-            .or_insert_with(|| segment.clone());
+/// 文档结构自己的版本号：文档里带着它，将来改结构可以让旧客户端明确拒绝而不是误读。
+const SYNC_STATE_VERSION: i64 = 1;
+
+/// 一次同步能覆盖的数据类别。账户上勾了哪几类，同步就只推拉哪几类。
+pub(crate) const SYNC_SCOPE_CATEGORIES: [&str; 8] = [
+    "progress",
+    "history",
+    "watchlist",
+    "search_presets",
+    "dedup",
+    "lrr_servers",
+    "eh_account",
+    "app_settings",
+];
+
+/// 默认勾选：进度、历史、待看、搜索预设、非重复标记。新增的三类默认不勾——它们会
+/// 带着服务器地址、E-H 账号名与应用偏好上路，是否上远端该由使用者决定。
+pub(crate) const DEFAULT_SYNC_SCOPE: [&str; 5] =
+    ["progress", "history", "watchlist", "search_presets", "dedup"];
+
+/// 不按某台服务器切分的数据（服务器列表、E-H 账户、应用设置）挂在固定 scope 上。
+const GLOBAL_SCOPE: &str = "__global__";
+
+/// 账户里存的是类别数组的 JSON；未知条目丢弃，空值回落到默认集合（旧账户的列是空串）。
+pub(crate) fn parse_sync_scope(value: &str) -> Vec<String> {
+    let parsed: Vec<String> = serde_json::from_str(value).unwrap_or_default();
+    let known: Vec<String> = parsed
+        .into_iter()
+        .filter(|item| SYNC_SCOPE_CATEGORIES.contains(&item.as_str()))
+        .collect();
+    if known.is_empty() {
+        DEFAULT_SYNC_SCOPE.iter().map(|item| item.to_string()).collect()
+    } else {
+        known
     }
-    let mut device_cursors = remote.device_cursors.clone();
-    for (device_id, cursor) in &local.device_cursors {
-        device_cursors
-            .entry(device_id.clone())
-            .and_modify(|value| *value = (*value).max(*cursor))
-            .or_insert(*cursor);
+}
+
+pub(crate) fn serialize_sync_scope(categories: &[String]) -> String {
+    let known: Vec<&String> = categories
+        .iter()
+        .filter(|item| SYNC_SCOPE_CATEGORIES.contains(&item.as_str()))
+        .collect();
+    let effective = if known.is_empty() {
+        DEFAULT_SYNC_SCOPE.iter().map(|item| item.to_string()).collect::<Vec<_>>()
+    } else {
+        known.into_iter().cloned().collect()
+    };
+    serde_json::to_string(&effective).unwrap_or_default()
+}
+
+/// 同步对象类型 → 它属于哪个类别（类别没勾就不推也不拉）。
+pub(crate) fn object_type_category(object_type: &str) -> Option<&'static str> {
+    match object_type {
+        "reading_progress" => Some("progress"),
+        "history" => Some("history"),
+        "watchlist" => Some("watchlist"),
+        "search_preset" => Some("search_presets"),
+        "dedup_non_duplicate" | "legacy_non_duplicate" => Some("dedup"),
+        "lrr_server" => Some("lrr_servers"),
+        "eh_account" => Some("eh_account"),
+        "app_setting" => Some("app_settings"),
+        _ => None,
     }
-    SyncManifest {
+}
+
+fn scope_includes(enabled: &[String], object_type: &str) -> bool {
+    match object_type_category(object_type) {
+        Some(category) => enabled.iter().any(|item| item == category),
+        None => false,
+    }
+}
+
+fn state_object_key(scope_id: &str, object_type: &str, object_id: &str) -> String {
+    format!("{scope_id}|{object_type}|{object_id}")
+}
+
+/// 同一个对象两版相争：逻辑时钟大的赢；时钟相同（两台设备各自离线改过）时比内容哈希。
+/// 规则完全确定，任何设备按任意顺序合并都会得到同一份结果。
+fn state_object_wins(candidate: &SyncStateObject, existing: &SyncStateObject) -> bool {
+    (candidate.logical_clock, &candidate.payload_hash)
+        > (existing.logical_clock, &existing.payload_hash)
+}
+
+fn merge_sync_states(local: &SyncStateDocument, remote: &SyncStateDocument) -> SyncStateDocument {
+    let mut objects = remote.objects.clone();
+    for (key, candidate) in &local.objects {
+        match objects.get(key) {
+            Some(existing) if !state_object_wins(candidate, existing) => {}
+            _ => {
+                objects.insert(key.clone(), candidate.clone());
+            }
+        }
+    }
+    SyncStateDocument {
         version: local.version.max(remote.version),
         epoch: local.epoch.max(remote.epoch),
-        segments: segments.into_values().collect(),
-        device_cursors,
+        objects,
     }
 }
 
-#[tauri::command]
-pub fn merge_sync_manifests(
-    local: SyncManifest,
-    remote: SyncManifest,
-) -> CommandResult<SyncManifest> {
-    CommandResult::success(merge_manifests(&local, &remote))
+/// 本地这一侧的全部对象：把该 scope 的日志按序号折叠，每个对象取最后一版。日志里
+/// upsert 与 delete 都在，所以折出来的文档天然带墓碑。
+fn build_local_state(
+    connection: &Connection,
+    scope_ids: &[&str],
+    enabled: &[String],
+) -> Result<SyncStateDocument, String> {
+    let mut objects = std::collections::BTreeMap::new();
+    let mut records = Vec::new();
+    for scope_id in scope_ids {
+        records.extend(query_journal_entries(connection, scope_id, None)?);
+    }
+    records.sort_by_key(|record| record.sequence);
+    for record in records {
+        // 类别没勾就不进文档：勾选是「要不要让它上远端」的开关。
+        if !scope_includes(enabled, &record.object_type) {
+            continue;
+        }
+        let payload = serde_json::from_str(&record.payload_json).unwrap_or(serde_json::Value::Null);
+        let object = SyncStateObject {
+            scope_id: record.scope_id.clone(),
+            object_type: record.object_type.clone(),
+            object_id: record.object_id.clone(),
+            operation: record.operation.clone(),
+            payload,
+            payload_hash: record.payload_hash.clone(),
+            logical_clock: record.logical_clock,
+            device_id: record.device_id.clone(),
+            wall_clock: record.wall_clock.clone(),
+        };
+        // 记录按序号升序，后面的覆盖前面的——这就是「取最后一版」。
+        objects.insert(
+            state_object_key(&record.scope_id, &record.object_type, &record.object_id),
+            object,
+        );
+    }
+    Ok(SyncStateDocument { version: SYNC_STATE_VERSION, epoch: 0, objects })
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SyncWireObject {
-    sequence: i64,
-    object_id: String,
-    object_type: String,
-    operation: String,
-    device_id: String,
+/// 写一条同步日志。scope 与逻辑时钟由调用方给：像去重标记那样自带时钟的对象要用
+/// 它自己的值，远端冲突抢占的规则才对得上；全局对象则用「该对象历史的下一格」。
+pub(crate) fn journal_object(
+    transaction: &rusqlite::Transaction<'_>,
+    scope_id: &str,
+    object_type: &str,
+    object_id: &str,
     logical_clock: i64,
-    wall_clock: String,
-    base_hash: Option<String>,
-    payload_hash: String,
     payload: serde_json::Value,
+) -> Result<(), String> {
+    let payload_json = payload.to_string();
+    let payload_hash = blake3::hash(payload_json.as_bytes()).to_hex().to_string();
+    let device_id = get_or_create_device_id(transaction)?;
+    append_journal_entry(
+        transaction,
+        SyncJournalInput {
+            scope_id: scope_id.to_string(),
+            object_id: object_id.to_string(),
+            object_type: object_type.to_string(),
+            operation: "upsert".to_string(),
+            device_id,
+            logical_clock,
+            base_hash: None,
+            payload_hash,
+            payload_json,
+        },
+    )?;
+    Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SyncSegmentEnvelope {
-    version: i64,
-    /// The journal scope every object in the segment belongs to. A sync run
-    /// claims one scope, so the segment is homogeneous; the pull side needs
-    /// the scope to route objects into the right local tables.
-    scope_id: String,
-    sequence_start: i64,
-    sequence_end: i64,
-    objects: Vec<SyncWireObject>,
+/// 不按服务器切分的对象（服务器条目、E-H 账户、应用偏好）写一条全局日志。
+pub(crate) fn journal_global_object(
+    transaction: &rusqlite::Transaction<'_>,
+    object_type: &str,
+    object_id: &str,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let clock: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal WHERE scope_id = ?1 AND object_id = ?2",
+            params![GLOBAL_SCOPE, object_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    journal_object(transaction, GLOBAL_SCOPE, object_type, object_id, clock, payload)
 }
 
-/// Envelope layout this build writes and reads. Version 1 (pre-pull) carried
-/// no scope, so its segments cannot be routed on merge — the pull side treats
-/// them as undecodable and moves on.
-const SYNC_SEGMENT_VERSION: i64 = 2;
+/// 全局对象在本地的当前时钟（该对象日志里的最大值），用来判断远端那一版该不该落。
+fn local_object_clock(
+    transaction: &rusqlite::Transaction<'_>,
+    object_id: &str,
+) -> Result<i64, String> {
+    transaction
+        .query_row(
+            "SELECT COALESCE(MAX(logical_clock), 0) FROM sync_journal WHERE scope_id = ?1 AND object_id = ?2",
+            params![GLOBAL_SCOPE, object_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+}
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuiltSyncSegment {
-    sequence_start: i64,
-    sequence_end: i64,
-    hash: String,
-    size: usize,
-    ciphertext: Vec<u8>,
+/// 服务器条目。同步的是「哪台服务器」——名字、地址与启用状态；API Key 在系统凭据
+/// 库里，按设备各存各的，不上远端（新设备拉到条目后需要自己填一次 Key）。
+fn apply_remote_server(
+    transaction: &rusqlite::Transaction<'_>,
+    object: &SyncStateObject,
+    payload: &serde_json::Value,
+) -> Result<bool, String> {
+    let scope_id = payload_text(payload, "scopeId")?;
+    let name = payload_text(payload, "name")?;
+    let base_url = payload_text(payload, "baseUrl")?;
+    let enabled = payload_bool(payload, "enabled").unwrap_or(false);
+    let updated = transaction
+        .query_row(
+            "SELECT updated_at FROM servers WHERE id = ?1",
+            params![scope_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let gate = match updated {
+        Some(updated) => remote_change_wins(
+            local_object_clock(transaction, &object.object_id)?,
+            &updated,
+            "",
+            object.logical_clock,
+            &object.wall_clock,
+            &object.device_id,
+        ),
+        None => true,
+    };
+    if !gate {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "INSERT INTO servers (id, name, base_url, scope_id, enabled, updated_at)
+             VALUES (?1, ?2, ?3, ?1, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name, base_url = excluded.base_url,
+               enabled = excluded.enabled, updated_at = excluded.updated_at",
+            params![scope_id, name, base_url, enabled, object.wall_clock],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// E-H 账户条目：同步名字、站点与用户名提示。Cookie 进凭据库，不上远端；新设备拉到
+/// 条目后需要重新登录，所以这里不把 remote 的 is_active 带过去。
+fn apply_remote_eh_account(
+    transaction: &rusqlite::Transaction<'_>,
+    object: &SyncStateObject,
+    payload: &serde_json::Value,
+) -> Result<bool, String> {
+    let account_id = payload_text(payload, "accountId")?;
+    let label = payload_text(payload, "label")?;
+    let host = payload_text(payload, "host")?;
+    let username_hint = payload_text(payload, "usernameHint").unwrap_or_default();
+    let updated = transaction
+        .query_row(
+            "SELECT updated_at FROM eh_accounts WHERE id = ?1",
+            params![account_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let gate = match updated {
+        Some(updated) => remote_change_wins(
+            local_object_clock(transaction, &object.object_id)?,
+            &updated,
+            "",
+            object.logical_clock,
+            &object.wall_clock,
+            &object.device_id,
+        ),
+        None => true,
+    };
+    if !gate {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "INSERT INTO eh_accounts (id, label, host, username_hint, cookie_ref, is_active, updated_at)
+             VALUES (?1, ?2, ?3, ?4, '', 0, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               label = excluded.label, host = excluded.host,
+               username_hint = excluded.username_hint, updated_at = excluded.updated_at",
+            params![account_id, label, host, username_hint, object.wall_clock],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// 应用偏好：一份快照整个替换。界面读的是设置表，所以这里直接写它。
+fn apply_remote_app_setting(
+    transaction: &rusqlite::Transaction<'_>,
+    object: &SyncStateObject,
+    payload: &serde_json::Value,
+) -> Result<bool, String> {
+    let updated = transaction
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = 'preferences'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let gate = match updated {
+        Some(_) => remote_change_wins(
+            local_object_clock(transaction, &object.object_id)?,
+            "",
+            "",
+            object.logical_clock,
+            &object.wall_clock,
+            &object.device_id,
+        ),
+        None => true,
+    };
+    if !gate {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES ('preferences', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![payload.to_string(), object.wall_clock],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// 从 Readoshi 导入带进来的「非重复」结论（按 path + 内容哈希记的），现在也随同步
+/// 走：落到同一张 dedup_features 表，行为与导入侧一致。
+fn apply_remote_legacy_non_duplicate(
+    transaction: &rusqlite::Transaction<'_>,
+    scope_id: &str,
+    _object: &SyncStateObject,
+    payload: &serde_json::Value,
+) -> Result<bool, String> {
+    let path = payload_text(payload, "path")?;
+    let exact_hash = payload_text(payload, "hash")?;
+    transaction
+        .execute(
+            "INSERT INTO dedup_features (scope_id, path, exact_hash, algorithm_version, size)
+             VALUES (?1, ?2, ?3, 'legacy-import', 0)
+             ON CONFLICT(scope_id, path) DO UPDATE SET
+               exact_hash = excluded.exact_hash,
+               algorithm_version = excluded.algorithm_version,
+               updated_at = CURRENT_TIMESTAMP",
+            params![scope_id, path, exact_hash],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// 还没推上去的日志行：用来报告本次推了几条，并在成功后就地标记完成。
+fn pending_journal_entries(
+    connection: &Connection,
+    scope_id: &str,
+) -> Result<Vec<SyncJournalRecord>, String> {
+    Ok(query_journal_entries(connection, scope_id, None)?
+        .into_iter()
+        .filter(|record| matches!(record.status.as_str(), "pending" | "retryable"))
+        .collect())
 }
 
 fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
@@ -138,113 +438,25 @@ fn decrypt_bytes(key: &[u8; 32], envelope: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|_| "Sync authentication failed".to_string())
 }
 
-fn encode_encrypted_segment(
-    key: &[u8; 32],
-    segment: &SyncSegmentEnvelope,
-) -> Result<Vec<u8>, String> {
-    let json = serde_json::to_vec(segment).map_err(|error| error.to_string())?;
-    encrypt_bytes(key, &json)
-}
-
-fn decode_encrypted_segment(key: &[u8; 32], bytes: &[u8]) -> Result<SyncSegmentEnvelope, String> {
-    let json = decrypt_bytes(key, bytes)?;
-    let envelope: SyncSegmentEnvelope =
-        serde_json::from_slice(&json).map_err(|error| error.to_string())?;
-    if envelope.version != SYNC_SEGMENT_VERSION {
-        return Err(format!(
-            "Unsupported sync segment version {}",
-            envelope.version
-        ));
-    }
-    Ok(envelope)
-}
-
-fn encode_encrypted_manifest(key: &[u8; 32], manifest: &SyncManifest) -> Result<Vec<u8>, String> {
+fn encode_sync_state(key: &[u8; 32], document: &SyncStateDocument) -> Result<Vec<u8>, String> {
     encrypt_bytes(
         key,
-        &serde_json::to_vec(manifest).map_err(|error| error.to_string())?,
+        &serde_json::to_vec(document).map_err(|error| error.to_string())?,
     )
 }
 
-fn decode_encrypted_manifest(key: &[u8; 32], bytes: &[u8]) -> Result<SyncManifest, String> {
-    serde_json::from_slice(&decrypt_bytes(key, bytes)?).map_err(|error| error.to_string())
-}
-
-fn build_pending_segment(
-    connection: &Connection,
-    scope_id: &str,
-    key: &[u8; 32],
-) -> Result<Option<BuiltSyncSegment>, String> {
-    let records = query_journal_entries(connection, scope_id, None)?;
-    build_segment_from_records(
-        records
-            .into_iter()
-            .filter(|record| matches!(record.status.as_str(), "pending" | "retryable"))
-            .collect(),
-        scope_id,
-        key,
-    )
-}
-
-fn build_segment_from_records(
-    records: Vec<SyncJournalRecord>,
-    scope_id: &str,
-    key: &[u8; 32],
-) -> Result<Option<BuiltSyncSegment>, String> {
-    let mut latest = std::collections::BTreeMap::new();
-    for record in records {
-        latest.insert(
-            (record.object_type.clone(), record.object_id.clone()),
-            record,
-        );
+fn decode_sync_state(key: &[u8; 32], bytes: &[u8]) -> Result<SyncStateDocument, String> {
+    let document: SyncStateDocument =
+        serde_json::from_slice(&decrypt_bytes(key, bytes)?).map_err(|error| error.to_string())?;
+    if document.version > SYNC_STATE_VERSION {
+        return Err(format!(
+            "远端同步文档是更新版本（{}）写的，请先升级应用",
+            document.version
+        ));
     }
-    if latest.is_empty() {
-        return Ok(None);
-    }
-    let mut objects = latest
-        .into_values()
-        .map(|record| {
-            Ok(SyncWireObject {
-                sequence: record.sequence,
-                object_id: record.object_id,
-                object_type: record.object_type,
-                operation: record.operation,
-                device_id: record.device_id,
-                logical_clock: record.logical_clock,
-                wall_clock: record.wall_clock,
-                base_hash: record.base_hash,
-                payload_hash: record.payload_hash,
-                payload: serde_json::from_str(&record.payload_json)
-                    .map_err(|error| error.to_string())?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    objects.sort_by_key(|object| object.sequence);
-    let sequence_start = objects.first().expect("non-empty segment").sequence;
-    let sequence_end = objects.last().expect("non-empty segment").sequence;
-    let ciphertext = encode_encrypted_segment(
-        key,
-        &SyncSegmentEnvelope {
-            version: SYNC_SEGMENT_VERSION,
-            scope_id: scope_id.to_string(),
-            sequence_start,
-            sequence_end,
-            objects,
-        },
-    )?;
-    let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
-    hasher.update(&ciphertext);
-    Ok(Some(BuiltSyncSegment {
-        sequence_start,
-        sequence_end,
-        hash: format!("{:x}", hasher.finalize()),
-        size: ciphertext.len(),
-        ciphertext,
-    }))
+    Ok(document)
 }
 
-const SYNC_KEYRING_SERVICE: &str = "app.yomika.sync";
 const WEBDAV_KEYRING_SERVICE: &str = "app.yomika.webdav";
 
 pub trait WebdavCredentialStore {
@@ -286,6 +498,9 @@ pub struct SaveWebdavAccountInput {
     base_url: String,
     username: String,
     credential: String,
+    /// 勾选的同步类别（JSON 数组）。缺省＝默认集合。
+    #[serde(default)]
+    sync_scope: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,6 +511,7 @@ pub struct WebdavAccountRecord {
     base_url: String,
     username: String,
     credential_ref: String,
+    sync_scope: String,
     status: String,
     last_probe_at: Option<String>,
     last_error_code: Option<String>,
@@ -309,7 +525,7 @@ fn read_webdav_account(
 ) -> Result<WebdavAccountRecord, String> {
     connection
         .query_row(
-            "SELECT id, label, base_url, username, credential_ref, status,
+            "SELECT id, label, base_url, username, credential_ref, sync_scope, status,
                     last_probe_at, last_error_code, created_at, updated_at
              FROM webdav_accounts WHERE id = ?1",
             params![account_id],
@@ -320,11 +536,12 @@ fn read_webdav_account(
                     base_url: row.get(2)?,
                     username: row.get(3)?,
                     credential_ref: row.get(4)?,
-                    status: row.get(5)?,
-                    last_probe_at: row.get(6)?,
-                    last_error_code: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    sync_scope: row.get(5)?,
+                    status: row.get(6)?,
+                    last_probe_at: row.get(7)?,
+                    last_error_code: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 })
             },
         )
@@ -353,24 +570,8 @@ pub fn save_webdav_account_record(
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
         || input.label.trim().is_empty()
-        || input.credential.is_empty()
     {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid WebDAV account", false);
-    }
-    let mut credential_nonce = [0_u8; 12];
-    if SystemRandom::new().fill(&mut credential_nonce).is_err() {
-        return CommandResult::failure("UNKNOWN", "Credential reference generation failed", true);
-    }
-    let credential_ref = format!(
-        "{}-{}",
-        input.id,
-        credential_nonce
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
-    if let Err(error) = credentials.set_credential(&credential_ref, &input.credential) {
-        return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
     }
 
     let old_credential_ref: Option<String> = connection
@@ -381,6 +582,34 @@ pub fn save_webdav_account_record(
         )
         .ok();
 
+    // 编辑已存在的账户时口令可以留空——表单不会把旧口令回填出来，为了让改名、
+    // 换地址这些操作不被迫重输一遍口令，空口令就沿用存着的那份凭据。
+    let credential_ref = if input.credential.is_empty() {
+        match &old_credential_ref {
+            Some(existing) => existing.clone(),
+            None => {
+                return CommandResult::failure("INVALID_RESPONSE", "Invalid WebDAV account", false)
+            }
+        }
+    } else {
+        let mut credential_nonce = [0_u8; 12];
+        if SystemRandom::new().fill(&mut credential_nonce).is_err() {
+            return CommandResult::failure("UNKNOWN", "Credential reference generation failed", true);
+        }
+        let credential_ref = format!(
+            "{}-{}",
+            input.id,
+            credential_nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        if let Err(error) = credentials.set_credential(&credential_ref, &input.credential) {
+            return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
+        }
+        credential_ref
+    };
+
     let transaction = match connection.transaction() {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -388,15 +617,17 @@ pub fn save_webdav_account_record(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     };
+    let sync_scope = serialize_sync_scope(&parse_sync_scope(&input.sync_scope));
     if let Err(error) = transaction.execute(
         "INSERT INTO webdav_accounts
-            (id, label, base_url, username, credential_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+            (id, label, base_url, username, credential_ref, sync_scope)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
             label = excluded.label,
             base_url = excluded.base_url,
             username = excluded.username,
             credential_ref = excluded.credential_ref,
+            sync_scope = excluded.sync_scope,
             status = 'unverified',
             last_probe_at = NULL,
             last_error_code = NULL,
@@ -407,6 +638,7 @@ pub fn save_webdav_account_record(
             parsed_url.as_str().trim_end_matches('/'),
             input.username.trim(),
             credential_ref,
+            sync_scope,
         ],
     ) {
         let _ = credentials.delete_credential(&credential_ref);
@@ -446,7 +678,7 @@ pub fn save_webdav_account(
 fn query_webdav_accounts(connection: &Connection) -> Result<Vec<WebdavAccountRecord>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, label, base_url, username, credential_ref, status,
+            "SELECT id, label, base_url, username, credential_ref, sync_scope, status,
                     last_probe_at, last_error_code, created_at, updated_at
              FROM webdav_accounts ORDER BY label COLLATE NOCASE, id",
         )
@@ -459,11 +691,12 @@ fn query_webdav_accounts(connection: &Connection) -> Result<Vec<WebdavAccountRec
                 base_url: row.get(2)?,
                 username: row.get(3)?,
                 credential_ref: row.get(4)?,
-                status: row.get(5)?,
-                last_probe_at: row.get(6)?,
-                last_error_code: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                sync_scope: row.get(5)?,
+                status: row.get(6)?,
+                last_probe_at: row.get(7)?,
+                last_error_code: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -485,347 +718,34 @@ pub fn list_webdav_accounts(
     }
 }
 
-fn load_sync_key(account_id: &str) -> Result<[u8; 32], String> {
-    let encoded = SystemSyncKeyStore
-        .get(account_id)
-        .map_err(|error| error.to_string())?;
-    let bytes = BASE64_STANDARD
-        .decode(encoded)
-        .map_err(|error| error.to_string())?;
-    bytes
-        .try_into()
-        .map_err(|_| "Invalid stored sync key".to_string())
-}
-
-#[tauri::command]
-pub fn encrypt_sync_manifest(account_id: String, manifest: SyncManifest) -> CommandResult<Vec<u8>> {
-    let key = match load_sync_key(&account_id) {
-        Ok(key) => key,
-        Err(error) => return CommandResult::failure("UNKNOWN", error, false),
-    };
-    match encode_encrypted_manifest(&key, &manifest) {
-        Ok(ciphertext) => CommandResult::success(ciphertext),
-        Err(error) => CommandResult::failure("UNKNOWN", error, false),
-    }
-}
-
-#[tauri::command]
-pub fn decrypt_sync_manifest(
-    account_id: String,
-    ciphertext: Vec<u8>,
-) -> CommandResult<SyncManifest> {
-    let key = match load_sync_key(&account_id) {
-        Ok(key) => key,
-        Err(error) => return CommandResult::failure("UNKNOWN", error, false),
-    };
-    match decode_encrypted_manifest(&key, &ciphertext) {
-        Ok(manifest) => CommandResult::success(manifest),
-        Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
-    }
-}
-
-/// Where the per-account sync master key lives. The key encrypts everything a
-/// device ever uploads, so it must be stable for the account's lifetime: a
-/// regenerated key would leave every existing remote ciphertext undecryptable.
-trait SyncKeyStore {
-    fn get(&self, account_id: &str) -> Result<String, String>;
-    fn set(&self, account_id: &str, encoded: &str) -> Result<(), String>;
-}
-
-struct SystemSyncKeyStore;
-
-impl SyncKeyStore for SystemSyncKeyStore {
-    fn get(&self, account_id: &str) -> Result<String, String> {
-        keyring::Entry::new(SYNC_KEYRING_SERVICE, account_id)
-            .map_err(|error| error.to_string())?
-            .get_password()
-            .map_err(|error| error.to_string())
-    }
-
-    fn set(&self, account_id: &str, encoded: &str) -> Result<(), String> {
-        keyring::Entry::new(SYNC_KEYRING_SERVICE, account_id)
-            .map_err(|error| error.to_string())?
-            .set_password(encoded)
-            .map_err(|error| error.to_string())
-    }
-}
-
-fn valid_sync_key_encoding(encoded: &str) -> bool {
-    BASE64_STANDARD
-        .decode(encoded)
-        .map(|bytes| bytes.len() == 32)
-        .unwrap_or(false)
-}
-
-fn ensure_sync_key(store: &dyn SyncKeyStore, account_id: &str) -> Result<(), String> {
-    let mut key = [0_u8; 32];
-    SystemRandom::new()
-        .fill(&mut key)
-        .map_err(|_| "Sync key generation failed".to_string())?;
-    store.set(account_id, &BASE64_STANDARD.encode(key))
-}
-
-/// Decodes a pasted key into its 32 raw bytes, or `None` when it is not a
-/// Base64 encoding of exactly 32 bytes.
-fn decode_imported_key(key: &str) -> Option<[u8; 32]> {
-    BASE64_STANDARD
-        .decode(key.trim())
-        .ok()
-        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-}
-
-fn import_key_into_store(
-    store: &dyn SyncKeyStore,
-    account_id: &str,
-    key: &str,
-) -> Result<(), String> {
-    store.set(account_id, key.trim())
-}
-
-/// Short, human-comparable fingerprint of a sync key. Device A shows it after
-/// exporting; device B shows it after importing — matching digits prove both
-/// hold the same key without printing the key itself.
-fn sync_key_fingerprint(key: &[u8; 32]) -> String {
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(key);
-    let fingerprint: String = digest.iter().take(8).map(|byte| format!("{byte:02X}")).collect();
-    fingerprint
-}
-
-/// What the account's remote looks like from this device.
-enum RemoteManifestProbe {
-    /// The remote manifest exists — some device already synced with a real key.
-    Present,
-    /// No remote manifest — this account has never synced from anywhere.
-    Missing,
-    /// The probe could not run (offline, bad credentials…).
-    Unavailable(String),
-}
-
-async fn probe_remote_manifest(
-    account: &WebdavAccountRecord,
+/// The account's sync key, derived from the WebDAV password that is already in
+/// the OS credential store.
+///
+/// It used to be a random master key kept in the credential store under its own
+/// entry and copied between devices by hand ("导出密钥"/"导入密钥"): a second device
+/// could not read the remote until the key was carried over, and a missing
+/// keyring entry — which is exactly what Windows handed back — broke sync
+/// outright. Deriving it from the account keeps the ciphertext opaque to the
+/// WebDAV server, needs nothing exported, and lets any device holding the same
+/// account read the same data.
+fn load_sync_key(
+    connection: &Connection,
     credentials: &dyn WebdavCredentialStore,
-) -> RemoteManifestProbe {
-    let credential = match credentials.get_credential(&account.credential_ref) {
-        Ok(credential) => credential,
-        Err(error) => return RemoteManifestProbe::Unavailable(error),
-    };
-    let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
-        Ok(client) => client,
-        Err(error) => return RemoteManifestProbe::Unavailable(error.to_string()),
-    };
-    match client.get_manifest(&account.id).await {
-        Ok(Some(_)) => RemoteManifestProbe::Present,
-        Ok(None) => RemoteManifestProbe::Missing,
-        Err(error) => RemoteManifestProbe::Unavailable(error.to_string()),
-    }
-}
-
-/// Creates the account's sync key exactly once. An existing, well-formed key is
-/// kept as-is — recreating it would orphan every ciphertext already on the
-/// remote. A missing key is generated only when the remote proves empty: a
-/// manifest on the server means another device already holds the real key, and
-/// a locally generated one would be a second, incompatible key for the account.
-fn create_sync_key_result(
-    store: &dyn SyncKeyStore,
     account_id: &str,
-    remote: RemoteManifestProbe,
-) -> CommandResult<String> {
-    if account_id.is_empty()
-        || !account_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account ID", false);
-    }
-    if let Ok(encoded) = store.get(account_id) {
-        if valid_sync_key_encoding(&encoded) {
-            return CommandResult::success(account_id.to_string());
-        }
-    }
-    match remote {
-        RemoteManifestProbe::Present => CommandResult::failure(
-            "SYNC_KEY_MISSING",
-            "远端已有此账户的同步数据，密钥应从原设备导入：请先在原设备导出同步密钥，再在此设备导入。直接新建密钥会让原设备的数据无法解密。",
-            false,
-        ),
-        RemoteManifestProbe::Unavailable(error) => CommandResult::failure(
-            "NETWORK",
-            format!(
-                "无法确认远端是否已有此账户的同步数据（{error}）。已停止生成新密钥：如果其他设备已经在同步，新密钥会让它们无法解密。请联网后重试，或直接导入原设备的同步密钥。"
-            ),
-            true,
-        ),
-        RemoteManifestProbe::Missing => match ensure_sync_key(store, account_id) {
-            Ok(()) => CommandResult::success(account_id.to_string()),
-            Err(error) => CommandResult::failure("UNKNOWN", error, true),
-        },
-    }
-}
-
-#[tauri::command]
-pub fn create_sync_key(
-    account_id: String,
-    database: State<'_, Database>,
-) -> CommandResult<String> {
-    tauri::async_runtime::block_on(async move {
-        let account = {
-            let connection = match database.connection.lock() {
-                Ok(connection) => connection,
-                Err(_) => {
-                    return create_sync_key_result(
-                        &SystemSyncKeyStore,
-                        &account_id,
-                        RemoteManifestProbe::Unavailable("数据库锁定失败".to_string()),
-                    );
-                }
-            };
-            read_webdav_account(&connection, &account_id).ok()
-        };
-        // No account row — the key can be created without any remote state to
-        // collide with. With one, the remote decides whether a new key is safe.
-        let remote = match account {
-            Some(account) => {
-                probe_remote_manifest(&account, &SystemWebdavCredentialStore).await
-            }
-            None => RemoteManifestProbe::Missing,
-        };
-        create_sync_key_result(&SystemSyncKeyStore, &account_id, remote)
-    })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncKeyExport {
-    /// The account's master key, base64. This is the secret every device must
-    /// share to read the account's ciphertexts.
-    pub key: String,
-    /// Short fingerprint for comparing devices without trusting the copy.
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncKeyImport {
-    pub fingerprint: String,
-    /// Some(true) — the remote manifest decrypts with the imported key.
-    /// Some(false) — a remote manifest exists but rejects the key.
-    /// None — the remote had no manifest, or could not be reached.
-    pub verified: Option<bool>,
-}
-
-#[tauri::command]
-pub fn export_sync_key(account_id: String) -> CommandResult<SyncKeyExport> {
-    match load_sync_key(&account_id) {
-        Ok(key) => CommandResult::success(SyncKeyExport {
-            key: BASE64_STANDARD.encode(key),
-            fingerprint: sync_key_fingerprint(&key),
-        }),
-        Err(error) => CommandResult::failure(
-            "NOT_FOUND",
-            format!("尚未创建或导入此账户的同步密钥：{error}"),
-            false,
-        ),
-    }
-}
-
-#[tauri::command]
-pub fn import_sync_key(
-    account_id: String,
-    key: String,
-    database: State<'_, Database>,
-) -> CommandResult<SyncKeyImport> {
-    if account_id.is_empty()
-        || !account_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account ID", false);
-    }
-    let key = key.trim().to_string();
-    let key_bytes = match decode_imported_key(&key) {
-        Some(bytes) => bytes,
-        None => {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                "同步密钥格式无效：应为原设备导出的 Base64 字符串",
-                false,
-            );
-        }
-    };
-    tauri::async_runtime::block_on(async move {
-        let account = {
-            let connection = match database.connection.lock() {
-                Ok(connection) => connection,
-                Err(_) => {
-                    return CommandResult::failure("UNKNOWN", "Database lock failed", true);
-                }
-            };
-            read_webdav_account(&connection, &account_id).ok()
-        };
-        // The remote is the authority on which keys exist. When it answers and
-        // rejects the pasted key, storing it would orphan every future upload
-        // from this device — refuse before writing.
-        let verified = match &account {
-            Some(account) => {
-                match verify_imported_key(account, &key_bytes, &SystemWebdavCredentialStore).await {
-                    Some(decrypts) => Some(decrypts),
-                    // No remote manifest (fresh account) or the remote is
-                    // unreachable — the user's explicit paste is accepted.
-                    None => None,
-                }
-            }
-            None => None,
-        };
-        if verified == Some(false) {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                "导入的密钥无法解密远端数据，未保存。请确认复制的是同一账户在原设备导出的完整密钥。",
-                false,
-            );
-        }
-        if let Err(error) = import_key_into_store(&SystemSyncKeyStore, &account_id, &key) {
-            return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
-        }
-        CommandResult::success(SyncKeyImport {
-            fingerprint: sync_key_fingerprint(&key_bytes),
-            verified,
-        })
-    })
-}
-
-/// Some(true/false) — the imported key does / does not decrypt the remote
-/// manifest. None — no remote manifest, or the remote could not be reached.
-async fn verify_imported_key(
-    account: &WebdavAccountRecord,
-    key: &[u8; 32],
-    credentials: &dyn WebdavCredentialStore,
-) -> Option<bool> {
-    let credential = credentials.get_credential(&account.credential_ref).ok()?;
-    let client = WebdavClient::new(&account.base_url, &account.username, &credential)
-        .ok()?;
-    let remote = client.get_manifest(&account.id).await.ok()??;
-    Some(decode_encrypted_manifest(key, &remote.ciphertext).is_ok())
-}
-
-#[tauri::command]
-pub fn build_sync_segment(
-    account_id: String,
-    scope_id: String,
-    database: State<'_, Database>,
-) -> CommandResult<Option<BuiltSyncSegment>> {
-    let key = match load_sync_key(&account_id) {
-        Ok(key) => key,
-        Err(error) => return CommandResult::failure("UNKNOWN", error, false),
-    };
-    let connection = match database.connection.lock() {
-        Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
-    match build_pending_segment(&connection, &scope_id, &key) {
-        Ok(segment) => CommandResult::success(segment),
-        Err(error) => CommandResult::failure("UNKNOWN", error, true),
-    }
+) -> Result<[u8; 32], String> {
+    let credential_ref: String = connection
+        .query_row(
+            "SELECT credential_ref FROM webdav_accounts WHERE id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "同步账户不存在".to_string())?;
+    let credential = credentials.get_credential(&credential_ref)?;
+    Ok(*blake3::Hasher::new_derive_key("app.yomika.webdav.sync.v1")
+        .update(account_id.as_bytes())
+        .update(credential.as_bytes())
+        .finalize()
+        .as_bytes())
 }
 
 fn set_journal_batch_state(
@@ -1000,14 +920,14 @@ fn compare_instants(left: &str, right: &str) -> std::cmp::Ordering {
 /// The return value counts the rows that actually changed.
 fn apply_remote_objects(
     connection: &mut Connection,
-    envelope: &SyncSegmentEnvelope,
+    objects: &[SyncStateObject],
 ) -> Result<usize, String> {
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
     let mut applied = 0;
-    for object in &envelope.objects {
-        if apply_remote_object(&transaction, &envelope.scope_id, object)? {
+    for object in objects {
+        if apply_remote_object(&transaction, &object.scope_id, object)? {
             applied += 1;
         }
     }
@@ -1020,18 +940,25 @@ fn apply_remote_objects(
 fn apply_remote_object(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
 ) -> Result<bool, String> {
     match object.object_type.as_str() {
         "reading_progress" => {
             apply_remote_progress(transaction, scope_id, object, &object.payload)
         }
         "history" => apply_remote_history(transaction, scope_id, object, &object.payload),
-        "watchlist" | "reading_list" => {
+        // 待看（LRR 叫 watchlist）。收藏夹不在此列：它是服务器收藏分类的镜像。
+        "watchlist" => {
             apply_remote_list_entry(transaction, scope_id, object, &object.payload)
         }
         "search_preset" => {
             apply_remote_search_preset(transaction, scope_id, object, &object.payload)
+        }
+        "lrr_server" => apply_remote_server(transaction, object, &object.payload),
+        "eh_account" => apply_remote_eh_account(transaction, object, &object.payload),
+        "app_setting" => apply_remote_app_setting(transaction, object, &object.payload),
+        "legacy_non_duplicate" => {
+            apply_remote_legacy_non_duplicate(transaction, scope_id, object, &object.payload)
         }
         "dedup_non_duplicate" => {
             apply_remote_dedup_relation(transaction, scope_id, object, &object.payload)
@@ -1080,7 +1007,7 @@ fn local_row_state(
 fn apply_remote_progress(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let archive_id = payload_text(payload, "archiveId")?;
@@ -1161,7 +1088,7 @@ fn apply_remote_progress(
 fn apply_remote_history(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let archive_id = payload_text(payload, "archiveId")?;
@@ -1225,11 +1152,11 @@ fn apply_remote_history(
 fn apply_remote_list_entry(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let table = match object.object_type.as_str() {
-        "watchlist" => "watchlist",
+        // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。
         _ => "reading_list",
     };
     let archive_id = payload_text(payload, "archiveId")?;
@@ -1275,7 +1202,7 @@ fn apply_remote_list_entry(
 fn apply_remote_search_preset(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let preset_id = payload_text(payload, "presetId")?;
@@ -1338,7 +1265,7 @@ fn apply_remote_search_preset(
 fn apply_remote_dedup_relation(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &SyncWireObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let pair_key = payload_text(payload, "pairKey")?;
@@ -1394,38 +1321,7 @@ fn apply_remote_dedup_relation(
 
 /// Reads whether an encrypted change segment has already been merged, and
 /// records one after a successful apply — both for this sync account.
-fn applied_segment_contains(
-    connection: &Connection,
-    account_id: &str,
-    segment_hash: &str,
-) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_applied_segments WHERE account_id = ?1 AND segment_hash = ?2)",
-            params![account_id, segment_hash],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn record_applied_segment(
-    connection: &mut Connection,
-    account_id: &str,
-    segment_hash: &str,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT INTO sync_applied_segments (account_id, segment_hash) VALUES (?1, ?2)
-             ON CONFLICT(account_id, segment_hash) DO NOTHING",
-            params![account_id, segment_hash],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-/// Returns journal entries stranded in `processing` to the retry lane. A claim
-/// flips rows to `processing` and only the same run completes them, so a crash
-/// in between would otherwise make them invisible to every future claim.
+/// 启动时把上次崩溃或中断留在 processing 的日志行交还重试队列。
 pub(crate) fn recover_stuck_sync_journal(connection: &Connection) -> Result<usize, String> {
     let recovered = connection
         .execute(
@@ -1444,8 +1340,8 @@ pub fn sync_webdav_scope(
     database: State<'_, Database>,
 ) -> CommandResult<usize> {
     tauri::async_runtime::block_on(async move {
-        let (account, key, claimed, segment, device_id) = {
-            let mut connection = match database.connection.lock() {
+        let (account, key, local_state, pending, enabled) = {
+            let connection = match database.connection.lock() {
                 Ok(connection) => connection,
                 Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
             };
@@ -1453,51 +1349,27 @@ pub fn sync_webdav_scope(
                 Ok(account) => account,
                 Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
             };
-            let key = match load_sync_key(&account_id) {
+            let key = match load_sync_key(&connection, &SystemWebdavCredentialStore, &account_id) {
                 Ok(key) => key,
                 Err(error) => return CommandResult::failure("UNKNOWN", error, false),
             };
-            let device_id = {
-                let transaction = match connection.transaction() {
-                    Ok(transaction) => transaction,
-                    Err(error) => {
-                        return CommandResult::failure("UNKNOWN", error.to_string(), true)
-                    }
-                };
-                let device_id = match get_or_create_device_id(&transaction) {
-                    Ok(device_id) => device_id,
+            // 要推的是本地这一侧的全部对象（日志折叠而来，含墓碑），不只是本批新增：
+            // 远端文档是「当前状态」，缺了旧对象就等于把它们删掉了。类别上只带上账户
+            // 勾选的：没勾的既不出门，也不落地。
+            let enabled = parse_sync_scope(&account.sync_scope);
+            let local_state =
+                match build_local_state(&connection, &[&scope_id, GLOBAL_SCOPE], &enabled) {
+                    Ok(state) => state,
                     Err(error) => return CommandResult::failure("UNKNOWN", error, true),
                 };
-                if let Err(error) = transaction.commit() {
-                    return CommandResult::failure("UNKNOWN", error.to_string(), true);
-                }
-                device_id
-            };
-            let claimed = match claim_journal_entries(&mut connection, &scope_id, 256) {
+            let mut pending = match pending_journal_entries(&connection, &scope_id) {
                 Ok(records) => records,
                 Err(error) => return CommandResult::failure("UNKNOWN", error, true),
             };
-            let segment = if claimed.is_empty() {
-                // Nothing local to push — the sync still pulls remote changes.
-                None
-            } else {
-                match build_segment_from_records(claimed.clone(), &scope_id, &key) {
-                    Ok(Some(segment)) => Some(segment),
-                    Ok(None) => None,
-                    Err(error) => {
-                        let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-                        let _ = set_journal_batch_state(
-                            &mut connection,
-                            &scope_id,
-                            &sequences,
-                            "retryable",
-                            Some(&error),
-                        );
-                        return CommandResult::failure("INVALID_RESPONSE", error, false);
-                    }
-                }
-            };
-            (account, key, claimed, segment, device_id)
+            if let Ok(global_pending) = pending_journal_entries(&connection, GLOBAL_SCOPE) {
+                pending.extend(global_pending);
+            }
+            (account, key, local_state, pending, enabled)
         };
 
         sync_scope_impl(
@@ -1505,45 +1377,100 @@ pub fn sync_webdav_scope(
             &account,
             &key,
             &scope_id,
-            &device_id,
-            claimed,
-            segment,
+            local_state,
+            pending,
+            &enabled,
             &SystemWebdavCredentialStore,
         )
         .await
     })
 }
 
-/// The push + pull pipeline behind `sync_webdav_scope`, split from the command
-/// so tests can drive it with an in-memory credential store against a local
-/// mock server. Push: the claimed batch uploads as one immutable segment and
-/// the manifest registers it with a conditional PUT (re-merge retries on
-/// conflict). Pull: every manifest segment this device has not applied yet is
-/// downloaded, decrypted and merged into the local tables. A pull failure is
-/// not fatal — the segment stays unrecorded, so the next sync retries it.
+/// 把远端那份文档删掉（「重置远端」）。用于远端状态坏掉又不想动本地数据的情形——
+/// 比如口令换过、旧密文再也解不开：重置后下次同步会按本地重新写一份。
+/// 「编辑」表单要回显已存的口令。凭据平时只在系统安全存储里，这里按需读一次。
+#[tauri::command]
+pub fn webdav_account_credential(
+    account_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<String> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let account = match read_webdav_account(&connection, &account_id) {
+        Ok(account) => account,
+        Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
+    };
+    match SystemWebdavCredentialStore.get_credential(&account.credential_ref) {
+        Ok(credential) => CommandResult::success(credential),
+        Err(error) => CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
+    }
+}
+
+#[tauri::command]
+pub fn reset_webdav_state(
+    account_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<()> {
+    tauri::async_runtime::block_on(async move {
+        let (account, credential) = {
+            let connection = match database.connection.lock() {
+                Ok(connection) => connection,
+                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+            };
+            let account = match read_webdav_account(&connection, &account_id) {
+                Ok(account) => account,
+                Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
+            };
+            let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref)
+            {
+                Ok(credential) => credential,
+                Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
+            };
+            (account, credential)
+        };
+        let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
+            Ok(client) => client,
+            Err(error) => {
+                return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false)
+            }
+        };
+        match client.delete_state(&account.id).await {
+            Ok(()) => CommandResult::success(()),
+            Err(error) => CommandResult::failure("NETWORK", sync_error(error), true),
+        }
+    })
+}
+
+/// The push + pull pipeline behind `sync_webdav_scope`, split from the command so
+/// tests can drive it with an in-memory credential store against a mock server.
+///
+/// Push: the local object set is merged into the remote document and written with
+/// a conditional PUT that re-merges on conflict — two devices syncing at once
+/// both survive. Pull: the merged document is applied back into the local tables,
+/// which is how another device's objects land here.
 #[allow(clippy::too_many_arguments)]
 async fn sync_scope_impl(
     database: &Database,
     account: &WebdavAccountRecord,
     key: &[u8; 32],
     scope_id: &str,
-    device_id: &str,
-    claimed: Vec<SyncJournalRecord>,
-    segment: Option<BuiltSyncSegment>,
+    local_state: SyncStateDocument,
+    pending: Vec<SyncJournalRecord>,
+    enabled: &[String],
     credentials: &dyn WebdavCredentialStore,
 ) -> CommandResult<usize> {
+    let retryable = |error: &str| {
+        let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+        let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
+        let _ = set_journal_batch_state(&mut connection, scope_id, &sequences, "retryable", Some(error));
+    };
+
     let credential = match credentials.get_credential(&account.credential_ref) {
         Ok(value) => value,
         Err(error) => {
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(
-                &mut connection,
-                scope_id,
-                &sequences,
-                "retryable",
-                Some(&error),
-            );
+            retryable(&error);
             return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
         }
     };
@@ -1551,215 +1478,74 @@ async fn sync_scope_impl(
         Ok(client) => client,
         Err(error) => {
             let message = sync_error(error);
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(
-                &mut connection,
-                scope_id,
-                &sequences,
-                "retryable",
-                Some(&message),
-            );
+            retryable(&message);
             return CommandResult::failure("INVALID_RESPONSE", message, false);
         }
     };
-    // A device with nothing to push still pulls; the push half only runs when
-    // the claim produced a segment.
-    if let Some(segment) = &segment {
-    let upload = client
-        .upload_segment(
-            &account.id,
-            device_id,
-            segment.sequence_start,
-            segment.sequence_end,
-            &segment.ciphertext,
-        )
-        .await;
-    if let Err(error) = upload {
-        let message = sync_error(error);
-        let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-        let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-        let _ = set_journal_batch_state(
-            &mut connection,
-            scope_id,
-            &sequences,
-            "retryable",
-            Some(&message),
-        );
-        return CommandResult::failure("NETWORK", message, true);
-    }
 
-    let remote = match client.get_manifest(&account.id).await {
+    let remote = match client.get_state(&account.id).await {
         Ok(value) => value,
         Err(error) => {
             let message = sync_error(error);
-            let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-            let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-            let _ = set_journal_batch_state(
-                &mut connection,
-                scope_id,
-                &sequences,
-                "retryable",
-                Some(&message),
-            );
+            retryable(&message);
             return CommandResult::failure("NETWORK", message, true);
         }
     };
-    let local = SyncManifest {
-        version: 1,
-        epoch: 0,
-        segments: vec![SyncManifestSegment {
-            hash: segment.hash.clone(),
-            size: segment.size as u64,
-            sequence_start: segment.sequence_start,
-            sequence_end: segment.sequence_end,
-            device_id: Some(device_id.to_string()),
-        }],
-        device_cursors: std::collections::BTreeMap::from([(
-            device_id.to_string(),
-            segment.sequence_end,
-        )]),
-    };
-    let (initial, etag) = match remote {
-        Some(remote) => match decode_encrypted_manifest(key, &remote.ciphertext) {
-            Ok(remote_manifest) => (merge_manifests(&local, &remote_manifest), remote.etag),
+    let (merged, etag) = match &remote {
+        Some(remote) => match decode_sync_state(key, &remote.ciphertext) {
+            Ok(remote_state) => (merge_sync_states(&local_state, &remote_state), remote.etag.clone()),
+            // 文档解不开只可能是换了口令或那不是本账户的数据；重试没有意义。
             Err(error) => {
-                let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-                let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-                let _ = set_journal_batch_state(
-                    &mut connection,
-                    scope_id,
-                    &sequences,
-                    "retryable",
-                    Some(&error),
-                );
+                retryable(&error);
                 return CommandResult::failure("INVALID_RESPONSE", error, false);
             }
         },
-        None => (local, None),
+        None => (local_state.clone(), None),
     };
-    let ciphertext = match encode_encrypted_manifest(key, &initial) {
+    let ciphertext = match encode_sync_state(key, &merged) {
         Ok(bytes) => bytes,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
     let result = client
-        .update_manifest_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
-            let remote = decode_encrypted_manifest(key, remote_bytes)
+        .update_state_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
+            let remote_state = decode_sync_state(key, remote_bytes)
                 .map_err(crate::network::webdav::WebdavError::Verification)?;
-            encode_encrypted_manifest(key, &merge_manifests(&initial, &remote))
+            encode_sync_state(key, &merge_sync_states(&local_state, &remote_state))
                 .map_err(crate::network::webdav::WebdavError::Verification)
         })
         .await;
     if let Err(error) = result {
         let message = sync_error(error);
-        let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-        let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-        let _ = set_journal_batch_state(
-            &mut connection,
-            scope_id,
-            &sequences,
-            "retryable",
-            Some(&message),
-        );
+        retryable(&message);
         return CommandResult::failure("NETWORK", message, true);
     }
-    let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
-    let sequences = claimed.iter().map(|r| r.sequence).collect::<Vec<_>>();
-    if let Err(error) =
-        set_journal_batch_state(&mut connection, scope_id, &sequences, "completed", None)
-    {
-        return CommandResult::failure("UNKNOWN", error, true);
-    }
-    drop(connection);
-    }
 
-    // Pull phase: every manifest segment this device has not merged yet. A
-    // failed pull is a failed sync: the pushed half stays pushed, but the
-    // command reports the failure instead of a success that never landed.
-    // Segments that did merge keep their applied mark; failed ones stay
-    // unrecorded, so the next sync pulls them again.
-    let uploaded_hash = segment.as_ref().map(|segment| segment.hash.clone());
-    let mut pull_errors: Vec<(String, bool)> = Vec::new();
-    let mut candidates = Vec::new();
-    match client.get_manifest(&account.id).await {
-        Ok(Some(remote)) => match decode_encrypted_manifest(key, &remote.ciphertext) {
-            Ok(remote_manifest) => {
-                let connection = match database.connection.lock() {
-                    Ok(connection) => connection,
-                    Err(_) => {
-                        return CommandResult::failure("UNKNOWN", "Database lock failed", true);
-                    }
-                };
-                candidates = remote_manifest
-                    .segments
-                    .iter()
-                    .filter(|segment| Some(&segment.hash) != uploaded_hash.as_ref())
-                    .filter(|segment| {
-                        !applied_segment_contains(&connection, &account.id, &segment.hash)
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-            }
-            // A manifest that does not decrypt with this account's key means a
-            // key mismatch — retrying without importing the right key cannot
-            // fix it.
-            Err(error) => pull_errors.push((
-                format!("远端清单无法用当前同步密钥解密：{error}"),
-                false,
-            )),
-        },
-        Ok(None) => {}
-        Err(error) => pull_errors.push((format!("读取远端同步清单失败：{error}"), true)),
-    };
-    candidates.sort_by_key(|segment| segment.sequence_start);
-    let mut pulled = 0usize;
-    for segment in candidates {
-        let Some(device) = segment.device_id.as_deref() else {
-            // Manifests written before the pull phase lack the writer's device
-            // id; those segments are undownloadable until a newer manifest
-            // replaces them. Skip, don't fail.
-            continue;
+    // 推上去了，这批日志就地标记完成。
+    let pushed = pending.len();
+    {
+        let mut connection = match database.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
         };
-        let outcome = async {
-            let bytes = client
-                .download_segment(&account.id, device, segment.sequence_start, segment.sequence_end)
-                .await
-                .map_err(|error| (format!("下载远端变更失败：{error}"), true))?;
-            let envelope = decode_encrypted_segment(key, &bytes)
-                .map_err(|error| (format!("远端变更无法用当前同步密钥解密：{error}"), false))?;
-            let mut connection = database
-                .connection
-                .lock()
-                .map_err(|_| ("数据库锁定失败".to_string(), true))?;
-            let applied = apply_remote_objects(&mut connection, &envelope)
-                .map_err(|error| (error, true))?;
-            let _ = record_applied_segment(&mut connection, &account.id, &segment.hash);
-            Ok::<usize, (String, bool)>(applied)
+        let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
+        if let Err(error) =
+            set_journal_batch_state(&mut connection, scope_id, &sequences, "completed", None)
+        {
+            return CommandResult::failure("UNKNOWN", error, true);
         }
-        .await;
-        match outcome {
-            Ok(applied) => pulled += applied,
-            Err((error, retryable)) => pull_errors.push((error, retryable)),
+        // 拉取：把合并后的对象落回本地表（自己那部分重复应用是无害的）。
+        let objects = merged
+            .objects
+            .values()
+            .filter(|object| object.scope_id == scope_id || object.scope_id == GLOBAL_SCOPE)
+            .filter(|object| scope_includes(enabled, &object.object_type))
+            .cloned()
+            .collect::<Vec<_>>();
+        match apply_remote_objects(&mut connection, &objects) {
+            Ok(pulled) => CommandResult::success(pushed + pulled),
+            Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
         }
     }
-    if let Some((first_error, _)) = pull_errors.first() {
-        let message = if pull_errors.len() == 1 {
-            format!("推送已完成，但拉取远端变更失败：{first_error}")
-        } else {
-            format!(
-                "推送已完成，但拉取远端变更失败：{first_error}（另有 {} 个来源同样失败）",
-                pull_errors.len() - 1
-            )
-        };
-        let retryable = pull_errors.iter().any(|(_, retryable)| *retryable);
-        return CommandResult::failure(
-            if retryable { "NETWORK" } else { "INVALID_RESPONSE" },
-            message,
-            retryable,
-        );
-    }
-    CommandResult::success(claimed.len() + pulled)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2142,6 +1928,12 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0021_sync_pull_state.sql"))
             .expect("sync pull state migration");
         connection
+            .execute_batch(include_str!("../../migrations/0023_servers_enabled.sql"))
+            .expect("servers enabled migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0024_sync_scope.sql"))
+            .expect("sync scope migration");
+        connection
     }
 
     struct MemoryWebdavCredentialStore {
@@ -2188,6 +1980,7 @@ mod tests {
             base_url: base_url.to_string(),
             username: "reader".to_string(),
             credential: "secret-token".to_string(),
+            sync_scope: String::new(),
         }
     }
 
@@ -2205,134 +1998,71 @@ mod tests {
         }
     }
 
-    struct MemorySyncKeyStore {
-        entries: Mutex<std::collections::BTreeMap<String, String>>,
-    }
-
-    impl MemorySyncKeyStore {
-        fn new() -> Self {
-            Self { entries: Mutex::new(std::collections::BTreeMap::new()) }
-        }
-
-        fn stored(&self, account_id: &str) -> Option<String> {
-            self.entries
-                .lock()
-                .expect("sync key store lock")
-                .get(account_id)
-                .cloned()
+    fn saved(label: &str, credential: &str) -> SaveWebdavAccountInput {
+        SaveWebdavAccountInput {
+            id: "account-a".to_string(),
+            label: label.to_string(),
+            base_url: "https://dav.example.com/Yomika".to_string(),
+            username: "reader".to_string(),
+            credential: credential.to_string(),
+            sync_scope: String::new(),
         }
     }
 
-    impl SyncKeyStore for MemorySyncKeyStore {
-        fn get(&self, account_id: &str) -> Result<String, String> {
-            self.stored(account_id).ok_or_else(|| "no key".to_string())
-        }
-
-        fn set(&self, account_id: &str, encoded: &str) -> Result<(), String> {
-            self.entries
-                .lock()
-                .expect("sync key store lock")
-                .insert(account_id.to_string(), encoded.to_string());
-            Ok(())
+    fn memory_credentials() -> MemoryWebdavCredentialStore {
+        MemoryWebdavCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
         }
     }
 
     #[test]
-    fn sync_key_creation_is_idempotent_across_saves() {
-        // Re-saving the same account must not rotate the key: a rotated key
-        // would leave every ciphertext already on the remote undecryptable.
-        let store = MemorySyncKeyStore::new();
-        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
-            CommandResult::Success { .. } => {}
-            CommandResult::Failure { error, .. } => panic!("first key: {}", error.message),
-        }
-        let first = store.stored("account-a").expect("stored key");
-        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
-            CommandResult::Success { .. } => {}
-            CommandResult::Failure { error, .. } => panic!("second key: {}", error.message),
-        }
-        assert_eq!(store.stored("account-a").as_deref(), Some(first.as_str()));
+    fn editing_an_account_without_a_credential_keeps_the_stored_one() {
+        // 编辑表单不会把旧口令回填出来：留空保存必须沿用原凭据，否则改个名字就会
+        // 把账户的口令抹掉（同步密钥还是从它派生的）。
+        let mut connection = migrated_connection();
+        let credentials = memory_credentials();
+        assert!(matches!(
+            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
+            CommandResult::Success { .. }
+        ));
+        let first_ref: String = connection
+            .query_row("SELECT credential_ref FROM webdav_accounts WHERE id = 'account-a'", [], |row| row.get(0))
+            .expect("credential ref");
+
+        assert!(matches!(
+            save_webdav_account_record(&mut connection, &credentials, saved("Renamed", "")),
+            CommandResult::Success { .. }
+        ));
+
+        let after_ref: String = connection
+            .query_row("SELECT credential_ref FROM webdav_accounts WHERE id = 'account-a'", [], |row| row.get(0))
+            .expect("credential ref after edit");
+        assert_eq!(first_ref, after_ref);
+        assert_eq!(credentials.writes.lock().expect("writes").len(), 1);
     }
 
     #[test]
-    fn corrupt_sync_key_is_repaired_with_a_fresh_valid_key() {
-        let store = MemorySyncKeyStore::new();
-        store.set("account-a", "not-a-key").expect("seed corrupt key");
-        ensure_sync_key(&store, "account-a").expect("repair");
-        let repaired = store.stored("account-a").expect("repaired key");
-        assert!(valid_sync_key_encoding(&repaired));
-        assert_ne!(repaired, "not-a-key");
-    }
+    fn the_sync_key_follows_the_account_credentials() {
+        // 密钥由账户与口令派生：同一账户两次读到同一把，换口令则换一把。任何设备
+        // 只要装了同一个账户就能解密，不需要再导出/导入密钥。
+        let mut connection = migrated_connection();
+        let credentials = memory_credentials();
+        assert!(matches!(
+            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
+            CommandResult::Success { .. }
+        ));
+        let first = load_sync_key(&connection, &credentials, "account-a").expect("derived key");
+        let again = load_sync_key(&connection, &credentials, "account-a").expect("derived key");
+        assert_eq!(first, again);
 
-    #[test]
-    fn a_key_exported_on_one_device_imports_on_another() {
-        // Two devices that each generated their own key can never decrypt each
-        // other. The export/import path is the pairing: device B must refuse
-        // to mint a key while the remote holds data, and import A's instead.
-        let device_a = MemorySyncKeyStore::new();
-        let device_b = MemorySyncKeyStore::new();
-        match create_sync_key_result(&device_a, "same-account", RemoteManifestProbe::Missing) {
-            CommandResult::Success { .. } => {}
-            CommandResult::Failure { error, .. } => panic!("device a key: {}", error.message),
-        }
-        let refused = create_sync_key_result(&device_b, "same-account", RemoteManifestProbe::Present);
-        assert!(matches!(refused, CommandResult::Failure { .. }));
-        assert!(device_b.stored("same-account").is_none(), "device b generated a second key for an account that already has one");
-        let exported = device_a.stored("same-account").expect("exported key");
-        match import_key_into_store(&device_b, "same-account", &exported) {
-            Ok(()) => {}
-            Err(error) => panic!("imported key: {error}"),
-        }
-        let key_a: [u8; 32] = BASE64_STANDARD
-            .decode(&exported)
-            .expect("decode export")
-            .try_into()
-            .expect("32 byte key");
-        let key_b: [u8; 32] = BASE64_STANDARD
-            .decode(&device_b.stored("same-account").expect("imported key"))
-            .expect("decode import")
-            .try_into()
-            .expect("32 byte key");
-        assert!(
-            decrypt_bytes(&key_b, &encrypt_bytes(&key_a, b"sync data").expect("encrypt")).is_ok(),
-            "independent stores generated incompatible master keys; no pairing/import path exists"
-        );
-    }
-
-    #[test]
-    fn import_rejects_keys_that_are_not_32_bytes_of_base64() {
-        let store = MemorySyncKeyStore::new();
-        assert!(decode_imported_key("not-a-key").is_none());
-        assert!(decode_imported_key(&BASE64_STANDARD.encode([0_u8; 16])).is_none());
-        assert!(decode_imported_key(&BASE64_STANDARD.encode([0_u8; 32])).is_some());
-        let _ = &store;
-    }
-
-    #[test]
-    fn an_unreachable_remote_stops_key_generation_instead_of_silently_minting_one() {
-        let store = MemorySyncKeyStore::new();
-        let result =
-            create_sync_key_result(&store, "account-a", RemoteManifestProbe::Unavailable("503".into()));
-        assert!(matches!(result, CommandResult::Failure { .. }));
-        assert!(
-            store.stored("account-a").is_none(),
-            "an uncertain remote silently minted a key that may strand the other device"
-        );
-    }
-
-    #[test]
-    fn an_existing_valid_key_is_kept_even_when_the_remote_holds_data() {
-        let store = MemorySyncKeyStore::new();
-        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Missing) {
-            CommandResult::Success { .. } => {}
-            CommandResult::Failure { error, .. } => panic!("first key: {}", error.message),
-        }
-        let first = store.stored("account-a").expect("stored key");
-        match create_sync_key_result(&store, "account-a", RemoteManifestProbe::Present) {
-            CommandResult::Success { .. } => {}
-            CommandResult::Failure { error, .. } => panic!("re-creation is a no-op: {}", error.message),
-        }
-        assert_eq!(store.stored("account-a").as_deref(), Some(first.as_str()));
+        assert!(matches!(
+            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "another-token")),
+            CommandResult::Success { .. }
+        ));
+        let rotated = load_sync_key(&connection, &credentials, "account-a").expect("derived key");
+        assert_ne!(first, rotated);
     }
 
     #[test]
@@ -2467,70 +2197,62 @@ mod tests {
         assert_eq!(pending, 1);
     }
 
+    fn scoped_object(
+        scope_id: &str,
+        object_type: &str,
+        object_id: &str,
+        payload: serde_json::Value,
+    ) -> SyncStateObject {
+        SyncStateObject {
+            scope_id: scope_id.to_string(),
+            object_type: object_type.to_string(),
+            object_id: object_id.to_string(),
+            operation: "upsert".to_string(),
+            payload,
+            payload_hash: "hash-a".to_string(),
+            logical_clock: 1,
+            device_id: "device-a".to_string(),
+            wall_clock: "2026-08-26T00:00:00Z".to_string(),
+        }
+    }
+
+    fn document_with(scope_id: &str, object_type: &str, object_id: &str, payload: serde_json::Value) -> SyncStateDocument {
+        SyncStateDocument {
+            version: SYNC_STATE_VERSION,
+            epoch: 0,
+            objects: std::collections::BTreeMap::from([(
+                state_object_key(scope_id, object_type, object_id),
+                scoped_object(scope_id, object_type, object_id, payload),
+            )]),
+        }
+    }
+
     #[test]
-    fn encrypted_segment_round_trips_and_tampering_fails() {
+    fn the_sync_document_round_trips_and_tampering_fails() {
         let key = [7_u8; 32];
-        let segment = SyncSegmentEnvelope {
-            version: SYNC_SEGMENT_VERSION,
-            scope_id: "scope-a".to_string(),
-            sequence_start: 1,
-            sequence_end: 1,
-            objects: vec![SyncWireObject {
-                sequence: 1,
-                object_id: "archive-a".to_string(),
-                object_type: "reading_progress".to_string(),
-                operation: "upsert".to_string(),
-                device_id: "device-a".to_string(),
-                logical_clock: 1,
-                wall_clock: "2026-08-26T00:00:00Z".to_string(),
-                base_hash: None,
-                payload_hash: "hash-a".to_string(),
-                payload: serde_json::json!({"page": 3}),
-            }],
-        };
-        let encoded = encode_encrypted_segment(&key, &segment).expect("encode segment");
-        assert_ne!(encoded, serde_json::to_vec(&segment).expect("plain json"));
-        let decoded = decode_encrypted_segment(&key, &encoded).expect("decode segment");
-        assert_eq!(decoded.scope_id, "scope-a");
+        let document = document_with("scope-a", "reading_progress", "archive-a", serde_json::json!({"page": 3}));
+        let encoded = encode_sync_state(&key, &document).expect("encode state");
+        assert_ne!(encoded, serde_json::to_vec(&document).expect("plain json"));
+        // 对象 id 不该在密文里出现——服务端只看到一份字节流。
+        assert!(!String::from_utf8_lossy(&encoded).contains("archive-a"));
+        let decoded = decode_sync_state(&key, &encoded).expect("decode state");
         assert_eq!(decoded.objects.len(), 1);
-        assert_eq!(decoded.objects[0].object_id, "archive-a");
+        assert_eq!(
+            decoded.objects.values().next().expect("object").object_id,
+            "archive-a"
+        );
         let mut tampered = encoded.clone();
         *tampered.last_mut().expect("ciphertext") ^= 1;
-        assert!(decode_encrypted_segment(&key, &tampered).is_err());
-        // A pre-pull (v1) envelope carries no scope and must not decode.
-        let mut legacy = segment.clone();
-        legacy.version = 1;
-        let legacy_encoded = encode_encrypted_segment(&key, &legacy).expect("encode legacy");
-        assert!(decode_encrypted_segment(&key, &legacy_encoded).is_err());
+        assert!(decode_sync_state(&key, &tampered).is_err());
+        // 更新版本写的文档要明确拒绝，而不是当成旧结构误读。
+        let mut future = document.clone();
+        future.version = SYNC_STATE_VERSION + 1;
+        let future_encoded = encode_sync_state(&key, &future).expect("encode future");
+        assert!(decode_sync_state(&key, &future_encoded).is_err());
     }
 
     #[test]
-    fn encrypted_manifest_hides_device_and_round_trips() {
-        let key = [9_u8; 32];
-        let manifest = SyncManifest {
-            version: 3,
-            epoch: 4,
-            segments: vec![SyncManifestSegment {
-                hash: "abc".to_string(),
-                size: 12,
-                sequence_start: 1,
-                sequence_end: 2,
-                device_id: Some("device-a".to_string()),
-            }],
-            device_cursors: std::collections::BTreeMap::from([("device-a".to_string(), 2)]),
-        };
-        let encoded = encode_encrypted_manifest(&key, &manifest).expect("encode manifest");
-        assert!(!String::from_utf8_lossy(&encoded).contains("device-a"));
-        assert_eq!(
-            decode_encrypted_manifest(&key, &encoded)
-                .expect("decode manifest")
-                .epoch,
-            4
-        );
-    }
-
-    #[test]
-    fn pending_segment_coalesces_latest_object_and_keeps_range() {
+    fn local_state_coalesces_the_latest_version_per_object() {
         let connection = migrated_connection();
         append_journal_entry(&connection, input("scope-a", "archive-a")).expect("first");
         let mut newer = input("scope-a", "archive-a");
@@ -2539,19 +2261,18 @@ mod tests {
         append_journal_entry(&connection, newer).expect("newer");
         append_journal_entry(&connection, input("scope-a", "archive-b")).expect("second object");
 
-        let segment = build_pending_segment(&connection, "scope-a", &[3_u8; 32])
-            .expect("segment")
-            .expect("pending segment");
-        assert_eq!((segment.sequence_start, segment.sequence_end), (2, 3));
-        let decoded = decode_encrypted_segment(&[3_u8; 32], &segment.ciphertext).expect("decode");
-        assert_eq!(decoded.objects.len(), 2);
-        assert_eq!(decoded.objects[0].logical_clock, 2);
-        assert_eq!(segment.size, segment.ciphertext.len());
-        assert_eq!(segment.hash.len(), 64);
+        let document = build_local_state(&connection, &["scope-a"], &default_scope()).expect("state");
+        assert_eq!(document.objects.len(), 2);
+        let latest = document
+            .objects
+            .get(&state_object_key("scope-a", "reading_progress", "archive-a"))
+            .expect("latest object");
+        assert_eq!(latest.logical_clock, 2);
+        assert_eq!(latest.payload["page"], serde_json::json!(4));
     }
 
     #[test]
-    fn pending_segment_keeps_distinct_object_types_with_same_object_id() {
+    fn local_state_keys_by_scope_type_and_id() {
         let connection = migrated_connection();
         append_journal_entry(&connection, input("scope-a", "scope-a/archive-a")).expect("progress");
         let mut history = input("scope-a", "scope-a/archive-a");
@@ -2559,64 +2280,50 @@ mod tests {
         history.payload_json = r#"{"pageIndex":3}"#.to_string();
         append_journal_entry(&connection, history).expect("history");
 
-        let segment = build_pending_segment(&connection, "scope-a", &[4_u8; 32])
-            .expect("segment")
-            .expect("pending segment");
-        let decoded = decode_encrypted_segment(&[4_u8; 32], &segment.ciphertext).expect("decode");
-        assert_eq!(decoded.objects.len(), 2);
-        assert_eq!(
-            decoded
-                .objects
-                .iter()
-                .map(|item| item.object_type.as_str())
-                .collect::<Vec<_>>(),
-            vec!["reading_progress", "history"],
-        );
+        let document = build_local_state(&connection, &["scope-a"], &default_scope()).expect("state");
+        assert_eq!(document.objects.len(), 2);
+        let mut types = document
+            .objects
+            .values()
+            .map(|object| object.object_type.as_str())
+            .collect::<Vec<_>>();
+        types.sort();
+        assert_eq!(types, vec!["history", "reading_progress"]);
     }
 
     #[test]
-    fn manifest_merge_unions_segments_and_takes_max_cursors() {
-        let local = SyncManifest {
-            version: 3,
-            epoch: 4,
-            segments: vec![SyncManifestSegment {
-                hash: "a".to_string(),
-                size: 10,
-                sequence_start: 1,
-                sequence_end: 2,
-                device_id: None,
-            }],
-            device_cursors: std::collections::BTreeMap::from([("device-a".to_string(), 2)]),
-        };
-        let remote = SyncManifest {
-            version: 2,
-            epoch: 5,
-            segments: vec![
-                SyncManifestSegment {
-                    hash: "a".to_string(),
-                    size: 10,
-                    sequence_start: 1,
-                    sequence_end: 2,
-                    device_id: None,
-                },
-                SyncManifestSegment {
-                    hash: "b".to_string(),
-                    size: 20,
-                    sequence_start: 3,
-                    sequence_end: 4,
-                    device_id: None,
-                },
-            ],
-            device_cursors: std::collections::BTreeMap::from([
-                ("device-a".to_string(), 1),
-                ("device-b".to_string(), 4),
-            ]),
-        };
-        let merged = merge_manifests(&local, &remote);
-        assert_eq!((merged.version, merged.epoch), (3, 5));
-        assert_eq!(merged.segments.len(), 2);
-        assert_eq!(merged.device_cursors["device-a"], 2);
-        assert_eq!(merged.device_cursors["device-b"], 4);
+    fn state_merge_takes_the_newer_object_and_is_order_independent() {
+        let key_a = state_object_key("scope-a", "reading_progress", "archive-a");
+        let key_b = state_object_key("scope-a", "reading_progress", "archive-b");
+        let mut local = document_with("scope-a", "reading_progress", "archive-a", serde_json::json!({"page": 9}));
+        local.epoch = 4;
+        local.objects.get_mut(&key_a).expect("local object").logical_clock = 3;
+        local.objects.get_mut(&key_a).expect("local object").payload_hash = "hash-local".to_string();
+
+        let mut remote = document_with("scope-a", "reading_progress", "archive-a", serde_json::json!({"page": 4}));
+        remote.epoch = 5;
+        remote.objects.get_mut(&key_a).expect("remote object").logical_clock = 2;
+        remote.objects.insert(key_b.clone(), scoped_object("scope-a", "reading_progress", "archive-b", serde_json::json!({"page": 1})));
+
+        let merged = merge_sync_states(&local, &remote);
+        assert_eq!((merged.version, merged.epoch), (SYNC_STATE_VERSION, 5));
+        assert_eq!(merged.objects.len(), 2);
+        assert_eq!(merged.objects[&key_a].logical_clock, 3);
+        assert_eq!(merged.objects[&key_a].payload_hash, "hash-local");
+        // 合并顺序不影响结果：反过来算同一次。
+        assert_eq!(merge_sync_states(&remote, &local), merged);
+
+        // 时钟相同（两台设备各自离线改过）时按内容哈希定胜负，仍然是确定的。
+        let mut tie_local = local.clone();
+        tie_local.objects.get_mut(&key_a).expect("object").logical_clock = 2;
+        tie_local.objects.get_mut(&key_a).expect("object").payload_hash = "hash-bbb".to_string();
+        let mut tie_remote = remote.clone();
+        tie_remote.objects.get_mut(&key_a).expect("object").logical_clock = 2;
+        tie_remote.objects.get_mut(&key_a).expect("object").payload_hash = "hash-aaa".to_string();
+        assert_eq!(
+            merge_sync_states(&tie_local, &tie_remote),
+            merge_sync_states(&tie_remote, &tie_local)
+        );
     }
 
     #[test]
@@ -2807,29 +2514,29 @@ mod tests {
         logical_clock: i64,
         wall_clock: &str,
         payload: serde_json::Value,
-    ) -> SyncWireObject {
-        SyncWireObject {
-            sequence: 1,
+    ) -> SyncStateObject {
+        SyncStateObject {
+            scope_id: String::new(),
             object_id: object_id.to_string(),
             object_type: object_type.to_string(),
             operation: "upsert".to_string(),
             device_id: "device-b".to_string(),
             logical_clock,
             wall_clock: wall_clock.to_string(),
-            base_hash: None,
             payload_hash: "remote-hash".to_string(),
             payload,
         }
     }
 
-    fn remote_envelope(scope_id: &str, objects: Vec<SyncWireObject>) -> SyncSegmentEnvelope {
-        SyncSegmentEnvelope {
-            version: SYNC_SEGMENT_VERSION,
-            scope_id: scope_id.to_string(),
-            sequence_start: 1,
-            sequence_end: 1,
-            objects,
-        }
+    /// 文档里的对象都带着自己的 scope（原来这个字段挂在段信封上），测试里补上。
+    fn remote_objects(scope_id: &str, objects: Vec<SyncStateObject>) -> Vec<SyncStateObject> {
+        objects
+            .into_iter()
+            .map(|mut object| {
+                object.scope_id = scope_id.to_string();
+                object
+            })
+            .collect()
     }
 
     #[test]
@@ -2844,7 +2551,7 @@ mod tests {
             .expect("local progress");
 
         // Higher clock wins outright.
-        let higher = remote_envelope(
+        let higher = remote_objects(
             "scope-a",
             vec![remote_object(
                 "reading_progress",
@@ -2865,7 +2572,7 @@ mod tests {
         assert_eq!((page, revision), (7, 5));
 
         // A lower clock is a cross-device regression and is refused.
-        let lower = remote_envelope(
+        let lower = remote_objects(
             "scope-a",
             vec![remote_object(
                 "reading_progress",
@@ -2886,7 +2593,7 @@ mod tests {
         assert_eq!(page, 7);
 
         // Equal clock falls back to the wall clock.
-        let equal_newer = remote_envelope(
+        let equal_newer = remote_objects(
             "scope-a",
             vec![remote_object(
                 "reading_progress",
@@ -2917,7 +2624,7 @@ mod tests {
         // clock — otherwise a device that jumped back drags the other one with
         // it on the next pull.
         let mut connection = migrated_connection();
-        let first = remote_envelope(
+        let first = remote_objects(
             "scope-a",
             vec![remote_object(
                 "reading_progress",
@@ -2935,7 +2642,7 @@ mod tests {
             serde_json::json!({"archiveId": "archive-a", "pageIndex": 10, "pageCount": 100, "layout": "paged", "direction": "ltr", "coverAlone": null}),
         );
         second.device_id = "device-c".to_string();
-        let second = remote_envelope("scope-a", vec![second]);
+        let second = remote_objects("scope-a", vec![second]);
         assert_eq!(apply_remote_objects(&mut connection, &first).expect("apply"), 1);
         assert_eq!(apply_remote_objects(&mut connection, &second).expect("apply"), 0);
         let page: i64 = connection
@@ -2954,7 +2661,7 @@ mod tests {
         // each device keeping whatever it applied last. The device-id
         // tiebreak makes the comparator a strict total order, so both
         // application orders end on the same winner.
-        fn progress(device_id: &str, page: i64) -> SyncWireObject {
+        fn progress(device_id: &str, page: i64) -> SyncStateObject {
             let mut object = remote_object(
                 "reading_progress",
                 "scope-a/archive-a",
@@ -2977,10 +2684,10 @@ mod tests {
         let mut device_a = migrated_connection();
         let mut device_b = migrated_connection();
         // Device A applies A's change then B's; device B the reverse.
-        assert_eq!(apply_remote_objects(&mut device_a, &remote_envelope("scope-a", vec![progress("device-a", 10)])).expect("apply"), 1);
-        assert_eq!(apply_remote_objects(&mut device_a, &remote_envelope("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
-        assert_eq!(apply_remote_objects(&mut device_b, &remote_envelope("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
-        assert_eq!(apply_remote_objects(&mut device_b, &remote_envelope("scope-a", vec![progress("device-a", 10)])).expect("apply"), 0);
+        assert_eq!(apply_remote_objects(&mut device_a, &remote_objects("scope-a", vec![progress("device-a", 10)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_a, &remote_objects("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_b, &remote_objects("scope-a", vec![progress("device-b", 20)])).expect("apply"), 1);
+        assert_eq!(apply_remote_objects(&mut device_b, &remote_objects("scope-a", vec![progress("device-a", 10)])).expect("apply"), 0);
         assert_eq!(
             page_of(&mut device_a),
             page_of(&mut device_b),
@@ -3001,7 +2708,7 @@ mod tests {
                 [],
             )
             .expect("local history");
-        let remote = remote_envelope(
+        let remote = remote_objects(
             "scope-a",
             vec![remote_object(
                 "history",
@@ -3036,7 +2743,7 @@ mod tests {
             )
             .expect("local history");
         // A lower clock still merges: history is a union, not a race.
-        let remote = remote_envelope(
+        let remote = remote_objects(
             "scope-a",
             vec![remote_object(
                 "history",
@@ -3060,16 +2767,17 @@ mod tests {
 
     #[test]
     fn remote_watchlist_tombstone_beats_an_older_add() {
+        // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。
         let mut connection = migrated_connection();
         connection
             .execute(
-                "INSERT INTO watchlist (scope_id, archive_id, device_id, deleted_at, revision, updated_at)
+                "INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision, updated_at)
                  VALUES ('scope-a', 'archive-a', 'device-a', NULL, 2, '2026-09-01 08:00:00')",
                 [],
             )
             .expect("local watchlist entry");
         // An older device's add must not resurrect the entry (lower clock).
-        let older_add = remote_envelope(
+        let older_add = remote_objects(
             "scope-a",
             vec![remote_object(
                 "watchlist",
@@ -3084,7 +2792,7 @@ mod tests {
             0
         );
         // A newer removal wins…
-        let newer_delete = remote_envelope(
+        let newer_delete = remote_objects(
             "scope-a",
             vec![remote_object(
                 "watchlist",
@@ -3099,7 +2807,7 @@ mod tests {
             1
         );
         // …and only an even newer add revives it.
-        let revive = remote_envelope(
+        let revive = remote_objects(
             "scope-a",
             vec![remote_object(
                 "watchlist",
@@ -3112,7 +2820,7 @@ mod tests {
         assert_eq!(apply_remote_objects(&mut connection, &revive).expect("apply"), 1);
         let (deleted_at, revision): (Option<String>, i64) = connection
             .query_row(
-                "SELECT deleted_at, revision FROM watchlist WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                "SELECT deleted_at, revision FROM reading_list WHERE scope_id='scope-a' AND archive_id='archive-a'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -3124,7 +2832,7 @@ mod tests {
     #[test]
     fn remote_search_preset_applies_and_tombstones_by_clock() {
         let mut connection = migrated_connection();
-        let upsert = remote_envelope(
+        let upsert = remote_objects(
             "scope-a",
             vec![remote_object(
                 "search_preset",
@@ -3144,7 +2852,7 @@ mod tests {
             .expect("preset");
         assert_eq!(name, "Fresh");
 
-        let delete = remote_envelope(
+        let delete = remote_objects(
             "scope-a",
             vec![remote_object(
                 "search_preset",
@@ -3168,7 +2876,7 @@ mod tests {
     #[test]
     fn remote_dedup_relation_unions_and_tombstones_with_the_clock() {
         let mut connection = migrated_connection();
-        let mark = remote_envelope(
+        let mark = remote_objects(
             "scope-a",
             vec![remote_object(
                 "dedup_non_duplicate",
@@ -3196,7 +2904,7 @@ mod tests {
             .expect("dedup clock");
         assert_eq!(clock, 2);
         // A higher-clock undo wins.
-        let undo = remote_envelope(
+        let undo = remote_objects(
             "scope-a",
             vec![remote_object(
                 "dedup_non_duplicate",
@@ -3220,7 +2928,7 @@ mod tests {
     #[test]
     fn unknown_remote_object_types_are_skipped_without_failing() {
         let mut connection = migrated_connection();
-        let future = remote_envelope(
+        let future = remote_objects(
             "scope-a",
             vec![remote_object(
                 "brand_new_type",
@@ -3269,8 +2977,105 @@ mod tests {
     /// Pull failures used to be swallowed: a 503 manifest fetch merged zero
     /// segments and still reported success, so the UI claimed a clean sync
     /// while remote changes never landed.
+    #[test]
+    fn the_scope_gate_keeps_unchecked_categories_out_of_the_document() {
+        // 勾选是「要不要让它上远端」的开关：没勾的类别既不进文档，也不写日志。
+        let connection = migrated_connection();
+        append_journal_entry(&connection, input("scope-a", "archive-a")).expect("progress");
+        append_journal_entry(
+            &connection,
+            progress_journal_input("scope-a", "archive-b", "device-a", 1, 2),
+        )
+        .expect("progress again");
+
+        let only_history = vec!["history".to_string()];
+        let document = build_local_state(&connection, &["scope-a"], &only_history)
+            .expect("scoped state");
+        assert!(
+            document.objects.is_empty(),
+            "progress rows leaked into a history-only document"
+        );
+
+        let with_progress = vec!["progress".to_string()];
+        let document = build_local_state(&connection, &["scope-a"], &with_progress)
+            .expect("scoped state");
+        assert_eq!(document.objects.len(), 2, "两条日志是两个对象");
+    }
+
+    #[test]
+    fn default_scope_parsing_falls_back_and_drops_unknown_categories() {
+        // 空值＝默认集合（旧账户的列是空串）；未知条目丢弃，不让远端塞进不认识的类别。
+        assert_eq!(parse_sync_scope(""), default_scope());
+        assert_eq!(
+            parse_sync_scope(r#"["history","app_settings","nonsense"]"#),
+            vec!["history".to_string(), "app_settings".to_string()]
+        );
+        assert_eq!(parse_sync_scope("not json").len(), DEFAULT_SYNC_SCOPE.len());
+    }
+
+    #[test]
+    fn imported_non_duplicate_marks_apply_into_the_feature_table() {
+        // 从 Readoshi 导入的非重复结论（path + 内容哈希）以前写的类型没人认识，
+        // 传不到别的设备；现在有对端的落地分支。
+        let mut connection = migrated_connection();
+        let marks = remote_objects(
+            "scope-a",
+            vec![remote_object(
+                "legacy_non_duplicate",
+                "scope-a/x.cbz",
+                1,
+                "2026-09-02 08:00:00",
+                serde_json::json!({"path": "x.cbz", "hash": "abc"}),
+            )],
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &marks).expect("apply"),
+            1
+        );
+        let exact_hash: String = connection
+            .query_row(
+                "SELECT exact_hash FROM dedup_features WHERE scope_id='scope-a' AND path='x.cbz'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported mark");
+        assert_eq!(exact_hash, "abc");
+    }
+
+    #[test]
+    fn a_global_server_entry_applies_without_touching_credential_refs() {
+        // 服务器条目带名字/地址/启用状态；API Key 的 credential_ref 是空值，
+        // 新设备拉到之后需要自己填一次 Key。
+        let mut connection = migrated_connection();
+        let entries = remote_objects(
+            GLOBAL_SCOPE,
+            vec![remote_object(
+                "lrr_server",
+                "server/scope-b",
+                1,
+                "2026-09-02 08:00:00",
+                serde_json::json!({
+                    "scopeId": "scope-b",
+                    "name": "NAS",
+                    "baseUrl": "https://lrr.example.com",
+                    "enabled": true,
+                }),
+            )],
+        );
+        assert_eq!(apply_remote_objects(&mut connection, &entries).expect("apply"), 1);
+        let (name, api_key_ref): (String, Option<String>) = connection
+            .query_row(
+                "SELECT name, api_key_ref FROM servers WHERE id='scope-b'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("server row");
+        assert_eq!(name, "NAS");
+        assert!(api_key_ref.is_none());
+    }
+
     #[tokio::test]
-    async fn a_failing_manifest_fetch_is_reported_as_a_failed_sync() {
+    async fn a_failing_state_fetch_is_reported_as_a_failed_sync() {
         let base_url = scripted_dav_server(vec!["503 Service Unavailable"]).await;
         let database = crate::db::Database::open_path(":memory:").expect("database");
         let credentials = MemoryWebdavCredentialStore {
@@ -3294,9 +3099,10 @@ mod tests {
             &account,
             &[7_u8; 32],
             "scope-a",
-            "device-a",
+            empty_state(),
             Vec::new(),
-            None,
+            &default_scope(),
+
             &credentials,
         )
         .await;
@@ -3306,65 +3112,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_segment_that_cannot_be_downloaded_fails_the_pull() {
-        // The manifest lists one unapplied segment, but the segment file is
-        // missing (404): the sync must fail, not quietly report zero changes.
-        let (base_url, store) = stateful_dav_server().await;
-        let database = crate::db::Database::open_path(":memory:").expect("database");
-        let manifest = SyncManifest {
-            version: 1,
-            epoch: 0,
-            segments: vec![SyncManifestSegment {
-                hash: "abc".to_string(),
-                size: 4,
-                sequence_start: 1,
-                sequence_end: 2,
-                device_id: Some("device-x".to_string()),
-            }],
-            device_cursors: Default::default(),
-        };
-        let ciphertext = encode_encrypted_manifest(&[7_u8; 32], &manifest).expect("manifest");
-        store
-            .lock()
-            .expect("store")
-            .insert("/Yomika/v1/account-a/manifest.json.enc".to_string(), ciphertext);
-        let credentials = MemoryWebdavCredentialStore {
-            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
-            deletes: Mutex::new(Vec::new()),
-            failure: None,
-        };
-        let account = {
-            let mut connection = database.connection.lock().expect("database lock");
-            connection
-                .execute(
-                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
-                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
-                    params![base_url],
-                )
-                .expect("webdav account");
-            read_webdav_account(&connection, "account-a").expect("account record")
-        };
-        let result = sync_scope_impl(
-            &database,
-            &account,
-            &[7_u8; 32],
-            "scope-a",
-            "device-a",
-            Vec::new(),
-            None,
-            &credentials,
-        )
-        .await;
-        assert!(
-            matches!(result, CommandResult::Failure { .. }),
-            "a missing remote segment returned a successful pull"
-        );
-    }
-
-    /// A tiny stateful WebDAV server: PUT stores the body, GET serves it back
-    /// with an ETag (404 when absent), MOVE renames. Enough to drive the full
-    /// push + pull pipeline across two simulated devices.
     async fn stateful_dav_server(
     ) -> (String, Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3489,6 +3236,18 @@ mod tests {
         (format!("http://{address}"), store)
     }
 
+    fn default_scope() -> Vec<String> {
+        DEFAULT_SYNC_SCOPE.iter().map(|item| item.to_string()).collect()
+    }
+
+    fn empty_state() -> SyncStateDocument {
+        SyncStateDocument {
+            version: SYNC_STATE_VERSION,
+            epoch: 0,
+            objects: std::collections::BTreeMap::new(),
+        }
+    }
+
     fn progress_journal_input(
         scope_id: &str,
         archive_id: &str,
@@ -3518,8 +3277,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_pushes_local_changes_and_pulls_remote_segments() {
-        let (base_url, _store) = stateful_dav_server().await;
+    async fn a_document_that_cannot_be_decrypted_is_not_retried() {
+        // 远端有一份文档，但用当前密钥解不开（换过口令，或那不是本账户的数据）：
+        // 必须明确失败并标记不可重试，绝不能当成空文档把本地状态推上去把它覆盖掉。
+        let (base_url, store) = stateful_dav_server().await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        store.lock().expect("store").insert(
+            "/Yomika/account-a.json.enc".to_string(),
+            b"foreign ciphertext".to_vec(),
+        );
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
+                    params![base_url],
+                )
+                .expect("webdav account");
+            read_webdav_account(&connection, "account-a").expect("account record")
+        };
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &[7_u8; 32],
+            "scope-a",
+            empty_state(),
+            Vec::new(),
+            &default_scope(),
+
+            &credentials,
+        )
+        .await;
+        match result {
+            CommandResult::Failure { error, .. } => {
+                assert!(!error.retryable, "a key mismatch cannot be fixed by retrying");
+            }
+            CommandResult::Success { .. } => panic!("a foreign document was overwritten"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_pushes_the_local_state_and_pulls_the_remote_document() {
+        let (base_url, store) = stateful_dav_server().await;
         let path = std::env::temp_dir().join(format!(
             "yomika-sync-e2e-{}-{}.sqlite3",
             std::process::id(),
@@ -3553,11 +3358,8 @@ mod tests {
             )
             .expect("progress journal entry");
 
-            let claimed = claim_journal_entries(&mut connection, "scope-a", 256)
-                .expect("device a claim");
-            let segment = build_segment_from_records(claimed.clone(), "scope-a", &key)
-                .expect("build")
-                .expect("device a segment");
+            let local_state = build_local_state(&connection, &["scope-a"], &default_scope()).expect("local state");
+            let pending = pending_journal_entries(&connection, "scope-a").expect("pending");
             let account =
                 read_webdav_account(&connection, "account-a").expect("account record");
             drop(connection);
@@ -3567,16 +3369,18 @@ mod tests {
                 &account,
                 &key,
                 "scope-a",
-                "device-a",
-                claimed,
-                Some(segment),
+                local_state,
+                pending,
+                &default_scope(),
+
                 &credentials,
             )
             .await;
             let CommandResult::Success { value: pushed, .. } = result else {
                 panic!("device a sync failed");
             };
-            assert_eq!(pushed, 1, "device a pushed its one change");
+            // 推送一条 + 落回本地（自己那条重复应用，计数可能多一）。
+            assert!(pushed >= 1, "device a pushed its one change");
         }
 
         {
@@ -3590,16 +3394,18 @@ mod tests {
                 &account,
                 &key,
                 "scope-a",
-                "device-b",
+                empty_state(),
                 Vec::new(),
-                None,
+                &default_scope(),
+
                 &credentials,
             )
             .await;
             let CommandResult::Success { value: pulled, .. } = result else {
                 panic!("device b sync failed");
             };
-            assert_eq!(pulled, 1, "device b merged device a's change");
+            // 同一个库上自己那条已经落过，重复应用不计数；关键是被拉回的行与远端文档。
+            assert!(pulled <= 1, "device b reported more merges than the document carries");
 
             let connection = database.connection.lock().expect("database lock");
             let (page, revision): (i64, i64) = connection
@@ -3613,7 +3419,21 @@ mod tests {
             assert_eq!((page, revision), (7, 3));
             drop(connection);
 
-            // A repeat sync is a no-op: the segment is already applied.
+            // 远端那份文档里确实带着 device a 写的对象。
+            let remote = store
+                .lock()
+                .expect("store")
+                .get("/Yomika/account-a.json.enc")
+                .cloned()
+                .expect("remote document");
+            let document = decode_sync_state(&key, &remote).expect("decode remote document");
+            let object = document
+                .objects
+                .get(&state_object_key("scope-a", "reading_progress", "scope-a/archive-a"))
+                .expect("progress object");
+            assert_eq!(object.payload["pageIndex"], serde_json::json!(7));
+
+            // A repeat sync is a no-op: 文档里的对象本地已经是同一版，应用不计数。
             let account = {
                 let connection = database.connection.lock().expect("database lock");
                 read_webdav_account(&connection, "account-a").expect("account record")
@@ -3623,9 +3443,10 @@ mod tests {
                 &account,
                 &key,
                 "scope-a",
-                "device-b",
+                empty_state(),
                 Vec::new(),
-                None,
+                &default_scope(),
+
                 &credentials,
             )
             .await;

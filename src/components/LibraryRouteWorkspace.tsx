@@ -5,6 +5,7 @@ import type { ArchiveRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { LibraryWorkspace } from './LibraryWorkspace';
+import { ServerRequiredPrompt } from './ServerRequiredPrompt';
 import { useArchiveSelection } from './useArchiveSelection';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -85,6 +86,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [error, setError] = useState<string>();
   const [needsCredentials, setNeedsCredentials] = useState(false);
   const [serverId, setServerId] = useState<string>();
+  /** Whether the server list has been read and came back with nothing usable:
+   * `undefined` while unknown, which keeps the first-load skeletons (we do not
+   * know yet), and `false` only once we do — the state that shows the shared
+   * "add a server" prompt instead of skeletons that would never resolve. */
+  const [hasServer, setHasServer] = useState<boolean>();
   const [scopeId, setScopeId] = useState<string>();
   const [metadata, setMetadata] = useState<import('../repositories/nativeLibraryRepository').ArchiveMetadata>();
   const [metadataLoading, setMetadataLoading] = useState(false);
@@ -264,9 +270,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     const server = pickServer(servers.value, serverParam);
     if (!server) {
       setServerId(undefined);
+      setHasServer(false);
       setLoading(false);
       return;
     }
+    setHasServer(true);
     setServerId(server.id);
     setScopeId(server.scopeId);
     // Categories are loaded once, by the effect below: it holds the TTL gate and
@@ -540,6 +548,17 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           {needsCredentials && <Link className="secondary-action" to="/settings">打开设置重新保存 API Key</Link>}
         </div>
             <button className="secondary-action" type="button" onClick={() => void loadLibrary().then(() => setReloadToken((value) => value + 1))}>重试读取档案库</button>
+      </div>
+    );
+  }
+
+  // 读完服务器列表、确认没有可用服务器时，一次都不拉取，直接给各页共用的引导。
+  // 之前 listLoading 只判断「首屏还没到」，于是没配服务器时骨架屏会一直转下去。
+  if (hasServer === false) {
+    return (
+      <div>
+        <h1 className="visually-hidden">档案库</h1>
+        <ServerRequiredPrompt />
       </div>
     );
   }

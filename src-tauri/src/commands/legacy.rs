@@ -191,23 +191,6 @@ pub fn import_legacy_export_record(
                 params![scope_id, record.archive_id, added_at.trim(), device_id],
             )
             .map_err(|e| e.to_string())?;
-            let revision: i64 = transaction
-                .query_row(
-                    "SELECT revision FROM watchlist WHERE scope_id=?1 AND archive_id=?2",
-                    params![scope_id, record.archive_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            append_import_journal(
-                &transaction,
-                scope_id,
-                &format!("{scope_id}/{}", record.archive_id),
-                "watchlist",
-                "upsert",
-                &device_id,
-                revision,
-                serde_json::json!({ "archiveId": record.archive_id, "deleted": false }),
-            )?;
             unified_count += 1;
         }
     }
@@ -221,23 +204,6 @@ pub fn import_legacy_export_record(
             params![scope_id, id.trim(), device_id, id.trim()],
         )
         .map_err(|e| e.to_string())?;
-        let revision: i64 = transaction
-            .query_row(
-                "SELECT revision FROM watchlist WHERE scope_id=?1 AND archive_id=?2",
-                params![scope_id, id.trim()],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        append_import_journal(
-            &transaction,
-            scope_id,
-            &format!("{scope_id}/{}", id.trim()),
-            "watchlist",
-            "delete",
-            &device_id,
-            revision,
-            serde_json::json!({ "archiveId": id.trim(), "deleted": true }),
-        )?;
         unified_count += 1;
     }
     for record in &export.reading_list {
@@ -261,7 +227,7 @@ pub fn import_legacy_export_record(
             &transaction,
             scope_id,
             &format!("{scope_id}/{}", record.archive_id),
-            "reading_list",
+            "watchlist",
             "upsert",
             &device_id,
             revision,
@@ -290,7 +256,7 @@ pub fn import_legacy_export_record(
             &transaction,
             scope_id,
             &format!("{scope_id}/{}", id.trim()),
-            "reading_list",
+            "watchlist",
             "delete",
             &device_id,
             revision,
@@ -322,26 +288,6 @@ pub fn import_legacy_export_record(
     }
     for record in &export.watchlist {
         transaction.execute("INSERT INTO watchlist (scope_id,archive_id,device_id,deleted_at,revision) VALUES (?1,?2,?3,CASE WHEN ?4 THEN NULL ELSE CURRENT_TIMESTAMP END,1) ON CONFLICT(scope_id,archive_id) DO UPDATE SET device_id=excluded.device_id,deleted_at=excluded.deleted_at,revision=watchlist.revision+1,updated_at=CURRENT_TIMESTAMP", params![scope_id, record.archive_id, &device_id, !record.deleted]).map_err(|e| e.to_string())?;
-        let revision: i64 = transaction
-            .query_row(
-                "SELECT revision FROM watchlist WHERE scope_id=?1 AND archive_id=?2",
-                params![scope_id, record.archive_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        append_import_journal(
-            &transaction,
-            scope_id,
-            &format!("{scope_id}/{}", record.archive_id),
-            "watchlist",
-            if record.deleted { "delete" } else { "upsert" },
-            &device_id,
-            revision,
-            serde_json::json!({
-                "archiveId": record.archive_id,
-                "deleted": record.deleted,
-            }),
-        )?;
     }
     for record in &export.non_duplicate {
         transaction.execute("INSERT INTO dedup_features (scope_id,path,exact_hash,algorithm_version,size) VALUES (?1,?2,?3,'legacy-import',0) ON CONFLICT(scope_id,path) DO UPDATE SET exact_hash=excluded.exact_hash,algorithm_version=excluded.algorithm_version,updated_at=CURRENT_TIMESTAMP", params![scope_id, record.path, record.hash]).map_err(|e| e.to_string())?;
@@ -355,7 +301,7 @@ pub fn import_legacy_export_record(
             &transaction,
             scope_id,
             &object_id,
-            "dedupe",
+            "legacy_non_duplicate",
             "upsert",
             &device_id,
             logical_clock,
@@ -727,7 +673,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 3);
+        // 历史 + 待看两类可同步对象；收藏夹（导入时叫 watchlist）不进日志。
+        assert_eq!(rows.len(), 2);
         assert_eq!(
             (&rows[0].0, &rows[0].1, &rows[0].2, &rows[0].3, rows[0].4, &rows[0].7),
             (
@@ -739,19 +686,12 @@ mod tests {
                 &"pending".to_string()
             )
         );
+        // 收藏夹那行已经不写日志了（它是服务器收藏分类的镜像），剩下非重复标记。
         assert_eq!(
             (&rows[1].0, &rows[1].1, &rows[1].2),
             (
-                &"scope-a/a2".to_string(),
-                &"watchlist".to_string(),
-                &"delete".to_string()
-            )
-        );
-        assert_eq!(
-            (&rows[2].0, &rows[2].1, &rows[2].2),
-            (
                 &"scope-a/x.cbz".to_string(),
-                &"dedupe".to_string(),
+                &"legacy_non_duplicate".to_string(),
                 &"upsert".to_string()
             )
         );
@@ -893,15 +833,17 @@ mod tests {
         .unwrap();
         assert_eq!(tombstone.as_str(), "2026-09-02 08:00:00.000");
         // Journal entries follow the shared payload/hash rules so WebDAV sync
-        // propagates the import like any local mutation. The worker's
-        // watchlist section is its 待看 view, so it journals as reading_list.
+        // propagates the import like any local mutation. 这份样例里只有历史是
+        // 可同步对象：它的 watchlist 段是收藏夹（服务器分类的镜像，不进日志），
+        // 待看段才是 watchlist 词汇。
         assert_eq!(
             c.query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND object_type='history' AND operation='upsert'", [], |row| row.get::<_, i64>(0)).unwrap(),
             1
         );
         assert_eq!(
-            c.query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND object_type='reading_list' AND operation='delete'", [], |row| row.get::<_, i64>(0)).unwrap(),
-            1
+            c.query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND object_type='watchlist' AND operation='delete'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0,
+            "收藏夹的导入不写同步日志"
         );
     }
 
@@ -976,10 +918,10 @@ mod tests {
             c.query_row("SELECT COUNT(*) FROM reading_list WHERE archive_id='rgone' AND deleted_at IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(),
             1
         );
-        // journal 覆盖三类对象，同步照常传播。
+        // journal 覆盖两类可同步对象（历史、待看）；收藏夹不进同步日志。
         assert_eq!(
             c.query_row("SELECT COUNT(DISTINCT object_type) FROM sync_journal WHERE scope_id='scope-a'", [], |row| row.get::<_, i64>(0)).unwrap(),
-            3
+            2
         );
     }
 

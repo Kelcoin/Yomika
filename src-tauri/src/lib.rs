@@ -35,10 +35,9 @@ use commands::library::{
 };
 use commands::platform::{open_external_url, platform_capabilities, write_clipboard_text};
 use commands::sync::{
-    append_sync_journal, build_sync_segment, claim_sync_journal, create_sync_key,
-    decrypt_sync_manifest, encrypt_sync_manifest, export_sync_key, import_sync_key,
-    list_sync_journal, list_webdav_accounts, merge_sync_manifests, save_webdav_account,
-    set_sync_journal_state, sync_webdav_scope,
+    append_sync_journal, claim_sync_journal, list_sync_journal, list_webdav_accounts,
+    reset_webdav_state, save_webdav_account, set_sync_journal_state, sync_webdav_scope,
+    webdav_account_credential,
 };
 use db::Database;
 use dedup::{
@@ -158,16 +157,11 @@ pub fn run() {
             claim_sync_journal,
             list_sync_journal,
             set_sync_journal_state,
-            create_sync_key,
-            export_sync_key,
-            import_sync_key,
-            build_sync_segment,
-            encrypt_sync_manifest,
-            decrypt_sync_manifest,
-            merge_sync_manifests,
             save_webdav_account,
             list_webdav_accounts,
             sync_webdav_scope,
+            reset_webdav_state,
+            webdav_account_credential,
             inference_cpu_scale,
             inference_probe,
             inference_start,

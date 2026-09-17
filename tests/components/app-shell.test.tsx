@@ -114,7 +114,9 @@ describe('application shell', () => {
     expect(within(desktop).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
 
     const compact = screen.getByRole('navigation', { name: '移动导航' });
-    expect(within(compact).getAllByRole('link')).toHaveLength(5);
+    // 五个页面 + 「更多」入口（它现在也是一个链接，指向独立页面而不是弹出菜单）。
+    expect(within(compact).getAllByRole('link')).toHaveLength(6);
+    expect(within(compact).getByRole('link', { name: /更多/ })).toHaveAttribute('href', '/more');
     expect(within(compact).queryByRole('link', { name: 'E-Hentai' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '下载' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
@@ -352,7 +354,7 @@ describe('application shell', () => {
     expect(screen.getByRole('button', { name: '展开侧栏' })).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('collects the pages the compact bar cannot fit under 更多', async () => {
+  it('lists the pages the compact bar cannot fit on the 更多 page', async () => {
     const user = userEvent.setup();
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({
@@ -373,15 +375,13 @@ describe('application shell', () => {
       });
       renderAt('/');
 
-      await user.click(await screen.findByRole('button', { name: /更多/ }));
-      const menu = screen.getByRole('menu', { name: '更多页面' });
-      // 默认底栏＝首页/档案库/历史/收藏夹/设置(+钉住)，菜单只列缺的待看与下载；
+      await user.click(await screen.findByRole('link', { name: /更多/ }));
+      // 独立页面而不是弹出菜单：行样式与设置页同一套，只列底栏放不下的页面。
+      expect(await screen.findByRole('heading', { name: '更多' })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: '打开待看' })).toHaveAttribute('href', '/to-read');
+      expect(screen.getByRole('link', { name: '打开下载' })).toHaveAttribute('href', '/downloads');
       // 已在底栏里的页面不再重复出现。
-      expect(within(menu).getByRole('menuitem', { name: /待看/ })).toBeInTheDocument();
-      expect(within(menu).getByRole('menuitem', { name: /下载/ })).toBeInTheDocument();
-      expect(within(menu).queryByRole('menuitem', { name: /历史/ })).not.toBeInTheDocument();
-      await user.click(within(menu).getByRole('menuitem', { name: /待看/ }));
-      expect(screen.queryByRole('menu', { name: '更多页面' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: '打开历史' })).not.toBeInTheDocument();
     } finally {
       window.matchMedia = original;
     }

@@ -1,51 +1,19 @@
 import { z } from 'zod';
 
-import { invokeCommand } from '../bridge/invoke';
-import { SyncJournalRecordSchema, type SyncJournalRecord } from '../domain/library';
+import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import {
-  BuiltSyncSegmentSchema,
-  SyncKeyExportSchema,
-  SyncKeyImportSchema,
-  SyncManifestSchema,
   WebdavAccountSchema,
-  type BuiltSyncSegment,
   type SaveWebdavAccountInput,
-  type SyncKeyExport,
-  type SyncKeyImport,
-  type SyncManifest,
   type WebdavAccount,
 } from '../domain/syncWire';
 import type { CommandResult } from '../domain/result';
 
+/** 同步只剩三件事：账户、同步一次、重置远端。
+ *
+ * 段与清单那套（build_segment / encrypt_manifest / merge_manifests / 认领日志…）已经
+ * 全部并进原生侧的同步引擎：远端现在是「一个账户一个文档」，本地日志也只由原生命令
+ * 写入与消费，所以桥这边不再逐个暴露中间件。 */
 export class NativeSyncRepository {
-  createKey(accountId: string): Promise<CommandResult<string>> {
-    return invokeCommand('create_sync_key', { accountId }, z.string().min(1));
-  }
-
-  exportKey(accountId: string): Promise<CommandResult<SyncKeyExport>> {
-    return invokeCommand('export_sync_key', { accountId }, SyncKeyExportSchema);
-  }
-
-  importKey(accountId: string, key: string): Promise<CommandResult<SyncKeyImport>> {
-    return invokeCommand('import_sync_key', { accountId, key }, SyncKeyImportSchema);
-  }
-
-  buildSegment(accountId: string, scopeId: string): Promise<CommandResult<BuiltSyncSegment | null>> {
-    return invokeCommand('build_sync_segment', { accountId, scopeId }, BuiltSyncSegmentSchema.nullable());
-  }
-
-  encryptManifest(accountId: string, manifest: SyncManifest): Promise<CommandResult<number[]>> {
-    return invokeCommand('encrypt_sync_manifest', { accountId, manifest }, z.array(z.number().int().min(0).max(255)));
-  }
-
-  decryptManifest(accountId: string, ciphertext: number[]): Promise<CommandResult<SyncManifest>> {
-    return invokeCommand('decrypt_sync_manifest', { accountId, ciphertext }, SyncManifestSchema);
-  }
-
-  mergeManifests(local: SyncManifest, remote: SyncManifest): Promise<CommandResult<SyncManifest>> {
-    return invokeCommand('merge_sync_manifests', { local, remote }, SyncManifestSchema);
-  }
-
   saveAccount(input: SaveWebdavAccountInput): Promise<CommandResult<WebdavAccount>> {
     return invokeCommand('save_webdav_account', { input }, WebdavAccountSchema);
   }
@@ -54,11 +22,17 @@ export class NativeSyncRepository {
     return invokeCommand('list_webdav_accounts', {}, z.array(WebdavAccountSchema));
   }
 
-  claimJournal(scopeId: string, limit = 32): Promise<CommandResult<SyncJournalRecord[]>> {
-    return invokeCommand('claim_sync_journal', { scopeId, limit }, z.array(SyncJournalRecordSchema));
-  }
-
   syncWebdavScope(accountId: string, scopeId: string): Promise<CommandResult<number>> {
     return invokeCommand('sync_webdav_scope', { accountId, scopeId }, z.number().int().nonnegative());
+  }
+
+  /** 「编辑」时回显已存的口令：凭据平时只在系统安全存储里，按需读一次。 */
+  accountCredential(accountId: string): Promise<CommandResult<string>> {
+    return invokeCommand('webdav_account_credential', { accountId }, z.string());
+  }
+
+  /** 删掉账户的远端文档；下次同步会按本地状态重新写一份。 */
+  resetRemote(accountId: string): Promise<CommandResult<void>> {
+    return invokeCommand('reset_webdav_state', { accountId }, VoidResponseSchema);
   }
 }

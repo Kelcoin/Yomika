@@ -41,207 +41,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_uses_temporary_put_verification_and_move() {
-        // HEAD probe, five MKCOLs, then the PUT / GET / MOVE trio.
-        let (base_url, requests) = mock_server(vec![
-            "404 Not Found",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "200 OK",
-            "201 Created",
-        ])
-        .await;
-        let client = WebdavClient::new(&base_url, "user", "password").expect("client");
-        let result = client
-            .upload_segment("account-a", "device-a", 1, 2, b"ciphertext")
+    async fn writing_the_document_creates_the_root_collection_first() {
+        // MKCOL Yomika, then the PUT. Anything that already exists answers 405.
+        let (base_url, requests) = mock_server(vec!["405 Method Not Allowed", "201 Created"]).await;
+        let client = WebdavClient::new(&base_url, "", "").expect("client");
+        client
+            .put_state("account-a", b"ciphertext", None)
             .await
-            .expect("upload");
-        assert!(result.ends_with("/changes/device-a/1-2.jsonl.enc"));
+            .expect("first state put");
         let requests = requests.lock().expect("requests");
-        assert!(
-            requests[0].starts_with("HEAD /Yomika/v1/account-a/changes/device-a/1-2.jsonl.enc")
-        );
-        assert!(requests[1].starts_with("MKCOL /Yomika"));
-        assert!(
-            requests[6].starts_with("PUT /Yomika/v1/account-a/changes/device-a/1-2.jsonl.enc.tmp-")
-        );
-        assert!(
-            requests[7].starts_with("GET /Yomika/v1/account-a/changes/device-a/1-2.jsonl.enc.tmp-")
-        );
-        assert!(requests[8]
-            .starts_with("MOVE /Yomika/v1/account-a/changes/device-a/1-2.jsonl.enc.tmp-"));
-        assert!(requests[8].to_ascii_lowercase().contains("destination:"));
+        assert!(requests[0].starts_with("MKCOL /Yomika"));
+        assert!(requests[1].starts_with("PUT /Yomika/account-a.json.enc"));
     }
 
-    /// A configured base URL with a sub-path (Nextcloud's
-    /// `/remote.php/dav/files/<user>/`) must survive every request: joining an
-    /// absolute path with `Url::join` replaces the base path entirely.
     #[tokio::test]
     async fn configured_subpath_survives_every_request() {
         let (base_url, requests) = mock_server(vec!["404 Not Found"]).await;
-        let client = WebdavClient::new(
-            &format!("{base_url}/remote.php/dav/files/tester/"),
-            "",
-            "",
-        )
-        .expect("client");
-        client
-            .get_manifest("account-a")
-            .await
-            .expect("manifest probe");
-        assert!(
-            requests.lock().expect("requests")[0]
-                .starts_with("GET /remote.php/dav/files/tester/Yomika/v1/account-a/"),
-            "the configured WebDAV sub-path was discarded"
-        );
-    }
-
-    /// A fresh WebDAV account has no collections yet, so the first segment PUT
-    /// would 404/409: the client creates the account's directory chain first.
-    #[tokio::test]
-    async fn fresh_account_creates_its_collection_chain_before_uploading() {
-        let (base_url, requests) = mock_server(vec![
-            "404 Not Found",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "200 OK",
-            "201 Created",
-        ])
-        .await;
-        let client = WebdavClient::new(&base_url, "", "").expect("client");
-        client
-            .upload_segment("account-a", "device-a", 1, 2, b"ciphertext")
-            .await
-            .expect("upload");
-        let requests = requests.lock().expect("requests");
-        assert!(requests[1].starts_with("MKCOL /Yomika "), "first MKCOL misses the root collection: {}", requests[1]);
-        assert!(requests[2].starts_with("MKCOL /Yomika/v1 "));
-        assert!(requests[3].starts_with("MKCOL /Yomika/v1/account-a "));
-        assert!(requests[4].starts_with("MKCOL /Yomika/v1/account-a/changes "));
-        assert!(requests[5].starts_with("MKCOL /Yomika/v1/account-a/changes/device-a "));
+        let client = WebdavClient::new(&format!("{base_url}/dav/Yomika"), "user", "password")
+            .expect("client");
+        client.get_state("account-a").await.expect("missing");
+        assert!(requests.lock().expect("requests")[0]
+            .starts_with("GET /dav/Yomika/Yomika/account-a.json.enc"));
     }
 
     #[tokio::test]
-    async fn first_manifest_put_is_conditional_on_the_manifest_not_existing() {
-        let (base_url, requests) = mock_server(vec!["201 Created"]).await;
+    async fn the_first_write_is_conditional_on_the_document_not_existing() {
+        // MKCOL 已存在（405）+ 首次 PUT（201）。
+        let (base_url, requests) = mock_server(vec!["405 Method Not Allowed", "201 Created"]).await;
         let client = WebdavClient::new(&base_url, "", "").expect("client");
         client
-            .put_manifest("account-a", b"ciphertext", None)
+            .put_state("account-a", b"ciphertext", None)
             .await
-            .expect("first manifest put");
+            .expect("first state put");
         assert!(
-            requests.lock().expect("requests")[0]
+            requests.lock().expect("requests")[1]
                 .to_ascii_lowercase()
                 .contains("if-none-match: *"),
-            "an unconditional first PUT can overwrite another device's first manifest"
+            "an unconditional first PUT can overwrite another device's document"
         );
     }
 
     #[tokio::test]
-    async fn retrying_an_already_moved_segment_succeeds() {
-        // Attempt 1 moves the segment into place but (off-screen) the manifest
-        // update fails. Attempt 2 re-uploads the same range: the HEAD probe
-        // finds the final file and the upload succeeds without a MOVE.
-        let (base_url, requests) = mock_server(vec![
-            "404 Not Found",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "200 OK",
-            "201 Created",
-            "200 OK",
-        ])
-        .await;
-        let client = WebdavClient::new(&base_url, "", "").expect("client");
-        client
-            .upload_segment("account-a", "device-a", 1, 2, b"ciphertext")
-            .await
-            .expect("first upload");
-        client
-            .upload_segment("account-a", "device-a", 1, 2, b"ciphertext")
-            .await
-            .expect("retry after a lost manifest update");
-        assert!(
-            requests.lock().expect("requests")[9].starts_with("HEAD "),
-            "the retry should stop at the HEAD probe"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_move_that_races_a_concurrent_upload_still_succeeds() {
-        // MOVE hits an existing destination (412), and the destination check
-        // finds the file — the concurrent attempt already uploaded this range.
-        let (base_url, requests) = mock_server(vec![
-            "404 Not Found",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "201 Created",
-            "200 OK",
-            "412 Precondition Failed",
-            "200 OK",
-            "204 No Content",
-        ])
-        .await;
-        let client = WebdavClient::new(&base_url, "", "").expect("client");
-        client
-            .upload_segment("account-a", "device-a", 1, 2, b"ciphertext")
-            .await
-            .expect("race-resolved upload");
-        assert!(
-            requests.lock().expect("requests")[8].starts_with("MOVE "),
-            "the fourth request after HEAD/MKCOLs/PUT/GET is the MOVE"
-        );
-    }
-
-    #[tokio::test]
-    async fn conditional_manifest_put_maps_412_conflict() {
-        let (base_url, requests) = mock_server(vec!["412 Precondition Failed"]).await;
+    async fn a_412_maps_to_a_conflict_and_keeps_the_etag_precondition() {
+        let (base_url, requests) =
+            mock_server(vec!["405 Method Not Allowed", "412 Precondition Failed"]).await;
         let client = WebdavClient::new(&base_url, "user", "password").expect("client");
         let error = client
-            .put_manifest("account-a", b"encrypted", Some("etag-a"))
+            .put_state("account-a", b"encrypted", Some("etag-a"))
             .await
             .unwrap_err();
-        assert!(matches!(error, WebdavError::ManifestConflict));
-        assert!(requests.lock().expect("requests")[0]
+        assert!(matches!(error, WebdavError::StateConflict));
+        assert!(requests.lock().expect("requests")[1]
             .to_ascii_lowercase()
             .contains("if-match: etag-a"));
     }
 
     #[tokio::test]
-    async fn get_manifest_returns_ciphertext_and_etag_or_none_for_404() {
+    async fn get_state_returns_ciphertext_and_etag_or_none_for_404() {
         let (base_url, requests) = mock_server(vec!["200 OK", "404 Not Found"]).await;
         let client = WebdavClient::new(&base_url, "user", "password").expect("client");
         let found = client
-            .get_manifest("account-a")
+            .get_state("account-a")
             .await
-            .expect("manifest")
+            .expect("state")
             .expect("present");
         assert_eq!(found.ciphertext, b"ciphertext");
-        assert_eq!(
-            client.get_manifest("account-a").await.expect("missing"),
-            None
-        );
+        assert_eq!(client.get_state("account-a").await.expect("missing"), None);
         assert!(requests.lock().expect("requests")[0]
-            .starts_with("GET /Yomika/v1/account-a/manifest.json.enc"));
+            .starts_with("GET /Yomika/account-a.json.enc"));
     }
 
     #[tokio::test]
-    async fn manifest_conflict_refetches_merges_and_retries_with_new_etag() {
+    async fn a_conflict_refetches_merges_and_retries_with_the_new_etag() {
         let (base_url, requests) = mock_server(vec![
+            "405 Method Not Allowed",
             "412 Precondition Failed",
             "200 OK\r\nETag: etag-new",
             "201 Created",
@@ -249,7 +122,7 @@ mod tests {
         .await;
         let client = WebdavClient::new(&base_url, "user", "password").expect("client");
         client
-            .update_manifest_with_retry(
+            .update_state_with_retry(
                 "account-a",
                 b"local".to_vec(),
                 Some("etag-old".to_string()),
@@ -261,32 +134,24 @@ mod tests {
             .await
             .expect("retry update");
         let requests = requests.lock().expect("requests");
-        assert!(requests[0]
+        assert!(requests[1]
             .to_ascii_lowercase()
             .contains("if-match: etag-old"));
-        assert!(requests[1].starts_with("GET /Yomika/v1/account-a/manifest.json.enc"));
-        assert!(requests[2].starts_with("PUT /Yomika/v1/account-a/manifest.json.enc"));
-        assert!(requests[2]
+        assert!(requests[2].starts_with("GET /Yomika/account-a.json.enc"));
+        assert!(requests[3].starts_with("PUT /Yomika/account-a.json.enc"));
+        assert!(requests[3]
             .to_ascii_lowercase()
             .contains("if-match: etag-new"));
     }
 
     #[tokio::test]
-    async fn segment_download_gets_the_immutable_file() {
-        let (base_url, requests) = mock_server(vec!["200 OK", "404 Not Found"]).await;
+    async fn deleting_the_document_tolerates_a_missing_one() {
+        let (base_url, requests) = mock_server(vec!["204 No Content", "404 Not Found"]).await;
         let client = WebdavClient::new(&base_url, "user", "password").expect("client");
-        let bytes = client
-            .download_segment("account-a", "device-b", 5, 9)
-            .await
-            .expect("download");
-        assert_eq!(bytes, b"ciphertext");
-        assert!(client
-            .download_segment("account-a", "device-b", 5, 9)
-            .await
-            .is_err());
-        let requests = requests.lock().expect("requests");
-        assert!(requests[0]
-            .starts_with("GET /Yomika/v1/account-a/changes/device-b/5-9.jsonl.enc"));
+        client.delete_state("account-a").await.expect("delete");
+        client.delete_state("account-a").await.expect("delete again");
+        assert!(requests.lock().expect("requests")[1]
+            .starts_with("DELETE /Yomika/account-a.json.enc"));
     }
 }
 use reqwest::{Client, StatusCode};
@@ -295,7 +160,7 @@ use reqwest::{Client, StatusCode};
 pub enum WebdavError {
     InvalidUrl(String),
     Request(String),
-    ManifestConflict,
+    StateConflict,
     Http(StatusCode),
     Verification(String),
 }
@@ -306,14 +171,14 @@ impl std::fmt::Display for WebdavError {
             Self::InvalidUrl(value) | Self::Request(value) | Self::Verification(value) => {
                 formatter.write_str(value)
             }
-            Self::ManifestConflict => formatter.write_str("WebDAV manifest conflict"),
+            Self::StateConflict => formatter.write_str("WebDAV sync document conflict"),
             Self::Http(status) => write!(formatter, "WebDAV HTTP {}", status),
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct RemoteManifest {
+pub struct RemoteState {
     pub ciphertext: Vec<u8>,
     pub etag: Option<String>,
 }
@@ -438,192 +303,22 @@ impl WebdavClient {
         Ok(())
     }
 
-    /// The five collections between the server root and one device's segment
-    /// directory.
-    fn collection_chain(account_id: &str, device_id: &str) -> Vec<String> {
-        vec![
-            "Yomika".to_string(),
-            "Yomika/v1".to_string(),
-            format!("Yomika/v1/{account_id}"),
-            format!("Yomika/v1/{account_id}/changes"),
-            format!("Yomika/v1/{account_id}/changes/{device_id}"),
-        ]
+    /// The one file a sync account owns. Everything a device knows lives in it
+    /// (see `SyncStateDocument`), so the remote is a single encrypted document
+    /// instead of an index plus per-device segment trees.
+    fn state_path(account_id: &str) -> String {
+        format!("Yomika/{account_id}.json.enc")
     }
 
-    /// Uploads one immutable change segment. Segments are content-addressed by
-    /// their name (`device/start-end`): the same name always carries the same
-    /// journal rows, so an existing final file means this batch is already on
-    /// the server — the ciphertext bytes differ between builds only by the
-    /// encryption nonce. That pre-check is what makes the retry after a lost
-    /// manifest update succeed instead of colliding with `Overwrite: F`.
-    pub async fn upload_segment(
-        &self,
-        account_id: &str,
-        device_id: &str,
-        start: i64,
-        end: i64,
-        bytes: &[u8],
-    ) -> Result<String, WebdavError> {
-        let final_path =
-            format!("/Yomika/v1/{account_id}/changes/{device_id}/{start}-{end}.jsonl.enc");
-        let probe = self
-            .request(reqwest::Method::HEAD, self.endpoint(&final_path[1..])?)
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if probe.status().is_success() {
-            return Ok(final_path);
-        }
-        self.ensure_collection_chain(&Self::collection_chain(account_id, device_id))
-            .await?;
-        let nonce = format!(
-            "{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| WebdavError::Request(error.to_string()))?
-                .as_nanos()
-        );
-        let temp_path = format!("{final_path}.tmp-{nonce}");
-        let put = self
-            .request(reqwest::Method::PUT, self.endpoint(&temp_path[1..])?)
-            .body(bytes.to_vec())
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if !put.status().is_success() {
-            return Err(WebdavError::Http(put.status()));
-        }
-        let read = self
-            .request(reqwest::Method::GET, self.endpoint(&temp_path[1..])?)
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if !read.status().is_success() {
-            return Err(WebdavError::Http(read.status()));
-        }
-        let downloaded = read
-            .bytes()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if downloaded.as_ref() != bytes {
-            return Err(WebdavError::Verification(
-                "temporary segment verification failed".to_string(),
-            ));
-        }
-        let moved = self
-            .request(
-                reqwest::Method::from_bytes(b"MOVE").expect("MOVE method"),
-                self.endpoint(&temp_path[1..])?,
-            )
-            .header("Destination", self.endpoint(&final_path[1..])?.as_str())
-            .header("Overwrite", "F")
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if !moved.status().is_success() {
-            // The pre-check raced another attempt that moved the same range
-            // into place in between; the destination check tells a lost race
-            // (already uploaded — done) from a real failure.
-            let existing = self
-                .request(reqwest::Method::GET, self.endpoint(&final_path[1..])?)
-                .send()
-                .await;
-            if existing
-                .as_ref()
-                .map(|response| response.status().is_success())
-                .unwrap_or(false)
-            {
-                let _ = self
-                    .request(
-                        reqwest::Method::DELETE,
-                        self.endpoint(&temp_path[1..])?,
-                    )
-                    .send()
-                    .await;
-                return Ok(final_path);
-            }
-            return Err(WebdavError::Http(moved.status()));
-        }
-        Ok(final_path)
+    async fn ensure_remote_root(&self) -> Result<(), WebdavError> {
+        self.ensure_collection_chain(&["Yomika".to_string()]).await
     }
 
-    /// Fetches another device's immutable change segment for local merge. The
-    /// file is content-addressed by its name, so a plain GET is enough — no
-    /// verification round trip like the upload's temporary file needs.
-    pub async fn download_segment(
-        &self,
-        account_id: &str,
-        device_id: &str,
-        start: i64,
-        end: i64,
-    ) -> Result<Vec<u8>, WebdavError> {
+    pub async fn get_state(&self, account_id: &str) -> Result<Option<RemoteState>, WebdavError> {
         let response = self
             .request(
                 reqwest::Method::GET,
-                self.endpoint(&format!(
-                    "/Yomika/v1/{account_id}/changes/{device_id}/{start}-{end}.jsonl.enc"
-                ))?,
-            )
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(WebdavError::Http(response.status()));
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if bytes.is_empty() {
-            return Err(WebdavError::Verification(
-                "remote change segment is empty".to_string(),
-            ));
-        }
-        Ok(bytes.to_vec())
-    }
-
-    pub async fn put_manifest(
-        &self,
-        account_id: &str,
-        bytes: &[u8],
-        etag: Option<&str>,
-    ) -> Result<(), WebdavError> {
-        let mut request = self
-            .request(
-                reqwest::Method::PUT,
-                self.endpoint(&format!("/Yomika/v1/{account_id}/manifest.json.enc"))?,
-            )
-            .body(bytes.to_vec());
-        // A manifest write is always conditional. With an ETag it must match
-        // the remote; without one the PUT may only CREATE the manifest —
-        // otherwise two devices racing their first sync silently overwrite
-        // each other's segment index.
-        if let Some(etag) = etag {
-            request = request.header("If-Match", etag);
-        } else {
-            request = request.header("If-None-Match", "*");
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
-        if response.status() == StatusCode::PRECONDITION_FAILED {
-            return Err(WebdavError::ManifestConflict);
-        }
-        if !response.status().is_success() {
-            return Err(WebdavError::Http(response.status()));
-        }
-        Ok(())
-    }
-
-    pub async fn get_manifest(
-        &self,
-        account_id: &str,
-    ) -> Result<Option<RemoteManifest>, WebdavError> {
-        let response = self
-            .request(
-                reqwest::Method::GET,
-                self.endpoint(&format!("/Yomika/v1/{account_id}/manifest.json.enc"))?,
+                self.endpoint(&Self::state_path(account_id))?,
             )
             .send()
             .await
@@ -644,10 +339,44 @@ impl WebdavClient {
             .await
             .map_err(|error| WebdavError::Request(error.to_string()))?
             .to_vec();
-        Ok(Some(RemoteManifest { ciphertext, etag }))
+        Ok(Some(RemoteState { ciphertext, etag }))
     }
 
-    pub async fn update_manifest_with_retry<F>(
+    pub async fn put_state(
+        &self,
+        account_id: &str,
+        bytes: &[u8],
+        etag: Option<&str>,
+    ) -> Result<(), WebdavError> {
+        self.ensure_remote_root().await?;
+        let mut request = self
+            .request(
+                reqwest::Method::PUT,
+                self.endpoint(&Self::state_path(account_id))?,
+            )
+            .body(bytes.to_vec());
+        // The write is always conditional. With an ETag it must match the
+        // remote; without one the PUT may only CREATE the document — otherwise
+        // two devices racing their first sync silently overwrite each other.
+        if let Some(etag) = etag {
+            request = request.header("If-Match", etag);
+        } else {
+            request = request.header("If-None-Match", "*");
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| WebdavError::Request(error.to_string()))?;
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return Err(WebdavError::StateConflict);
+        }
+        if !response.status().is_success() {
+            return Err(WebdavError::Http(response.status()));
+        }
+        Ok(())
+    }
+
+    pub async fn update_state_with_retry<F>(
         &self,
         account_id: &str,
         mut ciphertext: Vec<u8>,
@@ -658,13 +387,10 @@ impl WebdavClient {
         F: Fn(&[u8]) -> Result<Vec<u8>, WebdavError>,
     {
         for attempt in 0..3 {
-            match self
-                .put_manifest(account_id, &ciphertext, etag.as_deref())
-                .await
-            {
+            match self.put_state(account_id, &ciphertext, etag.as_deref()).await {
                 Ok(()) => return Ok(()),
-                Err(WebdavError::ManifestConflict) if attempt < 2 => {
-                    let remote = self.get_manifest(account_id).await?;
+                Err(WebdavError::StateConflict) if attempt < 2 => {
+                    let remote = self.get_state(account_id).await?;
                     if let Some(remote) = remote {
                         ciphertext = merge(&remote.ciphertext)?;
                         etag = remote.etag;
@@ -675,6 +401,23 @@ impl WebdavClient {
                 Err(error) => return Err(error),
             }
         }
-        Err(WebdavError::ManifestConflict)
+        Err(WebdavError::StateConflict)
+    }
+
+    /// 删掉账户的远端文档（「重置远端」）。本来就不存在也算成功。
+    pub async fn delete_state(&self, account_id: &str) -> Result<(), WebdavError> {
+        let response = self
+            .request(
+                reqwest::Method::DELETE,
+                self.endpoint(&Self::state_path(account_id))?,
+            )
+            .send()
+            .await
+            .map_err(|error| WebdavError::Request(error.to_string()))?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(WebdavError::Http(response.status()))
+        }
     }
 }

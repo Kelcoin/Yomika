@@ -127,9 +127,11 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     const compactMain = shell.match(/@media \(max-width: 900px\)[\s\S]*?\.app-main\s*\{([\s\S]*?)\}/)?.[1] ?? '';
     const archiveList = ruleBody(shell, '.archive-list');
-    // 底栏占位 + 两端安全区都要减掉：手机上顶部没有自绘标题栏，刘海由这一层的
-    // padding 让出来，不减就会把工作区顶出屏幕。
-    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ var\(--safe-bottom\) \+ var\(--safe-top\)\)\)/);
+    // 底栏占位与底部安全区要减掉；顶部安全区不能减——box-sizing: border-box 下
+    // padding-top 已经算在 height 里，减第二次就会在底栏上方留下一段 body 底色的
+    // 空带（手机上就是底栏之上那条黑带）。
+    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ var\(--safe-bottom\)\)\)/);
+    expect(compactMain).not.toMatch(/100dvh - \(64px \+ var\(--safe-bottom\) \+ var\(--safe-top\)\)/);
     expect(compactMain).toMatch(/padding-top:\s*var\(--safe-top\)/);
     expect(archiveList).toMatch(/background:\s*var\(--surface-panel\)/);
     expect(shell).not.toMatch(/\.workspace\.is-library-workspace \.archive-list\s*\{[\s\S]*padding-bottom:\s*calc\(80px/);
@@ -172,6 +174,24 @@ describe('design system contract', () => {
     // 模型下载按钮悬停只让字形变色，不铺一层底色。
     expect(base).toMatch(/\.select-option-download:hover:not\(:disabled\) \{ color: var\(--brand-vermilion\); \}/);
     expect(base).not.toMatch(/\.select-option-download:hover[^}]*background/);
+  });
+
+  it('shows one shared server prompt on every page that needs a server', () => {
+    // 同一个状态原来有三种长相：首页内联的 .first-run、书架那版的 EmptyState、档案库
+    // 那版干脆一直转骨架屏。现在只有 ServerRequiredPrompt 一份。
+    const routes = read('src/app/routes.tsx');
+    const library = read('src/components/LibraryRouteWorkspace.tsx');
+    const prompt = read('src/components/ServerRequiredPrompt.tsx');
+
+    expect(prompt).toContain('className="first-run"');
+    expect(prompt).toContain('/settings?section=sync');
+    expect(routes).toContain('<ServerRequiredPrompt />');
+    expect(library).toContain('<ServerRequiredPrompt />');
+    // 书架那版「尚未连接 LANraragi」的 EmptyState 已退役；首页剩下的另一处
+    // .first-run 是「无法读取服务器」的报错态，复用同一套样式，不是这个提示。
+    expect(routes).not.toContain('尚未连接 LANraragi');
+    // 没有服务器时档案库不该停在首屏骨架屏上：确认过没有可用服务器就换提示。
+    expect(library).toContain('hasServer === false');
   });
 
   it('draws the E-Hentai row like the other settings icons and reports download progress', () => {

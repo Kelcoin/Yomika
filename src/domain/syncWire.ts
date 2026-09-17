@@ -1,29 +1,5 @@
 import { z } from 'zod';
 
-export const BuiltSyncSegmentSchema = z.object({
-  sequenceStart: z.number().int().positive(),
-  sequenceEnd: z.number().int().positive(),
-  hash: z.string().regex(/^[a-f0-9]{64}$/),
-  size: z.number().int().positive(),
-  ciphertext: z.array(z.number().int().min(0).max(255)),
-});
-
-export type BuiltSyncSegment = z.infer<typeof BuiltSyncSegmentSchema>;
-
-export const SyncManifestSegmentSchema = z.object({
-  hash: z.string().min(1),
-  size: z.number().int().nonnegative(),
-  sequenceStart: z.number().int().positive(),
-  sequenceEnd: z.number().int().positive(),
-});
-
-export const SyncManifestSchema = z.object({
-  version: z.number().int().positive(),
-  epoch: z.number().int().nonnegative(),
-  segments: z.array(SyncManifestSegmentSchema),
-  deviceCursors: z.record(z.string(), z.number().int().nonnegative()),
-});
-export type SyncManifest = z.infer<typeof SyncManifestSchema>;
 
 export const WebdavAccountSchema = z.object({
   id: z.string().min(1),
@@ -31,6 +7,8 @@ export const WebdavAccountSchema = z.object({
   baseUrl: z.string().url(),
   username: z.string(),
   credentialRef: z.string().min(1),
+  /** 类别数组的 JSON；空串＝默认集合。解析用 domain/syncScope 的 parseSyncScope。 */
+  syncScope: z.string(),
   status: z.string().min(1),
   lastProbeAt: z.string().nullable(),
   lastErrorCode: z.string().nullable(),
@@ -40,24 +18,12 @@ export const WebdavAccountSchema = z.object({
 
 export type WebdavAccount = z.infer<typeof WebdavAccountSchema>;
 
-export const SyncKeyExportSchema = z.object({
-  key: z.string().min(1),
-  fingerprint: z.string().min(1),
-});
-
-export type SyncKeyExport = z.infer<typeof SyncKeyExportSchema>;
-
-export const SyncKeyImportSchema = z.object({
-  fingerprint: z.string().min(1),
-  verified: z.boolean().nullable(),
-});
-
-export type SyncKeyImport = z.infer<typeof SyncKeyImportSchema>;
-
 export type SaveWebdavAccountInput = {
   id: string;
   label: string;
   baseUrl: string;
   username: string;
   credential: string;
+  /** 勾选的类别，JSON 数组字符串；缺省由原生侧回落默认集合。 */
+  syncScope?: string;
 };

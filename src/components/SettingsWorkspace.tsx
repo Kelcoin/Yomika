@@ -18,7 +18,8 @@ import { YomikaMark } from './YomikaMark';
 import { EhMark } from './EhMark';
 import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
-import { useSyncSettings } from './SyncWorkspace';
+import { SyncAccountForm, useSyncSettings } from './SyncWorkspace';
+import { scopeSummary } from '../domain/syncScope';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -82,19 +83,29 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
 /** One setting row. A plain value row when there is nothing to open; a button
  * that opens a floating menu otherwise. Nothing in the row is shaped like a
  * field — choosing happens in the menu. */
-function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, ariaLabel, expanded, busy, disabled }: {
+export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, to, ariaLabel, expanded, busy, disabled }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
   value?: string | undefined;
   trailing?: 'menu' | 'nav' | 'none';
   onClick?: (() => void) | undefined;
+  /** 有 `to` 时这一行是路由链接而不是按钮：底栏「更多」页是跳转，不打开面板。 */
+  to?: string | undefined;
   ariaLabel?: string | undefined;
   expanded?: boolean | undefined;
   busy?: boolean | undefined;
   disabled?: boolean | undefined;
 }) {
-  const row = onClick ? (
+  const row = to ? (
+    <Link
+      className="settings-row settings-row-button"
+      to={to}
+      aria-label={ariaLabel ?? label}
+    >
+      <SettingsRowBody icon={icon} label={label} hint={hint} value={value} trailing={trailing} />
+    </Link>
+  ) : onClick ? (
     <button
       className="settings-row settings-row-button"
       type="button"
@@ -1200,27 +1211,40 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<Waypoints />}
                 label="WebDAV 账户"
-                hint="同步阅读进度、历史与待看变更；在菜单中管理账户并添加新设备"
+                hint="同步阅读进度、历史与待看变更"
                 ariaLabel="WebDAV 账户"
                 value={sync.loading ? '读取中…' : sync.accounts.length === 0 ? '未配置' : sync.accounts.length === 1 ? sync.accounts[0]!.label : `${sync.accounts[0]!.label} 等 ${sync.accounts.length} 个`}
               >
                 {sync.loading ? <p className="server-list-message" role="status">正在读取同步账户…</p> : sync.accounts.length === 0 ? (
-                  <p className="settings-menu-desc">尚未配置 WebDAV 账户，填写下方表单保存第一台设备。</p>
+                  <p className="settings-menu-desc">尚未配置 WebDAV 账户，填写下方表单即可开始同步。</p>
                 ) : (
                   <div className="settings-menu-accounts">
-                    {sync.accounts.map((account) => (
+                    {/* 单账户：只维护一个 WebDAV 账户。 */}
+                    {sync.accounts.slice(0, 1).map((account) => (
                       <div className="settings-menu-account" key={account.id}>
                         <Waypoints className="settings-menu-account-glyph" aria-hidden="true" />
                         <div className="settings-menu-account-copy">
                           <strong>{account.label}</strong>
                           <span>{account.baseUrl}</span>
-                          <small>{account.username || '无用户名'} · {account.status === 'unverified' ? '待首次同步验证' : account.status}</small>
+                          <small>{account.username || '无用户名'} · {scopeSummary(account.syncScope)}</small>
                         </div>
-                        <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => void sync.exportKey(account)}>导出密钥</button>
-                        <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.beginKeyImport(account)}>导入密钥</button>
-                        <button className="settings-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
-                          <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
-                        </button>
+                        {/* 编辑时动作与表单互为开关，收起/展开都有高度过渡。 */}
+                        <div className={`sync-collapsible${sync.formTarget !== undefined ? '' : ' is-open'}`}>
+                          <div className="settings-menu-account-actions">
+                            <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}>编辑</button>
+                            <button className="settings-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
+                              <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
+                            </button>
+                            {sync.resetAccount?.id === account.id ? (
+                              <>
+                                <button className="settings-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}>确认重置</button>
+                                <button className="settings-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>取消</button>
+                              </>
+                            ) : (
+                              <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}>重置远端</button>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1228,28 +1252,10 @@ export function SettingsWorkspace() {
                 {!sync.loading && sync.accounts.length > 0 && sync.servers.length === 0 && (
                   <p className="settings-menu-desc">需要先在「通用」中添加 LANraragi 服务器，才能确定本地同步范围。</p>
                 )}
-                <TextInputDialog
-                  open={sync.keyImportAccount !== undefined}
-                  onOpenChange={(open) => { if (!open) sync.closeKeyImport(); }}
-                  title={`导入同步密钥 · ${sync.keyImportAccount?.label ?? ''}`}
-                  description="粘贴原设备「导出密钥」复制的内容。远端已有数据时，导入前会先验证这把密钥能否解密它。"
-                  label="同步密钥"
-                  confirmLabel="导入密钥"
-                  validate={(value) => (value.trim() ? undefined : '请粘贴导出的同步密钥')}
-                  onConfirm={(value) => void sync.confirmKeyImport(value)}
-                />
-                {/* 账户管理与添加在同一个菜单里完成，不再分成两行。
-                    账户 ID 由名称自动派生，不再让用户填写。 */}
-                <p className="settings-menu-divider">添加或更新账户</p>
-                <form className="sync-form" onSubmit={sync.saveAccount}>
-                  <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" /></label>
-                  <label className="sync-form-wide">WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
-                  <label>用户名<input name="username" autoComplete="username" spellCheck={false} /></label>
-                  <label>密码或 Token<input name="credential" required type="password" autoComplete="off" spellCheck={false} /></label>
-                  <div className="sync-form-actions">
-                    <button className="secondary-action" type="submit" disabled={sync.saving} aria-busy={sync.saving}>{sync.saving ? '保存中…' : '保存同步账户'}</button>
-                  </div>
-                </form>
+                {/* 账户管理与添加都在这个菜单里完成；范围勾选在同一个表单里。 */}
+                <div className={`sync-collapsible${sync.formTarget !== undefined || sync.accounts.length === 0 ? ' is-open' : ''}`}>
+                  <SyncAccountForm sync={sync} />
+                </div>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-sync' && (

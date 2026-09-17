@@ -57,6 +57,13 @@ function compactNavItems(bottomNavItems: readonly string[]) {
   return navigation.filter(({ to }) => routes.has(to));
 }
 
+/** The entries the bottom bar has no room for: the 更多 page lists exactly these,
+ * and the 更多 entry itself only exists while the list is not empty. */
+export function compactNavHiddenItems(bottomNavItems: readonly string[] = []) {
+  const items = compactNavItems(bottomNavItems);
+  return navigation.filter(({ to }) => !items.some((entry) => entry.to === to));
+}
+
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
 
 // DOM nodes are replaced when a route unmounts, but the user's reading position
@@ -70,13 +77,11 @@ interface AppShellProps {
 function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
   const items = compact && bottomNavItems ? compactNavItems(bottomNavItems) : navigation;
-  // 底栏放不下的页面收进「更多」，悬浮在按钮上方；底栏装得下全部时不出现在导航里。
-  const hiddenItems = compact
-    ? navigation.filter(({ to }) => !items.some((entry) => entry.to === to))
-    : [];
-  const [moreOpen, setMoreOpen] = useState(false);
-  useEffect(() => { setMoreOpen(false); }, [location.pathname, location.search]);
+  // 底栏放不下的页面收进「更多」——它现在是独立页面（/more），不再是弹出菜单；
+  // 底栏装得下全部时连这个入口都不出现，人在那些页面或 /more 上时保持选中。
+  const hiddenItems = compact ? compactNavHiddenItems(bottomNavItems) : [];
   const showMore = compact && hiddenItems.length > 0;
+  const moreActive = location.pathname === '/more' || hiddenItems.some(({ to }) => to === location.pathname);
   return (
     <>
       <nav
@@ -102,38 +107,16 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
           </NavLink>
         ))}
         {showMore && (
-          <button
-            className={`nav-link nav-more${moreOpen ? ' is-active' : ''}`}
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded={moreOpen}
-            onClick={() => setMoreOpen((open) => !open)}
+          <NavLink
+            className={`nav-link nav-more${moreActive ? ' is-active' : ''}`}
+            to="/more"
+            title="更多"
           >
             <MoreHorizontal aria-hidden="true" />
             <span>更多</span>
-          </button>
+          </NavLink>
         )}
       </nav>
-      {showMore && moreOpen && (
-        <div className="nav-more-layer">
-          <button className="nav-more-backdrop" type="button" aria-label="关闭页面菜单" onClick={() => setMoreOpen(false)} />
-          <div className="nav-more-menu" role="menu" aria-label="更多页面">
-            {hiddenItems.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                role="menuitem"
-                to={to}
-                end={to === '/'}
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-                onClick={() => setMoreOpen(false)}
-              >
-                <Icon aria-hidden="true" />
-                <span>{label}</span>
-              </NavLink>
-            ))}
-          </div>
-        </div>
-      )}
     </>
   );
 }

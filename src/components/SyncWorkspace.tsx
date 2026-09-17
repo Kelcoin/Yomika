@@ -1,15 +1,14 @@
-import { KeyRound, RefreshCw, Waypoints } from 'lucide-react';
+import { RefreshCw, Waypoints } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { ServerRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
 import type { WebdavAccount } from '../domain/syncWire';
-import { writeClipboardText } from '../bridge/clipboard';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
+import { DEFAULT_SYNC_SCOPE, SYNC_SCOPE_CATEGORIES, parseSyncScope, scopeSummary, type SyncScopeCategory } from '../domain/syncScope';
 import { EmptyState } from './EmptyState';
 import { LoadingIndicator } from './LoadingIndicator';
-import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 
 const libraryRepository = new NativeLibraryRepository();
@@ -40,6 +39,16 @@ export function useSyncSettings(enabled = true) {
   const [message, setMessage] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [syncingId, setSyncingId] = useState<string>();
+  /** 表单开着时指向被编辑的账户；'new' 是新增；undefined 表示收起。 */
+  const [formTarget, setFormTarget] = useState<'new' | WebdavAccount>();
+  /** 范围草稿：表单里勾选的类别，保存时随账户一起写。 */
+  const [scopeDraft, setScopeDraft] = useState<SyncScopeCategory[]>([...DEFAULT_SYNC_SCOPE]);
+  /** 编辑时的口令：打开表单时从凭据库读一次，聚焦输入框才显示明文。 */
+  const [credentialDraft, setCredentialDraft] = useState('');
+  const [revealCredential, setRevealCredential] = useState(false);
+  /** 重置远端是破坏性的，所以按钮点两下：第一次只把它变成「确认重置」。 */
+  const [resetAccount, setResetAccount] = useState<WebdavAccount>();
+  const [resetting, setResetting] = useState(false);
 
   // Both reach the toast as well as the page. This panel is embedded in settings,
   // where every neighbouring control reports that way, and an error rendered only
@@ -73,12 +82,16 @@ export function useSyncSettings(enabled = true) {
     setMessage(undefined);
     const form = new FormData(formElement);
     const label = String(form.get('label') ?? '').trim();
+    const editing = typeof formTarget === 'object' ? formTarget : undefined;
     const input = {
-      id: webdavAccountIdFor(label),
+      // 编辑时沿用原 id（改名不该变成另一个账户），新增才由名称派生。
+      id: editing?.id ?? webdavAccountIdFor(label),
       label,
       baseUrl: String(form.get('baseUrl') ?? '').trim(),
       username: String(form.get('username') ?? '').trim(),
+      // 编辑时留空表示沿用已存的口令，原生侧就是这么理解的。
       credential: String(form.get('credential') ?? ''),
+      syncScope: JSON.stringify(scopeDraft),
     };
     try {
       const saved = await syncRepository.saveAccount(input);
@@ -88,12 +101,8 @@ export function useSyncSettings(enabled = true) {
       }
       setAccounts((current) => [...current.filter((account) => account.id !== saved.value.id), saved.value]
         .sort((left, right) => left.label.localeCompare(right.label)));
-      const key = await syncRepository.createKey(saved.value.id);
-      if (!key.ok) {
-        setError(`账户已保存，但同步密钥创建失败：${key.error.message}`);
-        return;
-      }
       formElement.reset();
+      setFormTarget(undefined);
       setMessage('同步账户已保存在本机');
     } finally {
       setSaving(false);
@@ -118,44 +127,116 @@ export function useSyncSettings(enabled = true) {
     }
   }
 
-  /** 密钥是账户的主密钥：每台设备必须持有同一把才能互相解密。导出把它复制
-   * 到剪贴板（附指纹），导入接收原设备复制来的密钥，远端能回答时会先验证。 */
-  const [keyImportAccount, setKeyImportAccount] = useState<WebdavAccount>();
-
-  async function exportKey(account: WebdavAccount) {
-    const result = await syncRepository.exportKey(account.id);
-    if (!result.ok) {
-      setError(result.error.message);
-      return;
-    }
-    try {
-      await writeClipboardText(result.value.key);
-      setMessage(`同步密钥已复制到剪贴板（指纹 ${result.value.fingerprint}）。在另一台设备导入它，即可解密此账户的同步数据。`);
-    } catch {
-      setError(`同步密钥已生成（指纹 ${result.value.fingerprint}），但无法访问剪贴板`);
-    }
-  }
-
-  function beginKeyImport(account: WebdavAccount) {
+  /** 打开表单：编辑时带上该账户的范围，并把已存口令读回来（读不到就留空，
+   * 留空保存＝不改口令，原生侧就是这么理解的）。 */
+  function openForm(account?: WebdavAccount) {
     setError(undefined);
     setMessage(undefined);
-    setKeyImportAccount(account);
-  }
-
-  async function confirmKeyImport(key: string) {
-    const account = keyImportAccount;
+    setScopeDraft(account ? parseSyncScope(account.syncScope) : [...DEFAULT_SYNC_SCOPE]);
+    setCredentialDraft('');
+    setRevealCredential(false);
+    setFormTarget(account ?? 'new');
     if (!account) return;
-    const result = await syncRepository.importKey(account.id, key);
-    if (!result.ok) {
-      setError(result.error.message);
-      return;
-    }
-    const verifiedNote = result.value.verified === true ? '，已通过远端数据验证' : '，联网后将自动验证';
-    setMessage(`同步密钥已导入（指纹 ${result.value.fingerprint}${verifiedNote}）。`);
-    setKeyImportAccount(undefined);
+    void syncRepository.accountCredential(account.id).then((result) => {
+      if (result.ok) setCredentialDraft((current) => (current === '' ? result.value : current));
+    });
   }
 
-  return { accounts, servers, loading, error, message, saving, syncingId, saveAccount, runSync, exportKey, beginKeyImport, confirmKeyImport, keyImportAccount, closeKeyImport: () => setKeyImportAccount(undefined) };
+  async function resetRemote(account: WebdavAccount) {
+    setResetting(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      const result = await syncRepository.resetRemote(account.id);
+      if (result.ok) setMessage(`已重置远端（${account.label}）：下次同步会按本地状态重新写一份。`);
+      else setError(result.error.message);
+    } finally {
+      setResetting(false);
+      setResetAccount(undefined);
+    }
+  }
+
+  return {
+    accounts,
+    resetAccount,
+    resetting,
+    beginReset: (account: WebdavAccount) => { setError(undefined); setMessage(undefined); setResetAccount(account); },
+    cancelReset: () => setResetAccount(undefined),
+    resetRemote,
+    servers,
+    loading,
+    error,
+    message,
+    saving,
+    syncingId,
+    saveAccount,
+    runSync,
+    formTarget,
+    scopeDraft,
+    toggleScope: (category: SyncScopeCategory) => setScopeDraft((current) => (
+      current.includes(category) ? current.filter((item) => item !== category) : [...current, category]
+    )),
+    credentialDraft,
+    setCredentialDraft,
+    revealCredential,
+    setRevealCredential,
+    startEdit: openForm,
+    closeForm: () => { setFormTarget(undefined); setRevealCredential(false); },
+  };
+}
+
+type SyncSettingsState = ReturnType<typeof useSyncSettings>;
+
+/** 账户表单，新建与编辑共用：名称/地址/用户名/口令 + 同步范围勾选。两个入口
+ * （/sync 页与设置里的菜单）都渲染它，行为只有这一份。 */
+export function SyncAccountForm({ sync, autoFocus = false }: { sync: SyncSettingsState; autoFocus?: boolean }) {
+  const account = typeof sync.formTarget === 'object' ? sync.formTarget : undefined;
+  return (
+    <form
+      className="sync-form"
+      key={account ? account.id : 'new'}
+      onSubmit={sync.saveAccount}
+    >
+      <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" defaultValue={account?.label ?? ''} autoFocus={autoFocus} /></label>
+      <label className="sync-form-wide">WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" defaultValue={account?.baseUrl ?? ''} /></label>
+      <label>用户名<input name="username" autoComplete="username" spellCheck={false} defaultValue={account?.username ?? ''} /></label>
+      {/* 编辑时口令已回填；聚焦时显示明文，方便核对。留空保存＝不改口令。 */}
+      <label>密码或 Token<input
+        name="credential"
+        required={account === undefined}
+        type={sync.revealCredential ? 'text' : 'password'}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={account ? '留空则保持不变' : ''}
+        value={sync.credentialDraft}
+        onChange={(event) => sync.setCredentialDraft(event.currentTarget.value)}
+        onFocus={() => sync.setRevealCredential(true)}
+        onBlur={() => sync.setRevealCredential(false)}
+      /></label>
+      <fieldset className="sync-scope">
+        <legend>同步范围</legend>
+        <div className="sync-scope-grid">
+          {SYNC_SCOPE_CATEGORIES.map((category) => (
+            <label key={category.id} className="sync-scope-option">
+              <input
+                type="checkbox"
+                checked={sync.scopeDraft.includes(category.id)}
+                onChange={() => sync.toggleScope(category.id)}
+              />
+              <span>{category.label}</span>
+            </label>
+          ))}
+        </div>
+        <p className="sync-scope-hint">默认只同步前五项。单独的账号行共享同一台服务器上的进度与书架；服务器地址、E-H 账户与应用设置会带着本机信息上远端，默认不勾。</p>
+      </fieldset>
+      <div className="sync-form-actions">
+        <button className="secondary-action" type="submit" disabled={sync.saving} aria-busy={sync.saving}>{sync.saving ? '保存中…' : '保存'}</button>
+        {sync.accounts.length > 0 && (
+          <button className="secondary-action" type="button" disabled={sync.saving} onClick={sync.closeForm}>取消</button>
+        )}
+      </div>
+    </form>
+  );
 }
 
 /** The /sync deep link keeps the full workspace: accounts with their sync
@@ -163,6 +244,10 @@ export function useSyncSettings(enabled = true) {
  * as plain settings rows whose menus hold these blocks. */
 export function SyncWorkspace() {
   const sync = useSyncSettings();
+  // 单账户：只维护一个 WebDAV 账户，多个账户的时代结束了。
+  const account = sync.accounts[0];
+  const editing = sync.formTarget !== undefined;
+  const formOpen = editing || sync.accounts.length === 0;
   return (
     <div className="sync-workspace">
       <h1 className="visually-hidden">同步</h1>
@@ -172,65 +257,48 @@ export function SyncWorkspace() {
           the section was opened. */}
       <div className="sync-account-slot">
         {sync.loading && <LoadingIndicator size="sm" label="正在读取同步账户" />}
-        {!sync.loading && sync.accounts.length === 0 && (
+        {!sync.loading && !account && (
           <div className="settings-group sync-empty">
             <EmptyState icon={Waypoints} title="同步尚未配置" description="添加 WebDAV 账户后，本地阅读进度、历史和待看变更会以密文增量同步。" />
             {sync.servers.length === 0 && <p className="server-list-message">需要先添加 LANraragi 服务器，才能确定本地同步范围。</p>}
           </div>
         )}
-        {sync.accounts.length > 0 && (
+        {account && (
           <section className="sync-account-list settings-group" aria-label="WebDAV 账户">
-              {sync.accounts.map((account) => (
-                <article className="sync-account-row" key={account.id}>
-                  <Waypoints className="sync-account-glyph" aria-hidden="true" />
-                  <div>
-                    <h2>{account.label}</h2>
-                    <p>{account.baseUrl}</p>
-                    <small>{account.username || '无用户名'} · {account.status === 'unverified' ? '待首次同步验证' : account.status}</small>
-                  </div>
-                  <div className="sync-account-actions">
-                    <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => void sync.exportKey(account)}>导出密钥</button>
-                    <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.beginKeyImport(account)}>导入密钥</button>
-                    <button className="primary-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
-                      <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
-                    </button>
-                  </div>
-                </article>
-              ))}
+            <article className="sync-account-row">
+              <Waypoints className="sync-account-glyph" aria-hidden="true" />
+              <div>
+                <h2>{account.label}</h2>
+                <p>{account.baseUrl}</p>
+                <small>{account.username || '无用户名'} · {scopeSummary(account.syncScope)}</small>
+              </div>
+              {/* 动作与表单互为开关：编辑时动作收起来，收起/展开都有高度过渡。 */}
+              <div className={`sync-collapsible${editing ? '' : ' is-open'}`}>
+                <div className="sync-account-actions">
+                  <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}>编辑</button>
+                  <button className="primary-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
+                    <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
+                  </button>
+                  {sync.resetAccount?.id === account.id ? (
+                    <>
+                      <button className="secondary-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}>确认重置</button>
+                      <button className="secondary-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>取消</button>
+                    </>
+                  ) : (
+                    <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}>重置远端</button>
+                  )}
+                </div>
+              </div>
+            </article>
             {sync.servers.length === 0 && <p className="server-list-message">需要先添加 LANraragi 服务器，才能确定本地同步范围。</p>}
           </section>
         )}
       </div>
-      <TextInputDialog
-        open={sync.keyImportAccount !== undefined}
-        onOpenChange={(open) => { if (!open) sync.closeKeyImport(); }}
-        title={`导入同步密钥 · ${sync.keyImportAccount?.label ?? ''}`}
-        description="粘贴原设备「导出密钥」复制的内容。远端已有数据时，导入前会先验证这把密钥能否解密它。"
-        label="同步密钥"
-        confirmLabel="导入密钥"
-        validate={(value) => (value.trim() ? undefined : '请粘贴导出的同步密钥')}
-        onConfirm={(value) => void sync.confirmKeyImport(value)}
-      />
-      <section className="sync-setup settings-group" aria-labelledby="sync-setup-title">
-        <div className="sync-setup-heading">
-          <KeyRound aria-hidden="true" />
-          <div>
-            <h2 id="sync-setup-title">添加或更新 WebDAV</h2>
-            <p>账户信息保存在本机，口令进入系统安全存储。</p>
-          </div>
-        </div>
-        {/* Two columns of labelled fields with the wide URL row spanning both:
-            everything used to sit in one cramped stack. */}
-        <form className="sync-form" onSubmit={sync.saveAccount}>
-          <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" /></label>
-          <label className="sync-form-wide">WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" /></label>
-          <label>用户名<input name="username" autoComplete="username" spellCheck={false} /></label>
-          <label>密码或 Token<input name="credential" required type="password" autoComplete="off" spellCheck={false} /></label>
-          <div className="sync-form-actions">
-            <button className="secondary-action" type="submit" disabled={sync.saving} aria-busy={sync.saving}>{sync.saving ? '保存中…' : '保存同步账户'}</button>
-          </div>
-        </form>
-      </section>
+      <div className={`sync-collapsible${formOpen ? ' is-open' : ''}`}>
+        <section className="sync-setup settings-group">
+          <SyncAccountForm sync={sync} autoFocus={!account} />
+        </section>
+      </div>
     </div>
   );
 }

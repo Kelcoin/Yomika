@@ -3457,6 +3457,20 @@ pub fn save_server_record(
         Ok(record) => record,
         Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
     };
+    // 服务器条目进同步日志（全局范围）：地址与启用状态要在设备间一致；API Key 不在此列。
+    if let Err(error) = super::sync::journal_global_object(
+        &transaction,
+        "lrr_server",
+        &format!("server/{}", record.scope_id),
+        serde_json::json!({
+            "scopeId": record.scope_id,
+            "name": record.name,
+            "baseUrl": record.base_url,
+            "enabled": record.enabled,
+        }),
+    ) {
+        return CommandResult::failure("UNKNOWN", error, true);
+    }
     if let Err(error) = transaction.commit() {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
@@ -4129,28 +4143,8 @@ fn set_watchlist_entry(
             },
         )
         .map_err(|error| error.to_string())?;
-    let payload_json = serde_json::json!({
-        "archiveId": record.archive_id,
-        "deleted": record.deleted,
-    })
-    .to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    transaction.execute(
-        "INSERT INTO sync_journal (
-            scope_id, object_id, object_type, operation, device_id,
-            logical_clock, payload_hash, payload_json
-         ) VALUES (?1, ?2, 'watchlist', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
-        params![
-            record.scope_id,
-            format!("{}/{}", record.scope_id, record.archive_id),
-            added,
-            record.device_id,
-            record.revision,
-            format!("{:x}", hasher.finalize()),
-            payload_json,
-        ],
-    ).map_err(|error| error.to_string())?;
+    // 收藏夹不写同步日志：它镜像的是 LRR 服务器上的收藏分类，服务器才是它的真相
+    // 来源，把本机这份推给别的设备只会在两边打架（见 sync.rs 的 apply 分支）。
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -4221,7 +4215,7 @@ fn write_reading_list_entry(
         "INSERT INTO sync_journal (
             scope_id, object_id, object_type, operation, device_id,
             logical_clock, payload_hash, payload_json
-         ) VALUES (?1, ?2, 'reading_list', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
+         ) VALUES (?1, ?2, 'watchlist', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
         params![
             record.scope_id,
             format!("{}/{}", record.scope_id, record.archive_id),
@@ -5262,7 +5256,7 @@ mod tests {
                 .unwrap();
             assert_eq!(deleted, expected_deleted);
         }
-        let deletes: i64 = connection.query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='reading_list' AND operation='delete'", [], |row| row.get(0)).unwrap();
+        let deletes: i64 = connection.query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='watchlist' AND operation='delete'", [], |row| row.get(0)).unwrap();
         assert_eq!(deletes, 1);
         for sql in [
             "SELECT deleted_at IS NULL FROM reading_list WHERE scope_id='scope-b'",
@@ -5344,23 +5338,25 @@ mod tests {
     }
 
     #[test]
-    fn watchlist_toggle_writes_tombstone_and_journal_in_same_transaction() {
+    fn favlist_toggle_writes_tombstone_without_journal() {
+        // 收藏夹镜像的是 LRR 服务器的收藏分类，不属于本机可同步状态：本地墓碑与
+        // revision 照旧（列表要显示得出来），但同步日志一笔都不写。
         let mut connection = migrated_connection();
         let added = set_watchlist_entry(&mut connection, "scope-a", "archive-a", true)
-            .expect("watchlist add");
+            .expect("favlist add");
         assert!(!added.deleted);
         let removed = set_watchlist_entry(&mut connection, "scope-a", "archive-a", false)
-            .expect("watchlist remove");
+            .expect("favlist remove");
         assert!(removed.deleted);
         assert_eq!(removed.revision, 2);
         let journal_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM sync_journal WHERE scope_id = 'scope-a' AND object_id = 'scope-a/archive-a' AND object_type = 'watchlist'",
+                "SELECT COUNT(*) FROM sync_journal WHERE scope_id = 'scope-a' AND object_id = 'scope-a/archive-a'",
                 [],
                 |row| row.get(0),
             )
-            .expect("watchlist journal count");
-        assert_eq!(journal_count, 2);
+            .expect("journal count");
+        assert_eq!(journal_count, 0, "收藏夹不进同步日志");
     }
 
     #[test]

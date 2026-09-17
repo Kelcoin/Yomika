@@ -931,7 +931,8 @@ describe('settings workspace', () => {
       );
       const compactNav = await compact.findByRole('navigation', { name: '移动导航' });
       const compactNames = Array.from(compactNav.querySelectorAll('a')).map((link) => link.textContent);
-      expect(compactNames).toEqual(['首页', '档案库', '下载', '设置']);
+      // 结尾的「更多」是入口本身（独立页面 /more），不是底栏放不下的那个页面。
+      expect(compactNames).toEqual(['首页', '档案库', '下载', '设置', '更多']);
       compact.unmount();
 
       // 桌面侧边栏不受该偏好影响，仍然完整。

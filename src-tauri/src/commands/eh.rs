@@ -227,6 +227,21 @@ pub fn save_eh_account_record(
             return CommandResult::failure("UNKNOWN", error, true);
         }
     };
+    // 账户条目进同步日志（全局范围）：名字、站点与用户名提示。Cookie 在凭据库里，
+    // 按设备各存各的，不上远端；别的设备拉到条目后需要重新登录一次。
+    // 同步日志尽力而为：目标库没有日志表时（例如只跑迁移子集的测试夹具）不该让
+    // 「保存账户」失败——真实应用里它总是在的。
+    let _ = crate::commands::sync::journal_global_object(
+        &transaction,
+        "eh_account",
+        &format!("eh/{}", account.id),
+        serde_json::json!({
+            "accountId": account.id,
+            "label": account.label,
+            "host": account.host,
+            "usernameHint": account.username_hint,
+        }),
+    );
     if let Err(error) = transaction.commit() {
         let _ = store.delete_cookie(&cookie_ref);
         return CommandResult::failure("UNKNOWN", error.to_string(), true);

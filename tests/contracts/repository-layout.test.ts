@@ -40,6 +40,9 @@ describe('repository layout', () => {
     // packaging job and the local build_exe.bat run this same file.
     expect(workflow).toContain('.github/scripts/build-windows.ps1');
     expect(exists('../../.github/scripts/build-windows.ps1')).toBe(true);
+    // 本地编 Android 走同一套路：脚本进仓库，入口 bat 与 SDK 一样留在本地。
+    expect(exists('../../.github/scripts/build-android.ps1')).toBe(true);
+    expect(ignore).toMatch(/^\/build_apk\.bat$/m);
     expect(read('../../build_exe.bat')).toContain('.github\\scripts\\build-windows.ps1');
   });
 

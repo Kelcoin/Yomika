@@ -1,4 +1,4 @@
-import { ArrowRight, Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
+import { Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
@@ -8,6 +8,8 @@ import { LibraryShell } from '../components/LibraryShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
 import { LoadingIndicator } from '../components/LoadingIndicator';
 import { pickServer } from '../domain/server';
+import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
+import { MorePagesRoute } from '../components/MorePagesRoute';
 
 /** The standalone pages load on first entry. Everything else — home, library
  * and the three shelves — stays in the main chunk: those five panels are the
@@ -285,18 +287,7 @@ function HomeWorkspace() {
         </section>
       ) : !connected && (
         // Only an unusable setup gets a prompt; a working server needs no banner.
-        <section className="first-run" aria-labelledby="first-run-title">
-        <div className="first-run-copy">
-          <Server aria-hidden="true" />
-          <p className="eyebrow">未连接</p>
-          <h2 id="first-run-title">添加你的 LANraragi</h2>
-          <p>服务器配置保存在本机。连接后即可浏览档案并建立离线书架。</p>
-        </div>
-        <Link className="primary-action" to="/settings">
-          添加服务器
-          <ArrowRight aria-hidden="true" />
-        </Link>
-        </section>
+        <ServerRequiredPrompt />
       )}
       {connected && homeServer && <>
       <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer.scopeId} serverId={homeServer.id} progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
@@ -573,14 +564,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
       {shelfMessage && <p className="server-list-message" role="status">{shelfMessage}</p>}
-      {!loading && !error && !hasServer && (
-        <EmptyState
-          icon={Server}
-          title="尚未连接 LANraragi"
-          description="添加服务器后即可读取和同步本机记录。"
-          action={<Link className="primary-action" to="/settings">添加服务器<ArrowRight aria-hidden="true" /></Link>}
-        />
-      )}
+      {!loading && !error && !hasServer && <ServerRequiredPrompt />}
       {!loading && !error && hasServer && shelfArchives.length === 0 && (
         <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
       )}
@@ -703,6 +687,7 @@ export function WorkspaceRoutes() {
           <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
           <Route path="/eh" element={<EhRouteWorkspace />} />
           <Route path="/downloads" element={<TaskCenter />} />
+          <Route path="/more" element={<MorePagesRoute />} />
           <Route path="/tools/upload" element={<UploadRoute />} />
           <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
           <Route path="/dedup" element={routeKey === key ? <Navigate to="/tools/dedup" replace /> : null} />

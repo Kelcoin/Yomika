@@ -30,6 +30,7 @@ CLAUDE.local.md
 # the one piece the repository needs, so it is checked in at
 # .github/scripts/build-windows.ps1; nothing else under tools/ is tracked.
 /build_exe.bat
+/build_apk.bat
 /tools/
 
 # Secrets and local environment
