@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../../src/lib/errorLog';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
 
 afterEach(resetInvokeAdapterForTests);
@@ -73,7 +74,7 @@ describe('native library repository bridge', () => {
   it('creates a persistent upload task through the native task command', async () => {
     const value = {
       id: 'task-1', kind: 'download', label: '上传 archive.cbz', status: 'queued',
-      progress: 0, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z',
+      progress: 0, cancelable: true, retryable: true, receivedBytes: 0, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z',
     };
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
@@ -87,7 +88,7 @@ describe('native library repository bridge', () => {
   it('lists persisted tasks through the native task command', async () => {
     const value = [{
       id: 'task-1', kind: 'download', label: '下载 archive.cbz', status: 'queued',
-      progress: 0, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z',
+      progress: 0, cancelable: true, retryable: true, receivedBytes: 0, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z',
     }];
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
@@ -101,7 +102,7 @@ describe('native library repository bridge', () => {
   it('updates a task status and progress through the native task command', async () => {
     const value = {
       id: 'task-1', kind: 'download', label: '下载 archive.cbz', status: 'running',
-      progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:01:00Z',
+      progress: 0.5, cancelable: true, retryable: true, receivedBytes: 0, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:01:00Z',
     };
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
@@ -115,13 +116,30 @@ describe('native library repository bridge', () => {
   it('retries a failed recoverable task explicitly', async () => {
     const value = {
       id: 'task-1', kind: 'download', label: '下载 archive.cbz', status: 'queued',
-      progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:02:00Z',
+      progress: 0.5, cancelable: true, retryable: true, receivedBytes: 0, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:02:00Z',
     };
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
 
     expect(await new NativeLibraryRepository().retryTask('task-1')).toEqual({ ok: true, value });
     expect(adapter).toHaveBeenCalledWith('retry_task', { id: 'task-1' });
+  });
+
+  // 原生 TaskRecord 的 error 是 Option<String>，serde 会一直把这个字段发出来，
+  // 没有错误时是 null；上面这些用例的假数据都把它整段省掉了，所以「没有报错」
+  // 的那一行——也就是每一行成功完成的任务——从来没有被这份 schema 收过。
+  it('accepts task rows the native side really serializes', async () => {
+    // 这一份是照原生那侧真正发出的 JSON 抄的：error 是 null、几个下载列也在。
+    const value = [{
+      id: 'task-1789696533845538100', kind: 'download', label: '下载 [ie] archive.zip',
+      status: 'completed', progress: 1, error: null, cancelable: false, retryable: false,
+      createdAt: '2026-09-18 01:55:33', updatedAt: '2026-09-18 01:55:36',
+      archiveId: 'a'.repeat(40), serverId: 'scope-a', localPath: 'E:\\Downloads\\a-archive.zip',
+      totalBytes: 200, receivedBytes: 200, bytesPerSecond: null,
+    }];
+    setInvokeAdapterForTests(vi.fn(async () => ({ ok: true, value })));
+
+    expect(await new NativeLibraryRepository().listTasks()).toEqual({ ok: true, value });
   });
 
   it('uploads a local archive through a task-scoped native command', async () => {
@@ -331,6 +349,23 @@ describe('native library repository bridge', () => {
   it('rejects malformed archive rows from native code', async () => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: [{ archiveId: 'a1' }] }));
     expect(await new NativeLibraryRepository().listArchives('s1')).toMatchObject({ ok: false, error: { code: 'INVALID_RESPONSE' } });
+  });
+
+  // 日志要说出是哪个字段。只写一句「没匹配上」，一个 null 撞上非 nullable 的
+  // schema 就得从猜字段开始查——任务表的那个 error 就是这么查出来的。
+  it('names the field that failed validation in the error log', async () => {
+    const written: ErrorLogRecord[] = [];
+    setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
+    try {
+      setInvokeAdapterForTests(async () => ({ ok: true, value: [{ archiveId: 'a1', fileSize: 'huge' }] }));
+
+      await new NativeLibraryRepository().listArchives('s1');
+      await flushErrorLog();
+
+      expect(written.at(-1)?.detail).toContain('fileSize');
+    } finally {
+      setErrorLogSinkForTests();
+    }
   });
 
   it('saves scoped progress through one typed command', async () => {

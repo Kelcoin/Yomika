@@ -53,7 +53,12 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
 
     const value = schema.safeParse(parsed.data.value);
     if (value.success) return ok(value.data);
-    logError(`bridge/${name}`, 'Native command answer did not match its schema', { request });
+    // 哪个字段没对上才是能查的东西。只写「不匹配」等于把现场丢掉：一个
+    // `null` 撞上非 nullable 的 schema，排查要从猜字段开始。
+    logError(`bridge/${name}`, 'Native command answer did not match its schema', {
+      request,
+      issues: value.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    });
     return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
   } catch (error) {
     logError(`bridge/${name}`, 'Native command failed', { request, error: error instanceof Error ? error.message : String(error) });

@@ -19,7 +19,7 @@ import { MorePagesRoute } from '../components/MorePagesRoute';
  * parsed bytes on boot even though they are one route deep. */
 const ReaderRouteScreen = lazy(() => import('../components/ReaderRoute').then((module) => ({ default: module.ReaderRoute })));
 const SettingsWorkspace = lazy(() => import('../components/SettingsWorkspace').then((module) => ({ default: module.SettingsWorkspace })));
-const TaskCenter = lazy(() => import('../components/TaskCenter').then((module) => ({ default: module.TaskCenter })));
+const LocalArchivesWorkspace = lazy(() => import('../components/LocalArchivesWorkspace').then((module) => ({ default: module.LocalArchivesWorkspace })));
 const UploadPanel = lazy(() => import('../components/UploadPanel').then((module) => ({ default: module.UploadPanel })));
 const EhRouteWorkspace = lazy(() => import('../components/EhRouteWorkspace').then((module) => ({ default: module.EhRouteWorkspace })));
 const MetadataEditRoute = lazy(() => import('../components/MetadataEditRoute').then((module) => ({ default: module.MetadataEditRoute })));
@@ -676,7 +676,7 @@ export function WorkspaceRoutes() {
     if (resume) navigate(`${resume.pathname}${resume.search}`, { replace: true, state: resume.state });
   }, [navigate, resume, routeKey]);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/history', '/watchlist', '/to-read'].includes(key)}>
+    <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
       <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
         <Routes location={saved}>
           <Route path="/" element={<HomeWorkspace />} />
@@ -687,7 +687,7 @@ export function WorkspaceRoutes() {
           <Route path="/to-read" element={<StateWorkspace name="toRead" />} />
           <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
           <Route path="/eh" element={<EhRouteWorkspace />} />
-          <Route path="/downloads" element={<TaskCenter />} />
+          <Route path="/downloads" element={<LocalArchivesWorkspace />} />
           <Route path="/more" element={<MorePagesRoute />} />
           <Route path="/tools/upload" element={<UploadRoute />} />
           <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />

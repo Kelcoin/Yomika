@@ -2,6 +2,7 @@ import {
   Archive,
   Bookmark,
   Download,
+  HardDrive,
   History,
   Home,
   MoreHorizontal,
@@ -33,7 +34,7 @@ const navigation = [
   { to: '/history', label: '历史', icon: History },
   { to: '/watchlist', label: '收藏夹', icon: Star },
   { to: '/to-read', label: '待看', icon: Bookmark },
-  { to: '/downloads', label: '下载', icon: Download },
+  { to: '/downloads', label: '本地档案', icon: HardDrive },
   { to: '/settings', label: '设置', icon: Settings },
 ] as const;
 
@@ -267,7 +268,7 @@ export function AppShell({ children }: AppShellProps) {
           // workspace container too. With a separate one their compact layout
           // clamped at a fixed height with `overflow: hidden`, which left the last
           // card behind the bottom nav with nothing able to scroll it into view.
-          className={`workspace${/^\/(library(?:\/[^/]+)?|history|watchlist|to-read)$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          className={`workspace${/^\/(library(?:\/[^/]+)?|downloads|history|watchlist|to-read)$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}

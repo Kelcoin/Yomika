@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
+import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import {
   ArchiveRecordSchema,
   ArchivePageSchema,
@@ -12,6 +12,10 @@ import {
   type ServerRecord,
   TaskRecordSchema,
   type TaskRecord,
+  DownloadResultSchema,
+  type DownloadResult,
+  LocalArchiveRecordSchema,
+  type LocalArchiveRecord,
   SyncJournalRecordSchema,
   type SyncJournalInput,
   type SyncJournalRecord,
@@ -169,8 +173,27 @@ export class NativeLibraryRepository {
   deleteArchive(serverId: string, archiveId: string): Promise<CommandResult<null>> {
     return invokeCommand('delete_archive', { serverId, archiveId }, z.null()).then(invalidateShelves);
   }
-  downloadArchive(serverId: string, archiveId: string): Promise<CommandResult<string>> {
-    return invokeCommand('download_archive', { serverId, archiveId }, z.string().min(1));
+  /** 一次性把这份档案收下来。暂停和中止不是失败：结果里带着最终状态。 */
+  downloadArchive(serverId: string, archiveId: string): Promise<CommandResult<DownloadResult>> {
+    return invokeCommand('download_archive', { serverId, archiveId }, DownloadResultSchema);
+  }
+  /** 接着收：从 `.part` 已有的字节往后要。失败过的任务也走这里。 */
+  resumeDownload(taskId: string): Promise<CommandResult<DownloadResult>> {
+    return invokeCommand('resume_download', { taskId }, DownloadResultSchema);
+  }
+  pauseDownload(taskId: string): Promise<CommandResult<void>> {
+    return invokeCommand('pause_download', { taskId }, VoidResponseSchema);
+  }
+  cancelDownload(taskId: string): Promise<CommandResult<void>> {
+    return invokeCommand('cancel_download', { taskId }, VoidResponseSchema);
+  }
+  /** 下载目录里现存的档案；顺便跟磁盘对齐一次（新增的记进来、没了的收掉）。 */
+  listLocalArchives(): Promise<CommandResult<LocalArchiveRecord[]>> {
+    return invokeCommand('list_local_archives', {}, z.array(LocalArchiveRecordSchema));
+  }
+  /** 删除本地文件，服务器上的那份档案不动。 */
+  deleteLocalArchives(paths: string[]): Promise<CommandResult<number>> {
+    return invokeCommand('delete_local_archives', { paths }, z.number().int().nonnegative());
   }
   createTask(input: { kind: 'download' | 'sync' | 'inference' | 'maintenance'; label: string }): Promise<CommandResult<TaskRecord>> {
     return invokeCommand('create_task', { task: input }, TaskRecordSchema);

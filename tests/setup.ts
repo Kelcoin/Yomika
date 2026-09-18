@@ -22,7 +22,7 @@ afterEach(() => {
 await Promise.all([
   import('../src/components/ReaderRoute'),
   import('../src/components/SettingsWorkspace'),
-  import('../src/components/TaskCenter'),
+  import('../src/components/LocalArchivesWorkspace'),
   import('../src/components/UploadPanel'),
   import('../src/components/EhRouteWorkspace'),
   import('../src/components/MetadataEditRoute'),

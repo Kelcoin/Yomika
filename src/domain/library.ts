@@ -87,12 +87,44 @@ export const TaskRecordSchema = z.object({
   progress: z.number().min(0).max(1),
   cancelable: z.boolean(),
   retryable: z.boolean(),
-  error: z.string().optional(),
+  // 原生那侧是 Option<String>，serde 一直发出这个字段，没有错误时是 null。
+  error: z.string().nullable().optional(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
+  // 下载任务才有：对应哪一份档案、文件落在哪、一共多少、收了多少、多快。
+  archiveId: z.string().nullable().optional(),
+  serverId: z.string().nullable().optional(),
+  localPath: z.string().nullable().optional(),
+  totalBytes: z.number().int().nonnegative().nullable().optional(),
+  receivedBytes: z.number().int().nonnegative().default(0),
+  bytesPerSecond: z.number().int().nonnegative().nullable().optional(),
 });
 
 export type TaskRecord = z.infer<typeof TaskRecordSchema>;
+
+export const DownloadResultSchema = z.object({
+  status: z.enum(['completed', 'paused', 'cancelled', 'failed']),
+  /** 落盘路径；暂停时是半份文件，中止时是空串。 */
+  path: z.string(),
+  taskId: z.string().min(1),
+});
+export type DownloadResult = z.infer<typeof DownloadResultSchema>;
+
+/** 下载目录里的一份档案。磁盘才是主语：路径是它的身份，镜像只用来补标题、标签
+ * 和封面。 */
+export const LocalArchiveRecordSchema = z.object({
+  path: z.string().min(1),
+  archiveId: z.string().nullable().optional(),
+  serverId: z.string().nullable().optional(),
+  scopeId: z.string().nullable().optional(),
+  title: z.string(),
+  fileSize: z.number().int().nonnegative(),
+  addedAt: z.number().int().nonnegative(),
+  pageCount: z.number().int().nonnegative().nullable().optional(),
+  tags: z.array(z.string()).default([]),
+});
+
+export type LocalArchiveRecord = z.infer<typeof LocalArchiveRecordSchema>;
 
 export const SyncJournalOperationSchema = z.enum(['upsert', 'delete']);
 export const SyncJournalStatusSchema = z.enum(['pending', 'retryable', 'processing', 'completed', 'failed']);

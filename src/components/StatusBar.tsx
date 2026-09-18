@@ -54,7 +54,9 @@ export function StatusBar() {
           setServerConnection('none');
           setServerName(undefined);
         }
-        if (tasks?.ok) setTaskCount(tasks.value.length);
+        // 只数没跑完的：任务行从不删除（完成的上传、下载都会留在表里），数到
+        // 底就成了「这个应用一共做过多少件事」，而不是现在有几件在跑。
+        if (tasks?.ok) setTaskCount(tasks.value.filter((task) => task.status === 'running' || task.status === 'queued' || task.status === 'paused').length);
         if (syncAccounts?.ok) setSyncConfigured(syncAccounts.value.length > 0);
         // The archive total comes from the local mirror's own index — one SQL
         // count, no LANraragi page request. It used to be published by whichever

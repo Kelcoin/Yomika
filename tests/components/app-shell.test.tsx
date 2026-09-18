@@ -110,7 +110,7 @@ describe('application shell', () => {
     expect(screen.getByRole('link', { name: '跳到主内容' })).toHaveAttribute('href', '#main-content');
     await screen.findByRole('heading', { name: '添加你的 LANraragi' });
     const desktop = screen.getByRole('navigation', { name: '主导航' });
-    expect(within(desktop).getByRole('link', { name: '下载' })).toBeInTheDocument();
+    expect(within(desktop).getByRole('link', { name: '本地档案' })).toBeInTheDocument();
     expect(within(desktop).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
 
     const compact = screen.getByRole('navigation', { name: '移动导航' });
@@ -118,7 +118,7 @@ describe('application shell', () => {
     expect(within(compact).getAllByRole('link')).toHaveLength(6);
     expect(within(compact).getByRole('link', { name: /更多/ })).toHaveAttribute('href', '/more');
     expect(within(compact).queryByRole('link', { name: 'E-Hentai' })).not.toBeInTheDocument();
-    expect(within(compact).queryByRole('link', { name: '下载' })).not.toBeInTheDocument();
+    expect(within(compact).queryByRole('link', { name: '本地档案' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
   });
 
@@ -379,7 +379,7 @@ describe('application shell', () => {
       // 独立页面而不是弹出菜单：行样式与设置页同一套，只列底栏放不下的页面。
       expect(await screen.findByRole('heading', { name: '更多' })).toBeInTheDocument();
       expect(screen.getByRole('link', { name: '打开待看' })).toHaveAttribute('href', '/to-read');
-      expect(screen.getByRole('link', { name: '打开下载' })).toHaveAttribute('href', '/downloads');
+      expect(screen.getByRole('link', { name: '打开本地档案' })).toHaveAttribute('href', '/downloads');
       // 已在底栏里的页面不再重复出现。
       expect(screen.queryByRole('link', { name: '打开历史' })).not.toBeInTheDocument();
     } finally {

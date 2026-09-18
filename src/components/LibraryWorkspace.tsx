@@ -10,6 +10,7 @@ import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/na
 import { EmptyState } from './EmptyState';
 import { longPressHandlers } from '../lib/longPressMenu';
 import { StatusLine } from './StatusLine';
+import { SearchPresetField } from './SearchPresetField';
 import { SelectField } from './SelectField';
 import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
@@ -211,8 +212,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
-  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
-  const presetMenuRef = useRef<HTMLDivElement>(null);
   /** How far the list is dragged past its ends, in on-screen pixels: positive
    * below the top, negative past the bottom. */
   const [overscroll, setOverscroll] = useState(0);
@@ -379,13 +378,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   });
   const navigate = useNavigate();
   useTagTranslations();
-
-  // The preset popover closes the way the select fields do.
-  useEffect(() => {
-    const close = (event: PointerEvent) => { if (!presetMenuRef.current?.contains(event.target as Node)) setPresetMenuOpen(false); };
-    document.addEventListener('pointerdown', close);
-    return () => document.removeEventListener('pointerdown', close);
-  }, []);
 
   const searchQuery = controlledSearchQuery ?? localSearchQuery;
   const sortOrder = controlledSortOrder ?? localSortOrder;
@@ -667,59 +659,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {onSavePreset && (
           /* Every preset action lives in one menu: the button no longer grows a
              row of chips beside itself, and each preset row carries its own
-             rename and delete actions. Same hand-rolled popover as the select
-             fields, so it closes on an outside pointer, Escape and scroll. */
-          <div className="search-preset-field" ref={presetMenuRef}>
-            <button
-              type="button"
-              className="icon-action search-preset-save"
-              aria-haspopup="menu"
-              aria-expanded={presetMenuOpen}
-              aria-label="检索预设"
-              title="检索预设"
-              onClick={() => setPresetMenuOpen((current) => !current)}
-              onKeyDown={(event) => { if (event.key === 'Escape') setPresetMenuOpen(false); }}
-            >
-              <BookmarkPlus aria-hidden="true" />
-            </button>
-            {presetMenuOpen && (
-              <div className="search-preset-overlay" role="presentation" onClick={() => setPresetMenuOpen(false)}>
-                <div
-                  className="search-preset-panel"
-                  role="menu"
-                  aria-label="检索预设"
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => { if (event.key === 'Escape') setPresetMenuOpen(false); }}
-                >
-                  <h2 className="search-preset-title">检索预设</h2>
-                  {presets && presets.length > 0
-                  ? presets.map((preset) => (
-                    <div className="search-preset-row" role="none" key={preset.presetId}>
-                      <button type="button" role="menuitem" className="search-preset-apply" onClick={() => { onApplyPreset?.(preset); setPresetMenuOpen(false); }}>
-                        {preset.name}
-                      </button>
-                      {onEditPreset && (
-                        <button type="button" className="search-preset-icon" aria-label={`重命名预设 ${preset.name}`} title="重命名预设" onClick={() => { onEditPreset(preset); setPresetMenuOpen(false); }}>
-                          <Pencil aria-hidden="true" />
-                        </button>
-                      )}
-                      {onDeletePreset && (
-                        <button type="button" className="search-preset-icon is-danger" aria-label={`删除预设 ${preset.name}`} title="删除预设" onClick={() => onDeletePreset(preset)}>
-                          <Trash2 aria-hidden="true" />
-                        </button>
-                      )}
-                    </div>
-                  ))
-                    : <p className="search-preset-empty">还没有预设</p>}
-                  <div className="search-preset-separator" role="none" />
-                  <button type="button" role="menuitem" className="search-preset-add" onClick={() => { setPresetMenuOpen(false); onSavePreset(); }}>
-                    <Plus aria-hidden="true" />
-                    <span>新增预设</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+             rename and delete actions. */
+          <SearchPresetField
+            presets={presets}
+            onApply={(preset) => onApplyPreset?.(preset)}
+            onSave={onSavePreset}
+            {...(onEditPreset ? { onEdit: onEditPreset } : {})}
+            {...(onDeletePreset ? { onDelete: onDeletePreset } : {})}
+          />
         )}
         {!showToolbar && onSelectionModeChange && (
           /* The shelves have no toolbar, so the toggle sits beside the preset

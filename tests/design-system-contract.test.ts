@@ -632,7 +632,7 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.workspace-heading h1,[\s\S]*?\.metadata-edit-header h1\s*\{[\s\S]*clip-path:\s*inset\(50%\)/);
     expect(read('src/components/LibraryRouteWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">档案库<\/h1>/);
     expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">设置<\/h1>/);
-    expect(read('src/components/TaskCenter.tsx')).toMatch(/<h1 className="visually-hidden">下载<\/h1>/);
+    expect(read('src/components/LocalArchivesWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">本地档案<\/h1>/);
   });
 
   it('centres the history rail node on the rail line', () => {
@@ -651,7 +651,7 @@ describe('design system contract', () => {
     const routes = read('src/app/routes.tsx');
     // route-cache-panel 的 height:100% 钳制会把溢出尾困在面板外：首页与书架
     // 面板必须随内容生长（is-flow），≤900 则所有路由（含档案库页面滚动）放开。
-    expect(routes).toContain("flow={!['/library', '/history', '/watchlist', '/to-read'].includes(key)}");
+    expect(routes).toContain("flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}");
     expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
     expect(shell).toMatch(/\.route-cache-panel\.is-flow \{ height: auto; \}/);
     expect(shell).toMatch(/@media \(max-width: 900px\)/);
@@ -976,7 +976,7 @@ describe('design system contract', () => {
     // The region's geometry is bound to the region element, so the borrowed-class
     // bug cannot come back to a <p>.
     expect(read('src/styles/shell.css')).toMatch(/\.empty-state:not\(section\)/);
-    for (const path of ['SettingsWorkspace.tsx', 'TaskCenter.tsx', 'DeduplicationWorkspace.tsx', 'UploadPanel.tsx',
+    for (const path of ['SettingsWorkspace.tsx', 'LocalArchivesWorkspace.tsx', 'DeduplicationWorkspace.tsx', 'UploadPanel.tsx',
       'EhComments.tsx', 'ErrorLogPanel.tsx', 'EhAccountPanel.tsx', 'MetadataEditRoute.tsx', 'MorePagesRoute.tsx', 'DedupSuggestionPanel.tsx']) {
       const source = read(`src/components/${path}`);
       expect(source, path).not.toMatch(/className="empty-state"/);

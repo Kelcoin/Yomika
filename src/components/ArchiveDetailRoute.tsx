@@ -27,6 +27,7 @@ import {
   type ArchiveMetadata,
 } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
+import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
 import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
@@ -423,7 +424,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
           if (!serverId || downloading) return;
           setDownloading(true);
-          void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? `下载完成：${result.value}` : result.error.message, result.ok ? 'success' : 'error')).finally(() => setDownloading(false));
+          void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error')).finally(() => setDownloading(false));
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
         {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 

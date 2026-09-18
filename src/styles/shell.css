@@ -919,7 +919,6 @@ body::-webkit-scrollbar,
   .toast-close:hover,
   .settings-choice-option-main:hover,
   .tag-suggest-option:hover,
-  .task-row:hover,
   .date-picker-days button:hover,
   .settings-menu-check:hover:not(:disabled),
   .custom-scheme-card:hover,
@@ -2936,8 +2935,6 @@ body::-webkit-scrollbar,
 .workspace-alert .form-error {
   flex: 1 1 320px;
   width: 100%;
-}.task-list {
-  border-top: 1px solid var(--hairline);
 }
 
 /* The account panel is the E-Hentai section's one group frame — the same
@@ -2997,14 +2994,12 @@ body::-webkit-scrollbar,
   color: var(--ink-secondary);
   font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
-}.eh-account-panel ul,
-  .task-list {
+}.eh-account-panel ul {
   display: grid;
   margin: 0;
   padding: 0;
   list-style: none;
-}.eh-account-panel li,
-  .task-row {
+}.eh-account-panel li {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -3016,29 +3011,21 @@ body::-webkit-scrollbar,
   touch-action: pan-y;
 }
 
-.task-summary {
-  display: grid;
-  flex: 1 1 auto;
-  gap: 3px;
-  min-width: 0;
-}
-
 .eh-account-panel li.active {
   border-left: 3px solid var(--state-success);
   padding-left: var(--space-3);
 }
 
 .eh-account-panel span,
-.eh-account-panel small,
-.task-summary small {
+.eh-account-panel small {
   color: var(--ink-secondary);
   font-size: var(--text-xs);
 }
 
-.task-actions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: var(--space-2);
+/* 状态标签只说「失败」，这里说是什么失败了：一行停在那里没有任何线索的任务，
+   除了让人再点一次没有别的用处。 */.task-error {
+  color: var(--state-danger);
+  overflow-wrap: anywhere;
 }
 
 /* Account info sits straight in the menu body — no inner card — and each
@@ -3158,32 +3145,6 @@ body::-webkit-scrollbar,
 .eh-account-actions > .primary-action,
 .eh-account-actions > .secondary-action {
   flex: 1 1 auto;
-}
-
-.task-row progress {
-  width: min(28vw, 260px);
-  height: 4px;
-  overflow: hidden;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: var(--surface-elevated);
-  accent-color: var(--brand-cyan);
-}
-
-.task-row progress::-webkit-progress-bar {
-  background: var(--surface-elevated);
-}
-
-.task-row progress::-webkit-progress-value {
-  background: var(--brand-cyan);
-}
-
-.task-progress {
-  min-width: 4ch;
-  color: var(--ink-secondary);
-  font-family: var(--font-utility);
-  font-size: var(--text-xs);
-  text-align: right;
 }
 
 /* Sync lives in the settings menu only: the account row is a settings row whose
@@ -3847,11 +3808,6 @@ body::-webkit-scrollbar,
     width: 100%;
   }
 
-  .task-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .eh-account-form {
     grid-template-columns: 1fr;
   }
@@ -3860,14 +3816,6 @@ body::-webkit-scrollbar,
   .eh-account-form button,
   .eh-account-form .form-error {
     grid-column: auto;
-  }
-
-  .task-row progress {
-    width: 100%;
-  }
-
-  .task-actions {
-    align-self: flex-end;
   }
 
   /* react-resizable-panels writes `height: 100%; overflow: hidden` inline on the
@@ -4934,4 +4882,126 @@ body::-webkit-scrollbar,
     content: '';
     transform: translate(-50%, -50%);
   }
+}
+
+/* ---- 本地档案页 ---------------------------------------------------------- */
+/* 这一页和档案库共用同一套行：同一个 .archive-row，同一个封面媒体框，同一套
+   标签瀑布。区别只在行里写什么——本地档案写大小和下载时间，没下完的那些写
+   进度、速度，和暂停 / 恢复 / 中止。 */
+
+.local-archives {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.local-archives-controls { flex: 0 0 auto; }
+
+.local-archives-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  align-content: start;
+  gap: var(--card-gap);
+  padding: var(--space-1) var(--space-1) calc(var(--space-6) + var(--chrome-bottom));
+  border-top: 1px solid var(--hairline);
+  scrollbar-width: none;
+}
+.local-archives-list::-webkit-scrollbar { display: none; }
+
+/* 档案库的行高来自虚拟列表，这里的行自己撑出同一格。 */.local-archives-list .archive-row {
+  height: 158px;
+  justify-content: flex-start;
+  gap: var(--space-3);
+}
+.local-archives-list .archive-row > .archive-row-copy {
+  flex: 1 1 auto;
+  /* 一列且可以被压缩：宽的那一格（进度条定宽 420px）否则会把列撑过行宽，
+     行再把溢出裁掉——右端的百分比和速度就是这么被吃掉的。 */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 行里的封面还是档案库那套媒体框（缩略图卡片里是 210px 高），按行收窄；认不出
+   对应哪份服务器档案时摆一个图标，而不是一块永远在加载的骨架。 */.local-archives-list .archive-thumb-card-media {
+  position: relative;
+  flex: 0 0 100px;
+  width: 100px;
+  height: 142px;
+  border-radius: var(--radius-control);
+  background: var(--surface-container);
+}
+.local-archives-list .archive-thumb-card-media.is-local-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--ink-secondary);
+  outline: 1px solid var(--outline-variant);
+  outline-offset: -1px;
+}
+.local-archives-list .archive-thumb-card-media.is-local-placeholder > svg {
+  width: 26px;
+  height: 26px;
+}
+
+/* 下载行不是按钮：它是一张还在变的牌，点下去没有去处。 */.local-archives-list .archive-row.is-downloading { cursor: default; }
+
+.local-archives-list .archive-row progress {
+  /* 定宽加 max-width：`min(100%, …)` 在这种网格项上被 UA 的默认宽度顶掉过。 */
+  width: 420px;
+  max-width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+  accent-color: var(--brand-cyan);
+}
+.local-archives-list .archive-row progress::-webkit-progress-bar { background: var(--surface-elevated); }
+.local-archives-list .archive-row progress::-webkit-progress-value { background: var(--brand-cyan); }
+
+.local-row-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 右侧那一页：这份本地文件的实情。服务器上的档案详情在 /library 里。 */
+.local-detail { display: grid; align-content: start; gap: var(--space-4); }
+.local-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.local-detail-head h2 { margin: 0; font-size: var(--text-lg); line-height: var(--leading-snug); overflow-wrap: anywhere; }
+.local-detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-5); margin: 0; }
+.local-detail-facts > div { display: grid; gap: 2px; min-width: 0; }
+.local-detail-facts > div.is-wide { grid-column: 1 / -1; }
+.local-detail-facts dt { color: var(--ink-secondary); font-size: var(--text-xs); }
+.local-detail-facts dd { margin: 0; font-size: var(--text-sm); }
+.local-detail-path { display: block; font-family: var(--font-utility); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.local-detail-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.local-delete-dialog { max-width: 440px; }
+
+@media (max-width: 900px) {
+  /* 手机上这一页跟着文档流滚；行还是封面加文案一行，按钮落到下一行的右端——
+     390px 里挤不下封面、标题和三个按钮。 */
+  .local-archives { height: auto; min-height: 100%; }
+  .local-archives-list {
+    overflow: visible;
+    padding: var(--space-3) 0 calc(var(--space-8) + var(--chrome-bottom));
+  }
+  .local-archives-list .archive-row {
+    flex-wrap: wrap;
+    height: auto;
+    align-items: flex-start;
+    row-gap: var(--space-2);
+    padding: var(--space-3);
+  }
+  .local-archives-list .archive-thumb-card-media { flex: 0 0 64px; width: 64px; height: 92px; }
+  .local-archives-list .archive-row > .archive-row-copy { flex: 1 1 60%; }
+  .local-archives-list .archive-row progress { min-width: 0; }
+  /* 窄屏上「42% · 142.8 MB / 340.0 MB · 12.0 MB/s」一行放不下，让它换行而不是
+     被省略号吃掉。 */
+  .local-archives-list .archive-row-footer { flex-wrap: wrap; }
+  .local-row-actions { margin-left: auto; }
+  .local-detail-facts { grid-template-columns: minmax(0, 1fr); }
 }

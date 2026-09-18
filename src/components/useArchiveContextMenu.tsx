@@ -7,6 +7,7 @@ import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { useToast } from './Toast';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository, type Category } from '../repositories/nativeLibraryRepository';
+import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
 import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
 
 const repository = new NativeLibraryRepository();
@@ -110,7 +111,7 @@ export function useArchiveContextMenu(options: {
       onDownload={(archive) => {
         showToast('正在下载档案', 'info');
         void repository.downloadArchive(archive.serverId, archive.archiveId).then((result) => {
-          showToast(result.ok ? `下载完成：${result.value}` : result.error.message, result.ok ? 'success' : 'error');
+          showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
         });
       }}
       {...(options.readingListLabels ? { readingListLabels: options.readingListLabels } : {})}

@@ -94,6 +94,10 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             27,
             include_str!("../../migrations/0027_sync_account_active.sql"),
         ),
+        (
+            28,
+            include_str!("../../migrations/0028_local_archives.sql"),
+        ),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -217,7 +221,7 @@ mod tests {
                     eh_health_columns
                 ),
                 (
-                    27,
+                    28,
                     1,
                     "servers",
                     "sync_accounts",

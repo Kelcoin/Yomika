@@ -466,23 +466,6 @@ describe('library route workspace', () => {
     expect(adapter).toHaveBeenCalledWith('delete_archive', { serverId: 'scope-a', archiveId: 'a1' });
   });
 
-  it('shows persisted tasks in the downloads workspace', async () => {
-    setInvokeAdapterForTests(async (command: string) => {
-      if (command === 'list_tasks') {
-        return {
-          ok: true,
-          value: [{ id: 'task-1', kind: 'download', label: '下载 demo.cbz', status: 'running', progress: 0.5, cancelable: true, retryable: true, createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:01:00Z' }],
-        };
-      }
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    render(<MemoryRouter initialEntries={['/downloads']}><App /></MemoryRouter>);
-
-    expect(await screen.findByRole('heading', { name: '下载' })).toBeInTheDocument();
-    expect(await screen.findByText('下载 demo.cbz')).toBeInTheDocument();
-    expect(screen.getByText('50%')).toBeInTheDocument();
-  });
-
   it('assigns an archive to a static category from the card menu', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
@@ -662,8 +645,8 @@ describe('library route workspace', () => {
     // Leaving and returning is a round trip to LANraragi now, not the local query
     // it used to be, so a snapshot this recent is served as-is.
     const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
-    await user.click(sidebar.getByRole('link', { name: '下载' }));
-    expect(await screen.findByRole('heading', { name: '下载' })).toBeInTheDocument();
+    await user.click(sidebar.getByRole('link', { name: '本地档案' }));
+    expect(await screen.findByRole('heading', { name: '本地档案' })).toBeInTheDocument();
     await user.click(sidebar.getByRole('link', { name: '档案库' }));
 
     expect(await screen.findByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
@@ -748,8 +731,8 @@ describe('library route workspace', () => {
     // Leave and come back inside the freshness window, so the list is restored
     // from the snapshot rather than refetched.
     const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
-    await user.click(sidebar.getByRole('link', { name: '下载' }));
-    await screen.findByRole('heading', { name: '下载' });
+    await user.click(sidebar.getByRole('link', { name: '本地档案' }));
+    await screen.findByRole('heading', { name: '本地档案' });
     await user.click(sidebar.getByRole('link', { name: '档案库' }));
     await screen.findByRole('button', { name: /^One\b/ });
     expect(offsets).toEqual([0]);

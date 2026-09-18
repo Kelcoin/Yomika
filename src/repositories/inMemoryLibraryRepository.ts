@@ -43,7 +43,7 @@ export class InMemoryLibraryRepository {
 
   async createTask(input: NewTask): Promise<TaskRecord> {
     const now = new Date().toISOString();
-    const task: TaskRecord = { ...input, id: crypto.randomUUID(), status: 'queued', progress: 0, cancelable: true, retryable: true, createdAt: now, updatedAt: now };
+    const task: TaskRecord = { ...input, id: crypto.randomUUID(), status: 'queued', progress: 0, cancelable: true, retryable: true, receivedBytes: 0, createdAt: now, updatedAt: now };
     this.tasks.set(task.id, task);
     return task;
   }

@@ -3,7 +3,8 @@ use reqwest::Client;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use std::io::{Read, Write};
+use tauri::{Manager, State};
 use tokio::task::JoinSet;
 use url::Url;
 
@@ -277,7 +278,17 @@ pub struct TaskRecord {
     retryable: bool,
     created_at: String,
     updated_at: String,
+    /// 下载任务才有：对应哪一份档案、文件在哪、一共多少、收了多少、多快。
+    archive_id: Option<String>,
+    server_id: Option<String>,
+    local_path: Option<String>,
+    total_bytes: Option<i64>,
+    received_bytes: i64,
+    bytes_per_second: Option<i64>,
 }
+
+/// 任务行的列顺序，读它的地方都从这里取，免得加一列要改四处。
+const TASK_COLUMNS: &str = "id,kind,label,status,progress,error,cancelable,retryable,created_at,updated_at,archive_id,server_id,local_path,total_bytes,received_bytes,bytes_per_second";
 
 fn read_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
@@ -291,15 +302,23 @@ fn read_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         retryable: row.get::<_, i64>(7)? != 0,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        archive_id: row.get(10)?,
+        server_id: row.get(11)?,
+        local_path: row.get(12)?,
+        total_bytes: row.get(13)?,
+        received_bytes: row.get(14)?,
+        bytes_per_second: row.get(15)?,
     })
 }
 
 fn read_task(connection: &rusqlite::Connection, id: &str) -> Result<TaskRecord, String> {
-    connection.query_row(
-        "SELECT id,kind,label,status,progress,error,cancelable,retryable,created_at,updated_at FROM tasks WHERE id=?1",
-        [id],
-        read_task_row,
-    ).map_err(|error| error.to_string())
+    connection
+        .query_row(
+            &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id=?1"),
+            [id],
+            read_task_row,
+        )
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn recover_interrupted_tasks(
@@ -1232,7 +1251,7 @@ pub async fn download_archive(
     server_id: String,
     archive_id: String,
     database: State<'_, Database>,
-) -> Result<CommandResult<String>, String> {
+) -> Result<CommandResult<DownloadResult>, String> {
     if archive_id.len() != 40 || !archive_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Ok(CommandResult::failure(
             "INVALID_RESPONSE",
@@ -1246,17 +1265,10 @@ pub async fn download_archive(
             .lock()
             .map_err(|_| "Database lock failed".to_string())?;
         let (base_url, scope_id) = server_connection(&connection, &server_id)?;
-        let preferences = crate::settings::load_preferences_from(&connection)?;
-        let directory = if preferences.download_directory.is_empty() {
-            crate::inference::model_data_dir(&app)
-                .map_err(|error| error.to_string())?
-                .join("downloads")
-        } else {
-            std::path::PathBuf::from(preferences.download_directory)
-        };
+        let directory = resolved_download_directory(&app, &connection)?;
         (base_url, scope_id, directory)
     };
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<DownloadResult, String> {
         let api_key = SystemCredentialStore
             .get_server_api_key(&scope_id)
             .map_err(credential_read_error)?;
@@ -1280,32 +1292,312 @@ pub async fn download_archive(
             .and_then(reqwest::blocking::Response::error_for_status)
             .and_then(reqwest::blocking::Response::json)
             .map_err(|error| error.to_string())?;
-        let filename = archive_download_filename(&archive_id, &metadata);
-        let mut response = client
-            .get(format!("{url}/download"))
-            .header(
-                reqwest::header::AUTHORIZATION,
-                authorization_value(&api_key),
-            )
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| error.to_string())?;
-        if response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("json") || value.contains("text/html"))
-        {
-            return Err("Server returned an error page instead of an archive".into());
-        }
-        save_archive_download(&mut response, &directory, &filename)
+        let database = app.state::<Database>();
+        transfer_archive(
+            &database,
+            TransferRequest {
+                client,
+                api_key,
+                base_url,
+                server_id,
+                archive_id,
+                directory,
+                metadata,
+                task: None,
+            },
+        )
     })
     .await
     .map_err(|error| error.to_string())?;
     Ok(match result {
-        Ok(path) => CommandResult::success(path),
+        Ok(download) => CommandResult::success(download),
         Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
     })
+}
+
+/// 下载对外报的结果：状态、落盘路径（中止时是空串）和任务 id。暂停不是失败，
+/// 所以它和完成一样走成功分支。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadResult {
+    status: String,
+    path: String,
+    task_id: String,
+}
+
+/// 一次 HTTP 请求唯一能停下来的地方就是块与块之间：暂停与中止都是前端写这个
+/// 信号、流式循环读它。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadSignal {
+    Running,
+    Paused,
+    Aborted,
+}
+
+static DOWNLOAD_SIGNALS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<DownloadSignal>>>>> =
+    std::sync::OnceLock::new();
+
+fn download_signals() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<DownloadSignal>>>> {
+    DOWNLOAD_SIGNALS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 取（必要时新建）一个任务的信号闸。循环跑在阻塞线程上，拿不到 Tauri 状态，所以
+/// 这份状态按任务 id 放在全局表里。
+fn download_signal(task_id: &str) -> std::sync::Arc<std::sync::Mutex<DownloadSignal>> {
+    let mut signals = match download_signals().lock() {
+        Ok(signals) => signals,
+        Err(_) => return std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running)),
+    };
+    signals
+        .entry(task_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running)))
+        .clone()
+}
+
+fn set_download_signal(task_id: &str, signal: DownloadSignal) {
+    if let Ok(state) = download_signal(task_id).lock() {
+        // 已经收到中止的下载，不会被后来的暂停改回来。
+        if *state != DownloadSignal::Aborted {
+            let mut state = state;
+            *state = signal;
+        }
+    }
+}
+
+fn clear_download_signal(task_id: &str) {
+    if let Ok(mut signals) = download_signals().lock() {
+        signals.remove(task_id);
+    }
+}
+
+fn read_download_signal(handle: &std::sync::Mutex<DownloadSignal>) -> DownloadSignal {
+    // 锁坏了当作中止：下载这件事宁可停错，也不要卡在谁也动不了的状态里。
+    handle.lock().map(|state| *state).unwrap_or(DownloadSignal::Aborted)
+}
+
+/// 传输结束的三种下场。中止和暂停都不是错误，所以从 `Result` 的成功分支回来，
+/// 由调用方去写任务行和文件。
+enum DownloadOutcome {
+    Finished { received: u64 },
+    Paused { received: u64 },
+    Aborted { received: u64 },
+}
+
+/// 一次下载的输入。HTTP 那一半（密钥、客户端、元数据）在命令里准备好，这里只
+/// 负责落盘、报进度、写任务行。
+struct TransferRequest {
+    client: reqwest::blocking::Client,
+    api_key: String,
+    base_url: String,
+    server_id: String,
+    archive_id: String,
+    directory: std::path::PathBuf,
+    metadata: serde_json::Value,
+    /// 恢复或重试时带上已有的任务行；新下载是 None。
+    task: Option<TaskTransfer>,
+}
+
+/// 任务行里与传输有关的那几列，恢复时全从这里读。
+struct TaskTransfer {
+    id: String,
+    label: String,
+    received: u64,
+    total: Option<u64>,
+    part: std::path::PathBuf,
+    final_name: String,
+}
+
+fn transfer_archive(
+    database: &Database,
+    request: TransferRequest,
+) -> Result<DownloadResult, String> {
+    let TransferRequest {
+        client,
+        api_key,
+        base_url,
+        server_id,
+        archive_id,
+        directory,
+        metadata,
+        task,
+    } = request;
+    let resume_from = task.as_ref().map(|task| task.received).unwrap_or(0);
+    let request_url = format!(
+        "{}/api/archives/{}/download",
+        base_url.trim_end_matches('/'),
+        archive_id
+    );
+    let mut transfer = client.get(&request_url).header(
+        reqwest::header::AUTHORIZATION,
+        authorization_value(&api_key),
+    );
+    if resume_from > 0 {
+        transfer = transfer.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+    }
+    let mut response = transfer
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| error.to_string())?;
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("json") || value.contains("text/html"))
+    {
+        return Err("Server returned an error page instead of an archive".into());
+    }
+    let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let total = if partial {
+        content_range_total(response.headers())
+            .or_else(|| response.content_length().map(|length| length + resume_from))
+    } else {
+        response.content_length()
+    };
+    store_archive_response(
+        database,
+        &server_id,
+        &archive_id,
+        &metadata,
+        &directory,
+        &mut response,
+        total,
+        partial,
+        task,
+    )
+}
+
+/// 响应体到手之后的一切：建任务行、流式落盘、报进度、收尾（发布 / 暂停 / 中止 /
+/// 失败）。HTTP 那一半留在 `transfer_archive` 里，所以这里脱网也能测。
+#[allow(clippy::too_many_arguments)]
+fn store_archive_response(
+    database: &Database,
+    server_id: &str,
+    archive_id: &str,
+    metadata: &serde_json::Value,
+    directory: &std::path::Path,
+    source: &mut impl Read,
+    total: Option<u64>,
+    partial: bool,
+    task: Option<TaskTransfer>,
+) -> Result<DownloadResult, String> {
+    let filename = match &task {
+        Some(task) => task.final_name.clone(),
+        None => archive_download_filename(archive_id, metadata),
+    };
+    let part = match &task {
+        Some(task) => task.part.clone(),
+        None => directory.join(format!("{filename}.part")),
+    };
+    let resume_from = task.as_ref().map(|task| task.received).unwrap_or(0);
+    // 服务端不认 Range（用 200 把整份重发过来）时必须从头写：否则前半段会和新收
+    // 的字节叠在一起。
+    let received = if partial { resume_from } else { 0 };
+    if !partial && resume_from > 0 {
+        let _ = std::fs::remove_file(&part);
+    }
+    let label = match &task {
+        Some(task) => task.label.clone(),
+        None => download_task_label(metadata),
+    };
+    let task_id = match &task {
+        Some(task) => task.id.clone(),
+        None => create_download_task(database, &label, server_id, archive_id, &part, total)?,
+    };
+    let signal = download_signal(&task_id);
+    let started = std::time::Instant::now();
+    let mut last_report = started;
+    let mut last_percent = None;
+    let mut speed: Option<u64> = None;
+    // 速度要的是「这一段时间收了多少」：上一次的字节数和时刻都在这里。
+    let traffic = std::sync::Mutex::new((received, started));
+    let outcome = stream_archive_to_file(source, &part, received, &signal, |now| {
+        let (previous, at) = match traffic.lock() {
+            Ok(mut traffic) => {
+                let state = (traffic.0, traffic.1);
+                traffic.0 = now;
+                traffic.1 = std::time::Instant::now();
+                state
+            }
+            Err(_) => (now, started),
+        };
+        let elapsed = at.elapsed();
+        if !elapsed.is_zero() && now > previous {
+            let instant = (now - previous) as f64 / elapsed.as_secs_f64();
+            speed = Some(match speed {
+                // 平滑一下：单块的瞬时速度抖得没法看。
+                Some(previous) => (previous as f64 * 0.6 + instant * 0.4) as u64,
+                None => instant as u64,
+            });
+        }
+        let percent = total
+            .filter(|total| *total > 0)
+            .map(|total| now.saturating_mul(100) / total);
+        // 百分比变了才写；一直不动的（服务端没报总量）也每秒留一次心跳，速度才
+        // 不会是几秒前的旧值。
+        if percent == last_percent && last_report.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        last_percent = percent;
+        last_report = std::time::Instant::now();
+        report_download_progress(database, &task_id, now, total, speed);
+    });
+    clear_download_signal(&task_id);
+    match outcome {
+        Ok(DownloadOutcome::Finished { received }) => {
+            let path = publish_archive_download(&part, directory, &filename)?;
+            finish_download_task(
+                database,
+                &task_id,
+                std::path::Path::new(&path),
+                received,
+                total,
+            );
+            record_local_archive(
+                database,
+                std::path::Path::new(&path),
+                server_id,
+                archive_id,
+                &label,
+                received,
+            );
+            Ok(DownloadResult {
+                status: "completed".into(),
+                path,
+                task_id,
+            })
+        }
+        Ok(DownloadOutcome::Paused { received }) => {
+            pause_download_task(database, &task_id, received);
+            Ok(DownloadResult {
+                status: "paused".into(),
+                path: part.to_string_lossy().into_owned(),
+                task_id,
+            })
+        }
+        Ok(DownloadOutcome::Aborted { .. }) => {
+            let _ = std::fs::remove_file(&part);
+            cancel_download_task(database, &task_id);
+            Ok(DownloadResult {
+                status: "cancelled".into(),
+                path: String::new(),
+                task_id,
+            })
+        }
+        Err(error) => {
+            // 半份档案留着：失败多半是网络断了，恢复时能接着收。
+            mark_task_failed(database, &task_id, &error);
+            Err(error)
+        }
+    }
+}
+
+/// `Content-Range: bytes 100-999/1000` 里的总数。
+fn content_range_total(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn archive_download_filename(archive_id: &str, metadata: &serde_json::Value) -> String {
@@ -1344,29 +1636,300 @@ fn archive_download_filename(archive_id: &str, metadata: &serde_json::Value) -> 
     )
 }
 
-fn save_archive_download(
-    source: &mut impl std::io::Read,
-    directory: &std::path::Path,
-    filename: &str,
-) -> Result<String, String> {
-    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
-    let bytes =
-        std::io::copy(source, temporary.as_file_mut()).map_err(|error| error.to_string())?;
-    if bytes == 0 {
+/// 收下的每一块都先落到 `<最终名>.part`；块大小同时也是进度回调的粒度。
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+/// 把响应体写进 `.part` 文件，每收一块报一次累计字节数。暂停与中止都在这里生效：
+/// 单次 HTTP 请求唯一能停下来的地方就是块与块之间。
+fn stream_archive_to_file(
+    source: &mut impl Read,
+    part: &std::path::Path,
+    received: u64,
+    signal: &std::sync::Mutex<DownloadSignal>,
+    mut on_chunk: impl FnMut(u64),
+) -> Result<DownloadOutcome, String> {
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let mut file = if received > 0 {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(part)
+            .map_err(|error| error.to_string())?
+    } else {
+        std::fs::File::create(part).map_err(|error| error.to_string())?
+    };
+    let mut buffer = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+    let mut received = received;
+    loop {
+        match read_download_signal(signal) {
+            DownloadSignal::Running => {}
+            DownloadSignal::Paused => return Ok(DownloadOutcome::Paused { received }),
+            DownloadSignal::Aborted => return Ok(DownloadOutcome::Aborted { received }),
+        }
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| error.to_string())?;
+        received += read as u64;
+        on_chunk(received);
+    }
+    if received == 0 {
         return Err("Server returned an empty archive".into());
     }
-    temporary
-        .as_file()
-        .sync_all()
+    file.sync_all().map_err(|error| error.to_string())?;
+    Ok(DownloadOutcome::Finished { received })
+}
+
+/// 标题可以很长，任务行截到 80 字符；没有标题时就退回一个通用的说法。
+fn download_task_label(metadata: &serde_json::Value) -> String {
+    let title: String = metadata["title"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(80)
+        .collect();
+    if title.is_empty() {
+        "下载档案".to_string()
+    } else {
+        format!("下载 {title}")
+    }
+}
+
+/// 进度按已收字节算，封顶 0.99：进度条走满之前，文件必须真的已经落地。
+fn download_progress(received: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    (received as f64 / total as f64).min(0.99)
+}
+
+/// 下载一开始就在任务表里留一行：文件落在哪、一共多少、收了多少都在这一行上，
+/// 也就是本地档案页读的那一行。两把开关都打开——暂停、恢复、中止、重试都在这条
+/// 路上。
+fn create_download_task(
+    database: &Database,
+    label: &str,
+    server_id: &str,
+    archive_id: &str,
+    part: &std::path::Path,
+    total: Option<u64>,
+) -> Result<String, String> {
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())?;
+    let id = new_task_id();
+    connection
+        .execute(
+            "INSERT INTO tasks (id, kind, label, status, progress, cancelable, retryable, archive_id, server_id, local_path, total_bytes, received_bytes)
+             VALUES (?1, 'download', ?2, 'running', 0, 1, 1, ?3, ?4, ?5, ?6, 0)",
+            params![
+                id,
+                label,
+                archive_id,
+                server_id,
+                part.to_string_lossy(),
+                total.map(|total| total as i64)
+            ],
+        )
         .map_err(|error| error.to_string())?;
-    publish_archive_download(temporary, directory, filename)
+    Ok(id)
+}
+
+/// 进度、已收字节、速度一起写：界面上的进度条、速度、总量都读这一行。
+fn report_download_progress(
+    database: &Database,
+    task_id: &str,
+    received: u64,
+    total: Option<u64>,
+    speed: Option<u64>,
+) {
+    if let Ok(connection) = database.connection.lock() {
+        let progress = match total.filter(|total| *total > 0) {
+            Some(total) => download_progress(received, total),
+            None => 0.0,
+        };
+        let _ = connection.execute(
+            "UPDATE tasks SET progress = ?1, received_bytes = ?2, bytes_per_second = ?3, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?4 AND status = 'running'",
+            params![
+                progress,
+                received as i64,
+                speed.map(|speed| speed as i64),
+                task_id
+            ],
+        );
+    }
+}
+
+fn finish_download_task(
+    database: &Database,
+    task_id: &str,
+    path: &std::path::Path,
+    received: u64,
+    total: Option<u64>,
+) {
+    if let Ok(connection) = database.connection.lock() {
+        let _ = connection.execute(
+            "UPDATE tasks SET status = 'completed', progress = 1, error = NULL, received_bytes = ?1,
+                    total_bytes = COALESCE(?2, ?1), bytes_per_second = NULL, local_path = ?3, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?4",
+            params![
+                received as i64,
+                total.map(|total| total as i64),
+                path.to_string_lossy(),
+                task_id
+            ],
+        );
+    }
+}
+
+fn pause_download_task(database: &Database, task_id: &str, received: u64) {
+    if let Ok(connection) = database.connection.lock() {
+        let _ = connection.execute(
+            "UPDATE tasks SET status = 'paused', received_bytes = ?1, bytes_per_second = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status IN ('running', 'queued')",
+            params![received as i64, task_id],
+        );
+    }
+}
+
+fn cancel_download_task(database: &Database, task_id: &str) {
+    if let Ok(connection) = database.connection.lock() {
+        let _ = connection.execute(
+            "UPDATE tasks SET status = 'cancelled', bytes_per_second = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status IN ('running', 'queued', 'paused', 'failed')",
+            params![task_id],
+        );
+    }
+}
+
+/// 下载完成 → 磁盘上多了一份档案。以文件为主语记一行：外部删掉文件之后，扫描
+/// 会把这一行一起收走（见 `reconcile_local_archives`）。
+fn record_local_archive(
+    database: &Database,
+    path: &std::path::Path,
+    server_id: &str,
+    archive_id: &str,
+    fallback_title: &str,
+    size: u64,
+) {
+    let Ok(connection) = database.connection.lock() else {
+        return;
+    };
+    let title = local_archive_title(path);
+    let _ = connection.execute(
+        "INSERT INTO local_archives (path, archive_id, server_id, title, file_size, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(path) DO UPDATE SET file_size = excluded.file_size, added_at = excluded.added_at",
+        params![
+            path.to_string_lossy(),
+            archive_id,
+            server_id,
+            if title.is_empty() {
+                fallback_title.to_string()
+            } else {
+                title
+            },
+            size as i64,
+            now_millis()
+        ],
+    );
 }
 
 #[cfg(test)]
 mod archive_download_tests {
     use super::*;
+
+    fn download_metadata(title: &str) -> serde_json::Value {
+        serde_json::json!({ "title": title, "filename": "a.cbz" })
+    }
+
+    fn only_task(database: &Database) -> TaskRecord {
+        query_tasks(&database.connection.lock().unwrap())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("task row")
+    }
+
+    /// 读到第几块时任务行长什么样：证明进度真的落在任务表上，而不是只在内存里
+    /// 算过一遍。
+    struct TaskWatcher<'a> {
+        database: &'a Database,
+        remaining: usize,
+        observed: Vec<(String, f64, i64)>,
+    }
+
+    impl Read for TaskWatcher<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if let Ok(connection) = self.database.connection.lock() {
+                if let Ok(tasks) = query_tasks(&connection) {
+                    if let Some(task) = tasks.first() {
+                        self.observed
+                            .push((task.status.clone(), task.progress, task.received_bytes));
+                    }
+                }
+            }
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let written = self.remaining.min(buffer.len());
+            buffer[..written].fill(9);
+            self.remaining -= written;
+            Ok(written)
+        }
+    }
+
+    /// 读够 `after` 块之后拨一次下载信号——用户按下暂停或中止的那一刻。
+    struct SignalReader<'a> {
+        database: &'a Database,
+        signal: DownloadSignal,
+        after: usize,
+        chunks: usize,
+        remaining: usize,
+    }
+
+    impl Read for SignalReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.chunks == self.after {
+                set_download_signal(&only_task(self.database).id, self.signal);
+            }
+            self.chunks += 1;
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let written = self.remaining.min(buffer.len());
+            buffer[..written].fill(7);
+            self.remaining -= written;
+            Ok(written)
+        }
+    }
+
+    fn store(
+        database: &Database,
+        directory: &std::path::Path,
+        source: &mut impl Read,
+        total: Option<u64>,
+    ) -> Result<DownloadResult, String> {
+        store_archive_response(
+            database,
+            "scope-a",
+            &"a".repeat(40),
+            &download_metadata("测试档案"),
+            directory,
+            source,
+            total,
+            true,
+            None,
+        )
+    }
 
     #[test]
     fn filenames_keep_format_and_cannot_escape_directory() {
@@ -1378,38 +1941,401 @@ mod archive_download_tests {
     }
 
     #[test]
-    fn repeated_download_preserves_existing_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let first =
-            save_archive_download(&mut &b"first"[..], directory.path(), "archive.zip").unwrap();
-        let second =
-            save_archive_download(&mut &b"second"[..], directory.path(), "archive.zip").unwrap();
-        assert_ne!(first, second);
-        assert_eq!(std::fs::read(first).unwrap(), b"first");
-        assert_eq!(std::fs::read(second).unwrap(), b"second");
+    fn local_titles_and_ids_are_read_back_from_the_filename() {
+        let id = "f6b58755f0aa4f02d4346592da9edfec0a22d349";
+        let named = format!("E:\\x\\{id}-[ie] 标题 (1).zip");
+        let path = std::path::Path::new(&named);
+        assert_eq!(local_archive_id(path).as_deref(), Some(id));
+        assert_eq!(local_archive_title(path), "[ie] 标题 (1)");
+        // 认不出 id 的文件也有标题，只是没有档案 id。
+        let plain = std::path::Path::new("E:\\x\\随手放进来的一份.cbz");
+        assert_eq!(local_archive_id(plain), None);
+        assert_eq!(local_archive_title(plain), "随手放进来的一份");
     }
 
     #[test]
-    fn failed_download_leaves_no_partial_archive() {
+    fn streaming_reports_every_chunk_and_keeps_a_part_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let part = directory.path().join("archive.zip.part");
+        let body = vec![9u8; 200 * 1024];
+        let mut seen = Vec::new();
+        let signal = std::sync::Mutex::new(DownloadSignal::Running);
+        let outcome = stream_archive_to_file(&mut &body[..], &part, 0, &signal, |received| {
+            seen.push(received)
+        })
+        .unwrap();
+        assert_eq!(seen, vec![64 * 1024, 128 * 1024, 192 * 1024, 200 * 1024]);
+        assert!(matches!(outcome, DownloadOutcome::Finished { received } if received == 200 * 1024));
+        // 收完还是 `.part`：发布是下一步。
+        assert_eq!(std::fs::read(&part).unwrap(), body);
+    }
+
+    #[test]
+    fn publishing_never_overwrites_an_existing_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("archive.zip.part");
+        let second = directory.path().join("archive.zip.part");
+        std::fs::write(&first, b"first").unwrap();
+        let published = publish_archive_download(&first, directory.path(), "archive.zip").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let other = publish_archive_download(&second, directory.path(), "archive.zip").unwrap();
+        assert_ne!(published, other);
+        assert_eq!(std::fs::read(published).unwrap(), b"first");
+        assert_eq!(std::fs::read(other).unwrap(), b"second");
+        // 发布之后没有留下半份文件。
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_finished_download_leaves_a_completed_task_and_a_local_archive() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let body = vec![9u8; 200 * 1024];
+        let result = store(
+            &database,
+            directory.path(),
+            &mut &body[..],
+            Some(body.len() as u64),
+        )
+        .expect("download");
+        assert_eq!(result.status, "completed");
+        assert!(result.path.ends_with(".cbz"));
+        assert_eq!(std::fs::read(&result.path).unwrap(), body);
+
+        let task = only_task(&database);
+        assert_eq!(task.kind, "download");
+        assert_eq!(task.label, "下载 测试档案");
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.progress, 1.0);
+        assert_eq!(task.error, None);
+        assert_eq!(task.received_bytes, body.len() as i64);
+        assert_eq!(task.total_bytes, Some(body.len() as i64));
+        // 能暂停、能恢复、能重试，界面上才有那三个按钮。
+        assert!(task.cancelable && task.retryable);
+        // 目标文件早就写进任务行了，恢复的时候才找得回来。
+        assert_eq!(task.local_path.as_deref(), Some(result.path.as_str()));
+
+        // 磁盘上多了一份档案，本地档案页读的就是它。
+        let connection = database.connection.lock().unwrap();
+        let records = reconcile_local_archives(&connection, directory.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title, "测试档案");
+        assert_eq!(records[0].file_size, body.len() as i64);
+        assert_eq!(
+            records[0].archive_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn a_running_download_reports_progress_before_it_finishes() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let total = 200 * 1024;
+        let mut watcher = TaskWatcher {
+            database: &database,
+            remaining: total,
+            observed: Vec::new(),
+        };
+        store(&database, directory.path(), &mut watcher, Some(total as u64)).expect("download");
+
+        assert!(
+            watcher
+                .observed
+                .iter()
+                .any(|(status, progress, _)| status == "running" && *progress > 0.0),
+            "下载途中没有任何进度写进任务表：{:?}",
+            watcher.observed
+        );
+        // 进度只增不减，而且走满之前不许读到 1.0。
+        assert!(watcher.observed.iter().all(|(_, progress, _)| *progress < 1.0));
+        // 已收字节也一路跟着涨，界面上才有「120 MiB / 356 MiB」。
+        assert!(watcher
+            .observed
+            .iter()
+            .any(|(_, _, received)| *received > 0 && *received < total as i64));
+    }
+
+    #[test]
+    fn pausing_keeps_the_bytes_already_received() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let total = 200 * 1024;
+        let mut reader = SignalReader {
+            database: &database,
+            signal: DownloadSignal::Paused,
+            after: 1,
+            chunks: 0,
+            remaining: total,
+        };
+        let result =
+            store(&database, directory.path(), &mut reader, Some(total as u64)).expect("download");
+
+        assert_eq!(result.status, "paused");
+        assert!(result.path.ends_with(".part"));
+        let task = only_task(&database);
+        assert_eq!(task.status, "paused");
+        assert_eq!(task.received_bytes, 2 * 64 * 1024);
+        assert!(task.progress > 0.0 && task.progress < 1.0);
+        // 半份文件留在原处：恢复就是从这里接着收。
+        assert_eq!(
+            std::fs::metadata(&result.path).unwrap().len(),
+            2 * 64 * 1024
+        );
+        // 没发布成正式档案，本地档案页也就不该多出一条。
+        let connection = database.connection.lock().unwrap();
+        assert!(reconcile_local_archives(&connection, directory.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn aborting_removes_the_partial_file() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let total = 200 * 1024;
+        let mut reader = SignalReader {
+            database: &database,
+            signal: DownloadSignal::Aborted,
+            after: 1,
+            chunks: 0,
+            remaining: total,
+        };
+        let result =
+            store(&database, directory.path(), &mut reader, Some(total as u64)).expect("download");
+
+        assert_eq!(result.status, "cancelled");
+        assert!(result.path.is_empty());
+        assert_eq!(only_task(&database).status, "cancelled");
+        // 半份文件跟着消失，目录里不留东西。
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn resuming_appends_to_the_partial_file_and_publishes_it() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        let received: u64 = 64 * 1024;
+        std::fs::write(&part, vec![1u8; received as usize]).unwrap();
+        let total = 128 * 1024;
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            Some(total),
+        )
+        .unwrap();
+        // 暂停过的任务行：恢复就是带着它继续跑。
+        pause_download_task(&database, &task_id, received);
+        let body = vec![2u8; (total - received) as usize];
+
+        let result = store_archive_response(
+            &database,
+            "scope-a",
+            &"a".repeat(40),
+            &download_metadata("测试档案"),
+            directory.path(),
+            &mut &body[..],
+            Some(total),
+            true,
+            Some(TaskTransfer {
+                id: task_id.clone(),
+                label: "下载 测试档案".into(),
+                received,
+                total: Some(total),
+                part: part.clone(),
+                final_name: filename.clone(),
+            }),
+        )
+        .expect("resume");
+
+        assert_eq!(result.status, "completed");
+        let saved = std::fs::read(&result.path).unwrap();
+        assert_eq!(saved.len(), total as usize);
+        // 前半段是暂停前收下的字节，后半段是这次接上的——顺序没有错位。
+        assert_eq!(&saved[..received as usize], vec![1u8; received as usize].as_slice());
+        assert_eq!(&saved[received as usize..], body.as_slice());
+        assert!(!part.exists());
+        let task = only_task(&database);
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.received_bytes, total as i64);
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_range_restarts_from_zero() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        // 服务端用 200 把整份重发：半份文件必须丢掉，否则会和新收的叠在一起。
+        std::fs::write(&part, vec![1u8; 64 * 1024]).unwrap();
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            None,
+        )
+        .unwrap();
+        pause_download_task(&database, &task_id, 64 * 1024);
+        let body = vec![3u8; 64 * 1024];
+
+        let result = store_archive_response(
+            &database,
+            "scope-a",
+            &"a".repeat(40),
+            &download_metadata("测试档案"),
+            directory.path(),
+            &mut &body[..],
+            Some(body.len() as u64),
+            false,
+            Some(TaskTransfer {
+                id: task_id,
+                label: "下载 测试档案".into(),
+                received: 64 * 1024,
+                total: None,
+                part,
+                final_name: filename,
+            }),
+        )
+        .expect("restart");
+
+        assert_eq!(std::fs::read(&result.path).unwrap(), body);
+        assert_eq!(only_task(&database).received_bytes, body.len() as i64);
+    }
+
+    #[test]
+    fn a_failed_download_keeps_its_part_file_for_a_resume() {
         struct Interrupted;
-        impl std::io::Read for Interrupted {
+        impl Read for Interrupted {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::other("connection closed"))
             }
         }
+        let database = Database::open_path(":memory:").expect("database");
         let directory = tempfile::tempdir().unwrap();
-        assert!(save_archive_download(&mut Interrupted, directory.path(), "archive.zip").is_err());
-        assert!(save_archive_download(&mut &b""[..], directory.path(), "archive.zip").is_err());
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        let error = store(
+            &database,
+            directory.path(),
+            &mut Interrupted,
+            Some(10),
+        )
+        .unwrap_err();
+
+        let task = only_task(&database);
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.error.as_deref(), Some(error.as_str()));
+        // 半份文件留着，恢复（或重试）时能接着收；它不会出现在档案列表里。
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let connection = database.connection.lock().unwrap();
+        assert!(reconcile_local_archives(&connection, directory.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn download_progress_never_reads_full_before_the_file_is_closed() {
+        assert_eq!(download_progress(50, 100), 0.5);
+        assert_eq!(download_progress(100, 100), 0.99);
+        assert_eq!(download_progress(100, 0), 0.0);
+    }
+
+    #[test]
+    fn download_labels_fall_back_and_stay_short() {
+        assert_eq!(download_task_label(&serde_json::json!({})), "下载档案");
+        assert_eq!(
+            download_task_label(&serde_json::json!({ "title": "   " })),
+            "下载档案"
+        );
+        let label = download_task_label(&serde_json::json!({ "title": "漫".repeat(400) }));
+        assert_eq!(label.chars().count(), "下载 ".chars().count() + 80);
+    }
+
+    #[test]
+    fn scanning_follows_the_directory_not_the_database() {
+        let database = Database::open_path(":memory:").expect("database");
+        let connection = database.connection.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let kept = directory.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-留下的.zip");
+        let gone = directory.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2-删掉的.cbz");
+        std::fs::write(&kept, b"kept").unwrap();
+        std::fs::write(&gone, b"gone").unwrap();
+        // 写一半的文件不算档案：它还没有名字，也没有内容。
+        std::fs::write(directory.path().join("cccccccccccccccccccccccccccccccccccccccc-x.zip.part"), b"half").unwrap();
+
+        let first = reconcile_local_archives(&connection, directory.path()).unwrap();
+        assert_eq!(first.len(), 2);
+
+        // 外部删掉一个文件之后，那一行也跟着走：页面上不会留一个点开才发现没有的条目。
+        std::fs::remove_file(&gone).unwrap();
+        let second = reconcile_local_archives(&connection, directory.path()).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].path, kept.to_string_lossy());
+        assert_eq!(second[0].title, "留下的");
+    }
+
+    #[test]
+    fn deleting_local_archives_removes_the_file_and_the_row() {
+        let database = Database::open_path(":memory:").expect("database");
+        let connection = database.connection.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let kept = directory.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-留下的.zip");
+        let doomed = directory.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2-删掉的.cbz");
+        std::fs::write(&kept, b"kept").unwrap();
+        std::fs::write(&doomed, b"gone").unwrap();
+        reconcile_local_archives(&connection, directory.path()).unwrap();
+
+        // 删除走的是「文件 + 行」两条腿：只剩行会让页面留一个点不开的条目，
+        // 只剩文件则是下次扫描又冒出来。
+        std::fs::remove_file(&doomed).unwrap();
+        connection
+            .execute(
+                "DELETE FROM local_archives WHERE path = ?1",
+                params![doomed.to_string_lossy()],
+            )
+            .unwrap();
+        let left = reconcile_local_archives(&connection, directory.path()).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, kept.to_string_lossy());
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn orphaned_part_files_are_swept_and_claimed_ones_are_not() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let claimed = directory.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-在下的.zip.part");
+        let orphan = directory.path().join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-没人认领的.zip.part");
+        std::fs::write(&claimed, b"half").unwrap();
+        std::fs::write(&orphan, b"half").unwrap();
+        // 任务行先建好，再拿锁去扫：`create_download_task` 自己也要这把锁。
+        create_download_task(
+            &database,
+            "下载 在下的",
+            "scope-a",
+            &"a".repeat(40),
+            &claimed,
+            Some(10),
+        )
+        .unwrap();
+
+        sweep_orphan_parts(&database.connection.lock().unwrap(), directory.path());
+
+        assert!(claimed.exists());
+        assert!(!orphan.exists());
     }
 }
 
 fn publish_archive_download(
-    temporary: tempfile::NamedTempFile,
+    part: &std::path::Path,
     directory: &std::path::Path,
     filename: &str,
 ) -> Result<String, String> {
-    let mut temporary = temporary;
     for suffix in 0..1000 {
         let name = if suffix == 0 {
             filename.to_string()
@@ -1422,15 +2348,480 @@ fn publish_archive_download(
             )
         };
         let destination = directory.join(name);
-        match temporary.persist_noclobber(&destination) {
-            Ok(_) => return Ok(destination.to_string_lossy().into_owned()),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                temporary = error.file
+        match std::fs::hard_link(part, &destination) {
+            Ok(()) => {
+                std::fs::remove_file(part).map_err(|error| error.to_string())?;
+                return Ok(destination.to_string_lossy().into_owned());
             }
-            Err(error) => return Err(error.error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
         }
     }
     Err("Too many existing copies of this archive".into())
+}
+
+/// 下载目录里认得出的档案后缀。下载写的是 `.part`，扫描时按后缀跳过。
+const LOCAL_ARCHIVE_EXTENSIONS: [&str; 9] = [
+    "zip", "rar", "7z", "tar", "gz", "cbz", "cbr", "cb7", "cbt",
+];
+
+/// 下载落在哪个目录：设置里为空就回到程序数据目录下的 `downloads`。
+fn resolved_download_directory(
+    app: &tauri::AppHandle,
+    connection: &Connection,
+) -> Result<std::path::PathBuf, String> {
+    let preferences = crate::settings::load_preferences_from(connection)?;
+    if preferences.download_directory.is_empty() {
+        Ok(crate::inference::model_data_dir(app)
+            .map_err(|error| error.to_string())?
+            .join("downloads"))
+    } else {
+        Ok(std::path::PathBuf::from(preferences.download_directory))
+    }
+}
+
+/// 文件名里带着下载时写进去的档案 id。认得出，就能借本地镜像拿到标题、标签和
+/// 封面；认不出，它就是一份普通的本地档案。
+fn local_archive_id(path: &std::path::Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.len() <= 41 || !stem.is_char_boundary(40) {
+        return None;
+    }
+    let (prefix, rest) = stem.split_at(40);
+    (rest.starts_with('-') && prefix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| prefix.to_ascii_lowercase())
+}
+
+/// `<40 位 id>-标题.ext` → 标题；认不出 id 就是去掉后缀的文件名。
+fn local_archive_title(path: &std::path::Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match local_archive_id(path).and_then(|id| stem.get(id.len() + 1..).map(str::to_string)) {
+        Some(title) => title.trim().to_string(),
+        None => stem.trim().to_string(),
+    }
+}
+
+fn local_archive_extension(path: &std::path::Path) -> String {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// 下载目录里现存的档案文件（路径、字节数、修改时间）。
+fn scan_local_archive_files(directory: &std::path::Path) -> Vec<(std::path::PathBuf, u64, i64)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || !LOCAL_ARCHIVE_EXTENSIONS.contains(&local_archive_extension(&path).as_str())
+        {
+            continue;
+        }
+        let added_at = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_else(now_millis);
+        found.push((path, metadata.len(), added_at));
+    }
+    found
+}
+
+/// 没有任务认领的 `.part`：进程被杀掉、任务行早已收掉之后留下的半份文件。它们
+/// 不进列表，也没人会去恢复，留着只是占地方。
+fn sweep_orphan_parts(connection: &Connection, directory: &std::path::Path) {
+    let claimed: std::collections::HashSet<String> = connection
+        .prepare("SELECT local_path FROM tasks WHERE local_path IS NOT NULL")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<std::collections::HashSet<_>, _>>()
+        })
+        .unwrap_or_default();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("part") {
+            continue;
+        }
+        if claimed.contains(path.to_string_lossy().as_ref()) {
+            continue;
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// 借本地镜像补上「这是服务器上的哪一份档案」：标题、页数、标签，以及取封面要
+/// 用的 scope。
+fn mirror_local_archive(
+    connection: &Connection,
+    archive_id: &str,
+    server_id: Option<&str>,
+) -> Option<(String, String, Option<i64>, String, String)> {
+    connection
+        .query_row(
+            "SELECT a.server_id, s.scope_id, a.page_count, a.tags_json, a.title
+             FROM archives a JOIN servers s ON s.id = a.server_id
+             WHERE a.archive_id = ?1 AND a.is_deleted = 0
+             ORDER BY (a.server_id = ?2) DESC
+             LIMIT 1",
+            params![archive_id, server_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .ok()
+}
+
+/// 本地档案页上的一个条目。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalArchiveRecord {
+    path: String,
+    archive_id: Option<String>,
+    server_id: Option<String>,
+    scope_id: Option<String>,
+    title: String,
+    file_size: i64,
+    added_at: i64,
+    page_count: Option<i64>,
+    tags: Vec<String>,
+}
+
+/// 扫一遍下载目录：文件才是主语，所以新增的记进来、已经不存在的行收掉，之后再
+/// 读表。外部删掉一个文件，这一页下次刷新就跟着少了它。
+fn reconcile_local_archives(
+    connection: &Connection,
+    directory: &std::path::Path,
+) -> Result<Vec<LocalArchiveRecord>, String> {
+    let files = scan_local_archive_files(directory);
+    let live: std::collections::HashSet<String> = files
+        .iter()
+        .map(|(path, _, _)| path.to_string_lossy().into_owned())
+        .collect();
+    let stored: Vec<String> = connection
+        .prepare("SELECT path FROM local_archives")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| error.to_string())?;
+    for path in stored {
+        if !live.contains(&path) {
+            connection
+                .execute("DELETE FROM local_archives WHERE path = ?1", params![path])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    for (path, size, added_at) in files {
+        connection
+            .execute(
+                "INSERT INTO local_archives (path, archive_id, title, file_size, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(path) DO UPDATE SET file_size = excluded.file_size, added_at = excluded.added_at",
+                params![
+                    path.to_string_lossy(),
+                    local_archive_id(&path),
+                    local_archive_title(&path),
+                    size as i64,
+                    added_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let rows: Vec<(String, Option<String>, Option<String>, String, i64, i64)> = connection
+        .prepare("SELECT path, archive_id, server_id, title, file_size, added_at FROM local_archives ORDER BY added_at DESC, path DESC")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(path, archive_id, server_id, title, file_size, added_at)| {
+                let mirror = archive_id.as_deref().and_then(|archive_id| {
+                    mirror_local_archive(connection, archive_id, server_id.as_deref())
+                });
+                if let Some((mirror_server, _, _, _, mirror_title)) = &mirror {
+                    // 第一次认出这个档案之后就把服务器记下来，下次不用再猜。
+                    if server_id.is_none() {
+                        let _ = connection.execute(
+                            "UPDATE local_archives SET server_id = ?1, title = ?2 WHERE path = ?3",
+                            params![mirror_server, mirror_title, path],
+                        );
+                    }
+                }
+                let name = mirror
+                    .as_ref()
+                    .map(|(_, _, _, _, title)| title.trim().to_string())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| {
+                        if title.trim().is_empty() {
+                            local_archive_title(std::path::Path::new(&path))
+                        } else {
+                            title
+                        }
+                    });
+                LocalArchiveRecord {
+                    archive_id,
+                    server_id: mirror
+                        .as_ref()
+                        .map(|(server, _, _, _, _)| server.clone())
+                        .or(server_id),
+                    scope_id: mirror.as_ref().map(|(_, scope, _, _, _)| scope.clone()),
+                    title: name,
+                    page_count: mirror.as_ref().and_then(|(_, _, pages, _, _)| *pages),
+                    tags: mirror
+                        .as_ref()
+                        .and_then(|(_, _, _, tags, _)| serde_json::from_str::<Vec<String>>(tags).ok())
+                        .unwrap_or_default(),
+                    path,
+                    file_size,
+                    added_at,
+                }
+            },
+        )
+        .collect())
+}
+
+/// 本地档案页读的就是这个：先跟磁盘对齐，再回一份带镜像信息的列表。
+#[tauri::command]
+pub fn list_local_archives(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<LocalArchiveRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let directory = match resolved_download_directory(&app, &connection) {
+        Ok(directory) => directory,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let _ = std::fs::create_dir_all(&directory);
+    sweep_orphan_parts(&connection, &directory);
+    match reconcile_local_archives(&connection, &directory) {
+        Ok(records) => CommandResult::success(records),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// 删除选中的本地档案：删的是磁盘上的文件，服务器上的那份档案不动。只认下载
+/// 目录里的直接子文件——这个命令的输入来自前端，不能变成「删任意路径」的接口。
+#[tauri::command]
+pub fn delete_local_archives(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    database: State<'_, Database>,
+) -> CommandResult<usize> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let directory = match resolved_download_directory(&app, &connection) {
+        Ok(directory) => directory,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let boundary = std::fs::canonicalize(&directory).unwrap_or_else(|_| directory.clone());
+    let mut removed = 0;
+    for path in &paths {
+        let candidate = std::path::Path::new(path);
+        let inside = std::fs::canonicalize(candidate)
+            .map(|resolved| resolved.parent() == Some(boundary.as_path()))
+            // 文件已经不在了也算「可以删」：要清掉的是那一行。
+            .unwrap_or(true);
+        if inside && std::fs::remove_file(candidate).is_ok() {
+            removed += 1;
+        }
+        if let Err(error) = connection.execute(
+            "DELETE FROM local_archives WHERE path = ?1",
+            params![path],
+        ) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+        }
+    }
+    CommandResult::success(removed)
+}
+
+/// 暂停：写信号，正在跑的那次传输会在下一块之前停下来，半份文件留在 `.part`。
+#[tauri::command]
+pub fn pause_download(task_id: String, database: State<'_, Database>) -> CommandResult<()> {
+    set_download_signal(&task_id, DownloadSignal::Paused);
+    // 没在跑的任务（比如重启之后停下的那些）也要落到 paused，界面上的状态和
+    // 按钮才对得上。
+    if let Ok(connection) = database.connection.lock() {
+        let _ = connection.execute(
+            "UPDATE tasks SET status = 'paused', bytes_per_second = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status IN ('running', 'queued')",
+            params![task_id],
+        );
+    }
+    CommandResult::success(())
+}
+
+/// 中止：删掉半份文件，任务收成 cancelled。
+#[tauri::command]
+pub fn cancel_download(task_id: String, database: State<'_, Database>) -> CommandResult<()> {
+    set_download_signal(&task_id, DownloadSignal::Aborted);
+    if let Ok(connection) = database.connection.lock() {
+        let part: Option<String> = connection
+            .query_row(
+                "SELECT local_path FROM tasks WHERE id = ?1 AND status IN ('running', 'queued', 'paused', 'failed')",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(part) = part.filter(|part| part.ends_with(".part")) {
+            let _ = std::fs::remove_file(part);
+        }
+    }
+    cancel_download_task(&database, &task_id);
+    CommandResult::success(())
+}
+
+/// 恢复（失败的任务也走这条路）：从 `.part` 已有的字节往后要，服务端不认 Range
+/// 就从头来。
+#[tauri::command]
+pub async fn resume_download(
+    app: tauri::AppHandle,
+    task_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<DownloadResult>, String> {
+    let loaded = {
+        let connection = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())?;
+        connection
+            .query_row(
+                "SELECT label, server_id, archive_id, local_path, received_bytes, total_bytes, status
+                 FROM tasks WHERE id = ?1 AND kind = 'download'",
+                params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .ok()
+    };
+    let Some((label, server_id, archive_id, local_path, received, total, status)) = loaded else {
+        return Ok(CommandResult::failure(
+            "LRR_NOT_FOUND",
+            "Download task not found",
+            false,
+        ));
+    };
+    if !matches!(status.as_str(), "paused" | "failed" | "queued") {
+        return Ok(CommandResult::failure(
+            "REMOTE_CONFLICT",
+            "Download is not resumable",
+            false,
+        ));
+    }
+    let (Some(server_id), Some(archive_id), Some(local_path)) = (server_id, archive_id, local_path)
+    else {
+        return Ok(CommandResult::failure(
+            "REMOTE_CONFLICT",
+            "Download has no target file",
+            false,
+        ));
+    };
+    let part = std::path::PathBuf::from(&local_path);
+    let directory = part
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let final_name = part
+        .file_name()
+        .map(|name| name.to_string_lossy().trim_end_matches(".part").to_string())
+        .unwrap_or_default();
+    let (base_url, scope_id) = {
+        let connection = database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".to_string())?;
+        server_connection(&connection, &server_id)?
+    };
+    // 文件被外部删掉或者短了，就从它现在真正有的地方接。
+    let on_disk = std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
+    let resume_from = if on_disk == 0 {
+        0
+    } else {
+        (received.max(0) as u64).min(on_disk)
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<DownloadResult, String> {
+        let api_key = SystemCredentialStore
+            .get_server_api_key(&scope_id)
+            .map_err(credential_read_error)?;
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(3600))
+            .build()
+            .map_err(|error| error.to_string())?;
+        // 阻塞线程拿不到 `State`，跟 download_archive 一样从 AppHandle 里取。
+        let database = app.state::<Database>();
+        transfer_archive(
+            &database,
+            TransferRequest {
+                client,
+                api_key,
+                base_url,
+                server_id,
+                archive_id,
+                directory,
+                metadata: serde_json::json!({}),
+                task: Some(TaskTransfer {
+                    id: task_id,
+                    label,
+                    received: resume_from,
+                    total: total.map(|total| total as u64),
+                    part,
+                    final_name,
+                }),
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(match result {
+        Ok(download) => CommandResult::success(download),
+        Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+    })
 }
 
 #[tauri::command]
@@ -4867,13 +6258,7 @@ pub fn create_task(task: TaskInput, database: State<'_, Database>) -> CommandRes
     {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid task", false);
     }
-    let id = format!(
-        "task-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
-    );
+    let id = new_task_id();
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
@@ -4886,7 +6271,7 @@ pub fn create_task(task: TaskInput, database: State<'_, Database>) -> CommandRes
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
     match connection.query_row(
-        "SELECT id,kind,label,status,progress,error,cancelable,retryable,created_at,updated_at FROM tasks WHERE id=?1",
+        &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id=?1"),
         params![id],
         read_task_row,
     ) {
@@ -4897,7 +6282,7 @@ pub fn create_task(task: TaskInput, database: State<'_, Database>) -> CommandRes
 
 fn query_tasks(connection: &rusqlite::Connection) -> Result<Vec<TaskRecord>, String> {
     let mut statement = connection
-        .prepare("SELECT id,kind,label,status,progress,error,cancelable,retryable,created_at,updated_at FROM tasks ORDER BY updated_at DESC")
+        .prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY updated_at DESC"))
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], read_task_row)
@@ -5185,17 +6570,31 @@ pub async fn upload_archive(
             false,
         ));
     }
+    complete_task(&database, &task_id);
+    Ok(CommandResult::success(UploadArchiveResult {
+        operation: wire.operation,
+        success: wire.success,
+        id: wire.id,
+    }))
+}
+
+fn new_task_id() -> String {
+    format!(
+        "task-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    )
+}
+
+fn complete_task(database: &Database, task_id: &str) {
     if let Ok(connection) = database.connection.lock() {
         let _ = connection.execute(
             "UPDATE tasks SET status = 'completed', progress = 1, error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
             params![task_id],
         );
     }
-    Ok(CommandResult::success(UploadArchiveResult {
-        operation: wire.operation,
-        success: wire.success,
-        id: wire.id,
-    }))
 }
 
 fn mark_task_failed(database: &Database, task_id: &str, message: &str) {
@@ -5476,6 +6875,9 @@ mod tests {
         connection
             .execute_batch(include_str!("../../migrations/0023_servers_enabled.sql"))
             .expect("servers enabled migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0028_local_archives.sql"))
+            .expect("local archives migration");
         connection
     }
 
