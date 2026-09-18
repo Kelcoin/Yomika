@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Download, Pause, Play, RotateCcw, X } from 'lucide-react';
 
 import { EmptyState } from './EmptyState';
+import { StatusLine } from './StatusLine';
 
 import type { TaskRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -56,7 +57,7 @@ export function TaskCenter() {
   return (
     <div className="task-center">
       <h1 className="visually-hidden">下载</h1>
-      {loading && <p className="server-list-message" role="status">正在读取任务…</p>}
+      {loading && <StatusLine busy>正在读取任务…</StatusLine>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {!loading && !error && tasks.length === 0 && (
         <EmptyState icon={Download} title="暂无下载任务" description="开始下载后，任务和进度会显示在这里。" />

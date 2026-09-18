@@ -53,7 +53,7 @@ describe('application shell', () => {
     // Windows 关了原生装饰，那条栏是应用自己画的；macOS 有自己的红绿灯，
     // iOS/Android 没有窗口按钮可点——只有 Windows 该出现这排按钮。
     const adapter = (platform: string) => vi.fn(async (command: string) => {
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'platform_capabilities') return { ok: true, value: { platform, native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
@@ -86,7 +86,7 @@ describe('application shell', () => {
 
   it('uses a single product label and provides global scroll-to-top', async () => {
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
@@ -101,7 +101,7 @@ describe('application shell', () => {
 
   it('exposes full desktop navigation and compact five-item navigation', async () => {
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -143,7 +143,7 @@ describe('application shell', () => {
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -168,7 +168,7 @@ describe('application shell', () => {
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '最近阅读档案', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -205,7 +205,7 @@ describe('application shell', () => {
       }
       if (command === 'verify_archives_exist') return { ok: true, value: ['gone'] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -222,7 +222,7 @@ describe('application shell', () => {
   it('shows the server load error instead of treating it as an empty setup', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: false, error: { code: 'PLATFORM_UNAVAILABLE', message: '本地存储不可用', retryable: true } };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -248,7 +248,7 @@ describe('application shell', () => {
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [] };
       if (command === 'search_random_archives') return { ok: true, value: [] };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -268,7 +268,7 @@ describe('application shell', () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, startupRoute: 'library' } };
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       return { ok: true, value: [] };
     });
 
@@ -286,7 +286,7 @@ describe('application shell', () => {
   it('stays on home when that is the startup preference', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, startupRoute: 'home' } };
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       return { ok: true, value: [] };
     });
 
@@ -327,7 +327,7 @@ describe('application shell', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://offline.example.com', scopeId: 'scope-a' }] };
       if (command === 'check_server_status') return { ok: true, value: [{ serverId: 'scope-a', online: false, name: 'Home', error: '无法连接' }] };
-      if (command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -340,7 +340,7 @@ describe('application shell', () => {
   it('collapses desktop navigation to an icon rail', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });

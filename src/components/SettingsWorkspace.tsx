@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
-  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, ChevronDown, ChevronRight, Copy,
+  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
-  HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Lock, Check, Minus,
+  HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Minus,
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
-  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
+  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText, History,
 } from 'lucide-react';
 import { pickDirectory } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
@@ -18,8 +18,13 @@ import { YomikaMark } from './YomikaMark';
 import { EhMark } from './EhMark';
 import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
-import { SyncAccountForm, useSyncSettings } from './SyncWorkspace';
-import { scopeSummary } from '../domain/syncScope';
+import { autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
+import { formatSyncAge } from '../lib/syncTime';
+import { SettingsRow, SettingsRowBody } from './SettingsRow';
+import { StatusLine } from './StatusLine';
+import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
+import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
+import { parseSyncScope, scopeLabel } from '../domain/syncScope';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -80,68 +85,6 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
   );
 }
 
-/** One setting row. A plain value row when there is nothing to open; a button
- * that opens a floating menu otherwise. Nothing in the row is shaped like a
- * field — choosing happens in the menu. */
-export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, to, ariaLabel, expanded, busy, disabled }: {
-  icon?: ReactNode;
-  label: string;
-  hint?: string | undefined;
-  value?: string | undefined;
-  trailing?: 'menu' | 'nav' | 'none';
-  onClick?: (() => void) | undefined;
-  /** 有 `to` 时这一行是路由链接而不是按钮：底栏「更多」页是跳转，不打开面板。 */
-  to?: string | undefined;
-  ariaLabel?: string | undefined;
-  expanded?: boolean | undefined;
-  busy?: boolean | undefined;
-  disabled?: boolean | undefined;
-}) {
-  const row = to ? (
-    <Link
-      className="settings-row settings-row-button"
-      to={to}
-      aria-label={ariaLabel ?? label}
-    >
-      <SettingsRowBody icon={icon} label={label} hint={hint} value={value} trailing={trailing} />
-    </Link>
-  ) : onClick ? (
-    <button
-      className="settings-row settings-row-button"
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={ariaLabel ?? label}
-      aria-haspopup="dialog"
-      aria-expanded={expanded}
-      aria-busy={busy}
-    >
-      <SettingsRowBody icon={icon} label={label} hint={hint} value={value} trailing={trailing} />
-    </button>
-  ) : (
-    <div className="settings-row">
-      <SettingsRowBody icon={icon} label={label} hint={hint} value={value} trailing={trailing} />
-    </div>
-  );
-  return <div className="settings-item">{row}</div>;
-}
-
-function SettingsRowBody({ icon, label, hint, value, trailing }: { icon?: ReactNode; label: string; hint?: string | undefined; value?: string | undefined; trailing: 'menu' | 'nav' | 'none' }) {
-  return (
-    <>
-      {icon && <span className="settings-row-icon" aria-hidden="true">{icon}</span>}
-      <span className="settings-row-copy">
-        <span className="settings-row-label">{label}</span>
-        {hint && <span className="settings-row-hint">{hint}</span>}
-      </span>
-      <span className="settings-row-control settings-row-value">
-        {value && <span>{value}</span>}
-        {trailing === 'menu' && <ChevronDown aria-hidden="true" />}
-        {trailing === 'nav' && <ChevronRight aria-hidden="true" />}
-      </span>
-    </>
-  );
-}
 
 /** A setting whose answer is one of a few. */
 function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, children }: {
@@ -178,29 +121,6 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
         </SettingsMenu>
       )}
     </>
-  );
-}
-
-/** A yes/no setting. A switch has no second level to open: the drawn switch
- * sits in the row itself, on the right where every other value lives, and
- * flipping it is the whole interaction. */
-function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle }: {
-  icon?: ReactNode;
-  label: string;
-  hint?: string | undefined;
-  checked: boolean;
-  disabled?: boolean | undefined;
-  onToggle: () => void;
-}) {
-  return (
-    <div className={`settings-row settings-switch-row${disabled ? ' is-disabled' : ''}`}>
-      {icon && <span className="settings-row-icon" aria-hidden="true">{icon}</span>}
-      <span className="settings-row-copy">
-        <span className="settings-row-label">{label}</span>
-        {hint && <span className="settings-row-hint">{hint}</span>}
-      </span>
-      <button className="switch-control" type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={onToggle}><span /></button>
-    </div>
   );
 }
 
@@ -334,8 +254,8 @@ function modelOption(model: InstalledModel): { value: string; label: string } {
   return { value: model.id, label: name };
 }
 
-/** The compact bar's selectable entries, in display order; 档案库与设置由
- * 偏好规范化与 UI 双重固定，始终显示。 */
+/** The compact bar's selectable entries, in display order; 档案库 由偏好规范化与
+ * UI 双重固定（没有它就进不了档案库），其余都可以关掉——关掉的项目会出现在「更多」里。 */
 const BOTTOM_NAV_OPTIONS = [
   { key: 'home', label: '首页' },
   { key: 'library', label: '档案库' },
@@ -433,6 +353,11 @@ export function SettingsWorkspace() {
   const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
+  /** 手动清一次历史；自动清理由 lib/historyMaintenance 排程。 */
+  const [historyPruning, setHistoryPruning] = useState(false);
+  /** 自动同步的进行状态：账户行据此显示「同步中」与上次同步时刻。 */
+  const [autoSync, setAutoSync] = useState(autoSyncStatus());
+  useEffect(() => subscribeAutoSync(setAutoSync), []);
   const openAboutLink = async (url: string) => {
     const result = await openExternalUrl(url);
     if (!result.ok) showToast(result.error.message, 'error');
@@ -532,6 +457,17 @@ export function SettingsWorkspace() {
     });
     return () => { active = false; };
   }, [serverLoadAttempt]);
+
+  async function pruneHistoryNow() {
+    setHistoryPruning(true);
+    try {
+      const result = await repository.pruneHistory();
+      if (!result.ok) { showToast(result.error.message, 'error'); return; }
+      showToast(result.value === 0 ? '没有需要清理的历史记录' : `已清理 ${result.value} 条历史记录`, 'success');
+    } finally {
+      setHistoryPruning(false);
+    }
+  }
 
   async function refreshCacheStats() {
     const result = await cacheRepository.stats();
@@ -823,8 +759,8 @@ export function SettingsWorkspace() {
 
   /** The compact bar answers scrolling the way the scroll-to-top disc does. */
   function toggleBottomNavItem(key: BottomNavItemKey) {
-    // 档案库与设置固定显示，对应的行是禁用态，这里只是双保险。
-    if (key === 'library' || key === 'settings') return;
+    // 档案库固定显示，对应的行是禁用态，这里只是双保险。
+    if (key === 'library') return;
     const current = preferenceDraft.bottomNavItems;
     const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
     editPreferences({ bottomNavItems: next });
@@ -920,7 +856,7 @@ export function SettingsWorkspace() {
             control in this panel saves itself, so a line saying so on every
             section was chrome that never told anyone anything they could act on.
             A failed save still interrupts, through the toast. */}
-        {preferenceState.loading ? <p className="server-list-message" role="status">正在读取偏好…</p> : (
+        {preferenceState.loading ? <StatusLine busy>正在读取偏好…</StatusLine> : (
           <div className="preferences-form">
             <div className="settings-group">
             {selectedSettingsSection === 'settings-general' && (
@@ -939,7 +875,7 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<BookOpen />}
                 label="继续阅读显示已读完"
-                hint="关闭后，首页继续阅读隐藏阅读进度超过 95% 的记录；历史页面始终完整显示"
+                hint="关闭时隐藏已读完的记录"
                 checked={preferenceDraft.continueReadingShowFinished}
                 onToggle={() => editPreferences({ continueReadingShowFinished: !preferenceDraft.continueReadingShowFinished })}
               />
@@ -948,7 +884,7 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<Shuffle />}
                 label="随机漫游显示已读完"
-                hint="关闭后，首页随机漫游隐藏已读完的档案，并继续抽取直到占满一整排"
+                hint="关闭时隐藏已读完的档案，并补抽到占满一排"
                 checked={preferenceDraft.randomRoamShowFinished}
                 onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
               />
@@ -962,12 +898,12 @@ export function SettingsWorkspace() {
               >
                 <p className="settings-menu-path is-selectable">{preferenceDraft.downloadDirectory || defaultDownloadHint}</p>
                 <div className="settings-menu-actions">
-                  <button className="settings-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
+                  <button className="secondary-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
                     void pickDirectory().then((selected) => {
                       if (typeof selected === 'string') editPreferences({ downloadDirectory: selected });
                     }).catch(() => showToast('无法打开目录选择器', 'error'));
                   }}><FolderOpen aria-hidden="true" />选择目录</button>
-                  <button className="settings-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
+                  <button className="secondary-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
                 </div>
               </SettingsPanel>
             )}
@@ -982,6 +918,22 @@ export function SettingsWorkspace() {
                 format={(value) => `${value} GB`}
                 onChange={(value) => editPreferences({ cacheMaxBytes: value * GIB })}
               />
+            )}
+            {selectedSettingsSection === 'settings-general' && (
+              <SettingsPanel
+                icon={<History />}
+                label="历史记录清理"
+                hint="已读完留 3 个月，未读完留 1 年，自动清理"
+                ariaLabel="历史记录清理"
+                value={historyPruning ? '清理中…' : '自动'}
+              >
+                <p className="settings-menu-desc">读到总页数 95% 以上算读完。清理会同步到其它设备。</p>
+                <div className="settings-menu-actions">
+                  <button className="secondary-action" type="button" disabled={historyPruning} aria-busy={historyPruning} onClick={() => void pruneHistoryNow()}>
+                    <Eraser aria-hidden="true" />{historyPruning ? '清理中…' : '立即清理'}
+                  </button>
+                </div>
+              </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-general' && (
               <SettingsPanel
@@ -1013,7 +965,7 @@ export function SettingsWorkspace() {
                     clean it", and one never shifts the other. */}
                 <div className="settings-menu-actions">
                   <button
-                    className="settings-action"
+                    className="secondary-action"
                     type="button"
                     disabled={cacheClearing}
                     aria-busy={cacheClearing}
@@ -1090,7 +1042,7 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<PanelBottom />}
                 label="悬浮底栏"
-                hint="移动端底栏改为悬浮胶囊样式；向下滚动时隐藏，向上滚动时恢复"
+                hint="底栏变成悬浮胶囊，滚动时自动收起"
                 checked={preferenceDraft.floatingNav}
                 onToggle={() => editPreferences({ floatingNav: !preferenceDraft.floatingNav })}
               />
@@ -1099,39 +1051,33 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<ListChecks />}
                 label="底栏项目"
-                hint="选择移动端底栏显示的项目；档案库与设置固定显示，不影响桌面端侧边栏"
+                hint="只影响移动端底栏，档案库固定显示"
                 ariaLabel="底栏项目"
                 value={`${preferenceDraft.bottomNavItems.length} 项`}
               >
-                <div className="settings-menu-checks">
+                <CheckRowGroup label="底栏项目">
                   {BOTTOM_NAV_OPTIONS.map(({ key, label }) => {
-                    const pinned = key === 'library' || key === 'settings';
-                    const included = pinned || preferenceDraft.bottomNavItems.includes(key);
+                    const pinned = key === 'library';
                     return (
-                      <button
+                      <CheckRow
                         key={key}
-                        type="button"
-                        role="checkbox"
-                        aria-checked={included}
-                        aria-label={`底栏显示${label}`}
-                        disabled={pinned}
-                        className={`settings-menu-check${included ? ' is-checked' : ''}${pinned ? ' is-pinned' : ''}`}
-                        onClick={() => toggleBottomNavItem(key)}
-                      >
-                        <span>{label}</span>
-                        {pinned ? <Lock aria-hidden="true" /> : included ? <Check aria-hidden="true" /> : null}
-                      </button>
+                        label={label}
+                        checked={pinned || preferenceDraft.bottomNavItems.includes(key)}
+                        locked={pinned}
+                        ariaLabel={`底栏显示${label}`}
+                        onToggle={() => toggleBottomNavItem(key)}
+                      />
                     );
                   })}
-                </div>
-                <p className="settings-menu-desc">带锁的档案库与设置固定显示，不受勾选影响。</p>
+                </CheckRowGroup>
+                <p className="settings-menu-desc">带锁的档案库固定显示；取消勾选的项收进「更多」。</p>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-appearance' && (
               <SettingsPanel
                 icon={<Paintbrush />}
                 label="自定义"
-                hint="基础配色一键套用；高级模式可在设计令牌之后追加任意 CSS 覆盖，改动即时生效"
+                hint="基础套用配色，高级可覆盖任意 CSS"
                 ariaLabel="自定义"
                 value={customValue}
               >
@@ -1190,7 +1136,7 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<HeartOff />}
                 label="同步删除 E-Hentai 收藏"
-                hint={ehAccountName ? '删除档案时一并删除对应的 E-Hentai 收藏' : '需要先登录 E-Hentai 账户；没登录时删除档案不会动收藏'}
+                hint={ehAccountName ? '删除档案时一并删除 E-Hentai 收藏' : '登录 E-Hentai 后才能启用'}
                 checked={preferenceDraft.ehFavoriteDeleteSync}
                 /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
                 disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
@@ -1201,136 +1147,175 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<ShieldCheck />}
                 label="默认开启收藏同步删除"
-                hint="删除确认弹窗中的「同步删除 E-Hentai 收藏」开关默认勾选；删除行为始终需要确认"
+                hint="删除确认弹窗里的开关默认勾选"
                 checked={preferenceDraft.confirmEhFavoriteDelete}
                 disabled={!preferenceDraft.ehFavoriteDeleteSync}
                 onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
               />
             )}
             {selectedSettingsSection === 'settings-sync' && (
+              <SettingsSwitch
+                icon={<RefreshCw />}
+                label="自动同步"
+                hint="写入后、回前台、联网后与每 30 分钟自动同步"
+                checked={preferenceDraft.autoSync}
+                onToggle={() => editPreferences({ autoSync: !preferenceDraft.autoSync })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-sync' && (
               <SettingsPanel
                 icon={<Waypoints />}
-                label="WebDAV 账户"
-                hint="同步阅读进度、历史与待看变更"
-                ariaLabel="WebDAV 账户"
-                value={sync.loading ? '读取中…' : sync.accounts.length === 0 ? '未配置' : sync.accounts.length === 1 ? sync.accounts[0]!.label : `${sync.accounts[0]!.label} 等 ${sync.accounts.length} 个`}
+                label="同步账户"
+                hint="WebDAV 或 S3 兼容存储，同时只生效一套"
+                ariaLabel="同步账户"
+                value={sync.loading ? '读取中…' : sync.activeAccount ? sync.activeAccount.label : '未配置'}
+                /* 关掉菜单就是离开这次编辑：再打开时应该是账号行加三个动作，而不是
+                   上次没收起的表单（含已回填的口令）。 */
+                onClose={sync.closeForm}
               >
-                {sync.loading ? <p className="server-list-message" role="status">正在读取同步账户…</p> : sync.accounts.length === 0 ? (
-                  <p className="settings-menu-desc">尚未配置 WebDAV 账户，填写下方表单即可开始同步。</p>
-                ) : (
-                  <div className="settings-menu-accounts">
-                    {/* 单账户：只维护一个 WebDAV 账户。 */}
-                    {sync.accounts.slice(0, 1).map((account) => (
+                {/* 账户行与它的表单是同一块：折叠层自带间距，收起时连间距一起收掉。
+                    网格的行间距不认「零高」——收起的那一层照样占一道缝，按钮下面就
+                    多出一块空白。 */}
+                <div className="settings-menu-accounts">
+                  {sync.loading ? <StatusLine busy>正在读取同步账户…</StatusLine> : !sync.activeAccount ? (
+                    <p className="settings-menu-desc">还没有账户：填下面的表单即可开始。</p>
+                  ) : (
+                    /* 单账户：只维护一个 WebDAV 账户。 */
+                    [sync.activeAccount].map((account) => (
                       <div className="settings-menu-account" key={account.id}>
                         <Waypoints className="settings-menu-account-glyph" aria-hidden="true" />
                         <div className="settings-menu-account-copy">
                           <strong>{account.label}</strong>
-                          <span>{account.baseUrl}</span>
-                          <small>{account.username || '无用户名'} · {scopeSummary(account.syncScope)}</small>
+                          <span>{account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}</span>
+                          <small>{accountKindLabel(account.kind)} · {autoSync.running ? '同步中…' : formatSyncAge(account.lastSyncAt)}</small>
                         </div>
                         {/* 编辑时动作与表单互为开关，收起/展开都有高度过渡。 */}
                         <div className={`sync-collapsible${sync.formTarget !== undefined ? '' : ' is-open'}`}>
                           <div className="settings-menu-account-actions">
-                            <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}>编辑</button>
-                            <button className="settings-action" type="button" disabled={sync.syncingId !== undefined || sync.servers.length === 0} aria-busy={sync.syncingId === account.id} onClick={() => void sync.runSync(account)}>
-                              <RefreshCw aria-hidden="true" />{sync.syncingId === account.id ? '同步中…' : '立即同步'}
+                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}>编辑</button>
+                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined || autoSync.running || sync.servers.length === 0} aria-busy={sync.syncingId === account.id || autoSync.running} onClick={() => void sync.runSync(account)}>
+                              <RefreshCw aria-hidden="true" />{sync.syncingId === account.id || autoSync.running ? '同步中…' : '立即同步'}
                             </button>
                             {sync.resetAccount?.id === account.id ? (
                               <>
-                                <button className="settings-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}>确认重置</button>
-                                <button className="settings-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>取消</button>
+                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}>确认重置</button>
+                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>取消</button>
                               </>
                             ) : (
-                              <button className="settings-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}>重置远端</button>
+                              <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}>重置远端</button>
                             )}
                           </div>
                         </div>
                       </div>
-                    ))}
+                    ))
+                  )}
+                  {!sync.loading && sync.accounts.length > 0 && sync.servers.length === 0 && (
+                    <p className="settings-menu-desc">先在「通用」里添加一台服务器。</p>
+                  )}
+                  {/* 账户管理与添加都在这个菜单里完成；范围勾选在同一个表单里。 */}
+                  <div className={`sync-collapsible${sync.formTarget !== undefined || !sync.activeAccount ? ' is-open' : ''}`}>
+                    <SyncAccountForm sync={sync} />
                   </div>
-                )}
-                {!sync.loading && sync.accounts.length > 0 && sync.servers.length === 0 && (
-                  <p className="settings-menu-desc">需要先在「通用」中添加 LANraragi 服务器，才能确定本地同步范围。</p>
-                )}
-                {/* 账户管理与添加都在这个菜单里完成；范围勾选在同一个表单里。 */}
-                <div className={`sync-collapsible${sync.formTarget !== undefined || sync.accounts.length === 0 ? ' is-open' : ''}`}>
-                  <SyncAccountForm sync={sync} />
                 </div>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-sync' && (
-              /* 导入 and 导出 are two directions, not one form: each opens its
-                 own menu, and closing either clears the shared draft — text
-                 that only mattered while the menu was open never lingers
-                 behind. */
+              /* 范围不再挂在账户表单里：它管的是「推拉哪几类」，与账户凭据无关，
+                 单独一行才看得清现在到底同步了什么。 */
               <SettingsPanel
-                icon={<FileDown />}
-                label="导出数据"
-                hint="导出阅读历史与待看记录为可迁移的 JSON；服务器凭据不在导出范围内"
-                onClose={() => setMigrationText('')}
+                icon={<ListChecks />}
+                label="同步范围"
+                hint="没勾的类别既不上传也不落地"
+                ariaLabel="同步范围"
+                value={!sync.activeAccount ? '未配置账户' : scopeLabel(parseSyncScope(sync.activeAccount.syncScope))}
               >
-                <form className="legacy-import-form" onSubmit={(event) => event.preventDefault()}>
-                  <textarea
-                    id="migration-export"
-                    aria-label="导出 JSON"
-                    className="is-selectable"
-                    readOnly
-                    rows={6}
-                    spellCheck={false}
-                    value={migrationText}
-                    onChange={(event) => setMigrationText(event.target.value)}
-                  />
-                  <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
-                    <button className="settings-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
-                      {migrationPending ? '处理中…' : '导出数据'}
-                    </button>
-                    <button className="settings-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
-                      <Copy aria-hidden="true" />复制
-                    </button>
-                  </div>
-                </form>
-              </SettingsPanel>
-            )}
-            {selectedSettingsSection === 'settings-sync' && (
-              <SettingsPanel
-                icon={<FileUp />}
-                label="导入数据"
-                hint="粘贴另一台设备导出的 JSON，恢复本地记录与偏好设置"
-                onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
-              >
-                <form className="legacy-import-form" onSubmit={runMigrationImport}>
-                  <textarea
-                    id="migration-json"
-                    name="migrationJson"
-                    aria-label="导出 JSON"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={migrationText}
-                    onChange={(event) => setMigrationText(event.target.value)}
-                    rows={6}
-                  />
-                  <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
-                    <button className="settings-action is-primary" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
-                      {migrationPending ? '处理中…' : '导入数据'}
-                    </button>
-                  </div>
-                </form>
+                {!sync.activeAccount ? (
+                  <p className="settings-menu-desc">先在「同步账户」里添加一个账户，再来挑要同步的类别。</p>
+                ) : (
+                  <SyncScopeChecks sync={sync} />
+                )}
               </SettingsPanel>
             )}
             </div>
+            {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
+                必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
+            {selectedSettingsSection === 'settings-sync' && (
+              <div className="settings-group">
+                <SettingsPanel
+                  icon={<FileDown />}
+                  label="导出数据"
+                  hint="导出为 JSON，不含服务器凭据"
+                  onClose={() => setMigrationText('')}
+                >
+                  <form className="legacy-import-form" onSubmit={(event) => event.preventDefault()}>
+                    <textarea
+                      id="migration-export"
+                      aria-label="导出 JSON"
+                      className="is-selectable"
+                      readOnly
+                      rows={6}
+                      spellCheck={false}
+                      value={migrationText}
+                      onChange={(event) => setMigrationText(event.target.value)}
+                    />
+                    <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
+                      <button className="secondary-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+                        {migrationPending ? '处理中…' : '导出数据'}
+                      </button>
+                      <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
+                        <Copy aria-hidden="true" />复制
+                      </button>
+                    </div>
+                  </form>
+                </SettingsPanel>
+                <SettingsPanel
+                  icon={<FileUp />}
+                  label="导入数据"
+                  hint="粘贴另一台设备导出的 JSON"
+                  onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
+                >
+                  <form className="legacy-import-form" onSubmit={runMigrationImport}>
+                    <textarea
+                      id="migration-json"
+                      name="migrationJson"
+                      aria-label="导出 JSON"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={migrationText}
+                      onChange={(event) => setMigrationText(event.target.value)}
+                      rows={6}
+                    />
+                    <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
+                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
+                        {migrationPending ? '处理中…' : '导入数据'}
+                      </button>
+                    </div>
+                  </form>
+                </SettingsPanel>
+              </div>
+            )}
             {/* 详情页两项单独成组：功能按钮与时间格式都属于「详情页长什么样」，
                 与配色等外观微调分开摆放。 */}
             {selectedSettingsSection === 'settings-appearance' && (
               <div className="settings-group">
                 <SettingsPanel icon={<ListChecks />} label="详情页功能按钮" hint="选择详情页显示的操作；其他操作仍可从右上角菜单打开" ariaLabel="详情页功能按钮" value={`${preferenceDraft.detailActions.length} 项`}>
-                  <div className="settings-menu-checks">
+                  <CheckRowGroup label="详情页功能按钮">
                     {DETAIL_ACTIONS.map((action) => {
                       const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
                       const included = preferenceDraft.detailActions.includes(action);
                       const locked = action === 'read';
-                      return <button key={action} type="button" role="checkbox" disabled={locked} aria-checked={locked || included} aria-label={`详情页显示${labels[action]}`} className={`settings-menu-check${locked || included ? ' is-checked' : ''}${locked ? ' is-pinned' : ''}`} onClick={() => { if (!locked) editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) }); }}><span>{labels[action]}</span>{locked ? <Lock aria-hidden="true" /> : included && <Check aria-hidden="true" />}</button>;
+                      return (
+                        <CheckRow
+                          key={action}
+                          label={labels[action]}
+                          checked={included}
+                          locked={locked}
+                          ariaLabel={`详情页显示${labels[action]}`}
+                          onToggle={() => editPreferences({ detailActions: DETAIL_ACTIONS.filter((key) => key === action ? !included : preferenceDraft.detailActions.includes(key)) })}
+                        />
+                      );
                     })}
-                  </div>
+                  </CheckRowGroup>
                 </SettingsPanel>
                 <SettingsChoice
                   icon={<CalendarClock />}
@@ -1350,7 +1335,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<EyeOff />}
                   label="SFW 模式"
-                  hint="所有封面模糊显示；悬停封面或点击卡片才临时显示那一枚，移开或失焦自动恢复"
+                  hint="封面模糊显示，悬停或点击可临时看清"
                   checked={preferenceDraft.sfwMode}
                   onToggle={() => editPreferences({ sfwMode: !preferenceDraft.sfwMode })}
                 />
@@ -1362,7 +1347,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<Sparkles />}
                   label="启用超分"
-                  hint={upscaleReady ? '用超分模型放大阅读画面' : '用超分模型放大阅读画面；尚未安装可用的超分模型'}
+                  hint={upscaleReady ? '用超分模型放大阅读画面' : '尚未安装可用的超分模型'}
                   checked={upscaleOn}
                   onToggle={() => {
                     if (upscaleOn) { editPreferences({ upscaleBackend: 'off' }); return; }
@@ -1384,7 +1369,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<WandSparkles />}
                   label="自动开启超分"
-                  hint="档案平均每页体积达到阈值时，进入阅读即自动开启本次的超分"
+                  hint="超过阈值时，进入阅读自动开启"
                   disabled={!upscaleOn}
                   checked={preferenceDraft.upscaleAutoEnable}
                   onToggle={() => editPreferences({ upscaleAutoEnable: !preferenceDraft.upscaleAutoEnable })}
@@ -1392,7 +1377,7 @@ export function SettingsWorkspace() {
                 <SettingsNumber
                   icon={<Gauge />}
                   label="超分开启阈值"
-                  hint="平均每页体积（体积 ÷ 页数）达到该值时自动开启，单位 KB"
+                  hint="平均每页体积，单位 KB"
                   value={Math.round(preferenceDraft.upscaleAutoThresholdBytes / 1024)}
                   min={64}
                   max={8192}
@@ -1402,7 +1387,7 @@ export function SettingsWorkspace() {
                   onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
                 {!runnableModels?.length && (
-                  <p className="server-list-message" role="status">{runnableModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</p>
+                  <StatusLine busy={!runnableModels}>{runnableModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</StatusLine>
                 )}
               </div>
             )}
@@ -1411,7 +1396,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<Eraser />}
                   label="启用去码"
-                  hint={decensorReady ? '按流程逐级修补遮挡' : '按流程逐级修补遮挡；去码模型不完整，无法启用'}
+                  hint={decensorReady ? '按流程逐级修补遮挡' : '去码模型不完整，无法启用'}
                   checked={decensorOn}
                   onToggle={() => {
                     if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
@@ -1441,7 +1426,7 @@ export function SettingsWorkspace() {
                   <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
                 )}
                 {!decensorBundles?.length && (
-                  <p className="server-list-message" role="status">{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</p>
+                  <StatusLine busy={!installedModels}>{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</StatusLine>
                 )}
               </div>
             )}
@@ -1450,22 +1435,22 @@ export function SettingsWorkspace() {
                 {/* 单按钮的设置不值得一个二级菜单：导入动作就在行右侧。
                     按钮里画一个"档案盒 + 上传箭头"的专属图标——这行的语义
                     （导入模型包）是 Upload 箭头说不完整的。 */}
-                <div className="settings-row">
-                  <span className="settings-row-icon" aria-hidden="true"><Upload /></span>
-                  <span className="settings-row-copy">
-                    <span className="settings-row-label">模型导入</span>
-                    <span className="settings-row-hint">导入超分或去码的模型文件与压缩包</span>
-                  </span>
-                  <button className="settings-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => modelInputRef.current?.click()}>
-                    <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
-                      <path d="M12 3v12" />
-                      <path d="m7 8 5-5 5 5" />
-                      <path d="M8 15h8" />
-                    </svg>
-                    {modelPending ? '导入中…' : '选择模型文件…'}
-                  </button>
-                </div>
+                <SettingsRow
+                  icon={<Upload />}
+                  label="模型导入"
+                  hint="导入超分或去码的模型文件与压缩包"
+                  control={
+                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => modelInputRef.current?.click()}>
+                      <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
+                        <path d="M12 3v12" />
+                        <path d="m7 8 5-5 5 5" />
+                        <path d="M8 15h8" />
+                      </svg>
+                      {modelPending ? '导入中…' : '选择模型文件…'}
+                    </button>
+                  }
+                />
                 <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
               </div>
             )}
@@ -1473,12 +1458,12 @@ export function SettingsWorkspace() {
                 each row opens the same setup dialog the add row does. */}
             {selectedSettingsSection === 'settings-general' && (
               <div className="settings-group server-region" role="region" aria-label="服务器" aria-live="polite">
-                {loading && <p className="server-list-message" role="status">正在读取服务器…</p>}
+                {loading && <StatusLine busy>正在读取服务器…</StatusLine>}
                 {!loading && loadError && (
                   <div className="server-list-error">
                     <p className="form-error" role="alert">{loadError}</p>
                     {loadRetryable && (
-                      <button className="settings-action" type="button" onClick={() => setServerLoadAttempt((attempt) => attempt + 1)}>
+                      <button className="secondary-action" type="button" onClick={() => setServerLoadAttempt((attempt) => attempt + 1)}>
                         <RefreshCw aria-hidden="true" />
                         重试读取服务器
                       </button>
@@ -1525,7 +1510,7 @@ export function SettingsWorkspace() {
           <SettingsSwitch
             icon={<Tags />}
             label="我的标签"
-            hint="拉取 E-Hentai 账户的「我的标签」：档案卡片与详情页中的这些标签优先靠左显示，并使用预设底色；需已登录 E-Hentai"
+            hint="这些标签在卡片与详情页优先靠左显示"
             disabled={!ehAccountName}
             checked={preferenceDraft.ehMyTagsPriority && Boolean(ehAccountName)}
             onToggle={() => editPreferences({ ehMyTagsPriority: !preferenceDraft.ehMyTagsPriority })}
@@ -1554,31 +1539,13 @@ export function SettingsWorkspace() {
               missing row than a licence the app made up on its behalf. */}
           {APP_LICENSE && <SettingsRow icon={<Scale />} label="开源协议" value={APP_LICENSE} trailing="none" />}
           <SettingsRow icon={<Blocks />} label="构建于" value="Tauri 2 · React 18 · SQLite" trailing="none" />
-          <div className="settings-item">
-            <button className="settings-row settings-row-button" type="button" aria-label="LANraragi 文档" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')}>
-              <span className="settings-row-icon" aria-hidden="true"><BookOpenText /></span>
-              <span className="settings-row-copy">
-                <span className="settings-row-label">LANraragi 文档</span>
-                <span className="settings-row-hint">在浏览器中打开 LANraragi 的使用文档</span>
-              </span>
-              <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
-            </button>
-          </div>
+          <SettingsRow icon={<BookOpenText />} label="LANraragi 文档" hint="在浏览器中打开 LANraragi 的使用文档" trailing="nav" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')} />
           {/* 错误日志是这一组里的一行（行上是状态，点开才是记录）：必须留在组框里，
               挂到框外面它就没有容器了。 */}
           <ErrorLogSetting />
           {/* 仓库地址放在这一组的最后一行。 */}
           {APP_REPOSITORY && (
-            <div className="settings-item">
-              <button className="settings-row settings-row-button" type="button" aria-label="仓库地址" onClick={() => void openAboutLink(APP_REPOSITORY)}>
-                <span className="settings-row-icon" aria-hidden="true"><Github /></span>
-                <span className="settings-row-copy">
-                  <span className="settings-row-label">仓库地址</span>
-                  <span className="settings-row-hint">{APP_REPOSITORY_DISPLAY}</span>
-                </span>
-                <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
-              </button>
-            </div>
+            <SettingsRow icon={<Github />} label="仓库地址" hint={APP_REPOSITORY_DISPLAY} trailing="nav" onClick={() => void openAboutLink(APP_REPOSITORY)} />
           )}
         </div>
       </section>
@@ -1588,26 +1555,8 @@ export function SettingsWorkspace() {
         <div className="settings-group">
           {/* Rows, not cards: each one says what it does, then navigates — the
               operation here is a route, so it happens on the row itself. */}
-          <div className="settings-item">
-            <Link className="settings-row settings-row-button" to="/tools/upload">
-              <span className="settings-row-icon" aria-hidden="true"><Upload /></span>
-              <span className="settings-row-copy">
-                <span className="settings-row-label">上传档案</span>
-                <span className="settings-row-hint">把本机压缩包传给 LANraragi，可批量选择。</span>
-              </span>
-              <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
-            </Link>
-          </div>
-          <div className="settings-item">
-            <Link className="settings-row settings-row-button" to="/tools/dedup">
-              <span className="settings-row-icon" aria-hidden="true"><CopyCheck /></span>
-              <span className="settings-row-copy">
-                <span className="settings-row-label">重复档案查重</span>
-                <span className="settings-row-hint">按内容比对整个库，逐组确认后删除。</span>
-              </span>
-              <span className="settings-row-control settings-row-value"><ChevronRight aria-hidden="true" /></span>
-            </Link>
-          </div>
+          <SettingsRow icon={<Upload />} label="上传档案" hint="把本机压缩包传给 LANraragi，可批量选择" trailing="nav" to="/tools/upload" />
+          <SettingsRow icon={<CopyCheck />} label="重复档案查重" hint="按内容比对整个库，逐组确认后删除" trailing="nav" to="/tools/dedup" />
         </div>
       </section>
       )}

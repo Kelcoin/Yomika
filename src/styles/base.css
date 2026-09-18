@@ -5,10 +5,13 @@
 html {
   min-width: 320px;
   height: 100%;
+  /* Nothing here scrolls, so no scroller should be able to hand a gesture back
+     to it — on a touch device that reads as the app itself bouncing. */
+  overscroll-behavior: none;
   background: var(--surface-canvas);
   font-family: var(--font-body);
   font-synthesis: none;
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-normal);
   text-rendering: optimizeLegibility;
   overflow: hidden;
 }
@@ -17,6 +20,7 @@ body {
   min-width: 320px;
   height: 100%;
   margin: 0;
+  overscroll-behavior: none;
   background: var(--surface-canvas);
   color: var(--ink-primary);
   overflow: hidden;
@@ -33,13 +37,32 @@ select,
 textarea {
   color: inherit;
   font: inherit;
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-normal);
+}
+
+/* Touch: a tap must not wait to find out whether it is half of a double-tap,
+   and a double-tap must not zoom the shell — this is an application, not a
+   page. `manipulation` keeps panning and pinching, and drops only the
+   double-tap-to-zoom that made the whole UI feel like a web page. The reader
+   overrides it on its own canvas, where a double-tap means fit-to-width. */
+button,
+a,
+label,
+summary,
+input,
+select,
+textarea,
+[role='button'],
+[role='checkbox'],
+[role='radio'],
+[role='switch'],
+[role='tab'] {
+  touch-action: manipulation;
 }
 
 /* Material 3 icon convention: one optical weight, round caps and joins, on a
    24px grid. Lucide supplies the geometry; pinning the stroke here stops the
-   1.4/1.5/1.8 per-icon overrides from mixing thin and heavy glyphs. */
-svg.lucide {
+   1.4/1.5/1.8 per-icon overrides from mixing thin and heavy glyphs. */svg.lucide {
   stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -74,21 +97,23 @@ svg.lucide {
   border-radius: var(--radius-control);
   background: var(--control-background);
   color: var(--control-text);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   text-align: left;
   cursor: pointer;
   transition: border-color var(--motion-standard), background-color var(--motion-standard), box-shadow var(--motion-standard), transform var(--motion-fast);
 }
 
-.select-trigger:hover:not(:disabled) { border-color: var(--on-surface-variant); background: var(--control-background-hover); }
+@media (hover: hover) {
+  .select-trigger:hover:not(:disabled) { border-color: var(--on-surface-variant); background: var(--control-background-hover); }
+}
+
 .select-trigger:active:not(:disabled) { transform: translateY(1px); }
 .select-trigger:focus-visible { outline: none; box-shadow: var(--focus-shadow); }
 
 .select-trigger > svg { width: 17px; height: 17px; margin-left: auto; color: var(--ink-secondary); }
 
 /* Anything the field shows at its right before the chevron — the sort direction
-   arrow. It takes the auto margin, so the chevron keeps its 4px beside it. */
-.select-trailing { display: grid; margin-left: auto; color: var(--ink-secondary); }
+   arrow. It takes the auto margin, so the chevron keeps its 4px beside it. */.select-trailing { display: grid; margin-left: auto; color: var(--ink-secondary); }
 .select-trailing svg { width: 15px; height: 15px; }
 .select-trailing + svg { margin-left: 4px; }
 
@@ -120,20 +145,26 @@ svg.lucide {
   align-items: center;
 }
 
-.select-option:hover,
 .select-option[aria-selected='true'] { background: var(--brand-paper); }
+@media (hover: hover) {
+  .select-option:hover { background: var(--brand-paper); }
+}
+
 .select-option:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .select-option-main { display: flex; align-items: center; justify-content: space-between; flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 0 10px; border-radius: var(--radius-control); background: transparent; color: inherit; text-align: left; }
 .select-option-main svg { width: 16px; height: 16px; color: var(--brand-vermilion); }
 .select-option-trailing { display: grid; flex: 0 0 28px; place-items: center; color: var(--ink-secondary); }
 .select-option-trailing svg { width: 15px; height: 15px; }
 .select-option-download { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; margin-right: 2px; border-radius: var(--radius-control); background: transparent; color: var(--ink-secondary); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast); }
-.select-option-download:hover:not(:disabled) { color: var(--brand-vermilion); }
+
+@media (hover: hover) {
+  .select-option-download:hover:not(:disabled) { color: var(--brand-vermilion); }
+}
+
 .select-option-download:active:not(:disabled) { transform: translateY(1px); }
 .select-option-download svg { width: 15px; height: 15px; }
 
-/* 下载中的进度行：与下载按钮同属模型选择项，所以放在同一处。 */
-.model-download-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4) var(--space-2); }
+/* 下载中的进度行：与下载按钮同属模型选择项，所以放在同一处。 */.model-download-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4) var(--space-2); }
 .model-download-status progress { width: 100%; height: 4px; overflow: hidden; border: 0; border-radius: var(--radius-pill); background: var(--surface-muted); accent-color: var(--primary); }
 .model-download-status progress::-webkit-progress-bar { background: var(--surface-muted); }
 .model-download-status progress::-webkit-progress-value { background: var(--primary); }
@@ -180,8 +211,7 @@ a {
 
 /* Desktop-app feel: nothing is selectable or draggable by default, so a stray
    drag cannot rip a cover out of the window or leave text highlighted. Inputs
-   and anything explicitly marked selectable keep normal behaviour. */
-:root {
+   and anything explicitly marked selectable keep normal behaviour. */:root {
   user-select: none;
   -webkit-user-select: none;
 }
@@ -208,7 +238,7 @@ button {
   gap: var(--space-2);
   border: 0;
   font-family: inherit;
-  line-height: 1;
+  line-height: var(--leading-none);
   text-align: center;
   cursor: pointer;
 }
@@ -244,10 +274,12 @@ textarea:focus {
   box-shadow: var(--focus-shadow);
 }
 
-input:hover:not(:disabled),
-select:hover:not(:disabled),
-textarea:hover:not(:disabled) {
-  border-color: var(--on-surface-variant);
+@media (hover: hover) {
+  input:hover:not(:disabled),
+  select:hover:not(:disabled),
+  textarea:hover:not(:disabled) {
+    border-color: var(--on-surface-variant);
+  }
 }
 
 button:active,
@@ -283,7 +315,7 @@ p {
 h1,
 h2 {
   font-family: var(--font-display);
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-normal);
 }
 
 @media (prefers-reduced-motion: reduce) {

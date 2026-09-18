@@ -23,11 +23,14 @@ import {
 } from '../domain/library';
 import type { CommandResult } from '../domain/result';
 import { invalidateRouteCache } from '../lib/routeCache';
+import { notifyLocalWrite } from '../lib/localWrite';
 
 function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) {
     invalidateRouteCache('home:');
     invalidateRouteCache('state:');
+    // 同步范围里的进度/历史/待看都从这些写入产生：自动同步据此合并成一次推送。
+    notifyLocalWrite();
   }
   return result;
 }
@@ -151,6 +154,15 @@ export class NativeLibraryRepository {
       input: { scopeId, sequence, status, ...(error ? { error } : {}) },
     }, SyncJournalRecordSchema);
   }
+  /** 历史自动清理：读完的留 90 天，没读完的留 365 天；返回清掉的条数。
+   * 只有真清掉了才喊一声（清理会写下同步墓碑，值得推一次）。 */
+  pruneHistory(): Promise<CommandResult<number>> {
+    return invokeCommand('prune_history', {}, z.number().int().nonnegative()).then((result) => {
+      if (result.ok && result.value > 0) notifyLocalWrite();
+      return result;
+    });
+  }
+
   loadArchiveMetadata(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ArchiveMetadataSchema>>> {
     return invokeCommand('load_archive_metadata', { serverId, archiveId }, ArchiveMetadataSchema);
   }

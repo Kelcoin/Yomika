@@ -68,6 +68,9 @@ export const PreferenceSnapshotSchema = z.object({
   bottomNavItems: z
     .array(z.enum(['home', 'library', 'history', 'watchlist', 'to-read', 'downloads', 'settings']))
     .default(['home', 'library', 'history', 'watchlist', 'settings']),
+  /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
+   * 关掉就只剩设置里的「立即同步」。 */
+  autoSync: z.boolean().default(true),
 }).strip();
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
@@ -109,6 +112,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
+  autoSync: true,
 };
 
 export class NativeSettingsRepository {

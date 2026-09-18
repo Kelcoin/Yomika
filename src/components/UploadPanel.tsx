@@ -13,6 +13,7 @@ import {
 } from '../domain/upload';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { useToast } from './Toast';
+import { StatusLine } from './StatusLine';
 
 const repository = new NativeLibraryRepository();
 
@@ -178,7 +179,7 @@ export function UploadPanel() {
           </div>
         </div>
         {items.length === 0
-          ? <p className="server-list-message">队列是空的。</p>
+          ? <StatusLine>队列是空的。</StatusLine>
           : <ul className="upload-queue-list">
               {items.map((item) => (
                 <li key={item.id} className={`upload-queue-row is-${item.status}`}>

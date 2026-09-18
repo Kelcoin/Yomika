@@ -38,9 +38,11 @@ const navigation = [
 ] as const;
 
 type NavKey = (typeof navigation)[number]['to'];
-/** The compact bar's entries are a preference keyed by these route ids;
- * 档案库与设置 are load-bearing and always present. */
-const PINNED_NAV_KEYS: NavKey[] = ['/library', '/settings'];
+/** The compact bar's entries are a preference keyed by these route ids. 档案库 is
+ * load-bearing — without it there is no way into the library — so it is always
+ * present. 设置 is not: an unselected entry reappears under 更多, which is where
+ * the bar sends whatever it has no room for. */
+const PINNED_NAV_KEYS: NavKey[] = ['/library'];
 const NAV_KEY_ROUTES: Record<string, NavKey> = {
   home: '/',
   library: '/library',

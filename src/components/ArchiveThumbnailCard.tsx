@@ -8,6 +8,7 @@ import { normalizeMyTagKey } from '../lib/ehMyTags';
 import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { useEhMyTags } from './useEhMyTags';
+import { longPressHandlers } from '../lib/longPressMenu';
 
 const imageCache = getNativeImageCache();
 
@@ -71,17 +72,21 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   const tags = useMemo(() => pickCardTags(archive.tags, 24, myTagKeys), [archive.tags, myTagKeys]);
   const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const isWide = isWideCoverRatio(aspectRatio);
+  // The same menu the library list opens, by right click on a desktop and by
+  // press-and-hold on a phone.
+  const press = onContextMenu ? longPressHandlers((at) => onContextMenu(archive, at)) : {};
   return <Link
     className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
     to={`/library/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`}
     onClick={onOpen}
-    // The same menu the library list opens. Without this a right click on a rail
-    // card did nothing, which is what "the app still has no context menu" was.
+    // Without the right click a rail card did nothing on a desktop, which is
+    // what "the app still has no context menu" was.
     onContextMenu={onContextMenu ? (event) => {
       event.preventDefault();
       event.stopPropagation();
       onContextMenu(archive, { x: event.clientX, y: event.clientY });
     } : undefined}
+    {...press}
   >
     <ArchiveThumbMedia
       scopeId={scopeId}

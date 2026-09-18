@@ -19,11 +19,16 @@ function renderWorkspace(props: React.ComponentProps<typeof LibraryWorkspace>) {
 }
 
 /** jsdom has no layout: scrollTop, clientHeight and scrollHeight are all 0, so
- * every list reads as being at both ends at once. Pin what the gesture asks for. */
+ * every list reads as being at both ends at once. Pin what the gesture asks for.
+ *
+ * `overflow-y` is set inline because that is what the pull reads to find the
+ * element it belongs to, and jsdom's getComputedStyle only sees inline styles
+ * here — the app's stylesheet is not loaded in these tests. */
 function scrollable(element: HTMLElement, metrics: { scrollTop: number; clientHeight: number; scrollHeight: number }) {
   for (const [key, value] of Object.entries(metrics)) {
     Object.defineProperty(element, key, { value, configurable: true, writable: true });
   }
+  element.style.overflowY = 'auto';
 }
 
 describe('library workspace', () => {
@@ -336,6 +341,46 @@ describe('library workspace', () => {
     fireEvent.touchEnd(list);
     expect(onRefresh).toHaveBeenCalledTimes(1);
     // The list is already back where it belongs; the disc carries the request.
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  });
+
+  it('pulls on the layouts where the page scrolls and the list does not', () => {
+    // Compact and the shelves run the list at full content height and scroll the
+    // page instead. Resolving the gesture to the list meant those layouts — the
+    // ones with no other way to ask — had no pull at all.
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    // The list may scroll but has nothing to scroll: it is exactly as tall as its
+    // content, which is what makes it a container rather than a scroller.
+    scrollable(list, { scrollTop: 0, clientHeight: 4000, scrollHeight: 4000 });
+    const page = list.closest('.library-workspace')?.parentElement as HTMLElement;
+    expect(page).toBeTruthy();
+    scrollable(page, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+    // The pull resolves its scroller once per layout, the same way it does after
+    // a rotation puts the app into the compact layout.
+    fireEvent(window, new Event('resize'));
+
+    fireEvent.wheel(page, { deltaY: -200 });
+    // Half the travel, capped — the same damping the list gets.
+    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    fireEvent.wheel(page, { deltaY: 0 });
+
+    fireEvent.touchStart(page, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(page, { touches: [{ clientY: 170 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    fireEvent.touchEnd(page);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+
+    // And the page keeps its own scrolling: an upward drag from the top is the
+    // page moving, not a pull, so nothing is asked for.
+    onRefresh.mockClear();
+    page.scrollTop = 400;
+    fireEvent.touchStart(page, { touches: [{ clientY: 400 }] });
+    fireEvent.touchMove(page, { touches: [{ clientY: 300 }] });
+    fireEvent.touchEnd(page);
+    expect(onRefresh).not.toHaveBeenCalled();
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });
 

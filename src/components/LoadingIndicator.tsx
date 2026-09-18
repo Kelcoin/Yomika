@@ -16,15 +16,22 @@
  * said what the animation already says, and repeated it in three sizes across
  * every route that loads anything.
  */
-export function LoadingIndicator({ label = '正在加载', size = 'md' }: { label?: string; size?: 'sm' | 'md' | 'lg' }) {
+export function LoadingIndicator({ label = '正在加载', size = 'md', inline = false }: { label?: string; size?: 'sm' | 'md' | 'lg'; inline?: boolean }) {
+  const mark = (
+    <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      {/* 2πr ≈ 125.7 for r=20; the dash cycle trims the arc the way the spec's
+          indicator does, and both cycles share one 1.6s period. */}
+      <circle className="loading-indicator-track" cx="24" cy="24" r="20" />
+      <circle className="loading-indicator-arc" cx="24" cy="24" r="20" />
+    </svg>
+  );
+  // `inline` draws the mark alone, for a line whose own text already carries the
+  // status: a spinner with role="status" inside a role="status" paragraph
+  // announces the same wait twice.
+  if (inline) return <span className="loading-mark" aria-hidden="true">{mark}</span>;
   return (
     <div className={`loading-indicator is-${size}`} role="status" aria-label={label}>
-      <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-        {/* 2πr ≈ 125.7 for r=20; the dash cycle trims the arc the way the spec's
-            indicator does, and both cycles share one 1.6s period. */}
-        <circle className="loading-indicator-track" cx="24" cy="24" r="20" />
-        <circle className="loading-indicator-arc" cx="24" cy="24" r="20" />
-      </svg>
+      {mark}
     </div>
   );
 }

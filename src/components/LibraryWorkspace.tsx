@@ -1,13 +1,15 @@
 import { CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, ListChecks, Pencil, Plus, RefreshCw, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type TouchEvent as ReactTouchEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
 import { EmptyState } from './EmptyState';
+import { longPressHandlers } from '../lib/longPressMenu';
+import { StatusLine } from './StatusLine';
 import { SelectField } from './SelectField';
 import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
@@ -41,6 +43,38 @@ const BOUNCE_MAX = 72;
 const PULL_DAMPING = 0.5;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
+
+const scrollsVertically = (element: HTMLElement) => {
+  const { overflowY } = getComputedStyle(element);
+  return overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+};
+/** CSS may allow scrolling without there being anything to scroll yet. */
+const overflows = (element: HTMLElement) => element.scrollHeight > element.clientHeight + 1;
+
+/** The element a gesture actually scrolls.
+ *
+ * The pull used to assume this was the archive list, which holds only inside the
+ * library's own panels on a wide window. On compact, and behind the shelves, the
+ * list is full-content height and the page scrolls instead — so the gesture
+ * resolved to an element that could not move, and the pull silently did nothing
+ * on exactly the layouts that have no other way to ask for a refresh.
+ *
+ * The list is checked first because it is a child of the root, not an ancestor:
+ * the walk up from the root can never reach it. Then the nearest scrollable
+ * ancestor, which is the page on compact. The list is the last resort, so a
+ * layout where nothing around it scrolls still drags what the user can see.
+ */
+function scrollHost(list: HTMLElement | null, root: HTMLElement): HTMLElement | undefined {
+  if (list && scrollsVertically(list) && overflows(list)) return list;
+  let fallback: HTMLElement | undefined;
+  for (let current: HTMLElement | null = root; current; current = current.parentElement) {
+    if (!scrollsVertically(current)) continue;
+    // Preferred: something with content to scroll behind the gesture.
+    if (overflows(current)) return current;
+    fallback ??= current;
+  }
+  return fallback ?? list ?? undefined;
+}
 
 /** One shared empty set, so the uncontrolled case does not allocate per render. */
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -147,6 +181,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [localCardStyle, setLocalCardStyle] = useState<'thumbnail' | 'wide'>('wide');
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** The element the pull is bound to: see scrollHost for how it is chosen. */
+  const [scrollHostElement, setScrollHostElement] = useState<HTMLElement>();
   const searchInputRef = useRef<HTMLInputElement>(null);
   // 鼠标悬在面板的左右留白（.library-shell-list 的 16px padding）或行间空隙上
   // 时，滚轮的目标链不经过 .archive-list——桌面端页面级 overflow:hidden，链条
@@ -191,9 +228,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
   const overscrollStartY = useRef<number | undefined>(undefined);
   const overscrollSettleTimer = useRef<number | undefined>(undefined);
-  /** The non-passive touchmove listener lives outside React and can only read a
-   * flag, never a render. */
-  const overscrollBlockingRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
   const refreshingRef = useRef(refreshing);
 
@@ -201,7 +235,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollTravel.current = 0;
     overscrollRef.current = 0;
     overscrollDirection.current = undefined;
-    overscrollBlockingRef.current = false;
     setOverscroll(0);
     setOverscrollGesture(null);
   }, []);
@@ -220,7 +253,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollTravel.current = travel;
     const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
     overscrollRef.current = offset;
-    overscrollBlockingRef.current = offset !== 0;
     setOverscroll(offset);
   }, []);
 
@@ -241,86 +273,104 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
   }, []);
 
-  // React's touchmove listener is passive, so it cannot stop the browser's own
-  // overscroll from fighting the gesture. This one is bound natively and can.
+  // The pull is bound natively, for two reasons. React's touchmove listener is
+  // passive, so it cannot stop the browser's own overscroll from fighting the
+  // gesture — and the gesture belongs to whichever element actually scrolls
+  // (see scrollHost), which may be an ancestor of everything this component
+  // renders, and so cannot be reached by React props.
+  //
+  // It is resolved into state rather than looked up per event: the host changes
+  // with the layout and not with the gesture, and reading computed styles on
+  // every wheel notch is work the compositor thread does not need.
   useEffect(() => {
-    const list = scrollRef.current;
-    if (!list) return;
-    const hold = (event: TouchEvent) => { if (overscrollBlockingRef.current) event.preventDefault(); };
-    list.addEventListener('touchmove', hold, { passive: false });
-    return () => list.removeEventListener('touchmove', hold);
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const resolve = () => setScrollHostElement(scrollHost(scrollRef.current, root));
+    resolve();
+    window.addEventListener('resize', resolve);
+    return () => window.removeEventListener('resize', resolve);
   }, []);
 
-  const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    // Only where the list itself scrolls. On the compact layout the page does,
-    // and swallowing its wheel would take scrolling away from the user.
-    if (compact) return;
-    const list = event.currentTarget;
-    // In the library shell the page scrolls and the list is full-content height
-    // — left alone, every wheel read as "beyond the bottom" and the bounce ate
-    // the scroll whole.
-    if (list.scrollHeight > 0 && list.scrollHeight <= list.clientHeight + 1) return;
-    // Deltas arrive in pixels, lines or pages; a line is about 16px.
-    const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-    const beyondTop = delta < 0 && list.scrollTop <= 0;
-    const beyondBottom = delta > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
-    if (!beyondTop && !beyondBottom) {
-      // Ordinary scrolling: a gesture in flight is abandoned, not fired.
-      if (overscrollRef.current !== 0 || overscrollSettleTimer.current !== undefined) cancelOverscroll();
-      return;
-    }
-    const direction = beyondTop ? 1 : -1;
-    // Reversing mid-gesture hands the list back before the other end takes it.
-    if (overscrollDirection.current !== undefined && overscrollDirection.current !== direction) cancelOverscroll();
-    overscrollDirection.current = direction;
-    setOverscrollGesture('wheel');
-    applyOverscroll(overscrollTravel.current + direction * Math.abs(delta));
-    if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
-    overscrollSettleTimer.current = window.setTimeout(() => {
-      overscrollSettleTimer.current = undefined;
-      releaseOverscroll();
-    }, PULL_SETTLE_MS);
-  };
+  useEffect(() => {
+    const host = scrollHostElement;
+    if (!host) return undefined;
 
-  const handleTouchStart = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (compact) return;
-    // Same rule as the wheel: the gestures belong to the list only when the
-    // list itself scrolls — in the shell the page does.
-    const list = event.currentTarget;
-    if (list.scrollHeight > 0 && list.scrollHeight <= list.clientHeight + 1) return;
-    // The end the finger lands on is the only one it may pull past; anywhere
-    // else the list needs the finger for its own scrolling.
-    const edge = list.scrollTop <= 0
-      ? 'top'
-      : list.scrollTop + list.clientHeight >= list.scrollHeight - 1 ? 'bottom' : undefined;
-    overscrollEdge.current = edge;
-    overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
-  };
+    const wheel = (event: WheelEvent) => {
+      // Deltas arrive in pixels, lines or pages; a line is about 16px.
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      const beyondTop = delta < 0 && host.scrollTop <= 0;
+      const beyondBottom = delta > 0 && host.scrollTop + host.clientHeight >= host.scrollHeight - 1;
+      if (!beyondTop && !beyondBottom) {
+        // Ordinary scrolling: a gesture in flight is abandoned, not fired.
+        if (overscrollRef.current !== 0 || overscrollSettleTimer.current !== undefined) cancelOverscroll();
+        return;
+      }
+      const direction = beyondTop ? 1 : -1;
+      // Reversing mid-gesture hands the scroller back before the other end takes it.
+      if (overscrollDirection.current !== undefined && overscrollDirection.current !== direction) cancelOverscroll();
+      overscrollDirection.current = direction;
+      setOverscrollGesture('wheel');
+      applyOverscroll(overscrollTravel.current + direction * Math.abs(delta));
+      if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
+      overscrollSettleTimer.current = window.setTimeout(() => {
+        overscrollSettleTimer.current = undefined;
+        releaseOverscroll();
+      }, PULL_SETTLE_MS);
+    };
 
-  const handleTouchMove = (event: ReactTouchEvent<HTMLDivElement>) => {
-    const edge = overscrollEdge.current;
-    const start = overscrollStartY.current;
-    if (!edge || start === undefined) return;
-    const y = event.touches[0]?.clientY ?? start;
-    const direction = edge === 'top' ? 1 : -1;
-    // Down past the top and up past the bottom are the two overscrolls; the
-    // way back is ordinary scrolling, which the list keeps.
-    if ((y - start) * direction <= 0) {
+    const touchStart = (event: TouchEvent) => {
+      // The end the finger lands on is the only one it may pull past; anywhere
+      // else the scroller needs the finger for its own scrolling.
+      const edge = host.scrollTop <= 0
+        ? 'top'
+        : host.scrollTop + host.clientHeight >= host.scrollHeight - 1 ? 'bottom' : undefined;
+      overscrollEdge.current = edge;
+      overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
+    };
+
+    const touchMove = (event: TouchEvent) => {
+      const edge = overscrollEdge.current;
+      const start = overscrollStartY.current;
+      if (!edge || start === undefined) return;
+      const y = event.touches[0]?.clientY ?? start;
+      const direction = edge === 'top' ? 1 : -1;
+      // Down past the top and up past the bottom are the two overscrolls; the
+      // way back is ordinary scrolling, which the scroller keeps.
+      if ((y - start) * direction <= 0) {
+        overscrollEdge.current = undefined;
+        overscrollStartY.current = undefined;
+        if (overscrollRef.current !== 0) cancelOverscroll();
+        return;
+      }
+      // The pull owns the gesture from here, and it has to say so on the move
+      // that starts it: once a touch browser has begun its own scroll it stops
+      // honouring preventDefault for the rest of the gesture, and the content
+      // would slide out from under the drag.
+      event.preventDefault();
+      overscrollDirection.current = direction;
+      setOverscrollGesture('touch');
+      applyOverscroll(direction * Math.abs(y - start));
+    };
+
+    const touchEnd = () => {
       overscrollEdge.current = undefined;
       overscrollStartY.current = undefined;
-      if (overscrollRef.current !== 0) cancelOverscroll();
-      return;
-    }
-    overscrollDirection.current = direction;
-    setOverscrollGesture('touch');
-    applyOverscroll(direction * Math.abs(y - start));
-  };
+      if (overscrollRef.current !== 0) releaseOverscroll();
+    };
 
-  const handleTouchEnd = () => {
-    overscrollEdge.current = undefined;
-    overscrollStartY.current = undefined;
-    if (overscrollRef.current !== 0) releaseOverscroll();
-  };
+    host.addEventListener('wheel', wheel, { passive: true });
+    host.addEventListener('touchstart', touchStart, { passive: true });
+    host.addEventListener('touchmove', touchMove, { passive: false });
+    host.addEventListener('touchend', touchEnd, { passive: true });
+    host.addEventListener('touchcancel', touchEnd, { passive: true });
+    return () => {
+      host.removeEventListener('wheel', wheel);
+      host.removeEventListener('touchstart', touchStart);
+      host.removeEventListener('touchmove', touchMove);
+      host.removeEventListener('touchend', touchEnd);
+      host.removeEventListener('touchcancel', touchEnd);
+    };
+  }, [scrollHostElement, applyOverscroll, cancelOverscroll, releaseOverscroll]);
   const savedPanelLayout = useDefaultLayout({
     id: 'library-detail-layout',
     panelIds: showDetail ? ['library-list', 'library-detail'] : ['library-list'],
@@ -495,11 +545,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     };
     const openMenu = onArchiveContextMenu ? (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
       // Cards are the only elements with a menu; everything else keeps the
-      // platform default (which Tauri suppresses anyway).
+      // platform default for a right click (text fields keep their own, which is
+      // where 粘贴 lives).
       event.preventDefault();
       event.stopPropagation();
       onArchiveContextMenu(archive, { x: event.clientX, y: event.clientY });
     } : undefined;
+    // A right click where there is one, a finger held still where there is not.
+    const press = onArchiveContextMenu
+      ? longPressHandlers((at) => onArchiveContextMenu(archive, at))
+      : {};
     const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
       // Returning a fresh Set on every cover load would re-render the whole
       // list once per thumbnail.
@@ -529,6 +584,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         className={`archive-thumb-card${isSelected ? ' is-selected' : ''}`}
         onClick={openArchive}
         onContextMenu={openMenu}
+        {...press}
         type="button"
       >
         <div className="archive-thumb-card-media">
@@ -550,6 +606,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         className={`archive-row${isSelected ? ' is-selected' : ''}`}
         onClick={openArchive}
         onContextMenu={openMenu}
+        {...press}
         type="button"
       >
         {cover}
@@ -577,7 +634,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   };
 
   return (
-    <div className="library-workspace">
+    <div className="library-workspace" ref={rootRef}>
       {heading !== null && <h1 className="visually-hidden">{heading}</h1>}
       {/* Pull to refresh is a gesture, so its state is announced, not drawn: the
           list sliding down and the disc on its top edge are what the eye gets. */}
@@ -590,6 +647,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             name="archiveQuery"
             type="search"
             autoComplete="off"
+            /* A tag query is not prose: no capitals, no autocorrect, no red
+               squiggles — and the keyboard's action key says 搜索, not 换行. */
+            enterKeyHint="search"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
             placeholder={SEARCH_PLACEHOLDER}
             value={searchDraft}
             onChange={(e) => editSearchDraft(e.target.value)}
@@ -752,17 +815,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                springs back. Past the top it can also refresh — there is no
                refresh button any more — so the wheel and the finger are the only
                way to ask for it. */
-            onWheel={handleWheel}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            onTouchCancel={handleTouchEnd}
           >
             {/* The refresh's feedback, pinned over the list rather than carried
                 by it: the list springs back on release and this stays on top,
-                spinning, until the request ends. Compact layouts have no pull —
-                their page is the scroller — so there is nothing to pin it to. */}
-            {onRefresh && !compact && (
+                spinning, until the request ends. Sticky inside the panel, so it
+                holds the list's top edge in every layout. */}
+            {onRefresh && (
               <span
                 className={`library-pull-indicator${refreshing || overscroll > 0 ? ' is-visible' : ''}`}
                 aria-hidden="true"

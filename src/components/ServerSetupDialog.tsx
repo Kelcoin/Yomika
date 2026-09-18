@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { ChevronRight, Pencil, Server } from 'lucide-react';
+import { Pencil, Server } from 'lucide-react';
 import { X } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
@@ -7,6 +7,7 @@ import type { CommandResult } from '../domain/result';
 import { createServerIdentity, normalizeServerUrl, type ServerIdentity } from '../domain/server';
 import type { ServerRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { SettingsRowBody } from './SettingsRow';
 
 const repository = new NativeLibraryRepository();
 
@@ -84,27 +85,30 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
+      {/* 行的三格交给共享的 SettingsRowBody：这是唯一一处不能用 SettingsRow
+          的地方——asChild 会把对话框属性交给触发器的子元素，所以这一行的元素
+          必须是触发器自己的按钮，行的内容则不必自己再画一遍。 */}
       {variant === 'row' ? (
         <Dialog.Trigger asChild><button
           className="settings-row settings-row-button"
           type="button"
           aria-label={server ? `编辑 ${server.name}` : '添加服务器'}
         >
-          <span className="settings-row-icon" aria-hidden="true"><Server aria-hidden="true" /></span>
-          <span className="settings-row-copy">
-            <span className="settings-row-label">
-              {server ? server.name : '添加服务器'}
-              {/* 当前启用的服务器：书架、首页与档案库都读它。标记跟在名字
-                  后面，一眼可辨又不占行尾的空间；语义交给图标 + 名称，
-                  悬停有说明。 */}
-              {server?.enabled && <span className="server-current-badge" role="img" aria-label="当前服务器" title="当前启用的服务器"><ServerActiveMark /></span>}
-            </span>
-            <span className="settings-row-hint">{server ? server.baseUrl : '连接一台 LANraragi 服务器'}</span>
-          </span>
-          <span className="settings-row-control settings-row-value">
-            {server && <span>已配置</span>}
-            <ChevronRight aria-hidden="true" />
-          </span>
+          <SettingsRowBody
+            icon={<Server aria-hidden="true" />}
+            label={(
+              <>
+                {server ? server.name : '添加服务器'}
+                {/* 当前启用的服务器：书架、首页与档案库都读它。标记跟在名字
+                    后面，一眼可辨又不占行尾的空间；语义交给图标 + 名称，
+                    悬停有说明。 */}
+                {server?.enabled && <span className="server-current-badge" role="img" aria-label="当前服务器" title="当前启用的服务器"><ServerActiveMark /></span>}
+              </>
+            )}
+            hint={server ? server.baseUrl : '连接一台 LANraragi 服务器'}
+            value={server ? '已配置' : undefined}
+            trailing="nav"
+          />
         </button></Dialog.Trigger>
       ) : (
         <Dialog.Trigger asChild><button

@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Client;
-use rusqlite::{params, params_from_iter, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
@@ -2911,7 +2911,14 @@ pub async fn refresh_archives(
     // Tombstoning happens once, after every page is in hand: doing it per page
     // would mark the rest of the library deleted between requests.
     match replace_server_archives(&mut connection, &input.server_id, &archives) {
-        Ok(records) => Ok(CommandResult::success(records)),
+        Ok(records) => {
+            // A complete walk is the one moment the whole index is known to be
+            // current, so it is also the cheapest moment to clean out the records
+            // that point at archives the walk did not find — no per-id request, and
+            // it covers ids a shelf visit never got round to verifying.
+            let _ = prune_dangling_records_for_server(&mut connection, &input.server_id);
+            Ok(CommandResult::success(records))
+        }
         Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
     }
 }
@@ -3861,7 +3868,7 @@ pub fn list_archives_by_ids(
 
 /// How many ids one verification pass will check. The shelves show a handful of
 /// cards; a cap keeps a long history from turning into a request storm.
-const VERIFY_ARCHIVE_LIMIT: usize = 32;
+const VERIFY_ARCHIVE_LIMIT: usize = 64;
 
 /// Confirms that archives the local mirror is about to show still exist on the
 /// server, tombstoning the ones that do not, and answers with those ids.
@@ -3931,6 +3938,15 @@ pub async fn verify_archives_exist(
         match tombstoned {
             Ok(_) => missing.push(archive_id.clone()),
             Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
+        }
+    }
+    if !missing.is_empty() {
+        // The records that pointed at them are what the user actually sees: a
+        // shelf card that only fails once it has been opened. Acting here is what
+        // makes the cleanup prompt — no second round trip, and the local index was
+        // just told these are gone.
+        if let Ok(mut connection) = database.connection.lock() {
+            let _ = prune_dangling_records_for_server(&mut connection, &server_id);
         }
     }
     Ok(CommandResult::success(missing))
@@ -4540,6 +4556,242 @@ pub fn list_watchlist(
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
 }
+
+/// 历史自动清理：读完的留 3 个月，没读完的留 1 年。
+///
+/// 历史表是「每部档案一条」，不清理就会一直长：翻过的每一部都留着。读完的判断与
+/// 界面一致（`isArchiveFinished`：已读页数超过总页数的 95%），页数取自进度行；
+/// 没有进度行的历史（例如导入的）按没读完算，留得更久。
+pub(crate) const HISTORY_RETENTION_FINISHED_DAYS: i64 = 90;
+pub(crate) const HISTORY_RETENTION_UNFINISHED_DAYS: i64 = 365;
+const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+fn history_is_finished(page_index: i64, page_count: Option<i64>) -> bool {
+    match page_count {
+        // 与前端同一条式子，整数比较免去浮点误差。
+        Some(count) if count > 0 => (i128::from(page_index) + 1) * 100 > i128::from(count) * 95,
+        _ => false,
+    }
+}
+
+/// 删掉过期历史，并为每条写一个同步墓碑：别的设备下一次同步就跟着删，不会被它们
+/// 那份文档再带回来。时间解析不了的行一律保留——清理宁可少删。
+pub(crate) fn prune_reading_history(
+    connection: &mut Connection,
+    now_millis: i64,
+) -> Result<usize, String> {
+    let candidates: Vec<(String, String, String, i64, Option<i64>)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT h.scope_id, h.archive_id, h.visited_at, h.page_index, p.page_count
+                 FROM reading_history h
+                 LEFT JOIN reading_progress p
+                   ON p.scope_id = h.scope_id AND p.archive_id = h.archive_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let doomed = candidates
+        .into_iter()
+        .filter_map(|(scope_id, archive_id, visited_at, page_index, page_count)| {
+            let visited = super::sync::instant_millis(&visited_at)?;
+            let days = if history_is_finished(page_index, page_count) {
+                HISTORY_RETENTION_FINISHED_DAYS
+            } else {
+                HISTORY_RETENTION_UNFINISHED_DAYS
+            };
+            (visited <= now_millis - days * DAY_MILLIS).then_some((scope_id, archive_id))
+        })
+        .collect::<Vec<_>>();
+    if doomed.is_empty() {
+        return Ok(0);
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for (scope_id, archive_id) in &doomed {
+        transaction
+            .execute(
+                "DELETE FROM reading_history WHERE scope_id = ?1 AND archive_id = ?2",
+                params![scope_id, archive_id],
+            )
+            .map_err(|error| error.to_string())?;
+        let object_id = format!("{scope_id}/{archive_id}");
+        let clock: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
+                 WHERE scope_id = ?1 AND object_id = ?2",
+                params![scope_id, object_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        super::sync::journal_object(
+            &transaction,
+            scope_id,
+            "history",
+            &object_id,
+            clock,
+            serde_json::json!({ "archiveId": archive_id, "deleted": true }),
+        )?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(doomed.len())
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 历史自动清理的入口：启动后的巡检与设置里的「立即清理」都走它。
+#[tauri::command]
+pub fn prune_history(database: State<'_, Database>) -> CommandResult<usize> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match prune_reading_history(&mut connection, now_millis()) {
+        Ok(removed) => CommandResult::success(removed),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// 清理指向已不在 LANraragi 的档案的记录，各自删掉了几条。
+#[derive(Default, serde::Serialize)]
+pub struct PrunedRecords {
+    pub history: usize,
+    pub reading_list: usize,
+    pub watchlist: usize,
+}
+
+/// 一张记录表，以及它在同步日志里的对象类型。
+const DANGLING_RECORD_TABLES: [(&str, &str); 3] = [
+    ("reading_history", "history"),
+    ("reading_list", "watchlist"),
+    ("watchlist", "watchlist"),
+];
+
+/// 删掉指向「已确认不在 LANraragi」的档案的历史、待看与收藏夹记录。
+///
+/// 这三张表都是本地镜像的延伸：档案在 LRR 被删掉之后记录还留着，于是书架上会留下
+/// 一张点进去才知道失效的卡。判据只有一条——**本地索引里那行存在，且 `is_deleted = 1`**。
+/// 索引里根本没有这行时不动：那多半只是还没被索引（导入进来的记录正是这样），
+/// 「没索引到」不是「被删了」的证据，清理宁可少删。
+///
+/// 索引只会在拿到确定答案时标记删除：`verify_archives_exist` 认的是 400/404，
+/// `refresh_archives` 认的是成功走完整個库之后的缺席。所以这里不会因为一次网络抖动
+/// 而删掉记录。
+///
+/// 删除与墓碑写在同一个事务里（与历史保留期清理同一条路径），别的设备下次同步就跟着
+/// 删，而不是把它们那份文档再带回来。
+fn prune_dangling_records_for_server(
+    connection: &mut Connection,
+    server_id: &str,
+) -> Result<PrunedRecords, String> {
+    let scope_id: String = connection
+        .query_row(
+            "SELECT scope_id FROM servers WHERE id = ?1",
+            [server_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut pruned = PrunedRecords::default();
+    let mut prune_table = |connection: &mut Connection,
+                           table: &str,
+                           object_type: &str|
+     -> Result<usize, String> {
+        let doomed: Vec<String> = {
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT r.archive_id FROM {table} r
+                     JOIN archives a ON a.server_id = ?2 AND a.archive_id = r.archive_id
+                     WHERE r.scope_id = ?1 AND a.is_deleted = 1"
+                ))
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![scope_id, server_id], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<String>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        if doomed.is_empty() {
+            return Ok(0);
+        }
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for archive_id in &doomed {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE scope_id = ?1 AND archive_id = ?2"),
+                    params![scope_id, archive_id],
+                )
+                .map_err(|error| error.to_string())?;
+            let object_id = format!("{scope_id}/{archive_id}");
+            let clock: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
+                     WHERE scope_id = ?1 AND object_id = ?2",
+                    params![scope_id, object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            super::sync::journal_object(
+                &transaction,
+                &scope_id,
+                object_type,
+                &object_id,
+                clock,
+                serde_json::json!({ "archiveId": archive_id, "deleted": true }),
+            )?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(doomed.len())
+    };
+    for (table, object_type) in DANGLING_RECORD_TABLES {
+        let removed = prune_table(connection, table, object_type)?;
+        match table {
+            "reading_history" => pruned.history = removed,
+            "reading_list" => pruned.reading_list = removed,
+            _ => pruned.watchlist = removed,
+        }
+    }
+    Ok(pruned)
+}
+
+/// 手动清理一次失效记录。
+///
+/// 正常路径用不着它：`verify_archives_exist` 与 `refresh_archives` 各自在拿到确定
+/// 答案之后顺手清理。留着它是为了让「清理」这件事本身可以被测试和手动触发。
+#[tauri::command]
+pub fn prune_dangling_records(
+    server_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<PrunedRecords> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match prune_dangling_records_for_server(&mut connection, &server_id) {
+        Ok(pruned) => CommandResult::success(pruned),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 
 #[tauri::command]
 pub fn list_reading_history(
@@ -5266,6 +5518,135 @@ mod tests {
                 .query_row(sql, [], |row| row.get::<_, bool>(0))
                 .unwrap());
         }
+    }
+
+    #[test]
+    fn history_prune_keeps_recent_rows_and_tombstones_the_rest() {
+        let mut connection = migrated_connection();
+        // 四行历史：读完/没读完 × 超过/没超过各自的保留窗口。时间直接写成偏移，
+        // 清理只按 visited_at 与进度判断，不依赖写入顺序。
+        let now = now_millis();
+        let days_ago = |days: i64| {
+            let millis = now - days * DAY_MILLIS;
+            let seconds = millis / 1000;
+            // SQLite 的 CURRENT_TIMESTAMP 形状：UTC 的 YYYY-MM-DD HH:MM:SS。
+            let (year, month, day, hour, minute, second) = epoch_to_parts(seconds);
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+        };
+        for (archive_id, page_index, page_count, visited_days) in [
+            ("finished-old", 99, 100, 100),
+            ("finished-recent", 99, 100, 10),
+            ("unfinished-old", 3, 100, 200),
+            ("unfinished-ancient", 3, 100, 400),
+            // 没有进度行的历史（导入的）按没读完算。
+            ("orphan-ancient", 1, 0, 400),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                     VALUES ('scope-a', ?1, ?2, ?3, 'device-a', 1)",
+                    params![archive_id, page_index, days_ago(visited_days)],
+                )
+                .unwrap();
+            if page_count > 0 {
+                connection
+                    .execute(
+                        "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
+                         VALUES ('scope-a', ?1, ?2, ?3, 'paged', 'ltr', 'device-a', 1)",
+                        params![archive_id, page_index, page_count],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let removed = prune_reading_history(&mut connection, now).expect("prune");
+        assert_eq!(removed, 3);
+
+        let remaining: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT archive_id FROM reading_history ORDER BY archive_id")
+                .unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(remaining, vec!["finished-recent", "unfinished-old"]);
+
+        // 每条被清掉的都留下一个墓碑，别的设备下一次同步跟着删。
+        let tombstones: Vec<(String, String)> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT object_id, payload_json FROM sync_journal
+                     WHERE object_type = 'history' ORDER BY object_id",
+                )
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(tombstones.len(), 3);
+        assert!(tombstones
+            .iter()
+            .all(|(_, payload)| payload.contains("\"deleted\":true")));
+        assert!(tombstones
+            .iter()
+            .any(|(object_id, _)| object_id == "scope-a/unfinished-ancient"));
+        // 时钟取该对象的下一格：墓碑一定压过被删掉的那一版。
+        let clocks: Vec<i64> = tombstones
+            .iter()
+            .map(|(object_id, _)| {
+                connection
+                    .query_row(
+                        "SELECT logical_clock FROM sync_journal WHERE object_id = ?1",
+                        params![object_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert!(clocks.iter().all(|clock| *clock == 1));
+    }
+
+    fn epoch_to_parts(seconds: i64) -> (i64, i64, i64, i64, i64, i64) {
+        // 只做测试用的日期分解：从 1970-01-01 起按天推进。
+        let days = seconds.div_euclid(86_400);
+        let remainder = seconds.rem_euclid(86_400);
+        let (hour, minute, second) = (remainder / 3600, (remainder % 3600) / 60, remainder % 60);
+        let mut year = 1970;
+        let mut remaining = days;
+        loop {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let length = if leap { 366 } else { 365 };
+            if remaining < length {
+                break;
+            }
+            remaining -= length;
+            year += 1;
+        }
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let lengths = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut month = 0;
+        for (index, length) in lengths.iter().enumerate() {
+            if remaining < *length {
+                month = index as i64 + 1;
+                break;
+            }
+            remaining -= *length;
+        }
+        (year, month, remaining + 1, hour, minute, second)
     }
 
     #[test]
@@ -6174,6 +6555,71 @@ mod tests {
         ).expect("random payload");
         assert_eq!(archives.len(), 1);
         assert_eq!(archives[0].page_count, 12);
+    }
+
+    #[test]
+    fn dangling_records_are_pruned_only_when_the_archive_is_known_gone() {
+        let mut connection = migrated_connection();
+        connection
+            .execute_batch(
+                "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
+                 INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at, is_deleted) VALUES
+                   ('scope-a', 'alive', 'Alive', 'alive', '[]', 1, 100, 0),
+                   ('scope-a', 'gone', 'Gone', 'gone', '[]', 1, 100, 1);
+                 INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id) VALUES
+                   ('scope-a', 'alive', 1, '2026-09-17 12:00:00', 'dev-1'),
+                   ('scope-a', 'gone', 1, '2026-09-17 12:00:00', 'dev-1'),
+                   ('scope-a', 'never-indexed', 1, '2026-09-17 12:00:00', 'dev-1');
+                 INSERT INTO reading_list (scope_id, archive_id, device_id) VALUES
+                   ('scope-a', 'alive', 'dev-1'), ('scope-a', 'gone', 'dev-1');
+                 INSERT INTO watchlist (scope_id, archive_id, device_id) VALUES
+                   ('scope-a', 'gone', 'dev-1');",
+            )
+            .unwrap();
+
+        let pruned =
+            prune_dangling_records_for_server(&mut connection, "scope-a").expect("prune dangling");
+        assert_eq!(
+            (pruned.history, pruned.reading_list, pruned.watchlist),
+            (1, 1, 1)
+        );
+
+        // 索引里根本没有的那条留着：「还没被索引到」不是「被删了」的证据——导入进来的
+        // 记录正是这样，按缺失来判会把它们一次清空。
+        let history: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT archive_id FROM reading_history ORDER BY archive_id")
+                .unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(history, vec!["alive", "never-indexed"]);
+        let lists: i64 = connection
+            .query_row("SELECT COUNT(*) FROM reading_list", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lists, 1, "the live one stays");
+
+        // 每条被清掉的都留下墓碑，别的设备下一次同步跟着删。
+        let tombstones: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT payload_json FROM sync_journal ORDER BY object_id")
+                .unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(tombstones.len(), 3);
+        assert!(tombstones
+            .iter()
+            .all(|payload| payload.contains("\"deleted\":true")
+                && payload.contains("\"gone\"")));
+
+        // 幂等：再跑一次没有可删的。
+        let again =
+            prune_dangling_records_for_server(&mut connection, "scope-a").expect("prune again");
+        assert_eq!(
+            (again.history, again.reading_list, again.watchlist),
+            (0, 0, 0)
+        );
     }
 
     #[test]

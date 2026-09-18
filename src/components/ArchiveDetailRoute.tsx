@@ -380,7 +380,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             阅读, which spent a permanent toolbar slot on a rare choice and put a
             second reading entry point next to the real one. */}
         {detailActions.includes('read') && <Link
-          className="archive-action-button archive-action-primary"
+          className="primary-action"
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
           aria-label="阅读"
           title="阅读（长按进入无痕阅读）"
@@ -391,7 +391,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
         ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
-        {detailActions.includes('readingList') && <button className="archive-action-button" type="button" aria-pressed={inReadingList} onClick={() => {
+        {detailActions.includes('readingList') && <button className="secondary-action" type="button" aria-pressed={inReadingList} onClick={() => {
           if (!scopeId) return;
           void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
             if (result.ok) setInReadingList(!result.value.deleted);
@@ -401,7 +401,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
         </button>}
-        {detailActions.includes('favorites') && <button className="archive-action-button" type="button" aria-pressed={favorite} onClick={() => {
+        {detailActions.includes('favorites') && <button className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
           if (!scopeId) return;
           void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {
             if (result.ok) setFavorite(!result.value.deleted);
@@ -420,15 +420,15 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             });
           });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
-        {detailActions.includes('download') && <button className="archive-action-button" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
+        {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
           if (!serverId || downloading) return;
           setDownloading(true);
           void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? `下载完成：${result.value}` : result.error.message, result.ok ? 'success' : 'error')).finally(() => setDownloading(false));
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
-        {detailActions.includes('edit') && <button className="archive-action-button" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
+        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
         {serverId && detailActions.includes('delete') && (
-          <><button className="archive-action-button" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
+          <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}</>
         )}
       </div>

@@ -6,21 +6,25 @@ import { NativeSyncRepository } from '../../src/repositories/nativeSyncRepositor
 afterEach(resetInvokeAdapterForTests);
 
 describe('native sync repository bridge', () => {
-  it('saves and lists WebDAV accounts without returning credentials', async () => {
+  it('saves and lists sync accounts without returning credentials', async () => {
     const account = {
       id: 'account-a',
+      kind: 'webdav',
+      active: true,
       label: 'Personal WebDAV',
+      bucket: '',
       baseUrl: 'https://dav.example.com/Yomika',
       username: 'reader',
       credentialRef: 'account-a',
       syncScope: '',
       status: 'unverified',
       lastProbeAt: null,
+      lastSyncAt: null,
       lastErrorCode: null,
       createdAt: '2026-08-26 00:00:00',
       updatedAt: '2026-08-26 00:00:00',
     };
-    const adapter = vi.fn(async (command: string) => command === 'save_webdav_account'
+    const adapter = vi.fn(async (command: string) => command === 'save_sync_account'
       ? { ok: true, value: account }
       : { ok: true, value: [account] });
     setInvokeAdapterForTests(adapter);
@@ -28,22 +32,26 @@ describe('native sync repository bridge', () => {
 
     expect(await repository.saveAccount({
       id: 'account-a',
+      kind: 'webdav',
       label: 'Personal WebDAV',
       baseUrl: 'https://dav.example.com/Yomika',
+      bucket: '',
       username: 'reader',
       credential: 'secret-token',
     })).toEqual({ ok: true, value: account });
     expect(await repository.listAccounts()).toEqual({ ok: true, value: [account] });
-    expect(adapter).toHaveBeenNthCalledWith(1, 'save_webdav_account', {
+    expect(adapter).toHaveBeenNthCalledWith(1, 'save_sync_account', {
       input: {
         id: 'account-a',
+        kind: 'webdav',
         label: 'Personal WebDAV',
         baseUrl: 'https://dav.example.com/Yomika',
+        bucket: '',
         username: 'reader',
         credential: 'secret-token',
       },
     });
-    expect(adapter).toHaveBeenNthCalledWith(2, 'list_webdav_accounts', {});
+    expect(adapter).toHaveBeenNthCalledWith(2, 'list_sync_accounts', {});
     expect(account).not.toHaveProperty('credential');
   });
 
@@ -52,9 +60,9 @@ describe('native sync repository bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value: 2 }));
     setInvokeAdapterForTests(adapter);
 
-    expect(await new NativeSyncRepository().syncWebdavScope('account-a', 'scope-a'))
+    expect(await new NativeSyncRepository().syncRemoteScope('account-a', 'scope-a'))
       .toEqual({ ok: true, value: 2 });
-    expect(adapter).toHaveBeenCalledWith('sync_webdav_scope', {
+    expect(adapter).toHaveBeenCalledWith('sync_remote_scope', {
       accountId: 'account-a', scopeId: 'scope-a',
     });
   });
@@ -63,7 +71,7 @@ describe('native sync repository bridge', () => {
     const surface = Object.getOwnPropertyNames(NativeSyncRepository.prototype)
       .filter((name) => name !== 'constructor')
       .sort();
-    expect(surface).toEqual(['accountCredential', 'listAccounts', 'resetRemote', 'saveAccount', 'syncWebdavScope']);
+    expect(surface).toEqual(['accountCredential', 'listAccounts', 'resetRemote', 'saveAccount', 'saveScope', 'syncRemoteScope', 'testAccount']);
   });
 
   it('resets the remote document through its own command', async () => {
@@ -71,6 +79,6 @@ describe('native sync repository bridge', () => {
     setInvokeAdapterForTests(adapter);
 
     expect(await new NativeSyncRepository().resetRemote('account-a')).toEqual({ ok: true, value: undefined });
-    expect(adapter).toHaveBeenCalledWith('reset_webdav_state', { accountId: 'account-a' });
+    expect(adapter).toHaveBeenCalledWith('reset_remote_state', { accountId: 'account-a' });
   });
 });

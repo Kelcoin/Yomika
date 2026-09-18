@@ -5,6 +5,7 @@ import { pickSavePath } from '../bridge/filePicker';
 import { flushErrorLog } from '../lib/errorLog';
 import { NativeErrorLogRepository, type ErrorLogEntry } from '../repositories/nativeErrorLogRepository';
 import { useToast } from './Toast';
+import { StatusLine } from './StatusLine';
 
 const repository = new NativeErrorLogRepository();
 
@@ -72,13 +73,9 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
   const { entries, busy, exporting, reload, exportLog } = state;
   return <div className="error-log-panel">
     <div className="error-log-toolbar">
-      <p className="error-log-summary">
-        {entries === undefined
-          ? '正在读取…'
-          : entries.length === 0
-            ? '本次运行还没有记录到错误。'
-            : `本次运行记录到 ${entries.length} 条。`}
-      </p>
+      {entries === undefined
+        ? <StatusLine busy>正在读取…</StatusLine>
+        : <p className="error-log-summary">{entries.length === 0 ? '本次运行还没有记录到错误。' : `本次运行记录到 ${entries.length} 条。`}</p>}
       <div className="error-log-actions">
         <button className="secondary-action" type="button" disabled={busy} aria-busy={busy} onClick={() => void reload()}>
           <RefreshCw aria-hidden="true" />刷新

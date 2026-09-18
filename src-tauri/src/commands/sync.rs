@@ -6,7 +6,7 @@ use tauri::State;
 use url::Url;
 
 use crate::{
-    db::Database, domain::result::CommandResult, network::webdav::WebdavClient,
+    db::Database, domain::result::CommandResult,
     settings::get_or_create_device_id,
 };
 
@@ -492,67 +492,92 @@ impl WebdavCredentialStore for SystemWebdavCredentialStore {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveWebdavAccountInput {
+pub struct SaveSyncAccountInput {
     id: String,
-    label: String,
-    base_url: String,
-    username: String,
-    credential: String,
-    /// 勾选的同步类别（JSON 数组）。缺省＝默认集合。
+    /// "webdav" 或 "s3"（S3 兼容对象存储，例如 Cloudflare R2）。
     #[serde(default)]
-    sync_scope: String,
+    kind: String,
+    label: String,
+    /// WebDAV：目录地址；S3：端点，如 https://<账号>.r2.cloudflarestorage.com。
+    base_url: String,
+    /// 只有 S3 用得上：存储桶名。
+    #[serde(default)]
+    bucket: String,
+    /// WebDAV：用户名；S3：Access Key ID。
+    username: String,
+    /// WebDAV：口令或应用密码；S3：Secret Access Key。都进系统凭据库。
+    credential: String,
+    /// 勾选的同步类别（JSON 数组）。这是「同步范围」那个设置行自己的事：
+    /// 账户表单不再带它，缺省＝沿用已存的范围（新账户＝默认集合）。
+    #[serde(default)]
+    sync_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebdavAccountRecord {
+pub struct SyncAccountRecord {
     id: String,
+    kind: String,
+    /// 同时只生效一套：同步、账户行、同步范围都看这一行。
+    active: bool,
     label: String,
     base_url: String,
+    bucket: String,
     username: String,
     credential_ref: String,
     sync_scope: String,
     status: String,
     last_probe_at: Option<String>,
+    /// 上次成功同步的时刻；空值＝还没同步过。
+    last_sync_at: Option<String>,
     last_error_code: Option<String>,
     created_at: String,
     updated_at: String,
 }
 
-fn read_webdav_account(
+fn read_sync_account(
     connection: &Connection,
     account_id: &str,
-) -> Result<WebdavAccountRecord, String> {
+) -> Result<SyncAccountRecord, String> {
     connection
         .query_row(
-            "SELECT id, label, base_url, username, credential_ref, sync_scope, status,
-                    last_probe_at, last_error_code, created_at, updated_at
-             FROM webdav_accounts WHERE id = ?1",
+            "SELECT id, kind, active, label, base_url, bucket, username, credential_ref, sync_scope,
+                    status, last_probe_at, last_sync_at, last_error_code, created_at, updated_at
+             FROM sync_accounts WHERE id = ?1",
             params![account_id],
             |row| {
-                Ok(WebdavAccountRecord {
+                Ok(SyncAccountRecord {
                     id: row.get(0)?,
-                    label: row.get(1)?,
-                    base_url: row.get(2)?,
-                    username: row.get(3)?,
-                    credential_ref: row.get(4)?,
-                    sync_scope: row.get(5)?,
-                    status: row.get(6)?,
-                    last_probe_at: row.get(7)?,
-                    last_error_code: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    kind: row.get(1)?,
+                    active: row.get(2)?,
+                    label: row.get(3)?,
+                    base_url: row.get(4)?,
+                    bucket: row.get(5)?,
+                    username: row.get(6)?,
+                    credential_ref: row.get(7)?,
+                    sync_scope: row.get(8)?,
+                    status: row.get(9)?,
+                    last_probe_at: row.get(10)?,
+                    last_sync_at: row.get(11)?,
+                    last_error_code: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
                 })
             },
         )
         .map_err(|error| error.to_string())
 }
 
-pub fn save_webdav_account_record(
+pub fn save_sync_account_record(
     connection: &mut Connection,
     credentials: &dyn WebdavCredentialStore,
-    input: SaveWebdavAccountInput,
-) -> CommandResult<WebdavAccountRecord> {
+    input: SaveSyncAccountInput,
+) -> CommandResult<SyncAccountRecord> {
+    let kind = match input.kind.trim() {
+        "" | "webdav" => "webdav",
+        "s3" => "s3",
+        _ => return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account kind", false),
+    };
     let parsed_url = match Url::parse(&input.base_url) {
         Ok(url)
             if matches!(url.scheme(), "http" | "https")
@@ -562,8 +587,30 @@ pub fn save_webdav_account_record(
         {
             url
         }
-        _ => return CommandResult::failure("INVALID_RESPONSE", "Invalid WebDAV URL", false),
+        _ => {
+            return CommandResult::failure(
+                "INVALID_RESPONSE",
+                if kind == "s3" { "Invalid object storage endpoint" } else { "Invalid WebDAV URL" },
+                false,
+            )
+        }
     };
+    let bucket = input.bucket.trim().trim_matches('/').to_string();
+    if kind == "s3" {
+        // 桶名就是 S3 自己那套规则（小写字母数字与点/连字符，3–63 位），
+        // 免得把 404 留到第一次同步才暴露。
+        if bucket.len() < 3
+            || bucket.len() > 63
+            || !bucket.chars().all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '.'))
+            || bucket.starts_with('-')
+            || bucket.ends_with('-')
+        {
+            return CommandResult::failure("INVALID_RESPONSE", "Invalid bucket name", false);
+        }
+        if input.username.trim().is_empty() {
+            return CommandResult::failure("INVALID_RESPONSE", "Access key ID is required", false);
+        }
+    }
     if input.id.is_empty()
         || !input
             .id
@@ -571,16 +618,17 @@ pub fn save_webdav_account_record(
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
         || input.label.trim().is_empty()
     {
-        return CommandResult::failure("INVALID_RESPONSE", "Invalid WebDAV account", false);
+        return CommandResult::failure("INVALID_RESPONSE", "Invalid sync account", false);
     }
 
-    let old_credential_ref: Option<String> = connection
+    let existing: Option<(String, String)> = connection
         .query_row(
-            "SELECT credential_ref FROM webdav_accounts WHERE id = ?1",
+            "SELECT credential_ref, sync_scope FROM sync_accounts WHERE id = ?1",
             params![input.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
+    let old_credential_ref: Option<String> = existing.as_ref().map(|(reference, _)| reference.clone());
 
     // 编辑已存在的账户时口令可以留空——表单不会把旧口令回填出来，为了让改名、
     // 换地址这些操作不被迫重输一遍口令，空口令就沿用存着的那份凭据。
@@ -617,14 +665,29 @@ pub fn save_webdav_account_record(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     };
-    let sync_scope = serialize_sync_scope(&parse_sync_scope(&input.sync_scope));
+    // 只生效一套：保存这一套就是启用它，另一套（另一种类型的那份）留在库里待命。
+    let sync_scope = match input.sync_scope.as_deref() {
+        Some(raw) => serialize_sync_scope(&parse_sync_scope(raw)),
+        // 表单没带范围就别动它：编辑账户（改个名字、换个地址）不该把勾选重置掉。
+        None => existing
+            .as_ref()
+            .map(|(_, scope)| scope.clone())
+            .unwrap_or_else(|| serialize_sync_scope(&[])),
+    };
+    if let Err(error) = transaction.execute("UPDATE sync_accounts SET active = 0 WHERE id <> ?1", params![input.id]) {
+        let _ = credentials.delete_credential(&credential_ref);
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
     if let Err(error) = transaction.execute(
-        "INSERT INTO webdav_accounts
-            (id, label, base_url, username, credential_ref, sync_scope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO sync_accounts
+            (id, kind, active, label, base_url, bucket, username, credential_ref, sync_scope)
+         VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind,
+            active = 1,
             label = excluded.label,
             base_url = excluded.base_url,
+            bucket = excluded.bucket,
             username = excluded.username,
             credential_ref = excluded.credential_ref,
             sync_scope = excluded.sync_scope,
@@ -634,8 +697,10 @@ pub fn save_webdav_account_record(
             updated_at = CURRENT_TIMESTAMP",
         params![
             input.id,
+            kind,
             input.label.trim(),
             parsed_url.as_str().trim_end_matches('/'),
+            bucket,
             input.username.trim(),
             credential_ref,
             sync_scope,
@@ -644,7 +709,7 @@ pub fn save_webdav_account_record(
         let _ = credentials.delete_credential(&credential_ref);
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
-    let record = match read_webdav_account(&transaction, &input.id) {
+    let record = match read_sync_account(&transaction, &input.id) {
         Ok(record) => record,
         Err(error) => {
             let _ = credentials.delete_credential(&credential_ref);
@@ -664,39 +729,43 @@ pub fn save_webdav_account_record(
 }
 
 #[tauri::command]
-pub fn save_webdav_account(
-    input: SaveWebdavAccountInput,
+pub fn save_sync_account(
+    input: SaveSyncAccountInput,
     database: State<'_, Database>,
-) -> CommandResult<WebdavAccountRecord> {
+) -> CommandResult<SyncAccountRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    save_webdav_account_record(&mut connection, &SystemWebdavCredentialStore, input)
+    save_sync_account_record(&mut connection, &SystemWebdavCredentialStore, input)
 }
 
-fn query_webdav_accounts(connection: &Connection) -> Result<Vec<WebdavAccountRecord>, String> {
+fn query_sync_accounts(connection: &Connection) -> Result<Vec<SyncAccountRecord>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, label, base_url, username, credential_ref, sync_scope, status,
-                    last_probe_at, last_error_code, created_at, updated_at
-             FROM webdav_accounts ORDER BY label COLLATE NOCASE, id",
+            "SELECT id, kind, active, label, base_url, bucket, username, credential_ref, sync_scope,
+                    status, last_probe_at, last_sync_at, last_error_code, created_at, updated_at
+             FROM sync_accounts ORDER BY active DESC, label COLLATE NOCASE, id",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
-            Ok(WebdavAccountRecord {
+            Ok(SyncAccountRecord {
                 id: row.get(0)?,
-                label: row.get(1)?,
-                base_url: row.get(2)?,
-                username: row.get(3)?,
-                credential_ref: row.get(4)?,
-                sync_scope: row.get(5)?,
-                status: row.get(6)?,
-                last_probe_at: row.get(7)?,
-                last_error_code: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                kind: row.get(1)?,
+                active: row.get(2)?,
+                label: row.get(3)?,
+                base_url: row.get(4)?,
+                bucket: row.get(5)?,
+                username: row.get(6)?,
+                credential_ref: row.get(7)?,
+                sync_scope: row.get(8)?,
+                status: row.get(9)?,
+                last_probe_at: row.get(10)?,
+                last_sync_at: row.get(11)?,
+                last_error_code: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -704,15 +773,152 @@ fn query_webdav_accounts(connection: &Connection) -> Result<Vec<WebdavAccountRec
         .map_err(|error| error.to_string())
 }
 
+/// 「测试」：拿表单里当前的字段去连一次远端，确认地址、桶、凭据都对。
+///
+/// 不写任何东西：WebDAV 只做一次 PROPFIND，对象存储只做一次 HeadBucket；如果远端
+/// 已经有同步文档，再用当前凭据解开它——那一步同时证明了「这份文档当初就是这套凭据
+/// 加的密」，也就是换口令之后最常踩的那个坑。
 #[tauri::command]
-pub fn list_webdav_accounts(
+pub fn test_sync_account(
+    input: SaveSyncAccountInput,
     database: State<'_, Database>,
-) -> CommandResult<Vec<WebdavAccountRecord>> {
+) -> CommandResult<String> {
+    tauri::async_runtime::block_on(async move {
+        let kind = match input.kind.trim() {
+            "s3" => "s3",
+            _ => "webdav",
+        };
+        if input.base_url.trim().is_empty()
+            || (kind == "s3" && input.bucket.trim().is_empty())
+            || (kind == "s3" && input.username.trim().is_empty())
+        {
+            return CommandResult::failure("INVALID_RESPONSE", "先填好地址、桶与 Access Key ID", false);
+        }
+        // 表单里可能是空凭据（编辑时留空＝沿用）：那就取库里那一份。
+        let credential = if input.credential.is_empty() {
+            let stored = {
+                let connection = match database.connection.lock() {
+                    Ok(connection) => connection,
+                    Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+                };
+                connection
+                    .query_row(
+                        "SELECT credential_ref FROM sync_accounts WHERE id = ?1",
+                        params![input.id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+            };
+            match stored.and_then(|reference| SystemWebdavCredentialStore.get_credential(&reference).ok()) {
+                Some(credential) => credential,
+                None => {
+                    return CommandResult::failure("INVALID_RESPONSE", "请先填写凭据再测试", false)
+                }
+            }
+        } else {
+            input.credential.clone()
+        };
+
+        let store = match RemoteStore::connect(
+            kind,
+            input.base_url.trim().trim_end_matches('/'),
+            input.bucket.trim().trim_matches('/'),
+            input.username.trim(),
+            &credential,
+        ) {
+            Ok(store) => store,
+            Err(error) => return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false),
+        };
+        if let Err(error) = store.probe().await {
+            let (code, message) = describe_probe_error(error);
+            return CommandResult::failure(code, message, false);
+        }
+        let account_id = if input.id.trim().is_empty() {
+            input.label.trim().to_string()
+        } else {
+            input.id.clone()
+        };
+        let key = derive_sync_key(&account_id, &credential);
+        match store.get_state(&account_id).await {
+            Ok(Some(remote)) => match decode_sync_state(&key, &remote.ciphertext) {
+                Ok(state) => CommandResult::success(format!(
+                    "连接正常：远端已有同步文档（{} 个对象），当前凭据可以解开",
+                    state.objects.len()
+                )),
+                Err(_) => CommandResult::failure(
+                    "INVALID_RESPONSE",
+                    "连接正常，但远端文档解不开：这台设备上的凭据和当初上传时不一致。换成当初那串口令，或在账户菜单里「重置远端」后按本机重写一份。",
+                    false,
+                ),
+            },
+            Ok(None) => CommandResult::success(
+                "连接正常：远端还没有同步文档，第一次同步会创建它".to_string(),
+            ),
+            Err(error) => {
+                let (code, message) = describe_probe_error(error);
+                CommandResult::failure(code, message, false)
+            }
+        }
+    })
+}
+
+/// 把探测失败翻译成使用者能照着修的说法：401/403 是凭据与权限，其余照原样报。
+fn describe_probe_error(error: crate::network::remote::RemoteError) -> (&'static str, String) {
+    match error {
+        crate::network::remote::RemoteError::Http(status) => match status.as_u16() {
+            401 => ("INVALID_INPUT", "凭据被拒绝（401）：检查用户名 / 密码或 Token".to_string()),
+            403 => (
+                "INVALID_INPUT",
+                "没有权限（403）：检查账号权限；对象存储的 Token 需要「对象读写」，且桶要在这个 Token 的范围内".to_string(),
+            ),
+            other => ("NETWORK", format!("远端返回 HTTP {other}")),
+        },
+        crate::network::remote::RemoteError::InvalidUrl(message) => ("INVALID_INPUT", message),
+        crate::network::remote::RemoteError::Request(message) => ("NETWORK", message),
+        crate::network::remote::RemoteError::StateConflict => {
+            ("REMOTE_CONFLICT", "远端文档被别的设备改过，重新测一次或直接同步".to_string())
+        }
+        crate::network::remote::RemoteError::Verification(message) => ("INVALID_RESPONSE", message),
+    }
+}
+
+/// 「同步范围」是一个独立的设置行：勾选后立刻写回账户，不必再走账户表单。
+#[tauri::command]
+pub fn save_sync_scope(
+    account_id: String,
+    sync_scope: String,
+    database: State<'_, Database>,
+) -> CommandResult<SyncAccountRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    match query_webdav_accounts(&connection) {
+    let serialized = serialize_sync_scope(&parse_sync_scope(&sync_scope));
+    let updated = match connection.execute(
+        "UPDATE sync_accounts SET sync_scope = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        params![account_id, serialized],
+    ) {
+        Ok(updated) => updated,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    if updated == 0 {
+        return CommandResult::failure("NOT_FOUND", "Sync account not found", false);
+    }
+    match read_sync_account(&connection, &account_id) {
+        Ok(record) => CommandResult::success(record),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn list_sync_accounts(
+    database: State<'_, Database>,
+) -> CommandResult<Vec<SyncAccountRecord>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match query_sync_accounts(&connection) {
         Ok(accounts) => CommandResult::success(accounts),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
@@ -735,17 +941,23 @@ fn load_sync_key(
 ) -> Result<[u8; 32], String> {
     let credential_ref: String = connection
         .query_row(
-            "SELECT credential_ref FROM webdav_accounts WHERE id = ?1",
+            "SELECT credential_ref FROM sync_accounts WHERE id = ?1",
             [account_id],
             |row| row.get(0),
         )
         .map_err(|_| "同步账户不存在".to_string())?;
     let credential = credentials.get_credential(&credential_ref)?;
-    Ok(*blake3::Hasher::new_derive_key("app.yomika.webdav.sync.v1")
+    Ok(derive_sync_key(account_id, &credential))
+}
+
+/// 同步密钥＝账户 id + 凭据派生。远端密文对存储服务不可读，靠的就是它；
+/// 也因此「凭据换了」等价于「远端文档解不开」——测试按钮据此给出人话提示。
+fn derive_sync_key(account_id: &str, credential: &str) -> [u8; 32] {
+    *blake3::Hasher::new_derive_key("app.yomika.webdav.sync.v1")
         .update(account_id.as_bytes())
         .update(credential.as_bytes())
         .finalize()
-        .as_bytes())
+        .as_bytes()
 }
 
 fn set_journal_batch_state(
@@ -839,7 +1051,7 @@ fn remote_progress_wins(
 /// 8601 shape — including explicit offsets, where printed digits stop
 /// matching time order. Unparseable strings fall back to lexical order so the
 /// comparison stays deterministic.
-fn instant_millis(timestamp: &str) -> Option<i64> {
+pub(crate) fn instant_millis(timestamp: &str) -> Option<i64> {
     let trimmed = timestamp.trim();
     let (date_part, rest) = if let Some((date, time)) = trimmed.split_once('T') {
         (date, time)
@@ -1092,6 +1304,42 @@ fn apply_remote_history(
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let archive_id = payload_text(payload, "archiveId")?;
+    // 历史清理写下的墓碑：远端已经把这条记录清掉了，本地跟着删，否则下一次同步
+    // 又会把它带回来（本地没有行时任何远端版本都算赢）。
+    if object.operation == "delete" || payload_bool(payload, "deleted").unwrap_or(false) {
+        // 历史表的时间列叫 visited_at，不是通用行状态里的 updated_at，这里单独读。
+        let local: Option<(i64, String, String)> = transaction
+            .query_row(
+                "SELECT revision, visited_at, COALESCE(device_id, '') FROM reading_history
+                 WHERE scope_id = ?1 AND archive_id = ?2",
+                params![scope_id, archive_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let gate = local
+            .map(|(clock, updated, device)| {
+                remote_change_wins(
+                    clock,
+                    &updated,
+                    &device,
+                    object.logical_clock,
+                    &object.wall_clock,
+                    &object.device_id,
+                )
+            })
+            .unwrap_or(false);
+        if !gate {
+            return Ok(false);
+        }
+        return transaction
+            .execute(
+                "DELETE FROM reading_history WHERE scope_id = ?1 AND archive_id = ?2",
+                params![scope_id, archive_id],
+            )
+            .map(|removed| removed > 0)
+            .map_err(|error| error.to_string());
+    }
     let page_index = payload
         .get("pageIndex")
         .and_then(|value| value.as_i64())
@@ -1334,7 +1582,7 @@ pub(crate) fn recover_stuck_sync_journal(connection: &Connection) -> Result<usiz
 }
 
 #[tauri::command]
-pub fn sync_webdav_scope(
+pub fn sync_remote_scope(
     account_id: String,
     scope_id: String,
     database: State<'_, Database>,
@@ -1345,7 +1593,7 @@ pub fn sync_webdav_scope(
                 Ok(connection) => connection,
                 Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
             };
-            let account = match read_webdav_account(&connection, &account_id) {
+            let account = match read_sync_account(&connection, &account_id) {
                 Ok(account) => account,
                 Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
             };
@@ -1390,7 +1638,7 @@ pub fn sync_webdav_scope(
 /// 比如口令换过、旧密文再也解不开：重置后下次同步会按本地重新写一份。
 /// 「编辑」表单要回显已存的口令。凭据平时只在系统安全存储里，这里按需读一次。
 #[tauri::command]
-pub fn webdav_account_credential(
+pub fn sync_account_credential(
     account_id: String,
     database: State<'_, Database>,
 ) -> CommandResult<String> {
@@ -1398,7 +1646,7 @@ pub fn webdav_account_credential(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let account = match read_webdav_account(&connection, &account_id) {
+    let account = match read_sync_account(&connection, &account_id) {
         Ok(account) => account,
         Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
     };
@@ -1409,7 +1657,7 @@ pub fn webdav_account_credential(
 }
 
 #[tauri::command]
-pub fn reset_webdav_state(
+pub fn reset_remote_state(
     account_id: String,
     database: State<'_, Database>,
 ) -> CommandResult<()> {
@@ -1419,7 +1667,7 @@ pub fn reset_webdav_state(
                 Ok(connection) => connection,
                 Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
             };
-            let account = match read_webdav_account(&connection, &account_id) {
+            let account = match read_sync_account(&connection, &account_id) {
                 Ok(account) => account,
                 Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
             };
@@ -1430,20 +1678,111 @@ pub fn reset_webdav_state(
             };
             (account, credential)
         };
-        let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
-            Ok(client) => client,
+        let store = match RemoteStore::for_account(&account, &credential) {
+            Ok(store) => store,
             Err(error) => {
                 return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false)
             }
         };
-        match client.delete_state(&account.id).await {
+        match store.delete_state(&account.id).await {
             Ok(()) => CommandResult::success(()),
             Err(error) => CommandResult::failure("NETWORK", sync_error(error), true),
         }
     })
 }
 
-/// The push + pull pipeline behind `sync_webdav_scope`, split from the command so
+/// 远端存储的两种实现。同一份同步引擎（合并、条件写、重试）对两者完全一样，
+/// 只有「怎么读一份文档、怎么条件写回」不同。
+enum RemoteStore {
+    Webdav(crate::network::webdav::WebdavClient),
+    S3(crate::network::s3::S3Client),
+}
+
+impl RemoteStore {
+    /// 按账户类型建客户端。S3 的「用户名」是 Access Key ID，凭据是 Secret Access Key。
+    /// 收字段而不是收整行：设置页的「测试」按钮手里只有表单草稿，账户还没保存。
+    fn connect(
+        kind: &str,
+        base_url: &str,
+        bucket: &str,
+        username: &str,
+        credential: &str,
+    ) -> Result<Self, crate::network::remote::RemoteError> {
+        if kind == "s3" {
+            Ok(Self::S3(crate::network::s3::S3Client::new(
+                base_url,
+                bucket,
+                username,
+                credential,
+                crate::network::s3::DEFAULT_REGION,
+            )?))
+        } else {
+            Ok(Self::Webdav(crate::network::webdav::WebdavClient::new(
+                base_url, username, credential,
+            )?))
+        }
+    }
+
+    /// 「测试」：只验证能不能连上、凭据对不对，不动远端数据。
+    async fn probe(&self) -> Result<(), crate::network::remote::RemoteError> {
+        match self {
+            Self::Webdav(client) => client.probe().await,
+            Self::S3(client) => client.probe().await,
+        }
+    }
+
+    /// 账户行的字段（调用点用起来顺手）。
+    fn for_account(
+        account: &SyncAccountRecord,
+        credential: &str,
+    ) -> Result<Self, crate::network::remote::RemoteError> {
+        Self::connect(
+            &account.kind,
+            &account.base_url,
+            &account.bucket,
+            &account.username,
+            credential,
+        )
+    }
+
+    async fn get_state(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<crate::network::remote::RemoteState>, crate::network::remote::RemoteError> {
+        match self {
+            Self::Webdav(client) => client.get_state(account_id).await,
+            Self::S3(client) => client.get_state(account_id).await,
+        }
+    }
+
+    async fn update_state_with_retry<F>(
+        &self,
+        account_id: &str,
+        ciphertext: Vec<u8>,
+        etag: Option<String>,
+        merge: F,
+    ) -> Result<(), crate::network::remote::RemoteError>
+    where
+        F: Fn(&[u8]) -> Result<Vec<u8>, crate::network::remote::RemoteError>,
+    {
+        match self {
+            Self::Webdav(client) => client.update_state_with_retry(account_id, ciphertext, etag, merge).await,
+            Self::S3(client) => client.update_state_with_retry(account_id, ciphertext, etag, merge).await,
+        }
+    }
+
+    async fn delete_state(
+        &self,
+        account_id: &str,
+    ) -> Result<(), crate::network::remote::RemoteError> {
+        match self {
+            Self::Webdav(client) => client.delete_state(account_id).await,
+            Self::S3(client) => client.delete_state(account_id).await,
+        }
+    }
+}
+
+/// The push + pull pipeline behind `sync_remote_scope`, split from the command so
 /// tests can drive it with an in-memory credential store against a mock server.
 ///
 /// Push: the local object set is merged into the remote document and written with
@@ -1453,7 +1792,7 @@ pub fn reset_webdav_state(
 #[allow(clippy::too_many_arguments)]
 async fn sync_scope_impl(
     database: &Database,
-    account: &WebdavAccountRecord,
+    account: &SyncAccountRecord,
     key: &[u8; 32],
     scope_id: &str,
     local_state: SyncStateDocument,
@@ -1474,8 +1813,8 @@ async fn sync_scope_impl(
             return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
         }
     };
-    let client = match WebdavClient::new(&account.base_url, &account.username, &credential) {
-        Ok(client) => client,
+    let store = match RemoteStore::for_account(account, &credential) {
+        Ok(store) => store,
         Err(error) => {
             let message = sync_error(error);
             retryable(&message);
@@ -1483,7 +1822,7 @@ async fn sync_scope_impl(
         }
     };
 
-    let remote = match client.get_state(&account.id).await {
+    let remote = match store.get_state(&account.id).await {
         Ok(value) => value,
         Err(error) => {
             let message = sync_error(error);
@@ -1506,12 +1845,12 @@ async fn sync_scope_impl(
         Ok(bytes) => bytes,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    let result = client
+    let result = store
         .update_state_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
             let remote_state = decode_sync_state(key, remote_bytes)
-                .map_err(crate::network::webdav::WebdavError::Verification)?;
+                .map_err(crate::network::remote::RemoteError::Verification)?;
             encode_sync_state(key, &merge_sync_states(&local_state, &remote_state))
-                .map_err(crate::network::webdav::WebdavError::Verification)
+                .map_err(crate::network::remote::RemoteError::Verification)
         })
         .await;
     if let Err(error) = result {
@@ -1532,6 +1871,14 @@ async fn sync_scope_impl(
             set_journal_batch_state(&mut connection, scope_id, &sequences, "completed", None)
         {
             return CommandResult::failure("UNKNOWN", error, true);
+        }
+        // 这一次是真的推拉成功了：账户行记下时刻，界面显示「上次同步」，
+        // 自动同步也据此判断启动/回到前台时要不要补一次。
+        if let Err(error) = connection.execute(
+            "UPDATE sync_accounts SET last_sync_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![account.id],
+        ) {
+            return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
         // 拉取：把合并后的对象落回本地表（自己那部分重复应用是无害的）。
         let objects = merged
@@ -1934,6 +2281,15 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0024_sync_scope.sql"))
             .expect("sync scope migration");
         connection
+            .execute_batch(include_str!("../../migrations/0025_webdav_last_sync.sql"))
+            .expect("webdav last sync migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0026_sync_accounts.sql"))
+            .expect("sync accounts migration");
+        connection
+            .execute_batch(include_str!("../../migrations/0027_sync_account_active.sql"))
+            .expect("sync account active migration");
+        connection
     }
 
     struct MemoryWebdavCredentialStore {
@@ -1973,14 +2329,16 @@ mod tests {
         }
     }
 
-    fn webdav_input(base_url: &str) -> SaveWebdavAccountInput {
-        SaveWebdavAccountInput {
+    fn account_input(base_url: &str) -> SaveSyncAccountInput {
+        SaveSyncAccountInput {
             id: "account-a".to_string(),
+            kind: "webdav".to_string(),
+            bucket: String::new(),
             label: "Personal WebDAV".to_string(),
             base_url: base_url.to_string(),
             username: "reader".to_string(),
             credential: "secret-token".to_string(),
-            sync_scope: String::new(),
+            sync_scope: None,
         }
     }
 
@@ -1998,14 +2356,16 @@ mod tests {
         }
     }
 
-    fn saved(label: &str, credential: &str) -> SaveWebdavAccountInput {
-        SaveWebdavAccountInput {
+    fn saved(label: &str, credential: &str) -> SaveSyncAccountInput {
+        SaveSyncAccountInput {
             id: "account-a".to_string(),
+            kind: "webdav".to_string(),
+            bucket: String::new(),
             label: label.to_string(),
             base_url: "https://dav.example.com/Yomika".to_string(),
             username: "reader".to_string(),
             credential: credential.to_string(),
-            sync_scope: String::new(),
+            sync_scope: None,
         }
     }
 
@@ -2018,26 +2378,201 @@ mod tests {
     }
 
     #[test]
+    fn each_kind_keeps_its_own_account_and_only_one_is_active() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        // WebDAV 一份。
+        let CommandResult::Success { value: webdav, .. } =
+            save_sync_account_record(&mut connection, &credentials, saved("NAS", "secret-token"))
+        else {
+            panic!("webdav save failed");
+        };
+        assert!(webdav.active, "the first account is the active one");
+
+        // 对象存储另一份：id 不同，两行共存，只有新的那行生效。
+        let mut object_storage = account_input("https://acct.r2.cloudflarestorage.com");
+        object_storage.id = "s3-1".to_string();
+        object_storage.kind = "s3".to_string();
+        object_storage.bucket = "yomika".to_string();
+        let CommandResult::Success { value: s3, .. } =
+            save_sync_account_record(&mut connection, &credentials, object_storage)
+        else {
+            panic!("s3 save failed");
+        };
+        assert!(s3.active);
+        assert_eq!(s3.kind, "s3");
+
+        let accounts = query_sync_accounts(&connection).expect("accounts");
+        assert_eq!(accounts.len(), 2, "两套账户各存各的");
+        assert_eq!(
+            accounts.iter().filter(|account| account.active).count(),
+            1,
+            "同时只生效一套"
+        );
+        assert!(accounts[0].active, "生效的那套排在最前");
+        assert_eq!(accounts[0].kind, "s3");
+        let webdav_row = accounts.iter().find(|account| account.id == "account-a").expect("webdav row");
+        assert!(!webdav_row.active);
+        // 待命那套的地址、凭据、范围都还在，切回去就能用。
+        assert_eq!(webdav_row.base_url, "https://dav.example.com/Yomika");
+        assert_eq!(credentials.get_credential(&webdav_row.credential_ref).expect("credential"), "secret-token");
+
+        // 切回 WebDAV：再存一次它就重新生效，对象存储那套转为待命。
+        let CommandResult::Success { value: back, .. } =
+            save_sync_account_record(&mut connection, &credentials, saved("NAS", ""))
+        else {
+            panic!("switch back failed");
+        };
+        assert!(back.active);
+        let accounts = query_sync_accounts(&connection).expect("accounts");
+        assert_eq!(accounts.iter().filter(|account| account.active).count(), 1);
+        assert_eq!(accounts[0].id, "account-a");
+    }
+
+    #[test]
+    fn saving_an_account_without_a_scope_keeps_the_stored_one() {
+        // 「同步范围」有了自己的设置行以后，账户表单不再带范围：改名/换地址不能顺手
+        // 把它重置回默认集合。
+        let mut connection = migrated_connection();
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let CommandResult::Success { value: created, .. } =
+            save_sync_account_record(&mut connection, &credentials, saved("Personal", "secret-token"))
+        else {
+            panic!("account save failed");
+        };
+        assert_eq!(parse_sync_scope(&created.sync_scope), default_scope());
+
+        let mut narrowed = account_input("https://dav.example.com/Yomika");
+        narrowed.sync_scope = Some(r#"["progress"]"#.to_string());
+        let CommandResult::Success { value: scoped, .. } =
+            save_sync_account_record(&mut connection, &credentials, narrowed)
+        else {
+            panic!("scoped save failed");
+        };
+        assert_eq!(parse_sync_scope(&scoped.sync_scope), vec!["progress".to_string()]);
+        let stored: String = connection
+            .query_row("SELECT sync_scope FROM sync_accounts WHERE id = 'account-a'", [], |row| row.get(0))
+            .expect("stored scope");
+        assert_eq!(parse_sync_scope(&stored), vec!["progress".to_string()]);
+
+        // 再存一次账户（不带范围）：范围保持不变。
+        let CommandResult::Success { value: renamed, .. } =
+            save_sync_account_record(&mut connection, &credentials, saved("Renamed", ""))
+        else {
+            panic!("rename failed");
+        };
+        assert_eq!(renamed.label, "Renamed");
+        assert_eq!(parse_sync_scope(&renamed.sync_scope), vec!["progress".to_string()]);
+    }
+
+    #[test]
+    fn the_scope_row_saves_by_itself_and_only_for_a_known_account() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let CommandResult::Success { .. } =
+            save_sync_account_record(&mut connection, &credentials, saved("Personal", "secret-token"))
+        else {
+            panic!("account save failed");
+        };
+
+        // 与命令同一条路径：先归一化，再写回。
+        let serialized = serialize_sync_scope(&parse_sync_scope(r#"["progress","lrr_servers"]"#));
+        connection
+            .execute(
+                "UPDATE sync_accounts SET sync_scope = ?2 WHERE id = ?1",
+                params!["account-a", serialized],
+            )
+            .expect("scope update");
+        let record = read_sync_account(&connection, "account-a").expect("record");
+        assert_eq!(
+            parse_sync_scope(&record.sync_scope),
+            vec!["progress".to_string(), "lrr_servers".to_string()]
+        );
+        // 账户表单里的其它字段没被动过。
+        assert_eq!(record.label, "Personal");
+        assert_eq!(record.kind, "webdav");
+        // 未知账户：更新 0 行，命令据此报 NOT_FOUND。
+        let updated = connection
+            .execute(
+                "UPDATE sync_accounts SET sync_scope = ?2 WHERE id = ?1",
+                params!["missing", r#"["progress"]"#],
+            )
+            .expect("no-op update");
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn a_history_tombstone_deletes_the_row_and_a_stale_one_does_not() {
+        let connection = migrated_connection();
+        connection
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                 VALUES ('scope-a', 'archive-a', 5, '2026-01-01 00:00:00', 'device-a', 4)",
+                [],
+            )
+            .expect("history fixture");
+        let transaction = connection.unchecked_transaction().expect("transaction");
+        let tombstone = |clock: i64| SyncStateObject {
+            scope_id: "scope-a".to_string(),
+            object_type: "history".to_string(),
+            object_id: "scope-a/archive-a".to_string(),
+            operation: "upsert".to_string(),
+            payload: serde_json::json!({"archiveId": "archive-a", "deleted": true}),
+            payload_hash: "hash-tombstone".to_string(),
+            logical_clock: clock,
+            device_id: "device-b".to_string(),
+            wall_clock: "2026-09-17 00:00:00".to_string(),
+        };
+
+        // 时钟更小的墓碑（例如从一台落后的设备拉回来的）不动本地这一行。
+        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(3)).expect("stale tombstone"));
+        let still_there: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get(0))
+            .expect("row count");
+        assert_eq!(still_there, 1);
+
+        // 时钟更大的一版赢：行被删掉，重复应用也不会把它插回来。
+        assert!(apply_remote_object(&transaction, "scope-a", &tombstone(5)).expect("tombstone"));
+        let removed: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get(0))
+            .expect("row count");
+        assert_eq!(removed, 0);
+        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(5)).expect("repeat tombstone"));
+    }
+
+    #[test]
     fn editing_an_account_without_a_credential_keeps_the_stored_one() {
         // 编辑表单不会把旧口令回填出来：留空保存必须沿用原凭据，否则改个名字就会
         // 把账户的口令抹掉（同步密钥还是从它派生的）。
         let mut connection = migrated_connection();
         let credentials = memory_credentials();
         assert!(matches!(
-            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
+            save_sync_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
             CommandResult::Success { .. }
         ));
         let first_ref: String = connection
-            .query_row("SELECT credential_ref FROM webdav_accounts WHERE id = 'account-a'", [], |row| row.get(0))
+            .query_row("SELECT credential_ref FROM sync_accounts WHERE id = 'account-a'", [], |row| row.get(0))
             .expect("credential ref");
 
         assert!(matches!(
-            save_webdav_account_record(&mut connection, &credentials, saved("Renamed", "")),
+            save_sync_account_record(&mut connection, &credentials, saved("Renamed", "")),
             CommandResult::Success { .. }
         ));
 
         let after_ref: String = connection
-            .query_row("SELECT credential_ref FROM webdav_accounts WHERE id = 'account-a'", [], |row| row.get(0))
+            .query_row("SELECT credential_ref FROM sync_accounts WHERE id = 'account-a'", [], |row| row.get(0))
             .expect("credential ref after edit");
         assert_eq!(first_ref, after_ref);
         assert_eq!(credentials.writes.lock().expect("writes").len(), 1);
@@ -2050,7 +2585,7 @@ mod tests {
         let mut connection = migrated_connection();
         let credentials = memory_credentials();
         assert!(matches!(
-            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
+            save_sync_account_record(&mut connection, &credentials, saved("Personal", "secret-token")),
             CommandResult::Success { .. }
         ));
         let first = load_sync_key(&connection, &credentials, "account-a").expect("derived key");
@@ -2058,7 +2593,7 @@ mod tests {
         assert_eq!(first, again);
 
         assert!(matches!(
-            save_webdav_account_record(&mut connection, &credentials, saved("Personal", "another-token")),
+            save_sync_account_record(&mut connection, &credentials, saved("Personal", "another-token")),
             CommandResult::Success { .. }
         ));
         let rotated = load_sync_key(&connection, &credentials, "account-a").expect("derived key");
@@ -2335,15 +2870,15 @@ mod tests {
             failure: Some("secure storage unavailable"),
         };
 
-        let result = save_webdav_account_record(
+        let result = save_sync_account_record(
             &mut connection,
             &credentials,
-            webdav_input("https://dav.example.com/Yomika"),
+            account_input("https://dav.example.com/Yomika"),
         );
 
         assert!(matches!(result, CommandResult::Failure { .. }));
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM webdav_accounts", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM sync_accounts", [], |row| row.get(0))
             .expect("account count");
         assert_eq!(count, 0);
     }
@@ -2353,7 +2888,7 @@ mod tests {
         let mut connection = migrated_connection();
         connection
             .execute(
-                "INSERT INTO webdav_accounts
+                "INSERT INTO sync_accounts
                     (id, label, base_url, username, credential_ref)
                  VALUES ('account-a', 'Old label', 'https://old.example.com', 'old-user', 'old-ref')",
                 [],
@@ -2364,15 +2899,15 @@ mod tests {
             deletes: Mutex::new(Vec::new()),
             failure: Some("secure storage unavailable"),
         };
-        let mut changed = webdav_input("https://new.example.com/Yomika");
+        let mut changed = account_input("https://new.example.com/Yomika");
         changed.label = "New label".to_string();
 
-        let result = save_webdav_account_record(&mut connection, &credentials, changed);
+        let result = save_sync_account_record(&mut connection, &credentials, changed);
 
         assert!(matches!(result, CommandResult::Failure { .. }));
         let stored: (String, String, String, String) = connection
             .query_row(
-                "SELECT label, base_url, username, credential_ref FROM webdav_accounts WHERE id = 'account-a'",
+                "SELECT label, base_url, username, credential_ref FROM sync_accounts WHERE id = 'account-a'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -2393,8 +2928,8 @@ mod tests {
         let mut connection = migrated_connection();
         connection
             .execute_batch(
-                "CREATE TRIGGER reject_webdav_account
-                 BEFORE INSERT ON webdav_accounts
+                "CREATE TRIGGER reject_sync_account
+                 BEFORE INSERT ON sync_accounts
                  BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
             )
             .expect("failure trigger");
@@ -2404,10 +2939,10 @@ mod tests {
             failure: None,
         };
 
-        let result = save_webdav_account_record(
+        let result = save_sync_account_record(
             &mut connection,
             &credentials,
-            webdav_input("https://dav.example.com/Yomika"),
+            account_input("https://dav.example.com/Yomika"),
         );
 
         assert!(matches!(result, CommandResult::Failure { .. }));
@@ -2418,7 +2953,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_webdav_account_keeps_plaintext_credential_out_of_sqlite_and_response() {
+    fn saved_sync_account_keeps_plaintext_credential_out_of_sqlite_and_response() {
         let mut connection = migrated_connection();
         let credentials = MemoryWebdavCredentialStore {
             writes: Mutex::new(Vec::new()),
@@ -2426,10 +2961,10 @@ mod tests {
             failure: None,
         };
 
-        let result = save_webdav_account_record(
+        let result = save_sync_account_record(
             &mut connection,
             &credentials,
-            webdav_input("https://dav.example.com/Yomika/"),
+            account_input("https://dav.example.com/Yomika/"),
         );
 
         let account = match result {
@@ -2443,7 +2978,7 @@ mod tests {
         assert_eq!(account.base_url, "https://dav.example.com/Yomika");
         let stored_text: String = connection
             .query_row(
-                "SELECT id || label || base_url || username || credential_ref || status FROM webdav_accounts",
+                "SELECT id || label || base_url || username || credential_ref || status FROM sync_accounts",
                 [],
                 |row| row.get(0),
             )
@@ -2455,20 +2990,20 @@ mod tests {
     }
 
     #[test]
-    fn listed_webdav_accounts_expose_only_public_metadata() {
+    fn listed_sync_accounts_expose_only_public_metadata() {
         let mut connection = migrated_connection();
         let credentials = MemoryWebdavCredentialStore {
             writes: Mutex::new(Vec::new()),
             deletes: Mutex::new(Vec::new()),
             failure: None,
         };
-        save_webdav_account_record(
+        save_sync_account_record(
             &mut connection,
             &credentials,
-            webdav_input("https://dav.example.com/Yomika"),
+            account_input("https://dav.example.com/Yomika"),
         );
 
-        let accounts = query_webdav_accounts(&connection).expect("list accounts");
+        let accounts = query_sync_accounts(&connection).expect("list accounts");
 
         assert_eq!(accounts.len(), 1);
         let serialized = serde_json::to_string(&accounts).expect("serialize accounts");
@@ -2477,7 +3012,7 @@ mod tests {
     }
 
     #[test]
-    fn webdav_account_rejects_non_http_and_embedded_credentials_before_keyring_write() {
+    fn sync_account_rejects_non_http_and_embedded_credentials_before_keyring_write() {
         let mut connection = migrated_connection();
         let credentials = MemoryWebdavCredentialStore {
             writes: Mutex::new(Vec::new()),
@@ -2489,10 +3024,10 @@ mod tests {
             "file:///tmp/Yomika",
             "https://reader:secret@dav.example.com/Yomika",
         ] {
-            let result = save_webdav_account_record(
+            let result = save_sync_account_record(
                 &mut connection,
                 &credentials,
-                webdav_input(invalid_url),
+                account_input(invalid_url),
             );
             assert!(matches!(result, CommandResult::Failure { .. }));
         }
@@ -2503,7 +3038,7 @@ mod tests {
             .expect("credential writes")
             .is_empty());
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM webdav_accounts", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM sync_accounts", [], |row| row.get(0))
             .expect("account count");
         assert_eq!(count, 0);
     }
@@ -3087,12 +3622,12 @@ mod tests {
             let mut connection = database.connection.lock().expect("database lock");
             connection
                 .execute(
-                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                    "INSERT INTO sync_accounts (id, label, base_url, username, credential_ref)
                      VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
                     params![base_url],
                 )
                 .expect("webdav account");
-            read_webdav_account(&connection, "account-a").expect("account record")
+            read_sync_account(&connection, "account-a").expect("account record")
         };
         let result = sync_scope_impl(
             &database,
@@ -3236,6 +3771,131 @@ mod tests {
         (format!("http://{address}"), store)
     }
 
+    /// 一个够用的 S3 兼容端点：GET/PUT/DELETE 一个对象，认 If-Match / If-None-Match，
+    /// 并把每个请求的头部原样记下来，好断言签名与条件写。ETag 取内容的长度加校验和。
+    async fn stateful_s3_server() -> (
+        String,
+        Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let objects: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>> =
+            Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let heads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared_objects = Arc::clone(&objects);
+        let shared_heads = Arc::clone(&heads);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let shared_objects = Arc::clone(&shared_objects);
+                let shared_heads = Arc::clone(&shared_heads);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; 262_144];
+                    let mut total = 0usize;
+                    loop {
+                        let read = stream.read(&mut buffer[total..]).await.expect("read request");
+                        if read == 0 {
+                            break;
+                        }
+                        total += read;
+                        let text = String::from_utf8_lossy(&buffer[..total]);
+                        let Some(head_end) = text.find("\r\n\r\n") else {
+                            if total == buffer.len() {
+                                break;
+                            }
+                            continue;
+                        };
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Content-Length:")?.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if total >= head_end + 4 + length || total == buffer.len() {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buffer[..total]).to_string();
+                    let head_end = text.find("\r\n\r\n").unwrap_or(total);
+                    let head = text[..head_end].to_string();
+                    let method = head
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let path = head
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
+                    let header_value = |name: &str| {
+                        head.lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case(name).then(|| value.trim().to_string())
+                            })
+                    };
+                    let body = buffer[head_end + 4..total].to_vec();
+                    shared_heads.lock().expect("heads").push(head.clone());
+
+                    let response = {
+                        let mut objects = shared_objects.lock().expect("objects");
+                        let etag = |bytes: &[u8]| {
+                            let checksum: usize = bytes.iter().map(|byte| *byte as usize).sum();
+                            format!("\"{}-{checksum}\"", bytes.len())
+                        };
+                        let (status, headers, body): (String, String, Vec<u8>) = match method.as_str() {
+                            "GET" => match objects.get(&path) {
+                                Some(bytes) => (
+                                    "200 OK".to_string(),
+                                    format!("ETag: {}\r\n", etag(bytes)),
+                                    bytes.clone(),
+                                ),
+                                None => ("404 Not Found".to_string(), String::new(), Vec::new()),
+                            },
+                            "PUT" => {
+                                let current = objects.get(&path).cloned();
+                                let expected_match = header_value("if-match");
+                                let none_match = header_value("if-none-match");
+                                let allowed = match (&current, expected_match, none_match) {
+                                    // 只在不存在时创建：已经有别人写的一版就冲突。
+                                    (Some(_), _, Some(value)) if value == "*" => false,
+                                    // 必须匹配上一版：ETag 对不上（别人改过）就冲突。
+                                    (Some(bytes), Some(expected), _) => etag(bytes) == expected,
+                                    (None, Some(_), _) => false,
+                                    _ => true,
+                                };
+                                if !allowed {
+                                    ("412 Precondition Failed".to_string(), String::new(), Vec::new())
+                                } else {
+                                    objects.insert(path.clone(), body);
+                                    ("200 OK".to_string(), String::new(), Vec::new())
+                                }
+                            }
+                            "DELETE" => {
+                                objects.remove(&path);
+                                ("204 No Content".to_string(), String::new(), Vec::new())
+                            }
+                            _ => ("405 Method Not Allowed".to_string(), String::new(), Vec::new()),
+                        };
+                        let mut response = format!(
+                            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        response.extend_from_slice(&body);
+                        response
+                    };
+                    stream.write_all(&response).await.expect("write response");
+                });
+            }
+        });
+        (format!("http://{address}"), objects, heads)
+    }
+
     fn default_scope() -> Vec<String> {
         DEFAULT_SYNC_SCOPE.iter().map(|item| item.to_string()).collect()
     }
@@ -3277,6 +3937,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_object_storage_account_pushes_pulls_and_resets_the_same_document() {
+        // 同一套引擎跑在 S3 兼容端点（Cloudflare R2 / MinIO…）上：读整份、合并、
+        // 条件写回，与 WebDAV 完全一样，只是签的是 SigV4。
+        let (endpoint, objects, heads) = stateful_s3_server().await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let key = [7_u8; 32];
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "secret-key".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO sync_accounts (id, kind, label, base_url, bucket, username, credential_ref)
+                     VALUES ('account-a', 's3', 'R2', ?1, 'yomika', 'ACCESSKEY', 'ref-a')",
+                    params![endpoint],
+                )
+                .expect("object storage account");
+            read_sync_account(&connection, "account-a").expect("account record")
+        };
+        let local_state = {
+            let mut state = empty_state();
+            state.objects.insert(
+                "scope-a|reading_progress|archive-a".to_string(),
+                SyncStateObject {
+                    scope_id: "scope-a".to_string(),
+                    object_type: "reading_progress".to_string(),
+                    object_id: "scope-a/archive-a".to_string(),
+                    operation: "upsert".to_string(),
+                    payload: serde_json::json!({"archiveId": "archive-a", "pageIndex": 4, "pageCount": 10, "layout": "paged", "direction": "ltr"}),
+                    payload_hash: "hash-a".to_string(),
+                    logical_clock: 1,
+                    device_id: "device-a".to_string(),
+                    wall_clock: "2026-09-17 00:00:00".to_string(),
+                },
+            );
+            state
+        };
+
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &key,
+            "scope-a",
+            local_state.clone(),
+            Vec::new(),
+            &default_scope(),
+            &credentials,
+        )
+        .await;
+        match result {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => {
+                panic!("object storage sync failed: {} {}", error.code, error.message)
+            }
+        }
+
+        // 对象落在 <bucket>/Yomika/<account>.json.enc，首次写是「仅当不存在」。
+        assert!(objects
+            .lock()
+            .expect("objects")
+            .contains_key("/yomika/Yomika/account-a.json.enc"));
+        {
+            let heads = heads.lock().expect("heads");
+            let put = heads
+                .iter()
+                .find(|head| head.starts_with("PUT "))
+                .expect("a PUT reached the endpoint");
+            assert!(
+                put.contains("authorization: AWS4-HMAC-SHA256 Credential=ACCESSKEY/"),
+                "the object request is not SigV4 signed: {put}"
+            );
+            assert!(put
+                .to_ascii_lowercase()
+                .contains("if-none-match: *"));
+        }
+
+        // 第二次同步：文档已经存在，条件头换成 If-Match。密文每次都换随机 nonce，
+        // 所以比的是解出来的内容（幂等）。
+        let before = decode_sync_state(
+            &key,
+            &objects
+                .lock()
+                .expect("objects")
+                .get("/yomika/Yomika/account-a.json.enc")
+                .cloned()
+                .expect("document"),
+        )
+        .expect("decode");
+        heads.lock().expect("heads").clear();
+        let repeat = sync_scope_impl(
+            &database,
+            &account,
+            &key,
+            "scope-a",
+            local_state,
+            Vec::new(),
+            &default_scope(),
+            &credentials,
+        )
+        .await;
+        assert!(matches!(repeat, CommandResult::Success { .. }));
+        let after = decode_sync_state(
+            &key,
+            &objects
+                .lock()
+                .expect("objects")
+                .get("/yomika/Yomika/account-a.json.enc")
+                .cloned()
+                .expect("document"),
+        )
+        .expect("decode");
+        let keys = |document: &SyncStateDocument| document.objects.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&before), keys(&after), "an unchanged state changed the document");
+        assert_eq!(
+            before.objects["scope-a|reading_progress|archive-a"].payload_hash,
+            after.objects["scope-a|reading_progress|archive-a"].payload_hash
+        );
+        assert!(heads
+            .lock()
+            .expect("heads")
+            .iter()
+            .any(|head| head.to_ascii_lowercase().contains("if-match:")));
+
+        // 「重置远端」删的就是这个对象。
+        let reset = RemoteStore::for_account(&account, "secret-key")
+            .expect("store")
+            .delete_state("account-a")
+            .await;
+        assert!(reset.is_ok());
+        assert!(!objects
+            .lock()
+            .expect("objects")
+            .contains_key("/yomika/Yomika/account-a.json.enc"));
+    }
+
+    #[tokio::test]
+    async fn a_second_device_pulls_the_objects_an_s3_account_pushed() {
+        let (endpoint, _objects, _heads) = stateful_s3_server().await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let key = [3_u8; 32];
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "secret-key".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO sync_accounts (id, kind, label, base_url, bucket, username, credential_ref)
+                     VALUES ('account-a', 's3', 'R2', ?1, 'yomika', 'ACCESSKEY', 'ref-a')",
+                    params![endpoint],
+                )
+                .expect("object storage account");
+            read_sync_account(&connection, "account-a").expect("account record")
+        };
+        let mut pushed = empty_state();
+        pushed.objects.insert(
+            "scope-a|history|scope-a/archive-a".to_string(),
+            SyncStateObject {
+                scope_id: "scope-a".to_string(),
+                object_type: "history".to_string(),
+                object_id: "scope-a/archive-a".to_string(),
+                operation: "upsert".to_string(),
+                payload: serde_json::json!({"archiveId": "archive-a", "pageIndex": 6, "visitedAt": "2026-09-17 00:00:00"}),
+                payload_hash: "hash-history".to_string(),
+                logical_clock: 2,
+                device_id: "device-a".to_string(),
+                wall_clock: "2026-09-17 00:00:00".to_string(),
+            },
+        );
+        let first = sync_scope_impl(&database, &account, &key, "scope-a", pushed, Vec::new(), &default_scope(), &credentials).await;
+        assert!(matches!(first, CommandResult::Success { .. }));
+
+        // 另一台设备（本地什么都没有）拉回来的就是刚才那份。
+        let second = sync_scope_impl(&database, &account, &key, "scope-a", empty_state(), Vec::new(), &default_scope(), &credentials).await;
+        let CommandResult::Success { value: pulled, .. } = second else {
+            panic!("second device sync failed");
+        };
+        assert_eq!(pulled, 1, "the pushed object came back");
+        let connection = database.connection.lock().expect("database lock");
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_history WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pulled history row");
+        assert_eq!(page, 6);
+    }
+
+    #[tokio::test]
     async fn a_document_that_cannot_be_decrypted_is_not_retried() {
         // 远端有一份文档，但用当前密钥解不开（换过口令，或那不是本账户的数据）：
         // 必须明确失败并标记不可重试，绝不能当成空文档把本地状态推上去把它覆盖掉。
@@ -3295,12 +4150,12 @@ mod tests {
             let connection = database.connection.lock().expect("database lock");
             connection
                 .execute(
-                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                    "INSERT INTO sync_accounts (id, label, base_url, username, credential_ref)
                      VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
                     params![base_url],
                 )
                 .expect("webdav account");
-            read_webdav_account(&connection, "account-a").expect("account record")
+            read_sync_account(&connection, "account-a").expect("account record")
         };
         let result = sync_scope_impl(
             &database,
@@ -3345,7 +4200,7 @@ mod tests {
             let mut connection = database.connection.lock().expect("database lock");
             connection
                 .execute(
-                    "INSERT INTO webdav_accounts (id, label, base_url, username, credential_ref)
+                    "INSERT INTO sync_accounts (id, label, base_url, username, credential_ref)
                      VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
                     params![base_url],
                 )
@@ -3361,7 +4216,7 @@ mod tests {
             let local_state = build_local_state(&connection, &["scope-a"], &default_scope()).expect("local state");
             let pending = pending_journal_entries(&connection, "scope-a").expect("pending");
             let account =
-                read_webdav_account(&connection, "account-a").expect("account record");
+                read_sync_account(&connection, "account-a").expect("account record");
             drop(connection);
 
             let result = sync_scope_impl(
@@ -3387,7 +4242,7 @@ mod tests {
             // Device B (same account) has nothing local to push — it pulls.
             let account = {
                 let connection = database.connection.lock().expect("database lock");
-                read_webdav_account(&connection, "account-a").expect("account record")
+                read_sync_account(&connection, "account-a").expect("account record")
             };
             let result = sync_scope_impl(
                 &database,
@@ -3436,7 +4291,7 @@ mod tests {
             // A repeat sync is a no-op: 文档里的对象本地已经是同一版，应用不计数。
             let account = {
                 let connection = database.connection.lock().expect("database lock");
-                read_webdav_account(&connection, "account-a").expect("account record")
+                read_sync_account(&connection, "account-a").expect("account record")
             };
             let repeat = sync_scope_impl(
                 &database,

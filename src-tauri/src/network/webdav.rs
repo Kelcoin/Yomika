@@ -41,6 +41,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn probing_separates_missing_path_from_rejected_credentials() {
+        // 207＝目录在、凭据可用；404＝路径不对；401＝凭据不对。三种说法要分开。
+        let (base_url, requests) = mock_server(vec![
+            "207 Multi-Status",
+            "404 Not Found",
+            "401 Unauthorized",
+        ])
+        .await;
+        let client = WebdavClient::new(&format!("{base_url}/dav/Yomika"), "user", "password")
+            .expect("client");
+        client.probe().await.expect("a reachable collection probes clean");
+        let first = requests.lock().expect("requests")[0].lines().next().unwrap_or_default().to_string();
+        assert!(first.starts_with("PROPFIND /dav/Yomika"), "unexpected request line: {first}");
+
+        let missing = client.probe().await.expect_err("404 is not healthy").to_string();
+        assert!(missing.contains("地址不存在"), "unexpected message: {missing}");
+        let rejected = client.probe().await.expect_err("401 is not healthy").to_string();
+        assert!(rejected.contains("HTTP 401"), "unexpected message: {rejected}");
+    }
+
+    #[tokio::test]
     async fn writing_the_document_creates_the_root_collection_first() {
         // MKCOL Yomika, then the PUT. Anything that already exists answers 405.
         let (base_url, requests) = mock_server(vec!["405 Method Not Allowed", "201 Created"]).await;
@@ -90,7 +111,7 @@ mod tests {
             .put_state("account-a", b"encrypted", Some("etag-a"))
             .await
             .unwrap_err();
-        assert!(matches!(error, WebdavError::StateConflict));
+        assert!(matches!(error, RemoteError::StateConflict));
         assert!(requests.lock().expect("requests")[1]
             .to_ascii_lowercase()
             .contains("if-match: etag-a"));
@@ -156,32 +177,7 @@ mod tests {
 }
 use reqwest::{Client, StatusCode};
 
-#[derive(Debug)]
-pub enum WebdavError {
-    InvalidUrl(String),
-    Request(String),
-    StateConflict,
-    Http(StatusCode),
-    Verification(String),
-}
-
-impl std::fmt::Display for WebdavError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidUrl(value) | Self::Request(value) | Self::Verification(value) => {
-                formatter.write_str(value)
-            }
-            Self::StateConflict => formatter.write_str("WebDAV sync document conflict"),
-            Self::Http(status) => write!(formatter, "WebDAV HTTP {}", status),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct RemoteState {
-    pub ciphertext: Vec<u8>,
-    pub etag: Option<String>,
-}
+use super::remote::{RemoteError, RemoteState};
 
 pub struct WebdavClient {
     base_url: reqwest::Url,
@@ -194,11 +190,11 @@ pub struct WebdavClient {
 }
 
 impl WebdavClient {
-    pub fn new(base_url: &str, username: &str, password: &str) -> Result<Self, WebdavError> {
+    pub fn new(base_url: &str, username: &str, password: &str) -> Result<Self, RemoteError> {
         let mut url = reqwest::Url::parse(base_url)
-            .map_err(|error| WebdavError::InvalidUrl(error.to_string()))?;
+            .map_err(|error| RemoteError::InvalidUrl(error.to_string()))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err(WebdavError::InvalidUrl(
+            return Err(RemoteError::InvalidUrl(
                 "WebDAV URL must use http(s)".to_string(),
             ));
         }
@@ -217,7 +213,7 @@ impl WebdavClient {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .map_err(|error| WebdavError::Request(error.to_string()))?,
+                .map_err(|error| RemoteError::Request(error.to_string()))?,
             username: username.to_string(),
             password: password.to_string(),
             ensured_collections: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -229,12 +225,12 @@ impl WebdavClient {
     /// join argument (`/Yomika/...`) would replace the base's own sub-path
     /// (`/remote.php/dav/files/user`), which is exactly what Nextcloud-style
     /// endpoints need kept.
-    fn endpoint(&self, path: &str) -> Result<reqwest::Url, WebdavError> {
+    fn endpoint(&self, path: &str) -> Result<reqwest::Url, RemoteError> {
         let mut url = self.base_url.clone();
         {
             let mut segments = url
                 .path_segments_mut()
-                .map_err(|()| WebdavError::InvalidUrl("WebDAV URL path cannot be joined".to_string()))?;
+                .map_err(|()| RemoteError::InvalidUrl("WebDAV URL path cannot be joined".to_string()))?;
             segments.pop_if_empty();
             for segment in path.split('/') {
                 if !segment.is_empty() {
@@ -255,7 +251,7 @@ impl WebdavClient {
     /// there": 405 is RFC 4918's MKCOL-on-existing, and some servers answer
     /// 409 when they auto-create intermediates. Anything else surfaces — the
     /// following PUT is the authoritative test of whether the tree is usable.
-    async fn ensure_collection(&self, directory: &str) -> Result<(), WebdavError> {
+    async fn ensure_collection(&self, directory: &str) -> Result<(), RemoteError> {
         let response = self
             .request(
                 reqwest::Method::from_bytes(b"MKCOL").expect("MKCOL method"),
@@ -263,7 +259,7 @@ impl WebdavClient {
             )
             .send()
             .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
         let status = response.status();
         if status.is_success()
             || status == StatusCode::METHOD_NOT_ALLOWED
@@ -271,19 +267,19 @@ impl WebdavClient {
         {
             Ok(())
         } else {
-            Err(WebdavError::Http(status))
+            Err(RemoteError::Http(status))
         }
     }
 
     /// Makes sure the account's directory chain exists before the first write
     /// to it. Per-run memoized: the chain only grows downward, so one pass is
     /// enough for the whole sync.
-    async fn ensure_collection_chain(&self, directories: &[String]) -> Result<(), WebdavError> {
+    async fn ensure_collection_chain(&self, directories: &[String]) -> Result<(), RemoteError> {
         let pending: Vec<String> = {
             let ensured = self
                 .ensured_collections
                 .lock()
-                .map_err(|_| WebdavError::Request("collection memo poisoned".to_string()))?;
+                .map_err(|_| RemoteError::Request("collection memo poisoned".to_string()))?;
             directories
                 .iter()
                 .filter(|directory| !ensured.contains(directory.as_str()))
@@ -298,7 +294,7 @@ impl WebdavClient {
         }
         self.ensured_collections
             .lock()
-            .map_err(|_| WebdavError::Request("collection memo poisoned".to_string()))?
+            .map_err(|_| RemoteError::Request("collection memo poisoned".to_string()))?
             .extend(pending);
         Ok(())
     }
@@ -310,11 +306,36 @@ impl WebdavClient {
         format!("Yomika/{account_id}.json.enc")
     }
 
-    async fn ensure_remote_root(&self) -> Result<(), WebdavError> {
+    async fn ensure_remote_root(&self) -> Result<(), RemoteError> {
         self.ensure_collection_chain(&["Yomika".to_string()]).await
     }
 
-    pub async fn get_state(&self, account_id: &str) -> Result<Option<RemoteState>, WebdavError> {
+    /// 「测试」按钮用：对 base_url 这一层做一次 PROPFIND（Depth: 0），确认
+    /// 地址存在、凭据被接受、这个账号至少能读。207/200 都算通；404 是路径不存在，
+    /// 401/403 是凭据或权限问题——三种说法对使用者来说完全不一样，所以要分开报。
+    pub async fn probe(&self) -> Result<(), RemoteError> {
+        let response = self
+            .request(
+                reqwest::Method::from_bytes(b"PROPFIND").expect("PROPFIND method"),
+                self.endpoint("")?,
+            )
+            .header("Depth", "0")
+            .send()
+            .await
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
+        let status = response.status();
+        if status.is_success() || status == StatusCode::MULTI_STATUS {
+            return Ok(());
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(RemoteError::Request(
+                "地址不存在：确认 WebDAV 目录路径正确".to_string(),
+            ));
+        }
+        Err(RemoteError::Http(status))
+    }
+
+    pub async fn get_state(&self, account_id: &str) -> Result<Option<RemoteState>, RemoteError> {
         let response = self
             .request(
                 reqwest::Method::GET,
@@ -322,12 +343,12 @@ impl WebdavClient {
             )
             .send()
             .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(WebdavError::Http(response.status()));
+            return Err(RemoteError::Http(response.status()));
         }
         let etag = response
             .headers()
@@ -337,7 +358,7 @@ impl WebdavClient {
         let ciphertext = response
             .bytes()
             .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?
+            .map_err(|error| RemoteError::Request(error.to_string()))?
             .to_vec();
         Ok(Some(RemoteState { ciphertext, etag }))
     }
@@ -347,7 +368,7 @@ impl WebdavClient {
         account_id: &str,
         bytes: &[u8],
         etag: Option<&str>,
-    ) -> Result<(), WebdavError> {
+    ) -> Result<(), RemoteError> {
         self.ensure_remote_root().await?;
         let mut request = self
             .request(
@@ -366,12 +387,12 @@ impl WebdavClient {
         let response = request
             .send()
             .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
         if response.status() == StatusCode::PRECONDITION_FAILED {
-            return Err(WebdavError::StateConflict);
+            return Err(RemoteError::StateConflict);
         }
         if !response.status().is_success() {
-            return Err(WebdavError::Http(response.status()));
+            return Err(RemoteError::Http(response.status()));
         }
         Ok(())
     }
@@ -382,14 +403,14 @@ impl WebdavClient {
         mut ciphertext: Vec<u8>,
         mut etag: Option<String>,
         merge: F,
-    ) -> Result<(), WebdavError>
+    ) -> Result<(), RemoteError>
     where
-        F: Fn(&[u8]) -> Result<Vec<u8>, WebdavError>,
+        F: Fn(&[u8]) -> Result<Vec<u8>, RemoteError>,
     {
         for attempt in 0..3 {
             match self.put_state(account_id, &ciphertext, etag.as_deref()).await {
                 Ok(()) => return Ok(()),
-                Err(WebdavError::StateConflict) if attempt < 2 => {
+                Err(RemoteError::StateConflict) if attempt < 2 => {
                     let remote = self.get_state(account_id).await?;
                     if let Some(remote) = remote {
                         ciphertext = merge(&remote.ciphertext)?;
@@ -401,11 +422,11 @@ impl WebdavClient {
                 Err(error) => return Err(error),
             }
         }
-        Err(WebdavError::StateConflict)
+        Err(RemoteError::StateConflict)
     }
 
     /// 删掉账户的远端文档（「重置远端」）。本来就不存在也算成功。
-    pub async fn delete_state(&self, account_id: &str) -> Result<(), WebdavError> {
+    pub async fn delete_state(&self, account_id: &str) -> Result<(), RemoteError> {
         let response = self
             .request(
                 reqwest::Method::DELETE,
@@ -413,11 +434,11 @@ impl WebdavClient {
             )
             .send()
             .await
-            .map_err(|error| WebdavError::Request(error.to_string()))?;
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(WebdavError::Http(response.status()))
+            Err(RemoteError::Http(response.status()))
         }
     }
 }

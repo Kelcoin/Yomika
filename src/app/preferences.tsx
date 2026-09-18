@@ -1,6 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
+import { SYNC_COMPLETED_EVENT, setAutoSyncEnabled, startAutoSync } from '../lib/autoSync';
+import { startHistoryMaintenance } from '../lib/historyMaintenance';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { setEhMyTagsPriorityEnabled } from '../lib/ehMyTags';
 import { upgradeCssThemePreset } from '../lib/cssThemePresets';
@@ -85,21 +87,38 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
-    let active = true;
-    void repository.load().then((result) => {
-      if (!active) return;
-      if (result.ok) {
-        const preferences = { ...result.value, customCss: upgradeCssThemePreset(result.value.customCss) };
-        setPreferences(preferences);
-        applyPreferences(preferences);
-      } else {
-        setError(result.error.message);
-      }
-      setLoading(false);
-    });
-    return () => { active = false; };
+  /** 读一次原生偏好并落到界面上：启动时一次，同步拉回别处的改动后再来一次。 */
+  const reload = useCallback(async () => {
+    const result = await repository.load();
+    if (result.ok) {
+      const preferences = { ...result.value, customCss: upgradeCssThemePreset(result.value.customCss) };
+      setPreferences(preferences);
+      applyPreferences(preferences);
+      setError(undefined);
+    } else {
+      setError(result.error.message);
+    }
+    setLoading(false);
+    return result.ok;
   }, []);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  // 自动同步与历史清理的触发点（启动、回前台、写入、联网、定时）在这里装上；
+  // 拉回到别的设备的改动时，偏好得重读一次，否则界面上还是本机这份。
+  useEffect(() => {
+    const stopSync = startAutoSync();
+    const stopMaintenance = startHistoryMaintenance();
+    const onApplied = () => { void reload(); };
+    window.addEventListener(SYNC_COMPLETED_EVENT, onApplied);
+    return () => {
+      window.removeEventListener(SYNC_COMPLETED_EVENT, onApplied);
+      stopSync();
+      stopMaintenance();
+    };
+  }, [reload]);
+
+  useEffect(() => { setAutoSyncEnabled(preferences.autoSync); }, [preferences.autoSync]);
 
   async function save(input: PreferenceSnapshot): Promise<CommandResult<PreferenceSnapshot>> {
     const result = await repository.save(input);

@@ -1,9 +1,23 @@
 import { useCallback, useEffect, useRef } from 'react';
 
-export function getHorizontalWheelDelta(event: Pick<WheelEvent, 'ctrlKey' | 'deltaX' | 'deltaY'>, scrollWidth: number, clientWidth: number): number | null {
+/** How far a wheel moves the rail, or null when the rail must leave the event
+ * alone and let the page have it.
+ *
+ * The rail takes a wheel that is actually going sideways — a trackpad swipe
+ * (deltaX), or shift+wheel, which is how a mouse asks for it. It does *not* take a
+ * plain vertical wheel. Converting that was the old behaviour, and it trapped the
+ * page: the rails span nearly the whole viewport, so with the pointer anywhere over
+ * the cards a vertical wheel moved the strip sideways instead of scrolling, and the
+ * only way down a page was to aim at the margin beside the rails.
+ */
+export function getHorizontalWheelDelta(
+  event: Pick<WheelEvent, 'ctrlKey' | 'shiftKey' | 'deltaX' | 'deltaY'>,
+  scrollWidth: number,
+  clientWidth: number,
+): number | null {
   if (event.ctrlKey || scrollWidth <= clientWidth + 1) return null;
-  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-  return delta === 0 ? null : delta;
+  if (event.shiftKey) return event.deltaX !== 0 ? event.deltaX : event.deltaY;
+  return Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : null;
 }
 
 type DragState = {

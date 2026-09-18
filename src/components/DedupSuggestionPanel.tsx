@@ -1,6 +1,8 @@
 import { AlertCircle, X } from 'lucide-react';
 import type { DHashMatch } from '../domain/dedup';
 
+import { StatusLine } from './StatusLine';
+
 interface DedupSuggestionPanelProps {
   matches: DHashMatch[];
   dismissedIds?: Set<string>;
@@ -18,7 +20,7 @@ export function DedupSuggestionPanel({ matches, dismissedIds = new Set(), onDism
   if (checking) {
     return (
       <section className="dedup-panel" aria-label="查重建议">
-        <p role="status">正在检查重复…</p>
+        <StatusLine busy>正在检查重复…</StatusLine>
       </section>
     );
   }
@@ -28,7 +30,7 @@ export function DedupSuggestionPanel({ matches, dismissedIds = new Set(), onDism
   if (visible.length === 0) {
     return (
       <section className="dedup-panel" aria-label="查重建议">
-        <p>未发现相似档案</p>
+        <StatusLine>未发现相似档案</StatusLine>
       </section>
     );
   }

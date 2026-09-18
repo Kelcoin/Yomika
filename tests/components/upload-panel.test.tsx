@@ -21,7 +21,7 @@ function baseAdapter(extra: (command: string, args?: Record<string, unknown>) =>
   return vi.fn(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'load_preferences') return { ok: true, value: preferences };
     if (command === 'list_servers') return { ok: true, value: [server] };
-    if (command === 'list_archives' || command === 'list_tasks' || command === 'list_webdav_accounts') return { ok: true, value: [] };
+    if (command === 'list_archives' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
     if (command === 'cache_stats') return { ok: true, value: { imageBytes: 0, imageEntries: 0, maxBytes: 2_147_483_648 } };
     const handled = extra(command, args);
     if (handled !== undefined) return handled;

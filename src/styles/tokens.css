@@ -205,6 +205,10 @@
     --control-placeholder: #5f6360;
     --control-height: 44px;
     --icon-button-size: 44px;
+    /* Smallest box a touch target may be. Chips and badges are drawn smaller
+       than this; the interactive ones reach it through a transparent
+       ::after overlay so the visual size and the hit area differ. */
+    --tap-min: 44px;
     --control-selected-background: #a83b32;
     --control-selected-text: #ffffff;
 
@@ -241,10 +245,35 @@
     --text-xs: 12px;
     --text-sm: 13px;
     --text-md: 14px;
+    --text-base: 15px;
     --text-heading: 24px;
     --text-lg: 20px;
     --text-title: 32px;
     --text-page-title: 40px;
+
+    /* Four weights, each with one job. Anything that says "this is a control"
+       is semibold; anything that says "this is a heading" is bold; prose and
+       meta text stay regular so the two above keep their contrast. */
+    --weight-regular: 400;
+    --weight-medium: 500;
+    --weight-semibold: 600;
+    --weight-bold: 700;
+
+    /* Leading is split by role, not by element: one line of control text has
+       none to give, prose that wraps needs enough. */
+    --leading-none: 1;
+    --leading-display: 1.08;
+    --leading-tight: 1.3;
+    --leading-snug: 1.45;
+    --leading-normal: 1.5;
+    --leading-relaxed: 1.65;
+
+    /* Tracking. Latin display text tightens slightly at size; the only place
+       the app letterspaces outward is the all-caps micro-label. */
+    --tracking-tight: -0.01em;
+    --tracking-normal: 0;
+    --tracking-wide: 0.04em;
+    --tracking-wider: 0.08em;
 
     /* ---- Spacing (4px base) -------------------------------------------- */
     --space-1: 4px;
@@ -279,7 +308,21 @@
     --motion-standard: 220ms var(--ease-standard);
     --motion-slow: 480ms var(--ease-standard);
 
-    /* ---- Systemic z-index layers — arbitrary values are banned --------- */
+    /* Looping indicators need a linear clock, so they cannot ride --motion-*.
+       They still get names, so the three spinners and the two shimmering
+       skeletons keep one speed each instead of drifting apart. */
+    --duration-spin: 900ms;
+    --duration-shimmer: 1.25s;
+    --duration-pulse: 1.6s;
+    --ease-linear: linear;
+    --ease-pulse: cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* ---- Systemic z-index layers ---------------------------------------
+       Two kinds live here and they are not interchangeable: --z-raised sorts
+       elements *inside* one component, everything from --z-sticky up is app
+       chrome and follows the layering order of the shell. Arbitrary values
+       are banned. ------------------------------------------------------ */
+    --z-raised: 2;
     --z-sticky: 10;
     --z-compact-nav: 20;
     --z-menu: 30;

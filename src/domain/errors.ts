@@ -37,6 +37,11 @@ export const DomainErrorCodeSchema = z.enum([
   'EH_EMPTY_RESPONSE',
   'EH_UNEXPECTED_PAGE',
   'EH_UNAVAILABLE',
+  /** 原生侧已经在用的三个码，之前没进这张表：任何一处发出它们，整条错误都会被桥
+   * 当成「无效响应」，真正的信息（比如 WebDAV 连不上）反而看不到。 */
+  'NETWORK',
+  'NOT_FOUND',
+  'LOCAL_DATABASE',
 ]);
 
 export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;

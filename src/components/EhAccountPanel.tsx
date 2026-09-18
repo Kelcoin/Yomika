@@ -5,6 +5,7 @@ import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '../lib/ehCookie';
 import { EhMark } from './EhMark';
 import { useToast } from './Toast';
+import { StatusLine } from './StatusLine';
 
 /** What the account is called anywhere it is shown: the username when one has
  * been recorded, otherwise the generic 「E 站用户」 — the member id is not a
@@ -159,7 +160,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
   if (loading) {
     return (
       <section className="eh-account-panel" aria-label="E-Hentai 账户">
-        <p role="status">正在读取账户…</p>
+        <StatusLine busy>正在读取账户…</StatusLine>
       </section>
     );
   }
@@ -190,11 +191,11 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
           ) : mode === 'browser' ? (
             <div className="eh-account-form">
               <p className="eh-login-hint">
-                在弹出的窗口中完成 Cloudflare 验证并登录，凭据会自动读取。遇到人机验证时这是唯一可行的方式。
+                在弹出的窗口里完成 Cloudflare 验证并登录，凭据自动读取。
               </p>
               {browserPending ? (
                 <>
-                  <p role="status">正在等待窗口中的登录…</p>
+                  <StatusLine busy>正在等待窗口中的登录…</StatusLine>
                   <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}>取消</button>
                 </>
               ) : (
@@ -206,7 +207,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
           ) : (
             <form className="eh-account-form" onSubmit={submitCookie}>
               <label>Cookie
-                <textarea name="ehCookie" required rows={3} spellCheck={false} placeholder="粘贴浏览器中的 ipb_member_id 与 ipb_pass_hash（可直接粘贴整段 Cookie）" />
+                <textarea name="ehCookie" required rows={3} spellCheck={false} placeholder="粘贴整段 Cookie，或 ipb_member_id 与 ipb_pass_hash" />
               </label>
               <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存 Cookie'}</button>
             </form>
@@ -263,17 +264,17 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
             </div>
             <div className="eh-account-actions">
               {onCheckHealth && (
-                <button type="button" className="settings-action" onClick={() => onCheckHealth(account.id)}>
+                <button type="button" className="secondary-action is-compact" onClick={() => onCheckHealth(account.id)}>
                   <RefreshCw aria-hidden="true" />检查登录状态
                 </button>
               )}
               {onReadCookie && (
-                <button type="button" className="settings-action" onClick={() => { void exportCookie(account); }}>
+                <button type="button" className="secondary-action is-compact" onClick={() => { void exportCookie(account); }}>
                   <Download aria-hidden="true" />导出 Cookie
                 </button>
               )}
               {onLogout && (
-                <button type="button" className="settings-action is-danger" onClick={() => { void onLogout(account.id); }}>
+                <button type="button" className="secondary-action is-compact is-danger" onClick={() => { void onLogout(account.id); }}>
                   <LogOut aria-hidden="true" />退出登录
                 </button>
               )}

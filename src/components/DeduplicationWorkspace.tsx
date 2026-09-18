@@ -10,6 +10,7 @@ import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
 import { CardTagRows } from './CardTagRows';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
+import { StatusLine } from './StatusLine';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
 import { pickCardTags } from '../lib/archiveCardPresentation';
 import { pickServer } from '../domain/server';
@@ -789,7 +790,7 @@ export function DeduplicationWorkspace() {
     </section>}
     {deleteSession && <ArchiveDeletionConfirmation description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => setDeleteSession(undefined)} onConfirm={executeSelected} />}
     {smartSelectPending && <div className="dedup-confirm" role="dialog" aria-label="智能选择确认">
-      <p>仅由档案名判定的重复组默认跳过，不计入智能选择。</p>
+      <p>只按文件名判定的组默认跳过。</p>
       <label><input type="checkbox" checked={includeFilenameOnly} onChange={(event) => setIncludeFilenameOnly(event.target.checked)} />把文件名来源的重复组一并纳入</label>
       <div className="dedup-confirm-actions">
         <button className="primary-action" type="button" onClick={() => void smartSelect(includeFilenameOnly)}>执行智能选择</button>
@@ -829,16 +830,16 @@ export function DeduplicationWorkspace() {
           </div>
         </section>)}
       </div>}
-      {!visibleGroups.length && !busy && <p className="empty-state">没有匹配当前筛选的重复组。</p>}
+      {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
     </>}
-    {!result && !busy && <p className="empty-state">尚未运行查重扫描。</p>}
+    {!result && !busy && <StatusLine>尚未运行查重扫描。</StatusLine>}
     <Dialog.Root open={relationsOpen} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content dedup-relations-dialog">
           <Dialog.Title>不重复关系</Dialog.Title>
           <Dialog.Description>
-            {`有效 ${relations.filter((record) => !record.tombstoned).length} 条：这些档案对不再参与查重比对。已移除 ${relations.filter((record) => record.tombstoned).length} 条：取消过标记的对，记录保留在这里，随时可以「恢复标记」，也照常参与比对。`}
+            {`有效 ${relations.filter((record) => !record.tombstoned).length} 条，不再参与比对；已移除 ${relations.filter((record) => record.tombstoned).length} 条仍可恢复标记。`}
           </Dialog.Description>
           <input className="dedup-relations-search" aria-label="搜索不重复关系" value={relationsQuery} onChange={(event) => setRelationsQuery(event.target.value)} placeholder="搜索档案标题或 ID" spellCheck={false} autoComplete="off" />
           <ul className="dedup-relations-list">
@@ -863,7 +864,7 @@ export function DeduplicationWorkspace() {
                 {record.tombstoned ? '恢复标记' : '取消标记'}
               </button>
             </li>)}
-            {!visibleRelations.length && <li className="empty-state">没有匹配的关系记录。</li>}
+            {!visibleRelations.length && <StatusLine as="li">没有匹配的关系记录。</StatusLine>}
           </ul>
           <div className="dialog-actions">
             <button className="secondary-action" type="button" onClick={() => setRelationsOpen(false)}>关闭</button>
@@ -890,7 +891,7 @@ export function DeduplicationWorkspace() {
                 <button className="secondary-action" type="button" disabled={historyBusy} onClick={() => void removeSession(item)}>删除</button>
               </div>
             </li>)}
-            {!sessions.length && <li className="empty-state">{historyBusy ? '正在读取…' : '还没有保存的扫描结果。'}</li>}
+            {!sessions.length && <StatusLine as="li" busy={historyBusy}>{historyBusy ? '正在读取…' : '还没有保存的扫描结果。'}</StatusLine>}
           </ul>
           <div className="dialog-actions">
             <button className="secondary-action" type="button" onClick={() => setHistoryOpen(false)}>关闭</button>

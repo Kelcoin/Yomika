@@ -26,6 +26,7 @@ use commands::library::{
     list_reading_list, list_search_presets, list_servers, list_tasks, list_watchlist,
     load_archive_metadata, load_archive_page_thumbnail, load_archive_thumbnail,
     load_reader_manifest, load_reader_page, load_reading_progress, probe_new_archives,
+    prune_dangling_records, prune_history,
     read_server_api_key, refresh_archives, remove_archive_from_category, replace_archives,
     retry_task, save_reading_progress, save_search_preset, save_server, search_archives_page,
     set_server_enabled,
@@ -35,9 +36,9 @@ use commands::library::{
 };
 use commands::platform::{open_external_url, platform_capabilities, write_clipboard_text};
 use commands::sync::{
-    append_sync_journal, claim_sync_journal, list_sync_journal, list_webdav_accounts,
-    reset_webdav_state, save_webdav_account, set_sync_journal_state, sync_webdav_scope,
-    webdav_account_credential,
+    append_sync_journal, claim_sync_journal, list_sync_accounts, list_sync_journal,
+    reset_remote_state, save_sync_account, save_sync_scope, set_sync_journal_state,
+    sync_account_credential, sync_remote_scope, test_sync_account,
 };
 use db::Database;
 use dedup::{
@@ -148,6 +149,8 @@ pub fn run() {
             set_watchlist,
             list_watchlist,
             list_reading_history,
+            prune_history,
+            prune_dangling_records,
             set_reading_list,
             list_reading_list,
             save_search_preset,
@@ -157,11 +160,13 @@ pub fn run() {
             claim_sync_journal,
             list_sync_journal,
             set_sync_journal_state,
-            save_webdav_account,
-            list_webdav_accounts,
-            sync_webdav_scope,
-            reset_webdav_state,
-            webdav_account_credential,
+            save_sync_account,
+            save_sync_scope,
+            list_sync_accounts,
+            sync_remote_scope,
+            test_sync_account,
+            reset_remote_state,
+            sync_account_credential,
             inference_cpu_scale,
             inference_probe,
             inference_start,

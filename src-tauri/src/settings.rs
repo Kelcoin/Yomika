@@ -30,6 +30,7 @@ const SFW_MODE_KEY: &str = "preferences.sfw_mode";
 const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
+const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -147,6 +148,10 @@ pub struct PreferenceSnapshot {
     /// hand-edited row cannot leave the bar without them.
     #[serde(default = "default_bottom_nav_items")]
     pub bottom_nav_items: Vec<String>,
+    /// 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次；
+    /// 关掉就只剩「立即同步」按钮。
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
 }
 
 fn default_detail_actions() -> Vec<String> {
@@ -214,6 +219,7 @@ impl Default for PreferenceSnapshot {
             custom_css: String::new(),
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
+            auto_sync: true,
         }
     }
 }
@@ -269,21 +275,24 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     })
 }
 
-/// Dedupe, keep the canonical order, and pin 档案库/设置 so the bar can never
-/// lose them regardless of what was stored.
+/// Dedupe, keep the canonical order, and pin 档案库 — without it there is no way
+/// into the library at all.
+///
+/// 设置 is deliberately *not* pinned. An unchecked entry is not lost: the compact
+/// bar grows a 更多 entry that lists exactly the ones it has no room for, and 设置
+/// appears there like any other. Pinning it made the choice look available when it
+/// was not.
+///
+/// Rebuilt by filtering the canonical order, so the bar is always in the app's
+/// order rather than in whatever order the stored list happened to arrive in, and a
+/// pinned entry lands in its canonical position instead of at the end.
 fn normalize_bottom_nav_items(items: &[String]) -> Vec<String> {
     let order = ["home", "library", "history", "watchlist", "to-read", "downloads", "settings"];
-    let mut normalized: Vec<String> = order
+    order
         .iter()
-        .filter(|key| items.iter().any(|item| item == *key))
+        .filter(|key| **key == "library" || items.iter().any(|item| item == *key))
         .map(|key| (*key).to_string())
-        .collect();
-    for required in ["library", "settings"] {
-        if !normalized.iter().any(|item| item == required) {
-            normalized.push(required.to_string());
-        }
-    }
-    normalized
+        .collect()
 }
 
 fn load_value<T: serde::de::DeserializeOwned>(
@@ -365,6 +374,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: load_value(connection, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
+        auto_sync: load_value(connection, AUTO_SYNC_KEY, defaults.auto_sync)?,
     };
     validate_preferences(&value)
 }
@@ -454,6 +464,7 @@ pub fn save_preferences_to(
             BOTTOM_NAV_ITEMS_KEY,
             serde_json::to_string(&value.bottom_nav_items),
         ),
+        (AUTO_SYNC_KEY, serde_json::to_string(&value.auto_sync)),
     ] {
         transaction
             .execute(
@@ -590,8 +601,8 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        import_legacy_preferences_from, load_preferences_from, save_preferences_to,
-        PreferenceSnapshot, MAX_PREFETCH_PAGES,
+        import_legacy_preferences_from, load_preferences_from, normalize_bottom_nav_items,
+        save_preferences_to, PreferenceSnapshot, MAX_PREFETCH_PAGES,
     };
 
     fn settings_db() -> Connection {
@@ -648,6 +659,7 @@ mod tests {
                 "settings".into(),
             ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
+            auto_sync: false,
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");
         assert_eq!(
@@ -662,6 +674,18 @@ mod tests {
             )
             .expect("unrelated setting preserved");
         assert_eq!(device_id, "\"secret-device\"");
+    }
+
+    #[test]
+    fn the_bottom_bar_pins_the_library_and_may_drop_settings() {
+        // 档案库 is load-bearing: unpinning it would leave no way into the library.
+        // 设置 is not, so unchecking it has to survive the save — and the result is
+        // in the canonical order regardless of the order it was stored in.
+        let keys = |items: &[&str]| normalize_bottom_nav_items(&items.iter().map(|item| item.to_string()).collect::<Vec<_>>());
+        assert_eq!(keys(&["settings", "home"]), ["home", "library", "settings"]);
+        assert_eq!(keys(&["downloads"]), ["library", "downloads"]);
+        assert_eq!(keys(&["home", "settings", "library"]), ["home", "library", "settings"]);
+        assert_eq!(keys(&[]), ["library"]);
     }
 
     #[test]

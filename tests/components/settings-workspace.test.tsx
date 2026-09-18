@@ -142,10 +142,10 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('sync');
-    // 没登录：开关按不动，行里说明原因（删除档案不会动收藏）。
+    // 没登录：开关按不动，行里说明原因。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     await waitFor(() => expect(toggle).toBeDisabled());
-    expect(screen.getByText(/需要先登录 E-Hentai 账户/)).toBeInTheDocument();
+    expect(screen.getByText('登录 E-Hentai 后才能启用')).toBeInTheDocument();
     await user.click(toggle);
     expect(adapter.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
   });
@@ -176,6 +176,56 @@ describe('settings workspace', () => {
     expect(myTags).toBeDisabled();
     expect(myTags).not.toBeChecked();
   });
+  it('carries the auto-sync switch and reports the last sync on the account row', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a', enabled: true }] };
+      if (command === 'list_sync_accounts') return { ok: true, value: [{
+        id: 'personal', label: 'Personal WebDAV', baseUrl: 'https://dav.example.com/Yomika', username: 'reader',
+        credentialRef: 'personal-secret', syncScope: '[]', status: 'ok', lastProbeAt: null,
+        lastSyncAt: new Date(Date.now() - 30 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' '),
+        lastErrorCode: null, createdAt: '2026-08-28 00:00:00', updatedAt: '2026-08-28 00:00:00',
+      }] };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('sync');
+
+    // 默认开着：关掉它只剩「立即同步」按钮。
+    const autoSync = await screen.findByRole('switch', { name: '自动同步' });
+    expect(autoSync).toBeChecked();
+    await user.click(autoSync);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, autoSync: false } }));
+
+    // 账户行报出上次同步的时刻（原生给的是 SQLite 的 UTC 串）。
+    await user.click(await screen.findByRole('button', { name: '同步账户' }));
+    const menu = await screen.findByRole('dialog', { name: '同步账户' });
+    // 行上只留「类型 · 上次同步」：范围有自己的行，用户名/Access Key 不再重复。
+    expect(within(menu).getByText('WebDAV · 30 分钟前同步')).toBeInTheDocument();
+  });
+
+  it('prunes the reading history from the general section', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'prune_history') return { ok: true, value: 4 };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('general');
+
+    await user.click(await screen.findByRole('button', { name: '历史记录清理' }));
+    const menu = await screen.findByRole('dialog', { name: '历史记录清理' });
+    // 策略写在菜单里，用户点之前就能看到留多久。
+    expect(within(menu).getByText(/已读完留 3 个月，未读完留 1 年/)).toBeInTheDocument();
+    expect(within(menu).getByText(/读到总页数 95% 以上算读完/)).toBeInTheDocument();
+    await user.click(within(menu).getByRole('button', { name: '立即清理' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('prune_history', {}));
+    expect(await screen.findByText('已清理 4 条历史记录')).toBeInTheDocument();
+  });
+
   it('loads models directly in advanced settings and toggles decensor', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -876,7 +926,7 @@ describe('settings workspace', () => {
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true } }));
   });
 
-  it('customizes bottom bar items with 档案库 and 设置 pinned', async () => {
+  it('customizes bottom bar items with only 档案库 pinned', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
@@ -905,6 +955,19 @@ describe('settings workspace', () => {
     // 行值随之更新（默认 5 项 − 历史 + 待看 = 5 项）。
     expect(screen.getByRole('button', { name: '底栏项目' })).toBeEnabled();
     expect(screen.getByText('5 项')).toBeInTheDocument();
+
+    // 设置不再是固定项：可以取消勾选，并且真的写进偏好。取消掉也不会失联——
+    // 没收进底栏的页面统一出现在「更多」里。
+    const settings = within(menu).getByRole('checkbox', { name: '底栏显示设置' });
+    expect(settings).toBeEnabled();
+    expect(settings).toHaveAttribute('aria-checked', 'true');
+    await user.click(settings);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
+      input: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'watchlist', 'to-read'] },
+    }));
+    expect(within(menu).getByRole('checkbox', { name: '底栏显示设置' })).toHaveAttribute('aria-checked', 'false');
+    // 详情页功能按钮的默认值同样是 4 项，所以计数要读在它自己那一行上。
+    expect(within(screen.getByRole('button', { name: '底栏项目' })).getByText('4 项')).toBeInTheDocument();
   });
 
   it('filters the compact bottom bar by preference and leaves the desktop sidebar whole', async () => {

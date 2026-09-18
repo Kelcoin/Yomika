@@ -518,9 +518,9 @@ describe('dedup scan progress and saved results', () => {
     expect(entry.closest('.dedup-section')).not.toBeNull();
     await user.click(entry);
     const dialog = await screen.findByRole('dialog', { name: '不重复关系' });
-    // 「已移除」的含义写在说明里：取消过标记、记录保留、可恢复、照常参与比对。
-    expect(within(dialog).getByText(/有效 1 条：这些档案对不再参与查重比对/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/已移除 0 条：取消过标记的对/)).toBeInTheDocument();
+    // 「已移除」的含义写在说明里：不再参与比对，但仍可恢复标记。
+    expect(within(dialog).getByText(/有效 1 条，不再参与比对/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/已移除 0 条仍可恢复标记/)).toBeInTheDocument();
     // 行内显示的是档案标题（按 ID 解析），解析不到才退回 ID 前缀。
     // 库里还有的档案，标题就是打开档案概览的入口（就地看，不跳阅读器），
     // 已删除的只显示文字。

@@ -35,6 +35,22 @@ function ruleBody(css: string, selector: string): string {
   throw new Error(`Unbalanced rule: ${selector}`);
 }
 
+/** A rule that lives inside a media block, where every line is indented. The
+ * first match for the bare selector would be the base rule instead. */
+function nestedRuleBody(css: string, selector: string): string {
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`\\n  ${escaped}\\s*\\{`).exec(source);
+  if (!match) throw new Error(`Nested rule not found: ${selector}`);
+  const open = match.index + match[0].lastIndexOf('{');
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}' && (depth -= 1) === 0) return source.slice(open + 1, index);
+  }
+  throw new Error(`Unbalanced nested rule: ${selector}`);
+}
+
 function rgb(value: string, backdrop?: Rgb): Rgb {
   const hex = value.match(/^#([0-9a-f]{6})$/i)?.[1];
   if (hex) return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)) as Rgb;
@@ -228,6 +244,82 @@ describe('design system contract', () => {
     expect(cargo).toMatch(/keyring\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*['"]windows-native['"]/s);
   });
 
+  it('scrolls the settings menu body instead of clipping a tall form', () => {
+    const shell = read('src/styles/shell.css');
+    // 面板是 flex 列：只有 flex 会按 max-height 收内容盒，网格的自动行按内容撑开，
+    // 长表单会被 overflow:hidden 直接切掉（保存/取消够不着，也无法滚动）。
+    const panel = ruleBody(shell, '.settings-choice-panel');
+    expect(panel).toMatch(/display:\s*flex/);
+    expect(panel).toMatch(/flex-direction:\s*column/);
+    expect(panel).toMatch(/max-height:\s*min\(85vh,\s*760px\)/);
+    expect(panel).toMatch(/overflow:\s*hidden/);
+    const body = ruleBody(shell, '.settings-menu-body');
+    expect(body).toMatch(/overflow-y:\s*auto/);
+    expect(body).toMatch(/flex:\s*1 1 auto/);
+    expect(body).toMatch(/min-height:\s*0/);
+    // 标题与说明是选择器列表，ruleBody 只吃单条选择器，这里直接看规则本体。
+    expect(shell).toMatch(/\.settings-choice-panel > \.settings-choice-title,\s*\n\.settings-choice-panel > \.settings-menu-desc\s*\{\s*\n\s*flex:\s*none/);
+  });
+
+  it('reuses the shared multi-select rows for the sync scope', () => {
+    const module = read('src/components/SyncSettings.tsx');
+    // 范围勾选就是设置菜单里「底栏项目」那一套行，不再自造复选框；而且它独立成行
+    // （自己的 SettingsPanel），不挂在账户表单里。
+    expect(module).toMatch(/function SyncScopeChecks[\s\S]*?<CheckRowGroup label="同步范围">/);
+    expect(module).toMatch(/<CheckRow[\s\S]*?label=\{category\.label\}/);
+    expect(module).not.toMatch(/input\s+type="checkbox"/);
+    expect(read('src/styles/shell.css')).not.toMatch(/\.sync-scope-option\b/);
+    expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/label="同步范围"/);
+    const form = module.slice(module.indexOf('export function SyncAccountForm'));
+    expect(form).not.toMatch(/toggleScope|CheckRowGroup/);
+  });
+
+  it('draws each multi-value control exactly once', () => {
+    // 复选框行、开关与「勾选行组」各只有一份实现：三处复制过的行、两处复制过的
+    // 开关，都改成从这里取。任何一处再自己画一个，这条就红。
+    const controls = read('src/components/SettingsControls.tsx');
+    expect(controls).toMatch(/export function CheckRow\(/);
+    expect(controls).toMatch(/export function CheckRowGroup\(/);
+    expect(controls).toMatch(/export function SettingsSwitch\(/);
+    expect(controls).toMatch(/export function SwitchControl\(/);
+
+    // DeduplicationWorkspace is deliberately absent: a selectable result card is
+    // not a check row, and its disc marker is shared a different way.
+    const components = ['SettingsWorkspace.tsx', 'SyncSettings.tsx', 'ArchiveDeleteDialog.tsx', 'EhAccountPanel.tsx'];
+    for (const file of components) {
+      const source = read(`src/components/${file}`);
+      // 自带 role="checkbox" 的行、自带 role="switch" 的按钮、直接写出的
+      // switch-control 类，都是绕过了共享实现。
+      expect(source, file).not.toMatch(/role="checkbox"/);
+      expect(source, file).not.toMatch(/role="switch"/);
+      expect(source, file).not.toMatch(/className="switch-control"/);
+    }
+    // 勾选行的类名只在共享实现里出现一次。
+    const checkRowClass = ['SettingsWorkspace.tsx', 'SyncSettings.tsx'].map((file) => read(`src/components/${file}`));
+    for (const source of checkRowClass) expect(source).not.toMatch(/settings-menu-check/);
+  });
+
+  it('keeps one button family and no dead member of it', () => {
+    const shell = read('src/styles/shell.css');
+    // 主/次按钮共用一段几何：色调才是修饰符。
+    expect(shell).toMatch(/\.primary-action,\s*\n\.secondary-action\s*\{/);
+    // 曾经各自成套的三个类都不该再出现（注释里提到旧名是允许的）。
+    const rules = shell.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(rules).not.toMatch(/\.settings-action\b/);
+    expect(rules).not.toMatch(/\.archive-action-button\b/);
+    expect(rules).not.toMatch(/\.danger-action\b/);
+    // 危险色调必须是「底色 + 文字」，不是一圈红描边；而且必须有静止态规则，
+    // 否则按钮平时还是次级色，只在悬停时才变红。
+    const danger = ruleBody(shell, '.secondary-action.is-danger');
+    expect(danger).toMatch(/background:\s*var\(--error-container\)/);
+    expect(danger).toMatch(/color:\s*var\(--on-error-container\)/);
+    expect(danger).not.toMatch(/border/);
+    // 动作行平分宽度：声明的容器与实际使用的一致。
+    for (const row of ['.sync-form-actions > button', '.settings-menu-actions > .secondary-action', '.archive-detail-actions > .primary-action']) {
+      expect(shell.replace(/\/\*[\s\S]*?\*\//g, '')).toContain(row);
+    }
+  });
+
   it('uses a two-level settings layout with stable rail targets', () => {
     const shell = read('src/styles/shell.css');
     const settings = read('src/components/SettingsWorkspace.tsx');
@@ -350,8 +442,10 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-card-tags\s*\{[\s\S]*align-items:\s*flex-start[\s\S]*align-content:\s*flex-start/);
     // The rail card and the library grid share one tag geometry: a 20px chip in a
     // 48px two-row slot, so two rows need 44px and keep 4px clearance — the second
-    // row's bottom edge is never shaved by the clip box.
-    expect(shell).toMatch(/\.archive-thumb-card-tags \.metadata-chip\s*\{[\s\S]*min-height:\s*20px[\s\S]*font-size:\s*var\(--text-xs\)/);
+    // row's bottom edge is never shaved by the clip box. The 20px is the only
+    // variant a chip has: its type comes from the chip family, which is declared
+    // once (see the label-family contract below).
+    expect(shell).toMatch(/\.archive-thumb-card-tags \.metadata-chip\s*\{[\s\S]*min-height:\s*20px;/);
     expect(shell).toMatch(/\.archive-thumb-card-tags\s*\{[\s\S]*height:\s*48px/);
     // Thumbnail grid rows are packed in JS (fixed 180px columns, wide covers
     // exactly two columns plus the gap) so the grid can virtualize by row.
@@ -369,8 +463,9 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-row-footer\s*\{[\s\S]*justify-content:\s*space-between/);
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[\s\S]*grid-template-columns:\s*100px minmax\(0, 1fr\);/);
     // The wide card has the biggest tag area in the app, so it gets full-size
-    // chips: it used to pair the largest area with the smallest chips.
-    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{[\s\S]*font-size:\s*var\(--text-xs\)/);
+    // chips. That is the family default now — the wide row used to restate the
+    // whole chip box to get there, which is how the sizes drifted apart.
+    expect(shell).not.toMatch(/\.archive-list\.is-wide \.archive-row-tags \.metadata-chip\s*\{/);
     // 宽行卡的标签区是 JHenTai 画廊详情的分组行形态：分组行纵向堆叠，行内
     // 不折行，前三条完整物理行由 JS 打包（WideTagRows）——像素封顶会把组内
     // 续行拦腰切掉半枚芯片。
@@ -538,7 +633,6 @@ describe('design system contract', () => {
     expect(read('src/components/LibraryRouteWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">档案库<\/h1>/);
     expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">设置<\/h1>/);
     expect(read('src/components/TaskCenter.tsx')).toMatch(/<h1 className="visually-hidden">下载<\/h1>/);
-    expect(read('src/components/SyncWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">同步<\/h1>/);
   });
 
   it('centres the history rail node on the rail line', () => {
@@ -644,7 +738,9 @@ describe('design system contract', () => {
     // gave two different things to click.
     expect(shell).toMatch(/\.settings-row-button \{/);
     expect(shell).not.toMatch(/settings-choice-trigger/);
-    expect(settings).toMatch(/className="settings-row settings-row-button"/);
+    // 行的元素只有一处画：SettingsRow 自己。设置页只负责给内容。
+    expect(read('src/components/SettingsRow.tsx')).toMatch(/className="settings-row settings-row-button"/);
+    expect(settings).not.toMatch(/className="settings-row settings-row-button"/);
     // No section may wrap its rows in a frame of its own: a legend or a fieldset
     // padding put the first row of that section lower than every other section's,
     // which is the jump between sections.
@@ -655,7 +751,7 @@ describe('design system contract', () => {
     // taller than a preset list, so the panel rules are separate now.
     expect(shell).toMatch(/\.search-preset-panel \{[^}]*max-height:\s*min\(70vh, 520px\)/);
     expect(shell).toMatch(/\.settings-choice-panel \{[^}]*max-height:\s*min\(85vh, 760px\)/);
-    expect(settings).toMatch(/function SettingsRow\(/);
+    expect(read('src/components/SettingsRow.tsx')).toMatch(/export function SettingsRow\(/);
     expect(settings).toMatch(/function SettingsChoice\(/);
     // The selection is a mode with its own bar, not a checkbox glued to a card.
     expect(shell).toMatch(/\.archive-selection-bar \{/);
@@ -771,5 +867,239 @@ describe('design system contract', () => {
       const foreground = rgb(theme.get(foregroundToken) ?? '', background);
       expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
     }
+  });
+
+  it('keeps every hover rule behind a hover capability guard', () => {
+    // A tap leaves :hover stuck on the element in a WebView, so a card stayed
+    // raised and a row stayed filled after the finger had gone. Every hover rule
+    // is inside @media (hover: hover); the selectors that share a rule with a
+    // resting state (aria-pressed, is-revealed, focus-visible) are split out and
+    // left outside, because those states must still work on a touch screen.
+    for (const path of ['src/styles/shell.css', 'src/styles/reader.css', 'src/styles/base.css']) {
+      const sheet = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+      const guarded = (() => {
+        let out = '';
+        let index = 0;
+        for (;;) {
+          const match = /@media \(hover: hover\) \{/.exec(sheet.slice(index));
+          if (!match) { out += sheet.slice(index); break; }
+          const at = index + match.index;
+          out += sheet.slice(index, at);
+          let depth = 1;
+          let cursor = at + match[0].length;
+          while (cursor < sheet.length && depth > 0) {
+            if (sheet[cursor] === '{') depth += 1;
+            else if (sheet[cursor] === '}') depth -= 1;
+            cursor += 1;
+          }
+          index = cursor;
+        }
+        return out;
+      })();
+      expect(guarded, path).not.toMatch(/:hover/);
+      expect(sheet, path).toMatch(/@media \(hover: hover\) \{/);
+    }
+  });
+
+  it('takes the browser out of the gestures the app owns', () => {
+    const base = read('src/styles/base.css');
+    // A tap must not wait to see whether it is half of a double-tap, and a
+    // double-tap must not zoom the shell: an application, not a page.
+    // The control selectors are one list, so every one of them carries it. The
+    // list matters: the last time these were per-component, most of them were
+    // missed.
+    const gesture = base.match(/([^{}]*)\{[^{}]*touch-action:\s*manipulation/)?.[1] ?? '';
+    expect(gesture.length).toBeGreaterThan(0);
+    expect(ruleBody(base, "[role='tab']")).toMatch(/touch-action:\s*manipulation/);
+    for (const selector of ['button', 'a', 'label', 'summary', 'input', 'select', 'textarea',
+      "[role='button']", "[role='checkbox']", "[role='switch']"]) {
+      expect(gesture, selector).toContain(selector);
+    }
+    // The shell is a fixed frame, so nothing should chain a gesture back to it.
+    expect(ruleBody(base, 'html')).toMatch(/overscroll-behavior:\s*none/);
+    expect(ruleBody(base, 'body')).toMatch(/overscroll-behavior:\s*none/);
+    // The soft keyboard resizes the viewport instead of covering the controls.
+    expect(read('index.html')).toMatch(/interactive-widget=resizes-content/);
+    // Machine values dominate, so the defaults are off at the root and the two
+    // prose fields opt back in.
+    expect(read('index.html')).toMatch(/autocapitalize="off"/);
+    const metadata = read('src/components/MetadataEditRoute.tsx');
+    expect(metadata).toMatch(/<label>标题<input value=\{title\} autoCapitalize="sentences"/);
+    expect(read('src/components/LibraryWorkspace.tsx')).toMatch(/enterKeyHint="search"/);
+  });
+
+  it('gives small controls a finger-sized target only where a finger is used', () => {
+    const shell = read('src/styles/shell.css');
+    const coarse = ruleBody(shell, '@media (pointer: coarse)');
+    // Rows take the height; boxes take both axes; glyphs inside a line keep
+    // their drawing and grow a transparent hit overlay around their centre.
+    expect(coarse).toMatch(/min-height:\s*var\(--tap-min\)/);
+    expect(coarse).toMatch(/min-width:\s*var\(--tap-min\)/);
+    expect(coarse).toMatch(/\.metadata-tag-delete::before,/);
+    expect(coarse).toMatch(/width:\s*max\(100%,\s*var\(--tap-min\)\)/);
+    expect(coarse).toMatch(/height:\s*max\(100%,\s*var\(--tap-min\)\)/);
+    // 44px is the floor, and it is a token so the three sizes cannot drift.
+    expect(cssVariables(ruleBody(read('src/styles/tokens.css'), ':root')).get('--tap-min')).toBe('44px');
+    // The toast stack clears the bottom nav instead of hiding under it.
+    expect(shell).toMatch(/@media \(max-width: 900px\) \{[\s\S]*?\.toast-stack \{[\s\S]*?bottom:\s*calc\(var\(--safe-bottom\) \+ 64px/);
+  });
+
+  it('keeps typography on the scale instead of spelling out weights and leading', () => {
+    for (const path of ['src/styles/shell.css', 'src/styles/reader.css', 'src/styles/base.css']) {
+      const sheet = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+      // Weights, leading, tracking and every looping indicator's clock are
+      // tokens — the drift they replaced was 52 / 23 / 47 deployments of the
+      // same three numbers.
+      expect(sheet, path).not.toMatch(/font-weight:\s*\d/);
+      expect(sheet, path).not.toMatch(/line-height:\s*1\.[0-9]/);
+      expect(sheet, path).not.toMatch(/letter-spacing:\s*-?[0-9.]+(px|em)/);
+      expect(sheet, path).not.toMatch(/animation:[^;]*\d+ms/);
+      expect(sheet, path).not.toMatch(/animation:[^;]*\d+(\.\d+)?s/);
+    }
+    const tokens = cssVariables(ruleBody(read('src/styles/tokens.css'), ':root'));
+    for (const token of ['--weight-regular', '--weight-medium', '--weight-semibold', '--weight-bold',
+      '--leading-none', '--leading-tight', '--leading-normal', '--leading-relaxed',
+      '--tracking-tight', '--tracking-normal', '--tracking-wide',
+      '--duration-spin', '--duration-shimmer', '--duration-pulse', '--z-raised']) {
+      expect(tokens.has(token), token).toBe(true);
+    }
+  });
+
+  it('says "nothing here" and "still loading" with one component each', () => {
+    // EmptyState is a region; StatusLine is the one-line version. Four places
+    // used to borrow the region's class on a <p> and inherit its 320px centring.
+    const empty = read('src/components/EmptyState.tsx');
+    const status = read('src/components/StatusLine.tsx');
+    expect(empty).toMatch(/export function EmptyState\(/);
+    expect(status).toMatch(/export function StatusLine\(/);
+    expect(status).toMatch(/LoadingIndicator inline/);
+    // The region's geometry is bound to the region element, so the borrowed-class
+    // bug cannot come back to a <p>.
+    expect(read('src/styles/shell.css')).toMatch(/\.empty-state:not\(section\)/);
+    for (const path of ['SettingsWorkspace.tsx', 'TaskCenter.tsx', 'DeduplicationWorkspace.tsx', 'UploadPanel.tsx',
+      'EhComments.tsx', 'ErrorLogPanel.tsx', 'EhAccountPanel.tsx', 'MetadataEditRoute.tsx', 'MorePagesRoute.tsx', 'DedupSuggestionPanel.tsx']) {
+      const source = read(`src/components/${path}`);
+      expect(source, path).not.toMatch(/className="empty-state"/);
+      expect(source, path).not.toMatch(/server-list-message/);
+      expect(source, path).not.toMatch(/<p role="status">/);
+    }
+    // The reader-only spinner was referenced by a class that never existed.
+    expect(read('src/components/MetadataEditRoute.tsx')).not.toMatch(/className="spin"/);
+    expect(read('src/components/LoadingIndicator.tsx')).toMatch(/export function LoadingIndicator\(/);
+  });
+
+  it('binds the pull to whatever scrolls, on every layout', () => {
+    // The gesture used to be bound to the archive list, which only scrolls inside
+    // the library's own panels on a wide window. On compact and behind the
+    // shelves the page scrolls instead, so the pull did nothing on exactly the
+    // layouts that have no other way to ask for a refresh — and a refresh button
+    // is not the answer: the app has one way to ask, and it is this gesture.
+    const workspace = read('src/components/LibraryWorkspace.tsx');
+    expect(workspace).toMatch(/function scrollHost\(list: HTMLElement \| null, root: HTMLElement\)/);
+    expect(workspace).toMatch(/if \(list && scrollsVertically\(list\) && overflows\(list\)\) return list;/);
+    expect(workspace).toMatch(/hostRef|setScrollHostElement/);
+    expect(workspace).toMatch(/host\.addEventListener\('touchmove', touchMove, \{ passive: false \}\)/);
+    // The disc is pinned to the list panel, which every layout has.
+    expect(workspace).toMatch(/\{onRefresh && \(/);
+    // No layout may opt out of the gesture, and no second refresh control may
+    // appear beside it.
+    expect(workspace).not.toMatch(/if \(compact\) return/);
+    expect(workspace).not.toMatch(/aria-label="刷新"/);
+  });
+
+  it('pins only the library in the compact bar', () => {
+    // 档案库 is load-bearing: unchecking it would leave no way into the library.
+    // 设置 is not — an unselected entry reappears under 更多 — and pinning it made
+    // the checkbox look like a choice while refusing it.
+    const shell = read('src/components/AppShell.tsx');
+    expect(shell).toMatch(/const PINNED_NAV_KEYS: NavKey\[\] = \['\/library'\];/);
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    expect(settings).toMatch(/const pinned = key === 'library';/);
+    expect(settings).toMatch(/if \(key === 'library'\) return;/);
+    // The stored preference is re-pinned on the native side too, and that is the
+    // copy that actually decides: unpinning it only in the UI would have been
+    // undone on the next save.
+    const rust = read('src-tauri/src/settings.rs');
+    const normalize = rust.slice(rust.indexOf('fn normalize_bottom_nav_items'), rust.indexOf('fn load_value'));
+    expect(normalize).toMatch(/\*\*key == "library"/);
+    // No pin loop may put anything back: that is what forced 设置 on the last line.
+    expect(normalize).not.toMatch(/for required/);
+    expect(normalize).not.toMatch(/\["library", "settings"\]/);
+  });
+
+  it('draws a phone toast the way Android does', () => {
+    const shell = read('src/styles/shell.css');
+    // A phone: centred over the bottom of the screen, above the bottom bar — a
+    // corner is where a desktop puts a notification, not where a thumb is.
+    const stack = nestedRuleBody(shell, '.toast-stack');
+    expect(stack).toMatch(/justify-items: center/);
+    expect(stack).toMatch(/bottom: calc\(var\(--safe-bottom\) \+ 64px \+ var\(--space-6\)\)/);
+    // A solid pill sized to its message, and not something you act on: no border,
+    // no dismiss control, touches through to the content underneath.
+    const card = nestedRuleBody(shell, '.toast-card');
+    expect(card).toMatch(/display: flex/);
+    expect(card).toMatch(/justify-content: center/);
+    expect(card).toMatch(/border: 0/);
+    expect(card).toMatch(/border-radius: var\(--radius-pill\)/);
+    expect(card).toMatch(/pointer-events: none/);
+    expect(card).toMatch(/text-align: center/);
+    expect(nestedRuleBody(shell, '.toast-close')).toMatch(/display: none/);
+    // The desktop card keeps the snackbar it had, dismiss control included, and
+    // the media block comes after it so a first-match read still finds it.
+    const desktop = ruleBody(shell, '.toast-card');
+    expect(desktop).toMatch(/border: 1px solid var\(--outline-variant\)/);
+    expect(desktop).toMatch(/display: grid/);
+    expect(ruleBody(shell, '.toast-close')).toMatch(/cursor: pointer/);
+  });
+
+  it('cleans up records that point at archives the server no longer has', () => {
+    // A shelf card that only fails once it has been opened is the thing being
+    // prevented: the record has to go, not just the card. Both paths that learn a
+    // deletion is real must act on it, or the cleanup is only as prompt as the
+    // slower of the two.
+    const rust = read('src-tauri/src/commands/library.rs');
+    expect(rust).toMatch(/fn prune_dangling_records_for_server\(/);
+    // Only a tombstoned archive counts. A record whose archive was never indexed
+    // (an import, or a list written offline) must survive: "not indexed" is not
+    // evidence of deletion.
+    const helper = rust.slice(rust.indexOf('fn prune_dangling_records_for_server'), rust.indexOf('pub fn prune_dangling_records'));
+    expect(helper).toMatch(/JOIN archives a ON a\.server_id = \?2 AND a\.archive_id = r\.archive_id/);
+    expect(helper).toMatch(/a\.is_deleted = 1/);
+    expect(helper).not.toMatch(/LEFT JOIN/);
+    expect(helper).toMatch(/for \(table, object_type\) in DANGLING_RECORD_TABLES/);
+    expect(rust).toMatch(/\("reading_history", "history"\),\s*\("reading_list", "watchlist"\),\s*\("watchlist", "watchlist"\),/);
+    // Wired into both: the per-id verification, and the complete library walk.
+    const verify = rust.slice(rust.indexOf('pub async fn verify_archives_exist'), rust.indexOf('pub fn save_reading_progress'));
+    expect(verify).toMatch(/prune_dangling_records_for_server\(&mut connection, &server_id\)/);
+    const refresh = rust.slice(rust.indexOf('pub async fn refresh_archives'), rust.indexOf('fn search_status_failure'));
+    expect(refresh).toMatch(/prune_dangling_records_for_server\(&mut connection, &input\.server_id\)/);
+    // And reachable from the bridge, so it can be triggered by hand.
+    expect(read('src-tauri/src/lib.rs')).toMatch(/prune_dangling_records,/);
+
+    // A shelf is checked in batches, so a shelf longer than one call still gets
+    // looked at instead of only ever checking its first page.
+    const existence = read('src/lib/archiveExistence.ts');
+    expect(existence).toMatch(/for \(let at = 0; at < unchecked\.length; at \+= VERIFY_BATCH\)/);
+    expect(existence).toMatch(/if \(!result\.ok\) break;/);
+    const verifyLimit = Number(rust.match(/const VERIFY_ARCHIVE_LIMIT: usize = (\d+);/)?.[1]);
+    const batch = Number(existence.match(/const VERIFY_BATCH = (\d+);/)?.[1]);
+    expect(batch).toBeLessThanOrEqual(verifyLimit);
+  });
+
+  it('describes each setting in one line', () => {
+    // Hints used to be two clauses joined by ；, the second restating the label or
+    // the disabled state. The label says what it is; the hint says only what the
+    // label cannot.
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    // A hint is either a literal or a conditional of literals; the strings inside
+    // are what a reader sees, so those are what has to stay short.
+    const hints = [...settings.matchAll(/hint=(?:"([^"]*)"|\{([^}]*)\})/g)]
+      .flatMap((match): string[] => (match[1] !== undefined
+        ? [match[1]]
+        : [...(match[2] ?? '').matchAll(/'([^']*)'/g)].flatMap((inner) => (inner[1] === undefined ? [] : [inner[1]]))))
+      .filter((hint) => hint.length > 0);
+    const longest = hints.reduce((worst, hint) => (hint.length > worst.length ? hint : worst), '');
+    expect(hints.length).toBeGreaterThan(15);
+    expect(longest.length, `longest hint: ${longest}`).toBeLessThanOrEqual(34);
   });
 });

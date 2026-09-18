@@ -1,6 +1,7 @@
 import { usePreferences } from '../app/preferences';
 import { compactNavHiddenItems } from './AppShell';
-import { SettingsRow } from './SettingsWorkspace';
+import { SettingsRow } from './SettingsRow';
+import { StatusLine } from './StatusLine';
 
 /** 底栏放不下的页面在这里列出来。
  *
@@ -17,7 +18,7 @@ export function MorePagesRoute() {
       <div className="settings-group">
         <h1 className="visually-hidden">更多</h1>
         {hidden.length === 0
-          ? <p className="server-list-message" role="status">底栏已经放得下所有页面。</p>
+          ? <StatusLine>底栏已经放得下所有页面。</StatusLine>
           : hidden.map(({ to, label, icon: Icon }) => (
             <SettingsRow
               key={to}

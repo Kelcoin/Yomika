@@ -4,6 +4,7 @@ import type { EhComment } from '../services/ehClient';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { presentEhError } from '../services/ehClient';
 import { useToast } from './Toast';
+import { StatusLine } from './StatusLine';
 
 const repository = new NativeEhRepository();
 const COMMENT_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -159,7 +160,9 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
         <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
         <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
       </div>
-      {loading && comments.length === 0 ? <p role="status">正在读取评论…</p> : !error && comments.length === 0 ? <p className="eh-comments-empty">暂无评论</p> : null}
+      {loading && comments.length === 0
+        ? <StatusLine busy>正在读取评论…</StatusLine>
+        : !error && comments.length === 0 ? <StatusLine>暂无评论</StatusLine> : null}
       {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
         <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
           <div className="eh-comment-meta">

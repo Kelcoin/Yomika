@@ -1,10 +1,15 @@
 <!doctype html>
-<html lang="zh-Hans">
+<!-- 这台设备上要输入的几乎都是机器值——标签、URL、密钥、桶名、搜索式——所以
+     自动大写、自动更正和拼写检查在根上关掉，由真正写散文的两个字段自己打开。
+     三个属性都会向下继承，省掉每个输入框各写一遍、又漏掉几个。 -->
+<html lang="zh-Hans" autocapitalize="off" autocorrect="off" spellcheck="false">
   <head>
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover 是移动端读到安全区的前提：没有它，iOS 会把布局视口
-         缩进安全区、env(safe-area-inset-*) 一律为 0，Android 也不会给出刘海值。 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+         缩进安全区、env(safe-area-inset-*) 一律为 0，Android 也不会给出刘海值。
+         interactive-widget=resizes-content：键盘弹出时缩小视口，而不是盖在上面——
+         否则底部操作栏和对话框里的按钮会被键盘挡在下面，够不着。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#f3eee4" />
     <title>Yomika</title>
   </head>

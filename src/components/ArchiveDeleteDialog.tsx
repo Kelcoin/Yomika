@@ -6,6 +6,7 @@ import { NativeSettingsRepository, type PreferenceSnapshot } from '../repositori
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
 import { useToast } from './Toast';
+import { SwitchControl } from './SettingsControls';
 
 export function ArchiveDeleteDialog({ archive, onClose, onDeleted }: {
   archive: Pick<ArchiveRecord, 'serverId' | 'archiveId' | 'title'>;
@@ -70,9 +71,11 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
             只会让人以为功能坏了，而这次删除确实没有收藏可同步。 */}
         {syncAvailable && (
           /* The whole row toggles: a label cannot activate a button, so the
-             handler lives on the label and the switch is its visual control. */
+             handler lives on the label and the shared switch is its control. It
+             carries no aria-label of its own here — the label text next to it is
+             the name, and two names for one control is one too many. */
           <label className="preference-toggle" onClick={() => { if (!busy) setSyncFavorite(!syncFavorite); }}>
-            <button className="switch-control" type="button" role="switch" aria-label="本次同步删除 E-Hentai 收藏" aria-checked={Boolean(syncFavorite)} disabled={busy} tabIndex={-1}><span /></button>
+            <SwitchControl label="本次同步删除 E-Hentai 收藏" checked={Boolean(syncFavorite)} disabled={busy} tabIndex={-1} />
             <span>同步删除 E-Hentai 收藏</span>
           </label>
         )}

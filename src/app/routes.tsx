@@ -4,6 +4,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, use
 
 import { RetainedPage } from './RetainedPage';
 import { EmptyState } from '../components/EmptyState';
+import { StatusLine } from '../components/StatusLine';
 import { LibraryShell } from '../components/LibraryShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
 import { LoadingIndicator } from '../components/LoadingIndicator';
@@ -563,7 +564,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
         </div>
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {shelfMessage && <p className="server-list-message" role="status">{shelfMessage}</p>}
+      {shelfMessage && <StatusLine>{shelfMessage}</StatusLine>}
       {!loading && !error && !hasServer && <ServerRequiredPrompt />}
       {!loading && !error && hasServer && shelfArchives.length === 0 && (
         <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />

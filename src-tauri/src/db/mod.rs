@@ -82,6 +82,18 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         (22, include_str!("../../migrations/0022_eh_my_tags.sql")),
         (23, include_str!("../../migrations/0023_servers_enabled.sql")),
         (24, include_str!("../../migrations/0024_sync_scope.sql")),
+        (
+            25,
+            include_str!("../../migrations/0025_webdav_last_sync.sql"),
+        ),
+        (
+            26,
+            include_str!("../../migrations/0026_sync_accounts.sql"),
+        ),
+        (
+            27,
+            include_str!("../../migrations/0027_sync_account_active.sql"),
+        ),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -135,9 +147,9 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("servers table");
-            let webdav_table: String = connection
+            let sync_table: String = connection
                 .query_row(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'webdav_accounts'",
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_accounts'",
                     [],
                     |row| row.get(0),
                 )
@@ -196,7 +208,7 @@ mod tests {
                     version,
                     foreign_keys,
                     server_table.as_str(),
-                    webdav_table.as_str(),
+                    sync_table.as_str(),
                     archive_categories_table.as_str(),
                     archive_categories_index.as_str(),
                     archive_categories_fk_count,
@@ -205,10 +217,10 @@ mod tests {
                     eh_health_columns
                 ),
                 (
-                    24,
+                    27,
                     1,
                     "servers",
-                    "webdav_accounts",
+                    "sync_accounts",
                     "archive_categories",
                     "archive_categories_lookup_idx",
                     2,
@@ -233,7 +245,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 23);
+        assert_eq!(migration_count, 26);
         let recovered_status: String = reopened
             .connection
             .lock()

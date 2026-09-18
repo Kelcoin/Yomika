@@ -1,0 +1,98 @@
+import type { ReactNode } from 'react';
+import { Check, Lock } from 'lucide-react';
+
+/* The controls that are neither a button nor a field, drawn once.
+ *
+ * A switch and a check row both answer "on or off", but for different shapes of
+ * question: a switch is a single setting stated in a row, a check row is one
+ * member of a set. Both used to be copy-pasted wherever they were needed — the
+ * switch into two files, the check row into three — so every change had to be
+ * made three times to stay consistent, and did not always get made. The callers
+ * choose the wording now; the drawing lives here.
+ */
+
+/** The drawn switch: track, handle, role and checked state.
+ *
+ * `onToggle` is optional because one caller needs the switch as a picture only.
+ * The delete dialog states its option as a sentence with the switch in front of
+ * it, and the sentence is the hit target — a handler here as well would toggle
+ * twice per click.
+ */
+export function SwitchControl({ label, checked, disabled, tabIndex, onToggle }: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean | undefined;
+  tabIndex?: number | undefined;
+  onToggle?: (() => void) | undefined;
+}) {
+  return (
+    <button
+      className="switch-control"
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      disabled={disabled}
+      tabIndex={tabIndex}
+      onClick={onToggle}
+    ><span /></button>
+  );
+}
+
+/** A yes/no setting. A switch has no second level to open: the drawn switch
+ * sits in the row itself, on the right where every other value lives, and
+ * flipping it is the whole interaction. */
+export function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle }: {
+  icon?: ReactNode;
+  label: string;
+  hint?: string | undefined;
+  checked: boolean;
+  disabled?: boolean | undefined;
+  onToggle: () => void;
+}) {
+  return (
+    <div className={`settings-row settings-switch-row${disabled ? ' is-disabled' : ''}`}>
+      {icon && <span className="settings-row-icon" aria-hidden="true">{icon}</span>}
+      <span className="settings-row-copy">
+        <span className="settings-row-label">{label}</span>
+        {hint && <span className="settings-row-hint">{hint}</span>}
+      </span>
+      <SwitchControl label={label} checked={checked} disabled={disabled} onToggle={onToggle} />
+    </div>
+  );
+}
+
+/** One check row: a member of a set, toggled in place. The whole row is the hit
+ * target and the tick sits at the trailing edge, where every other row's value
+ * lives. `locked` is the member that cannot be turned off (底栏的档案库与设置,
+ * 详情页的阅读) — it keeps its tick, shows a lock instead, and is disabled. */
+export function CheckRow({ label, checked, locked = false, disabled = false, ariaLabel, onToggle }: {
+  label: string;
+  checked: boolean;
+  locked?: boolean | undefined;
+  disabled?: boolean | undefined;
+  ariaLabel: string;
+  onToggle: () => void;
+}) {
+  const on = locked || checked;
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      aria-label={ariaLabel}
+      disabled={locked || disabled}
+      className={`settings-menu-check${on ? ' is-checked' : ''}${locked ? ' is-pinned' : ''}`}
+      onClick={onToggle}
+    >
+      <span>{label}</span>
+      {locked ? <Lock aria-hidden="true" /> : on && <Check aria-hidden="true" />}
+    </button>
+  );
+}
+
+/** The set the check rows belong to. One wrapper so every group of them is the
+ * same grid and the rows line up across panels. */
+export function CheckRowGroup({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="settings-menu-checks" role="group" aria-label={label}>{children}</div>;
+}

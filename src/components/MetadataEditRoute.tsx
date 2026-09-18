@@ -11,6 +11,8 @@ import { MetadataTagRows } from './MetadataTagRows';
 import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { TagSuggest } from './TagSuggest';
 import { useToast } from './Toast';
+import { LoadingIndicator } from './LoadingIndicator';
+import { StatusLine } from './StatusLine';
 import { SelectField } from './SelectField';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 
@@ -130,7 +132,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     setBusy('');
   };
 
-  if (loading) return <main className="metadata-edit-page metadata-edit-loading"><LoaderCircle className="spin" aria-hidden="true" /><span>正在载入元数据…</span></main>;
+  // 整页等待用全应用同一个标记：之前这里引的是不存在的 .spin 类，图标根本不会转。
+  if (loading) return <main className="metadata-edit-page metadata-edit-loading"><LoadingIndicator size="lg" label="正在载入元数据" /></main>;
   if (error && !serverId) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button></main>;
   return (
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">
@@ -139,7 +142,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
         <h1 id="metadata-edit-title">编辑元数据</h1>
       </header>
       <form className="metadata-edit-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-        <label>标题<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        {/* 标题与简介是这里仅有的两段散文，所以只有它们要回自动大写与拼写检查。 */}
+        <label>标题<input value={title} autoCapitalize="sentences" spellCheck onChange={(event) => setTitle(event.target.value)} /></label>
         {/* One list, not two. There used to be a raw comma-separated textarea and
             a read-only run of translated chips underneath it: nothing tied them
             together, so the translations were decoration and every edit was
@@ -149,16 +153,19 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
           <span className="metadata-tag-field-label" id="metadata-tags-label">标签</span>
           <div className="metadata-tags-box" role="group" aria-labelledby="metadata-tags-label">
             <MetadataTagRows tags={tagList} onDelete={(tag) => setTagList(tagList.filter((item) => item !== tag))} />
-            {tagList.length === 0 && <span className="metadata-tags-empty">还没有标签</span>}
+            {tagList.length === 0 && <StatusLine>还没有标签</StatusLine>}
           </div>
           <label className="metadata-tag-input">
             <input
               ref={tagInputRef}
               aria-label="添加标签"
+              enterKeyHint="enter"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               placeholder="输入标签后回车，例如 artist:someone"
               value={tagDraft}
               autoComplete="off"
-              spellCheck={false}
               onChange={(event) => setTagDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') { event.preventDefault(); commitTagDraft(tagDraft); }
@@ -172,7 +179,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
             <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} onSelect={(tag) => commitTagDraft(tag)} />
           </label>
         </div>
-        <label>简介<textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
+        <label>简介<textarea value={summary} autoCapitalize="sentences" spellCheck onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
         {plugins.length > 0 && <div className="metadata-plugin-row"><SelectField name="metadataPlugin" aria-label="元数据插件" value={plugin} onChange={setPlugin} options={plugins.map((item) => ({ value: item.id, label: item.name }))} /><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
       {/* Same as the sync panel: a save landing or failing is an event, and the
           toast is where events are reported. */}

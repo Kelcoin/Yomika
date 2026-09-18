@@ -27,8 +27,7 @@
 
 /* Three frames on one track: the slot being read, and the two a swipe reveals.
    The track carries the drag offset, so a neighbour slides in from exactly where
-   it will land — the gesture used to drag the page off an empty background. */
-.reader-track {
+   it will land — the gesture used to drag the page off an empty background. */.reader-track {
   will-change: transform;
   /* Layout containment only: `paint` clipped every descendant to the track's
      own box, and the swipe-neighbour frames live at translateX(±100%) — they
@@ -50,9 +49,7 @@
 /* The zoom lives inside the frame being read — it is applied inline to the same
    element that carries the layout class — so the neighbours stay exactly one
    viewport away whatever the scale is. On the track it scaled the gaps too, and
-   zooming out brought both neighbours into view beside the page. */
-
-.reader-single,
+   zooming out brought both neighbours into view beside the page. */.reader-single,
 .reader-spread,
 .reader-webtoon {
   display: flex;
@@ -66,8 +63,7 @@
 /* Two halves, each anchored to the middle of the viewport. As a centred flex row
    the first page sat in the middle alone and jumped left when the second one
    arrived, so the pair is a fixed grid and an unloaded page still holds its
-   slot. */
-.reader-spread {
+   slot. */.reader-spread {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -78,8 +74,7 @@
 
 .reader-spread .reader-slot:first-child { justify-self: end; }
 .reader-spread .reader-slot:last-child { justify-self: start; }
-/* Right to left: the lower page number is the right-hand half. */
-.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
+/* Right to left: the lower page number is the right-hand half. */.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
 .reader-spread.is-rtl .reader-slot:last-child { grid-column: 1; justify-self: end; }
 
 .reader-slot {
@@ -90,8 +85,7 @@
   max-height: 100%;
 }
 
-/* Keep the incoming and outgoing pages visually identical at the handoff. */
-.reader-single.is-dragging,
+/* Keep the incoming and outgoing pages visually identical at the handoff. */.reader-single.is-dragging,
 .reader-spread.is-dragging {
   cursor: grabbing;
 }
@@ -109,8 +103,7 @@
 
 /* One slot per page, of a height the renderer and the windowing arithmetic both
    know. Only the slots inside the window hold anything: continuous mode used to
-   mount the entire archive at once, which is what froze the app. */
-.reader-webtoon-slot {
+   mount the entire archive at once, which is what froze the app. */.reader-webtoon-slot {
   display: flex;
   flex: none;
   align-items: flex-start;
@@ -126,8 +119,7 @@
 /* Loading and failure are one shape in two moods, so a page still on its way and
    a page that gave up read as the same object rather than as two unrelated
    screens — they used to share a branch, and every unloaded page was announced
-   as a failure. */
-.reader-page-status {
+   as a failure. */.reader-page-status {
   display: grid;
   place-items: center;
   gap: var(--space-3);
@@ -142,8 +134,7 @@
 .reader-page-status.is-failed p { color: var(--reader-ink); }
 
 /* 阅读器里的加载指示就是全应用那一个（M3 圆形指示器），只换颜色：它落在自己的
-   深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */
-.reader-screen-loading .loading-indicator,
+   深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */.reader-screen-loading .loading-indicator,
 .reader-page-status .loading-indicator { color: var(--reader-ink); }
 .reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
@@ -152,8 +143,7 @@
   text-align: center;
 }
 
-/* Failure view: a single top bar for leaving, message plus retry in the middle. */
-.reader-screen-error {
+/* Failure view: a single top bar for leaving, message plus retry in the middle. */.reader-screen-error {
   grid-template-rows: auto 1fr;
   place-items: stretch;
 }
@@ -184,7 +174,7 @@
 
 .reader-error p {
   color: var(--reader-muted);
-  line-height: 1.6;
+  line-height: var(--leading-relaxed);
 }
 
 .reader-error a {
@@ -204,8 +194,7 @@
 
 /* The two bars are positioned, not laid out in a grid, because they animate
    separately: as one grid with one transform the bottom bar slid in from the top
-   of the screen, which is not where it lives. */
-.reader-chrome {
+   of the screen, which is not where it lives. */.reader-chrome {
   position: absolute;
   inset: 0;
   z-index: var(--z-reader-chrome);
@@ -244,8 +233,7 @@
 /* The page pill, Readoshi-style. It avoids the page geometry itself: the
    bottom-centre slot rests in the letterbox under a width-filling image, the
    corner slot rides the right gap of a height-filling one, and both fade out
-   in continuous mode and while zoomed. */
-.reader-page-indicator {
+   in continuous mode and while zoomed. */.reader-page-indicator {
   position: fixed;
   z-index: var(--z-reader-chrome);
   right: 16px;
@@ -258,35 +246,25 @@
   font-family: var(--font-body);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--tracking-wide);
   pointer-events: none;
   transition: opacity var(--motion-standard), bottom var(--motion-standard);
 }
 
-/* Width-filling image: there is real room below it — take the centre slot. */
-.reader-page-indicator[data-placement='bottom'] {
+/* Width-filling image: there is real room below it — take the centre slot. */.reader-page-indicator[data-placement='bottom'] {
   right: auto;
   left: 50%;
   transform: translateX(-50%);
 }
 
-/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */
-.reader-page-indicator[data-placement='hidden'] { opacity: 0; }
+/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-placement='hidden'] { opacity: 0; }
 
 /* The toolbar owns the bottom strip while it is up, so the pill steps above it
-   instead of overlapping the controls. */
-.reader-page-indicator.is-raised { bottom: calc(86px + var(--safe-bottom)); }
+   instead of overlapping the controls. */.reader-page-indicator.is-raised { bottom: calc(86px + var(--safe-bottom)); }
 
 .reader-incognito-badge {
-  display: inline-flex;
   flex: none;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
   border: 1px solid var(--reader-border);
-  border-radius: var(--radius-pill);
-  font-family: var(--font-body);
-  font-size: var(--text-xs);
 }
 
 .reader-incognito-badge svg { width: 14px; height: 14px; }
@@ -304,9 +282,11 @@
   cursor: pointer;
 }
 
-.reader-icon-button:hover,
-.reader-toolbar button:hover {
-  background: var(--reader-control-hover);
+@media (hover: hover) {
+  .reader-icon-button:hover,
+  .reader-toolbar button:hover {
+    background: var(--reader-control-hover);
+  }
 }
 
 .reader-toolbar button[aria-pressed="true"] {
@@ -337,7 +317,9 @@
   cursor: not-allowed;
 }
 
-.reader-toolbar button:disabled:hover { background: transparent; }
+@media (hover: hover) {
+  .reader-toolbar button:disabled:hover { background: transparent; }
+}
 
 .reader-toolbar span {
   flex: 0 0 auto;
@@ -351,8 +333,7 @@
   flex: 0 0 44px;
 }
 
-/* Every control is an icon now, so no button needs extra text width. */
-.reader-webtoon-inner {
+/* Every control is an icon now, so no button needs extra text width. */.reader-webtoon-inner {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -372,11 +353,13 @@
   cursor: pointer;
 }
 
-.reader-retry-button:hover { background: var(--reader-control-hover); }
+@media (hover: hover) {
+  .reader-retry-button:hover { background: var(--reader-control-hover); }
+}
+
 .reader-retry-button svg { width: 24px; height: 24px; }
 
-/* Centred overview instead of a side drawer: cover, size, tags, then pages. */
-.reader-overview-backdrop {
+/* Centred overview instead of a side drawer: cover, size, tags, then pages. */.reader-overview-backdrop {
   position: absolute;
   inset: 0;
   z-index: var(--z-reader-overview);
@@ -431,15 +414,13 @@
 
 /* Cover with its own facts underneath: page count and byte size describe the
    archive, not its tags, and in the wide column they pushed every tag group down
-   a line. */
-.reader-overview-identity {
+   a line. */.reader-overview-identity {
   display: grid;
   align-content: start;
   gap: var(--space-2);
 }
 
-/* 框负责尺寸与裁切，图片只负责填满：模糊与放大都发生在框里面。 */
-.reader-overview-cover-frame {
+/* 框负责尺寸与裁切，图片只负责填满：模糊与放大都发生在框里面。 */.reader-overview-cover-frame {
   display: block;
   width: 120px;
   aspect-ratio: 3 / 4;
@@ -455,8 +436,7 @@
 }
 
 /* SFW 也覆盖这面概览：封面与页缩略图是浏览用的画面，和档案库的封面一样默认
-   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */
-:root[data-sfw='true'] .reader-overview-cover,
+   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */:root[data-sfw='true'] .reader-overview-cover,
 :root[data-sfw='true'] .reader-overview-thumbnails img {
   filter: blur(14px);
   transform: scale(1.12);
@@ -465,20 +445,24 @@
 .reader-overview-thumbnails img {
   transition: filter var(--motion-standard), transform var(--motion-standard);
 }
-:root[data-sfw='true'] .reader-overview-cover:hover,
-:root[data-sfw='true'] .reader-overview-thumbnails button:hover img,
 :root[data-sfw='true'] .reader-overview-thumbnails button:focus-visible img {
   filter: none;
   transform: none;
+}
+@media (hover: hover) {
+  :root[data-sfw='true'] .reader-overview-cover:hover,
+  :root[data-sfw='true'] .reader-overview-thumbnails button:hover img {
+    filter: none;
+    transform: none;
+  }
 }
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
 .reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
-   rather than being one run of identical chips. */
-.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
+   rather than being one run of identical chips. */.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }
-.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: var(--text-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
 .reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .reader-overview-thumbnails {
@@ -515,8 +499,7 @@
 
 .reader-overview-thumbnails button[aria-current="true"] { border-color: var(--brand-cyan); }
 /* Preview mode (opened from the duplicate workspace): the grid is reference
-   only, and it must not look like a control that will turn the page. */
-.reader-overview-thumbnails.is-preview button { cursor: default; }
+   only, and it must not look like a control that will turn the page. */.reader-overview-thumbnails.is-preview button { cursor: default; }
 .reader-overview-thumbnails img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 
 .reader-overview-page-number {
@@ -532,11 +515,18 @@
 }
 
 /* Compact layout, matching COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and the
-   shell's own media query. */
-@media (max-width: 900px) {
+   shell's own media query. */@media (max-width: 900px) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {
     justify-content: flex-start;
   }
+}
+
+/* The reader's own scrollers, for the same reason as the shell's: a webtoon that
+   has run out must not hand the swipe back to the route underneath it. */
+.reader-webtoon,
+.reader-overview-tags,
+.reader-overview-thumbnails {
+  overscroll-behavior: contain;
 }
