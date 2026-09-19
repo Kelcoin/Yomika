@@ -409,7 +409,11 @@ body::-webkit-scrollbar,
 }
 
 /* Home draws rails, which want the room: a maximized window fit 8 cards with
-   a strip of rail left over. Other shelf pages keep the 1320px measure. */.workspace:has(.workspace-home) { width: min(100%, 1680px); }
+   a strip of rail left over. Other shelf pages keep the 1320px measure.
+   `:not([hidden])` is load-bearing: every visited route stays mounted in its own
+   `route-cache-panel`, so a plain `:has(.workspace-home)` also matched after
+   leaving home — and clamped every other page to 1680px, left-aligned, with the
+   rest of the window left blank. */.workspace:has(> .route-cache-panel:not([hidden]) .workspace-home) { width: min(100%, 1680px); }
 
 .scroll-to-top {
   position: fixed;
@@ -3022,12 +3026,6 @@ body::-webkit-scrollbar,
   font-size: var(--text-xs);
 }
 
-/* 状态标签只说「失败」，这里说是什么失败了：一行停在那里没有任何线索的任务，
-   除了让人再点一次没有别的用处。 */.task-error {
-  color: var(--state-danger);
-  overflow-wrap: anywhere;
-}
-
 /* Account info sits straight in the menu body — no inner card — and each
    account's actions are one row of the standard pill buttons, the same shape
    every other menu action uses. The full selector weight is required: the
@@ -4885,9 +4883,10 @@ body::-webkit-scrollbar,
 }
 
 /* ---- 本地档案页 ---------------------------------------------------------- */
-/* 这一页和档案库共用同一套行：同一个 .archive-row，同一个封面媒体框，同一套
-   标签瀑布。区别只在行里写什么——本地档案写大小和下载时间，没下完的那些写
-   进度、速度，和暂停 / 恢复 / 中止。 */
+/* 这一页的行就是档案库的宽行：`.archive-list.is-wide` + `.archive-row` 那一整套规则
+   给出行高、封面框、文案三格和标签瀑布，这里只写「这一页的行里写什么」——大小和
+   下载时间，以及没下完那些的进度、速度与暂停 / 恢复 / 中止。自己另写一套行，
+   标签的顺序、范围和染色就会和档案库各走一路。 */
 
 .local-archives {
   display: flex;
@@ -4898,36 +4897,19 @@ body::-webkit-scrollbar,
 
 .local-archives-controls { flex: 0 0 auto; }
 
+/* `.archive-list` 的 height: 100% 是给「面板本身就是列表」的布局准备的；这里的
+   列表在 controls 下面，得按 flex 剩余空间算。 */
 .local-archives-list {
   flex: 1 1 auto;
+  height: auto;
   min-height: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  display: grid;
-  align-content: start;
-  gap: var(--card-gap);
-  padding: var(--space-1) var(--space-1) calc(var(--space-6) + var(--chrome-bottom));
   border-top: 1px solid var(--hairline);
-  scrollbar-width: none;
-}
-.local-archives-list::-webkit-scrollbar { display: none; }
-
-/* 档案库的行高来自虚拟列表，这里的行自己撑出同一格。 */.local-archives-list .archive-row {
-  height: 158px;
-  justify-content: flex-start;
-  gap: var(--space-3);
-}
-.local-archives-list .archive-row > .archive-row-copy {
-  flex: 1 1 auto;
-  /* 一列且可以被压缩：宽的那一格（进度条定宽 420px）否则会把列撑过行宽，
-     行再把溢出裁掉——右端的百分比和速度就是这么被吃掉的。 */
-  grid-template-columns: minmax(0, 1fr);
 }
 
-/* 行里的封面还是档案库那套媒体框（缩略图卡片里是 210px 高），按行收窄；认不出
-   对应哪份服务器档案时摆一个图标，而不是一块永远在加载的骨架。 */.local-archives-list .archive-thumb-card-media {
+/* 行里的封面还是档案库那套媒体框（缩略卡片里 210px 高），收窄成宽行那一格；
+   认不出对应哪份服务器档案时摆一个图标，而不是一块永远在加载的骨架。 */
+.local-archives-list .archive-thumb-card-media {
   position: relative;
-  flex: 0 0 100px;
   width: 100px;
   height: 142px;
   border-radius: var(--radius-control);
@@ -4945,9 +4927,19 @@ body::-webkit-scrollbar,
   height: 26px;
 }
 
-/* 下载行不是按钮：它是一张还在变的牌，点下去没有去处。 */.local-archives-list .archive-row.is-downloading { cursor: default; }
+/* 下载行不是按钮：它是一张还在变的牌，点下去没有去处。多出来的第三列是动作按钮。 */
+.local-archives-list .archive-row.is-downloading {
+  grid-template-columns: 100px minmax(0, 1fr) auto;
+  cursor: default;
+}
+/* 一列且可以被压缩：定宽 420px 的进度条否则会把这一列撑过行宽，行再把溢出裁掉——
+   右端的百分比和速度就是这么被吃掉的。 */
+.local-archives-list .archive-row.is-downloading > .archive-row-copy {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 .local-archives-list .archive-row progress {
+  align-self: center;
   /* 定宽加 max-width：`min(100%, …)` 在这种网格项上被 UA 的默认宽度顶掉过。 */
   width: 420px;
   max-width: 100%;
@@ -4961,47 +4953,40 @@ body::-webkit-scrollbar,
 .local-archives-list .archive-row progress::-webkit-progress-bar { background: var(--surface-elevated); }
 .local-archives-list .archive-row progress::-webkit-progress-value { background: var(--brand-cyan); }
 
+/* 失败那一条：状态芯片已经说了「失败」，右边那格本来写给进度，改成写原因。 */
+.local-archives-list .archive-row-stats.is-error {
+  color: var(--error);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 本地档案那一页的路径一格占满整行：它比另外三格长得多，挤在半列里会折成三行。
+   等宽字体，路径里的斜杠和点才读得准。 */
+.archive-detail-facts > div[data-fact='path'] { grid-column: 1 / -1; }
+.archive-detail-facts > div[data-fact='path'] dd { font-family: var(--font-utility); font-size: var(--text-xs); }
+
 .local-row-actions {
-  flex: 0 0 auto;
+  align-self: center;
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
 
-/* 右侧那一页：这份本地文件的实情。服务器上的档案详情在 /library 里。 */
-.local-detail { display: grid; align-content: start; gap: var(--space-4); }
-.local-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.local-detail-head h2 { margin: 0; font-size: var(--text-lg); line-height: var(--leading-snug); overflow-wrap: anywhere; }
-.local-detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-5); margin: 0; }
-.local-detail-facts > div { display: grid; gap: 2px; min-width: 0; }
-.local-detail-facts > div.is-wide { grid-column: 1 / -1; }
-.local-detail-facts dt { color: var(--ink-secondary); font-size: var(--text-xs); }
-.local-detail-facts dd { margin: 0; font-size: var(--text-sm); }
-.local-detail-path { display: block; font-family: var(--font-utility); font-size: var(--text-xs); overflow-wrap: anywhere; }
-.local-detail-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .local-delete-dialog { max-width: 440px; }
 
 @media (max-width: 900px) {
-  /* 手机上这一页跟着文档流滚；行还是封面加文案一行，按钮落到下一行的右端——
-     390px 里挤不下封面、标题和三个按钮。 */
+  /* 手机上这一页跟着文档流滚。档案行照旧是档案库那套（封面 + 文案），只有下载行
+     要多占一行：390px 里挤不下封面、文案和三个按钮。 */
   .local-archives { height: auto; min-height: 100%; }
-  .local-archives-list {
-    overflow: visible;
-    padding: var(--space-3) 0 calc(var(--space-8) + var(--chrome-bottom));
-  }
-  .local-archives-list .archive-row {
-    flex-wrap: wrap;
+  .local-archives-list .archive-row.is-downloading {
+    grid-template-columns: 64px minmax(0, 1fr);
     height: auto;
-    align-items: flex-start;
     row-gap: var(--space-2);
-    padding: var(--space-3);
   }
-  .local-archives-list .archive-thumb-card-media { flex: 0 0 64px; width: 64px; height: 92px; }
-  .local-archives-list .archive-row > .archive-row-copy { flex: 1 1 60%; }
-  .local-archives-list .archive-row progress { min-width: 0; }
+  .local-archives-list .archive-row.is-downloading .archive-thumb-card-media { width: 64px; height: 92px; }
   /* 窄屏上「42% · 142.8 MB / 340.0 MB · 12.0 MB/s」一行放不下，让它换行而不是
      被省略号吃掉。 */
-  .local-archives-list .archive-row-footer { flex-wrap: wrap; }
-  .local-row-actions { margin-left: auto; }
-  .local-detail-facts { grid-template-columns: minmax(0, 1fr); }
+  .local-archives-list .archive-row.is-downloading .archive-row-footer { flex-wrap: wrap; }
+  .local-row-actions { grid-column: 1 / -1; margin-left: auto; }
 }

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -170,5 +170,58 @@ describe('local archives workspace', () => {
     await user.click(await screen.findByRole('button', { name: '恢复demo.cbz' }));
     expect(adapter).toHaveBeenCalledWith('resume_download', { taskId: 'task-1' });
     expect(await screen.findByText('下载完成')).toBeInTheDocument();
+  });
+
+  it('ranks and trims the row tags exactly like a library row', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') {
+        return { ok: true, value: [{ ...localFile, tags: ['language:chinese', 'source:https://e-hentai.org/g/1/abc', 'category:doujinshi', 'date_added:1758000000', 'female:glasses'] }] };
+      }
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    const row = (await screen.findByText('测试档案')).closest('.archive-row');
+    expect(row).not.toBeNull();
+    const chips = [...row!.querySelectorAll('.archive-row-tags .metadata-chip')].map((chip) => chip.textContent);
+    // 记账用的命名空间不上卡片（原来它们会当标签摆出来，源地址还排在第一个）。
+    expect(chips.join(' ')).not.toContain('e-hentai.org');
+    expect(chips.join(' ')).not.toContain('doujinshi');
+    expect(chips.join(' ')).not.toContain('1758000000');
+    // 顺序按命名空间优先级，不按服务器给的次序：female 排在 language 前面。
+    expect(chips.join(' ')).toContain('glasses');
+    expect(chips.findIndex((chip) => chip?.includes('glasses'))).toBeLessThan(chips.findIndex((chip) => chip?.includes('chinese')));
+  });
+
+  it('opens the archive detail panes for a local file, not a private layout', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') {
+        return { ok: true, value: [localFile, { ...localFile, path: 'E:\\Downloads\\bbb-另一份.zip', title: '另一份', archiveId: null, serverId: null, scopeId: null, tags: ['language:chinese'] }] };
+      }
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    await user.click(await screen.findByText('测试档案'));
+
+    // 详情面板用的就是档案详情页那几块：事实网格、按命名空间分组的标签墙。
+    const facts = document.querySelector('.archive-detail-facts');
+    expect(facts).not.toBeNull();
+    expect(document.querySelector('.local-detail-facts')).toBeNull();
+    expect(screen.getByLabelText('路径')).toBeInTheDocument();
+    expect(screen.getByLabelText('体积')).toBeInTheDocument();
+    expect(document.querySelector('.archive-detail-tag-section .tag-group-artist')).not.toBeNull();
+
+    // 标签芯片筛的是这一页的列表，不是去档案库搜。
+    await user.click(screen.getByRole('button', { name: '筛选 someone' }));
+    const list = within(document.querySelector('.local-archives-list') as HTMLElement);
+    expect(list.getByText('测试档案')).toBeInTheDocument();
+    expect(list.queryByText('另一份')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '本地删除' })).toBeInTheDocument();
   });
 });

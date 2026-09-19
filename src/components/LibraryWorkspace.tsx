@@ -1,4 +1,4 @@
-import { CardTagRows } from './CardTagRows';
+import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, ListChecks, Pencil, Plus, RefreshCw, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
@@ -16,7 +16,7 @@ import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, 
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
 import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -31,9 +31,6 @@ import { useEhMyTags } from './useEhMyTags';
  * per standard or wide card. */
 /** One search hint for every page that has a search box. */
 const SEARCH_PLACEHOLDER = '搜索档案…';
-
-const CARD_TAG_LIMIT_THUMBNAIL = 24;
-const CARD_TAG_LIMIT_WIDE = 36;
 
 /* Overscroll. Beyond the top the list can be pulled down to refresh, beyond the
    bottom it bounces; both are damped, so the numbers are on-screen pixels and
@@ -171,9 +168,6 @@ interface LibraryWorkspaceProps {
 }
 
 export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, onSelectAllFinished, finishedSelectableCount, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
-  const myTags = useEhMyTags();
-  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
-  const myTagColorFor = useCallback((tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -516,7 +510,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   };
 
   const renderArchiveButton = (archive: ArchiveRecord, eager: boolean, dayLabel?: string) => {
-    const cardTags = pickCardTags(archive.tags, displayMode === 'thumbnail' ? CARD_TAG_LIMIT_THUMBNAIL : CARD_TAG_LIMIT_WIDE, myTagKeys);
     const isSelected = selectedIds.has(archive.archiveId);
     const openArchive = (event: ReactMouseEvent<HTMLButtonElement>) => {
       if (selectionMode && onSelectionChange) {
@@ -585,8 +578,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         </div>
         <ArchiveThumbCardBody
           title={archive.title}
-          tags={cardTags}
-          colorFor={myTagColorFor}
+          tags={archive.tags}
           meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
         />
       </button>
@@ -605,7 +597,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         <span className="archive-row-copy">
           <strong>{archive.title}</strong>
-          <CardTagRows tags={cardTags} rowCount={3} className="archive-row-tags" colorFor={myTagColorFor} />
+          <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
           <span className="archive-row-footer">
             <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
             <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>

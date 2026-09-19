@@ -1,11 +1,12 @@
-import { CardTagRows } from './CardTagRows';
+import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Download, FileArchive, ListChecks, Pause, Play, RotateCcw, Trash2, X } from 'lucide-react';
+import { Download, FileArchive, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
 import { StatusLine } from './StatusLine';
@@ -14,7 +15,7 @@ import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
 import { writeClipboardText } from '../bridge/clipboard';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
-import { formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
+import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
 import { NativeLibraryRepository, type SearchPreset } from '../repositories/nativeLibraryRepository';
 
 const repository = new NativeLibraryRepository();
@@ -284,7 +285,9 @@ export function LocalArchivesWorkspace() {
         />
       )}
       {(activeDownloads.length > 0 || visibleArchives.length > 0) && (
-        <div className="local-archives-list">
+        /* `archive-list is-wide`：这一页的行就是档案库的宽行。行高、封面框、文案
+           三格和标签瀑布全部由那一套规则给，本地档案只多写「行里写什么」。 */
+        <div className="archive-list is-wide local-archives-list">
           {activeDownloads.map((task) => (
             <article className="archive-row is-downloading" key={task.id}>
               <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><Download /></div>
@@ -293,9 +296,10 @@ export function LocalArchivesWorkspace() {
                 <progress aria-label={`${downloadTitle(task)}进度`} max="100" value={Math.round(task.progress * 100)} />
                 <span className="archive-row-footer">
                   <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
-                  <small className="archive-row-stats">{downloadStats(task)}</small>
+                  {/* 失败那一条：右边这格本来写给进度，改成写原因——四行会撑破 142px
+                      的文案格，所以理由占进度的位置，完整文本留在 title 上。 */}
+                  <small className={`archive-row-stats${task.error ? ' is-error' : ''}`} title={task.error ?? undefined}>{task.error ?? downloadStats(task)}</small>
                 </span>
-                {task.error && <small className="task-error">{task.error}</small>}
               </span>
               <div className="local-row-actions">
                 {task.status === 'running' && (
@@ -310,7 +314,7 @@ export function LocalArchivesWorkspace() {
           ))}
           {visibleArchives.map((archive) => {
             const isSelected = selected.has(archive.path);
-            const extension = archive.path.split('.').pop()?.toUpperCase() ?? '';
+            const category = archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
             return (
               <button
                 type="button"
@@ -327,9 +331,9 @@ export function LocalArchivesWorkspace() {
                 {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
                 <span className="archive-row-copy">
                   <strong>{archive.title}</strong>
-                  <CardTagRows tags={archive.tags} rowCount={2} className="archive-row-tags" />
+                  <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
                   <span className="archive-row-footer">
-                    <small className="archive-row-category" data-category="local">{extension}</small>
+                    <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{category || archive.path.split('.').pop()?.toUpperCase()}</small>
                     <small className="archive-row-stats">
                       {[formatByteSize(archive.fileSize), formatArchiveDate(Math.floor(archive.addedAt / 1000))].filter(Boolean).join(' · ')}
                     </small>
@@ -400,6 +404,7 @@ export function LocalArchivesWorkspace() {
             archive={detail}
             onClose={closeDetail}
             onDelete={() => { setSelected(new Set([detail.path])); setConfirmingDelete(true); }}
+            onSelectTag={(query) => { setDraft(query); setQuery(query); }}
           />
         </section>
       </Panel>
@@ -407,42 +412,44 @@ export function LocalArchivesWorkspace() {
   );
 }
 
-/** 右侧那一页：这一份本地文件的实情。服务器上的档案详情在 /library 里，这里
- * 只说磁盘上的事——路径、大小、下载时间，以及能对它做的几件事。 */
-function LocalArchiveDetail({ archive, onClose, onDelete }: {
+/** 右侧那一页：这份本地文件的实情。渲染的是档案详情页的同一批分区——标题、封面、
+ * 事实网格、按命名空间分组的标签墙，类名也一样，所以两边的长相和标签顺序不会各自
+ * 漂移。差别只有内容：这一页说的是磁盘上的事（大小、下载时间、路径），动作也只有
+ * 复制路径和本地删除。 */
+function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   archive: LocalArchiveRecord;
   onClose: () => void;
   onDelete: () => void;
+  onSelectTag: (query: string) => void;
 }) {
   const { showToast } = useToast();
-  const [busy, setBusy] = useState(false);
+  const { groups, colorFor } = useDetailTagGroups(archive.tags);
+  const { cover, loading: coverLoading } = useArchiveCover({
+    scopeId: archive.scopeId ?? undefined,
+    serverId: archive.serverId ?? undefined,
+    archiveId: archive.archiveId ?? undefined,
+  });
+  const titleRef = useTwoLineTitle(archive.title);
   const facts = [
-    ['大小', formatByteSize(archive.fileSize)],
-    ['下载时间', formatArchiveDate(Math.floor(archive.addedAt / 1000))],
-    ['页数', archive.pageCount ? `${archive.pageCount} 页` : '未知'],
-    ['档案 ID', archive.archiveId ?? '不在服务器索引里'],
-  ] as const;
+    { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },
+    { kind: 'added' as const, label: '下载时间', value: formatArchiveDate(Math.floor(archive.addedAt / 1000)) || '未知' },
+    { kind: 'pages' as const, label: '页数', value: archive.pageCount ? `${archive.pageCount} 页` : '未知' },
+    { kind: 'path' as const, label: '路径', value: archive.path },
+  ];
 
   return (
-    <div className="local-detail">
-      <header className="local-detail-head">
-        <h2>{archive.title}</h2>
-        <button type="button" className="icon-button" aria-label="关闭详情" title="关闭" onClick={onClose}><X aria-hidden="true" /></button>
+    <main className="archive-detail-route" aria-labelledby="local-archive-title">
+      <header className="archive-detail-route-header">
+        <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>
+        <button type="button" className="reader-icon-button" aria-label="关闭详情" title="关闭" onClick={onClose}><X aria-hidden="true" /></button>
       </header>
-      <dl className="local-detail-facts">
-        {facts.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-        <div className="is-wide">
-          <dt>路径</dt>
-          <dd><span className="local-detail-path">{archive.path}</span></dd>
+      <div className="archive-detail-overview">
+        <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} />
+        <div className="archive-detail-overview-copy">
+          <ArchiveDetailFacts facts={facts} />
         </div>
-      </dl>
-      {archive.tags.length > 0 && <CardTagRows tags={archive.tags} rowCount={4} className="local-detail-tags" />}
-      <div className="local-detail-actions">
+      </div>
+      <div className="archive-detail-route-actions" role="toolbar" aria-label="本地档案操作">
         <button
           type="button"
           className="secondary-action"
@@ -453,10 +460,13 @@ function LocalArchiveDetail({ archive, onClose, onDelete }: {
         >
           复制路径
         </button>
-        <button type="button" className="secondary-action is-danger" disabled={busy} onClick={() => { setBusy(true); onDelete(); setBusy(false); }}>
+        <button type="button" className="secondary-action is-danger" onClick={onDelete}>
           <Trash2 aria-hidden="true" />本地删除
         </button>
       </div>
-    </div>
+      {/* 标签芯片照存档详情那一套排（My Tags 优先、按命名空间分组），点下去筛的是这一页
+          的列表：本地档案的标签来自下载时抓下的元数据，不去档案库搜。 */}
+      <ArchiveDetailTagSection groups={groups} colorFor={colorFor} onSelect={(tag) => onSelectTag(tag.query.replace(/\$$/, ''))} />
+    </main>
   );
 }

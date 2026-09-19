@@ -15,6 +15,11 @@ export const CARD_TAG_NAMESPACE_PRIORITY = [
 
 const HIDDEN_CARD_TAG_NAMESPACES = ['date_added', 'dateadded', 'timestamp', 'source', 'uploader', 'category'];
 
+/** 一张卡片能摆下的标签数。挑的时候给得宽：缩略卡片的两行瀑布会丢掉装不下的，
+ * 宽行有三行——上限只负责「别把整份标签表交给比较器」。 */
+export const CARD_TAG_LIMIT_THUMBNAIL = 24;
+export const CARD_TAG_LIMIT_WIDE = 36;
+
 /** Watched tags take the leftmost waterfall slots across all namespaces. */
 export function pickCardTags(tags: readonly string[] = [], limit = 10, priority?: ReadonlySet<string> | undefined): string[] {
   const rank = (tag: string) => {

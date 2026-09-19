@@ -347,6 +347,45 @@ describe('design system contract', () => {
     expect(cover).toMatch(/object-fit:\s*cover/);
   });
 
+  it('widens only the visible home panel, not the pages kept mounted beside it', () => {
+    // RetainedPage 把访问过的路由都留在 DOM 里，所以 `:has(.workspace-home)` 在离开
+    // 首页之后依然命中：每个页面被压到 1680px 并左对齐，右边整块留白。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)/);
+    expect(shell).not.toMatch(/\.workspace:has\(\.workspace-home\)/);
+  });
+
+  it('draws card tags and detail panes from one implementation each', () => {
+    // 本地档案页原来各写一套：标签直接摆原始列表（顺序、范围、My Tags 染色全丢），
+    // 详情是自带的 <dl>。现在三方共用同一批组件，页面里不该再有第二份。
+    const local = read('src/components/LocalArchivesWorkspace.tsx');
+    const library = read('src/components/LibraryWorkspace.tsx');
+    const route = read('src/components/ArchiveDetailRoute.tsx');
+    const sections = read('src/components/ArchiveDetailSections.tsx');
+    const tagRows = read('src/components/CardTagRows.tsx');
+
+    // 卡片标签：挑选（pickCardTags + My Tags 席位）与染色只此一份。
+    expect(tagRows).toMatch(/export function ArchiveCardTags/);
+    expect(tagRows).toMatch(/pickCardTags\(tags \?\? \[\], limit, myTagKeys\)/);
+    for (const page of [local, library]) {
+      expect(page).toContain('ArchiveCardTags');
+      expect(page).not.toMatch(/<CardTagRows\b/);
+      expect(page).not.toMatch(/pickCardTags\(/);
+    }
+    // 详情分区：标题、封面、事实网格、标签墙都住在共用模块里。
+    for (const name of ['ArchiveDetailCover', 'ArchiveDetailFacts', 'ArchiveDetailTagSection', 'useDetailTagGroups', 'useArchiveCover', 'useTwoLineTitle']) {
+      expect(sections).toContain(`export function ${name}`);
+    }
+    expect(local).toContain('ArchiveDetailTagSection');
+    expect(local).not.toMatch(/local-detail/);
+    // 档案详情页自己也要用共享的那几块，而不是留一份拷贝。
+    expect(route).toContain("from './ArchiveDetailSections'");
+    expect(route).not.toMatch(/className="archive-detail-facts"/);
+    expect(route).not.toMatch(/function DetailFactGlyph/);
+    // 本地档案那一页的自有样式已经退役。
+    expect(read('src/styles/shell.css')).not.toMatch(/\.local-detail/);
+  });
+
   it('keeps hover rules free of geometry so a hover never resizes a control', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     // A previous style merge fused the brand mark's 38px sizing into the chrome

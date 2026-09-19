@@ -1,13 +1,34 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { pickCardTags } from '../lib/archiveCardPresentation';
+import { normalizeMyTagKey } from '../lib/ehMyTags';
 import { translateRawTag } from '../lib/tags';
 import { readableInkOnHex } from '../lib/ehMyTags';
 import { distributeTagRows } from '../lib/tagWaterfall';
+import { useEhMyTags } from './useEhMyTags';
 
 /** Mirrors JHenTai's horizontal tag waterfall, using the actual translated chip
  * widths. With `fill` the rows pack top-down and the overflow is dropped, so a
  * card's tag slot is full rather than evenly spread; the caller keeps the tag
  * list generous and lets the measurement decide how many actually fit. */
 export interface CardTagLeadingChip { label: string; tone?: string; }
+
+/** 卡片上的标签从挑选到染色只有这一条路：命名空间优先级、隐藏的记账命名空间、
+ * watched 的席位和上限都在 `pickCardTags` 里，颜色取自同一个账户的 My Tags 预设。
+ * 档案库的宽行、缩略卡片和本地档案页都渲染这一个组件——各写一遍，正是标签顺序、
+ * 显示范围和「我的标签」在本地档案页失效的原因。 */
+export function ArchiveCardTags({ tags, limit, rowCount, className, fill = false }: {
+  tags: readonly string[] | undefined;
+  limit: number;
+  rowCount: number;
+  className: string;
+  fill?: boolean | undefined;
+}) {
+  const myTags = useEhMyTags();
+  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
+  const picked = useMemo(() => pickCardTags(tags ?? [], limit, myTagKeys), [tags, limit, myTagKeys]);
+  const colorFor = useCallback((tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
+  return <CardTagRows tags={picked} rowCount={rowCount} className={className} colorFor={colorFor} fill={fill} />;
+}
 
 export function CardTagRows({ tags, rowCount, className, colorFor, fill = false, leading = [] }: {
   tags: string[];

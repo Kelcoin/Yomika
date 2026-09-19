@@ -12,13 +12,12 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { categorizeSearchableTags, parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
+import { parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
 import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
 import { pickServer } from '../domain/server';
-import { normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
@@ -37,9 +36,8 @@ import { findMissingArchives } from '../lib/archiveExistence';
 import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { TagSearchLink } from './TagSearchLink';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailTagTime, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
 import { useDetailActions, useDetailDateKind } from '../app/preferences';
-import { useEhMyTags } from './useEhMyTags';
 
 const repository = new NativeLibraryRepository();
 const ehRepository = new NativeEhRepository();
@@ -52,17 +50,6 @@ const LONG_PRESS_MS = 500;
  * shows a loading state first. */
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
-function detailTagTime(tags: readonly string[], namespace: string): string {
-  const tag = tags.find((value) => value.split(':', 1)[0]?.trim().toLowerCase() === namespace);
-  const raw = tag?.slice(tag.indexOf(':') + 1).trim();
-  if (!raw) return '未知';
-  const numeric = Number(raw);
-  const date = new Date(Number.isFinite(numeric) ? numeric * (numeric > 1e12 ? 1 : 1000) : raw);
-  if (Number.isNaN(date.getTime()) || (Number.isFinite(numeric) && numeric <= 0)) return '未知';
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
 function DetailGlyph() {
   return (
     <svg className="detail-panel-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -71,17 +58,6 @@ function DetailGlyph() {
       <circle cx="9" cy="8.5" r="1.25" />
     </svg>
   );
-}
-
-function DetailFactGlyph({ kind }: { kind: 'pages' | 'size' | 'category' | 'added' | 'published' }) {
-  const paths = {
-    pages: 'M7 2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm0 2v12h10V4H7ZM3 6v14h12v2H3a2 2 0 0 1-2-2V6h2Z',
-    size: 'M4 3h16a2 2 0 0 1 2 2v4H2V5a2 2 0 0 1 2-2Zm0 2v2h16V5H4ZM3 11h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Zm2 2v7h14v-7H5Zm4 1h6v2H9v-2Z',
-    category: 'M4 4h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v2h18V8H4Zm0 4v8h18v-8H4Z',
-    added: 'M7 1h2v2h6V1h2v2h3a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3V1ZM4 5v3h16V5H4Zm0 5v10h16V10H4Zm7 1h2v3h3v2h-3v3h-2v-3H8v-2h3v-3Z',
-    published: 'M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm-1 2h2v5.6l3.7 2.2-1 1.7-4.7-2.8V6Z',
-  };
-  return <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d={paths[kind]} /></svg>;
 }
 
 export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
@@ -95,8 +71,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [metadata, setMetadata] = useState<ArchiveMetadata | undefined>(() => (
     readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS)
   ));
-  const [cover, setCover] = useState<string>();
-  const [coverLoading, setCoverLoading] = useState(true);
   const [metadataLoading, setMetadataLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [serverId, setServerId] = useState<string>();
@@ -109,7 +83,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
    * also follow the link, so the click is swallowed once. */
   const [incognitoAsk, setIncognitoAsk] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [coverPreviewOpen, setCoverPreviewOpen] = useState(false);
   const [detailPanel, setDetailPanel] = useState<'media' | 'comments'>('media');
   const [ehAccountId, setEhAccountId] = useState<string>();
   const incognitoTimer = useRef<number>();
@@ -130,12 +103,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   }, []);
 
   useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
-  useEffect(() => {
-    if (!coverPreviewOpen) return undefined;
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setCoverPreviewOpen(false); };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [coverPreviewOpen]);
 
   /** Back means back. This was a hardcoded link to the library, so arriving from
    * the home shelves and pressing it took you somewhere you had never been.
@@ -153,12 +120,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
   useEffect(() => {
     let active = true;
-    const coverController = new AbortController();
-    let coverHandle: import('../lib/unifiedImageCache').ImageHandle | undefined;
     const lastSnapshot = readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
     setMetadata(lastSnapshot);
-    setCover(undefined);
-    setCoverLoading(true);
     setMetadataLoading(true);
     setError(undefined);
     setServerId(undefined);
@@ -172,7 +135,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       if (!active) return;
       const server = servers.ok ? pickServer(servers.value, serverParam) : undefined;
       if (!server) {
-        setCoverLoading(false);
         setError(servers.ok ? '尚未配置服务器' : servers.error.message);
         return;
       }
@@ -214,19 +176,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
-      void getNativeImageCache().load({
-        scopeId: server.scopeId,
-        serverId: server.id,
-        archiveId,
-        rendition: 'cover',
-        pageIndex: 0,
-      }, { signal: coverController.signal }).then((handle) => {
-        if (!active) { getNativeImageCache().release(handle); return; }
-        coverHandle = handle;
-        setCover(handle.url);
-      }).catch(() => undefined).finally(() => {
-        if (active) setCoverLoading(false);
-      });
       void repository.listWatchlist(server.scopeId).then((result) => {
         if (!active || !result.ok) return;
         setFavorite(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
@@ -241,11 +190,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       });
     });
 
-    return () => {
-      active = false;
-      coverController.abort();
-      if (coverHandle) getNativeImageCache().release(coverHandle);
-    };
+    return () => { active = false; };
   }, [archiveId, navigate, serverParam, showToast]);
 
   // A retained detail does not remount after saving metadata in the editor.
@@ -273,10 +218,9 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   // 我的标签开启时，每个命名空间组内把账户标记过的标签排到最前（排序发生在
   // 分组之前，分组保持稳定顺序），并把这些芯片染成账户预设的颜色。挂钩必须
   // 全部在早退分支之前。
-  const myTags = useEhMyTags();
   const metadataTags = useMemo(() => metadata ? parseArchiveTagString(metadata.tags) : [], [metadata?.tags]);
-  const tagGroups = useMemo(() => categorizeSearchableTags(prioritizeByMyTags(metadataTags, myTags)), [metadataTags, myTags]);
-  const myTagColorFor = useCallback((query: string) => myTags.colors.get(normalizeMyTagKey(query.replace(/\$$/, ''))), [myTags.colors]);
+  const { groups: tagGroups, colorFor: myTagColorFor } = useDetailTagGroups(metadataTags);
+  const { cover, loading: coverLoading } = useArchiveCover({ scopeId, serverId, archiveId, enabled: Boolean(scopeId && serverId) });
 
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
@@ -316,34 +260,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   /** Title fitting: at most two lines, stepping the font down a notch at a
    * time when the text still overflows, and letting the CSS line-clamp cut the
    * rest to an ellipsis only when even the smallest size cannot fit. */
-  const titleRef = useRef<HTMLHeadingElement>(null);
-  useLayoutEffect(() => {
-    const element = titleRef.current;
-    if (!element) return undefined;
-    const sizes = ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)'];
-    const fit = () => {
-      // The stylesheet clamps the element to two lines, which pins scrollHeight
-      // to the clamped height — lift it for the measurement, restore after.
-      const previousDisplay = element.style.display;
-      element.style.display = 'block';
-      let step = 0;
-      element.style.fontSize = sizes[0]!;
-      while (step < sizes.length - 1) {
-        const style = window.getComputedStyle(element);
-        // line-height resolves to px already (1.4 × font-size); the two-line
-        // budget is just that height doubled.
-        const lineHeight = style.lineHeight === 'normal' ? parseFloat(style.fontSize) * 1.4 : parseFloat(style.lineHeight);
-        if (element.scrollHeight <= lineHeight * 2 + 2) break;
-        step += 1;
-        element.style.fontSize = sizes[step]!;
-      }
-      element.style.display = previousDisplay;
-    };
-    fit();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => fit());
-    observer?.observe(element);
-    return () => observer?.disconnect();
-  }, [title]);
+  const titleRef = useTwoLineTitle(title);
 
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
@@ -358,20 +275,9 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       </header>
 
       <div className="archive-detail-overview">
-        <div className="archive-detail-route-cover">
-          {cover
-            ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setCoverPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图"><img src={cover} alt={`${title} 封面`} /></button>
-            : <div className={`archive-detail-cover-placeholder${coverLoading ? ' is-skeleton' : ''}`} aria-label={coverLoading ? '正在加载封面' : '暂无封面'} />}
-        </div>
+        <ArchiveDetailCover title={title} cover={cover} loading={coverLoading} />
         <div className="archive-detail-overview-copy">
-          <dl className="archive-detail-facts" aria-label="档案信息">
-            {facts.map(({ kind, label, value }) => (
-              <div key={kind} title={label}>
-                <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
-                <dd>{metadata ? value : <span className="skeleton-line" />}</dd>
-              </div>
-            ))}
-          </dl>
+          <ArchiveDetailFacts facts={facts} loading={!metadata} />
         </div>
       </div>
 
@@ -454,38 +360,18 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
         </Dialog.Portal>
       </Dialog.Root>
 
-      {coverPreviewOpen && cover && (
-        <div className="archive-cover-preview" role="dialog" aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setCoverPreviewOpen(false)}>
-          <img src={cover} alt={`${title} 封面大图`} />
-        </div>
-      )}
-
       <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容">
         <button type="button" role="tab" aria-selected={detailPanel === 'media'} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => setDetailPanel('media')}><DetailGlyph /><span>详情</span></button>
         <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
       <div role="tabpanel" aria-label="详情" hidden={detailPanel !== 'media'}>
-        <div className="archive-detail-tag-section">
-          {metadataLoading && !metadata && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
-          {tags.length > 0 && (
-            <div className="archive-detail-tags" aria-label="档案标签">
-              {tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace)).map((group) => (
-                <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}>
-                  <h2>{group.label}</h2>
-                  <div className="archive-detail-tag-row">
-                    <span className="archive-detail-tag-values">
-                      {group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} color={myTagColorFor(tag.query)} key={`${group.namespace}-${tag.query}-${index}`} />)}
-                    </span>
-                  </div>
-                </section>
-              ))}
-            </div>
-          )}
-          {/* The footer meta appears once the metadata exists; while it loads
-              the copy skeleton above is the loading indicator — a second
-              skeleton chip under it read as one squeezed blob. */}
-        </div>
+        {/* 分类、日期这些记账标签在事实网格里已经各占一格，标签墙上不再重复。 */}
+        <ArchiveDetailTagSection
+          groups={tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace))}
+          loading={metadataLoading && !metadata}
+          colorFor={myTagColorFor}
+        />
       {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (

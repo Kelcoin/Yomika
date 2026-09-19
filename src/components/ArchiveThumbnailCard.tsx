@@ -1,13 +1,11 @@
-import { CardTagRows } from './CardTagRows';
+import { CardTagRows, ArchiveCardTags } from './CardTagRows';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { normalizeMyTagKey } from '../lib/ehMyTags';
-import { formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, pickCardTags } from '../lib/archiveCardPresentation';
+import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
-import { useEhMyTags } from './useEhMyTags';
 import { longPressHandlers } from '../lib/longPressMenu';
 
 const imageCache = getNativeImageCache();
@@ -15,15 +13,16 @@ const imageCache = getNativeImageCache();
 /** The thumbnail card's media + copy stack, shared by the recommendation rail
  * and the library grid so both are literally the same card. The caller supplies
  * the root element (an anchor in the rail, a button in the grid) and the meta
- * line, which carries different facts in each place. `colorFor` recolours a
- * chip when the E-Hentai account's My Tags holds a preset for the tag. */
-export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, colorFor }: { title: string; tags: string[]; meta: ReactNode; favorite?: boolean; colorFor?: ((tag: string) => string | undefined) | undefined }) {
+ * line, which carries different facts in each place. The tag slot picks and
+ * colours its own tags from the raw list, so a caller cannot pass a differently
+ * ordered or differently coloured set by accident. */
+export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number }) {
   return <div className="archive-thumb-card-body">
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
         width — the list row's waterfall keeps its own spreading behaviour. */}
-    <CardTagRows tags={tags} rowCount={2} fill className="archive-thumb-card-tags" colorFor={colorFor} />
+    <ArchiveCardTags tags={tags} limit={limit} rowCount={2} fill className="archive-thumb-card-tags" />
     <div className="archive-thumb-card-meta">{meta}</div>
   </div>;
 }
@@ -65,12 +64,6 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
 
 export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
   const [aspectRatio, setAspectRatio] = useState<number>();
-  const myTags = useEhMyTags();
-  const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
-  // Generous on purpose: the fill waterfall drops whatever the two rows cannot
-  // hold, so the limit only has to exceed what the widest card can show.
-  const tags = useMemo(() => pickCardTags(archive.tags, 24, myTagKeys), [archive.tags, myTagKeys]);
-  const colorFor = useMemo(() => (tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
   const isWide = isWideCoverRatio(aspectRatio);
   // The same menu the library list opens, by right click on a desktop and by
   // press-and-hold on a phone.
@@ -96,9 +89,8 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
     />
     <ArchiveThumbCardBody
       title={archive.title}
-      tags={tags}
+      tags={archive.tags}
       favorite={favorite}
-      colorFor={colorFor}
       meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
     />
   </Link>;
