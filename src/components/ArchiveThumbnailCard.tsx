@@ -7,7 +7,7 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio } from '../lib/archiveCardPresentation';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { longPressHandlers } from '../lib/longPressMenu';
-import { observeOnce } from '../lib/sharedIntersectionObserver';
+import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 
 const imageCache = getNativeImageCache();
 
@@ -48,7 +48,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     const load = () => void imageCache.load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => undefined);
     // 观察器按 rootMargin 分桶共享：书架/去重页一屏就是几十上百张卡，
     // 每卡一个 observer 实例的开销跟着页数走。
-    const stopObserving = observeOnce(node, load, '480px');
+    const stopObserving = observeOnceInScroll(node, load, '480px');
     return () => { stopObserving(); controller.abort(); if (handle) imageCache.release(handle); };
   }, [archiveId, node, scopeId, serverId]);
   return <div className="archive-thumb-card-media" ref={setNode}>

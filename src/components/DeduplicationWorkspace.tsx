@@ -7,7 +7,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeDedupRepository, type DedupLoadResult, type DedupNonDuplicateRecord, type DedupScanProgress, type DedupSessionSummary } from '../repositories/nativeDedupRepository';
 import { ArchiveOverviewDialog } from './ArchiveOverviewDialog';
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
-import { observeOnce } from '../lib/sharedIntersectionObserver';
+import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { CardTagRows } from './CardTagRows';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
@@ -325,7 +325,7 @@ export function DeduplicationWorkspace() {
     if (!moreRowsMounted) return undefined;
     const node = sentinelRef.current;
     if (!node) return undefined;
-    return observeOnce(node, () => setMountedRowCount((current) => current + DEMOUNT_ROW_CHUNK), '600px');
+    return observeOnceInScroll(node, () => setMountedRowCount((current) => current + DEMOUNT_ROW_CHUNK), '600px');
   }, [moreRowsMounted, mountedRowCount]);
   /** 组序号按完整列表（含被筛掉的）编号，筛选时也不会跳号。 */
   const groupNumberByKey = useMemo(() => new Map(groups.map((group, index) => [groupKeyOf(group), index + 1])), [groups]);

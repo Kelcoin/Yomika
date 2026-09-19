@@ -20,7 +20,7 @@ import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorReco
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { observeOnce } from '../lib/sharedIntersectionObserver';
+import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
   NativeLibraryRepository,
@@ -607,9 +607,9 @@ function ArchivePageThumbnail({
       });
     };
     // Browser loading="lazy" only delays decoding an existing URL. Delay the
-    // native IPC request as well, so a long archive does not fetch every page.
-    // 观察器全页面共享：两千页就是两千个 observer 实例，没必要。
-    const stopObserving = observeOnce(node, load, '300px');
+    // native IPC request as well — but generously: 1200px 约等于视口下方
+    // 好几行，正常滚动时缩略图总是先到一步，而不是滚到跟前才出现骨架。
+    const stopObserving = observeOnceInScroll(node, load, '1200px');
     return () => {
       stopObserving();
       controller.abort();

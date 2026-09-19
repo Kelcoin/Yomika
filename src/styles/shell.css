@@ -3803,12 +3803,10 @@ body::-webkit-scrollbar,
     flex-wrap: wrap;
   }
   .library-toolbar > .select-field { min-width: 140px; }
-  .archive-detail-overview { grid-template-columns: 1fr; }
-  .archive-detail-route-cover { justify-content: center; }
-  /* Fixed here too — see the desktop rule. */.archive-detail-cover-trigger,
-  .archive-detail-route-cover img,
-  .archive-detail-cover-placeholder { width: 240px; }
-  .archive-detail-route-cover img { height: 320px; }
+  /* 详情页的封面左、信息右不随视口收窄而堆叠：桌面基准（210px 封面）照常生效，
+     更窄的容器由下面的 archive-detail 容器查询分档收紧（520px→140px、
+     340px→104px）。原先这里在 ≤900px 强行单列居中，中档宽度反而塞不下
+     信息——宽度明明够。 */
   /* The toolbar is already a single non-wrapping flex row; on a phone the six
      icon buttons only need a floor so they stay tappable. */.archive-detail-route-actions > .primary-action,
   .archive-detail-route-actions > .secondary-action,
