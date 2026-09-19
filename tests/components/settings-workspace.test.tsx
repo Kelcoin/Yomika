@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { resetFilePickerForTests, setDirectoryPickerForTests, setSavePickerForTests } from '../../src/bridge/filePicker';
+import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForTests, setSavePickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { COLOR_SCHEMES } from '../../src/lib/cssThemePresets';
@@ -267,9 +267,10 @@ describe('settings workspace', () => {
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ decensorModel: 'aletheia-lens' }) }));
     await user.keyboard('{Escape}');
     // Model import keeps to its row: the picker button sits on the right of it
-    // and the file input lives beside the row, with no second level to open.
+    // and opens the native file dialog directly, with no second level to open
+    // and no hidden file input in the DOM.
     expect(screen.getByRole('button', { name: '选择模型文件…' })).toBeInTheDocument();
-    expect(document.querySelector('input[type="file"]')).not.toBeNull();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(screen.queryByRole('dialog', { name: '模型导入' })).toBeNull();
     expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(1);
   });
@@ -642,7 +643,7 @@ describe('settings workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'inference_list_models') return { ok: true, value: installed };
-      if (command === 'inference_import_model_file') {
+      if (command === 'inference_import_model_path') {
         installed = [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor', components: [
           { id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' },
           { id: 'deepcreampy-bar', name: 'DeepCreamPy Bar', role: '条状遮挡修补', path: 'deepcreampy/bar.onnx' },
@@ -659,13 +660,11 @@ describe('settings workspace', () => {
     expect(toggle).not.toBeDisabled();
     await user.click(toggle);
     expect(await screen.findByRole('alert')).toHaveTextContent('去码模型不完整');
-    // The bundle arrives through the import row's own file input.
+    // The bundle now travels by disk path: Rust reads the file itself instead
+    // of the front end shipping hundreds of MB of numbers across the bridge.
+    setModelPickerForTests(() => Promise.resolve('E:\models\bundle.zip'));
     await user.click(screen.getByRole('button', { name: '选择模型文件…' }));
-    const file = new File(['zip'], 'bundle.zip', { type: 'application/zip' });
-    Object.defineProperty(file, 'arrayBuffer', { value: async () => new Uint8Array([1, 2, 3]).buffer });
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-    fireEvent.change(input, { target: { files: [file] } });
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_import_model_file', { input: { file: [1, 2, 3], filename: 'bundle.zip' } }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_import_model_path', { input: { path: 'E:\models\bundle.zip' } }));
     const enabledToggle = screen.getByRole('switch', { name: '启用去码' });
     await vi.waitFor(() => expect(enabledToggle).toBeEnabled());
     await user.click(enabledToggle);

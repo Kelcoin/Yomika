@@ -16,7 +16,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return {ok:true,value:{...DEFAULT_PREFERENCES,ehFavoriteDeleteSync:true}};
       if (command === 'list_servers') return {ok:true,value:[{id:'s',scopeId:'scope',name:'Server',baseUrl:'https://lrr.test'}]};
-      if (command === 'list_archives') return {ok:true,value:[]};
+      if (command === 'list_archive_identities') return {ok:true,value:[]};
       if (command === 'dedup_scan') return {ok:true,value:{...session,stage:'completed',processed:2,total:2,cacheHits:0,downloads:0,missingCovers:0,invalidCovers:0,pairCount:1,degraded:false,diagnostics:[],pairs:[pair]}};
       if (command === 'dedup_load_result') return {ok:true,value:{session,archives:[],pairs:[pair],selectedArchiveIds:['a'],outcomes:[]}};
       if (command === 'dedup_delete_selected') return {ok:true,value:{rejectedArchiveIds:[],outcomes:[{archiveId:'a',deleted:false,message:'收藏同步失败'}]}};
@@ -42,7 +42,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: [] };
       // 没有已登录的 E-Hentai 账户：收藏同步这次做不了。
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs: [pair] } };
@@ -73,7 +73,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: [] };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs: [pair] } };
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs: [pair], selectedArchiveIds: [], outcomes: [] } };
       throw new Error(command);
@@ -88,7 +88,8 @@ describe('duplicate deletion confirmation', () => {
     await user.click(screen.getByRole('button', { name: '执行所选' }));
     expect(await screen.findByRole('dialog', { name: '确认删除' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '确认删除' }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_non_duplicate', { input: { scopeId: 'scope', leftArchiveId: 'a', rightArchiveId: 'b' } }));
+    // 整组标记走批命令：一把锁内落库，返回成功条数。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_non_duplicates', { input: { entries: [{ scopeId: 'scope', leftArchiveId: 'a', rightArchiveId: 'b' }] } }));
   });
 
   it('removes deleted archives from the view after execute', async () => {
@@ -129,7 +130,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string, payload?: { input?: { selectedArchiveIds?: string[] }; selectedArchiveIds?: string[] }) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: records };
+      if (command === 'list_archive_identities') return { ok: true, value: records };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs } };
       if (command === 'dedup_save_selection') {
         selectedArchiveIds = [...(payload?.selectedArchiveIds ?? [])];
@@ -279,7 +280,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return {
+      if (command === 'list_archive_identities') return {
         ok: true,
         value: ['a', 'b', 'c'].map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })),
       };
@@ -327,7 +328,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: ids.map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
+      if (command === 'list_archive_identities') return { ok: true, value: ids.map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 8, total: 8, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 4, degraded: false, diagnostics: [], pairs } };
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs, selectedArchiveIds: [], outcomes: [] } };
       throw new Error(command);
@@ -356,7 +357,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return {
+      if (command === 'list_archive_identities') return {
         ok: true,
         value: ['a', 'b', 'c'].map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })),
       };
@@ -424,7 +425,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: ids.map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
+      if (command === 'list_archive_identities') return { ok: true, value: ids.map((id) => ({ serverId: 's', archiveId: id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 4, total: 4, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 2, degraded: false, diagnostics: [], pairs } };
       if (command === 'dedup_save_selection') return { ok: true, value: null };
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs, selectedArchiveIds: [], outcomes: [] } };
@@ -469,7 +470,7 @@ describe('dedup scan progress and saved results', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: Array.from({ length: 10 }, (_, index) => ({ serverId: 's', archiveId: `a${index}`, title: `A${index}`, tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
+      if (command === 'list_archive_identities') return { ok: true, value: Array.from({ length: 10 }, (_, index) => ({ serverId: 's', archiveId: `a${index}`, title: `A${index}`, tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' })) };
       if (command === 'dedup_scan') return new Promise((resolve) => { resolveScan = resolve; });
       if (command === 'dedup_scan_progress') return { ok: true, value: scanProgress };
       if (command === 'dedup_load_result') return { ok: true, value: { session: { sessionId: 'scan', scopeId: 'scope', algorithmVersion: 'v1', status: 'completed', checkpoint: 10, archiveCount: 10 }, archives: [], pairs: [], selectedArchiveIds: [], outcomes: [] } };
@@ -498,7 +499,7 @@ describe('dedup scan progress and saved results', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return {
+      if (command === 'list_archive_identities') return {
         ok: true,
         value: [{ serverId: 's', archiveId: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' }],
       };
@@ -507,6 +508,11 @@ describe('dedup scan progress and saved results', () => {
         value: [
           { pairKey: 'a|z', leftArchiveId: 'a', rightArchiveId: 'z8y7x6w5v4u3t2s1r0q9p8o7n6m5l4k3j2i1h0g9', tombstoned: false },
         ],
+      };
+      // 身份列表里没有概览弹窗要的全字段：打开标题时按 id 现取整条记录。
+      if (command === 'list_archives_by_ids') return {
+        ok: true,
+        value: [{ serverId: 's', archiveId: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' }],
       };
       throw new Error(command);
     });
@@ -546,7 +552,7 @@ describe('dedup scan progress and saved results', () => {
     const adapter = vi.fn(async (command: string, payload?: { scopeId?: string; sessionId?: string }) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archives') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: [] };
       if (command === 'dedup_list_sessions') return { ok: true, value: saved };
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs: [], selectedArchiveIds: [], outcomes: [] } };
       if (command === 'dedup_delete_session') { saved = saved.filter((item) => item.sessionId !== payload?.sessionId); return { ok: true, value: null }; }

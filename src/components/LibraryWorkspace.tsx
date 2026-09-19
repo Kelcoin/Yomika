@@ -719,10 +719,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           {displayMode === 'wide' ? <Rows3 aria-hidden="true" /> : <Grid2X2 aria-hidden="true" />}
         </button>
       </div>}
-      {selectionMode && onSelectionChange && (
-        /* The slot animates from zero height, so the bar grows in and the list
-           below is pushed down by the same motion instead of teleporting. */
-        <div className="archive-selection-slot">
+      {onSelectionChange && (
+        /* The slot stays mounted and swaps `is-open`, so collapsing animates
+           with the same motion that grew it in. While closed it is
+           visibility-hidden: nothing inside is tabbable or announced. */
+        <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
           <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
             <span className="archive-selection-count" role="status" aria-live="polite">已选 {selectedIds.size} 个</span>
             <button className="secondary-action" type="button" onClick={toggleAllVisible} disabled={archives.length === 0}>

@@ -179,21 +179,23 @@ function HomeWorkspace() {
         ...historyResult.value.slice(0, 6).map((item) => item.archiveId),
         ...readingListResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
       ])];
-      const archiveResult = await repository.listArchivesByIds(server.id, shelfIds);
+      // 书架 id 解析与随机漫游互不依赖，重叠拉取：原先是先等完书架、
+      // 再等随机、最后等缺失确认，三条链串行只让首屏更晚齐。
+      const archivePromise = repository.listArchivesByIds(server.id, shelfIds);
+      const randomPromise = loadRandom(server.id, {
+        showFinished: preferencesRef.current.randomRoamShowFinished,
+        progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
+      });
+      const archiveResult = await archivePromise;
       if (!active) return;
       if (!archiveResult.ok) setRecentError(archiveResult.error.message);
       else setArchives(archiveResult.value);
       setRecentLoading(false);
-      // Fresh history in hand — the finished-archive filter reads it here, not
-      // from whatever render happened to be current when the call started.
-      await loadRandom(server.id, {
-        showFinished: preferencesRef.current.randomRoamShowFinished,
-        progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
-      });
       // The mirror only learns about a deletion when something asks the server,
       // so confirm the handful of cards the rails are about to show rather than
       // letting the user discover a gone archive by clicking it.
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
+      await randomPromise;
       if (!active || missing.size === 0) return;
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
       setRandomArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
@@ -412,13 +414,18 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       if (!server) { setHasServer(false); setLoading(false); return; }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      const result = await (name === 'history'
-        ? repository.listHistory(server.scopeId)
-        : name === 'toRead'
-          ? repository.listReadingList(server.scopeId)
-          : repository.listWatchlist(server.scopeId));
+      // 书架列表与分类列表相互独立，并行拉；只有收藏夹需要分类。
+      const [shelf, categories] = await Promise.all([
+        name === 'history'
+          ? repository.listHistory(server.scopeId)
+          : name === 'toRead'
+            ? repository.listReadingList(server.scopeId)
+            : repository.listWatchlist(server.scopeId),
+        name === 'watchlist' ? repository.listCategories(server.id) : Promise.resolve(undefined),
+      ] as const);
       if (!active) return;
-      if (!result.ok) { setError(result.error.message); setLoading(false); return; }
+      if (!shelf.ok) { setError(shelf.error.message); setLoading(false); return; }
+      const result = shelf;
       if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setWatchlist(result.value as WatchlistRecord[]);
       // 收藏夹 reads the LANraragi 🔖 Favorites category; the local table only
@@ -426,14 +433,11 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       let shelfIds = name === 'history'
         ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
         : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
-      if (name === 'watchlist') {
-        const categories = await repository.listCategories(server.id);
-        if (active && categories.ok) {
-          const favorites = categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME);
-          if (favorites) {
-            setFavoritesIds(favorites.archives);
-            shelfIds = favorites.archives;
-          }
+      if (name === 'watchlist' && categories?.ok) {
+        const favorites = categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME);
+        if (favorites) {
+          setFavoritesIds(favorites.archives);
+          shelfIds = favorites.archives;
         }
       }
       const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);

@@ -185,9 +185,11 @@ pub fn store_image_cache(
         .parent()
         .ok_or_else(|| "Invalid image cache path".to_string())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let target_is_valid = std::fs::read(&target).ok().is_some_and(|stored| {
-        stored.len() == bytes.len() && blake3::hash(&stored).to_hex().as_str() == content_hash
-    });
+    // 内容寻址路径：目标存在且长度一致即视为同一份内容，不再把整个文件
+    // 读回来重算 hash——每次写多付一整次读+hash 没有买到正确性。
+    let target_is_valid = std::fs::metadata(&target)
+        .map(|meta| meta.len() == bytes.len() as u64)
+        .unwrap_or(false);
     if !target_is_valid {
         let _ = std::fs::remove_file(&target);
         use std::io::Write;
@@ -204,7 +206,10 @@ pub fn store_image_cache(
             .create_new(true)
             .open(&temporary)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = output.write_all(bytes).and_then(|_| output.sync_all()) {
+        // 不 fsync：这是可再生的缓存，掉电丢一页的代价远小于每次写都
+        // 强制刷盘（Windows 上 10-100ms，且此刻持有全局 DB 锁）。
+        // rename 仍保证读者看到的是完整文件。
+        if let Err(error) = output.write_all(bytes) {
             drop(output);
             let _ = std::fs::remove_file(&temporary);
             return Err(error.to_string());
@@ -224,7 +229,9 @@ pub fn store_image_cache(
     maintain_image_cache_quota(connection, app_data)
 }
 
-#[tauri::command]
+/// async：命令体是整文件读 + hash + SQL，原先是同步命令、跑在主线程上，
+/// 阅读器预取的每一页都会在那里停一下 UI。
+#[tauri::command(async)]
 pub fn cache_read_image(
     identity: CacheImageIdentity,
     app: tauri::AppHandle,
@@ -250,7 +257,8 @@ pub fn cache_read_image(
     }
 }
 
-#[tauri::command]
+/// async：同 cache_read_image——写缓存含文件写 + 驱逐检查，不占主线程。
+#[tauri::command(async)]
 pub fn cache_store_image(
     input: CacheStoreImageInput,
     app: tauri::AppHandle,
@@ -513,12 +521,20 @@ pub fn clear_image_cache(
     let mut removed_entries = 0;
     let mut removed_files = 0;
     let mut bytes_freed = 0_u64;
+    // 有别的条目（其它 kind 或 pinned）共用的路径不能删文件：一次查询把
+    // 这些受保护路径问齐，省掉循环里每条一个 COUNT 的回查。
+    let protected_paths: std::collections::HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT path FROM cache_entries WHERE NOT(kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0)")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::HashSet<String>, _>>()
+            .map_err(|error| error.to_string())?
+    };
     for (relative, size) in candidates {
-        let remaining: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0)",
-            [&relative], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
-        let isolated = if remaining == 0 {
+        let isolated = if !protected_paths.contains(&relative) {
             isolate_cache_file(app_data, &relative)?
         } else {
             None
@@ -572,12 +588,19 @@ pub fn invalidate_archive_cache(
     let mut removed_entries = 0;
     let mut removed_files = 0;
     let mut bytes_freed = 0_u64;
+    // 同 clear_image_cache：受其它 scope/档案条目共用的路径一次问齐。
+    let protected_paths: std::collections::HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT path FROM cache_entries WHERE NOT(source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored'))")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params![scope_id, archive_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::HashSet<String>, _>>()
+            .map_err(|error| error.to_string())?
+    };
     for (relative, size) in candidates {
-        let remaining: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM cache_entries WHERE path=?1 AND NOT(source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored'))",
-            rusqlite::params![relative, scope_id, archive_id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
-        let isolated = if remaining == 0 {
+        let isolated = if !protected_paths.contains(&relative) {
             isolate_cache_file(app_data, &relative)?
         } else {
             None
@@ -678,8 +701,10 @@ pub fn evict_cache_batch(
     }
 
     let candidates = {
+        // SUM 而不是 MAX：DELETE 按路径删掉全部行，字节账本（递减与
+        // bytes_freed）要的就是这个路径上的总字节。
         let mut statement = connection.prepare(
-            "SELECT path,MAX(size) FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 ORDER BY MIN(last_accessed_at),path LIMIT ?1"
+            "SELECT path,SUM(size) FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 ORDER BY MIN(last_accessed_at),path LIMIT ?1"
         ).map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([batch_limit as i64], |row| {
@@ -694,14 +719,19 @@ pub fn evict_cache_batch(
     let mut removed_entries = 0;
     let mut removed_files = 0;
     let mut bytes_freed = 0_u64;
+    // 全表 SUM 聚合只算一次，循环内按删掉的条目递减：原来每个候选都重跑
+    // 一遍聚合（最多 4096 次全表扫描），而且此时多半持有全局 DB 锁。
+    // 近似误差由收尾的精确 remaining_bytes 与外层的多批循环兜底。
+    let mut current_bytes = indexed_cache_bytes(connection)?;
     for (relative, indexed_size) in candidates {
-        if indexed_cache_bytes(connection)? <= max_bytes {
+        if current_bytes <= max_bytes {
             break;
         }
         let Some(path) = controlled_cache_path(app_data, &relative) else {
             removed_entries += connection
                 .execute("DELETE FROM cache_entries WHERE path=?1", [&relative])
                 .map_err(|error| error.to_string())?;
+            current_bytes = current_bytes.saturating_sub(u64::try_from(indexed_size).unwrap_or(0));
             continue;
         };
         let quarantine = path.with_file_name(format!(
@@ -721,7 +751,10 @@ pub fn evict_cache_batch(
             Ok(_) | Err(_) => false,
         };
         match connection.execute("DELETE FROM cache_entries WHERE path=?1", [&relative]) {
-            Ok(count) => removed_entries += count,
+            Ok(count) => {
+                removed_entries += count;
+                current_bytes = current_bytes.saturating_sub(u64::try_from(indexed_size).unwrap_or(0));
+            }
             Err(error) => {
                 if isolated {
                     let _ = std::fs::rename(&quarantine, &path);
@@ -866,7 +899,9 @@ mod tests {
             CacheEvictionResult {
                 removed_entries: 2,
                 removed_files: 1,
-                bytes_freed: 6,
+                // 共享路径的两行各 6 字节，DELETE 按路径删掉两行，
+                // 实际释放 12 字节——SUM(size)，不是 MAX(size) 的 6。
+                bytes_freed: 12,
                 remaining_bytes: 14,
                 quota_satisfied: true,
                 has_more: false

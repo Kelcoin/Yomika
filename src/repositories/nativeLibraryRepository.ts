@@ -2,10 +2,12 @@ import { z } from 'zod';
 
 import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import {
+  ArchiveIdentitySchema,
   ArchiveRecordSchema,
   ArchivePageSchema,
   ReadingProgressSchema,
   ServerRecordSchema,
+  type ArchiveIdentity,
   type ArchiveRecord,
   type ArchivePage,
   type ReadingProgress,
@@ -127,6 +129,10 @@ export class NativeLibraryRepository {
   }
   listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
+  }
+  /** 右键菜单要的两个布尔：两个 PK 点查就够，犯不着拉全量列表。 */
+  archiveMembership(scopeId: string, archiveId: string): Promise<CommandResult<{ reading: boolean; favorites: boolean }>> {
+    return invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() }));
   }
   /** Saved searches sync with everything else, so they live in the database
    * rather than local settings. */
@@ -334,6 +340,10 @@ export class NativeLibraryRepository {
 
   listArchives(serverId: string): Promise<CommandResult<ArchiveRecord[]>> {
     return invokeCommand('list_archives', { serverId }, z.array(ArchiveRecordSchema));
+  }
+  /** 去重页专用：只回 id/标题/标签/页数/体积，整库校验不再为全字段付费。 */
+  listArchiveIdentities(serverId: string): Promise<CommandResult<ArchiveIdentity[]>> {
+    return invokeCommand('list_archive_identities', { serverId }, z.array(ArchiveIdentitySchema));
   }
   /** For the shelves, which know their archive ids and only need the records
    * behind them — reading the whole library to resolve a dozen titles scaled

@@ -142,6 +142,28 @@ fn merge_sync_states(local: &SyncStateDocument, remote: &SyncStateDocument) -> S
     }
 }
 
+/// 折叠冗余的日志行：每个对象只留序号最大的那一版，更早的行仅当 status =
+/// 'completed' 才删——pending/retryable 是推送队列，failed 要留给重试与诊断。
+/// build_local_state 按「每对象取最后一版」折叠，删掉的全是被覆盖的已完成行，
+/// 折出来的文档因此逐字节不变。失败静默：压缩只是卫生，不值得让同步因它失败。
+fn compact_journal(connection: &Connection, scope_ids: &[&str]) -> Result<(), String> {
+    for scope_id in scope_ids {
+        connection
+            .execute(
+                "DELETE FROM sync_journal
+                 WHERE scope_id = ?1
+                   AND status = 'completed'
+                   AND sequence < (SELECT MAX(j2.sequence) FROM sync_journal j2
+                                   WHERE j2.scope_id = sync_journal.scope_id
+                                     AND j2.object_type = sync_journal.object_type
+                                     AND j2.object_id = sync_journal.object_id)",
+                params![scope_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// 本地这一侧的全部对象：把该 scope 的日志按序号折叠，每个对象取最后一版。日志里
 /// upsert 与 delete 都在，所以折出来的文档天然带墓碑。
 fn build_local_state(
@@ -1581,7 +1603,9 @@ pub(crate) fn recover_stuck_sync_journal(connection: &Connection) -> Result<usiz
     Ok(recovered)
 }
 
-#[tauri::command]
+/// (async) 整个网络同步最长可达分钟级（WebDAV/S3 超时 30/60s），
+/// 不能让 block_on 占着主线程把 UI 冻住。
+#[tauri::command(async)]
 pub fn sync_remote_scope(
     account_id: String,
     scope_id: String,
@@ -1605,6 +1629,9 @@ pub fn sync_remote_scope(
             // 远端文档是「当前状态」，缺了旧对象就等于把它们删掉了。类别上只带上账户
             // 勾选的：没勾的既不出门，也不落地。
             let enabled = parse_sync_scope(&account.sync_scope);
+            // 折叠前先把冗余行收掉：每个对象只留最后一版，更早的行仅当已推完
+            // （completed）才删。折叠结果不变，同步与日志体积都不再随历史线性涨。
+            let _ = compact_journal(&connection, &[&scope_id, GLOBAL_SCOPE]);
             let local_state =
                 match build_local_state(&connection, &[&scope_id, GLOBAL_SCOPE], &enabled) {
                     Ok(state) => state,
@@ -2101,10 +2128,19 @@ fn update_journal_state(
     if changed == 0 {
         return Err("Sync journal entry not found".to_string());
     }
-    query_journal_entries(connection, scope_id, None)?
-        .into_iter()
-        .find(|entry| entry.sequence == sequence)
-        .ok_or_else(|| "Sync journal entry not found".to_string())
+    // 按主键单行读回。原先把该 scope 的全部日志行重新查一遍再 find，
+    // 每次状态更新 O(N)，一次同步逐行更新下来是 O(N²)。
+    connection
+        .query_row(
+            "SELECT sequence, scope_id, object_id, object_type, operation, device_id,
+                    logical_clock, wall_clock, base_hash, payload_hash, payload_json,
+                    status, attempt_count, last_error
+             FROM sync_journal
+             WHERE scope_id = ?1 AND sequence = ?2",
+            params![scope_id, sequence],
+            row_to_record,
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn claim_journal_entries(
@@ -2804,6 +2840,46 @@ mod tests {
             .expect("latest object");
         assert_eq!(latest.logical_clock, 2);
         assert_eq!(latest.payload["page"], serde_json::json!(4));
+    }
+
+    #[test]
+    fn compacting_drops_only_superseded_completed_rows() {
+        let connection = migrated_connection();
+        append_journal_entry(&connection, input("scope-a", "archive-a")).expect("first");
+        let mut newer = input("scope-a", "archive-a");
+        newer.logical_clock = 2;
+        newer.payload_json = r#"{"page":4}"#.to_string();
+        append_journal_entry(&connection, newer).expect("newer");
+        // 另一个对象的一行，仍是 pending：推送队列，压缩不得碰。
+        append_journal_entry(&connection, input("scope-a", "archive-b")).expect("pending object");
+
+        // 第一行标记为已推送；第二行保持 pending。
+        connection
+            .execute(
+                "UPDATE sync_journal SET status='completed' WHERE scope_id='scope-a' AND sequence=1",
+                [],
+            )
+            .expect("mark completed");
+
+        let before = build_local_state(&connection, &["scope-a"], &default_scope()).expect("state before");
+        compact_journal(&connection, &["scope-a"]).expect("compact");
+        let after = build_local_state(&connection, &["scope-a"], &default_scope()).expect("state after");
+
+        // 被覆盖的已完成行没了，但折叠出来的文档逐字节一致。
+        assert_eq!(before, after);
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a'", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(remaining, 2);
+        // archive-a 的最新一行与 archive-b 都是 pending，推送队列原封不动。
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND status='pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending count");
+        assert_eq!(pending, 2);
     }
 
     #[test]

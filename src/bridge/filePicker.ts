@@ -6,6 +6,11 @@ let testPicker: FilePicker | undefined;
 let testMultiPicker: MultiFilePicker | undefined;
 let testDirectoryPicker: FilePicker | undefined;
 let testSavePicker: SavePicker | undefined;
+let testModelPicker: FilePicker | undefined;
+
+export function setModelPickerForTests(picker: FilePicker): void {
+  testModelPicker = picker;
+}
 
 export function setFilePickerForTests(picker: FilePicker): void {
   testPicker = picker;
@@ -28,6 +33,7 @@ export function resetFilePickerForTests(): void {
   testMultiPicker = undefined;
   testDirectoryPicker = undefined;
   testSavePicker = undefined;
+  testModelPicker = undefined;
 }
 
 /** 导出用：让用户挑一个保存位置，取消返回 null。 */
@@ -50,6 +56,20 @@ export async function pickDirectory(): Promise<string | null> {
 }
 
 const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'cbz', 'cbr', 'cb7', 'pdf'];
+
+const MODEL_EXTENSIONS = ['zip', 'onnx'];
+
+export async function pickModelFile(): Promise<string | null> {
+  if (testModelPicker) return testModelPicker();
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: '模型（zip / onnx）', extensions: MODEL_EXTENSIONS }],
+  });
+  return typeof selected === 'string' ? selected : null;
+}
 
 export async function pickArchiveFile(): Promise<string | null> {
   if (testPicker) return testPicker();

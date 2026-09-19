@@ -7,7 +7,7 @@ import {
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText, History,
 } from 'lucide-react';
-import { pickDirectory } from '../bridge/filePicker';
+import { pickDirectory, pickModelFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
 import { EhRouteWorkspace } from './EhRouteWorkspace';
@@ -380,7 +380,6 @@ export function SettingsWorkspace() {
    * one download runs at a time. */
   const [pendingModel, setPendingModel] = useState<{ id: string; label: string }>();
   const [modelDownload, setModelDownload] = useState<{ completed: number; total?: number | undefined }>();
-  const modelInputRef = useRef<HTMLInputElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   /** WebDAV state for the 同步 rows, loaded only while that section is shown. */
   const sync = useSyncSettings(selectedSettingsSection === 'settings-sync');
@@ -554,11 +553,10 @@ export function SettingsWorkspace() {
     if (models.ok) setInstalledModels(models.value);
   }
 
-  async function importModelFile(file: File) {
+  async function importModelFromPath(path: string) {
     setModelPending(true);
     try {
-      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-      const result = await inferenceRepository.importModelFile(bytes, file.name);
+      const result = await inferenceRepository.importModelPath(path);
       if (!result.ok) { showToast(result.error.message, 'error'); return; }
       showToast(`模型已导入：${modelOption(result.value).label}`, 'success');
       await refreshModels();
@@ -935,11 +933,10 @@ export function SettingsWorkspace() {
                 </div>
               </SettingsPanel>
             )}
+            </div>
             {selectedSettingsSection === 'settings-general' && (
-              /* 缓存相关的两项收进同一个容器：上限是它的预算，占用是它的现状，
-                 读作一组而不是两条散落的设置。 */
-              <div className="settings-cache-group" role="group" aria-label="缓存">
-                <p className="settings-cache-group-label">缓存</p>
+              /* 缓存的上限与现状单独成组：与下方服务器组同级同款，吃同一道组间距。 */
+              <div className="settings-group">
                 <SettingsNumber
                   icon={<HardDrive />}
                   label="图片缓存上限"
@@ -1009,6 +1006,8 @@ export function SettingsWorkspace() {
                 </SettingsPanel>
               </div>
             )}
+            {selectedSettingsSection !== 'settings-general' && (
+              <div className="settings-group">
             {selectedSettingsSection === 'settings-reading' && (
               <SettingsChoice
                 icon={<BookOpen />}
@@ -1270,7 +1269,8 @@ export function SettingsWorkspace() {
                 )}
               </SettingsPanel>
             )}
-            </div>
+              </div>
+            )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
             {selectedSettingsSection === 'settings-sync' && (
@@ -1474,7 +1474,7 @@ export function SettingsWorkspace() {
                   label="模型导入"
                   hint="导入超分或去码的模型文件与压缩包"
                   control={
-                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => modelInputRef.current?.click()}>
+                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
                         <path d="M12 3v12" />
@@ -1485,7 +1485,6 @@ export function SettingsWorkspace() {
                     </button>
                   }
                 />
-                <input ref={modelInputRef} className="visually-hidden" type="file" accept=".zip,.onnx,application/zip,application/octet-stream" disabled={modelPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importModelFile(file); event.currentTarget.value = ''; }} />
               </div>
             )}
             {/* The server list keeps its own live region and its own group of rows:

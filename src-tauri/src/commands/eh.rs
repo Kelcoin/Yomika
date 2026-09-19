@@ -404,11 +404,18 @@ fn build_search_url(
 const EH_CLIENT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 fn eh_http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(EH_CLIENT_UA)
-        .build()
-        .map_err(|error| error.to_string())
+    // 进程内共享一个 Client：连接池与 TLS 会话跨命令复用。配置恒定
+    // （超时 + UA），适合进程级缓存。
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent(EH_CLIENT_UA)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .clone()
 }
 
 async fn read_http_response(request: reqwest::RequestBuilder) -> Result<(u16, String), String> {

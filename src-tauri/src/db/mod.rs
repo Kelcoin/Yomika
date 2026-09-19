@@ -102,6 +102,10 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             29,
             include_str!("../../migrations/0029_local_archive_metadata.sql"),
         ),
+        (
+            30,
+            include_str!("../../migrations/0030_hot_path_indexes.sql"),
+        ),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -234,7 +238,7 @@ mod tests {
                     local_archive_metadata_columns
                 ),
                 (
-                    29,
+                    30,
                     1,
                     "servers",
                     "sync_accounts",
@@ -263,7 +267,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 26);
+        assert_eq!(migration_count, 27);
         let recovered_status: String = reopened
             .connection
             .lock()

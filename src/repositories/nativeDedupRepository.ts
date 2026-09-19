@@ -123,6 +123,10 @@ export class NativeDedupRepository {
   resumeScan(sessionId: string) { return invokeCommand('dedup_resume_scan', { sessionId }, DedupScanSessionSchema); }
   loadResult(sessionId: string) { return invokeCommand('dedup_load_result', { sessionId }, DedupLoadResultSchema); }
   saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema); }
+  /** 整组执行用：一把锁内逐条落库，按输入顺序回每条成败。 */
+  saveNonDuplicates(entries: DedupNonDuplicateInput[]): Promise<CommandResult<boolean[]>> {
+    return invokeCommand('dedup_save_non_duplicates', { input: { entries } }, z.array(z.boolean()));
+  }
   removeNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_remove_non_duplicate', { input }, VoidResponseSchema); }
   importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) { return invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema); }
   listNonDuplicates(scopeId: string): Promise<CommandResult<DedupNonDuplicateRecord[]>> {

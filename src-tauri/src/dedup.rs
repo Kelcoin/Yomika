@@ -3418,6 +3418,52 @@ pub fn dedup_save_non_duplicate(
             }),
     )
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupNonDuplicateBatchInput {
+    pub entries: Vec<DedupNonDuplicateInput>,
+}
+
+/// 一批两两标记一次落库：整组执行时前端按 C(m,2) 逐对发 IPC，
+/// 一组五人就是十次串行往返。按输入顺序逐条回 bool：前端只把成功的对
+/// 记作已处理，部分失败不会把没落库的组从视图里误删。
+#[tauri::command]
+pub fn dedup_save_non_duplicates(
+    input: DedupNonDuplicateBatchInput,
+    database: tauri::State<'_, crate::db::Database>,
+) -> crate::domain::result::CommandResult<Vec<bool>> {
+    command_error(
+        database
+            .connection
+            .lock()
+            .map_err(|_| "Database lock failed".into())
+            .and_then(|mut connection| {
+                let mut outcomes = Vec::with_capacity(input.entries.len());
+                for entry in input.entries {
+                    let scope_id = entry.scope_id.clone();
+                    let outcome = match pair_key(&entry.left_archive_id, &entry.right_archive_id) {
+                        Ok((pair_key, left, right)) => {
+                            save_non_duplicate(&mut connection, entry).is_ok()
+                                && crate::commands::sync::append_dedup_journal(
+                                    &mut connection,
+                                    &scope_id,
+                                    &pair_key,
+                                    "upsert",
+                                    &left,
+                                    &right,
+                                    false,
+                                )
+                                .is_ok()
+                        }
+                        Err(_) => false,
+                    };
+                    outcomes.push(outcome);
+                }
+                Ok(outcomes)
+            }),
+    )
+}
 #[tauri::command]
 pub fn dedup_remove_non_duplicate(
     input: DedupNonDuplicateInput,

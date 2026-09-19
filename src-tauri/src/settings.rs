@@ -295,86 +295,100 @@ fn normalize_bottom_nav_items(items: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn load_value<T: serde::de::DeserializeOwned>(
-    connection: &Connection,
+/// One table scan replaces one point query per key: load_preferences_from used
+/// to run ~28 SELECTs + parses per invocation, on the main thread, at startup
+/// and at every preferences reload.
+fn map_value<T: serde::de::DeserializeOwned>(
+    stored: &std::collections::HashMap<String, String>,
     key: &str,
     fallback: T,
 ) -> Result<T, String> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT value_json FROM settings WHERE key=?1",
-            [key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    match stored {
-        Some(value) => serde_json::from_str(&value).map_err(|error| error.to_string()),
+    match stored.get(key) {
+        Some(value) => serde_json::from_str(value).map_err(|error| error.to_string()),
         None => Ok(fallback),
     }
 }
 
 pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapshot, String> {
     let defaults = PreferenceSnapshot::default();
+    let mut stored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT key, value_json FROM settings")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (key, value) = row.map_err(|error| error.to_string())?;
+            stored.insert(key, value);
+        }
+    }
     let value = PreferenceSnapshot {
-        theme: load_value(connection, THEME_KEY, defaults.theme)?,
-        default_layout: load_value(connection, LAYOUT_KEY, defaults.default_layout)?,
-        default_direction: load_value(connection, DIRECTION_KEY, defaults.default_direction)?,
-        cache_max_bytes: load_value(connection, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
-        prefetch_pages: load_value(connection, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
-        cover_concurrency: load_value(
-            connection,
+        theme: map_value(&stored, THEME_KEY, defaults.theme)?,
+        default_layout: map_value(&stored, LAYOUT_KEY, defaults.default_layout)?,
+        default_direction: map_value(&stored, DIRECTION_KEY, defaults.default_direction)?,
+        cache_max_bytes: map_value(&stored, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
+        prefetch_pages: map_value(&stored, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
+        cover_concurrency: map_value(
+            &stored,
             COVER_CONCURRENCY_KEY,
             defaults.cover_concurrency,
         )?,
-        startup_route: load_value(connection, STARTUP_ROUTE_KEY, defaults.startup_route)?,
-        card_style: load_value(connection, CARD_STYLE_KEY, defaults.card_style)?,
-        upscale_backend: load_value(connection, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
-        upscale_model: load_value(connection, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
-        upscale_auto_enable: load_value(connection, UPSCALE_AUTO_ENABLE_KEY, defaults.upscale_auto_enable)?,
-        upscale_auto_threshold_bytes: load_value(
-            connection,
+        startup_route: map_value(&stored, STARTUP_ROUTE_KEY, defaults.startup_route)?,
+        card_style: map_value(&stored, CARD_STYLE_KEY, defaults.card_style)?,
+        upscale_backend: map_value(&stored, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
+        upscale_model: map_value(&stored, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
+        upscale_auto_enable: map_value(
+            &stored,
+            UPSCALE_AUTO_ENABLE_KEY,
+            defaults.upscale_auto_enable,
+        )?,
+        upscale_auto_threshold_bytes: map_value(
+            &stored,
             UPSCALE_AUTO_THRESHOLD_KEY,
             defaults.upscale_auto_threshold_bytes,
         )?,
-        decensor_model: load_value(connection, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
-        download_directory: load_value(
-            connection,
+        decensor_model: map_value(&stored, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
+        download_directory: map_value(
+            &stored,
             DOWNLOAD_DIRECTORY_KEY,
             defaults.download_directory,
         )?,
-        eh_favorite_delete_sync: load_value(
-            connection,
+        eh_favorite_delete_sync: map_value(
+            &stored,
             EH_FAVORITE_DELETE_SYNC_KEY,
             defaults.eh_favorite_delete_sync,
         )?,
-        confirm_eh_favorite_delete: load_value(
-            connection,
+        confirm_eh_favorite_delete: map_value(
+            &stored,
             CONFIRM_EH_FAVORITE_DELETE_KEY,
             defaults.confirm_eh_favorite_delete,
         )?,
-        continue_reading_show_finished: load_value(
-            connection,
+        continue_reading_show_finished: map_value(
+            &stored,
             CONTINUE_READING_SHOW_FINISHED_KEY,
             defaults.continue_reading_show_finished,
         )?,
-        random_roam_show_finished: load_value(
-            connection,
+        random_roam_show_finished: map_value(
+            &stored,
             RANDOM_ROAM_SHOW_FINISHED_KEY,
             defaults.random_roam_show_finished,
         )?,
-        eh_my_tags_priority: load_value(
-            connection,
+        eh_my_tags_priority: map_value(
+            &stored,
             EH_MY_TAGS_PRIORITY_KEY,
             defaults.eh_my_tags_priority,
         )?,
-        sfw_mode: load_value(connection, SFW_MODE_KEY, defaults.sfw_mode)?,
-        detail_date_kind: load_value(connection, DETAIL_DATE_KIND_KEY, defaults.detail_date_kind)?,
-        detail_actions: load_value(connection, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
-        custom_css: load_value(connection, CUSTOM_CSS_KEY, defaults.custom_css)?,
-        floating_nav: load_value(connection, FLOATING_NAV_KEY, defaults.floating_nav)?,
-        bottom_nav_items: load_value(connection, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
-        auto_sync: load_value(connection, AUTO_SYNC_KEY, defaults.auto_sync)?,
+        sfw_mode: map_value(&stored, SFW_MODE_KEY, defaults.sfw_mode)?,
+        detail_date_kind: map_value(&stored, DETAIL_DATE_KIND_KEY, defaults.detail_date_kind)?,
+        detail_actions: map_value(&stored, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
+        custom_css: map_value(&stored, CUSTOM_CSS_KEY, defaults.custom_css)?,
+        floating_nav: map_value(&stored, FLOATING_NAV_KEY, defaults.floating_nav)?,
+        bottom_nav_items: map_value(&stored, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
+        auto_sync: map_value(&stored, AUTO_SYNC_KEY, defaults.auto_sync)?,
     };
     validate_preferences(&value)
 }

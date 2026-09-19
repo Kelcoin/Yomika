@@ -571,12 +571,9 @@ async fn reader_request_with_timeout(
     api_key: String,
     timeout_seconds: u64,
 ) -> Result<reqwest::Response, String> {
-    Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(std::time::Duration::from_secs(timeout_seconds))
-        .build()
-        .map_err(|error| error.to_string())?
+    lanraragi_client()?
         .request(method, url)
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
         .header(
             reqwest::header::AUTHORIZATION,
             authorization_value(&api_key),
@@ -584,6 +581,21 @@ async fn reader_request_with_timeout(
         .send()
         .await
         .map_err(|error| error.to_string())
+}
+
+/// 共享的 LANraragi HTTP 客户端：进程内一份，连接池跨请求复用，
+/// TLS/TCP 握手与 keep-alive 不再每次重付。总超时按请求给
+/// （RequestBuilder.timeout），连接超时在构建时固定。
+fn lanraragi_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<Client, String>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .clone()
 }
 
 #[tauri::command]
@@ -2619,32 +2631,72 @@ fn sweep_orphan_parts(connection: &Connection, directory: &std::path::Path) {
     }
 }
 
-/// 借本地镜像补上「这是服务器上的哪一份档案」：标题、页数、标签，以及取封面要
-/// 用的 scope。
-fn mirror_local_archive(
+/// 批量版镜像补缺：一次把本页出现的所有 archive_id 问齐（按 500 分块，
+/// 尊重 SQLite 参数上限），原先每行一查，一页几百个本地档案就是几百次点查。
+/// 每个 id 优先取本地行归属的那台服务器的记录，没有就取第一条。
+fn query_mirror_local_archives(
     connection: &Connection,
-    archive_id: &str,
-    server_id: Option<&str>,
-) -> Option<(String, String, Option<i64>, String, String)> {
-    connection
-        .query_row(
-            "SELECT a.server_id, s.scope_id, a.page_count, a.tags_json, a.title
+    rows: &[LocalArchiveRow],
+) -> std::collections::HashMap<String, (String, String, Option<i64>, String, String)> {
+    let mut preferences: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut ids: Vec<String> = Vec::new();
+    for (_, archive_id, server_id, ..) in rows {
+        let Some(archive_id) = archive_id else { continue };
+        preferences.entry(archive_id).or_insert(server_id.as_deref().unwrap_or(""));
+        if seen.insert(archive_id) {
+            ids.push(archive_id.clone());
+        }
+    }
+    let mut mirrors: std::collections::HashMap<String, (String, String, Option<i64>, String, String)> =
+        std::collections::HashMap::new();
+    for chunk in ids.chunks(500) {
+        let mut sql = String::from(
+            "SELECT a.archive_id, a.server_id, s.scope_id, a.page_count, a.tags_json, a.title
              FROM archives a JOIN servers s ON s.id = a.server_id
-             WHERE a.archive_id = ?1 AND a.is_deleted = 0
-             ORDER BY (a.server_id = ?2) DESC
-             LIMIT 1",
-            params![archive_id, server_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .ok()
+             WHERE a.is_deleted = 0 AND a.archive_id IN (",
+        );
+        for (index, _) in chunk.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("?{}", index + 1));
+        }
+        sql.push(')');
+        let candidates = connection
+            .prepare(&sql)
+            .and_then(|mut statement| {
+                let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|error| error.to_string());
+        let Ok(candidates) = candidates else { continue };
+        for (archive_id, server_id, scope_id, page_count, tags_json, title) in candidates {
+            let preferred = preferences
+                .get(archive_id.as_str())
+                .is_some_and(|pref| **pref == server_id);
+            match mirrors.entry(archive_id) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((server_id, scope_id, page_count, tags_json, title));
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if preferred {
+                        slot.insert((server_id, scope_id, page_count, tags_json, title));
+                    }
+                }
+            }
+        }
+    }
+    mirrors
 }
 
 /// 本地档案页上的一个条目。
@@ -2701,7 +2753,27 @@ fn reconcile_local_archives(
                 .map_err(|error| error.to_string())?;
         }
     }
+    // 只有新文件或 size/mtime 变了才 UPSERT：这一页每十几秒刷一次，
+    // 无条件重写每一行只是给 WAL 制造 churn。
+    let stored_signatures: std::collections::HashMap<String, (i64, i64)> = connection
+        .prepare("SELECT path, file_size, added_at FROM local_archives")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            })?;
+            rows.collect::<Result<Vec<(String, i64, i64)>, _>>()
+        })
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(path, size, added)| (path, (size, added)))
+        .collect();
     for (path, size, added_at) in files {
+        if stored_signatures
+            .get(path.to_string_lossy().as_ref())
+            .is_some_and(|(stored_size, stored_added)| *stored_size == size as i64 && *stored_added == added_at)
+        {
+            continue;
+        }
         connection
             .execute(
                 "INSERT INTO local_archives (path, archive_id, title, file_size, added_at)
@@ -2736,13 +2808,12 @@ fn reconcile_local_archives(
             rows.collect::<Result<Vec<_>, _>>()
         })
         .map_err(|error| error.to_string())?;
+    let mirror = query_mirror_local_archives(connection, &rows);
     Ok(rows
         .into_iter()
         .map(
             |(path, archive_id, server_id, title, file_size, added_at, page_count, tags_json, scope_id)| {
-                let mirror = archive_id.as_deref().and_then(|archive_id| {
-                    mirror_local_archive(connection, archive_id, server_id.as_deref())
-                });
+                let mirror = archive_id.as_deref().and_then(|archive_id| mirror.get(archive_id)).cloned();
                 // 服务器镜像只补缺：下载时抄下的那一份在，就不再要求 archives 表里
                 // 正好有这一份。补到的东西写回行里——下一次断网也读得到，而不是每
                 // 次都去问服务器上那份还在不在。
@@ -2807,7 +2878,9 @@ fn reconcile_local_archives(
 }
 
 /// 本地档案页读的就是这个：先跟磁盘对齐，再回一份带镜像信息的列表。
-#[tauri::command]
+/// async：命令体里有目录 walk 与整表 UPSERT，必须离开主线程，
+/// 否则每 10-15s 一次的轮询会卡 UI。
+#[tauri::command(async)]
 pub fn list_local_archives(
     app: tauri::AppHandle,
     database: State<'_, Database>,
@@ -3548,8 +3621,9 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         if let Some(job_id) = job_id {
             let mut finished = false;
             // 2 分钟上限，和 Readoshi 等缩略图任务的口径一致。
+            // 先查再等：任务常常转瞬就绪，上来先睡半秒是白付的；
+            // 查重扫描会串行经过每个缺封面的档案，这笔就是 N×500ms。
             for _ in 0..240 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let status_url =
                     format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
                 let status =
@@ -3578,6 +3652,7 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                         true,
                     ));
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             if !finished {
                 return Ok(CommandResult::failure(
@@ -3765,8 +3840,8 @@ async fn fetch_page_thumbnail(
             });
         if let Some(job_id) = job_id {
             let mut finished = false;
+            // 先查再等：与 thumbnail 那边的口径一致，不白付首次的半秒。
             for _ in 0..poll_attempts {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let status_url =
                     format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
                 let status =
@@ -3795,6 +3870,7 @@ async fn fetch_page_thumbnail(
                         true,
                     ));
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             if !finished {
                 return Ok(CommandResult::failure(
@@ -5434,6 +5510,53 @@ pub fn list_archives(
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveIdentity {
+    pub archive_id: String,
+    pub title: String,
+    pub tags: Vec<String>,
+    pub page_count: Option<i64>,
+    pub file_size: Option<i64>,
+}
+
+/// 去重页只读这五个字段（id/标题/标签/页数/体积）。整库返回全字段记录
+/// 会让序列化体积和前端的逐条 zod 校验跟着不相关的字段一起涨。
+#[tauri::command]
+pub fn list_archive_identities(
+    server_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<ArchiveIdentity>> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let query = || -> Result<Vec<ArchiveIdentity>, String> {
+        let mut statement = connection.prepare(
+            "SELECT archive_id, title, tags_json, page_count, file_size
+             FROM archives WHERE server_id = ?1 AND is_deleted = 0",
+        )
+        .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([server_id.as_str()], |row| {
+                Ok(ArchiveIdentity {
+                    archive_id: row.get(0)?,
+                    title: row.get(1)?,
+                    tags: archive_tags(row.get::<_, String>(2)?),
+                    page_count: row.get(3)?,
+                    file_size: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    };
+    match query() {
+        Ok(identities) => CommandResult::success(identities),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 #[tauri::command]
 pub fn list_archives_page(
     input: ArchiveQueryInput,
@@ -5481,8 +5604,11 @@ const VERIFY_ARCHIVE_LIMIT: usize = 64;
 /// (history, favourites, to-read, the home rails) kept offering archives that
 /// were gone — the user found out by clicking one.
 ///
-/// Requests run one at a time and only a definite 400/404 counts: a timeout or a
-/// server error must never tombstone an archive that is merely unreachable.
+/// Requests run eight at a time (the probes are independent reads; serialized
+/// probes paid one full RTT each) and only a definite 400/404 counts: a timeout
+/// or a server error must never tombstone an archive that is merely unreachable.
+/// Tombstone writes happen after the probes finish, so no database lock is held
+/// across a network await.
 #[tauri::command]
 pub async fn verify_archives_exist(
     server_id: String,
@@ -5511,34 +5637,57 @@ pub async fn verify_archives_exist(
             ))
         }
     };
-    let mut missing = Vec::new();
-    for archive_id in archive_ids.iter().take(VERIFY_ARCHIVE_LIMIT) {
-        let url = format!(
-            "{}/api/archives/{}/metadata",
-            base_url.trim_end_matches('/'),
-            archive_id
-        );
-        let response = match reader_request(reqwest::Method::GET, url, api_key.clone()).await {
-            Ok(response) => response,
-            // Unreachable is not deleted.
-            Err(_) => continue,
-        };
-        let status = response.status();
-        if !matches!(
-            status,
-            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
-        ) {
-            continue;
+    let ids: Vec<String> = archive_ids
+        .iter()
+        .take(VERIFY_ARCHIVE_LIMIT)
+        .cloned()
+        .collect();
+    let mut tombstones = Vec::new();
+    for chunk in ids.chunks(8) {
+        let mut probes = JoinSet::new();
+        for archive_id in chunk {
+            let url = format!(
+                "{}/api/archives/{}/metadata",
+                base_url.trim_end_matches('/'),
+                archive_id
+            );
+            let api_key = api_key.clone();
+            let archive_id = archive_id.clone();
+            probes.spawn(async move {
+                match reader_request(reqwest::Method::GET, url, api_key).await {
+                    Ok(response) => {
+                        let status = response.status();
+                        if matches!(
+                            status,
+                            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+                        ) {
+                            Some((archive_id, status))
+                        } else {
+                            None
+                        }
+                    }
+                    // Unreachable is not deleted.
+                    Err(_) => None,
+                }
+            });
         }
+        while let Some(probe) = probes.join_next().await {
+            if let Ok(Some((archive_id, status))) = probe {
+                tombstones.push((archive_id, status));
+            }
+        }
+    }
+    let mut missing = Vec::new();
+    for (archive_id, status) in tombstones {
         let tombstoned = database
             .connection
             .lock()
             .map_err(|_| "Database lock failed".to_string())
             .and_then(|connection| {
-                reconcile_missing_archive_status(&connection, &server_id, archive_id, status)
+                reconcile_missing_archive_status(&connection, &server_id, &archive_id, status)
             });
         match tombstoned {
-            Ok(_) => missing.push(archive_id.clone()),
+            Ok(_) => missing.push(archive_id),
             Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
         }
     }
@@ -5554,7 +5703,9 @@ pub async fn verify_archives_exist(
     Ok(CommandResult::success(missing))
 }
 
-#[tauri::command]
+/// async：翻一页写一次进度，还带着日志写入与 MAX(logical_clock) 查询，
+/// 不许占主线程。
+#[tauri::command(async)]
 pub fn save_reading_progress(
     progress: ReadingProgressInput,
     database: State<'_, Database>,
@@ -6066,6 +6217,49 @@ pub fn set_reading_list(
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMembershipStatus {
+    pub reading: bool,
+    pub favorites: bool,
+}
+
+/// 右键菜单要的两个布尔（在待看？在收藏？）。原先为了它们把整个待看列表
+/// 和整个收藏列表都拉过来——数据量跟着库走，而两个 PK 点查就够。
+#[tauri::command]
+pub fn get_archive_membership(
+    scope_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<ArchiveMembershipStatus> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let probe = |table: &str| -> Result<bool, String> {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE scope_id = ?1 AND archive_id = ?2 AND deleted_at IS NULL)"
+                ),
+                params![scope_id, archive_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|flag| flag != 0)
+            .map_err(|error| error.to_string())
+    };
+    let result = (|| -> Result<ArchiveMembershipStatus, String> {
+        Ok(ArchiveMembershipStatus {
+            reading: probe("reading_list")?,
+            favorites: probe("watchlist")?,
+        })
+    })();
+    match result {
+        Ok(status) => CommandResult::success(status),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 #[tauri::command]
 pub fn list_reading_list(
     scope_id: String,
@@ -6395,7 +6589,7 @@ pub fn prune_dangling_records(
 }
 
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_reading_history(
     scope_id: String,
     database: State<'_, Database>,
@@ -6716,11 +6910,21 @@ pub async fn upload_archive(
             ))
         }
     };
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
+    // 整文件读是几百 MB 的阻塞 IO，丢给阻塞线程池：不该让 async 运行时
+    // 的工作线程（也不该让主线程）陪着读盘。
+    let read_path = path.clone();
+    let bytes = match tauri::async_runtime::spawn_blocking(move || std::fs::read(&read_path)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
             return Ok(CommandResult::failure(
                 "LRR_NOT_FOUND",
+                error.to_string(),
+                false,
+            ))
+        }
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "UNKNOWN",
                 error.to_string(),
                 false,
             ))
@@ -6728,9 +6932,7 @@ pub async fn upload_archive(
     };
     let part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
     let form = reqwest::multipart::Form::new().part("file", part);
-    let response = match Client::builder()
-        .build()
-        .map_err(|error| error.to_string())?
+    let response = match lanraragi_client()?
         .put(format!(
             "{}/api/archives/upload",
             base_url.trim_end_matches('/')

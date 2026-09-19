@@ -20,8 +20,8 @@ describe('archive actions', () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_reading_list') return { ok: true, value: [{ scopeId: 'scope', archiveId: 'a', addedAt: 'now', updatedAt: 'now', deviceId: 'd', revision: 1, deleted: false }] };
-      if (command === 'list_watchlist') return { ok: true, value: [] };
+      // 右键菜单现在用单点 membership 探针，不再拉全量列表。
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: true, favorites: false } };
       if (command === 'download_archive') return { ok: true, value: { status: 'completed', path: 'E:\\Comics\\a.zip', taskId: 'task-1' } };
       return { ok: true, value: null };
     });

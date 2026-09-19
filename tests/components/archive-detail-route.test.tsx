@@ -359,10 +359,15 @@ describe('archive detail route', () => {
   it('requests page thumbnails only when they approach the viewport', async () => {
     const OriginalObserver = window.IntersectionObserver;
     const observed: Array<() => void> = [];
+    // 共享观察器（全页面一个实例）的语义：observe 一个节点产生一次可触发的
+    // 回调注册，而不是构造实例时触发一次。
     window.IntersectionObserver = class {
-      constructor(callback: IntersectionObserverCallback) { observed.push(() => callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver)); }
+      private callback: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) { this.callback = callback; }
+      observe(node: Element) {
+        observed.push(() => this.callback([{ isIntersecting: true, target: node } as IntersectionObserverEntry], this as unknown as IntersectionObserver));
+      }
       disconnect() {}
-      observe() {}
       takeRecords() { return []; }
       unobserve() {}
       root = null;

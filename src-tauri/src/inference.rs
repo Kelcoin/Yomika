@@ -645,6 +645,24 @@ fn model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
     Ok(format!("v3-{:016x}", hash.finish()))
 }
 
+/// 指纹按根目录缓存：模型装好后内容不变，而逐页去码会让每个页面都走一遍
+/// 目录遍历。失效信号用根目录自身的 mtime——安装、换版本必然动到它；
+/// 只在既有版本目录里原地替换权重文件的场景才会漏，而那不是任何入口的做法。
+fn cached_model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, (Option<std::time::SystemTime>, String)>>> = std::sync::Mutex::new(None);
+    let stamp = root.metadata()?.modified().ok();
+    let mut guard = CACHE.lock().map_err(|_| std::io::Error::other("fingerprint cache poisoned"))?;
+    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+    if let Some((cached_stamp, cached)) = cache.get(root) {
+        if *cached_stamp == stamp {
+            return Ok(cached.clone());
+        }
+    }
+    let fingerprint = model_fingerprint(root)?;
+    cache.insert(root.to_path_buf(), (stamp, fingerprint.clone()));
+    Ok(fingerprint)
+}
+
 pub fn model_data_dir(_app: &tauri::AppHandle) -> std::io::Result<std::path::PathBuf> {
     crate::data_paths::data_dir(_app)
 }
@@ -930,12 +948,6 @@ pub fn inference_install_model(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct ModelImportFileInput {
-    pub file: Vec<u8>,
-    pub filename: String,
-}
-
 fn import_decensor_zip(
     data: &std::path::Path,
     bytes: &[u8],
@@ -1042,29 +1054,76 @@ fn imported_model_id(filename: &str) -> String {
 }
 
 /// Imports either a zip containing `manifest.json` and model assets, or a raw
-/// ONNX file. Raw files receive a conservative CPU manifest and use the fixed
-/// application data model directory through the normal installer.
-#[tauri::command]
-pub fn inference_import_model_file(
+/// ONNX file, from a path on disk. Raw files receive a conservative CPU
+/// manifest and use the fixed application data model directory through the
+/// normal installer.
+///
+/// 几百 MB 的包不再被前端拆成 number[] 过 JSON 桥（一进一出要占十几倍内存，
+/// 还会冻结主线程）：由 Rust 直接读路径。(async)：整文件读 + 安装是重活。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImportPathInput {
+    pub path: String,
+}
+
+#[tauri::command(async)]
+pub fn inference_import_model_path(
     app: tauri::AppHandle,
-    input: ModelImportFileInput,
+    input: ModelImportPathInput,
 ) -> crate::domain::result::CommandResult<InstalledModel> {
-    let result = model_data_dir(&app)
+    let trimmed = input.path.trim();
+    if trimmed.is_empty() {
+        return crate::domain::result::CommandResult::failure(
+            "INVALID_MODEL_IMPORT",
+            String::from("model path is empty"),
+            false,
+        );
+    }
+    let path = std::path::Path::new(trimmed);
+    let outcome = (|| -> Result<InstalledModel, String> {
+        let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err(String::from("not a file"));
+        }
+        let filename = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| String::from("model path has no filename"))?;
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        // InferenceError 的 Debug 形状与旧入口一致地透出。
+        import_model_bytes(&app, filename, bytes).map_err(|e| format!("{e:?}"))
+    })();
+    match outcome {
+        Ok(model) => crate::domain::result::CommandResult::success(model),
+        Err(message) => crate::domain::result::CommandResult::failure(
+            "INVALID_MODEL_IMPORT",
+            message,
+            false,
+        ),
+    }
+}
+
+fn import_model_bytes(
+    app: &tauri::AppHandle,
+    filename: String,
+    file: Vec<u8>,
+) -> Result<InstalledModel, InferenceError> {
+    model_data_dir(app)
         .map_err(|e| InferenceError::InvalidInput(e.to_string()))
         .and_then(|data| {
-            if !input.filename.to_ascii_lowercase().ends_with(".onnx") {
-                if let Some(model) = import_decensor_zip(&data, &input.file)? {
+            if !filename.to_ascii_lowercase().ends_with(".onnx") {
+                if let Some(model) = import_decensor_zip(&data, &file)? {
                     return Ok(model);
                 }
             }
-            let (manifest, archive) = if input.filename.to_ascii_lowercase().ends_with(".onnx") {
+            let (manifest, archive) = if filename.to_ascii_lowercase().ends_with(".onnx") {
                 use sha2::{Digest, Sha256};
-                let hash = Sha256::digest(&input.file)
+                let hash = Sha256::digest(&file)
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
                 let manifest = ModelManifest {
-                    id: imported_model_id(&input.filename),
+                    id: imported_model_id(&filename),
                     version: "1".into(),
                     format: "onnx".into(),
                     scale: 2,
@@ -1078,7 +1137,7 @@ pub fn inference_import_model_file(
                     writer
                         .start_file("model.onnx", zip::write::SimpleFileOptions::default())
                         .map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
-                    std::io::Write::write_all(&mut writer, &input.file)
+                    std::io::Write::write_all(&mut writer, &file)
                         .map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
                     writer
                         .finish()
@@ -1087,7 +1146,7 @@ pub fn inference_import_model_file(
                 (manifest, archive.into_inner())
             } else {
                 let manifest = {
-                    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&input.file))
+                    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&file))
                         .map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
                     let mut manifest_file = zip.by_name("manifest.json").map_err(|e| {
                         InferenceError::InvalidManifest(format!("manifest.json missing: {e}"))
@@ -1098,7 +1157,7 @@ pub fn inference_import_model_file(
                     serde_json::from_slice::<ModelManifest>(&manifest_bytes)
                         .map_err(|e| InferenceError::InvalidManifest(e.to_string()))?
                 };
-                (manifest, input.file)
+                (manifest, file)
             };
             let (staging, install) = model_install_roots(&data, &manifest.id, &manifest.version)?;
             install_model_archive(&archive, &manifest, &staging, &install).map(|_| InstalledModel {
@@ -1108,15 +1167,7 @@ pub fn inference_import_model_file(
                 kind: MODEL_KIND_UPSCALE.to_string(),
                 components: Vec::new(),
             })
-        });
-    match result {
-        Ok(model) => crate::domain::result::CommandResult::success(model),
-        Err(e) => crate::domain::result::CommandResult::failure(
-            "INVALID_MODEL_IMPORT",
-            format!("{e:?}"),
-            false,
-        ),
-    }
+        })
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -1546,7 +1597,7 @@ fn resolve_installed_bundle(
                 sha256: String::new(),
                 supported_backends: vec!["cpu".into()],
             });
-            manifest.sha256 = model_fingerprint(&root).ok()?;
+            manifest.sha256 = cached_model_fingerprint(&root).ok()?;
             decensor::bundle_in(&root).map(|bundle| (bundle, manifest))
         })
 }

@@ -38,7 +38,8 @@ async function nativeSink(records: readonly ErrorLogRecord[]): Promise<boolean> 
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return false;
   try {
     const { invoke } = await import('@tauri-apps/api/core');
-    for (const record of records) await invoke('error_log_append', { input: record });
+    // 一批一次 IPC：错误风暴时 60 条就是 60 次串行往返，桥上全是它。
+    await invoke('error_log_append_batch', { inputs: records });
     return true;
   } catch {
     return false;

@@ -90,6 +90,41 @@ pub fn open_external_url(url: String) -> CommandResult<()> {
     }
 }
 
+/// 在资源管理器里定位一个本机文件：文件夹打开且文件被选中。只有 Windows 有
+/// 这个动作（调用方按平台藏按钮，这里再兜底拒绝）；路径必须真实存在。
+#[tauri::command]
+pub fn reveal_in_file_manager(path: String) -> CommandResult<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        return CommandResult::failure(
+            "PLATFORM_UNAVAILABLE",
+            "此动作仅在 Windows 上可用",
+            false,
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        if path.trim().is_empty() {
+            return CommandResult::failure("INVALID_RESPONSE", "路径为空", false);
+        }
+        if !std::path::Path::new(&path).is_file() {
+            return CommandResult::failure("INVALID_RESPONSE", "文件不存在或已被移动", false);
+        }
+        // `/select,"<path>"`：打开所在文件夹并选中该文件。整段作为一个参数交给
+        // explorer 自己解析（路径里有空格也由引号护住）。
+        let result = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{path}\""))
+            .spawn();
+        match result {
+            Ok(_) => CommandResult::success(()),
+            Err(error) => CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        }
+    }
+}
+
 fn secure_storage_available() -> bool {
     #[cfg(any(
         target_os = "windows",
@@ -126,6 +161,19 @@ mod tests {
     fn external_url_rejects_non_web_schemes() {
         assert!(matches!(
             open_external_url("file:///tmp/private".into()),
+            CommandResult::Failure { .. }
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reveal_refuses_paths_that_are_not_real_files() {
+        assert!(matches!(
+            reveal_in_file_manager("".into()),
+            CommandResult::Failure { .. }
+        ));
+        assert!(matches!(
+            reveal_in_file_manager("E:\\definitely\\not\\here.zip".into()),
             CommandResult::Failure { .. }
         ));
     }

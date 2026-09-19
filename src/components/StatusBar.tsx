@@ -91,12 +91,32 @@ export function StatusBar() {
     refresh();
     const timer = window.setInterval(refresh, 10_000);
     window.addEventListener('focus', refresh);
-    window.addEventListener('yomika:cache-changed', refresh);
+    // 封面一落缓存就触发一次这个事件：首屏几十张封面就是几十次 stats IPC。
+    // 节流到一秒一次，缓存字节数不差这一秒。
+    let lastStats = 0;
+    let throttleTimer: number | undefined;
+    let pending = false;
+    const onCacheChanged = () => {
+      pending = true;
+      const now = Date.now();
+      if (now - lastStats < 1_000) {
+        throttleTimer ??= window.setTimeout(() => {
+          throttleTimer = undefined;
+          if (pending) { pending = false; lastStats = Date.now(); refresh(); }
+        }, 1_000 - (now - lastStats));
+        return;
+      }
+      pending = false;
+      lastStats = now;
+      refresh();
+    };
+    window.addEventListener('yomika:cache-changed', onCacheChanged);
     return () => {
       active = false;
       window.clearInterval(timer);
+      if (throttleTimer !== undefined) window.clearTimeout(throttleTimer);
       window.removeEventListener('focus', refresh);
-      window.removeEventListener('yomika:cache-changed', refresh);
+      window.removeEventListener('yomika:cache-changed', onCacheChanged);
     };
   }, [pageActive]);
 

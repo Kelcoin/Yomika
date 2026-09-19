@@ -1,12 +1,13 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { FileText, Image as ImageIcon, Play, X } from 'lucide-react';
-import type { ArchiveRecord, ServerRecord } from '../domain/library';
+import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeDedupRepository, type DedupLoadResult, type DedupNonDuplicateRecord, type DedupScanProgress, type DedupSessionSummary } from '../repositories/nativeDedupRepository';
 import { ArchiveOverviewDialog } from './ArchiveOverviewDialog';
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
+import { observeOnce } from '../lib/sharedIntersectionObserver';
 import { CardTagRows } from './CardTagRows';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
@@ -23,16 +24,18 @@ const dedup = new NativeDedupRepository();
 // v3：块级证据 + Wilson 聚合（imsearch 的「多特征匹配 → 按图聚合 → Wilson 下
 // 界」思想）+ dhash 预筛 + 平移搜索；比较层对齐 imsearch 的评分思想。
 const ALGORITHM_VERSION = 'readoshi-v3';
+/** 结果列表渐进挂载：首批行数与每次追加的行数。 */
+const DEMOUNT_ROW_CHUNK = 60;
 
 type DedupMember = DedupeArchive & { archiveId: string };
 
-function dedupeArchiveOf(archive: ArchiveRecord): DedupeArchive {
+function dedupeArchiveOf(archive: ArchiveIdentity): DedupeArchive {
   return {
     id: archive.archiveId,
     title: archive.title,
     tags: archive.tags,
-    size: archive.fileSize,
-    pagecount: archive.pageCount,
+    size: archive.fileSize ?? undefined,
+    pagecount: archive.pageCount ?? undefined,
   };
 }
 
@@ -175,7 +178,7 @@ export function DeduplicationWorkspace() {
   const { showToast } = useToast();
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [server, setServer] = useState<ServerRecord>();
-  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
+  const [archives, setArchives] = useState<ArchiveIdentity[]>([]);
   const [progress, setProgress] = useState<DedupScanProgress>();
   const [result, setResult] = useState<DedupLoadResult>();
   const [sessionId, setSessionId] = useState<string>();
@@ -198,6 +201,8 @@ export function DeduplicationWorkspace() {
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);
   /** 从关系行打开的档案概览：就地看一眼，不离开查重页（筛选与选择都留着）。 */
   const [overviewArchiveId, setOverviewArchiveId] = useState<string>();
+  /** 身份列表里没有概览弹窗要的全字段：打开时按 id 现取一条。 */
+  const [overviewArchive, setOverviewArchive] = useState<ArchiveRecord>();
   const [relationsQuery, setRelationsQuery] = useState('');
   // 扫描结果：会话本来就会落库，这个对话框把它们列出来供随时载入。
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -222,7 +227,7 @@ export function DeduplicationWorkspace() {
 
   useEffect(() => {
     if (!server) return;
-    void library.listArchives(server.id).then((response) => {
+    void library.listArchiveIdentities(server.id).then((response) => {
       if (response.ok) setArchives(response.value);
       else showToast(response.error.message, 'error');
     });
@@ -241,7 +246,7 @@ export function DeduplicationWorkspace() {
   }, [server, result]);
 
   const archiveById = useMemo(() => {
-    const byId = new Map<string, ArchiveRecord>();
+    const byId = new Map<string, ArchiveIdentity>();
     archives.forEach((archive) => byId.set(archive.archiveId, archive));
     return byId;
   }, [archives]);
@@ -308,6 +313,20 @@ export function DeduplicationWorkspace() {
     flush();
     return rows;
   }, [visibleSections, groupColumns]);
+  /** 结果行渐进挂载：1.5 万对快照能铺出几千行卡片，一进页面就全部挂上
+   * 会让首屏卡一下。先挂一小段，滚动哨兵再追加；布局与交互不变。 */
+  const [mountedRowCount, setMountedRowCount] = useState(DEMOUNT_ROW_CHUNK);
+  useEffect(() => { setMountedRowCount(DEMOUNT_ROW_CHUNK); }, [sourceFilter, selectionFilter, view, result?.session.sessionId]);
+  const mountedRows = useMemo(() => resultRows.slice(0, mountedRowCount), [resultRows, mountedRowCount]);
+  const mountedSections = useMemo(() => visibleSections.slice(0, mountedRowCount), [visibleSections, mountedRowCount]);
+  const moreRowsMounted = view === 'groups' ? mountedRows.length < resultRows.length : mountedSections.length < visibleSections.length;
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!moreRowsMounted) return undefined;
+    const node = sentinelRef.current;
+    if (!node) return undefined;
+    return observeOnce(node, () => setMountedRowCount((current) => current + DEMOUNT_ROW_CHUNK), '600px');
+  }, [moreRowsMounted, mountedRowCount]);
   /** 组序号按完整列表（含被筛掉的）编号，筛选时也不会跳号。 */
   const groupNumberByKey = useMemo(() => new Map(groups.map((group, index) => [groupKeyOf(group), index + 1])), [groups]);
 
@@ -512,21 +531,40 @@ export function DeduplicationWorkspace() {
     setDeleteSession(undefined);
     // 整组选择 → 组内全部两两组合标记为不重复。
     const markedGroups = groups.filter((group) => selectedGroupKeys.has(groupKeyOf(group)));
-    let markFailures = 0;
-    for (const group of markedGroups) {
+    // 一批一次 IPC：原先按 C(m,2) 逐对串行往返，一组五人就是十次。
+    const pairEntries = markedGroups.flatMap((group) => {
+      const entries = [];
       for (let i = 0; i < group.length; i += 1) {
         for (let j = i + 1; j < group.length; j += 1) {
-          const response = await dedup.saveNonDuplicate({ scopeId: server.scopeId, leftArchiveId: group[i]!.archiveId, rightArchiveId: group[j]!.archiveId });
-          if (response.ok) {
-            setProcessedNonDuplicatePairKeys((current) => new Set([...current, toPairKey(group[i]!.archiveId, group[j]!.archiveId)]));
-          } else {
-            markFailures += 1;
-          }
+          entries.push({ scopeId: server.scopeId, leftArchiveId: group[i]!.archiveId, rightArchiveId: group[j]!.archiveId });
         }
       }
+      return entries;
+    });
+    const markedPairKeys = new Set<string>();
+    let markCount = 0;
+    if (pairEntries.length > 0) {
+      const response = await dedup.saveNonDuplicates(pairEntries);
+      if (response.ok) {
+        pairEntries.forEach((entry, index) => {
+          // 批命令按输入顺序回每条成败：只有真落库的对才算已处理，
+          // 部分失败不能把没标记的组从视图里误删。
+          if (response.value[index]) markedPairKeys.add(toPairKey(entry.leftArchiveId, entry.rightArchiveId));
+        });
+      }
+      const markFailures = pairEntries.length - markedPairKeys.size;
+      if (markFailures > 0) showToast(`${markFailures} 组标记失败，请重试`, 'error');
+      setProcessedNonDuplicatePairKeys((current) => new Set([...current, ...markedPairKeys]));
+      // 提示语按组计数：组内所有对都落库才算这一组标记完成。
+      markCount = markedGroups.filter((group) => {
+        for (let i = 0; i < group.length; i += 1) {
+          for (let j = i + 1; j < group.length; j += 1) {
+            if (!markedPairKeys.has(toPairKey(group[i]!.archiveId, group[j]!.archiveId))) return false;
+          }
+        }
+        return true;
+      }).length;
     }
-    if (markFailures > 0) showToast(`${markFailures} 组标记失败，请重试`, 'error');
-    const markCount = markedGroups.length - markFailures;
     const deletedIds = [...selected];
     const actuallyDeleted = new Set<string>();
     if (deletedIds.length > 0) {
@@ -552,7 +590,7 @@ export function DeduplicationWorkspace() {
     if (reloaded.ok) setResult(reloaded.value);
     else setResult((current) => current ? { ...current, selectedArchiveIds: [] } : current);
     if (actuallyDeleted.size > 0) {
-      const refreshed = await library.listArchives(server.id);
+      const refreshed = await library.listArchiveIdentities(server.id);
       if (refreshed.ok) setArchives(refreshed.value);
     }
     setBusy(false);
@@ -646,7 +684,14 @@ export function DeduplicationWorkspace() {
     await loadSessions();
   }
 
-  const overviewArchive = overviewArchiveId ? archiveById.get(overviewArchiveId) : undefined;
+  useEffect(() => {
+    if (!overviewArchiveId || !server) { setOverviewArchive(undefined); return; }
+    let active = true;
+    void library.listArchivesByIds(server.id, [overviewArchiveId]).then((response) => {
+      setOverviewArchive(active && response.ok ? response.value[0] : undefined);
+    });
+    return () => { active = false; };
+  }, [overviewArchiveId, server]);
 
   const visibleRelations = useMemo(() => {
     const query = relationsQuery.trim().toLowerCase();
@@ -801,7 +846,7 @@ export function DeduplicationWorkspace() {
       {/* 默认视图也把关联链划出来（Readoshi 的 renderChain）：多个组属于同一条
           重复关系链时，它们围在一个带标题的区块里，而不是散落在网格中。 */}
       {view === 'groups' && <div className="dedup-group-rows" aria-label="重复结果" ref={groupsRef}>
-        {resultRows.map((row) => row.kind === 'chain'
+        {mountedRows.map((row) => row.kind === 'chain'
           ? <ul className="dedup-group-row is-chain-row" key={row.key} style={{ '--group-columns': chainColumns } as CSSProperties}>
             <li className="dedup-chain">
               <div className="dedup-chain-heading">
@@ -819,7 +864,7 @@ export function DeduplicationWorkspace() {
           </ul>)}
       </div>}
       {view === 'chains' && <div className="dedup-chains" aria-label="重复链">
-        {visibleSections.filter((section) => section.groups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
+        {mountedSections.filter((section) => section.groups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
           <div className="dedup-chain-heading">
             <button className="secondary-action" type="button" aria-pressed={section.groups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} onClick={() => void toggleChainSelection(section.groups)}>关联重复链 {section.number}</button>
           </div>
@@ -830,6 +875,7 @@ export function DeduplicationWorkspace() {
           </div>
         </section>)}
       </div>}
+      {moreRowsMounted && <div ref={sentinelRef} aria-hidden="true" className="dedup-list-sentinel" />}
       {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
     </>}
     {!result && !busy && <StatusLine>尚未运行查重扫描。</StatusLine>}

@@ -213,7 +213,8 @@ describe('local archives workspace', () => {
     const facts = document.querySelector('.archive-detail-facts');
     expect(facts).not.toBeNull();
     expect(document.querySelector('.local-detail-facts')).toBeNull();
-    expect(screen.getByLabelText('路径')).toBeInTheDocument();
+    expect(screen.getByLabelText('分类')).toBeInTheDocument();
+    expect(screen.queryByLabelText('路径')).toBeNull();
     expect(screen.getByLabelText('体积')).toBeInTheDocument();
     expect(document.querySelector('.archive-detail-tag-section .tag-group-artist')).not.toBeNull();
 
@@ -249,11 +250,16 @@ describe('local archives workspace', () => {
   it('reads a local file through the server copy it was downloaded from', async () => {
     const user = userEvent.setup();
     const noSource = { ...localFile, path: 'E:\\Downloads\\bbb-另一份.zip', title: '另一份', archiveId: null, serverId: null, scopeId: null };
-    setInvokeAdapterForTests(async (command) => {
+    const adapter = vi.fn(async (command: string) => {
       if (command === 'list_local_archives') return { ok: true, value: [localFile, noSource] };
       if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      if (command === 'platform_capabilities') return { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
+      if (command === 'reveal_in_file_manager') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
+    setInvokeAdapterForTests(adapter);
+    // 平台桥在浏览器里短路成 browser；摆一个运行时标记让 capabilities 真的走适配器。
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
 
     renderPage();
 
@@ -261,10 +267,13 @@ describe('local archives workspace', () => {
     // 认得出下载来源：阅读走档案详情页同一个入口，按服务器档案出页。
     expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', `/reader/${archiveId}?server=server-a`);
 
-    await user.click(screen.getByRole('button', { name: '关闭详情' }));
+    await user.click(screen.getByRole('button', { name: '返回列表' }));
     await user.click(await screen.findByText('另一份'));
-    // 侧放进来、认不出来源的文件没有阅读去处，按钮不摆。
+    // 侧放进来、认不出来源的文件没有阅读去处，按钮不摆；资源管理器定位只看
+    // 本机文件（Windows 一律有），并真的把路径交给原生命令。
     expect(screen.queryByRole('link', { name: '阅读' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制路径' })).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: '在资源管理器中打开' }));
+    expect(adapter).toHaveBeenCalledWith('reveal_in_file_manager', { path: noSource.path });
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 });

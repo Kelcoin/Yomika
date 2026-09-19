@@ -18,14 +18,15 @@ use cache::{
 };
 use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
-use error_log::{error_log_append, error_log_export, error_log_read};
+use error_log::{error_log_append, error_log_append_batch, error_log_export, error_log_read};
 use commands::library::{
     add_archive_to_category, cancel_download, check_server_status, create_task, delete_archive,
-    delete_local_archives, delete_search_preset, download_archive, download_url, list_archives,
+    delete_local_archives, delete_search_preset, download_archive, download_url, list_archive_identities,
+    list_archives,
     list_archives_by_ids,
     list_archives_page, list_categories, list_local_archives, list_metadata_plugins,
     list_reading_history,
-    list_reading_list, list_search_presets, list_servers, list_tasks, list_watchlist,
+    get_archive_membership, list_reading_list, list_search_presets, list_servers, list_tasks, list_watchlist,
     load_archive_metadata, load_archive_page_thumbnail, load_archive_thumbnail,
     load_reader_manifest, load_reader_page, load_reading_progress, pause_download,
     probe_new_archives,
@@ -38,7 +39,7 @@ use commands::library::{
     set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
     use_metadata_plugin, verify_archives_exist,
 };
-use commands::platform::{open_external_url, platform_capabilities, write_clipboard_text};
+use commands::platform::{open_external_url, platform_capabilities, reveal_in_file_manager, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, claim_sync_journal, list_sync_accounts, list_sync_journal,
     reset_remote_state, save_sync_account, save_sync_scope, set_sync_journal_state,
@@ -49,13 +50,14 @@ use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
     dedup_find_exact, dedup_import_readoshi, dedup_list_non_duplicates, dedup_list_sessions,
     dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature,
-    dedup_save_non_duplicate, dedup_save_selection, dedup_scan, dedup_scan_chunk,
+    dedup_save_non_duplicate, dedup_save_non_duplicates, dedup_save_selection,
+    dedup_scan, dedup_scan_chunk,
     dedup_scan_progress, dedup_start_scan,
     DedupScanRegistry,
 };
 use inference::{
     inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale,
-    inference_decensor_page, inference_get_job, inference_import_model_file,
+    inference_decensor_page, inference_get_job, inference_import_model_path,
     inference_install_decensor_bundle, inference_install_model, inference_list_models,
     inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page,
     inference_validate_model,
@@ -104,6 +106,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             platform_capabilities,
+            reveal_in_file_manager,
             open_external_url,
             write_clipboard_text,
             load_preferences,
@@ -127,6 +130,7 @@ pub fn run() {
             load_reader_manifest,
             load_reader_page,
             list_archives,
+            list_archive_identities,
             list_archives_by_ids,
             verify_archives_exist,
             list_archives_page,
@@ -162,6 +166,7 @@ pub fn run() {
             prune_dangling_records,
             set_reading_list,
             list_reading_list,
+            get_archive_membership,
             save_search_preset,
             list_search_presets,
             delete_search_preset,
@@ -186,7 +191,7 @@ pub fn run() {
             inference_resume,
             inference_validate_model,
             inference_install_model,
-            inference_import_model_file,
+            inference_import_model_path,
             inference_install_decensor_bundle,
             inference_list_models,
             inference_clear_cache,
@@ -235,6 +240,7 @@ pub fn run() {
             dedup_resume_scan,
             dedup_load_result,
             dedup_save_non_duplicate,
+            dedup_save_non_duplicates,
             dedup_remove_non_duplicate,
             dedup_delete_selected,
             dedup_import_readoshi,
@@ -242,6 +248,7 @@ pub fn run() {
             import_legacy_export,
             import_worker_export,
             error_log_append,
+            error_log_append_batch,
             error_log_read,
             error_log_export
         ])

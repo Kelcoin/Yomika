@@ -20,6 +20,7 @@ import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorReco
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
+import { observeOnce } from '../lib/sharedIntersectionObserver';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
   NativeLibraryRepository,
@@ -463,22 +464,26 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
       if (seeds.length === 0) return found;
-      for (const seed of seeds) {
-        // The native LANraragi adapter treats a trailing `$` as an exact-tag
-        // marker and strips it before querying SQLite. Passing the plain tag
-        // here keeps the same exact-match semantics while also working with
-        // remote/test adapters that return the original tag text verbatim.
-        const result = await repository.listArchivesPage(serverId, 0, 100, { query: seed });
+      // 四路并发：一打种子串行要付一打 RTT，推荐栏才出得来。
+      const searchOne = async (seed: string) => ({
+        seed,
+        result: await repository.listArchivesPage(serverId, 0, 100, { query: seed }),
+      });
+      for (let index = 0; index < seeds.length; index += 4) {
         if (!active) return found;
-        if (!result.ok) continue;
-        const normalizedSeed = seed.trim().toLowerCase();
-        for (const archive of result.value.items) {
-          // LANraragi's text search is a substring match; a `$` suffix in
-          // the seed means an exact tag, so enforce that part here after the
-          // broad server query to prevent `artist:foo` matching
-          // `artist:foobar` (and the same issue for taste tags).
-          const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
-          if (archive.archiveId !== currentArchiveId && hasExactTag) found.set(archive.archiveId, archive);
+        const responses = await Promise.all(seeds.slice(index, index + 4).map(searchOne));
+        if (!active) return found;
+        for (const { seed, result } of responses) {
+          if (!result.ok) continue;
+          const normalizedSeed = seed.trim().toLowerCase();
+          for (const archive of result.value.items) {
+            // LANraragi's text search is a substring match; a `$` suffix in
+            // the seed means an exact tag, so enforce that part here after the
+            // broad server query to prevent `artist:foo` matching
+            // `artist:foobar` (and the same issue for taste tags).
+            const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
+            if (archive.archiveId !== currentArchiveId && hasExactTag) found.set(archive.archiveId, archive);
+          }
         }
       }
       return found;
@@ -488,11 +493,13 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       const progress = await loadProgress();
       if (!active) return;
       const seeds = pickSeedTags(tags);
-      const candidates = await searchByTags(seeds);
+      // 相似与同作者两条搜索互不依赖，并行。
+      const [candidates, creatorMatches] = await Promise.all([
+        searchByTags(seeds),
+        searchByTags(creator.tags),
+      ]);
       if (!active) return;
       const ranked = rankRecommendations(tags, addProgress([...candidates.values()], progress), Number.MAX_SAFE_INTEGER);
-      const creatorMatches = await searchByTags(creator.tags);
-      if (!active) return;
       const byCreator = sortSameCreatorRecommendations(addProgress([...creatorMatches.values()], progress));
       // Verify each rail independently. The native verifier intentionally caps
       // one pass, so a large similarity result must not consume the budget and
@@ -601,15 +608,10 @@ function ArchivePageThumbnail({
     };
     // Browser loading="lazy" only delays decoding an existing URL. Delay the
     // native IPC request as well, so a long archive does not fetch every page.
-    const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      observer?.disconnect();
-      load();
-    }, { rootMargin: '300px' });
-    if (observer) observer.observe(node);
-    else load();
+    // 观察器全页面共享：两千页就是两千个 observer 实例，没必要。
+    const stopObserving = observeOnce(node, load, '300px');
     return () => {
-      observer?.disconnect();
+      stopObserving();
       controller.abort();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (handle) getNativeImageCache().release(handle);

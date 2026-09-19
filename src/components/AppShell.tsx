@@ -12,7 +12,6 @@ import {
   Star,
   ArrowUp,
 } from 'lucide-react';
-import { motion, useReducedMotion } from 'motion/react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
@@ -129,7 +128,6 @@ const SIDEBAR_COLLAPSED_KEY = 'yomika.sidebar-collapsed';
 
 export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
-  const reduceMotion = useReducedMotion();
   const { preferences } = usePreferences();
   const floatingNav = preferences.floatingNav;
   // The rail's collapsed state is a preference, not session state: it used to
@@ -262,7 +260,7 @@ export function AppShell({ children }: AppShellProps) {
       </aside>
 
       <div className="app-main">
-        <motion.main
+        <main
           id="main-content"
           // The shelves render the library's own list, so they take the library's
           // workspace container too. With a separate one their compact layout
@@ -271,12 +269,9 @@ export function AppShell({ children }: AppShellProps) {
           className={`workspace${/^\/(library(?:\/[^/]+)?|downloads|history|watchlist|to-read)$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}
-          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: reduceMotion ? 0 : 0.28, ease: [0.32, 0.72, 0, 1] }}
         >
           {children}
-        </motion.main>
+        </main>
         <button className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
           workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
           document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => !region.closest('[hidden]') && region.scrollTo({ top: 0, behavior: 'smooth' }));

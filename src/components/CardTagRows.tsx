@@ -42,12 +42,17 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
 }) {
   const root = useRef<HTMLSpanElement>(null);
   const [measured, setMeasured] = useState<{ tags: string[]; widths: number[]; containerWidth: number }>();
-  const labels = [...leading.map((chip) => chip.label), ...tags.map(translateRawTag)];
+  // 翻译与序列化只在标签集合变化时重算：搜索框每敲一键，档案库会重渲染
+  // 所有可见卡片，这里不挡一下就是每卡 × 每键的重复工作。
+  const labels = useMemo(
+    () => [...leading.map((chip) => chip.label), ...tags.map(translateRawTag)],
+    [leading, tags],
+  );
   // 判定胶囊按同样的类名渲染与测量，宽窄、字重才和实际显示一致。
   const chipClass = (index: number) => index < leading.length
     ? `metadata-chip dedup-signal-chip ${leading[index]?.tone ?? ''}`.trim()
     : 'metadata-chip';
-  const labelKey = JSON.stringify(labels);
+  const labelKey = useMemo(() => JSON.stringify(labels), [labels]);
   useLayoutEffect(() => {
     const element = root.current;
     if (!element) return;

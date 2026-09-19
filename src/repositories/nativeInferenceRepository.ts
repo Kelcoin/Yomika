@@ -125,7 +125,9 @@ export class NativeInferenceRepository {
   resume(id: string): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_resume', { id }, InferenceJobSchema); }
   validateModel(manifest: ModelManifest, model: number[]): Promise<CommandResult<void>> { return invokeCommand('inference_validate_model', { input: { manifest, model } }, VoidResponseSchema); }
   installModel(manifest: ModelManifest, archive: number[]): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_model', { input: { manifest, archive } }, InstalledModelResponse); }
-  importModelFile(file: number[], filename: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_import_model_file', { input: { file, filename } }, InstalledModelResponse); }
+  /** 导入走磁盘路径而不是字节：几百 MB 的包拆成 number[] 过 JSON 桥，
+   * 一进一出要占十几倍内存还会冻结主线程；由 Rust 直接读路径。 */
+  importModelPath(path: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_import_model_path', { input: { path } }, InstalledModelResponse); }
   /** The models actually on disk, so the settings page can offer a choice
    * instead of asking for a model name to be typed from memory. */
   /** Installs a de-censoring bundle by copying it out of a directory the user

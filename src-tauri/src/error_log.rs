@@ -168,17 +168,78 @@ pub fn error_log_append(
     if input.message.trim().is_empty() {
         return CommandResult::success(());
     }
-    let entry = ErrorLogEntry {
-        at: input
-            .at
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(now_stamp),
-        level: input.level,
-        source: input.source,
-        message: input.message,
-        detail: input.detail.filter(|value| !value.trim().is_empty()),
+    error_log_write(
+        &app,
+        &ErrorLogEntry {
+            at: input
+                .at
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(now_stamp),
+            level: input.level,
+            source: input.source,
+            message: input.message,
+            detail: input.detail.filter(|value| !value.trim().is_empty()),
+        },
+    )
+}
+
+/// 一批一次落盘：错误风暴时前端是整批交过来的，逐条 IPC 往返
+/// 只会让桥上全是日志流量。
+#[tauri::command]
+pub fn error_log_append_batch(
+    app: tauri::AppHandle,
+    inputs: Vec<ErrorLogAppendInput>,
+) -> CommandResult<()> {
+    let entries = inputs
+        .into_iter()
+        .filter(|input| !input.message.trim().is_empty())
+        .map(|input| ErrorLogEntry {
+            at: input
+                .at
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(now_stamp),
+            level: input.level,
+            source: input.source,
+            message: input.message,
+            detail: input.detail.filter(|value| !value.trim().is_empty()),
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return CommandResult::success(());
+    }
+    error_log_write_all(&app, &entries)
+}
+
+fn error_log_write(app: &tauri::AppHandle, entry: &ErrorLogEntry) -> CommandResult<()> {
+    error_log_write_all(app, std::slice::from_ref(entry))
+}
+
+fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> CommandResult<()> {
+    let path = match log_path(app) {
+        Ok(path) => path,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Error log write failed", true),
     };
-    match append_entry(&app, &entry) {
+    let write = || -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        for entry in entries {
+            writeln!(
+                file,
+                "{}\t{}\t{}\t{}\t{}",
+                field(&entry.at),
+                field(&entry.level),
+                field(&entry.source),
+                field(&entry.message),
+                field(entry.detail.as_deref().unwrap_or("")),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    };
+    match write() {
         Ok(()) => CommandResult::success(()),
         Err(_) => CommandResult::failure("UNKNOWN", "Error log write failed", true),
     }

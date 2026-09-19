@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { BookOpen, Copy, Download, FileArchive, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Download, FileArchive, FolderOpen, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -14,7 +14,7 @@ import { StatusLine } from './StatusLine';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
-import { writeClipboardText } from '../bridge/clipboard';
+import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
 import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
 import { ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
@@ -355,22 +355,22 @@ export function LocalArchivesWorkspace() {
           <ListChecks aria-hidden="true" />
         </button>
       </div>
-      {selectionMode && (
-        <div className="archive-selection-slot">
-          <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
-            <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
-            <button className="secondary-action" type="button" disabled={visibleArchives.length === 0} onClick={toggleAll}>
-              {selectAll ? '取消全选' : '全选当前'}
-            </button>
-            <button className="secondary-action is-danger" type="button" disabled={selected.size === 0 || busy} onClick={() => setConfirmingDelete(true)}>
-              删除所选
-            </button>
-            <button className="secondary-action archive-selection-done" type="button" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
-              完成
-            </button>
-          </div>
+      {/* 槽位常驻并切换 is-open：展开与收起共用同一段过渡，收起时列表跟着合拢
+          而不是瞬间弹回。收起态 visibility-hidden，内部的按钮不可聚焦。 */}
+      <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
+        <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
+          <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
+          <button className="secondary-action" type="button" disabled={visibleArchives.length === 0} onClick={toggleAll}>
+            {selectAll ? '取消全选' : '全选当前'}
+          </button>
+          <button className="secondary-action is-danger" type="button" disabled={selected.size === 0 || busy} onClick={() => setConfirmingDelete(true)}>
+            删除所选
+          </button>
+          <button className="secondary-action archive-selection-done" type="button" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
+            完成
+          </button>
         </div>
-      )}
+      </div>
       {(loading || !archivesLoaded) && <StatusLine busy>正在读取本地档案…</StatusLine>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && (
@@ -492,11 +492,11 @@ export function LocalArchivesWorkspace() {
   );
 }
 
-/** 右侧那一页：这份本地文件的实情。结构和档案详情页（/library/:id）同构——头部
- * 图标钮 + 两行自适应标题、封面加事实网格的概览、一条动作工具栏、按命名空间分组
- * 的标签墙，类名也一致，所以两边的长相不会各自漂移。差别只有内容：这一页说的是
- * 磁盘上的事（大小、下载时间、路径），阅读走下载来源那台服务器，动作只有复制
- * 路径和本地删除。 */
+/** 右侧那一页：这份本地文件的实情。结构和档案详情页（/library/:id）同构——返回
+ * 钮 + 两行自适应标题的头部、封面加事实网格的概览、一条动作工具栏、按命名空间
+ * 分组的标签墙，事实的顺序也和档案详情页一致（页数/体积/分类/时间）。差别只有
+ * 内容：这一页说的是磁盘上的事（大小、下载时间），阅读走下载来源那台服务器，
+ * 动作只有资源管理器定位（Windows）和本地删除。 */
 function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   archive: LocalArchiveRecord;
   onClose: () => void;
@@ -504,6 +504,12 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   onSelectTag: (query: string) => void;
 }) {
   const { showToast } = useToast();
+  const [platform, setPlatform] = useState<string>();
+  useEffect(() => {
+    void getPlatformCapabilities().then((result) => {
+      if (result.ok) setPlatform(result.value.platform);
+    });
+  }, []);
   const { groups, colorFor } = useDetailTagGroups(archive.tags);
   // 认得出下载来源时才能去阅读：阅读器按服务器档案出页，本地文件没有自己的
   // 出页管道。侧放进来、认不出来源的文件不给这个按钮。
@@ -518,16 +524,16 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   });
   const titleRef = useTwoLineTitle(archive.title);
   const facts = [
-    { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },
-    { kind: 'added' as const, label: '下载时间', value: formatArchiveDate(Math.floor(archive.addedAt / 1000)) || '未知' },
     { kind: 'pages' as const, label: '页数', value: archive.pageCount ? `${archive.pageCount} 页` : '未知' },
-    { kind: 'path' as const, label: '路径', value: archive.path },
+    { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },
+    { kind: 'category' as const, label: '分类', value: archiveCategoryLabel(archive) || '未知' },
+    { kind: 'added' as const, label: '下载时间', value: formatArchiveDate(Math.floor(archive.addedAt / 1000)) || '未知' },
   ];
 
   return (
     <main className="archive-detail-route" aria-labelledby="local-archive-title">
       <header className="archive-detail-route-header">
-        <button type="button" className="reader-icon-button" aria-label="关闭详情" title="关闭" onClick={onClose}><X aria-hidden="true" /></button>
+        <button type="button" className="reader-icon-button" aria-label="返回列表" title="返回" onClick={onClose}><ArrowLeft aria-hidden="true" /></button>
         <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>
       </header>
       <div className="archive-detail-overview">
@@ -545,17 +551,21 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
             title="阅读"
           ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
         )}
-        <button
-          type="button"
-          className="secondary-action"
-          onClick={() => void writeClipboardText(archive.path).then(
-            () => showToast('路径已复制', 'success'),
-            () => showToast('复制失败', 'error'),
-          )}
-        >
-          <Copy aria-hidden="true" /><span className="archive-action-label">复制路径</span>
-        </button>
-        <button type="button" className="secondary-action is-danger" onClick={onDelete}>
+        {platform === 'windows' && (
+          <button
+            type="button"
+            className="secondary-action"
+            aria-label="在资源管理器中打开"
+            title="在资源管理器中打开"
+            onClick={() => void revealInFileManager(archive.path).then(
+              () => {},
+              () => showToast('无法打开资源管理器', 'error'),
+            )}
+          >
+            <FolderOpen aria-hidden="true" /><span className="archive-action-label">在资源管理器中打开</span>
+          </button>
+        )}
+        <button type="button" className="secondary-action" onClick={onDelete}>
           <Trash2 aria-hidden="true" /><span className="archive-action-label">本地删除</span>
         </button>
       </div>

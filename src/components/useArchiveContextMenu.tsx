@@ -54,10 +54,10 @@ export function useArchiveContextMenu(options: {
       const servers = await repository.listServers();
       const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
       if (!server) return;
-      const [reading, favorites] = await Promise.all([repository.listReadingList(server.scopeId), repository.listWatchlist(server.scopeId)]);
+      const status = await repository.archiveMembership(server.scopeId, target.archive.archiveId);
       if (request !== membershipRequest.current) return;
-      if (!reading.ok || !favorites.ok) showToast('部分待看或收藏状态读取失败', 'error');
-      setMembership({ scopeId: server.scopeId, reading: reading.ok ? reading.value.some((item) => item.archiveId === target.archive.archiveId && !item.deleted) : undefined, favorites: favorites.ok ? favorites.value.some((item) => item.archiveId === target.archive.archiveId && !item.deleted) : undefined });
+      if (!status.ok) showToast('待看或收藏状态读取失败', 'error');
+      setMembership({ scopeId: server.scopeId, reading: status.ok ? status.value.reading : undefined, favorites: status.ok ? status.value.favorites : undefined });
     })();
     return () => { membershipRequest.current += 1; };
   }, [target, showToast]);

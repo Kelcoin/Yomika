@@ -31,6 +31,17 @@ export const ArchiveRecordSchema = z.object({
 
 export type ArchiveRecord = z.infer<typeof ArchiveRecordSchema>;
 
+/** 去重页只需要 id/标题/标签/页数/体积五个字段：整库逐条验证全字段记录
+ * 是按不相关的字段付的校验成本。 */
+export const ArchiveIdentitySchema = z.object({
+  archiveId: z.string().min(1),
+  title: z.string(),
+  tags: z.array(z.string()).optional(),
+  pageCount: z.number().int().nullable().optional(),
+  fileSize: z.number().int().nullable().optional(),
+});
+export type ArchiveIdentity = z.infer<typeof ArchiveIdentitySchema>;
+
 export const ArchivePageSchema = z.object({
   items: z.array(ArchiveRecordSchema),
   total: z.number().int().nonnegative(),

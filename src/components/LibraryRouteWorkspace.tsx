@@ -11,6 +11,18 @@ import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
+
+/** 分类镜像一次性读取：注水只发生在挂载和换服务器时。原先这读写在
+ * 组件体里无条件执行，搜索每敲一键、卡片每次悬停都要 parse 一遍。 */
+function readPersistedCategories(serverParam: string | null) {
+  try {
+    const raw = window.localStorage.getItem(`yomika:library-categories:${serverParam ?? 'default'}`);
+    const parsed = raw ? JSON.parse(raw) as import('../repositories/nativeLibraryRepository').Category[] : undefined;
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
 import type { ImageHandle } from '../lib/unifiedImageCache';
@@ -98,15 +110,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   /** 分类在会话之间也保持可见：路由快照过期或应用重启后，用上一次的
    * localStorage 镜像同步注水，下拉不再闪骨架——原生六小时快照随后静默
    * 校正。镜像按服务器分开（?server= 未指定时归入 default）。 */
-  const persistedCategories = (() => {
-    try {
-      const raw = window.localStorage.getItem(`yomika:library-categories:${serverParam ?? 'default'}`);
-      const parsed = raw ? JSON.parse(raw) as import('../repositories/nativeLibraryRepository').Category[] : undefined;
-      return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
+  const persistedCategories = useMemo(() => readPersistedCategories(serverParam), [serverParam]);
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? persistedCategories ?? []);
   const [categoriesLoading, setCategoriesLoading] = useState(!(snapshot?.categories?.length || persistedCategories?.length));
   /** 只要下拉上有可显示的分类，本 effect 的每一次重跑（刷新、换服务器）都
