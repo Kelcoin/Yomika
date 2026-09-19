@@ -1300,6 +1300,7 @@ pub async fn download_archive(
                 api_key,
                 base_url,
                 server_id,
+                scope_id,
                 archive_id,
                 directory,
                 metadata,
@@ -1390,6 +1391,8 @@ struct TransferRequest {
     api_key: String,
     base_url: String,
     server_id: String,
+    /// 取封面要用的 scope：完成时连同元数据一起记进本地档案那一行。
+    scope_id: String,
     archive_id: String,
     directory: std::path::PathBuf,
     metadata: serde_json::Value,
@@ -1416,6 +1419,7 @@ fn transfer_archive(
         api_key,
         base_url,
         server_id,
+        scope_id,
         archive_id,
         directory,
         metadata,
@@ -1456,6 +1460,7 @@ fn transfer_archive(
     store_archive_response(
         database,
         &server_id,
+        &scope_id,
         &archive_id,
         &metadata,
         &directory,
@@ -1472,6 +1477,7 @@ fn transfer_archive(
 fn store_archive_response(
     database: &Database,
     server_id: &str,
+    scope_id: &str,
     archive_id: &str,
     metadata: &serde_json::Value,
     directory: &std::path::Path,
@@ -1556,7 +1562,9 @@ fn store_archive_response(
                 database,
                 std::path::Path::new(&path),
                 server_id,
+                scope_id,
                 archive_id,
+                metadata,
                 &label,
                 received,
             );
@@ -1810,35 +1818,87 @@ fn cancel_download_task(database: &Database, task_id: &str) {
     }
 }
 
+/// 下载时顺手抄下来的那几列。LANraragi 的 metadata 里 `tags` 是逗号分隔的一整串，
+/// 落库时存成 JSON 数组，和 archives 表里的 `tags_json` 同形——读的时候两边可以
+/// 直接互换。
+struct MirroredArchiveMetadata {
+    title: Option<String>,
+    page_count: Option<i64>,
+    tags_json: Option<String>,
+}
+
+fn mirrored_archive_metadata(metadata: &serde_json::Value) -> MirroredArchiveMetadata {
+    let title = metadata["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string);
+    let page_count = metadata["pagecount"].as_i64().filter(|count| *count > 0);
+    let tags_json = metadata["tags"].as_str().map(|tags| {
+        let tags: Vec<&str> = tags
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string())
+    });
+    MirroredArchiveMetadata {
+        title,
+        page_count,
+        tags_json,
+    }
+}
+
 /// 下载完成 → 磁盘上多了一份档案。以文件为主语记一行：外部删掉文件之后，扫描
 /// 会把这一行一起收走（见 `reconcile_local_archives`）。
+///
+/// 标题、页数、标签、scope 都在这里落库，因为**现在**手上正好有服务器的元数据，
+/// 而这一页以后要离线看：镜像是一条 JOIN，服务器换了、那份档案在服务器上被删了、
+/// 或者压根没同步过，本地就只剩文件名。已经写好的值不会被空值覆盖（恢复时拿不到
+/// 元数据的那一次不该把第一次下载抄下来的标签抹掉）。
+#[allow(clippy::too_many_arguments)]
 fn record_local_archive(
     database: &Database,
     path: &std::path::Path,
     server_id: &str,
+    scope_id: &str,
     archive_id: &str,
+    metadata: &serde_json::Value,
     fallback_title: &str,
     size: u64,
 ) {
     let Ok(connection) = database.connection.lock() else {
         return;
     };
-    let title = local_archive_title(path);
+    let mirrored = mirrored_archive_metadata(metadata);
+    let from_name = local_archive_title(path);
+    let title = mirrored
+        .title
+        .clone()
+        .unwrap_or_else(|| if from_name.is_empty() { fallback_title.to_string() } else { from_name });
     let _ = connection.execute(
-        "INSERT INTO local_archives (path, archive_id, server_id, title, file_size, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(path) DO UPDATE SET file_size = excluded.file_size, added_at = excluded.added_at",
+        "INSERT INTO local_archives (path, archive_id, server_id, scope_id, title, page_count, tags_json, file_size, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(path) DO UPDATE SET
+             file_size = excluded.file_size,
+             added_at = excluded.added_at,
+             title = COALESCE(?10, local_archives.title),
+             page_count = COALESCE(?6, local_archives.page_count),
+             tags_json = COALESCE(?7, local_archives.tags_json),
+             scope_id = COALESCE(?4, local_archives.scope_id),
+             archive_id = COALESCE(local_archives.archive_id, ?2),
+             server_id = COALESCE(?3, local_archives.server_id)",
         params![
             path.to_string_lossy(),
             archive_id,
             server_id,
-            if title.is_empty() {
-                fallback_title.to_string()
-            } else {
-                title
-            },
+            scope_id,
+            title,
+            mirrored.page_count,
+            mirrored.tags_json,
             size as i64,
-            now_millis()
+            now_millis(),
+            mirrored.title,
         ],
     );
 }
@@ -1920,6 +1980,7 @@ mod archive_download_tests {
     ) -> Result<DownloadResult, String> {
         store_archive_response(
             database,
+            "scope-a",
             "scope-a",
             &"a".repeat(40),
             &download_metadata("测试档案"),
@@ -2024,6 +2085,99 @@ mod archive_download_tests {
         assert_eq!(
             records[0].archive_id.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    /// 元数据在下载时就得落库：本地档案页要能离线看，而服务器镜像是 archives 表上的
+    /// 一条 JOIN——那份档案在服务器上被删了、或者这台机器压根没同步过它，标签和页数
+    /// 就一起没了，本地只剩一个文件名。
+    #[test]
+    fn a_finished_download_keeps_the_metadata_it_was_served() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let metadata = serde_json::json!({
+            "title": "被抄下来的标题",
+            "filename": "original.zip",
+            "pagecount": 42,
+            "tags": "female:glasses, language:chinese, artist:somebody",
+        });
+        let body = vec![4u8; 32 * 1024];
+        store_archive_response(
+            &database,
+            "server-a",
+            "scope-a",
+            &"b".repeat(40),
+            &metadata,
+            directory.path(),
+            &mut &body[..],
+            Some(body.len() as u64),
+            true,
+            None,
+        )
+        .expect("download");
+
+        let connection = database.connection.lock().unwrap();
+        // archives 表里空着：这一页不该依赖服务器镜像。
+        let records = reconcile_local_archives(&connection, directory.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title, "被抄下来的标题");
+        assert_eq!(records[0].page_count, Some(42));
+        assert_eq!(records[0].scope_id.as_deref(), Some("scope-a"));
+        assert_eq!(
+            records[0].tags,
+            vec!["female:glasses", "language:chinese", "artist:somebody"]
+        );
+    }
+
+    /// 恢复那一次拿不到元数据（断网、服务器换了）时，不许把第一次下载抄下来的标签、
+    /// 页数和 scope 抹成空。
+    #[test]
+    fn recording_without_metadata_keeps_what_the_first_download_stored() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{}-标题.cbz", "c".repeat(40)));
+        let metadata = serde_json::json!({
+            "title": "标题",
+            "pagecount": 12,
+            "tags": "female:glasses, artist:somebody",
+        });
+        record_local_archive(
+            &database,
+            &path,
+            "server-a",
+            "scope-a",
+            &"c".repeat(40),
+            &metadata,
+            "标题",
+            1024,
+        );
+        // 之后的一次收尾什么元数据都没有。
+        record_local_archive(
+            &database,
+            &path,
+            "server-a",
+            "scope-a",
+            &"c".repeat(40),
+            &serde_json::json!({}),
+            "标题",
+            2048,
+        );
+
+        let connection = database.connection.lock().unwrap();
+        let (title, page_count, tags, scope): (String, Option<i64>, Option<String>, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT title, page_count, tags_json, scope_id FROM local_archives WHERE path = ?1",
+                    params![path.to_string_lossy()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("local archive row");
+        assert_eq!(title, "标题");
+        assert_eq!(page_count, Some(12));
+        assert_eq!(scope.as_deref(), Some("scope-a"));
+        assert_eq!(
+            tags.as_deref(),
+            Some(r#"["female:glasses","artist:somebody"]"#)
         );
     }
 
@@ -2136,6 +2290,7 @@ mod archive_download_tests {
         let result = store_archive_response(
             &database,
             "scope-a",
+            "scope-a",
             &"a".repeat(40),
             &download_metadata("测试档案"),
             directory.path(),
@@ -2187,6 +2342,7 @@ mod archive_download_tests {
 
         let result = store_archive_response(
             &database,
+            "scope-a",
             "scope-a",
             &"a".repeat(40),
             &download_metadata("测试档案"),
@@ -2506,6 +2662,20 @@ pub struct LocalArchiveRecord {
     tags: Vec<String>,
 }
 
+/// `local_archives` 一行读出来的样子：路径、档案 id、服务器、标题、大小、加入时间，
+/// 以及下载时抄下来的那三列（页数、标签 JSON、取封面用的 scope）。
+type LocalArchiveRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
 /// 扫一遍下载目录：文件才是主语，所以新增的记进来、已经不存在的行收掉，之后再
 /// 读表。外部删掉一个文件，这一页下次刷新就跟着少了它。
 fn reconcile_local_archives(
@@ -2547,8 +2717,8 @@ fn reconcile_local_archives(
             )
             .map_err(|error| error.to_string())?;
     }
-    let rows: Vec<(String, Option<String>, Option<String>, String, i64, i64)> = connection
-        .prepare("SELECT path, archive_id, server_id, title, file_size, added_at FROM local_archives ORDER BY added_at DESC, path DESC")
+    let rows: Vec<LocalArchiveRow> = connection
+        .prepare("SELECT path, archive_id, server_id, title, file_size, added_at, page_count, tags_json, scope_id FROM local_archives ORDER BY added_at DESC, path DESC")
         .and_then(|mut statement| {
             let rows = statement.query_map([], |row| {
                 Ok((
@@ -2558,6 +2728,9 @@ fn reconcile_local_archives(
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -2566,42 +2739,63 @@ fn reconcile_local_archives(
     Ok(rows
         .into_iter()
         .map(
-            |(path, archive_id, server_id, title, file_size, added_at)| {
+            |(path, archive_id, server_id, title, file_size, added_at, page_count, tags_json, scope_id)| {
                 let mirror = archive_id.as_deref().and_then(|archive_id| {
                     mirror_local_archive(connection, archive_id, server_id.as_deref())
                 });
-                if let Some((mirror_server, _, _, _, mirror_title)) = &mirror {
-                    // 第一次认出这个档案之后就把服务器记下来，下次不用再猜。
-                    if server_id.is_none() {
+                // 服务器镜像只补缺：下载时抄下的那一份在，就不再要求 archives 表里
+                // 正好有这一份。补到的东西写回行里——下一次断网也读得到，而不是每
+                // 次都去问服务器上那份还在不在。
+                let mut record_server = server_id;
+                let mut record_scope = scope_id;
+                let mut record_pages = page_count;
+                let mut record_tags = tags_json;
+                let mut record_title = title;
+                if let Some((mirror_server, mirror_scope, mirror_pages, mirror_tags, mirror_title)) =
+                    mirror
+                {
+                    let before = (
+                        record_server.clone(),
+                        record_scope.clone(),
+                        record_pages,
+                        record_tags.clone(),
+                        record_title.clone(),
+                    );
+                    record_server = record_server.or(Some(mirror_server));
+                    record_scope = record_scope.or(Some(mirror_scope));
+                    record_pages = record_pages.or(mirror_pages);
+                    record_tags = record_tags.or(Some(mirror_tags));
+                    // 文件名拆出来的标题不算标题：认出了服务器上那一份就用它的。
+                    if record_title.trim().is_empty()
+                        || record_title == local_archive_title(std::path::Path::new(&path))
+                    {
+                        record_title = mirror_title;
+                    }
+                    // 只在真补到东西时写回：这一页每十几秒读一次，不能每次都对每行做
+                    // 一遍无谓的 UPDATE。
+                    if (
+                        record_server.clone(),
+                        record_scope.clone(),
+                        record_pages,
+                        record_tags.clone(),
+                        record_title.clone(),
+                    ) != before
+                    {
                         let _ = connection.execute(
-                            "UPDATE local_archives SET server_id = ?1, title = ?2 WHERE path = ?3",
-                            params![mirror_server, mirror_title, path],
+                            "UPDATE local_archives SET server_id = ?1, scope_id = ?2, page_count = ?3, tags_json = ?4, title = ?5 WHERE path = ?6",
+                            params![record_server, record_scope, record_pages, record_tags, record_title, path],
                         );
                     }
                 }
-                let name = mirror
-                    .as_ref()
-                    .map(|(_, _, _, _, title)| title.trim().to_string())
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| {
-                        if title.trim().is_empty() {
-                            local_archive_title(std::path::Path::new(&path))
-                        } else {
-                            title
-                        }
-                    });
                 LocalArchiveRecord {
                     archive_id,
-                    server_id: mirror
-                        .as_ref()
-                        .map(|(server, _, _, _, _)| server.clone())
-                        .or(server_id),
-                    scope_id: mirror.as_ref().map(|(_, scope, _, _, _)| scope.clone()),
-                    title: name,
-                    page_count: mirror.as_ref().and_then(|(_, _, pages, _, _)| *pages),
-                    tags: mirror
-                        .as_ref()
-                        .and_then(|(_, _, _, tags, _)| serde_json::from_str::<Vec<String>>(tags).ok())
+                    server_id: record_server,
+                    scope_id: record_scope,
+                    title: record_title,
+                    page_count: record_pages,
+                    tags: record_tags
+                        .as_deref()
+                        .and_then(|tags| serde_json::from_str::<Vec<String>>(tags).ok())
                         .unwrap_or_default(),
                     path,
                     file_size,
@@ -2795,6 +2989,22 @@ pub async fn resume_download(
             .map_err(|error| error.to_string())?;
         // 阻塞线程拿不到 `State`，跟 download_archive 一样从 AppHandle 里取。
         let database = app.state::<Database>();
+        // 恢复也要把元数据带上：收完那一刻本地档案那一行要写标题、标签和页数，而
+        // 这一路手上只有任务行的标签。拿不到不算失败——档案本身还是要收完的。
+        let metadata = client
+            .get(format!(
+                "{}/api/archives/{}/metadata",
+                base_url.trim_end_matches('/'),
+                archive_id
+            ))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                authorization_value(&api_key),
+            )
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json::<serde_json::Value>)
+            .unwrap_or_else(|_| serde_json::json!({}));
         transfer_archive(
             &database,
             TransferRequest {
@@ -2802,9 +3012,10 @@ pub async fn resume_download(
                 api_key,
                 base_url,
                 server_id,
+                scope_id,
                 archive_id,
                 directory,
-                metadata: serde_json::json!({}),
+                metadata,
                 task: Some(TaskTransfer {
                     id: task_id,
                     label,
@@ -6878,6 +7089,11 @@ mod tests {
         connection
             .execute_batch(include_str!("../../migrations/0028_local_archives.sql"))
             .expect("local archives migration");
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0029_local_archive_metadata.sql"
+            ))
+            .expect("local archive metadata migration");
         connection
     }
 

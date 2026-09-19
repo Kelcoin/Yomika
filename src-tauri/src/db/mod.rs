@@ -98,6 +98,10 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             28,
             include_str!("../../migrations/0028_local_archives.sql"),
         ),
+        (
+            29,
+            include_str!("../../migrations/0029_local_archive_metadata.sql"),
+        ),
     ];
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -193,6 +197,14 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("eh health columns");
+            // 本地档案行自带元数据：离线（没有 archives 镜像可借）也读得出标签和页数。
+            let local_archive_metadata_columns: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('local_archives') WHERE name IN ('page_count','tags_json','scope_id')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("local archive metadata columns");
             let mut archive_categories_fk_statement = connection
                 .prepare("PRAGMA foreign_key_list(archive_categories)")
                 .expect("archive categories foreign keys");
@@ -218,10 +230,11 @@ mod tests {
                     archive_categories_fk_count,
                     cache_archive_column.as_str(),
                     cache_archive_index.as_str(),
-                    eh_health_columns
+                    eh_health_columns,
+                    local_archive_metadata_columns
                 ),
                 (
-                    28,
+                    29,
                     1,
                     "servers",
                     "sync_accounts",
@@ -230,7 +243,8 @@ mod tests {
                     2,
                     "source_archive",
                     "cache_entries_archive_idx",
-                    4
+                    4,
+                    3
                 )
             );
             connection.execute(
