@@ -224,4 +224,47 @@ describe('local archives workspace', () => {
     expect(list.queryByText('另一份')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '本地删除' })).toBeInTheDocument();
   });
+
+  it('keeps the empty state off the screen until the archive list has landed', async () => {
+    let resolveArchives: () => void = () => undefined;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') {
+        return new Promise((resolve) => { resolveArchives = () => resolve({ ok: true, value: [localFile] }); });
+      }
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    // 任务列表先落地也不能代表档案读完了：空状态放行得太早，就会先闪一下
+    // 「还没有下载过档案」再变成有数据的样子。
+    await screen.findByText('正在读取本地档案…');
+    expect(screen.queryByText('还没有下载过档案')).not.toBeInTheDocument();
+    resolveArchives();
+    expect(await screen.findByText('测试档案')).toBeInTheDocument();
+    expect(screen.queryByText('还没有下载过档案')).not.toBeInTheDocument();
+  });
+
+  it('reads a local file through the server copy it was downloaded from', async () => {
+    const user = userEvent.setup();
+    const noSource = { ...localFile, path: 'E:\\Downloads\\bbb-另一份.zip', title: '另一份', archiveId: null, serverId: null, scopeId: null };
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile, noSource] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    await user.click(await screen.findByText('测试档案'));
+    // 认得出下载来源：阅读走档案详情页同一个入口，按服务器档案出页。
+    expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', `/reader/${archiveId}?server=server-a`);
+
+    await user.click(screen.getByRole('button', { name: '关闭详情' }));
+    await user.click(await screen.findByText('另一份'));
+    // 侧放进来、认不出来源的文件没有阅读去处，按钮不摆。
+    expect(screen.queryByRole('link', { name: '阅读' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制路径' })).toBeInTheDocument();
+  });
 });

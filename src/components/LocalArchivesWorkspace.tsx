@@ -1,8 +1,9 @@
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Download, FileArchive, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { BookOpen, Copy, Download, FileArchive, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
@@ -16,6 +17,7 @@ import { usePageActive } from '../app/RetainedPage';
 import { writeClipboardText } from '../bridge/clipboard';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
 import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
+import { ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
 import { NativeLibraryRepository, type SearchPreset } from '../repositories/nativeLibraryRepository';
 
 const repository = new NativeLibraryRepository();
@@ -65,6 +67,78 @@ function downloadStats(task: TaskRecord): string {
   return parts.join(' · ');
 }
 
+/** 列表的一行。下载任务和落地的档案混在同一条列表里，虚拟器按平铺的序号定位。 */
+type LocalListRow =
+  | { kind: 'task'; key: string; task: TaskRecord }
+  | { kind: 'archive'; key: string; archive: LocalArchiveRecord };
+
+function DownloadRow({ task, pending, onControl }: {
+  task: TaskRecord;
+  pending: boolean;
+  onControl: (task: TaskRecord, action: 'pause' | 'resume' | 'cancel') => void;
+}) {
+  return (
+    <article className="archive-row is-downloading">
+      <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><Download /></div>
+      <span className="archive-row-copy">
+        <strong>{downloadTitle(task)}</strong>
+        <progress aria-label={`${downloadTitle(task)}进度`} max="100" value={Math.round(task.progress * 100)} />
+        <span className="archive-row-footer">
+          <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
+          {/* 失败那一条：右边这格本来写给进度，改成写原因——四行会撑破 142px
+              的文案格，所以理由占进度的位置，完整文本留在 title 上。 */}
+          <small className={`archive-row-stats${task.error ? ' is-error' : ''}`} title={task.error ?? undefined}>{task.error ?? downloadStats(task)}</small>
+        </span>
+      </span>
+      <div className="local-row-actions">
+        {task.status === 'running' && (
+          <button type="button" className="icon-button" disabled={pending} aria-label={`暂停${downloadTitle(task)}`} title="暂停" onClick={() => onControl(task, 'pause')}><Pause aria-hidden="true" /></button>
+        )}
+        {(task.status === 'paused' || task.status === 'failed') && (
+          <button type="button" className="icon-button" disabled={pending} aria-label={`${task.status === 'failed' ? '重试' : '恢复'}${downloadTitle(task)}`} title={task.status === 'failed' ? '重试' : '恢复'} onClick={() => onControl(task, 'resume')}><Play aria-hidden="true" /></button>
+        )}
+        <button type="button" className="icon-button" disabled={pending} aria-label={`中止${downloadTitle(task)}`} title="中止" onClick={() => onControl(task, 'cancel')}><X aria-hidden="true" /></button>
+      </div>
+    </article>
+  );
+}
+
+function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onToggle }: {
+  archive: LocalArchiveRecord;
+  selectionMode: boolean;
+  selected: boolean;
+  active: boolean;
+  onOpen: (archive: LocalArchiveRecord) => void;
+  onToggle: (path: string) => void;
+}) {
+  const category = archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
+  return (
+    <button
+      type="button"
+      className={`archive-row${selected ? ' is-selected' : ''}${active ? ' is-active' : ''}`}
+      {...(selectionMode
+        ? { role: 'checkbox', 'aria-checked': selected, 'aria-label': `选择 ${archive.title}` }
+        : { 'aria-pressed': active })}
+      onClick={() => { if (selectionMode) onToggle(archive.path); else onOpen(archive); }}
+    >
+      {archive.scopeId && archive.serverId && archive.archiveId
+        ? <ArchiveThumbMedia scopeId={archive.scopeId} serverId={archive.serverId} archiveId={archive.archiveId} />
+        : <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><FileArchive /></div>}
+      {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
+      <span className="archive-row-copy">
+        <strong>{archive.title}</strong>
+        <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
+        <span className="archive-row-footer">
+          <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{category || archive.path.split('.').pop()?.toUpperCase()}</small>
+          <small className="archive-row-stats">
+            {[formatByteSize(archive.fileSize), formatArchiveDate(Math.floor(archive.addedAt / 1000))].filter(Boolean).join(' · ')}
+          </small>
+        </span>
+      </span>
+    </button>
+  );
+}
+
 export function LocalArchivesWorkspace() {
   const pageActive = usePageActive();
   const { showToast } = useToast();
@@ -73,6 +147,10 @@ export function LocalArchivesWorkspace() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [presets, setPresets] = useState<SearchPreset[]>([]);
   const [loading, setLoading] = useState(true);
+  /** 档案列表是否已经落地。任务列表先回来不能代表档案读完了：两者是并行的
+   * 两笔 IPC，拿任务的「读完了」去放行空状态，就会先闪一下「还没有下载过档案」
+   * 再变成有数据的样子。 */
+  const [archivesLoaded, setArchivesLoaded] = useState(false);
   const [error, setError] = useState<string>();
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
@@ -88,9 +166,10 @@ export function LocalArchivesWorkspace() {
 
   const loadArchives = useCallback(async () => {
     const result = await repository.listLocalArchives();
-    if (!result.ok) { setError(result.error.message); return; }
+    if (!result.ok) { setError(result.error.message); setArchivesLoaded(true); return; }
     setError(undefined);
     setArchives(result.value);
+    setArchivesLoaded(true);
   }, []);
 
   // 本地档案是磁盘的镜像，下载跑完才会多一份：任务列表每次落地都重读一次。
@@ -213,6 +292,23 @@ export function LocalArchivesWorkspace() {
     onlySaveAfterUserInteractions: true,
   });
 
+  // 列表交给虚拟器：几百行全量渲染时，每一行的标签瀑布和封面都在滚动里重排，
+  // 拖动就是一顿一顿的。行座的高度交给 measureElement 去量——下载行在窄屏上
+  // 高度随内容长，不能像档案库那样按固定行距算死。
+  const listRef = useRef<HTMLDivElement>(null);
+  const listRows = useMemo<LocalListRow[]>(() => [
+    ...activeDownloads.map((task) => ({ kind: 'task' as const, key: task.id, task })),
+    ...visibleArchives.map((archive) => ({ kind: 'archive' as const, key: archive.path, archive })),
+  ], [activeDownloads, visibleArchives]);
+  const rowVirtualizer = useVirtualizer({
+    count: listRows.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => ARCHIVE_LIST_ROW_STRIDE,
+    getItemKey: (index) => listRows[index]?.key ?? index,
+    overscan: 6,
+    initialRect: { width: 720, height: 560 },
+  });
+
   const list = (
     <div className="local-archives">
       <h1 className="visually-hidden">本地档案</h1>
@@ -275,73 +371,48 @@ export function LocalArchivesWorkspace() {
           </div>
         </div>
       )}
-      {loading && <StatusLine busy>正在读取本地档案…</StatusLine>}
+      {(loading || !archivesLoaded) && <StatusLine busy>正在读取本地档案…</StatusLine>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {!loading && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && (
+      {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && (
         <EmptyState
           icon={Download}
           title={query ? '没有匹配的档案' : '还没有下载过档案'}
           description={query ? '换个关键词试试。' : '右键档案卡片选「下载档案」，进度和文件都会出现在这里。'}
         />
       )}
-      {(activeDownloads.length > 0 || visibleArchives.length > 0) && (
+      {listRows.length > 0 && (
         /* `archive-list is-wide`：这一页的行就是档案库的宽行。行高、封面框、文案
            三格和标签瀑布全部由那一套规则给，本地档案只多写「行里写什么」。 */
-        <div className="archive-list is-wide local-archives-list">
-          {activeDownloads.map((task) => (
-            <article className="archive-row is-downloading" key={task.id}>
-              <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><Download /></div>
-              <span className="archive-row-copy">
-                <strong>{downloadTitle(task)}</strong>
-                <progress aria-label={`${downloadTitle(task)}进度`} max="100" value={Math.round(task.progress * 100)} />
-                <span className="archive-row-footer">
-                  <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
-                  {/* 失败那一条：右边这格本来写给进度，改成写原因——四行会撑破 142px
-                      的文案格，所以理由占进度的位置，完整文本留在 title 上。 */}
-                  <small className={`archive-row-stats${task.error ? ' is-error' : ''}`} title={task.error ?? undefined}>{task.error ?? downloadStats(task)}</small>
-                </span>
-              </span>
-              <div className="local-row-actions">
-                {task.status === 'running' && (
-                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-label={`暂停${downloadTitle(task)}`} title="暂停" onClick={() => void control(task, 'pause')}><Pause aria-hidden="true" /></button>
-                )}
-                {(task.status === 'paused' || task.status === 'failed') && (
-                  <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-label={`${task.status === 'failed' ? '重试' : '恢复'}${downloadTitle(task)}`} title={task.status === 'failed' ? '重试' : '恢复'} onClick={() => void control(task, 'resume')}><Play aria-hidden="true" /></button>
-                )}
-                <button type="button" className="icon-button" disabled={pendingTaskId === task.id} aria-label={`中止${downloadTitle(task)}`} title="中止" onClick={() => void control(task, 'cancel')}><X aria-hidden="true" /></button>
-              </div>
-            </article>
-          ))}
-          {visibleArchives.map((archive) => {
-            const isSelected = selected.has(archive.path);
-            const category = archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
-            return (
-              <button
-                type="button"
-                key={archive.path}
-                className={`archive-row${isSelected ? ' is-selected' : ''}${openPath === archive.path ? ' is-active' : ''}`}
-                {...(selectionMode
-                  ? { role: 'checkbox', 'aria-checked': isSelected, 'aria-label': `选择 ${archive.title}` }
-                  : { 'aria-pressed': openPath === archive.path })}
-                onClick={() => { if (selectionMode) toggleOne(archive.path); else openArchive(archive); }}
-              >
-                {archive.scopeId && archive.serverId && archive.archiveId
-                  ? <ArchiveThumbMedia scopeId={archive.scopeId} serverId={archive.serverId} archiveId={archive.archiveId} />
-                  : <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><FileArchive /></div>}
-                {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
-                <span className="archive-row-copy">
-                  <strong>{archive.title}</strong>
-                  <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
-                  <span className="archive-row-footer">
-                    <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{category || archive.path.split('.').pop()?.toUpperCase()}</small>
-                    <small className="archive-row-stats">
-                      {[formatByteSize(archive.fileSize), formatArchiveDate(Math.floor(archive.addedAt / 1000))].filter(Boolean).join(' · ')}
-                    </small>
-                  </span>
-                </span>
-              </button>
-            );
-          })}
+        <div className="archive-list is-wide local-archives-list" data-scroll-region ref={listRef} role="list" aria-label="本地档案">
+          <div className="archive-list-inner" style={{ height: rowVirtualizer.getTotalSize() }}>
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const row = listRows[virtualRow.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={virtualRow.key}
+                  className={`archive-row-wrap${row.kind === 'task' ? ' is-downloading' : ''}`}
+                  role="listitem"
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  {row.kind === 'task'
+                    ? <DownloadRow task={row.task} pending={pendingTaskId === row.task.id} onControl={control} />
+                    : (
+                      <LocalArchiveRow
+                        archive={row.archive}
+                        selectionMode={selectionMode}
+                        selected={selected.has(row.archive.path)}
+                        active={openPath === row.archive.path}
+                        onOpen={openArchive}
+                        onToggle={toggleOne}
+                      />
+                    )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
       <TextInputDialog
@@ -391,7 +462,16 @@ export function LocalArchivesWorkspace() {
     </div>
   );
 
-  if (!detail) return list;
+  // 档案库与各个书架的留白都来自 `.library-shell-list` 的 16px 内边距；这一页
+  // 的路由同样吃 `is-library-workspace` 的零内边距，不包这层时内容直接怼到
+  // 窗口边上。没开详情时也要包，四周才和别的页面一致。
+  if (!detail) {
+    return (
+      <div className="library-shell">
+        <section className="library-shell-list">{list}</section>
+      </div>
+    );
+  }
   return (
     <Group className="library-shell has-detail" orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
       <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-list" defaultSize="58" minSize="40">
@@ -412,10 +492,11 @@ export function LocalArchivesWorkspace() {
   );
 }
 
-/** 右侧那一页：这份本地文件的实情。渲染的是档案详情页的同一批分区——标题、封面、
- * 事实网格、按命名空间分组的标签墙，类名也一样，所以两边的长相和标签顺序不会各自
- * 漂移。差别只有内容：这一页说的是磁盘上的事（大小、下载时间、路径），动作也只有
- * 复制路径和本地删除。 */
+/** 右侧那一页：这份本地文件的实情。结构和档案详情页（/library/:id）同构——头部
+ * 图标钮 + 两行自适应标题、封面加事实网格的概览、一条动作工具栏、按命名空间分组
+ * 的标签墙，类名也一致，所以两边的长相不会各自漂移。差别只有内容：这一页说的是
+ * 磁盘上的事（大小、下载时间、路径），阅读走下载来源那台服务器，动作只有复制
+ * 路径和本地删除。 */
 function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   archive: LocalArchiveRecord;
   onClose: () => void;
@@ -424,10 +505,16 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
 }) {
   const { showToast } = useToast();
   const { groups, colorFor } = useDetailTagGroups(archive.tags);
+  // 认得出下载来源时才能去阅读：阅读器按服务器档案出页，本地文件没有自己的
+  // 出页管道。侧放进来、认不出来源的文件不给这个按钮。
+  const serverCopy = archive.scopeId && archive.serverId && archive.archiveId
+    ? { scopeId: archive.scopeId, serverId: archive.serverId, archiveId: archive.archiveId }
+    : undefined;
   const { cover, loading: coverLoading } = useArchiveCover({
-    scopeId: archive.scopeId ?? undefined,
-    serverId: archive.serverId ?? undefined,
-    archiveId: archive.archiveId ?? undefined,
+    scopeId: serverCopy?.scopeId,
+    serverId: serverCopy?.serverId,
+    archiveId: serverCopy?.archiveId,
+    enabled: Boolean(serverCopy),
   });
   const titleRef = useTwoLineTitle(archive.title);
   const facts = [
@@ -440,8 +527,8 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
   return (
     <main className="archive-detail-route" aria-labelledby="local-archive-title">
       <header className="archive-detail-route-header">
-        <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>
         <button type="button" className="reader-icon-button" aria-label="关闭详情" title="关闭" onClick={onClose}><X aria-hidden="true" /></button>
+        <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>
       </header>
       <div className="archive-detail-overview">
         <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} />
@@ -450,6 +537,14 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
         </div>
       </div>
       <div className="archive-detail-route-actions" role="toolbar" aria-label="本地档案操作">
+        {serverCopy && (
+          <Link
+            className="primary-action"
+            to={`/reader/${serverCopy.archiveId}?server=${encodeURIComponent(serverCopy.serverId)}`}
+            aria-label="阅读"
+            title="阅读"
+          ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
+        )}
         <button
           type="button"
           className="secondary-action"
@@ -458,10 +553,10 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
             () => showToast('复制失败', 'error'),
           )}
         >
-          复制路径
+          <Copy aria-hidden="true" /><span className="archive-action-label">复制路径</span>
         </button>
         <button type="button" className="secondary-action is-danger" onClick={onDelete}>
-          <Trash2 aria-hidden="true" />本地删除
+          <Trash2 aria-hidden="true" /><span className="archive-action-label">本地删除</span>
         </button>
       </div>
       {/* 标签芯片照存档详情那一套排（My Tags 优先、按命名空间分组），点下去筛的是这一页

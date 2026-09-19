@@ -130,10 +130,19 @@ describe('application shell', () => {
     expect(screen.getByRole('heading', { name: '档案库' })).toBeInTheDocument();
   });
 
-  it('offers server setup from the first-run home', () => {
+  it('offers server setup from the first-run home', async () => {
+    // 提示要等服务器列表读完才出现：它若在 listServers 落地前渲染，冷启动会先
+    // 闪一下「添加你的 LANraragi」再换成书架。
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
     renderAt();
-
-    expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
+    // 列表还没回来时什么都不摆：先渲染提示再换书架就是冷启动的那一下闪烁。
+    expect(screen.queryByRole('link', { name: '添加服务器' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
   });
 
   it('shows repository-backed recent reading on home', async () => {

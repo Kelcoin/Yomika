@@ -286,8 +286,12 @@ function HomeWorkspace() {
             <Link className="secondary-action" to="/settings">打开设置</Link>
           </div>
         </section>
-      ) : !connected && (
+      ) : servers !== undefined && !connected && (
         // Only an unusable setup gets a prompt; a working server needs no banner.
+        // The gate is "the server list has been read", not "no server known":
+        // listServers is an IPC round trip, and until it lands nothing is known —
+        // rendering the prompt there meant every cold start flashed 添加你的
+        // LANraragi for a beat before the shelves replaced it.
         <ServerRequiredPrompt />
       )}
       {connected && homeServer && <>

@@ -2146,8 +2146,11 @@ body::-webkit-scrollbar,
 /* Same three-slot copy block as a thumbnail card, just wider: a two-line title,
    three tag rows, then category and stats on the footer line. The title and tag
    slots are fixed tracks, so a long title or a short tag list never moves the
-   footer or the row height. */.archive-list.is-wide .archive-row-copy {
-  grid-template-rows: 34px minmax(0, 1fr) 18px;
+   footer or the row height. The footer track holds the 22px chip family at full
+   height — at 18px the chip's bottom rounded corners were shaved off by this
+   block's overflow hidden, on the library and the local archives alike. */
+.archive-list.is-wide .archive-row-copy {
+  grid-template-rows: 34px minmax(0, 1fr) 22px;
   gap: 4px !important;
   height: 142px;
   overflow: hidden;
@@ -4915,6 +4918,11 @@ body::-webkit-scrollbar,
   border-radius: var(--radius-control);
   background: var(--surface-container);
 }
+
+/* 列表交给虚拟器后每行坐在绝对定位的行座里。档案行固定 166px（158 行高 +
+   8 行距），下载行在窄屏上高度随内容长，交给 measureElement 去量，行座不能
+   像 `.archive-list.is-wide .archive-row-wrap` 那样按 166px 算死。 */
+.local-archives-list .archive-row-wrap.is-downloading { height: auto; }
 .local-archives-list .archive-thumb-card-media.is-local-placeholder {
   display: grid;
   place-items: center;
