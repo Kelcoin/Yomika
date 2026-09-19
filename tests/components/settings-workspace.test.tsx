@@ -340,6 +340,31 @@ describe('settings workspace', () => {
     expect(screen.queryByRole('button', { name: '下载Anime4K' })).toBeNull();
   });
 
+  it('collapses model menu rows that share an id into one option', async () => {
+    const user = userEvent.setup();
+    // 后端按版本各出一条记录，选项的值是 id：两个版本照旧渲染成两行一模一样的
+    // 「Mask R-CNN」。同一 id 只能有一行。
+    const decensorRecord = (version: string) => ({
+      id: 'aletheia-lens', version, scale: null, kind: 'decensor',
+      components: [{ id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' }],
+    });
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [decensorRecord('1'), decensorRecord('2')],
+      };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    await user.click(await screen.findByRole('button', { name: '遮挡区域检测模型' }));
+    const menu = screen.getByRole('dialog', { name: '遮挡区域检测模型' });
+    expect(within(menu).getAllByRole('button', { name: 'Mask R-CNN' })).toHaveLength(1);
+  });
+
   it('loads saved servers from the native repository', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -718,16 +743,16 @@ describe('settings workspace', () => {
     const cacheMenu = await screen.findByRole('dialog', { name: '图片缓存' });
     expect(await within(cacheMenu).findByText('7 KB')).toBeInTheDocument();
     const breakdown = screen.getByLabelText('图片缓存明细');
-    expect(breakdown).toHaveTextContent('封面 1 KB');
-    expect(breakdown).toHaveTextContent('页缩略图 2 KB');
-    expect(breakdown).toHaveTextContent('阅读页 4 KB');
-    expect(breakdown).toHaveTextContent('超分结果 1 KB');
-    expect(breakdown).toHaveTextContent('去码结果 1 KB');
-    expect(breakdown).toHaveTextContent('推理缓存 1 KB');
+    expect(breakdown).toHaveTextContent(/封面\s*1\s*KB/);
+    expect(breakdown).toHaveTextContent(/页缩略图\s*2\s*KB/);
+    expect(breakdown).toHaveTextContent(/阅读页\s*4\s*KB/);
+    expect(breakdown).toHaveTextContent(/超分结果\s*1\s*KB/);
+    expect(breakdown).toHaveTextContent(/去码结果\s*1\s*KB/);
+    expect(breakdown).toHaveTextContent(/推理缓存\s*1\s*KB/);
     await user.click(within(cacheMenu).getByRole('button', { name: '清空图片缓存' }));
     expect(adapter).toHaveBeenCalledWith('cache_clear_images', {});
     expect(await screen.findByText('已释放 6.88 KB，保留 128 B 受保护缓存')).toBeInTheDocument();
-    expect(within(screen.getByRole('dialog', { name: '图片缓存' })).getByText('128 B')).toBeInTheDocument();
+    expect(within(screen.getByRole('dialog', { name: '图片缓存' })).getAllByText('128 B')[0]).toBeInTheDocument();
   });
 
   it('shows a preference loading error', async () => {

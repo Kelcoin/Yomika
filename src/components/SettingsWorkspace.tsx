@@ -249,9 +249,21 @@ function formatCacheBytes(value: number): string {
 /** Keep the selector compact: version and scale are implementation metadata. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
   if (model.kind === 'decensor') return { value: model.id, label: model.id === 'aletheia-lens' ? 'Aletheia Lens' : model.id.replaceAll('-', ' ') };
-  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K' };
+  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K', 'imported-model': '导入的模型' };
   const name = names[model.id] ?? model.id.replaceAll('-', ' ');
   return { value: model.id, label: name };
+}
+
+/** One row per id. The backend lists one record per installed version (newest
+ * first, so `resolve_installed_model` can fall back), but an option's value is
+ * the id — two versions of the same model rendered as two identical rows. */
+function firstPerId(models: InstalledModel[]): InstalledModel[] {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    if (seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
 }
 
 /** The compact bar's selectable entries, in display order; 档案库 由偏好规范化与
@@ -395,20 +407,20 @@ export function SettingsWorkspace() {
 
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
-  // de-censoring bundle, which is not an upscaler.
-  const runnableModels = installedModels?.filter((model) => model.scale && model.kind === 'upscale');
+  // de-censoring bundle, which is not an upscaler. One row per id: see firstPerId.
+  const runnableModels = firstPerId(installedModels?.filter((model) => model.scale && model.kind === 'upscale') ?? []);
   /** One switch each, derived from what is stored rather than stored separately:
    * a second boolean would be one more thing to keep in step with the model it
    * points at. Off is the backend being off, and no bundle chosen. */
-  const upscaleOn = preferenceDraft.upscaleBackend !== 'off' && Boolean(runnableModels?.length);
+  const upscaleOn = preferenceDraft.upscaleBackend !== 'off' && Boolean(runnableModels.length);
   const decensorOn = preferenceDraft.decensorModel !== '' && hasCompleteDecensorBundle(
     installedModels?.find((model) => model.id === preferenceDraft.decensorModel),
   );
-  const decensorBundles = installedModels?.filter((model) => model.kind === 'decensor');
-  const selectedDecensorBundle = decensorBundles?.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles?.[0];
+  const decensorBundles = firstPerId(installedModels?.filter((model) => model.kind === 'decensor') ?? []);
+  const selectedDecensorBundle = decensorBundles.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles[0];
   const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
-  const upscaleReady = Boolean(runnableModels?.length);
-  const upscaleModelOptions = runnableModels?.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x' }];
+  const upscaleReady = Boolean(runnableModels.length);
+  const upscaleModelOptions = runnableModels.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x' }];
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -908,18 +920,6 @@ export function SettingsWorkspace() {
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-general' && (
-              <SettingsNumber
-                icon={<HardDrive />}
-                label="图片缓存上限"
-                hint="单位 GB，超出后按最近最少使用清理"
-                value={preferenceDraft.cacheMaxBytes / GIB}
-                min={1}
-                max={32}
-                format={(value) => `${value} GB`}
-                onChange={(value) => editPreferences({ cacheMaxBytes: value * GIB })}
-              />
-            )}
-            {selectedSettingsSection === 'settings-general' && (
               <SettingsPanel
                 icon={<History />}
                 label="历史记录清理"
@@ -936,47 +936,78 @@ export function SettingsWorkspace() {
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-general' && (
-              <SettingsPanel
-                icon={<Database />}
-                label="图片缓存"
-                hint="封面、阅读页与模型结果的本地缓存，可随时清理"
-                value={cacheStats ? formatCacheBytes(cacheStats.bytes) : '统计中…'}
-              >
-                <strong className="settings-menu-strong">{cacheStats ? formatCacheBytes(cacheStats.bytes) : '正在统计…'}</strong>
-                {cacheStats && cacheStats.bytes > 0 && (
-                  /* Proportions read faster than four byte counts side by side. */
-                  <div className="cache-bar" aria-hidden="true">
-                    {CACHE_RENDITIONS.map(([kind]) => [kind, cacheStats.byRendition[kind].bytes] as const).filter(([, bytes]) => bytes > 0).map(([kind, bytes]) => (
-                      <span
-                        key={kind}
-                        className={`cache-bar-slice is-${kind}`}
-                        style={{ flexGrow: bytes, flexBasis: 0 }}
-                      />
-                    ))}
-                  </div>
-                )}
-                {cacheStats && (
-                  <div className="cache-breakdown" aria-label="图片缓存明细">
-                    {CACHE_RENDITIONS.map(([kind, label]) => cacheStats.byRendition[kind].bytes > 0 && <span key={kind}><i className={`cache-swatch is-${kind}`} aria-hidden="true" />{label} {formatCacheBytes(cacheStats.byRendition[kind].bytes)}</span>)}
-                  </div>
-                )}
-                {/* Clearing sits at the end of its menu: the numbers above are the
-                    answer to "what is in there", the button is the answer to "so
-                    clean it", and one never shifts the other. */}
-                <div className="settings-menu-actions">
-                  <button
-                    className="secondary-action"
-                    type="button"
-                    disabled={cacheClearing}
-                    aria-busy={cacheClearing}
-                    aria-label="清空图片缓存"
-                    title="清空图片缓存"
-                    onClick={() => void clearImageCache()}
-                  >
-                    <Eraser aria-hidden="true" />清空图片缓存
-                  </button>
-                </div>
-              </SettingsPanel>
+              /* 缓存相关的两项收进同一个容器：上限是它的预算，占用是它的现状，
+                 读作一组而不是两条散落的设置。 */
+              <div className="settings-cache-group" role="group" aria-label="缓存">
+                <p className="settings-cache-group-label">缓存</p>
+                <SettingsNumber
+                  icon={<HardDrive />}
+                  label="图片缓存上限"
+                  hint="单位 GB，超出后按最近最少使用清理"
+                  value={preferenceDraft.cacheMaxBytes / GIB}
+                  min={1}
+                  max={32}
+                  format={(value) => `${value} GB`}
+                  onChange={(value) => editPreferences({ cacheMaxBytes: value * GIB })}
+                />
+                <SettingsPanel
+                  icon={<Database />}
+                  label="图片缓存"
+                  hint="封面、阅读页与模型结果的本地缓存，可随时清理"
+                  value={cacheStats ? formatCacheBytes(cacheStats.bytes) : '统计中…'}
+                >
+                  {cacheStats ? (
+                    <>
+                      <div className="cache-summary">
+                        <div className="cache-summary-total">
+                          <strong>{formatCacheBytes(cacheStats.bytes)}</strong>
+                          <span>本地已占用</span>
+                        </div>
+                        {cacheStats.bytes > 0 && (
+                          /* Proportions read faster than four byte counts side by side. */
+                          <div className="cache-bar" aria-hidden="true">
+                            {CACHE_RENDITIONS.map(([kind]) => [kind, cacheStats.byRendition[kind].bytes] as const).filter(([, bytes]) => bytes > 0).map(([kind, bytes]) => (
+                              <span
+                                key={kind}
+                                className={`cache-bar-slice is-${kind}`}
+                                style={{ flexGrow: bytes, flexBasis: 0 }}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {cacheStats.bytes > 0 && (
+                        <div className="cache-breakdown" aria-label="图片缓存明细">
+                          {CACHE_RENDITIONS.map(([kind, label]) => cacheStats.byRendition[kind].bytes > 0 && (
+                            <span className="cache-breakdown-item" key={kind}>
+                              <span className="cache-breakdown-name"><i className={`cache-swatch is-${kind}`} aria-hidden="true" />{label}</span>
+                              <b className="cache-breakdown-size">{formatCacheBytes(cacheStats.byRendition[kind].bytes)}</b>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {/* Clearing sits at the end of its menu: the numbers above are the
+                          answer to "what is in there", the button is the answer to "so
+                          clean it", and one never shifts the other. */}
+                      <div className="settings-menu-actions">
+                        <button
+                          className="secondary-action"
+                          type="button"
+                          disabled={cacheClearing}
+                          aria-busy={cacheClearing}
+                          aria-label="清空图片缓存"
+                          title="清空图片缓存"
+                          onClick={() => void clearImageCache()}
+                        >
+                          <Eraser aria-hidden="true" />清空图片缓存
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="settings-menu-desc">正在统计缓存占用…</p>
+                  )}
+                </SettingsPanel>
+              </div>
             )}
             {selectedSettingsSection === 'settings-reading' && (
               <SettingsChoice
@@ -1186,7 +1217,10 @@ export function SettingsWorkspace() {
                         <Waypoints className="settings-menu-account-glyph" aria-hidden="true" />
                         <div className="settings-menu-account-copy">
                           <strong>{account.label}</strong>
-                          <span>{account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}</span>
+                          {/* 端点/域名很长：一行放不下就省略号截断，完整的悬停可读。 */}
+                          <span title={account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}>
+                            {account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}
+                          </span>
                           <small>{accountKindLabel(account.kind)} · {autoSync.running ? '同步中…' : formatSyncAge(account.lastSyncAt)}</small>
                         </div>
                         {/* 编辑时动作与表单互为开关，收起/展开都有高度过渡。 */}
@@ -1386,8 +1420,8 @@ export function SettingsWorkspace() {
                   disabled={!preferenceDraft.upscaleAutoEnable}
                   onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
-                {!runnableModels?.length && (
-                  <StatusLine busy={!runnableModels}>{runnableModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</StatusLine>
+                {!runnableModels.length && (
+                  <StatusLine busy={!installedModels}>{installedModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</StatusLine>
                 )}
               </div>
             )}

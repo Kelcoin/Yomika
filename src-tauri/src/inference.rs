@@ -642,7 +642,7 @@ fn model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
     }
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     visit(root, &mut hash)?;
-    Ok(format!("v2-{:016x}", hash.finish()))
+    Ok(format!("v3-{:016x}", hash.finish()))
 }
 
 pub fn model_data_dir(_app: &tauri::AppHandle) -> std::io::Result<std::path::PathBuf> {
@@ -670,17 +670,6 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
     let Ok(model_dirs) = std::fs::read_dir(&models_dir) else {
         return found;
     };
-    // Accept a bundled de-censor install copied directly into models/. Older
-    // builds and manual installs use this layout instead of id/version nesting.
-    if decensor::bundle_in(&models_dir).is_some() {
-        found.push(InstalledModel {
-            id: "aletheia-lens".into(),
-            version: "1".into(),
-            scale: None,
-            kind: MODEL_KIND_DECENSOR.into(),
-            components: decensor_components(),
-        });
-    }
     for model_dir in model_dirs.flatten() {
         if !model_dir
             .file_type()
@@ -736,6 +725,22 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
                 },
             });
         }
+    }
+    // Accept a bundled de-censor install copied directly into models/. Older
+    // builds and manual installs use this layout instead of id/version nesting —
+    // but only when no proper install exists: when both are present the loose
+    // files are leftovers of the same bundle, and reporting both made every
+    // stage menu list each component twice.
+    if !found.iter().any(|model| model.kind == MODEL_KIND_DECENSOR)
+        && decensor::bundle_in(&models_dir).is_some()
+    {
+        found.push(InstalledModel {
+            id: "aletheia-lens".into(),
+            version: "1".into(),
+            scale: None,
+            kind: MODEL_KIND_DECENSOR.into(),
+            components: decensor_components(),
+        });
     }
     found.sort_by(|left, right| left.id.cmp(&right.id));
     if let Some(fp) = fingerprint {
@@ -1018,6 +1023,24 @@ fn import_decensor_zip(
     result
 }
 
+/// The model id a raw `.onnx` import lands under: the file's stem when it is a
+/// safe path segment (so `realesr-general-x4v3.onnx` is selectable under the
+/// name the settings menu already knows), otherwise the legacy catch-all.
+fn imported_model_id(filename: &str) -> String {
+    let stem = filename.trim();
+    let stem = stem.strip_suffix(".onnx").or_else(|| stem.strip_suffix(".ONNX")).unwrap_or(stem);
+    let sanitized: String = stem
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        .map(|byte| byte as char)
+        .collect();
+    if safe_model_identity_segment(&sanitized) {
+        sanitized
+    } else {
+        "imported-model".into()
+    }
+}
+
 /// Imports either a zip containing `manifest.json` and model assets, or a raw
 /// ONNX file. Raw files receive a conservative CPU manifest and use the fixed
 /// application data model directory through the normal installer.
@@ -1041,7 +1064,7 @@ pub fn inference_import_model_file(
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
                 let manifest = ModelManifest {
-                    id: "imported-model".into(),
+                    id: imported_model_id(&input.filename),
                     version: "1".into(),
                     format: "onnx".into(),
                     scale: 2,
@@ -2822,6 +2845,53 @@ mod tests {
         // install has nowhere to look yet.
         assert!(installed_models_in(&base.join("elsewhere")).is_empty());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_loose_bundle_never_shadows_a_proper_install() {
+        // Loose component folders sitting directly in models/ (an older layout,
+        // or a manual copy) make the models root itself look like a bundle. With
+        // a proper `aletheia-lens/1` install next to them the loose files are
+        // leftovers: reporting both listed every stage of the flow twice.
+        let base = std::env::temp_dir().join("yomika-loose-bundle");
+        let _ = std::fs::remove_dir_all(&base);
+        let models = base.join("models");
+        for path in [
+            models.join("mrcnn"),
+            models.join("deepcreampy"),
+            models.join("esrgan"),
+            models.join("aletheia-lens").join("1").join("mrcnn"),
+            models.join("aletheia-lens").join("1").join("deepcreampy"),
+            models.join("aletheia-lens").join("1").join("esrgan"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(models.join("mrcnn").join("weights.onnx"), b"onnx").unwrap();
+        std::fs::write(models.join("deepcreampy").join("bar.onnx"), b"onnx").unwrap();
+        std::fs::write(models.join("deepcreampy").join("mosaic.onnx"), b"onnx").unwrap();
+        std::fs::write(models.join("esrgan").join("4x-Fatal-Pixels.onnx"), b"onnx").unwrap();
+        for path in ["mrcnn/weights.onnx", "deepcreampy/bar.onnx", "deepcreampy/mosaic.onnx", "esrgan/4x-Fatal-Pixels.onnx"] {
+            std::fs::write(models.join("aletheia-lens").join("1").join(path.replace('/', std::path::MAIN_SEPARATOR_STR)), b"onnx").unwrap();
+        }
+
+        let listed = installed_models_in(&base);
+        assert_eq!(listed.iter().filter(|model| model.kind == MODEL_KIND_DECENSOR).count(), 1);
+        // Without the proper install the loose layout is the bundle: it must
+        // still be listed, or a manual copy has nothing to run. Deleting it
+        // changes the fingerprint, so the cached index cannot answer.
+        std::fs::remove_dir_all(models.join("aletheia-lens")).unwrap();
+        let listed = installed_models_in(&base);
+        assert_eq!(listed.iter().filter(|model| model.kind == MODEL_KIND_DECENSOR).count(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_raw_import_takes_its_identity_from_the_file_name() {
+        assert_eq!(imported_model_id("realesr-general-x4v3.onnx"), "realesr-general-x4v3");
+        assert_eq!(imported_model_id(" 4x-Fatal-Pixels.ONNX "), "4x-Fatal-Pixels");
+        // A name that cannot be a path segment falls back to the legacy catch-all.
+        assert_eq!(imported_model_id("模型.onnx"), "imported-model");
+        assert_eq!(imported_model_id(".onnx"), "imported-model");
     }
 
     #[test]

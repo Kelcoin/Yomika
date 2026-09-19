@@ -3,12 +3,12 @@ import { useCallback, useEffect, useRef } from 'react';
 /** How far a wheel moves the rail, or null when the rail must leave the event
  * alone and let the page have it.
  *
- * The rail takes a wheel that is actually going sideways — a trackpad swipe
- * (deltaX), or shift+wheel, which is how a mouse asks for it. It does *not* take a
- * plain vertical wheel. Converting that was the old behaviour, and it trapped the
- * page: the rails span nearly the whole viewport, so with the pointer anywhere over
- * the cards a vertical wheel moved the strip sideways instead of scrolling, and the
- * only way down a page was to aim at the margin beside the rails.
+ * A wheel over the cards moves the rail — sideways input (a trackpad swipe, a
+ * tilted wheel) and the plain vertical wheel alike. ctrl+wheel is zoom and stays
+ * untouched; shift+wheel is the mouse's explicit sideways ask and follows the
+ * axis Chromium reports. Which events reach here at all is decided per gesture
+ * by `handleWheel`: a gesture that starts mid-rail belongs to the rail, one that
+ * starts past either end belongs to the page.
  */
 export function getHorizontalWheelDelta(
   event: Pick<WheelEvent, 'ctrlKey' | 'shiftKey' | 'deltaX' | 'deltaY'>,
@@ -17,7 +17,8 @@ export function getHorizontalWheelDelta(
 ): number | null {
   if (event.ctrlKey || scrollWidth <= clientWidth + 1) return null;
   if (event.shiftKey) return event.deltaX !== 0 ? event.deltaX : event.deltaY;
-  return Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : null;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  return delta === 0 ? null : delta;
 }
 
 type DragState = {
@@ -30,9 +31,15 @@ type DragState = {
   previousUserSelect: string;
 };
 
+/** Wheel events closer together than this belong to one gesture. Ownership of
+ * the wheel is decided when the gesture starts and frozen until it settles —
+ * see `handleWheel` for why the page may not join a gesture half way through. */
+export const WHEEL_GESTURE_SETTLE_MS = 250;
+
 export function useHorizontalScroller() {
   const elementRef = useRef<HTMLElement | null>(null);
   const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '' });
+  const gestureRef = useRef({ lastAt: 0, owns: false });
 
   const finishDrag = useCallback(() => {
     const state = dragRef.current;
@@ -66,12 +73,19 @@ export function useHorizontalScroller() {
     if (!element) return;
     const delta = getHorizontalWheelDelta(event, element.scrollWidth, element.clientWidth);
     if (delta === null) return;
-    // Chain to the page at either end: a rail with no room left must not keep
-    // swallowing the wheel — the home rails span nearly the whole viewport, and
-    // the page behind them would never scroll again.
+    // Ownership is per gesture, decided when the gesture starts and frozen until
+    // the wheel settles: a gesture that begins mid-rail belongs to the rail even
+    // after it runs out (otherwise the horizontal scroll dragged the page along
+    // with it, half way through the same gesture), and a gesture that begins at
+    // either end belongs to the page — the rails span nearly the whole viewport,
+    // and only this keeps the page reachable from a pointer resting on the cards.
+    const now = Date.now();
+    const fresh = now - gestureRef.current.lastAt > WHEEL_GESTURE_SETTLE_MS;
+    gestureRef.current.lastAt = now;
     const atStart = element.scrollLeft <= 0;
     const atEnd = element.scrollLeft >= element.scrollWidth - element.clientWidth - 1;
-    if ((delta < 0 && atStart) || (delta > 0 && atEnd)) return;
+    if (fresh) gestureRef.current.owns = !((delta < 0 && atStart) || (delta > 0 && atEnd));
+    if (!gestureRef.current.owns) return;
     if (event.cancelable) event.preventDefault();
     event.stopPropagation();
     element.scrollLeft += delta * 2.4;
