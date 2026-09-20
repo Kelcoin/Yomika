@@ -171,6 +171,32 @@ describe('design system contract', () => {
     expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
   });
 
+  it('pins the page scale and keeps text controls off the focus-zoom threshold', () => {
+    // 这是个应用，不是一篇文档：整个界面不能被双指捏着缩放。少了这两项，手机上
+    // 一捏界面就浮起来、工具栏跑出屏幕，一眼看得出来是网页套了个壳。
+    const html = read('index.html');
+    expect(html).toMatch(/maximum-scale=1(?:\.0)?/);
+    expect(html).toMatch(/user-scalable=no/);
+
+    // 阅读模式的缩放不能被这两项牵连：它不是浏览器缩放，是页帧上的 transform，
+    // 手势也归画布自己管——ReaderScreen 按布局把 touch-action 写在画布上，连续
+    // 模式让浏览器纵向滚动，单页/双页整个交给自己的双击、双指与滚轮。
+    const reader = read('src/components/ReaderScreen.tsx');
+    expect(reader).toMatch(/transform: `scale\(\$\{zoom\.scale\}\)/);
+    expect(reader).toMatch(/touchAction: effectiveLayout === 'webtoon' \? 'pan-y' : 'none'/);
+    // 阅读页里没有任何文本控件，所以下面那条字号下限够不到它。
+    expect(reader).not.toMatch(/<input|<textarea|<select/);
+
+    // 移动端 WebView 聚焦时会放大「算出来小于 16px」的输入框所在的页面，阈值只看
+    // 控件自己的字号。控件是 font: inherit，而说明文字的 label 按 --text-xs 排
+    // （.server-form、.metadata-form），里面的输入框就跟着掉到阈值以下——所以下限
+    // 补在控件这一层，而且要压得过直接写在控件上的字号。
+    const coarse = ruleBody(read('src/styles/base.css'), '@media (pointer: coarse)');
+    expect(coarse).toMatch(/input:not\(\[type='checkbox'\]\):not\(\[type='radio'\]\)/);
+    expect(coarse).toMatch(/textarea/);
+    expect(coarse).toMatch(/font-size:\s*max\(16px,\s*1em\)\s*!important/);
+  });
+
   it('parks the compact bar only while it floats, and leaves the docked row empty', () => {
     const shell = read('src/styles/shell.css');
     const app = read('src/components/AppShell.tsx');

@@ -8,8 +8,13 @@
     <!-- viewport-fit=cover 是移动端读到安全区的前提：没有它，iOS 会把布局视口
          缩进安全区、env(safe-area-inset-*) 一律为 0，Android 也不会给出刘海值。
          interactive-widget=resizes-content：键盘弹出时缩小视口，而不是盖在上面——
-         否则底部操作栏和对话框里的按钮会被键盘挡在下面，够不着。 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+         否则底部操作栏和对话框里的按钮会被键盘挡在下面，够不着。
+         maximum-scale=1 加 user-scalable=no：这里是个应用，不是一篇文档。少了这
+         两项，整个界面都能被双指捏着放大——放大之后工具栏浮到屏幕外、内容跑到
+         一边，一眼就看出来是网页套了个壳。阅读模式的缩放不受影响：它不是浏览器
+         缩放，而是页帧上的 transform 加画布自己的手势（见 ReaderScreen.tsx），
+         两套互不相干。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#f3eee4" />
     <title>Yomika</title>
   </head>

@@ -266,6 +266,23 @@ textarea {
   resize: vertical;
 }
 
+/* 移动端 WebView 有一条硬规矩：聚焦时算出来小于 16px 的输入框，会把整个页面
+   放大一下以示强调。页面自己跳一下，是这个应用最像网页的一刻，而阈值只看控件
+   算出来的字号，跟它画得多大无关。字号是从别处漏进控件的：控件是
+   `font: inherit`，而说明文字的 label 按 --text-xs 排——.server-form 里那几个
+   字段实测就是 12px，输入框跟着一起掉到阈值以下；另有 .eh-name-input、
+   .settings-choice-panel textarea、.upload-url-form textarea 把字号直接写在
+   控件上。补在控件这一层，是因为下限属于平台，不属于哪一处样式。
+   `1em` 就是原本会继承到的字号：比 16px 大的地方照旧，只有小的被抬上来；加上
+   !important，将来谁再写一个 13px 的输入框也推翻不了它。复选框和单选框不算
+   文本输入，不参与。 */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']),
+  textarea {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 input:focus,
 select:focus,
 textarea:focus {
