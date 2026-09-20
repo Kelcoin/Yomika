@@ -44,4 +44,51 @@ describe('native inference bridge', () => {
     });
     expect(adapter).toHaveBeenCalledWith('inference_clear_cache', {});
   });
+
+  it('reads the hosted upscale catalog and refuses entries it cannot install', async () => {
+    const entry = {
+      id: 'realcugan-2x-conservative',
+      label: 'Real-CUGAN 2x 保守版（推荐）',
+      scale: 2,
+      version: '2022.02.27',
+      source: 'https://github.com/bilibili/ailab/tree/main/Real-CUGAN',
+      // 引擎要照着它把页面边缘那些细条补到 20px 再裁回来。
+      minInputEdge: 20,
+      files: [{
+        name: 'realcugan-2x-conservative.onnx',
+        size: 5272599,
+        sha256: 'a'.repeat(64),
+        directUrl: null,
+      }],
+    };
+    const adapter = vi.fn(async () => ({ ok: true, value: { tag: 'models-v1', models: [entry] } }));
+    setInvokeAdapterForTests(adapter);
+
+    await expect(new NativeInferenceRepository().listUpscaleCatalog()).resolves.toEqual({
+      ok: true,
+      value: { tag: 'models-v1', models: [entry] },
+    });
+    expect(adapter).toHaveBeenCalledWith('model_release_list_upscalers', {});
+
+    // 上游直链（HuggingFace 那类）是清单支持的字段，虽然当前两项 CUGAN 都是本仓库
+    // 自己发布、不需要它。
+    setInvokeAdapterForTests(async () => ({
+      ok: true,
+      value: { tag: 'models-v1', models: [{ ...entry, files: [{ ...entry.files[0], directUrl: 'https://huggingface.co/o/r/resolve/main/m.onnx' }] }] },
+    }));
+    await expect(new NativeInferenceRepository().listUpscaleCatalog()).resolves.toMatchObject({ ok: true });
+
+    // 哈希短一位、或者没有规模，装下去也跑不起来：宁可在桥上就被拒掉，
+    // 也不要写进目录再报「模型不可用」。
+    for (const broken of [
+      { ...entry, scale: 0 },
+      { ...entry, minInputEdge: 0 },
+      { ...entry, files: [{ ...entry.files[0], sha256: 'a'.repeat(63) }] },
+      { ...entry, files: [] },
+    ]) {
+      setInvokeAdapterForTests(async () => ({ ok: true, value: { tag: 'models-v1', models: [broken] } }));
+      const result = await new NativeInferenceRepository().listUpscaleCatalog();
+      expect(result.ok).toBe(false);
+    }
+  });
 });

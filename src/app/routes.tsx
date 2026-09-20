@@ -269,25 +269,29 @@ function HomeWorkspace() {
   return (
     <div className="workspace-home">
       {connectionError ? (
-        <section className="first-run" aria-labelledby="first-run-title">
-          <div className="first-run-copy">
-            <Server aria-hidden="true" />
-            <h2 id="first-run-title">无法读取服务器</h2>
-            <p className="form-error" role="alert">{connectionError}</p>
-          </div>
-          <div className="first-run-actions">
-            {serverFailure?.error.retryable && (
-              <button className="secondary-action" type="button" onClick={() => {
-                setServers(undefined);
-                setServerLoadAttempt((attempt) => attempt + 1);
-              }}>
-                <RefreshCw aria-hidden="true" />
-                重试读取服务器
-              </button>
-            )}
-            <Link className="secondary-action" to="/settings">打开设置</Link>
-          </div>
-        </section>
+        // 与 ServerRequiredPrompt 同一层壳：位置归 `.first-run-page` 管，两个状态才落
+        // 在同一个高度上。
+        <div className="first-run-page">
+          <section className="first-run" aria-labelledby="first-run-title">
+            <div className="first-run-copy">
+              <Server aria-hidden="true" />
+              <h2 id="first-run-title">无法读取服务器</h2>
+              <p className="form-error" role="alert">{connectionError}</p>
+            </div>
+            <div className="first-run-actions">
+              {serverFailure?.error.retryable && (
+                <button className="secondary-action" type="button" onClick={() => {
+                  setServers(undefined);
+                  setServerLoadAttempt((attempt) => attempt + 1);
+                }}>
+                  <RefreshCw aria-hidden="true" />
+                  重试读取服务器
+                </button>
+              )}
+              <Link className="secondary-action" to="/settings">打开设置</Link>
+            </div>
+          </section>
+        </div>
       ) : servers !== undefined && !connected && (
         // Only an unusable setup gets a prompt; a working server needs no banner.
         // The gate is "the server list has been read", not "no server known":

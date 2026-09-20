@@ -42,6 +42,26 @@ describe('mobile packaging', () => {
     });
   });
 
+  it('strips the prebuilt native libraries that AGP leaves alone', () => {
+    const gradle = read('../../src-tauri/gen/android/app/build.gradle.kts');
+    const cargo = read('../../src-tauri/Cargo.toml');
+
+    // 发布版的原生库不该带调试信息或静态符号表。APK 里它们是不压缩存放的
+    // （extractNativeLibs=false，为的是能从 APK 直接 mmap），所以符号表有多大一目了然
+    // 地落在下载里：改之前 .so 64.30MB（其中 17MB 是 .symtab/.strtab）。
+    expect(cargo).toMatch(/\[profile\.release\]\nstrip = "symbols"/);
+    // AGP 的 stripUniversalReleaseDebugSymbols 对**预编译** jniLibs 是空操作（实测它
+    // 的输出与输入逐字节相同），所以 release 变体的中间产物要自己再 strip 一遍；
+    // debug 变体不碰，jni 调试要留符号。
+    expect(gradle).toMatch(/it\.name\.endsWith\("ReleaseNativeLibs"\) \|\| it\.name\.endsWith\("ReleaseDebugSymbols"\)/);
+    expect(gradle).toContain('"--strip-all"');
+    // 只动中间产物：源目录那份 libc++_shared.so 是指向 NDK sysroot 的符号链接，
+    // 就地 strip 等于改掉本机的 NDK 安装。（注释里提到它不算——所以先去掉注释再判。）
+    expect(gradle).toContain('intermediates/merged_native_libs');
+    expect(gradle).toContain('intermediates/stripped_native_libs');
+    expect(gradle.replace(/\/\/[^\n]*/g, '')).not.toContain('src/main/jniLibs');
+  });
+
   it('composes the Android launcher icon from our foreground and background', () => {
     const res = '../../src-tauri/gen/android/app/src/main/res';
 

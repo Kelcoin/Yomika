@@ -20,6 +20,7 @@ import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
 import { formatSyncAge } from '../lib/syncTime';
+import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow, SettingsRowBody } from './SettingsRow';
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
@@ -41,7 +42,7 @@ import { COLOR_SCHEMES, CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { NativeInferenceRepository, type InstalledModel } from '../repositories/nativeInferenceRepository';
+import { NativeInferenceRepository, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { openExternalUrl } from '../bridge/externalUrl';
 
@@ -68,20 +69,22 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
     return () => document.removeEventListener('keydown', close);
   }, [onClose]);
   return (
-    <div className="settings-choice-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="settings-choice-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
-      >
-        <h2 className="settings-choice-title">{title}</h2>
-        {description && <p className="settings-menu-desc">{description}</p>}
-        <div className="settings-menu-body">{children}</div>
+    <OverlayLayer>
+      <div className="settings-choice-overlay" role="presentation" onClick={onClose}>
+        <div
+          className="settings-choice-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
+        >
+          <h2 className="settings-choice-title">{title}</h2>
+          {description && <p className="settings-menu-desc">{description}</p>}
+          <div className="settings-menu-body">{children}</div>
+        </div>
       </div>
-    </div>
+    </OverlayLayer>
   );
 }
 
@@ -249,7 +252,9 @@ function formatCacheBytes(value: number): string {
 /** Keep the selector compact: version and scale are implementation metadata. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
   if (model.kind === 'decensor') return { value: model.id, label: model.id === 'aletheia-lens' ? 'Aletheia Lens' : model.id.replaceAll('-', ' ') };
-  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K', 'imported-model': '导入的模型' };
+  // 行名的兜底：目录拿不到时（离线）也要有个像样的名字，而不是把 id 里的连字符
+  // 换成空格。在线时目录里的 label 优先，这里只取它们的前半段以保持一致。
+  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', 'realcugan-2x-conservative': 'Real-CUGAN 2x 通用', 'realcugan-2x-denoise3x': 'Real-CUGAN 2x 漫画', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K', 'imported-model': '导入的模型' };
   const name = names[model.id] ?? model.id.replaceAll('-', ' ');
   return { value: model.id, label: name };
 }
@@ -405,6 +410,8 @@ export function SettingsWorkspace() {
   const customValue = activeScheme ? activeScheme.label : preferenceDraft.customCss ? '高级自定义' : '默认';
 
   const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
+  /** The hosted catalog. `undefined` = not fetched yet, `[]` = fetch failed. */
+  const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[]>();
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
   // de-censoring bundle, which is not an upscaler. One row per id: see firstPerId.
   const runnableModels = firstPerId(installedModels?.filter((model) => model.scale && model.kind === 'upscale') ?? []);
@@ -419,7 +426,21 @@ export function SettingsWorkspace() {
   const selectedDecensorBundle = decensorBundles.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles[0];
   const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
   const upscaleReady = Boolean(runnableModels.length);
-  const upscaleModelOptions = runnableModels.length ? runnableModels.map(modelOption) : [{ value: 'waifu2x-upconv7', label: 'waifu2x' }];
+  /** 目录里还没装上盘的那些：列出来才有下载按钮。只列已安装的模型，手机端
+   * 就永远等不到 real-esrgan —— 既没有导入入口，也没有下载入口。已安装的排
+   * 在前（内置 Anime4K、随包 waifu2x 是默认选择），目录里的跟在后面。
+   *
+   * 行名以目录为准：装之前叫「Real-ESRGAN 通用 x4」，装完还叫这个，不会退回
+   * 内置那份按 id 拼出来的名字。 */
+  const hostedLabels = new Map((upscaleCatalog ?? []).map((hosted) => [hosted.id, hosted.label] as const));
+  const upscaleModelOptions = [
+    ...runnableModels.map((model) => ({ value: model.id, label: hostedLabels.get(model.id) ?? modelOption(model).label })),
+    ...(upscaleCatalog ?? [])
+      .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
+      .map((hosted) => ({ value: hosted.id, label: hosted.label })),
+  ];
+  // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
+  if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'waifu2x' });
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -513,6 +534,11 @@ export function SettingsWorkspace() {
     void inferenceRepository.listModels().then((result) => {
       setInstalledModels(result.ok ? result.value : []);
       if (!result.ok) showToast(result.error.message, 'error');
+    });
+    // 目录要走网络，慢、而且离线时必然失败：拿不到只是「没有新的可下载」，
+    // 已经装在盘上的模型照样可选，所以不弹错、也不挡住上面的模型列表。
+    void inferenceRepository.listUpscaleCatalog().then((result) => {
+      setUpscaleCatalog(result.ok ? result.value.models : []);
     });
   }, [installedModels, selectedSettingsSection, showToast]);
 

@@ -65,8 +65,8 @@ use inference::{
 use model_release::{
     model_release_activate, model_release_cancel, model_release_download,
     model_release_download_bundle, model_release_download_default, model_release_fetch_manifest,
-    model_release_url, model_release_validate, model_release_validate_archive,
-    model_release_validate_import, model_release_validate_local,
+    model_release_list_upscalers, model_release_url, model_release_validate,
+    model_release_validate_archive, model_release_validate_import, model_release_validate_local,
 };
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
 use tauri::Manager;
@@ -197,6 +197,7 @@ pub fn run() {
             inference_clear_cache,
             model_release_url,
             model_release_fetch_manifest,
+            model_release_list_upscalers,
             model_release_validate,
             model_release_download,
             model_release_download_bundle,

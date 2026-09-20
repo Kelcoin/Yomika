@@ -99,7 +99,7 @@ describe('library route workspace', () => {
     // 不再各画一版。
     expect(await screen.findByRole('heading', { name: '添加你的 LANraragi' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
-    expect(screen.getByRole('link', { name: /从 WebDAV 同步/ })).toHaveAttribute('href', '/settings?section=sync');
+    expect(screen.getByRole('link', { name: /从云端同步/ })).toHaveAttribute('href', '/settings?section=sync');
   });
 
   it('resolves history records to archive titles and server context', async () => {

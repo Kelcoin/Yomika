@@ -17,6 +17,18 @@ pub struct ModelManifest {
     pub max_pixels: usize,
     pub sha256: String,
     pub supported_backends: Vec<String>,
+    /// Smallest tile edge the graph will accept, in source pixels. Real-CUGAN
+    /// reflects 18 px inside the graph and rejects anything under 20, while the
+    /// tiler can hand it a 9 px strip at a page's right edge; the engine grows
+    /// such a tile and crops the answer. 1 — the default, and what every model
+    /// without an opinion gets — leaves the tile exactly as the pipeline planned
+    /// it.
+    #[serde(default = "default_min_input_edge")]
+    pub min_input_edge: u32,
+}
+
+fn default_min_input_edge() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +338,11 @@ pub mod inpaint;
 pub mod onnx;
 pub mod upscale;
 
+/// The pixel budget a model is handed when nothing on disk says otherwise.
+/// Tiles are far smaller than this; the budget exists so a pathological page
+/// cannot ask for an allocation that takes the process down.
+pub const DEFAULT_MAX_PIXELS: usize = 64_000_000;
+
 /// Execution providers we know how to ask for, most preferred first per
 /// platform. The ONNX Runtime session picks one of these; CPU always works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +434,13 @@ pub fn validate_manifest(manifest: &ModelManifest) -> Result<(), InferenceError>
     {
         return Err(InferenceError::InvalidManifest(
             "CPU backend is required".to_string(),
+        ));
+    }
+    // A zero floor would mean "grow every tile to nothing"; an enormous one would
+    // ask for an allocation far past any model's needs.
+    if manifest.min_input_edge == 0 || manifest.min_input_edge > 4096 {
+        return Err(InferenceError::InvalidManifest(
+            "model minimum input edge is out of range".to_string(),
         ));
     }
     Ok(())
@@ -1130,6 +1154,7 @@ fn import_model_bytes(
                     max_pixels: 64_000_000,
                     sha256: hash,
                     supported_backends: vec!["cpu".into()],
+                    min_input_edge: default_min_input_edge(),
                 };
                 let mut archive = std::io::Cursor::new(Vec::new());
                 {
@@ -1458,7 +1483,12 @@ fn upscale_cached_page_with_models(
     // otherwise see a blurry page with no explanation.
     let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match &resolved {
         Some(ResolvedUpscaler::Onnx(path, manifest)) => {
-            match onnx::OnnxEngine::open(path, manifest.scale, max_pixels) {
+            match onnx::OnnxEngine::open(
+                path,
+                manifest.scale,
+                max_pixels,
+                manifest.min_input_edge,
+            ) {
                 Ok(engine) => Some(Box::new(engine)),
                 Err(error) => {
                     return CommandResult::failure(
@@ -1596,6 +1626,7 @@ fn resolve_installed_bundle(
                 max_pixels: 64_000_000,
                 sha256: String::new(),
                 supported_backends: vec!["cpu".into()],
+                min_input_edge: default_min_input_edge(),
             });
             manifest.sha256 = cached_model_fingerprint(&root).ok()?;
             decensor::bundle_in(&root).map(|bundle| (bundle, manifest))
@@ -2522,7 +2553,7 @@ mod tests {
     #[test]
     fn the_downloaded_model_installs_and_resolves_into_a_working_engine() {
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/models/realesr-general-x4v3.onnx");
+            .join("../docs/models/realcugan-2x-conservative.onnx");
         if !source.exists() {
             eprintln!("skipping: {} is not present", source.display());
             return;
@@ -2531,13 +2562,17 @@ mod tests {
 
         let base = std::env::temp_dir().join("yomika-install-real-model");
         let _ = std::fs::remove_dir_all(&base);
-        let (staging, install) = model_install_roots(&base, "realesr-general-x4v3", "2026.09.04")
-            .expect("install roots");
+        let (staging, install) =
+            model_install_roots(&base, "realcugan-2x-conservative", "2022.02.27")
+                .expect("install roots");
 
         let mut manifest = model_manifest(&model_bytes);
-        manifest.id = "realesr-general-x4v3".into();
-        manifest.version = "2026.09.04".into();
-        manifest.scale = 4;
+        manifest.id = "realcugan-2x-conservative".into();
+        manifest.version = "2022.02.27".into();
+        manifest.scale = 2;
+        // As the published catalog declares it, so the tile below is grown the way
+        // a page-edge strip is.
+        manifest.min_input_edge = 20;
         install_model_archive(
             &model_zip(&[("model.onnx", &model_bytes)]),
             &manifest,
@@ -2546,7 +2581,7 @@ mod tests {
         )
         .expect("install the downloaded model");
 
-        let (path, resolved) = resolve_installed_model(&base, "realesr-general-x4v3")
+        let (path, resolved) = resolve_installed_model(&base, "realcugan-2x-conservative")
             .expect("resolve the installed model");
         assert_eq!(path, install.join("model.onnx"));
         assert_eq!(
@@ -2554,12 +2589,21 @@ mod tests {
             "the manifest must survive installation verbatim"
         );
 
-        let engine = onnx::OnnxEngine::open(&path, resolved.scale, resolved.max_pixels)
-            .expect("open the installed model");
+        let engine = onnx::OnnxEngine::open(
+            &path,
+            resolved.scale,
+            resolved.max_pixels,
+            resolved.min_input_edge,
+        )
+        .expect("open the installed model");
         let rgba = vec![128_u8; 8 * 8 * 4];
         let output = upscale::UpscaleEngine::upscale_tile(&engine, &rgba, 8, 8)
             .expect("upscale a tile with the installed model");
-        assert_eq!(output.len(), 32 * 32 * 4, "a x4 model turns 8x8 into 32x32");
+        assert_eq!(
+            output.len(),
+            16 * 16 * 4,
+            "a x2 model turns an 8x8 tile into 16x16, however far it had to grow it first"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -2616,6 +2660,7 @@ mod tests {
             max_pixels: 64_000_000,
             sha256,
             supported_backends: vec!["cpu".into()],
+            min_input_edge: default_min_input_edge(),
         }
     }
 
@@ -2684,6 +2729,7 @@ mod tests {
             max_pixels: 64_000_000,
             sha256: "a".repeat(64),
             supported_backends: vec!["directml".into(), "cpu".into()],
+            min_input_edge: default_min_input_edge(),
         };
         assert!(validate_manifest(&manifest).is_ok());
         let mut invalid = manifest.clone();
@@ -2710,6 +2756,7 @@ mod tests {
             max_pixels: 64_000_000,
             sha256: hash,
             supported_backends: vec!["cpu".into()],
+            min_input_edge: default_min_input_edge(),
         };
         assert!(validate_model_bytes(&manifest, bytes).is_ok());
         assert!(matches!(

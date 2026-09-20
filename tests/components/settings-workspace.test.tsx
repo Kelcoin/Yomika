@@ -586,7 +586,7 @@ describe('settings workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'inference_list_models') return { ok: true, value: [
-        { id: 'realesr-general', version: '2026.09.2', scale: 4 },
+        { id: 'realcugan-2x-conservative', version: '2022.02.27', scale: 2 },
         { id: 'waifu2x-upconv7', version: '1', scale: 2, kind: 'upscale' },
         // No manifest means no recorded scale, so this one cannot be run and
         // must not be offered as a choice.
@@ -621,15 +621,15 @@ describe('settings workspace', () => {
     // Installed models are offered by name, with the scale the model itself
     // produces; typing a name from memory was a silent failure at upscale time.
     await user.click(screen.getByRole('button', { name: '超分模型' }));
-    expect(await screen.findByRole('button', { name: 'Real-ESRGAN' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /下载Real-ESRGAN/ })).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Real-CUGAN 2x 通用' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /下载Real-CUGAN/ })).toBeNull();
     expect(screen.getAllByLabelText('超分模型').length).toBeGreaterThan(0);
     await user.keyboard('{Escape}');
     expect(screen.queryByLabelText('超分后端')).not.toBeInTheDocument();
     // Turning it on picks a backend and the one runnable model, rather than
     // leaving two controls still saying "no".
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...DEFAULT_PREFERENCES, ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'auto', upscaleModel: 'realesr-general' },
+      input: { ...DEFAULT_PREFERENCES, ...loaded, prefetchPages: 8, coverConcurrency: 2, upscaleBackend: 'auto', upscaleModel: 'realcugan-2x-conservative' },
     }));
 
   });
@@ -693,6 +693,68 @@ describe('settings workspace', () => {
     await user.click(screen.getByRole('button', { name: '遮挡区域检测模型' }));
     await user.click(await screen.findByRole('button', { name: '下载Mask R-CNN' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'aletheia-lens' });
+  });
+
+  it('offers hosted upscale models that are not on disk yet', async () => {
+    const user = userEvent.setup();
+    // 只列已安装的模型，手机端就永远等不到 real-cugan：既没有导入入口，也没有
+    // 下载入口。目录里的条目要跟着已安装的一起出现，并带上各自的下载按钮。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [{ id: 'anime4k-hq', version: '2', scale: 2, kind: 'upscale', components: [] }],
+      };
+      if (command === 'model_release_list_upscalers') return {
+        ok: true,
+        value: {
+          tag: 'models-v1',
+          models: [
+            {
+              id: 'realcugan-2x-conservative',
+              label: 'Real-CUGAN 2x 通用（保守版）',
+              scale: 2,
+              version: '2022.02.27',
+              source: 'https://github.com/bilibili/ailab/tree/main/Real-CUGAN',
+              minInputEdge: 20,
+              files: [{ name: 'realcugan-2x-conservative.onnx', size: 5272599, sha256: 'a'.repeat(64) }],
+            },
+            {
+              id: 'realcugan-2x-denoise3x',
+              label: 'Real-CUGAN 2x 漫画（强降噪）',
+              scale: 2,
+              version: '2022.02.27',
+              source: 'https://github.com/bilibili/ailab/tree/main/Real-CUGAN',
+              minInputEdge: 20,
+              files: [{ name: 'realcugan-2x-denoise3x.onnx', size: 5272599, sha256: 'b'.repeat(64) }],
+            },
+            // 目录重复了已经装上的 id：列表里不能出现第二行。
+            {
+              id: 'anime4k-hq',
+              label: 'Anime4K 重复项',
+              scale: 2,
+              version: '2',
+              files: [{ name: 'anime4k-hq.onnx', size: 1, sha256: 'c'.repeat(64) }],
+            },
+          ],
+        },
+      };
+      if (command === 'model_release_download_default') return { ok: true, value: null };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
+    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
+
+    const menu = screen.getByRole('dialog', { name: '超分模型' });
+    // 已安装的 anime4k-hq 只有一行：目录里同名那条不再另起一行，也就没有下载
+    // 按钮。行名取目录那份——装之前装之后是同一个名字。
+    expect(within(menu).getAllByRole('button', { name: 'Anime4K 重复项' })).toHaveLength(1);
+    expect(within(menu).queryByRole('button', { name: '下载Anime4K 重复项' })).toBeNull();
   });
 
   it('shows cache usage by rendition and clears unprotected images', async () => {

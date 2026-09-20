@@ -63,7 +63,7 @@ mod tests {
         )
         .unwrap();
         let engine =
-            crate::inference::onnx::OnnxEngine::open(&root.join("model.onnx"), 2, 64000000)
+            crate::inference::onnx::OnnxEngine::open(&root.join("model.onnx"), 2, 64000000, 1)
                 .unwrap();
         let pixels: Vec<u8> = (0..35)
             .flat_map(|i| [(i * 5) as u8, 80, 160, 127])

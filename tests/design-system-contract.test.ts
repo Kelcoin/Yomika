@@ -198,6 +198,7 @@ describe('design system contract', () => {
     const routes = read('src/app/routes.tsx');
     const library = read('src/components/LibraryRouteWorkspace.tsx');
     const prompt = read('src/components/ServerRequiredPrompt.tsx');
+    const shell = read('src/styles/shell.css');
 
     expect(prompt).toContain('className="first-run"');
     expect(prompt).toContain('/settings?section=sync');
@@ -208,6 +209,58 @@ describe('design system contract', () => {
     expect(routes).not.toContain('尚未连接 LANraragi');
     // 没有服务器时档案库不该停在首屏骨架屏上：确认过没有可用服务器就换提示。
     expect(library).toContain('hasServer === false');
+
+    // 位置也归一份管。三处宿主各加各的内边距——首页的 workspace 上边 32px、档案库
+    // 的列表面板 16px、书架什么都没加——只排 .first-run 就会算出三个高度（实测
+    // 76 / 60 / 44）。所以外面统一加一层 .first-run-page：宿主给过的写 0，没给的
+    // 补成同一份。
+    expect(prompt).toContain('className="first-run-page"');
+    expect(routes).toMatch(/<div className="first-run-page">/);
+    expect(ruleBody(shell, '.first-run-page')).toMatch(/padding-block-start:\s*var\(--space-8\)/);
+    expect(ruleBody(shell, '.workspace-home > .first-run-page')).toMatch(/padding-block-start:\s*0/);
+    expect(ruleBody(shell, '.library-shell-list .first-run-page')).toMatch(/padding-block-start:\s*var\(--space-4\)/);
+
+    // 形状是设置项那种容器：一个圆角描边卡片，动作在底部自己的容器里。以前是上下
+    // 两条整幅分割线夹一段文案——页面上像两条与这个提示无关的横线。
+    expect(ruleBody(shell, '.first-run')).toMatch(/border:\s*1px solid var\(--outline-variant\)/);
+    expect(ruleBody(shell, '.first-run')).toMatch(/border-radius:\s*var\(--radius-card\)/);
+    expect(ruleBody(shell, '.first-run')).not.toMatch(/border-(top|bottom):/);
+    expect(ruleBody(shell, '.first-run-actions')).toMatch(/border-top:\s*1px solid var\(--hairline\)/);
+    // 云端同步不只 WebDAV：S3 兼容存储同样能恢复配置。
+    expect(prompt).toContain('WebDAV 或 S3 兼容存储');
+    expect(prompt).not.toContain('从 WebDAV 同步');
+  });
+
+  it('keeps app-level overlays out of the page’s own stacking contexts', () => {
+    // 浮层的 z-index 要真的比底栏大，两边就得在同一个层叠上下文里。页面容器会自己
+    // 建层叠上下文——`.library-shell-list` 的 --z-raised 是为了让列表面板压在详情
+    // 面板上，`.workspace` 的入场动画曾经留下一个 translateY(0)——手写的全屏浮层
+    // 留在里面，z-index 就被关住了，底栏于是永远压在设置菜单 / 检索预设 / 封面预览
+    // 之上。Radix 的对话框（Dialog.Portal）和标签建议一直是挂到 body 的，手写浮层
+    // 现在也走同一条路。
+    const shell = read('src/styles/shell.css');
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    const preset = read('src/components/SearchPresetField.tsx');
+
+    expect(read('src/components/OverlayLayer.tsx')).toMatch(/createPortal\(children, document\.body\)/);
+    expect(settings).toMatch(/<OverlayLayer>\s*<div className="settings-choice-overlay"/);
+    expect(preset).toMatch(/<OverlayLayer>\s*<div className="search-preset-overlay"/);
+    // 浮层挂出去以后，面板里的点击不再算「在 field 里」，外点关闭必须放过它，
+    // 否则指针一按下按钮就被卸载，click 永远到不了按钮。
+    expect(preset).toContain("if (target?.closest?.('.search-preset-overlay')) return;");
+
+    // 入场动画不能留填充值：translateY(0) 也是一个不是 none 的 transform，它会让
+    // .workspace 同时变成层叠上下文和 position: fixed 子元素的包含块（浮层被裁到
+    // 内容区，而不是盖住整个窗口）。backwards 只在动画开始前生效，结束后什么都不留。
+    expect(ruleBody(shell, '.workspace')).toMatch(/animation:\s*workspace-in 0\.28s cubic-bezier\(0\.32, 0\.72, 0, 1\) backwards/);
+    expect(ruleBody(shell, '.workspace')).not.toMatch(/animation:[^;]*\bboth\b/);
+
+    // 层序本身也是合同：底栏 < 菜单 < 遮罩 < 模态。
+    const tokens = cssVariables(ruleBody(read('src/styles/tokens.css'), ':root'));
+    const z = (name: string) => Number(tokens.get(name));
+    expect(z('--z-compact-nav')).toBeLessThan(z('--z-menu'));
+    expect(z('--z-menu')).toBeLessThan(z('--z-overlay'));
+    expect(z('--z-overlay')).toBeLessThan(z('--z-modal'));
   });
 
   it('draws the E-Hentai row like the other settings icons and reports download progress', () => {

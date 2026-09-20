@@ -25,10 +25,33 @@ const InstalledModelSchema = z.object({
   components: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), path: z.string() })).default([]),
 });
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
+/** 托管模型的目录清单。`directUrl` 是上游那份导出（HuggingFace），本仓库的
+ * Release 资产是它下载不到时的兜底。 */
+const UpscaleCatalogSchema = z.object({
+  tag: z.string().min(1),
+  models: z.array(z.object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    scale: z.number().int().positive(),
+    version: z.string().min(1),
+    source: z.string().nullish(),
+    /** 图的最小可接受边长；缺省表示图对尺寸没要求。 */
+    minInputEdge: z.number().int().positive().nullish(),
+    files: z.array(z.object({
+      name: z.string().min(1),
+      size: z.number().int().positive(),
+      sha256: z.string().length(64),
+      directUrl: z.string().nullish(),
+    })).min(1),
+  })),
+});
+export type UpscaleCatalog = z.infer<typeof UpscaleCatalogSchema>;
+export type UpscaleCatalogModel = UpscaleCatalog['models'][number];
 export type InferenceJob = z.infer<typeof InferenceJobSchema>;
 export interface InferenceStartInput { id: string; sourceScope: string; sourceId: string; modelId: string; modelVersion: string; inputHashes: string[]; }
 export interface InferenceCheckpointInput { jobId: string; itemIndex: number; completedTile: number; status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'; outputPath?: string; }
-export interface ModelManifest { id: string; version: string; format: 'onnx'; scale: number; maxPixels: number; sha256: string; supportedBackends: string[]; }
+export interface ModelManifest { id: string; version: string; format: 'onnx'; scale: number; maxPixels: number; sha256: string; supportedBackends: string[]; /** 图能接受的最小边长（源像素）。Real-CUGAN 的 18px 反射 pad 要求每边 ≥20；
+ * 引擎会把更细的块补到这么大再裁回来。缺省 1，等于不动。 */ minInputEdge?: number; }
 export type InferenceCapabilities = z.infer<typeof InferenceCapabilitiesSchema>;
 /** `z.infer` gives the input type, where a defaulted field is optional; commands
  * answer with the filled-in shape. */
@@ -135,5 +158,8 @@ export class NativeInferenceRepository {
    * way an upscaling model is. */
   installDecensorBundle(sourceDir: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_decensor_bundle', { sourceDir }, InstalledModelResponse); }
   listModels(): Promise<CommandResult<InstalledModel[]>> { return invokeCommand('inference_list_models', {}, z.array(InstalledModelResponse)); }
+  /** 线上托管的超分模型目录。装在盘上的模型和它能选什么不是一回事：目录里的
+   * 条目还没下载，设置页也要列出来——否则手机端永远没有 real-esrgan 可选。 */
+  listUpscaleCatalog(): Promise<CommandResult<UpscaleCatalog>> { return invokeCommand('model_release_list_upscalers', {}, UpscaleCatalogSchema); }
   clearCache(): Promise<CommandResult<InferenceCacheClearResult>> { return invokeCommand('inference_clear_cache', {}, InferenceCacheClearResultSchema); }
 }

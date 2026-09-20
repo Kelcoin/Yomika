@@ -50,3 +50,19 @@ custom-protocol = ["tauri/custom-protocol"]
 # clipboard as unavailable there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = "3"
+
+# 发布构建不带符号表。
+#
+# Android 的 .so 里 `.symtab`(5.4MB) + `.strtab`(11.6MB) 一共 17MB，而 APK 里的原生库
+# 是不压缩存放的（AGP 的 extractNativeLibs=false，为的是能从 APK 直接 mmap），所以那
+# 17MB 一分不少地落在下载里——Windows 的 exe 与 iOS 的 dylib 都被 deflate 盖掉了一半，
+# 只有 APK 把真实体积摊在外面。实测：--strip-all 之后 64.3MB → 47.4MB，`.text` /
+# `.rodata` 逐字节不变，动态链接要的 `.dynsym` 保留。iOS 的 __LINKEDIT 有 22MB 同类
+# 内容，Windows 那边 rustc 本来就没留 COFF 符号表。
+#
+# 只动 release：debug 构建（手机上 jni 调试、本地 cargo test）符号照旧。应用自己的
+# panic 日志（`error_log::install_panic_hook`）存的是 panic 文案 + `file:line`，那是编译
+# 期写进 .rodata 的，不受影响；只有 std 默认钩子打印的栈会变成地址，需要可读回溯时
+# 单独编一份不 strip 的即可。代码里没有任何地方读自己的符号表（无 backtrace / dladdr）。
+[profile.release]
+strip = "symbols"

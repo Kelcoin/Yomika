@@ -405,7 +405,13 @@ body::-webkit-scrollbar,
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  animation: workspace-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) both;
+  /* `backwards`，不是 `both`：`both` 会在动画结束后继续把 translateY(0) 留在元素上，
+     而一个不是 none 的 transform 会同时做两件事——把 .workspace 变成层叠上下文
+     （里面所有浮层的 z-index 被关在这一层里，手机底栏的 z-index 在更外层，于是永远压
+     在设置菜单、搜索预设、封面预览之上），以及成为 position: fixed 子元素的包含块
+     （那些浮层会被裁到内容区，而不是盖住整个窗口）。动画本身从不可见滑入到常态，不留
+     填充值正好停在常态上，视觉上没有任何区别。 */
+  animation: workspace-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) backwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -807,17 +813,41 @@ body::-webkit-scrollbar,
   color: var(--brand-vermilion);
 }
 
-/* 未配置服务器时各页共用的引导（ServerRequiredPrompt）：居中、上下各一条分割线，
-   两个入口在下方居中排开。首页原来自己画过一版（左文案右按钮），书架与档案库那两版
-   连分割线都没有——同一个状态三种长相。 */.first-run {
+/* 未配置服务器时这一页只有这一个提示，落点由它自己定。宿主页各加各的内边距，直接
+   排 .first-run 就会得到三个高度：首页的 workspace 加 32px、档案库的列表面板加 16px、
+   书架什么都没加——同一个状态三个位置。这里把自己那份补成同一份，宿主已经给过的
+   就写 0，两边不叠加。
+   左右留白只在窗口比提示本身（最宽 560px）还窄时才看得出来，那种宽度下 workspace
+   的内边距已经是 --space-4，所以书架这份也用它。 */
+.first-run-page {
+  padding-block-start: var(--space-8);
+  padding-inline: var(--space-4);
+}
+
+/* 首页：workspace 已经给了 32px 上间距，左右也是同一个 clamp。 */
+.workspace-home > .first-run-page {
+  padding-block-start: 0;
+  padding-inline: 0;
+}
+
+/* 档案库：列表面板给了 16px，再补 16px 才和首页落在同一个高度。 */
+.library-shell-list .first-run-page {
+  padding-block-start: var(--space-4);
+  padding-inline: 0;
+}
+
+/* 未配置服务器时各页共用的引导（ServerRequiredPrompt）：形状就是设置项那种容器——
+   一个圆角描边卡片，说明居中，两个入口在底部自己的容器里（与设置表单的保存/测试同一
+   形状）。首页原来自己画过一版（左文案右按钮），书架与档案库那两版连分割线都没有；
+   同一份提示后来又是上下两条整幅分割线夹一段文案，页面上像两条无关的横线。 */.first-run {
   display: grid;
   justify-items: center;
-  gap: var(--space-6);
   width: min(100%, 560px);
   margin: 0 auto;
-  padding: var(--space-8) var(--space-4);
-  border-top: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
+  overflow: hidden;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-card);
+  background: var(--surface-container);
   text-align: center;
 }
 
@@ -1015,10 +1045,14 @@ body::-webkit-scrollbar,
 
 .settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
 
+/* 文案区自己给内边距：卡片只画框，上下两块各自管自己的留白。 */
 .first-run-copy {
   display: grid;
   justify-items: center;
   gap: var(--space-2);
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-8) var(--space-5) var(--space-6);
 }
 
 .first-run-copy > svg {
@@ -1027,11 +1061,16 @@ body::-webkit-scrollbar,
   color: var(--brand-cyan);
 }
 
+/* 底部容器：动作与文案之间一条 hairline——分割线收进卡片里，不再是整页宽的两条。 */
 .first-run-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: var(--space-3);
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-top: 1px solid var(--hairline);
 }
 
 .first-run h2,
@@ -3897,7 +3936,6 @@ body::-webkit-scrollbar,
     border-left-width: 1px;
   }
 
-  .first-run,
   .settings-section,
   .preferences-panel {
     grid-template-columns: 1fr;
@@ -3906,17 +3944,21 @@ body::-webkit-scrollbar,
     padding: var(--space-6) 0;
   }
 
-  /* 引导在手机上不再是「图标 + 文案」两列：居中一列，图标小一号，两个入口
+  /* 引导在手机上不再是「图标 + 文案」两列：居中一列，卡片留白小一号，两个入口
      竖排、各自占满一行（.primary-action 在这层已经是 100% 宽）。 */.first-run {
     justify-items: center;
     width: min(100%, 420px);
-    padding: var(--space-6) var(--space-4);
     text-align: center;
   }
 
   .first-run-copy {
     justify-items: center;
     gap: var(--space-1);
+    padding: var(--space-6) var(--space-4) var(--space-4);
+  }
+
+  .first-run-actions {
+    padding: var(--space-4);
   }
 
   .first-run-copy > svg {
