@@ -168,13 +168,35 @@
     --selection-background: color-mix(in srgb, #a83b32 24%, transparent);
     --selection-ink: #1a1c1a;
 
-    /* ---- Reader chrome is theme-independent black ----------------------- */
+    /* ---- Reader chrome: its own dark M3 scheme --------------------------
+       The reader canvas is black in both themes, so this chrome cannot reuse
+       the theme's roles: in the light theme --primary is a deep vermilion,
+       which is unreadable on black. These values are the dark scheme, fixed.
+       Role map (M3 → token):
+         surface              --reader-chrome        top app bar (64dp)
+         surface-container    --reader-bar-container bottom app bar (80dp), one
+                                                     tonal step above the top bar
+         surface-container-high --reader-panel      dialog / overview panel
+         on-surface           --reader-ink          app-bar title, page counter
+         on-surface-variant   --reader-muted        toolbar icons, subtitle badge
+         primary              --reader-primary      a selected toggle
+       Custom colour schemes recolor the app, not this chrome — as with every
+       other --reader-* token here. ---------------------------------------- */
     --reader-canvas: #050506;
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
+    --reader-primary: #ffb4a9;
     --reader-chrome: rgb(5 5 7 / 0.82);
+    /* Translucency plus backdrop blur stands in for M3's tonal elevation (see
+       docs/03-visual-system.md §3.6): the container is surface-container, and
+       the blur keeps the artwork legible underneath it. */
+    --reader-bar-container: rgb(26 27 30 / 0.86);
     --reader-border: rgb(244 241 248 / 0.24);
     --reader-border-muted: rgb(244 241 248 / 0.16);
+    /* State layer over a control. M3 asks for 8% on hover and 10% on press;
+       both states share one value here so the pointer and the touch path stay
+       textually identical — the contract test compares the two tiers by
+       declaration text (tests/design-system-contract.test.ts). */
     --reader-control-hover: rgb(244 241 248 / 0.1);
     --reader-thumbnail-surface: rgb(5 5 7 / 0.24);
     --reader-page-overlay: rgb(5 5 7 / 0.55);
@@ -182,7 +204,18 @@
     /* Opaque, unlike the chrome: the overview panel holds a scroller, and a
        scroller inside a backdrop-filter layer is a known source of stale tiles —
        which is what made its thumbnails appear to overlap. */
-    --reader-panel: #131318;
+    --reader-panel: #1e1f24;
+
+    /* ---- Reader chrome: M3 type scale and bar heights -------------------
+       The reader chrome reads two roles off the M3 type scale — the app-bar
+       title is title-large (22sp/28sp) and the page counter is label-medium
+       (12sp/500, --text-xs + --weight-medium). 22px is off the UI scale, so
+       it lives here rather than in component CSS. The bar heights are the M3
+       container sizes; the page pill reads --reader-toolbar-height to step
+       above the bar, so the two can never drift apart. ------------------- */
+    --reader-title-size: 22px;
+    --reader-title-leading: 28px;
+    --reader-toolbar-height: 80px;
 
     /* ---- Elevation: menus, dialogs and masks only ----------------------- */
     --shadow-menu: 0 8px 24px rgb(26 28 26 / 0.16);

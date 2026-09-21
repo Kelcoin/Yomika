@@ -519,6 +519,82 @@ describe('design system contract', () => {
     expect(markRule).not.toMatch(/:hover/);
   });
 
+  it('gives every hover rule a pressed twin, so a tap is visible on touch', () => {
+    // 触屏没有 hover——`:hover` 在触屏上会留在屏幕上（点过的行一直填着色），所以整套
+    // 悬停规则都关在 @media (hover: hover) 里，按下态就是触屏唯一的反馈。两边必须成对：
+    // 悬停加一条，按下态就得补一条，否则那个组件在手机上又变回"点下去毫无动静"。
+    //
+    // 变换是机械的：把悬停选择器里的 `:hover` 原样换成 `:is(.is-pressed, :active)`，
+    // 祖先上下文与 `:not(...)` 守卫都不动——这样特异性和悬停完全一致，凡是悬停压得住
+    // 的静止态，按下态也压得住。机制见 src/lib/pressFeedback.ts。
+    const shell = read('src/styles/shell.css');
+    const source = shell.replace(/\/\*[\s\S]*?\*\//g, '');
+    // 选择器列表要按**顶层**逗号切：`:is(.is-pressed, :active)` 自己带一个逗号。
+    const splitSelectors = (list: string): string[] => {
+      const parts: string[] = [];
+      let depth = 0;
+      let current = '';
+      for (const character of list) {
+        if (character === '(') depth += 1;
+        if (character === ')') depth -= 1;
+        if (character === ',' && depth === 0) { parts.push(current.trim()); current = ''; continue; }
+        current += character;
+      }
+      parts.push(current.trim());
+      return parts.filter(Boolean);
+    };
+
+    // 有意不补的：桌面专属（自绘标题栏）；触屏另有一套交互（标签的悬停是揭示机制、
+    // SFW 的悬停是揭图）；骨架屏不是可点元素；分隔线纯装饰；`:disabled:hover` 是禁用态
+    // 的中和规则；输入框在触屏上点一下就直接聚焦，聚焦环就是反馈；下拉的选项行外层是
+    // `div[role=option]`，被标记的是行里那个真正的按钮，所以按下态写在 .select-option-main 上。
+    const exempt = (selector: string) => /titlebar|metadata-tag|data-sfw|is-skeleton|panel-separator|:disabled:hover|^input:hover|^select:hover|^textarea:hover|^\.select-option:hover$/.test(selector);
+    // 只比颜色：悬停规则里那点位移（`transform: translateY(-1px)`）按下去不该复刻，
+    // 布局一动就会跳。
+    const colour = (body: string) => [...body.matchAll(/(background(?:-color)?|color|border-color)\s*:\s*([^;]+)/g)].map((match) => `${match[1]}: ${match[2]?.trim()}`);
+
+    const missing: string[] = [];
+    let checked = 0;
+    for (const path of ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css']) {
+      const sheet = read(path);
+      const stripped = sheet.replace(/\/\*[\s\S]*?\*\//g, '');
+
+      const hovered = new Map<string, string>();
+      for (let at = stripped.indexOf('@media (hover: hover)'); at >= 0; at = stripped.indexOf('@media (hover: hover)', at + 1)) {
+        const open = stripped.indexOf('{', at);
+        let depth = 0;
+        let end = open;
+        for (let index = open; index < stripped.length; index += 1) {
+          if (stripped[index] === '{') depth += 1;
+          else if (stripped[index] === '}' && (depth -= 1) === 0) { end = index; break; }
+        }
+        for (const rule of stripped.slice(open + 1, end).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+          for (const selector of splitSelectors(rule[1] ?? '')) {
+            if (selector.includes(':hover')) hovered.set(selector, rule[2] ?? '');
+          }
+        }
+      }
+
+      const pressed = new Map<string, string>();
+      for (const rule of ruleBody(sheet, '@media (hover: none)').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        for (const selector of splitSelectors(rule[1] ?? '')) pressed.set(selector, rule[2] ?? '');
+      }
+
+      for (const [selector, body] of hovered) {
+        if (exempt(selector)) continue;
+        checked += 1;
+        const twin = pressed.get(selector.replace(/:hover/g, ':is(.is-pressed, :active)'));
+        if (twin === undefined) { missing.push(`${path} 没有按下态：${selector}`); continue; }
+        for (const declaration of colour(body)) {
+          if (!twin.includes(declaration)) missing.push(`${path} 按下态少了 ${declaration}：${selector}`);
+        }
+      }
+    }
+    // 覆盖得够多才说明这个断言有意义（三份样式表加起来几十条悬停规则）。
+    expect(checked).toBeGreaterThan(35);
+    expect(missing).toEqual([]);
+  });
+
   it('keeps design tokens in a cascade layer so user CSS can override them', () => {
     // The reason presets appeared to do nothing twice over: a preset's
     // `:root { --brand-vermilion: … }` is (0,1,0) and loses on specificity to
@@ -604,6 +680,67 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.status-item\s*\{[\s\S]*font-family:\s*var\(--font-body\)/);
     expect(shell).toMatch(/\.icon-button\s*\{[\s\S]*width:\s*var\(--icon-button-size\)[\s\S]*height:\s*var\(--icon-button-size\)/);
     expect(reader).toMatch(/\.reader-icon-button,[\s\S]*?\.reader-toolbar button\s*\{[\s\S]*width:\s*var\(--icon-button-size\)[\s\S]*height:\s*var\(--icon-button-size\)/);
+  });
+
+  it('gives the reader chrome the Material 3 app-bar geometry and roles', () => {
+    // 阅读模式的顶栏/底栏按 M3 的 small top app bar 与 bottom app bar 规格：容器
+    // 64dp / 80dp（各加自己的安全区）、左右 4dp（TopAppBarHorizontalPadding 与
+    // BottomAppBarHorizontalPadding —— M3 把「距图标 16dp」的内容边距交给按钮自己
+    // 的内边距，容器只留 4dp）、24dp 图标、标题 title-large（22/28）、底栏容器是
+    // surface-container（比顶栏的 surface 高一档）。
+    const reader = read('src/styles/reader.css');
+    const tokens = read('src/styles/tokens.css');
+
+    expect(tokens).toMatch(/--reader-title-size:\s*22px/);
+    expect(tokens).toMatch(/--reader-title-leading:\s*28px/);
+    expect(tokens).toMatch(/--reader-toolbar-height:\s*80px/);
+    expect(tokens).toMatch(/--reader-primary:\s*#ffb4a9/);
+    expect(tokens).toMatch(/--reader-bar-container:/);
+
+    const top = ruleBody(reader, '.reader-chrome-top');
+    expect(top).toMatch(/height:\s*calc\(64px \+ var\(--safe-top\)\)/);
+    expect(top).toMatch(/padding:\s*var\(--safe-top\)\s+var\(--space-1\)\s+0/);
+    // 容器高度是定的，不是 min-height：内容在 64dp 里居中，多一行也不会长高。
+    expect(top).not.toMatch(/min-height/);
+
+    const title = ruleBody(reader, '.reader-chrome-top strong');
+    expect(title).toMatch(/font-size:\s*var\(--reader-title-size\)/);
+    expect(title).toMatch(/font-weight:\s*var\(--weight-regular\)/);
+    expect(title).toMatch(/line-height:\s*var\(--reader-title-leading\)/);
+
+    const toolbar = ruleBody(reader, '.reader-toolbar');
+    expect(toolbar).toMatch(/height:\s*calc\(var\(--reader-toolbar-height\) \+ var\(--safe-bottom\)\)/);
+    expect(toolbar).toMatch(/padding:\s*0 var\(--space-1\) var\(--safe-bottom\)/);
+    // IconButtonSpace = 0：动作之间不留缝，间距由每个按钮自己的触控面提供。
+    expect(toolbar).toMatch(/gap:\s*0/);
+    expect(toolbar).toMatch(/background:\s*var\(--reader-bar-container\)/);
+
+    // 图标按钮是 M3 的 full shape，不是 8px 圆角；图标 24dp。
+    expect(ruleBody(reader, '.reader-icon-button,\n.reader-toolbar button')).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    expect(ruleBody(reader, '.reader-error svg,\n.reader-icon-button svg,\n.reader-toolbar svg')).toMatch(/width:\s*24px/);
+
+    // 选中的开关走 M3 standard icon button 的选中态：只有图标换 primary，容器保持
+    // 透明。填充式（整块实色）会把一枚控件变成压在画面上的色块。
+    const selected = ruleBody(reader, '.reader-toolbar button[aria-pressed="true"]');
+    expect(selected).toMatch(/color:\s*var\(--reader-primary\)/);
+    expect(selected).not.toMatch(/background/);
+
+    // 概览面板是一枚 M3 对话框：extra-large 圆角 + 24dp 内边距。
+    const panel = ruleBody(reader, '.reader-overview');
+    expect(panel).toMatch(/border-radius:\s*var\(--radius-overlay\)/);
+    expect(panel).toMatch(/padding:\s*var\(--space-6\)/);
+
+    // 页码胶囊压在底栏上，读的是底栏自己的高度令牌，改一边不会让两边错位。
+    expect(ruleBody(reader, '.reader-page-indicator.is-raised')).toMatch(/bottom:\s*calc\(var\(--reader-toolbar-height\)/);
+  });
+
+  it('keeps the reader chrome on its own fixed dark scheme', () => {
+    // 阅读画布两个主题下都是黑的，所以这一层 chrome 只能用 --reader-* 那套固定的
+    // 深色方案。引用会随主题翻转的颜色令牌，在浅色主题下就会变成深色落在黑底上：
+    // 选中页缩略图的描边（--brand-cyan）、画布焦点环（--focus-ring）都曾如此。
+    const reader = read('src/styles/reader.css');
+    const flipping = /var\(--(?:primary|on-primary|primary-container|on-primary-container|secondary|tertiary|error|success|warning|surface[\w-]*|on-surface[\w-]*|ink-[\w-]+|brand-[\w-]+|outline[\w-]*|hairline[\w-]*|control-[\w-]+|chip-[\w-]+|backdrop-overlay|selection-[\w-]+|focus-[\w-]+|inverse-[\w-]+|state-[\w-]+|category-[\w-]+|tag-ns-[\w-]+|eh-mark-[\w-]+|shadow-[\w-]+)\)/;
+    expect(reader).not.toMatch(flipping);
   });
 
   it('anchors the enabled switch thumb to the track end even if its flex row shrinks', () => {

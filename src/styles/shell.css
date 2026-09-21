@@ -5052,6 +5052,157 @@ body::-webkit-scrollbar,
   }
 }
 
+/* ---- 触屏按下去的颜色 ---------------------------------------------------- */
+/* 机制在 src/lib/pressFeedback.ts：手指按住哪个可点元素，就给谁一个瞬时的
+   `.is-pressed`，抬起 / 滑走 / 滚动立刻撤掉。
+
+   为什么要有这一块：hover 那整套规则都关在 `@media (hover: hover)` 里，因为触屏上
+   `:hover` 会留在屏幕上（点过的行一直填着色）。代价是触屏那条路径上什么都没剩下，
+   点下去毫无动静——所以触屏得另有一条"按住"的色阶。
+
+   每条都照着对应 hover 规则的选择器抄，只把 `:hover` 换成 `:is(.is-pressed, :active)`：
+   祖先上下文（`.archive-list.is-wide .archive-row`）和 `:not(...)` 守卫（已选中的行
+   不参与、禁用的不参与）都原样保留。这样特异性和 hover 一模一样——凡是 hover 在桌面上
+   压得住的静止态，按下态在触屏上也压得住。加新的 hover 规则时照这个变换补一条即可。
+   `:active` 一起列上：有些平台确实会设它（本地实测按住期间不成立，只在抬手那一帧为
+   真），设了就当按住，不设也不缺什么。
+
+   整块放在文件末尾是有意的：与静止态同特异性时后写的赢，不必靠 !important 抢。 */
+@media (hover: none) {
+  /* 悬停填一层容器色，文字转成正文色。 */
+  .icon-button:is(.is-pressed, :active),
+  .nav-link:is(.is-pressed, :active),
+  .settings-nav a:is(.is-pressed, :active),
+  .settings-nav button:is(.is-pressed, :active),
+  .sidebar-toggle:is(.is-pressed, :active),
+  .server-current-toggle:is(.is-pressed, :active) {
+    background: var(--surface-container-high);
+    color: var(--on-surface);
+  }
+
+  /* 底栏那条胶囊自己有选中态：选中时按下去用选中色，别退回普通容器色。 */
+  .compact-nav .nav-link:is(.is-pressed, :active):not(.is-active) {
+    background: var(--surface-container-high);
+  }
+
+  .compact-nav .nav-link.is-active:is(.is-pressed, :active) {
+    background: var(--primary-container);
+    color: var(--on-primary-container);
+  }
+
+  /* 只填容器色，文字不变。 */
+  .custom-scheme-card:is(.is-pressed, :active),
+  .date-picker-days button:is(.is-pressed, :active),
+  .date-picker-grid button:is(.is-pressed, :active),
+  .search-preset-apply:is(.is-pressed, :active),
+  .settings-choice-option-main:is(.is-pressed, :active),
+  .settings-menu-check:is(.is-pressed, :active):not(:disabled),
+  .settings-row-button:is(.is-pressed, :active):not(:disabled),
+  .tag-suggest-option:is(.is-pressed, :active),
+  .toast-close:is(.is-pressed, :active) {
+    background: var(--surface-container-high);
+  }
+
+  .archive-detail-panel-tabs button:is(.is-pressed, :active),
+  .segmented-control button:is(.is-pressed, :active):not(.is-active) {
+    background: var(--surface-container-high);
+    color: var(--ink-primary);
+  }
+
+  .archive-recommendations-tabs button:is(.is-pressed, :active):not(.is-active) {
+    background: color-mix(in srgb, var(--ink-primary) 8%, transparent);
+    color: var(--ink-primary);
+  }
+
+  .search-preset-icon:is(.is-pressed, :active) {
+    background: var(--surface-container-highest);
+    color: var(--on-surface);
+  }
+
+  .search-preset-icon.is-danger:is(.is-pressed, :active) {
+    background: var(--error-container);
+    color: var(--on-error-container);
+  }
+
+  .date-picker-heading:is(.is-pressed, :active) {
+    border-color: var(--outline-variant);
+    background: var(--surface-container-high);
+  }
+
+  /* 列表行和网格卡片：选择态自带底色，按下去不覆盖它。 */
+  .archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active):not([aria-pressed='true']),
+  .archive-list.is-wide .archive-row:is(.is-pressed, :active):not([aria-pressed='true']),
+  .archive-row:is(.is-pressed, :active):not([aria-pressed='true']) {
+    background: var(--surface-container-highest);
+  }
+
+  .archive-thumb-card:is(.is-pressed, :active) {
+    border-color: var(--primary);
+    background: var(--surface-container-high);
+  }
+
+  /* 次级动作：悬停时往容器里掺一点次级色，不是整块换底。 */
+  .icon-action:is(.is-pressed, :active):not(:disabled),
+  .secondary-action:is(.is-pressed, :active):not(:disabled),
+  .eh-comment-votes-actions button:is(.is-pressed, :active):not(:disabled) {
+    background: color-mix(in srgb, var(--on-secondary-container) 10%, var(--secondary-container));
+    color: var(--on-secondary-container);
+  }
+
+  .search-preset-add:is(.is-pressed, :active) {
+    background: color-mix(in srgb, var(--on-secondary-container) 10%, var(--secondary-container));
+  }
+
+  /* 主次动作各有自己的按下色，和悬停同一对 token。 */
+  .primary-action:is(.is-pressed, :active):not(:disabled) { background: var(--primary-hover); }
+  .primary-action.is-danger:is(.is-pressed, :active):not(:disabled) { background: var(--error-hover); }
+
+  .eh-comment-votes-actions button[aria-pressed='true']:is(.is-pressed, :active):not(:disabled) {
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+
+  .metadata-tag-delete:is(.is-pressed, :active) {
+    background: color-mix(in srgb, var(--state-danger) 16%, transparent);
+    color: var(--state-danger);
+  }
+
+  .eh-name-edit:is(.is-pressed, :active) {
+    background: var(--secondary-container);
+    color: var(--on-secondary-container);
+  }
+
+  /* 选中的选项已经高亮过一层，按下去要再深一点才看得出来。 */
+  .settings-choice-option.is-active .settings-choice-option-main:is(.is-pressed, :active) {
+    background: color-mix(in srgb, var(--on-primary-container) 8%, transparent);
+  }
+
+  .css-preset-card:is(.is-pressed, :active) {
+    border-color: color-mix(in srgb, var(--brand-vermilion) 32%, var(--hairline));
+    background: var(--brand-paper);
+    color: var(--ink-primary);
+  }
+
+  .tag-search-link:is(.is-pressed, :active) {
+    border-color: var(--brand-vermilion);
+    color: var(--ink-primary);
+  }
+
+  .dedup-group-heading:is(.is-pressed, :active) {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 10%, var(--surface-container-low));
+  }
+
+  .dedup-member:is(.is-pressed, :active) { border-color: var(--primary); }
+
+  .dedup-relation-title:is(.is-pressed, :active) {
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    color: var(--primary);
+  }
+
+  .scroll-to-top:is(.is-pressed, :active) { color: var(--brand-vermilion); }
+}
+
 /* ---- 本地档案页 ---------------------------------------------------------- */
 /* 这一页的行就是档案库的宽行：`.archive-list.is-wide` + `.archive-row` 那一整套规则
    给出行高、封面框、文案三格和标签瀑布，这里只写「这一页的行里写什么」——大小和

@@ -283,6 +283,21 @@ textarea {
   }
 }
 
+/* 触屏按下去的颜色（机制见 src/lib/pressFeedback.ts）：下拉的触发器与菜单项，
+   取的就是它们悬停时用的同一个 token。选中的那一项有自己的底色，不参与。 */
+@media (hover: none) {
+  .select-trigger:is(.is-pressed, :active):not(:disabled) {
+    border-color: var(--on-surface-variant);
+    background: var(--control-background-hover);
+  }
+
+  .select-option-download:is(.is-pressed, :active):not(:disabled) { color: var(--brand-vermilion); }
+
+  /* 选项行外层是 `div[role=option]`，而手指按下去时被标记的是行里那个真正的按钮，
+     所以按下态写在这里。 */
+  .select-option-main:is(.is-pressed, :active) { background: var(--brand-paper); }
+}
+
 input:focus,
 select:focus,
 textarea:focus {

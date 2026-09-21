@@ -850,7 +850,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const renderWindowMaximize = () => windowApi ? (
     <button
       type="button"
-      className="reader-icon-button"
+      className="reader-icon-button reader-chrome-window"
       aria-label={windowMaximized ? '还原窗口' : '最大化窗口'}
       title={windowMaximized ? '还原窗口' : '最大化窗口'}
       onClick={(event) => { event.stopPropagation(); void windowApi.toggleMaximize().catch(() => {}); }}

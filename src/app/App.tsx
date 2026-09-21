@@ -6,6 +6,7 @@ import { ReaderRoutes, WorkspaceRoutes } from './routes';
 import { PreferencesProvider, usePreferences } from './preferences';
 import { startTagTranslationUpdates, stopTagTranslationUpdates } from '../lib/tagTranslationService';
 import { installErrorLogging } from '../lib/errorLog';
+import { installPressFeedback } from '../lib/pressFeedback';
 import { ToastProvider } from '../components/Toast';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
@@ -37,6 +38,8 @@ export function App() {
   useEffect(() => {
     // 没人接住的错误要有地方去：设置页的「错误日志」读的就是这里记下的内容。
     const stopErrorLogging = installErrorLogging();
+    // 触屏没有 hover，`is-pressed` 就是"按下去"那一瞬间的反馈。
+    const stopPressFeedback = installPressFeedback();
     const suppressNativeMenu = (event: Event) => event.preventDefault();
     document.addEventListener('contextmenu', suppressNativeMenu);
     const updateLifecycle = () => {
@@ -47,6 +50,7 @@ export function App() {
     document.addEventListener('visibilitychange', updateLifecycle);
     return () => {
       stopErrorLogging();
+      stopPressFeedback();
       document.removeEventListener('contextmenu', suppressNativeMenu);
       document.removeEventListener('visibilitychange', updateLifecycle);
       stopTagTranslationUpdates();
