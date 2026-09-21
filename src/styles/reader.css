@@ -463,15 +463,22 @@
   width: min(100%, 880px);
   max-height: min(86vh, 760px);
   /* M3 dialog: 24dp of padding inside a container that uses the extra-large
-     corner (--radius-overlay), on the surface-container-high role. */
+     corner (--radius-overlay), on the surface-container-high role.
+     It follows the theme rather than the reader's fixed dark scheme, because it
+     is a dialog body and not reader chrome: the same panel is the dedup
+     workspace's preview, inside a themed .dialog-content, and the tag chips it
+     holds are the theme's. A fixed dark panel under light-theme chips left the
+     namespace labels unreadable and put a dark sheet inside a light dialog. */
   padding: var(--space-6);
-  border: 1px solid var(--reader-border-muted);
+  border: 1px solid var(--outline-variant);
   border-radius: var(--radius-overlay);
-  /* Opaque on purpose — see --reader-panel. The backdrop behind it is already
-     blurred, and this panel's own blur made its thumbnail scroller leave stale
-     tiles that looked like overlapping rows. */
-  background: var(--reader-panel);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
 }
+
+/* M3 trailing icon role. The panel sets its own ink above, so the close button
+   has to say so explicitly — `.reader-icon-button` inherits. */
+.reader-overview .reader-icon-button { color: var(--on-surface-variant); }
 
 .reader-overview-heading {
   display: flex;
@@ -547,11 +554,15 @@
 }
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
-.reader-overview-stats { color: var(--reader-muted); font-family: var(--font-utility); font-size: var(--text-xs); }
+.reader-overview-stats { color: var(--on-surface-variant); font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
    rather than being one run of identical chips. */.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }
-.reader-overview-tags .tag-group h3 { margin: 0; color: var(--reader-muted); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+/* 命名空间的标题就是那枚带色芯片（`.tag-group h3`），所以这里不能再写颜色：这条
+   规则的特异性 (0,2,1) 压得住 `.tag-group-artist h3` 那几条 (0,1,1)，一写就把芯片
+   的墨色换成 --reader-muted，标签变成灰字压在彩色底上——实测对比度 1.4–4.8，最差的
+   几乎看不见。间距与芯片本身由 `.tag-group` 那份共享规则给。 */
+.reader-overview-tags .tag-group h3 { margin: 0; }
 .reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .reader-overview-thumbnails {
@@ -579,27 +590,30 @@
   min-width: 0;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--reader-border-muted);
+  border: 1px solid var(--outline-variant);
   border-radius: var(--radius-control);
-  background: var(--reader-thumbnail-surface);
+  background: var(--surface-container);
   color: inherit;
   cursor: pointer;
 }
 
-/* M3: selected is the scheme's primary. It was --brand-cyan, which in the light
-   theme resolves to a deep teal — invisible against this panel's fixed dark
-   surface. */
-.reader-overview-thumbnails button[aria-current="true"] { border-color: var(--reader-primary); }
+/* M3: selected is the scheme's primary. It was --brand-cyan, whose light-theme
+   value is a deep teal — invisible against the panel it sits on. */
+.reader-overview-thumbnails button[aria-current="true"] { border-color: var(--primary); }
 /* Preview mode (opened from the duplicate workspace): the grid is reference
    only, and it must not look like a control that will turn the page. */.reader-overview-thumbnails.is-preview button { cursor: default; }
 .reader-overview-thumbnails img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 
+/* 页码压在缩略图上，底下的画面可能是任何亮度（SFW 下还带着模糊），所以它和阅读
+   chrome 一样是主题无关的：黑底 + 阅读器的亮墨。不写 color 就会继承面板的墨色，
+   浅色主题下变成深字压黑底。 */
 .reader-overview-page-number {
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
   background: var(--reader-page-overlay);
+  color: var(--reader-ink);
   font-family: var(--font-utility);
   font-size: var(--text-xs);
   line-height: 14px;

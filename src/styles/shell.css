@@ -456,6 +456,12 @@ body::-webkit-scrollbar,
 
 .skeleton-block,
 .skeleton-line {
+  /* 块级，因为这两个类都写在 `<span>` 上，而 span 是行内盒：width / height /
+     border-radius 对它不生效。在 flex 或 grid 父元素里子元素本来就会被块化，
+     所以那些地方一直是好的；但详情页的标题写在 `<h1>` 里、每个事实的条写在
+     `<dd>` 里，这两处没人替它块化，整个占位就画成 0×0 —— 封面右侧那四条信息
+     只剩图标，右边一片空白。 */
+  display: block;
   /* The middle stop used to sit at 45% of the elevated surface, which in dark
      mode was barely a shade off the resting colour — the sweep was invisible.
      Widened so the pass reads as motion without turning into a flash. */
@@ -468,19 +474,18 @@ body::-webkit-scrollbar,
   background-size: 220% 100%;
   animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite;
 }
-.archive-detail-skeleton { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: var(--space-6); min-height: 360px; width: 100%; }
-.skeleton-cover { width: 210px; aspect-ratio: 3 / 4; border-radius: var(--radius-control); }
-.skeleton-copy { display: grid; align-content: start; gap: var(--space-3); padding-top: var(--space-2); }
 .skeleton-line { width: 100%; height: 22px; border-radius: var(--radius-control); }
 .skeleton-line-title { width: 72%; height: 34px; }
 .skeleton-line-short { width: 46%; }
 .skeleton-line.is-chip { width: 52px; height: 20px; border-radius: var(--radius-control); }
+/* 事实网格里四条占位条都一样长会读成一段话；真实的值都很短（「27 页」
+   「12.0 MB」），所以收到七成宽。高度跟 13px 那一行对齐（行盒 19px，占位条 18px
+   与图标同高），数据到达时网格不会长高。 */
+.archive-detail-facts .skeleton-line { width: 72%; height: 18px; }
 /* The inline metadata-loading skeleton mirrors the real column it stands in:
    tag-group rows (a short label over a full chip row) with real gaps — it was
    an unstyled div, so every line collapsed onto the next one. The min-height
    keeps the page from jumping when the tag groups replace it. */.archive-detail-copy-skeleton { display: grid; align-content: start; gap: var(--space-3); padding-top: var(--space-2); min-height: 320px; }
-.archive-detail-title-loading { display: block; }
-.archive-detail-title-loading .skeleton-line { width: 60%; height: clamp(var(--text-lg), 2vw, var(--text-heading)); }
 /* Holds a select's footprint while its options load, so the toolbar does not
    reflow when they arrive. */.select-placeholder { width: 132px; height: var(--control-height); border-radius: var(--radius-control); }
 @keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }

@@ -738,9 +738,31 @@ describe('design system contract', () => {
     // 阅读画布两个主题下都是黑的，所以这一层 chrome 只能用 --reader-* 那套固定的
     // 深色方案。引用会随主题翻转的颜色令牌，在浅色主题下就会变成深色落在黑底上：
     // 选中页缩略图的描边（--brand-cyan）、画布焦点环（--focus-ring）都曾如此。
+    //
+    // 唯一的例外是概览面板（.reader-overview*）：它是一枚对话框，同一个面板还出现
+    // 在去重工作区那个跟随主题的对话框里，里面的标签芯片本来就是主题色——所以它跟随
+    // 主题，反而必须引用主题角色。把面板的规则剔掉再查。
     const reader = read('src/styles/reader.css');
+    const rules = [...reader.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*)\{([^{}]*)\}/g)];
+    const chrome = rules.filter(([, selector]) => !(selector ?? '').includes('.reader-overview')).map(([whole]) => whole).join('\n');
+    expect(chrome).toMatch(/--reader-chrome/);
     const flipping = /var\(--(?:primary|on-primary|primary-container|on-primary-container|secondary|tertiary|error|success|warning|surface[\w-]*|on-surface[\w-]*|ink-[\w-]+|brand-[\w-]+|outline[\w-]*|hairline[\w-]*|control-[\w-]+|chip-[\w-]+|backdrop-overlay|selection-[\w-]+|focus-[\w-]+|inverse-[\w-]+|state-[\w-]+|category-[\w-]+|tag-ns-[\w-]+|eh-mark-[\w-]+|shadow-[\w-]+)\)/;
-    expect(reader).not.toMatch(flipping);
+    expect(chrome).not.toMatch(flipping);
+  });
+
+  it('leaves the namespace label chip its own ink in the reader overview', () => {
+    // 命名空间的标题就是那枚带色芯片（`.tag-group h3` 的 background + color 由
+    // 命名空间变量给）。面板里再写一次 color 就会把它换成灰色：`.reader-overview-tags
+    // .tag-group h3` 的特异性 (0,2,1) 压得住 `.tag-group-artist h3` 那几条 (0,1,1)，
+    // 于是标签成了灰字压在彩色底上——实测对比度 1.4–4.8，最差的几乎看不见。
+    const reader = read('src/styles/reader.css');
+    const body = ruleBody(reader, '.reader-overview-tags .tag-group h3');
+    expect(body).toMatch(/margin:\s*0/);
+    expect(body).not.toMatch(/color|background/);
+    // 而且面板必须给得出芯片的底色：它跟随主题，就得用主题的容器与墨色。
+    const panel = ruleBody(reader, '.reader-overview');
+    expect(panel).toMatch(/background:\s*var\(--surface-container-high\)/);
+    expect(panel).toMatch(/color:\s*var\(--on-surface\)/);
   });
 
   it('anchors the enabled switch thumb to the track end even if its flex row shrinks', () => {

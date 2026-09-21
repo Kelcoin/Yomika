@@ -176,10 +176,12 @@
          surface              --reader-chrome        top app bar (64dp)
          surface-container    --reader-bar-container bottom app bar (80dp), one
                                                      tonal step above the top bar
-         surface-container-high --reader-panel      dialog / overview panel
          on-surface           --reader-ink          app-bar title, page counter
          on-surface-variant   --reader-muted        toolbar icons, subtitle badge
          primary              --reader-primary      a selected toggle
+       The overview panel is deliberately NOT in this group: it is a dialog body
+       that also appears inside the dedup workspace's themed dialog, so it
+       follows the theme (see .reader-overview in reader.css).
        Custom colour schemes recolor the app, not this chrome — as with every
        other --reader-* token here. ---------------------------------------- */
     --reader-canvas: #050506;
@@ -198,13 +200,9 @@
        textually identical — the contract test compares the two tiers by
        declaration text (tests/design-system-contract.test.ts). */
     --reader-control-hover: rgb(244 241 248 / 0.1);
-    --reader-thumbnail-surface: rgb(5 5 7 / 0.24);
+    /* 页码压在缩略图上，底下可能是任何亮度的画面，所以它也跟着这套深色方案走。 */
     --reader-page-overlay: rgb(5 5 7 / 0.55);
     --reader-backdrop: rgb(5 5 7 / 0.62);
-    /* Opaque, unlike the chrome: the overview panel holds a scroller, and a
-       scroller inside a backdrop-filter layer is a known source of stale tiles —
-       which is what made its thumbnails appear to overlap. */
-    --reader-panel: #1e1f24;
 
     /* ---- Reader chrome: M3 type scale and bar heights -------------------
        The reader chrome reads two roles off the M3 type scale — the app-bar
