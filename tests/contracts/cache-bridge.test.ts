@@ -5,9 +5,10 @@ import { NativeCacheRepository } from '../../src/repositories/nativeCacheReposit
 afterEach(resetInvokeAdapterForTests);
 
 describe('native cache bridge', () => {
-  it('reads a persisted image and converts native bytes', async () => {
-    const value = { bytes: [1, 2, 3], mime: 'image/jpeg' };
-    const adapter = vi.fn(async () => ({ ok: true, value }));
+  it('reads a persisted image as raw bytes and sniffs its type', async () => {
+    // 命中走的是二进制体：一页 1.5MB 的 JPEG 若走 JSON 数字数组 + zod 逐个校验，
+    // 主线程一次就要停 200–280ms（阅读器一次开三页＝加载动画一顿一顿的）。
+    const adapter = vi.fn(async () => ({ ok: true, value: [0xff, 0xd8, 0xff, 0xe0] }));
     setInvokeAdapterForTests(adapter);
     const identity = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'cover' as const, pageIndex: 0 };
 
@@ -15,20 +16,28 @@ describe('native cache bridge', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(Array.from(result.value?.bytes ?? [])).toEqual([1, 2, 3]);
+      expect(Array.from(result.value?.bytes ?? [])).toEqual([0xff, 0xd8, 0xff, 0xe0]);
+      // 类型由字节认，不再跟着 IPC 多带一个字段。
       expect(result.value?.mime).toBe('image/jpeg');
     }
     expect(adapter).toHaveBeenCalledWith('cache_read_image', { identity });
   });
 
-  it('stores image bytes using the native command envelope', async () => {
-    const adapter = vi.fn(async () => ({ ok: true, value: null }));
+  it('treats an empty body as no cached entry', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [] }));
     setInvokeAdapterForTests(adapter);
-    const identity = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'page-thumbnail' as const, pageIndex: 2 };
+    const identity = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'reader-page' as const, pageIndex: 4 };
 
-    await expect(new NativeCacheRepository().storeImage(identity, { bytes: new Uint8Array([4, 5]), mime: 'image/png' }))
-      .resolves.toEqual({ ok: true, value: undefined });
-    expect(adapter).toHaveBeenCalledWith('cache_store_image', { input: { identity, mime: 'image/png', bytes: [4, 5] } });
+    await expect(new NativeCacheRepository().readImage(identity)).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('passes a read failure through as an error rather than a miss', async () => {
+    const adapter = vi.fn(async () => ({ ok: false, error: { code: 'UNKNOWN', message: 'Database lock failed', retryable: true } }));
+    setInvokeAdapterForTests(adapter);
+    const identity = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'cover' as const, pageIndex: 0 };
+
+    await expect(new NativeCacheRepository().readImage(identity))
+      .resolves.toEqual({ ok: false, error: { code: 'UNKNOWN', message: 'Database lock failed', retryable: true } });
   });
 
   it('reads indexed cache usage and defaults enhancement categories from older responses', async () => {

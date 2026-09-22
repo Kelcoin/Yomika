@@ -411,7 +411,9 @@ body::-webkit-scrollbar,
      在设置菜单、搜索预设、封面预览之上），以及成为 position: fixed 子元素的包含块
      （那些浮层会被裁到内容区，而不是盖住整个窗口）。动画本身从不可见滑入到常态，不留
      填充值正好停在常态上，视觉上没有任何区别。 */
-  animation: workspace-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) backwards;
+  /* 时钟走令牌：这里原来手写着 `0.28s cubic-bezier(0.32, 0.72, 0, 1)`——那正是
+     `--motion-standard` 的曲线，只是时长悄悄漂成了 0.28s。 */
+  animation: workspace-in var(--motion-standard) backwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -550,6 +552,34 @@ body::-webkit-scrollbar,
   width: 15px;
   height: 15px;
   animation: loading-indicator-spin var(--duration-pulse) var(--ease-linear) infinite;
+}
+
+/* 减弱动效下：不转，只呼吸。
+ *
+ * base.css 有一条通杀规则，把每个动画压成 `1ms` 一次的（`animation-duration` /
+ * `animation-iteration-count` 都带 !important）。对装饰性动效那是对的，对一个**不确定
+ * 进度**是错的：那两个动画只跑 1ms，圈就冻在那一帧——一根不动的弧看起来不是「减弱了
+ * 动效」，而是「卡住了 / 挂了」，比动着的圈更糟。实测：reduce 下 dashoffset 在整整
+ * 1.4 秒的加载里一动不动（一直 0）。
+ *
+ * 换成只动透明度：可合成、没有位移，落在减弱动效的范围里，又还在说「在工作」。
+ * 弧的形状动画关掉，呼吸由整个标记来交代——形状每帧变是主线程重画，这里正好连它也免了。
+ * 通杀规则用的是 !important，所以这边也得用，否则压不过它。 */
+@keyframes loading-indicator-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-indicator svg,
+  .loading-mark svg {
+    animation-name: loading-indicator-breathe !important;
+    animation-duration: var(--duration-pulse) !important;
+    animation-timing-function: var(--ease-pulse);
+    animation-iteration-count: infinite !important;
+  }
+
+  .loading-indicator-arc { animation: none; }
 }
 
 /* One line of status: the inline counterpart to .empty-state, for a list, panel
@@ -905,6 +935,41 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
+/* 一行设置外加它自己的动作。动作不能放进行里——行本身是一个按钮，按钮里再放按钮
+   就不是 HTML 了——所以它站在行旁边，和行一样高。 */
+.settings-item-with-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.settings-row-action {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-right: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.settings-row-action svg { width: 18px; height: 18px; }
+
+.settings-row-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (hover: hover) {
+  .settings-row-action:hover:not(:disabled) { color: var(--ink-primary); }
+}
+
+/* 按下态在文件末尾那一块里（触屏按下去的颜色）：这一条只是把选择器记在这里，
+   免得找它的时候以为漏了。 */
+
 .settings-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1025,9 +1090,16 @@ body::-webkit-scrollbar,
 
 .settings-choice-option {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   border-radius: var(--radius-control);
+}
+
+/* 下载进度独占一行，挂在它自己那一项下面：这一层就是点「下载」的地方，进度必须
+   在这里看得见——画在设置项上等于画在菜单那层遮罩的后面。 */
+.settings-choice-option > .model-download-status {
+  flex: 1 0 100%;
 }
 
 .settings-choice-option-main {
@@ -1321,6 +1393,24 @@ body::-webkit-scrollbar,
 
 .primary-action svg,
 .secondary-action svg { flex: none; width: 17px; height: 17px; }
+
+/* Label dropped, box kept: a row of actions reads as one row of symbols, and the
+   square is the row's own height so it still lines up with any button beside it
+   that does carry a word. The words are the accessible name and the tooltip. */
+.primary-action.is-icon,
+.secondary-action.is-icon {
+  width: var(--control-height);
+  min-width: var(--control-height);
+  padding: 0;
+}
+
+.primary-action.is-icon svg,
+.secondary-action.is-icon svg { width: 19px; height: 19px; }
+
+/* The inline loading mark is sized for 13px copy; inside an icon button it is the
+   button's own glyph and has to read at the same weight as the icons beside it. */
+.primary-action.is-icon .loading-mark svg,
+.secondary-action.is-icon .loading-mark svg { width: 20px; height: 20px; }
 
 .primary-action.is-danger { border-color: var(--error); background: var(--error); color: var(--on-error); }
 .secondary-action.is-danger { background: var(--error-container); color: var(--on-error-container); }
@@ -2380,16 +2470,19 @@ body::-webkit-scrollbar,
    it act on rows the list is still showing. The slot stays mounted and swaps an
    `is-open` class, so growing in and collapsing back are the same transition —
    the list below is pushed and released by one motion. While closed the slot is
-   visibility-hidden, so nothing inside is tabbable or announced. */
+   visibility-hidden, so nothing inside is tabbable or announced.
+   Collapsing rides the exit curve, not the entrance one: with a decelerate curve
+   two thirds of the travel is over within 60ms, which is why the collapse read as
+   a snap while the expand looked animated. */
 .archive-selection-slot {
   display: grid;
   grid-template-rows: 0fr;
   visibility: hidden;
   opacity: 0;
   transition:
-    grid-template-rows var(--motion-standard),
-    opacity var(--motion-standard),
-    visibility 0s linear var(--motion-standard);
+    grid-template-rows var(--motion-exit),
+    opacity var(--motion-exit),
+    visibility 0s linear var(--duration-exit);
 }
 
 .archive-selection-slot.is-open {
@@ -2410,12 +2503,13 @@ body::-webkit-scrollbar,
   box-sizing: border-box;
   padding-block: 0;
   margin-bottom: 0;
-  transition: margin-bottom var(--motion-standard), padding var(--motion-standard);
+  transition: margin-bottom var(--motion-exit), padding var(--motion-exit);
 }
 
 .archive-selection-slot.is-open > .archive-selection-bar {
   padding-block: var(--space-2);
   margin-bottom: var(--space-2);
+  transition: margin-bottom var(--motion-standard), padding var(--motion-standard);
 }
 
 .archive-selection-bar {
@@ -2780,13 +2874,22 @@ body::-webkit-scrollbar,
 /* Recommendations: one tabbed rail instead of two stacked ones. */
 /* Rendered inside the rail's heading row, where the title would otherwise be —
    as a sibling above the rail these floated outside the panel they belong to.
-   A segmented control rather than loose pills: the two options are one choice. */.archive-recommendations-tabs {
-  display: inline-flex;
+   A segmented control rather than loose pills: the two options are one choice.
+   The strip reads 推荐 by default and grows a second segment once the archive has
+   a creator worth searching by, so it is a grid whose second column animates from
+   nothing — the heading used to be swapped for a different label outright. */.archive-recommendations-tabs {
+  display: inline-grid;
+  grid-template-columns: auto 0fr;
   gap: 2px;
   padding: 2px;
   border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
   border-radius: var(--radius-control);
   background: var(--surface-elevated);
+  transition: grid-template-columns var(--motion-standard);
+}
+
+.archive-recommendations-tabs.has-creator {
+  grid-template-columns: auto 1fr;
 }
 
 .archive-recommendations-tabs button {
@@ -2800,6 +2903,26 @@ body::-webkit-scrollbar,
   font-weight: var(--weight-semibold);
   cursor: pointer;
   transition: background-color var(--motion-standard), color var(--motion-standard);
+}
+
+/* Collapsed into a zero-width column, the button has to give up its min-content
+   width or it holds the track open. */
+.archive-recommendations-tabs .archive-recommendations-tab-creator {
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity var(--motion-standard);
+}
+
+.archive-recommendations-tabs.has-creator .archive-recommendations-tab-creator {
+  opacity: 1;
+}
+
+/* A collapsed segment is not a control — it cannot be pressed and it is out of the
+   tab order, so it must not be reachable by the pointer either. */
+.archive-recommendations-tabs .archive-recommendations-tab-creator:disabled {
+  cursor: default;
+  pointer-events: none;
 }
 
 @media (hover: hover) {
@@ -3558,6 +3681,9 @@ body::-webkit-scrollbar,
 .dedup-workspace .dedup-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; gap: var(--space-3); }
 .dedup-workspace .dedup-filters label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .dedup-history-dialog { width: min(560px, 92vw); }
+/* 对话框里的空态比整页的小一号：320px 的整页空态会把「扫描结果」这个弹窗撑成一屏，
+   而这里要说的只是一句「还没有」。 */
+.dedup-history-dialog .empty-state { min-height: 180px; padding: var(--space-5) var(--space-4); }
 .dedup-history-list { display: grid; gap: var(--space-2); max-height: 46vh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
@@ -5206,6 +5332,9 @@ body::-webkit-scrollbar,
   }
 
   .scroll-to-top:is(.is-pressed, :active) { color: var(--brand-vermilion); }
+
+  /* 行上的模型下载按钮：悬停只让字形变正文色，按下去一样。 */
+  .settings-row-action:is(.is-pressed, :active):not(:disabled) { color: var(--ink-primary); }
 }
 
 /* ---- 本地档案页 ---------------------------------------------------------- */

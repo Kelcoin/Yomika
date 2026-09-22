@@ -90,7 +90,7 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
 
 
 /** A setting whose answer is one of a few. */
-function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, children }: {
+function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, optionStatus, rowAction, children }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
@@ -99,6 +99,10 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
   options: Array<{ value: string; label: string }>;
   onChange: (value: string) => void;
   optionAction?: ((option: { value: string; label: string }) => ReactNode) | undefined;
+  /** 挂在某一项下面的一行状态（模型下载进度）：它和那一项同处一层，点完就看得见。 */
+  optionStatus?: ((option: { value: string; label: string }) => ReactNode) | undefined;
+  /** 这一行自己的动作，站在行旁边——行本身是一个按钮，动作放不进去。 */
+  rowAction?: ReactNode | undefined;
   /** The hidden compat input the tests and the old markup rely on. */
   children?: ReactNode;
 }) {
@@ -106,7 +110,7 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
   const selected = options.find((option) => option.value === value) ?? options[0];
   return (
     <>
-      <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} />
+      <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} action={rowAction} />
       {children}
       {open && (
         <SettingsMenu title={ariaLabel ?? label} onClose={() => setOpen(false)}>
@@ -117,6 +121,7 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
                   <span>{option.label}</span>
                 </button>
                 {optionAction?.(option)}
+                {optionStatus?.(option)}
               </div>
             ))}
             {options.length === 0 && <p className="settings-choice-empty">暂无可选项</p>}
@@ -320,6 +325,34 @@ function ModelDownloadStatus({ label, progress }: { label: string; progress?: { 
   );
 }
 
+/** 下载一颗尚未安装的模型。
+ *
+ * 同一个动作有两个入口：菜单里挂在它自己那一项上，行上挂在行右侧。以前只有菜单里
+ * 那一个，于是「下载」这件事必须先打开二级菜单才做得到；而进度条画在设置项上、
+ * 也就是菜单那层遮罩的后面，点完下载根本看不到。 */
+function ModelDownloadButton({ option, installed, pending, className, onDownload }: {
+  option: { value: string; label: string };
+  installed: boolean;
+  pending: boolean;
+  className: string;
+  onDownload: () => void;
+}) {
+  // Nothing to offer when the model is already installed, and nothing to offer for
+  // an empty id either: the upscale row exists before any catalog has answered.
+  if (installed || !option.value) return null;
+  return (
+    <button
+      className={className}
+      type="button"
+      aria-label={`下载${option.label}`}
+      title="下载模型"
+      disabled={pending}
+      // 菜单里那一个：不冒泡，否则点下载会顺手把菜单关掉，进度条刚出现就没了。
+      onClick={(event) => { event.stopPropagation(); onDownload(); }}
+    ><Download aria-hidden="true" /></button>
+  );
+}
+
 /** Settings are split by workflow so everyday controls stay separate from
  * visual preferences, synchronization, and model tooling. */
 const settingsSections = [
@@ -439,6 +472,11 @@ export function SettingsWorkspace() {
       .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
       .map((hosted) => ({ value: hosted.id, label: hosted.label })),
   ];
+  /** The model the row is showing, and the option that describes it: the row's own
+   * download button needs both the id and the name the catalog gave it. */
+  const upscaleSelectedModel = preferenceDraft.upscaleModel || upscaleModelOptions[0]?.value || '';
+  const selectedUpscaleOption = upscaleModelOptions.find((option) => option.value === upscaleSelectedModel)
+    ?? { value: upscaleSelectedModel, label: upscaleSelectedModel };
   // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
   if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'waifu2x' });
   const statsRequestedRef = useRef(false);
@@ -608,15 +646,25 @@ export function SettingsWorkspace() {
 
   // Progress arrives as an event rather than from the awaited command, so the row
   // can show a bar while the download runs. Only one model downloads at a time.
+  //
+  // The listener is attached once, not when a download starts: registering it from
+  // an effect keyed on `pendingModel` meant the first progress events — the ones
+  // between the command starting and the effect running — were dropped by
+  // construction. `path` is the model id the backend tags each event with, so a
+  // second download can never drive the first one's bar.
+  const pendingModelRef = useRef<{ id: string; label: string }>();
+  pendingModelRef.current = pendingModel;
   useEffect(() => {
-    if (!pendingModel) return undefined;
     let active = true;
     let unlisten: (() => void) | undefined;
-    void listen<{ completed: number; total?: number | null }>('model-download-progress', (event) => {
-      if (active) setModelDownload({ completed: event.payload.completed, total: event.payload.total ?? undefined });
+    void listen<{ path?: string; completed: number; total?: number | null }>('model-download-progress', (event) => {
+      const current = pendingModelRef.current;
+      if (!active || !current) return;
+      if (event.payload.path && event.payload.path !== current.id) return;
+      setModelDownload({ completed: event.payload.completed, total: event.payload.total ?? undefined });
     }).then((detach) => { if (active) unlisten = detach; else detach(); }).catch(() => { /* no webview outside the app */ });
     return () => { active = false; unlisten?.(); };
-  }, [pendingModel]);
+  }, []);
 
   /** 默认下载目录的描述按运行平台给出准确位置（Windows 便携版在 exe 同目录）。 */
   const defaultDownloadHint = useMemo(() => {
@@ -1418,10 +1466,26 @@ export function SettingsWorkspace() {
                 <SettingsChoice
                   icon={<ImageUpscale />}
                   label="超分模型"
-                  value={preferenceDraft.upscaleModel || upscaleModelOptions[0]!.value}
+                  value={upscaleSelectedModel}
                   options={upscaleModelOptions}
                   onChange={(value) => editPreferences({ upscaleModel: value })}
-                  optionAction={(option) => runnableModels?.some((model) => model.id === option.value) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value, option.label); }}><Download aria-hidden="true" /></button>}
+                  optionAction={(option) => <ModelDownloadButton
+                    option={option}
+                    installed={Boolean(runnableModels?.some((model) => model.id === option.value))}
+                    pending={modelPending}
+                    className="select-option-download"
+                    onDownload={() => void downloadModel(option.value, option.label)}
+                  />}
+                  optionStatus={(option) => pendingModel?.id === option.value
+                    ? <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
+                    : null}
+                  rowAction={<ModelDownloadButton
+                    option={selectedUpscaleOption}
+                    installed={Boolean(runnableModels?.some((model) => model.id === upscaleSelectedModel))}
+                    pending={modelPending}
+                    className="settings-row-action"
+                    onDownload={() => void downloadModel(upscaleSelectedModel, selectedUpscaleOption.label)}
+                  />}
                 />
                 {pendingModel && upscaleModelOptions.some((option) => option.value === pendingModel.id) && (
                   <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
@@ -1478,7 +1542,16 @@ export function SettingsWorkspace() {
                       value={preferenceDraft.decensorModel || stageOptions[0]?.value || fallback.value}
                       options={stageOptions.length ? stageOptions : [fallback]}
                       onChange={(value) => { if (value) editPreferences({ decensorModel: value }); }}
-                      optionAction={(option) => decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)) ? null : <button className="select-option-download" type="button" aria-label={`下载${option.label}`} title="下载模型" disabled={modelPending} onClick={(event) => { event.stopPropagation(); void downloadModel(option.value, option.label); }}><Download aria-hidden="true" /></button>}
+                      optionAction={(option) => <ModelDownloadButton
+                        option={option}
+                        installed={Boolean(decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)))}
+                        pending={modelPending}
+                        className="select-option-download"
+                        onDownload={() => void downloadModel(option.value, option.label)}
+                      />}
+                      optionStatus={(option) => pendingModel?.id === option.value
+                        ? <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
+                        : null}
                     />;
                   })}
                 </div>

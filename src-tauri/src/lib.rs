@@ -14,7 +14,6 @@ mod settings;
 
 use cache::{
     cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats,
-    cache_store_image,
 };
 use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
@@ -56,7 +55,7 @@ use dedup::{
     DedupScanRegistry,
 };
 use inference::{
-    inference_cancel, inference_checkpoint, inference_clear_cache, inference_cpu_scale,
+    inference_cancel, inference_checkpoint, inference_clear_cache,
     inference_decensor_page, inference_get_job, inference_import_model_path,
     inference_install_decensor_bundle, inference_install_model, inference_list_models,
     inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page,
@@ -117,8 +116,7 @@ pub fn run() {
             cache_invalidate_archive,
             cache_read_image,
             cache_stats,
-            cache_store_image,
-            list_servers,
+                    list_servers,
             check_server_status,
             save_server,
             set_server_enabled,
@@ -181,7 +179,6 @@ pub fn run() {
             test_sync_account,
             reset_remote_state,
             sync_account_credential,
-            inference_cpu_scale,
             inference_probe,
             inference_start,
             inference_get_job,

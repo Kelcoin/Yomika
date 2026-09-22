@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
+import { BookmarkMinus, BookmarkPlus, Trash2 } from 'lucide-react';
 
 import type { ArchiveRecord } from '../domain/library';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
@@ -94,22 +95,25 @@ export function useArchiveSelection(options: {
     }
   }, [membership, onRemoved, scopeId, selected, serverId, showToast]);
 
+  // Icon-only, like the list's own selection bar: the words are the accessible
+  // name and the tooltip, and the membership's label is the only thing that
+  // changes between the two directions.
+  const membershipLabel = membership ? (membership.present ? `移出${membership.label}` : `加入${membership.label}`) : '加入收藏';
   const actions = (
     <>
-      {membership && (
-        <button className="secondary-action" type="button" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
-          {membership.present ? `移出${membership.label}` : `加入${membership.label}`}
+      {membership ? (
+        <button className="secondary-action is-icon" type="button" aria-label={membershipLabel} title={membershipLabel} disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
+          {membership.present ? <BookmarkMinus aria-hidden="true" /> : <BookmarkPlus aria-hidden="true" />}
         </button>
-      )}
-      {!membership && (
-        <button className="secondary-action" type="button" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
-          加入收藏
+      ) : (
+        <button className="secondary-action is-icon" type="button" aria-label="加入收藏" title="加入收藏" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
+          <BookmarkPlus aria-hidden="true" />
         </button>
       )}
       {/* 删除也用同一颗按钮的形状——危险只体现在色调上，底色加文字与其它
           动作一致，不再是一圈红描边。 */}
-      <button className="secondary-action is-danger" type="button" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
-        删除所选
+      <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
+        <Trash2 aria-hidden="true" />
       </button>
     </>
   );

@@ -17,7 +17,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 /** One setting row. A plain value row when there is nothing to open; a button
  * that opens a floating menu otherwise. Nothing in the row is shaped like a
  * field — choosing happens in the menu. */
-export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, to, ariaLabel, expanded, busy, disabled, control }: {
+export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, to, ariaLabel, expanded, busy, disabled, control, action }: {
   icon?: ReactNode;
   /** A node, not just a string: the server row trails a 「当前」 mark behind the
    * name, and that mark belongs to the label rather than the control slot. */
@@ -28,6 +28,10 @@ export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onCli
   /** A control of the row's own, sitting where the value would. The one-button
    * settings (模型导入) need their action right here instead of a second level. */
   control?: ReactNode | undefined;
+  /** An action beside the row rather than inside it. The row is a button, so a
+   * second control cannot live in it — but a setting that has one thing worth
+   * doing without opening the menu (downloading a model) needs to offer it. */
+  action?: ReactNode | undefined;
   onClick?: (() => void) | undefined;
   /** 有 `to` 时这一行是路由链接而不是按钮：底栏「更多」页是跳转，不打开面板。 */
   to?: string | undefined;
@@ -60,7 +64,7 @@ export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onCli
   ) : (
     <div className="settings-row">{body}</div>
   );
-  return <div className="settings-item">{row}</div>;
+  return <div className="settings-item">{action ? <div className="settings-item-with-action">{row}{action}</div> : row}</div>;
 }
 
 /** The three cells of a row, without the row's own element. Exported for the one

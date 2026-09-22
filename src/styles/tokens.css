@@ -335,9 +335,21 @@
 
     /* ---- Motion: spring-like curve only; never linear / ease-in-out ---- */
     --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
+    /* Exits need a second curve. `--ease-standard` is a decelerate curve: nearly
+       all of its travel is in its first third, which is what makes an entrance
+       feel immediate — and on the way out reads as no animation at all, because
+       the element is gone before the eye catches it. M3 pairs a decelerate curve
+       with an entrance and an accelerate curve with an exit. */
+    --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
     --motion-fast: 140ms var(--ease-standard);
     --motion-standard: 220ms var(--ease-standard);
     --motion-slow: 480ms var(--ease-standard);
+    --motion-exit: var(--duration-exit) var(--ease-exit);
+    /* A duration on its own, because a transition that has to delay a discrete
+       property (visibility) needs the time without the curve: pasting a whole
+       --motion-* value into that slot puts two easing functions into one
+       transition item, which makes the entire declaration invalid. */
+    --duration-exit: 260ms;
 
     /* Looping indicators need a linear clock, so they cannot ride --motion-*.
        They still get names, so the three spinners and the two shimmering

@@ -58,19 +58,10 @@ impl CacheImageIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedImage {
     pub bytes: Vec<u8>,
     pub mime: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CacheStoreImageInput {
-    pub identity: CacheImageIdentity,
-    pub mime: String,
-    pub bytes: Vec<u8>,
 }
 
 pub fn image_cache_key(identity: &CacheImageIdentity) -> String {
@@ -231,65 +222,57 @@ pub fn store_image_cache(
 
 /// async：命令体是整文件读 + hash + SQL，原先是同步命令、跑在主线程上，
 /// 阅读器预取的每一页都会在那里停一下 UI。
+///
+/// 命中时回的是**二进制体**，不是 JSON 信封：一页 1.5MB 的 JPEG 走 JSON 就是上百万
+/// 个数字，前端还得用 zod 逐个校验（int、0–255…），实测每次命中在主线程上留下一个
+/// 200–280ms 的 long task，阅读器一次开三页，加载动画就在那里一顿一顿的。二进制体
+/// 直接进 `Uint8Array`，一个字段都不用验。
+///
+/// 没有缓存条目回**空体**：图片不会是 0 字节，`mime` 由前端按字节自己认（`cache/CachedImage`
+/// 里那份 mime 仍然给推理与缩略图那几条路径用）。
 #[tauri::command(async)]
 pub fn cache_read_image(
     identity: CacheImageIdentity,
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
-) -> CommandResult<Option<CachedImage>> {
+) -> Result<tauri::ipc::Response, String> {
     let app_data = match crate::data_paths::data_dir(&app) {
         Ok(value) => value,
         Err(_) => {
-            return CommandResult::failure(
-                "PLATFORM_UNAVAILABLE",
-                "App data directory unavailable",
-                true,
-            )
+            return Ok(crate::domain::result::into_binary_response(
+                CommandResult::failure(
+                    "PLATFORM_UNAVAILABLE",
+                    "App data directory unavailable",
+                    true,
+                ),
+            ))
         }
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => {
+            return Ok(crate::domain::result::into_binary_response(
+                CommandResult::failure("UNKNOWN", "Database lock failed", true),
+            ))
+        }
     };
     match load_image_cache(&connection, &app_data, &identity) {
-        Ok(value) => CommandResult::success(value),
-        Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
+        Ok(Some(image)) => Ok(crate::domain::result::into_binary_response(
+            CommandResult::success(image.bytes),
+        )),
+        Ok(None) => Ok(crate::domain::result::into_binary_response(
+            CommandResult::success(Vec::new()),
+        )),
+        Err(error) => Ok(crate::domain::result::into_binary_response(
+            CommandResult::failure("INVALID_RESPONSE", error, false),
+        )),
     }
 }
 
-/// async：同 cache_read_image——写缓存含文件写 + 驱逐检查，不占主线程。
-#[tauri::command(async)]
-pub fn cache_store_image(
-    input: CacheStoreImageInput,
-    app: tauri::AppHandle,
-    database: tauri::State<'_, Database>,
-) -> CommandResult<()> {
-    let app_data = match crate::data_paths::data_dir(&app) {
-        Ok(value) => value,
-        Err(_) => {
-            return CommandResult::failure(
-                "PLATFORM_UNAVAILABLE",
-                "App data directory unavailable",
-                true,
-            )
-        }
-    };
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
-    match store_image_cache(
-        &connection,
-        &app_data,
-        &input.identity,
-        &input.mime,
-        &input.bytes,
-    ) {
-        Ok(()) => CommandResult::success(()),
-        Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
-    }
-}
-
+/// 写缓存是 Rust 自己的事：`load_reader_page` 取回一页就写，推理产出派生图也写
+/// （都走 `store_image_cache`）。这里曾经有一条 `cache_store_image` IPC 命令，前端
+/// 谁也没调用它，而它的协议是把整张图摊成 JSON 数字数组——和 `cache_read_image`
+/// 刚去掉的那条一样，所以整条删掉，不留一个只能以错误方式使用的入口。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheEvictionResult {

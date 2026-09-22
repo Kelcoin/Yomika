@@ -106,12 +106,12 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
   return <>
     <div className="archive-detail-route-cover">
       {cover
-        ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图"><img src={cover} alt={`${title} 封面`} /></button>
+        ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图"><img src={cover} alt={`${title} 封面`} decoding="async" /></button>
         : <div className={`archive-detail-cover-placeholder${loading ? ' is-skeleton' : ''}`} aria-label={loading ? '正在加载封面' : '暂无封面'} />}
     </div>
     {previewOpen && cover && (
       <div className="archive-cover-preview" role="dialog" aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setPreviewOpen(false)}>
-        <img src={cover} alt={`${title} 封面大图`} />
+        <img src={cover} alt={`${title} 封面大图`} decoding="async" />
       </div>
     )}
   </>;

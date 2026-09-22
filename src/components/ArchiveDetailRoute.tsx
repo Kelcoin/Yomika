@@ -9,7 +9,6 @@ import {
   MoreVertical,
   MessageCircle,
   Pencil,
-  Sparkles,
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -402,6 +401,8 @@ interface RecommendationSnapshot {
   sameCreator: ArchiveRecord[];
 }
 
+type RecommendationTab = 'similar' | 'creator';
+
 /** Recommendations cost up to a dozen searches on the server, and the answer for
  * one archive does not change minute to minute. Stepping back into a detail page
  * should not pay for them again. */
@@ -413,7 +414,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   const [similar, setSimilar] = useState<ArchiveRecord[]>(snapshot?.similar ?? []);
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
   const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
-  const [tab, setTab] = useState<'similar' | 'creator'>('similar');
+  const [tab, setTab] = useState<RecommendationTab>('similar');
   const [reloadToken, setReloadToken] = useState(0);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
@@ -525,33 +526,47 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.
   const creatorLabel = creator.namespace === 'cosplayer' ? '同 Coser' : '同作者';
-  const activeTab = tab === 'creator' && sameCreator.length === 0 ? 'similar' : tab;
+  const hasSimilar = similar.length > 0;
+  const hasCreator = sameCreator.length > 0;
+  // 推荐 is what the strip reads by default and it never leaves; the creator
+  // segment only exists once there is something behind it. A tab whose list came
+  // back empty must not be the one on screen either, or the whole rail vanished
+  // while the other tab had matches.
+  const activeTab: RecommendationTab = tab === 'creator' && hasCreator ? 'creator'
+    : tab === 'similar' && hasSimilar ? 'similar'
+      : hasCreator ? 'creator' : 'similar';
   const visible = activeTab === 'creator' ? sameCreator : similar;
   // The rail draws the panel, so the tabs go inside it as its heading. Rendered
   // as a sibling above, they floated outside the component they belonged to.
   const tabs = (
-    <div className="archive-recommendations-tabs" role="tablist" aria-label="推荐分组">
-      {similar.length > 0 && (
-        <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
-      )}
-      {sameCreator.length > 0 && (
-        <button type="button" role="tab" aria-selected={activeTab === 'creator'} className={activeTab === 'creator' ? 'is-active' : ''} onClick={() => setTab('creator')}>{creatorLabel}</button>
-      )}
+    <div className={`archive-recommendations-tabs${hasCreator ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组">
+      <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} disabled={!hasSimilar && hasCreator} onClick={() => setTab('similar')}>推荐</button>
+      {/* In the DOM from the start, collapsed to nothing: the segment grows out of
+          the strip rather than popping in and shoving the heading sideways. */}
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'creator'}
+        aria-hidden={!hasCreator}
+        tabIndex={hasCreator ? 0 : -1}
+        disabled={!hasCreator}
+        className={`archive-recommendations-tab-creator${activeTab === 'creator' ? ' is-active' : ''}`}
+        onClick={() => setTab('creator')}
+      >{creatorLabel}</button>
     </div>
   );
 
   // A skeleton while the searches run, rather than nothing at all: the section
   // used to pop into existence and shove the page thumbnails down.
-  if (loading && similar.length === 0 && sameCreator.length === 0) {
-    return <ArchiveThumbnailRail title="猜你喜欢" headingIcon={<Sparkles aria-hidden="true" />} archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} />;
+  if (loading && !hasSimilar && !hasCreator) {
+    return <ArchiveThumbnailRail title="推荐" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} headingContent={tabs} />;
   }
-  if (similar.length === 0 && sameCreator.length === 0) return null;
+  if (!hasSimilar && !hasCreator) return null;
 
   return (
     <>
     <ArchiveThumbnailRail
-      title={activeTab === 'creator' ? `${creatorLabel}作品` : '猜你喜欢'}
-      headingIcon={<Sparkles aria-hidden="true" />}
+      title="推荐"
       archives={visible}
       scopeId={scopeId}
       serverId={serverId}
@@ -621,7 +636,7 @@ function ArchivePageThumbnail({
     <button ref={setNode} className={`archive-page-thumbnail${src ? '' : ' is-skeleton'}`} type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
       {/* Loading is conveyed by the shimmer, the same as library covers; no
           "加载中" text on top of the image slot. */}
-      {src ? <img src={src} alt="" loading="lazy" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true">{state === 'idle' ? page : ''}</span>}
+      {src ? <img src={src} alt="" loading="lazy" decoding="async" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true">{state === 'idle' ? page : ''}</span>}
       <span className="archive-page-thumbnail-number" aria-hidden="true">{page}</span>
     </button>
   );

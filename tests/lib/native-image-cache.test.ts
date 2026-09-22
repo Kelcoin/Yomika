@@ -7,7 +7,7 @@ afterEach(resetInvokeAdapterForTests);
 describe('NativeImageCacheAdapter', () => {
   it('reads a persistent cover before using the LANraragi command', async () => {
     const adapter = vi.fn(async (command: string) => {
-      if (command === 'cache_read_image') return { ok: true, value: { bytes: [0xff, 0xd8, 0xff], mime: 'image/jpeg' } };
+      if (command === 'cache_read_image') return { ok: true, value: [0xff, 0xd8, 0xff] };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);

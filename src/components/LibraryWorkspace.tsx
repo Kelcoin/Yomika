@@ -1,6 +1,6 @@
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, ListChecks, Pencil, Plus, RefreshCw, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -726,16 +726,19 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
           <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
             <span className="archive-selection-count" role="status" aria-live="polite">已选 {selectedIds.size} 个</span>
-            <button className="secondary-action" type="button" onClick={toggleAllVisible} disabled={archives.length === 0}>
-              {allVisibleSelected ? '取消全选' : '全选当前'}
+            {/* Icon-only, like the reader's toolbar: the words live in the
+                accessible name and the tooltip, so a row of actions reads as one
+                row of symbols whatever the language. */}
+            <button className="secondary-action is-icon" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
+              <SquareCheckBig aria-hidden="true" />
             </button>
             {onSelectAllFinished && (
-              <button className="secondary-action" type="button" onClick={onSelectAllFinished} disabled={(finishedSelectableCount ?? 0) === 0}>
-                全选已读完
+              <button className="secondary-action is-icon" type="button" aria-label="全选已读完" title="全选已读完" onClick={onSelectAllFinished} disabled={(finishedSelectableCount ?? 0) === 0}>
+                <ListTodo aria-hidden="true" />
               </button>
             )}
             {selectionActions}
-            <button className="secondary-action archive-selection-done" type="button" onClick={() => onSelectionModeChange?.(false)}>完成</button>
+            <button className="secondary-action is-icon archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => onSelectionModeChange?.(false)}><Check aria-hidden="true" /></button>
           </div>
         </div>
       )}
@@ -842,7 +845,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 {cardCategoryLabel(selected) && <span className="metadata-chip" data-category={archiveCategoryKey(selected)}>{cardCategoryLabel(selected)}</span>}
                 {archiveLanguageLabel(selected) && <span className="metadata-chip">{archiveLanguageLabel(selected)}</span>}
               </div>
-              {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" /></div>}
+              {thumbnail && <div className="archive-detail-media"><img className="archive-cover" src={thumbnail} alt={`${selected.title} 封面`} width="320" height="450" loading="lazy" decoding="async" /></div>}
               {(selected.tags ?? []).length > 0 && <div className="archive-detail-tags" aria-label="档案标签">{categorizeSearchableTags(selected.tags ?? []).map((group) => <section className={`tag-group tag-group-${group.namespace}`} key={group.namespace}><h3>{group.label}</h3><div>{group.values.map((tag, index) => <TagSearchLink label={tag.label} query={tag.query} key={`${group.namespace}-${tag.query}-${index}`} />)}</div></section>)}</div>}
               <div className="archive-detail-actions">
                 <Link className="primary-action" to={`/reader/${selected.archiveId}?server=${encodeURIComponent(selected.serverId)}`} aria-label={`阅读 ${selected.title}`}>

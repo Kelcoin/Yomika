@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
+import { usePageActive } from '../app/RetainedPage';
 import type { ArchiveRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -382,11 +383,18 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   // 启用服务器切换以全量失效广播（prefix 为空）：档案库就地整页重读（解析到
   // 新启用的服务器、重读书架作用域与首页），列表留在屏幕上直到新数据到位。
+  // 'library:' 是同一条路径的窄化版本——在详情页删掉一条档案、或元数据编辑器改了
+  // 标签之后，档案库自己那份快照（服务器、书架作用域、首页）和列表都作废了。
+  // 以前这里只认整库失效，于是从检索结果进的详情页删完档案回到列表，那一行还在。
   useEffect(() => {
     const handleInvalidation = (event: Event) => {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
-      if (!prefix) {
+      if (!prefix || prefix === 'library:') {
         setError(undefined);
+        // 删除一条档案之后，屏幕上那份列表仍然是要看的那份（只是少一行），所以让首页
+        // 重读落在它后面而不是把它清空重建——清空会闪一次骨架，比那行自己消失难看得多。
+        // 这里借用的正是「快照还新鲜」那条分支：列表留在原处，重读回来再换。
+        if (prefix === 'library:') snapshotIsFresh.current = true;
         void loadLibrary().then(() => setReloadToken((value) => value + 1));
       }
     };
@@ -400,7 +408,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setCategoryFilter('');
   }, [requestedQuery]);
 
-  const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean; silent?: boolean } = {}) => {
+  const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean; silent?: boolean; background?: boolean } = {}) => {
     const request = ++pageRequest.current;
     // Keep the existing input/list mounted while a filter request is in flight.
     // Unmounting the workspace here loses focus after the first typed character.
@@ -408,15 +416,19 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // Any first-page request, not only the first one ever: `loading` deliberately
     // stays false for a refilter so the input keeps focus, but the list is emptied
     // all the same — which is how 暂无档案库 flashed before the archives arrived.
-    setPageLoading(true);
+    // A background read is the entry refresh, and the list it is re-reading is
+    // already on screen: neither the skeleton nor the list's busy state may take
+    // over the page for a request nobody asked for.
+    if (!options.background) setPageLoading(true);
     setError(undefined);
     if (options.clear) setArchives([]);
     const result = await fetchArchivePage(currentServerId, 0);
     if (request !== pageRequest.current) return false;
     if (!result.ok) {
-      // A silent load is the pull's refresh: the list stays exactly as it is,
-      // and the failure is a toast rather than the whole page.
-      if (options.silent) setRefreshError(result.error.message);
+      // A silent load is the pull's refresh, and a background one is the entry
+      // refresh: the list stays exactly as it is, and the failure is a toast
+      // rather than the whole page.
+      if (options.silent || options.background) setRefreshError(result.error.message);
       else {
         setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
         setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
@@ -456,14 +468,33 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (!serverId) return;
     // Re-runs whenever the query, sort or category changes, because all three are
     // resolved by the server now. A list restored from a fresh snapshot skips the
-    // first run: the page it would fetch is the page already on screen, and it is
-    // an HTTP round trip rather than the local query it used to be.
-    if (snapshotIsFresh.current) {
-      snapshotIsFresh.current = false;
-      return;
-    }
-    void loadFirstPage(serverId, { clear: true });
+    // *visible* load — the page it would fetch is the page already on screen — but
+    // not the request itself: "fresh" is a 90-second guess, and the library is
+    // exactly where an archive added since the last visit has to turn up. So the
+    // restored page stays on screen and the same page is re-read behind it, and
+    // the list is replaced only once the server has answered.
+    const restored = snapshotIsFresh.current;
+    snapshotIsFresh.current = false;
+    void loadFirstPage(serverId, restored ? { background: true } : { clear: true });
   }, [loadFirstPage, reloadToken, serverId]);
+
+  // The library route is retained while another route is on screen, so leaving and
+  // coming back is not a remount and the effect above never re-runs — which is why
+  // an archive added since the last visit only turned up after a manual refresh.
+  // Coming back is the moment to re-read the page; the loader and the server id are
+  // read through refs so that a filter change cannot fire a second, duplicate read.
+  const pageActive = usePageActive();
+  const wasActiveRef = useRef(pageActive);
+  const loadFirstPageRef = useRef(loadFirstPage);
+  loadFirstPageRef.current = loadFirstPage;
+  const serverIdRef = useRef(serverId);
+  serverIdRef.current = serverId;
+  useEffect(() => {
+    const wasActive = wasActiveRef.current;
+    wasActiveRef.current = pageActive;
+    if (!pageActive || wasActive || !serverIdRef.current) return;
+    void loadFirstPageRef.current(serverIdRef.current, { background: true });
+  }, [pageActive]);
 
   useEffect(() => {
     if (!serverId) return;

@@ -5,14 +5,6 @@ import { NativeInferenceRepository } from '../../src/repositories/nativeInferenc
 afterEach(resetInvokeAdapterForTests);
 
 describe('native inference bridge', () => {
-  it('uses CPU fallback and validates rendition dimensions', async () => {
-    const adapter = vi.fn(async () => ({ ok: true, value: { rgba: [1, 2, 3, 4], width: 1, height: 1 } }));
-    setInvokeAdapterForTests(adapter);
-    const result = await new NativeInferenceRepository().cpuScale({ rgba: [1, 2, 3, 4], width: 1, height: 1, scale: 1, maxPixels: 1 });
-    expect(result).toEqual({ ok: true, value: { rgba: [1, 2, 3, 4], width: 1, height: 1 } });
-    expect(adapter).toHaveBeenCalledWith('inference_cpu_scale', { input: { rgba: [1, 2, 3, 4], width: 1, height: 1, scale: 1, maxPixels: 1 } });
-  });
-
   it('starts, loads and cancels persistent jobs', async () => {
     const job = { id: 'job-a', status: 'queued', itemCount: 2, completedCount: 0 };
     const adapter = vi.fn(async () => ({ ok: true, value: job }));

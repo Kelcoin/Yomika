@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowLeft, BookOpen, Download, FileArchive, FolderOpen, ListChecks, Pause, Play, Trash2, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -360,14 +360,15 @@ export function LocalArchivesWorkspace() {
       <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
         <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
           <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
-          <button className="secondary-action" type="button" disabled={visibleArchives.length === 0} onClick={toggleAll}>
-            {selectAll ? '取消全选' : '全选当前'}
+          {/* 与档案库那一条同形：纯图标 + 可访问名/提示，两个列表的多选栏是同一套。 */}
+          <button className="secondary-action is-icon" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
+            <SquareCheckBig aria-hidden="true" />
           </button>
-          <button className="secondary-action is-danger" type="button" disabled={selected.size === 0 || busy} onClick={() => setConfirmingDelete(true)}>
-            删除所选
+          <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setConfirmingDelete(true)}>
+            <Trash2 aria-hidden="true" />
           </button>
-          <button className="secondary-action archive-selection-done" type="button" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
-            完成
+          <button className="secondary-action is-icon archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
+            <Check aria-hidden="true" />
           </button>
         </div>
       </div>

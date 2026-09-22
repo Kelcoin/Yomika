@@ -51,18 +51,48 @@ describe('reader route', () => {
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
   });
 
-  it('releases derived images after their pages leave the retention window', async () => {
-    const release = enhancedReader(14, async (index) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 1 }));
+  it('keeps derived images for the whole session, so going back does not re-run inference', async () => {
+    const enhance = vi.fn(async (index: number) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 1 }));
+    const release = enhancedReader(14, enhance);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    const runsForPageOne = () => enhance.mock.calls.filter(([index]) => index === 0).length;
+
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     for (let index = 1; index <= 10; index += 1) {
       fireEvent.keyDown(reader, { key: 'ArrowRight' });
       await screen.findByRole('img', { name: `第 ${index + 1} 页` });
     }
-    await waitFor(() => expect(release).toHaveBeenCalledWith({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 }));
+    // Ten pages later the result is still held. It used to be released as its page
+    // left the window, and since the attempt had already been spent, going back
+    // showed the *plain* page for the rest of the sitting.
+    expect(release).not.toHaveBeenCalledWith({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 });
+
+    for (let index = 0; index < 10; index += 1) {
+      fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+      await screen.findByRole('img', { name: `第 ${10 - index} 页` });
+    }
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(runsForPageOne()).toBe(1);
+  });
+
+  it('drops the oldest derived result once the session is holding too much', async () => {
+    // The hold is bounded: the shared image cache only evicts what nobody
+    // references, so an unbounded hold would pin every upscaled page in memory.
+    const release = enhancedReader(6, async (index) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 40 * 1024 * 1024 }));
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1'));
+    await waitFor(() => expect(release).toHaveBeenCalledWith({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 40 * 1024 * 1024 }));
+    // The page just enhanced is never the one dropped for room.
+    expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1');
   });
 
   it('loads native manifest and page bytes, then persists progress on navigation', async () => {
@@ -119,7 +149,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'server-cache', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-reader-cache' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'cached-reader', title: 'Cached reader', pages: ['0.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'cache_read_image') return { ok: true, value: [255, 216, 255, 224] };
       if (command === 'load_reader_page') throw new Error('reader network should not be called');
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -154,8 +184,9 @@ describe('reader route', () => {
     // The prefetch budget still runs forward — reading does — but the slots
     // either side are rendered for the swipe now, so both have to exist: a drag
     // used to pull the page off an empty background. That is one slot back, not a
-    // window behind.
-    expect(new Set(loadedPaths)).toEqual(new Set(['2.jpg', '3.jpg', '4.jpg']));
+    // window behind. This viewport is wide enough for a spread, so the restored
+    // page shares its slot with page 5 and the slot in front of it is the pair 2–3.
+    expect(new Set(loadedPaths)).toEqual(new Set(['1.jpg', '2.jpg', '3.jpg', '4.jpg']));
   });
 
   it('opens the restored page even when a neighbour prefetch fails', async () => {
@@ -230,7 +261,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: stored };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
       if (command === 'save_reading_progress') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
@@ -311,7 +342,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
       if (command === 'inference_upscale_page') {
         return upscaleWorks

@@ -3,6 +3,7 @@ import type { MouseEvent } from 'react';
 
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeSearchableTags } from '../lib/tags';
+import { DetailFactGlyph, type DetailFact } from './ArchiveDetailSections';
 import { TagSearchLink } from './TagSearchLink';
 
 /** The archive overview: cover, facts and the page grid.
@@ -35,6 +36,13 @@ export interface ArchiveOverviewPanelProps {
 
 export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags, currentPage, thumbnailAt, registerTile, onSelectPage, onClose, onPanelClick }: ArchiveOverviewPanelProps) {
   const grouped = categorizeSearchableTags(tags ?? []);
+  // The same two facts the detail page lists beside its cover, in the same shape
+  // and with the same glyphs: as a "3 页 · 143.2 MB" line of its own this was a
+  // second rendering of the same numbers, and the two drifted apart.
+  const facts: DetailFact[] = [
+    { kind: 'pages', label: '页数', value: `${pageCount} 页` },
+    ...(sizeBytes ? [{ kind: 'size' as const, label: '体积', value: formatByteSize(sizeBytes) }] : []),
+  ];
   return <aside className="reader-overview" aria-label="档案概览" onClick={onPanelClick}>
     <header className="reader-overview-heading">
       <strong>{title}</strong>
@@ -47,8 +55,15 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
       <div className="reader-overview-identity">
         {/* 封面装在一个裁切框里：SFW 的模糊与 1.12 倍放大都会画到元素盒子外面，
             没有 overflow: hidden 就会糊到旁边的页数、标签上。 */}
-        {cover && <span className="reader-overview-cover-frame"><img className="reader-overview-cover" src={cover} alt="" /></span>}
-        <p className="reader-overview-stats">{[`${pageCount} 页`, sizeBytes ? formatByteSize(sizeBytes) : ''].filter(Boolean).join(' · ')}</p>
+        {cover && <span className="reader-overview-cover-frame"><img className="reader-overview-cover" src={cover} alt="" decoding="async" /></span>}
+        <dl className="reader-overview-stats" aria-label="档案信息">
+          {facts.map(({ kind, label, value }) => (
+            <div key={kind} data-fact={kind} title={label}>
+              <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
       <div className="reader-overview-facts">
         {grouped.length > 0 && (
@@ -76,7 +91,7 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
           aria-current={currentPage === index}
           onClick={onSelectPage ? () => onSelectPage(index) : undefined}
         >
-          {preview ? <img src={preview} alt="" loading="lazy" /> : <span aria-hidden="true">{index + 1}</span>}
+          {preview ? <img src={preview} alt="" loading="lazy" decoding="async" /> : <span aria-hidden="true">{index + 1}</span>}
           <span className="reader-overview-page-number" aria-hidden="true">{index + 1}</span>
         </button>;
       })}

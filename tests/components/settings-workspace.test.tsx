@@ -757,6 +757,59 @@ describe('settings workspace', () => {
     expect(within(menu).queryByRole('button', { name: '下载Anime4K 重复项' })).toBeNull();
   });
 
+  it('shows the download progress where the download was started', async () => {
+    const user = userEvent.setup();
+    let finishDownload: (() => void) | undefined;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return { ok: true, value: [] };
+      if (command === 'model_release_list_upscalers') return {
+        ok: true,
+        value: {
+          tag: 'models-v1',
+          models: [{
+            id: 'realcugan-2x-denoise3x',
+            label: 'Real-CUGAN 2x 漫画（强降噪）',
+            scale: 2,
+            version: '2022.02.27',
+            source: 'https://github.com/bilibili/ailab/tree/main/Real-CUGAN',
+            minInputEdge: 20,
+            files: [{ name: 'realcugan-2x-denoise3x.onnx', size: 5272599, sha256: 'b'.repeat(64) }],
+          }],
+        },
+      };
+      // 挂住下载：进度条要在下载进行中才存在。
+      if (command === 'model_release_download_default') {
+        await new Promise<void>((resolve) => { finishDownload = resolve; });
+        return { ok: true, value: null };
+      }
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    // 行上就有下载入口。以前只有二级菜单里那一个，于是「下载」这件事必须先打开菜单
+    // 才做得到——这条断言就是那个入口的存在性。
+    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
+
+    // 行上的进度条：菜单关着也看得见。
+    const rowStatus = document.querySelector('.settings-group > .model-download-status');
+    expect(rowStatus).not.toBeNull();
+    expect(rowStatus).toHaveAttribute('role', 'status');
+
+    // 菜单里那条进度挂在它自己那一项下面——也就是点「下载」的地方。以前进度画在设置
+    // 项上，正好在菜单那层遮罩后面，点完下载根本看不到。
+    await user.click(screen.getByRole('button', { name: '超分模型' }));
+    const menu = screen.getByRole('dialog', { name: '超分模型' });
+    const status = menu.querySelector('.model-download-status');
+    expect(status).not.toBeNull();
+    expect(status?.closest('.settings-choice-option')?.textContent).toContain('Real-CUGAN 2x 漫画（强降噪）');
+
+    await act(async () => finishDownload?.());
+  });
+
   it('shows cache usage by rendition and clears unprotected images', async () => {
     const user = userEvent.setup();
     // Keyed on whether the cache was cleared rather than on a call count: the

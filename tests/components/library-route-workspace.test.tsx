@@ -468,6 +468,40 @@ describe('library route workspace', () => {
     expect(adapter).toHaveBeenCalledWith('delete_archive', { serverId: 'scope-a', archiveId: 'a1' });
   });
 
+  it('drops a deleted archive from the results it was opened from', async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    const rows = [{ serverId: 'scope-a', archiveId: 'a2', title: 'Surviving search hit', pageCount: 1, updatedAt: '2026-08-25T00:00:00Z' }];
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      // 删除之后服务器不再返回这一条。
+      if (command === 'search_archives_page') {
+        return servedPage(deleted ? rows : [{ ...rows[0], archiveId: 'a1', title: 'Doomed search hit' }, ...rows]);
+      }
+      if (command === 'list_categories' || command === 'list_watchlist' || command === 'list_reading_list' || command === 'list_reading_history') return { ok: true, value: [] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'a1', title: 'Doomed search hit', filename: 'a.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
+      if (command === 'delete_archive') { deleted = true; return { ok: true, value: null }; }
+      return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    // 检索进来：列表是这次检索的结果。
+    renderLibrary('/library?q=Found');
+
+    await user.click(await screen.findByRole('button', { name: /^Doomed search hit\b/ }));
+    expect(await screen.findByRole('button', { name: '档案菜单' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '档案菜单' }));
+    await user.click(await screen.findByRole('menuitem', { name: '删除档案' }));
+    await user.click(await screen.findByRole('button', { name: '确认删除' }));
+    expect(adapter).toHaveBeenCalledWith('delete_archive', { serverId: 'scope-a', archiveId: 'a1' });
+
+    // 删除会带着 'library:' 前缀让快照失效，列表必须跟着重读：以前它只认整库失效，
+    // 于是这一行在检索结果里一直留着，直到手动刷新。重读落在列表后面，所以剩下的
+    // 那一条从按下确认到重读回来都在屏幕上。
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Doomed search hit\b/ })).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /^Surviving search hit\b/ })).toBeInTheDocument();
+  });
+
   it('assigns an archive to a static category from the card menu', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
@@ -560,7 +594,7 @@ describe('library route workspace', () => {
       if (command === 'search_archives_page') return servedPage([{ serverId: 'server-a', archiveId: 'persistent-cover', title: 'Persistent cover', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }]);
       if (command === 'list_categories' || command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'persistent-cover', title: 'Persistent cover', filename: 'cached.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 2, lastReadTime: 0, size: 1 } };
-      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'cache_read_image') return { ok: true, value: [255, 216, 255, 224] };
       if (command === 'load_archive_thumbnail') throw new Error('cover network should not be called');
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -625,7 +659,7 @@ describe('library route workspace', () => {
     expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
   });
 
-  it('reuses a fresh list instead of refetching it on every visit', async () => {
+  it('re-reads the page behind a restored list instead of leaving it as it was', async () => {
     const user = userEvent.setup();
     let pageRequests = 0;
     const adapter = vi.fn(async (command: string) => {
@@ -633,7 +667,14 @@ describe('library route workspace', () => {
       if (command === 'list_categories') return { ok: true, value: [] };
       if (command === 'search_archives_page') {
         pageRequests += 1;
-        return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Cached Archive', pageCount: 5, updatedAt: '2026-08-26T00:00:00Z' }]);
+        // The second read is the entry refresh, and it has something new to say.
+        return servedPage([{
+          serverId: 'scope-a',
+          archiveId: pageRequests === 1 ? 'a1' : 'a2',
+          title: pageRequests === 1 ? 'Cached Archive' : 'Added Since',
+          pageCount: 5,
+          updatedAt: '2026-08-26T00:00:00Z',
+        }]);
       }
       if (command === 'list_tasks') return { ok: true, value: [] };
       return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'not needed here', retryable: false } };
@@ -644,15 +685,18 @@ describe('library route workspace', () => {
     expect(await screen.findByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
     expect(pageRequests).toBe(1);
 
-    // Leaving and returning is a round trip to LANraragi now, not the local query
-    // it used to be, so a snapshot this recent is served as-is.
     const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
     await user.click(sidebar.getByRole('link', { name: '本地档案' }));
     expect(await screen.findByRole('heading', { name: '本地档案' })).toBeInTheDocument();
     await user.click(sidebar.getByRole('link', { name: '档案库' }));
 
-    expect(await screen.findByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
-    expect(pageRequests).toBe(1);
+    // The restored list is on screen at once — no skeleton, no empty flash — and
+    // the same page is re-read behind it. "Fresh" is a 90-second guess, and the
+    // library is exactly where an archive added since the last visit has to turn
+    // up, so skipping the request left the list as old as the last visit.
+    expect(await screen.findByRole('button', { name: /^Added Since\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cached Archive\b/ })).not.toBeInTheDocument();
+    expect(pageRequests).toBe(2);
   });
 
   it('pages by what the server handed over, not by what survived de-duplication', async () => {
@@ -730,19 +774,18 @@ describe('library route workspace', () => {
     await screen.findByRole('button', { name: /^One\b/ });
     expect(offsets).toEqual([0]);
 
-    // Leave and come back inside the freshness window, so the list is restored
-    // from the snapshot rather than refetched.
+    // Leave and come back: the page is re-read behind the restored list.
     const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
     await user.click(sidebar.getByRole('link', { name: '本地档案' }));
     await screen.findByRole('heading', { name: '本地档案' });
     await user.click(sidebar.getByRole('link', { name: '档案库' }));
     await screen.findByRole('button', { name: /^One\b/ });
-    expect(offsets).toEqual([0]);
+    await waitFor(() => expect(offsets).toEqual([0, 0]));
 
     // The restored cursor has to be the server's (2), not the rendered length (1).
     fireEvent.scroll(screen.getByRole('list', { name: '档案' }), { target: { scrollTop: 10_000 } });
     await waitFor(() => expect(screen.getByRole('button', { name: /^Three\b/ })).toBeInTheDocument());
-    expect(offsets).toEqual([0, 2]);
+    expect(offsets).toEqual([0, 0, 2]);
   });
 
   it('shows the loading indicator instead of claiming the library is empty', async () => {

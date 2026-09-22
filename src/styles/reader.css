@@ -20,10 +20,17 @@
   box-shadow: inset 0 0 0 2px var(--reader-primary);
 }
 
+/* Every rendition of a page draws at the size the *first* one measured.
+   An enhanced page is the same picture at up to twice the pixels, and an image
+   sized by its own natural size is therefore drawn twice as large wherever the
+   source was smaller than the fit box — so a zoomed page changed magnification
+   the moment inference finished. The pin is a `min()` rather than a bare
+   max-width so the clamps here still apply: a page larger than its slot is still
+   scaled down to it. */
 .reader-page {
   display: block;
-  max-width: 100%;
-  max-height: 100dvh;
+  max-width: min(100%, var(--reader-page-max-width, 100%));
+  max-height: min(100dvh, var(--reader-page-max-height, 100dvh));
   object-fit: contain;
   user-select: none;
 }
@@ -554,7 +561,14 @@
 }
 
 .reader-overview-facts { display: grid; align-content: start; gap: var(--space-2); min-width: 0; }
-.reader-overview-stats { color: var(--on-surface-variant); font-family: var(--font-utility); font-size: var(--text-xs); }
+/* 封面自己的两个数字：与详情页封面右侧那份事实网格同一套结构、同一套图标、同一套
+   字色（值继承面板正文，标签与图标走 on-surface-variant）。以前这里是一行
+   "3 页 · 143.2 MB"，同一份数据两处各画一遍，两边迟早不一样。 */
+.reader-overview-stats { display: grid; gap: 4px; margin: 0; }
+.reader-overview-stats > div { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.reader-overview-stats dt { display: flex; flex: 0 0 16px; color: var(--on-surface-variant); }
+.reader-overview-stats dt svg { width: 16px; height: 16px; }
+.reader-overview-stats dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
    rather than being one run of identical chips. */.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }

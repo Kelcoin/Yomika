@@ -229,15 +229,27 @@ export function getVisiblePageIndexes(state: Pick<ReaderState, 'pageIndex' | 'pa
 interface LayoutContext {
   viewportWidth: number;
   viewportHeight: number;
-  pageWidth: number;
-  pageHeight: number;
 }
 
+/** Whether the viewport has room for two pages side by side. */
+export function viewportHoldsSpread(context: LayoutContext): boolean {
+  return context.viewportWidth >= 900 && context.viewportWidth / context.viewportHeight >= 1.2;
+}
+
+/** What `auto` resolves to, which is a question about the *viewport* only.
+ *
+ * It used to take the page on screen as well, and refuse a spread when that page
+ * was landscape. That made the answer depend on where the reader happened to be:
+ * the frame a swipe reveals is built from the state *before* the turn, so leaving
+ * a landscape page towards a pair rendered the incoming frame as a single page and
+ * only re-rendered it as a spread once the turn had committed — the spread
+ * appeared to arrive after the swipe rather than during it. A landscape page does
+ * not need this rule anyway: `planPageSpreads` already gives it a slot of its own,
+ * so resolving from the viewport alone renders it alone and pairs everything else.
+ */
 export function resolveReaderLayout(preference: ReaderLayoutPreference, context: LayoutContext): ReaderLayout {
   if (preference !== 'auto') return preference;
-  const viewportIsWide = context.viewportWidth >= 900 && context.viewportWidth / context.viewportHeight >= 1.2;
-  const pageIsPortrait = context.pageHeight > context.pageWidth;
-  return viewportIsWide && pageIsPortrait ? 'double' : 'single';
+  return viewportHoldsSpread(context) ? 'double' : 'single';
 }
 
 /** Cycle order for the reader's single layout control. `auto` is part of the
@@ -262,6 +274,9 @@ export function createReaderState(input: {
   pageIndex?: number;
   direction?: ReadingDirection;
   layout?: ReaderLayoutPreference;
+  /** What `auto` resolves to on the current viewport, so the very first paint is
+   * already the right shape rather than flipping a frame later. */
+  resolvedLayout?: ReaderLayout;
 }): ReaderState {
   const pageCount = Math.max(0, Math.floor(input.pageCount));
   return {
@@ -270,6 +285,7 @@ export function createReaderState(input: {
     pageIndex: clampPage(input.pageIndex ?? 0, pageCount),
     direction: input.direction ?? 'ltr',
     layout: input.layout ?? 'auto',
+    ...(input.resolvedLayout ? { resolvedLayout: input.resolvedLayout } : {}),
     phase: 'ready',
   };
 }

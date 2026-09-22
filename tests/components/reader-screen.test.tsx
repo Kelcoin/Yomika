@@ -1,13 +1,21 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 
 import { App } from '../../src/app/App';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 afterEach(resetInvokeAdapterForTests);
+
+// `auto` resolves from the viewport, so the viewport is an input every test here
+// has to state. jsdom's default is 1024×768 — wide enough for a spread — which
+// would quietly turn most of these single-page gestures into spread gestures.
+beforeEach(() => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+});
 
 const pages = [
   'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
@@ -405,7 +413,12 @@ describe('reader screen', () => {
 
     const overview = screen.getByRole('complementary', { name: '档案概览' });
     expect(overview).toBeInTheDocument();
-    expect(within(overview).getByText('3 页 · 5.0 MB')).toBeInTheDocument();
+    // Page count and size are the detail page's two facts, with its glyphs, rather
+    // than a "3 页 · 5.0 MB" line of the panel's own.
+    expect(within(overview).getByText('3 页')).toBeInTheDocument();
+    expect(within(overview).getByText('5.0 MB')).toBeInTheDocument();
+    expect(overview.querySelectorAll('.reader-overview-stats > div')).toHaveLength(2);
+    expect(overview.querySelectorAll('.reader-overview-stats dt svg')).toHaveLength(2);
     expect(within(overview).getByText(/big breasts|巨乳/)).toBeInTheDocument();
     // Jumping from the panel closes it and moves the reader.
     await user.click(within(overview).getByRole('button', { name: '跳转到第 3 页' }));
@@ -487,17 +500,46 @@ describe('reader screen', () => {
     expect(screen.getByRole('button', { name: '从右到左' })).toBeInTheDocument();
   });
 
-  it('resolves auto layout to a double spread on wide portrait pages', () => {
+  it('resolves auto layout to a double spread on a wide viewport', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1400 });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
     renderReader();
-    const first = screen.getByRole('img', { name: '第 1 页' });
-    Object.defineProperty(first, 'naturalWidth', { configurable: true, value: 700 });
-    Object.defineProperty(first, 'naturalHeight', { configurable: true, value: 1000 });
-    fireEvent.load(first);
     expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    // A pair, not just the next page: the wide viewport is the whole question, and
+    // it is answered before any image has decoded.
+    expect(document.querySelector('.reader-spread')?.children).toHaveLength(2);
+  });
+
+  it('has the incoming spread ready before the swipe lands', () => {
+    // The layout was resolved from the page on screen and held globally, so the
+    // frame a swipe reveals was built from the *outgoing* page's answer: leaving a
+    // landscape scan towards a pair rendered the incoming frame as a single page
+    // and only re-rendered it as a spread once the turn committed, which is the
+    // spread appearing after the swipe instead of during it.
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1400 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+    const { container } = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={[...pages, pages[0]!]} initialPage={1} />
+      </MemoryRouter>,
+    );
+
+    // Page 2 is a landscape scan: wider than the half-viewport slot it would have
+    // to share, so it takes a slot of its own.
+    const landscape = screen.getByRole('img', { name: '第 2 页' });
+    Object.defineProperty(landscape, 'naturalWidth', { configurable: true, value: 1400 });
+    Object.defineProperty(landscape, 'naturalHeight', { configurable: true, value: 1000 });
+    fireEvent.load(landscape);
+
+    const frames = Array.from(container.querySelectorAll<HTMLElement>('.reader-frame'));
+    const nextFrame = frames.find((frame) => frame.style.transform === 'translateX(100%)');
+    expect(nextFrame?.querySelector('.reader-spread')).not.toBeNull();
+    // One viewport to the right, pages 3 and 4 are already laid out as the pair
+    // they will be the moment the swipe commits.
+    expect(Array.from(nextFrame?.querySelectorAll('img') ?? []).map((image) => image.getAttribute('alt')))
+      .toEqual(['第 3 页', '第 4 页']);
   });
 
   it('uses a shell-free route for reading', async () => {
@@ -540,6 +582,38 @@ describe('reader screen', () => {
     );
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
     expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
+  });
+
+  it('draws an enhanced page at the size the plain one measured', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
+      </MemoryRouter>,
+    );
+    const measure = (element: HTMLElement, width: number, height: number) => {
+      Object.defineProperty(element, 'naturalWidth', { configurable: true, value: width });
+      Object.defineProperty(element, 'naturalHeight', { configurable: true, value: height });
+      fireEvent.load(element);
+    };
+
+    const plain = screen.getByRole('img', { name: '第 1 页' });
+    measure(plain, 700, 1000);
+    expect(plain.style.getPropertyValue('--reader-page-max-width')).toBe('700px');
+    expect(plain.style.getPropertyValue('--reader-page-max-height')).toBe('1000px');
+
+    // The enhanced rendition is the same picture at twice the pixels. Sized by its
+    // own natural size it would be drawn twice as large, so a zoomed reader watched
+    // the magnification change the moment inference finished.
+    rerender(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map([[0, 'blob:enhanced-0']])} />
+      </MemoryRouter>,
+    );
+    const enhanced = screen.getByRole('img', { name: '第 1 页' });
+    expect(enhanced).toHaveAttribute('src', 'blob:enhanced-0');
+    measure(enhanced, 1400, 2000);
+    expect(enhanced.style.getPropertyValue('--reader-page-max-width')).toBe('700px');
+    expect(enhanced.style.getPropertyValue('--reader-page-max-height')).toBe('1000px');
   });
 
   it('asks for enhancement only for the pages on screen', async () => {

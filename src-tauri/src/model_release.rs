@@ -850,14 +850,32 @@ fn install_hosted_upscale_model(
 }
 
 #[tauri::command]
-pub fn model_release_download_default(
+pub async fn model_release_download_default(
     app: tauri::AppHandle,
+    model_id: Option<String>,
+) -> crate::domain::result::CommandResult<()> {
+    // 下载是几分钟的阻塞网络 IO，而不带 `async` 的 command 跑在主线程上——事件也是
+    // 从主线程投递给 webview 的，于是 model-download-progress 要等下载整个结束才一起
+    // 到达，进度条永远停在起点。丢给阻塞线程池，主线程才有空把每一帧进度发出去。
+    match tauri::async_runtime::spawn_blocking(move || download_default(&app, model_id)).await {
+        Ok(result) => result,
+        Err(error) => crate::domain::result::CommandResult::failure(
+            "MODEL_DOWNLOAD_FAILED",
+            error.to_string(),
+            true,
+        ),
+    }
+}
+
+/// 真正干活的那一段：跑在阻塞线程池上，因为里面的 reqwest 是阻塞版。
+fn download_default(
+    app: &tauri::AppHandle,
     model_id: Option<String>,
 ) -> crate::domain::result::CommandResult<()> {
     let requested = model_id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "aletheia-lens".into());
-    let result = crate::inference::model_data_dir(&app)
+    let result = crate::inference::model_data_dir(app)
         .map_err(|e| e.to_string())
         .and_then(|data| match requested.as_str() {
             // This model ships with the application. The operation is still
@@ -912,7 +930,7 @@ pub fn model_release_download_default(
             }
             // Anything else is a hosted upscaler: the settings list offers the
             // catalog's models, and downloading one is an ordinary install.
-            other => install_hosted_upscale_model(&app, &data, other),
+            other => install_hosted_upscale_model(app, &data, other),
         });
     match result {
         Ok(()) => crate::domain::result::CommandResult::success(()),

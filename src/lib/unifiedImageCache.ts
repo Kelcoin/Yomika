@@ -2,7 +2,11 @@ import { createImageCacheKey, type ImageCacheIdentity } from '../domain/cache';
 import { createSemaphore, type Semaphore } from './concurrency';
 
 export interface CachedImageData {
-  bytes: Uint8Array;
+  /** 图片字节。类型写成 `ArrayBuffer` 而不是 `ArrayBufferLike`：这些字节一定来自真的
+   * ArrayBuffer（IPC 回包 / Rust 的 `Vec<u8>`），而 `Blob` 只接受真的 ArrayBuffer——
+   * 以前这里靠 `Uint8Array.from(...).buffer` 绕过类型检查，代价是每张图在主线程上白拷
+   * 一份（一页 1.5MB 的 JPEG 就是 1.5MB，预览窗口一次三页）。 */
+  bytes: Uint8Array<ArrayBuffer>;
   mime: string;
 }
 
@@ -97,7 +101,10 @@ export class UnifiedImageCache {
       cached.lastUsed = Date.now();
       return { key, url: cached.url, bytes: cached.bytes };
     }
-    const blob = new Blob([Uint8Array.from(data.bytes).buffer], { type: data.mime || 'application/octet-stream' });
+    // 直接把字节交给 Blob：`Uint8Array.from(...).buffer` 在多一份完整拷贝——一页
+    // 1.5MB 的 JPEG 就是主线程上白拷 1.5MB，而预览窗口一次来三页。Blob 自己会拷进
+    // 它的存储，视图的部分用不上第二份。
+    const blob = new Blob([data.bytes], { type: data.mime || 'application/octet-stream' });
     const url = this.options.createObjectURL(blob);
     const entry: MemoryEntry = { key, identity, url, bytes: data.bytes.byteLength, refs: 1, lastUsed: Date.now() };
     this.memory.set(key, entry);

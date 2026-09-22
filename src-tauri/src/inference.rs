@@ -1319,20 +1319,6 @@ pub struct CpuRgbaOutput {
     pub height: u32,
 }
 
-impl serde::Serialize for CpuRgbaOutput {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CpuRgbaOutput", 3)?;
-        state.serialize_field("rgba", &self.rgba)?;
-        state.serialize_field("width", &self.width)?;
-        state.serialize_field("height", &self.height)?;
-        state.end()
-    }
-}
-
 /// Upscales one cached reader page and stores the result as the `enhanced`
 /// rendition, keyed by the model version so a model change does not serve a
 /// stale image.
@@ -1692,49 +1678,11 @@ fn decensor_cached_page(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CpuScaleInput {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub scale: u32,
-    pub max_pixels: usize,
-}
-
-#[tauri::command]
-pub fn inference_cpu_scale(
-    input: CpuScaleInput,
-) -> crate::domain::result::CommandResult<CpuRgbaOutput> {
-    match cpu_scale_rgba(
-        &input.rgba,
-        input.width,
-        input.height,
-        input.scale,
-        input.max_pixels,
-    ) {
-        Ok(output) => crate::domain::result::CommandResult::success(output),
-        Err(InferenceError::InvalidInput(message)) => {
-            crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
-        }
-        Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels }) => {
-            crate::domain::result::CommandResult::failure(
-                "INFERENCE_UNAVAILABLE",
-                format!("Image pixel budget exceeded: {pixels} > {max_pixels}"),
-                false,
-            )
-        }
-        Err(InferenceError::InvalidManifest(message)) => {
-            crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
-        }
-        Err(InferenceError::CacheBusy) => crate::domain::result::CommandResult::failure(
-            "INFERENCE_UNAVAILABLE",
-            "Inference cache is in use",
-            true,
-        ),
-    }
-}
-
+/// CPU 最近邻缩放是**内部**兜底：`upscale.rs` / `onnx.rs` / `anime4k.rs` 在模型不可用时
+/// 都直接调 `cpu_scale_rgba`，产物由 `inference_upscale_page` 以二进制体交出去。
+/// 这里曾经另有一条把整页 RGBA 摊成 JSON 数字数组来回的 `inference_cpu_scale` 命令
+/// （一百多万个数字进出，前端一个调用方都没有），已随 `cache_store_image` 一起删除：
+/// 能力留在 Rust 内部，不再留一个只能以错误方式使用的入口。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceStartInput {

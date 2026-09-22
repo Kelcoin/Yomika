@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { FileText, Image as ImageIcon, Play, X } from 'lucide-react';
+import { Ban, Check, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, SquareCheckBig, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -11,6 +11,8 @@ import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { CardTagRows } from './CardTagRows';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
+import { EmptyState } from './EmptyState';
+import { LoadingIndicator } from './LoadingIndicator';
 import { StatusLine } from './StatusLine';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
 import { pickCardTags } from '../lib/archiveCardPresentation';
@@ -767,12 +769,14 @@ export function DeduplicationWorkspace() {
           <span>服务器：{server?.name ?? '未配置'}。按加入日期圈定参与比对的档案。</span>
         </div>
         <div className="dedup-section-actions">
-          <button className="secondary-action" type="button" disabled={!server} onClick={openRelations}>不重复关系</button>
-          <button className="secondary-action" type="button" disabled={busy} onClick={() => { setStartDate('2000-01-01'); setEndDate(toDedupeDayString()); }}>重置</button>
-          <button className="secondary-action" type="button" disabled={!server || busy} onClick={openHistory}>扫描结果</button>
-          {progress?.status === 'cancelled' && !busy && <button className="secondary-action" type="button" disabled={!server} onClick={() => void runScan(true)}>恢复扫描</button>}
+          {/* 与阅读器的工具栏、档案库的多选栏同一种语言：动作一律是纯图标，词放在
+              可访问名与提示里；只有「开始扫描」保留文字，它是这一页的主动作。 */}
+          <button className="secondary-action is-icon" type="button" aria-label="不重复关系" title="不重复关系" disabled={!server} onClick={openRelations}><Link2Off aria-hidden="true" /></button>
+          <button className="secondary-action is-icon" type="button" aria-label="重置" title="重置" disabled={busy} onClick={() => { setStartDate('2000-01-01'); setEndDate(toDedupeDayString()); }}><RotateCcw aria-hidden="true" /></button>
+          <button className="secondary-action is-icon" type="button" aria-label="扫描结果" title="扫描结果" disabled={!server || busy} onClick={openHistory}><History aria-hidden="true" /></button>
+          {progress?.status === 'cancelled' && !busy && <button className="secondary-action is-icon" type="button" aria-label="恢复扫描" title="恢复扫描" disabled={!server} onClick={() => void runScan(true)}><CirclePlay aria-hidden="true" /></button>}
           {busy
-            ? <button className="secondary-action" type="button" onClick={() => void cancelScan()}>取消扫描</button>
+            ? <button className="secondary-action is-icon" type="button" aria-label="取消扫描" title="取消扫描" onClick={() => void cancelScan()}><CircleStop aria-hidden="true" /></button>
             : <button className="primary-action" type="button" disabled={!server} onClick={() => void runScan()}><Play aria-hidden="true" />开始扫描</button>}
         </div>
       </div>
@@ -811,11 +815,11 @@ export function DeduplicationWorkspace() {
           {progress?.stage === 'cancelled' && <span>扫描已取消，下面是已完成部分的结果。</span>}
         </div>
         <div className="dedup-section-actions">
-          <button className="secondary-action" type="button" onClick={requestSmartSelect}>智能选择</button>
-          <button className="secondary-action" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} disabled={!groups.length} onClick={() => void toggleAllGroups()}>{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</button>
+          <button className="secondary-action is-icon" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /></button>
+          <button className="secondary-action is-icon" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><SquareCheckBig aria-hidden="true" /></button>
           {/* 主按钮样式与「开始扫描」一致：都是这一步的主动作，删除的危险性由确认
               弹窗承担，不靠按钮颜色提前喊。 */}
-          <button className="primary-action" type="button" disabled={(!selectedGroupKeys.size && !selected.size) || busy} aria-busy={busy} onClick={requestExecuteSelected}>{busy ? '执行中…' : '执行所选'}</button>
+          <button className="primary-action is-icon" type="button" aria-label={busy ? '执行中' : '执行所选'} title={busy ? '执行中' : '执行所选'} disabled={(!selectedGroupKeys.size && !selected.size) || busy} aria-busy={busy} onClick={requestExecuteSelected}>{busy ? <LoadingIndicator inline /> : <Trash2 aria-hidden="true" />}</button>
         </div>
       </div>
       <dl className="dedup-stats">
@@ -838,8 +842,8 @@ export function DeduplicationWorkspace() {
       <p>只按文件名判定的组默认跳过。</p>
       <label><input type="checkbox" checked={includeFilenameOnly} onChange={(event) => setIncludeFilenameOnly(event.target.checked)} />把文件名来源的重复组一并纳入</label>
       <div className="dedup-confirm-actions">
-        <button className="primary-action" type="button" onClick={() => void smartSelect(includeFilenameOnly)}>执行智能选择</button>
-        <button className="secondary-action" type="button" onClick={() => setSmartSelectPending(false)}>取消</button>
+        <button className="primary-action is-icon" type="button" aria-label="执行智能选择" title="执行智能选择" onClick={() => void smartSelect(includeFilenameOnly)}><Check aria-hidden="true" /></button>
+        <button className="secondary-action is-icon" type="button" aria-label="取消" title="取消" onClick={() => setSmartSelectPending(false)}><X aria-hidden="true" /></button>
       </div>
     </div>}
     {result && <>
@@ -850,7 +854,8 @@ export function DeduplicationWorkspace() {
           ? <ul className="dedup-group-row is-chain-row" key={row.key} style={{ '--group-columns': chainColumns } as CSSProperties}>
             <li className="dedup-chain">
               <div className="dedup-chain-heading">
-                <button className="secondary-action" type="button" aria-pressed={row.chain.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} onClick={() => void toggleChainSelection(row.chain)}>关联重复链 {row.number}</button>
+                {/* 图标 + 链号：这枚按钮的身份就是那个号，号是数据不是标签，所以它留下。 */}
+                <button className="secondary-action is-compact" type="button" aria-pressed={row.chain.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${row.number}`} title={`关联重复链 ${row.number}`} onClick={() => void toggleChainSelection(row.chain)}><Link2 aria-hidden="true" />{row.number}</button>
               </div>
               <div className="dedup-group-rows">
                 {chunkRows(row.chain, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`${row.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>
@@ -866,7 +871,7 @@ export function DeduplicationWorkspace() {
       {view === 'chains' && <div className="dedup-chains" aria-label="重复链">
         {mountedSections.filter((section) => section.groups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
           <div className="dedup-chain-heading">
-            <button className="secondary-action" type="button" aria-pressed={section.groups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} onClick={() => void toggleChainSelection(section.groups)}>关联重复链 {section.number}</button>
+            <button className="secondary-action is-compact" type="button" aria-pressed={section.groups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${section.number}`} title={`关联重复链 ${section.number}`} onClick={() => void toggleChainSelection(section.groups)}><Link2 aria-hidden="true" />{section.number}</button>
           </div>
           <div className="dedup-group-rows">
             {chunkRows(section.groups, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`chain-only-${section.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>
@@ -878,7 +883,6 @@ export function DeduplicationWorkspace() {
       {moreRowsMounted && <div ref={sentinelRef} aria-hidden="true" className="dedup-list-sentinel" />}
       {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
     </>}
-    {!result && !busy && <StatusLine>尚未运行查重扫描。</StatusLine>}
     <Dialog.Root open={relationsOpen} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
@@ -906,14 +910,14 @@ export function DeduplicationWorkspace() {
                     : <span key={id} className="is-missing">{relationLabel(id)}</span>)}
                 </span>
               </div>
-              <button className="secondary-action" type="button" onClick={() => void changeRelationTombstone(record)}>
-                {record.tombstoned ? '恢复标记' : '取消标记'}
+              <button className="secondary-action is-icon" type="button" aria-label={record.tombstoned ? '恢复标记' : '取消标记'} title={record.tombstoned ? '恢复标记' : '取消标记'} onClick={() => void changeRelationTombstone(record)}>
+                {record.tombstoned ? <Undo2 aria-hidden="true" /> : <Ban aria-hidden="true" />}
               </button>
             </li>)}
             {!visibleRelations.length && <StatusLine as="li">没有匹配的关系记录。</StatusLine>}
           </ul>
           <div className="dialog-actions">
-            <button className="secondary-action" type="button" onClick={() => setRelationsOpen(false)}>关闭</button>
+            <button className="secondary-action is-icon" type="button" aria-label="关闭" title="关闭" onClick={() => setRelationsOpen(false)}><X aria-hidden="true" /></button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -926,21 +930,28 @@ export function DeduplicationWorkspace() {
         <Dialog.Content className="dialog-content dedup-history-dialog">
           <Dialog.Title>扫描结果</Dialog.Title>
           <Dialog.Description>每次扫描都会连同命中对、选择与删除结果一起保存在本机，可以重新载入继续处理；删除只清理该次扫描的记录。</Dialog.Description>
-          <ul className="dedup-history-list">
+          {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
+              描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}
+          {sessions.length > 0 ? <ul className="dedup-history-list">
             {sessions.map((item) => <li key={item.sessionId} className={item.sessionId === sessionId ? 'is-current' : ''}>
               <div>
                 <strong>{formatSessionTime(item.updatedAt)}</strong>
                 <span>{item.status === 'completed' ? '已完成' : item.status === 'cancelled' ? '已取消' : '未完成'} · {formatCount(item.archiveCount)} 档案 · {formatCount(item.pairCount)} 组疑似重复{item.sessionId === sessionId ? ' · 当前结果' : ''}</span>
               </div>
               <div className="dedup-history-actions">
-                <button className="secondary-action" type="button" disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}>载入</button>
-                <button className="secondary-action" type="button" disabled={historyBusy} onClick={() => void removeSession(item)}>删除</button>
+                <button className="secondary-action is-icon" type="button" aria-label={`载入 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="载入" disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}><FolderOpen aria-hidden="true" /></button>
+                <button className="secondary-action is-danger is-icon" type="button" aria-label={`删除 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="删除" disabled={historyBusy} onClick={() => void removeSession(item)}><Trash2 aria-hidden="true" /></button>
               </div>
             </li>)}
-            {!sessions.length && <StatusLine as="li" busy={historyBusy}>{historyBusy ? '正在读取…' : '还没有保存的扫描结果。'}</StatusLine>}
-          </ul>
+          </ul> : historyBusy
+            ? <StatusLine busy>正在读取扫描结果…</StatusLine>
+            : <EmptyState
+              icon={History}
+              title="还没有保存的扫描结果"
+              description="扫描完成后会连同命中对、选择与删除结果一起保存在本机，回到这里可以重新载入继续处理。"
+            />}
           <div className="dialog-actions">
-            <button className="secondary-action" type="button" onClick={() => setHistoryOpen(false)}>关闭</button>
+            <button className="secondary-action is-icon" type="button" aria-label="关闭" title="关闭" onClick={() => setHistoryOpen(false)}><X aria-hidden="true" /></button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

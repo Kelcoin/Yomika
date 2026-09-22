@@ -202,7 +202,7 @@ describe('duplicate deletion confirmation', () => {
     expect(screen.getByRole('checkbox', { name: '选择 Archive A' })).toHaveAttribute('aria-checked', 'true');
   });
 
-  it('labels each group with its source, number and warning without icons on the actions', async () => {
+  it('labels each group with its source and number, and draws its actions as icons', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(scanFixture([
       { id: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 1 },
@@ -219,11 +219,18 @@ describe('duplicate deletion confirmation', () => {
     expect(within(heading).getByRole('img', { name: '来源：文件名' })).toBeInTheDocument();
     // 「页数差大」这类提醒不再写在组标题上。
     expect(within(heading).queryByText(/页数差/) ).toBeNull();
-    // 除「开始扫描」外，动作按钮不再带 SVG 图标。
-    expect(screen.getByRole('button', { name: '重置' }).querySelector('svg')).toBeNull();
-    expect(screen.getByRole('button', { name: '扫描结果' }).querySelector('svg')).toBeNull();
-    expect(screen.getByRole('button', { name: /不重复关系/ }).querySelector('svg')).toBeNull();
-    expect(screen.getByRole('button', { name: '开始扫描' }).querySelector('svg')).not.toBeNull();
+    // 与阅读器工具栏同一种语言：除「开始扫描」外一律纯图标，词只留在可访问名和
+    // 提示里，一排动作看起来就是一排符号。
+    for (const name of ['重置', '扫描结果', '不重复关系']) {
+      const button = screen.getByRole('button', { name });
+      expect(button.querySelector('svg')).not.toBeNull();
+      expect(button.textContent?.trim()).toBe('');
+      expect(button).toHaveAttribute('title', name);
+    }
+    // 「开始扫描」是这一页的主动作，保留文字。
+    const start = screen.getByRole('button', { name: '开始扫描' });
+    expect(start.querySelector('svg')).not.toBeNull();
+    expect(start).toHaveTextContent('开始扫描');
   });
 
   it('keeps manually touched groups when smart select runs', async () => {
@@ -306,7 +313,8 @@ describe('duplicate deletion confirmation', () => {
     const chainButton = await screen.findByRole('button', { name: '关联重复链 1' });
     expect(chainButton.closest('.dedup-chain')).not.toBeNull();
     expect(chainButton.closest('.dedup-chain')!.querySelectorAll('.dedup-group')).toHaveLength(2);
-    expect(chainButton.closest('.dedup-chain-heading')!.textContent).toBe('关联重复链 1');
+    // 图标加链号：号是数据不是标签，所以它留在按钮上。
+    expect(chainButton.closest('.dedup-chain-heading')!.textContent).toBe('1');
     // 一组永远是两两成对，标题里不再重复「N 项」。
     expect(screen.queryByText(/\d+ 项/)).not.toBeInTheDocument();
     // 「已排除」显示的是标记为不重复的条数，墓碑不算。
@@ -565,7 +573,8 @@ describe('dedup scan progress and saved results', () => {
 
     const dialog = await screen.findByRole('dialog', { name: '扫描结果' });
     expect(await screen.findByText(/15,226 档案 · 37 组疑似重复/)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '载入' }));
+    // 纯图标按钮：可访问名带上这是哪一次结果，免得一排「载入」分不出谁是谁。
+    await user.click(screen.getByRole('button', { name: /^载入 / }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-1' }));
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
 
@@ -573,6 +582,8 @@ describe('dedup scan progress and saved results', () => {
     await user.click(screen.getByRole('button', { name: '扫描结果' }));
     await user.click(await screen.findByRole('button', { name: /删除/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_delete_session', { sessionId: 'saved-1' }));
-    expect(await screen.findByText('还没有保存的扫描结果。')).toBeInTheDocument();
+    // 空态是「这里什么都没有」，不再是一条套着记录外框的列表项。
+    expect(await screen.findByText('还没有保存的扫描结果')).toBeInTheDocument();
+    expect(document.querySelector('.dedup-history-list')).toBeNull();
   });
 });

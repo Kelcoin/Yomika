@@ -189,11 +189,24 @@ describe('reader domain', () => {
     expect(advanceReader({ ...base, pageIndex: 4 }, 'next').pageIndex).toBe(4);
   });
 
-  it('resolves automatic layout from viewport and page shape', () => {
-    expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900, pageWidth: 700, pageHeight: 1000 })).toBe('double');
-    expect(resolveReaderLayout('auto', { viewportWidth: 390, viewportHeight: 844, pageWidth: 700, pageHeight: 1000 })).toBe('single');
-    expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900, pageWidth: 1400, pageHeight: 800 })).toBe('single');
-    expect(resolveReaderLayout('webtoon', { viewportWidth: 390, viewportHeight: 844, pageWidth: 700, pageHeight: 1000 })).toBe('webtoon');
+  it('resolves automatic layout from the viewport, and lets each page decide its slot', () => {
+    // Room for two pages is a question about the viewport, and only the viewport.
+    // Resolving from the page on screen made it a global answer that lagged a turn
+    // behind: the frame a swipe reveals is built from the state *before* the turn,
+    // so leaving a landscape page towards a pair rendered the incoming frame as a
+    // single page and only re-rendered it as a spread once the turn committed.
+    expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900 })).toBe('double');
+    expect(resolveReaderLayout('auto', { viewportWidth: 390, viewportHeight: 844 })).toBe('single');
+    // A portrait window is not a portrait page: this used to be refused a spread
+    // by the landscape page on screen, and nothing needs that rule.
+    expect(resolveReaderLayout('auto', { viewportWidth: 1400, viewportHeight: 900 })).toBe('double');
+    expect(resolveReaderLayout('webtoon', { viewportWidth: 390, viewportHeight: 844 })).toBe('webtoon');
+
+    // A landscape page in that wide viewport still gets a slot to itself, which is
+    // what the old rule was there to guarantee.
+    const wide = { ...createReaderState({ archiveId: 'a1', pageCount: 4, layout: 'auto', resolvedLayout: 'double' }), shapes: ['normal', 'wide', 'normal', 'normal'] as const };
+    expect(getVisiblePageIndexes({ ...wide, pageIndex: 1 })).toEqual([1]);
+    expect(getVisiblePageIndexes({ ...wide, pageIndex: 2 })).toEqual([2, 3]);
   });
 
   it('advances in reading direction and clamps to valid pages', () => {

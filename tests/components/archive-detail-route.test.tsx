@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -46,7 +46,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return new Promise(() => undefined);
       if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
     renderDetail();
@@ -58,7 +58,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'cache_read_image') return { ok: true, value: [255, 216, 255, 224] };
       if (command === 'load_archive_thumbnail') throw new Error('network should not be called');
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -76,7 +76,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+      if (command === 'cache_read_image') return { ok: true, value: [255, 216, 255, 224] };
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -100,7 +100,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_eh_accounts') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -120,8 +120,8 @@ describe('archive detail route', () => {
       if (command === 'list_watchlist' || command === 'list_categories') return { ok: true, value: [] };
       if (command === 'cache_read_image') {
         return args?.identity?.rendition === 'page-thumbnail'
-          ? { ok: true, value: { bytes: [0x89, 0x50, 0x4e, 0x47], mime: 'image/png' } }
-          : { ok: true, value: null };
+          ? { ok: true, value: [0x89, 0x50, 0x4e, 0x47] }
+          : { ok: true, value: [] };
       }
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       if (command === 'load_archive_page_thumbnail') throw new Error('page network should not be called');
@@ -188,7 +188,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: '档案不存在', retryable: false } };
       if (command === 'list_watchlist') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: '档案不存在', retryable: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -284,7 +284,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
       throw new Error(`Unexpected command: ${command}`);
@@ -340,7 +340,7 @@ describe('archive detail route', () => {
 
     renderDetail();
 
-    const similar = await screen.findByRole('region', { name: '猜你喜欢' });
+    const similar = await screen.findByRole('region', { name: '推荐' });
     expect(await within(similar).findByRole('link', { name: /Strong match/ })).toBeInTheDocument();
     // Sharing only a zero-weight namespace is not a recommendation.
     expect(within(similar).queryByRole('link', { name: /Weak match/ })).not.toBeInTheDocument();
@@ -349,11 +349,59 @@ describe('archive detail route', () => {
     // costs one card row instead of two.
     const creatorTab = await screen.findByRole('tab', { name: '同作者' });
     fireEvent.click(creatorTab);
-    const creator = await screen.findByRole('region', { name: '同作者作品' });
-    expect(await within(creator).findByRole('link', { name: /By same artist/ })).toBeInTheDocument();
+    expect(await within(similar).findByRole('link', { name: /By same artist/ })).toBeInTheDocument();
+    expect(within(similar).queryByRole('link', { name: /Strong match/ })).not.toBeInTheDocument();
 
     expect(await screen.findByRole('region', { name: '页面缩略图' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: '同作者作品' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '推荐' })).toBeInTheDocument();
+  });
+
+  it('reads 推荐 before the searches land, and grows the creator tab out of it', async () => {
+    // The heading used to be 猜你喜欢 until the results arrived, and only then
+    // turned into tabs — so the same section announced two different names.
+    const releases: Array<() => void> = [];
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_archive_metadata') {
+        return { ok: true, value: {
+          archiveId: 'archive-a', title: 'Source', filename: 'a.cbz',
+          tags: 'artist:someone, female:glasses, female:futanari, category:manga',
+          extension: 'cbz', progress: 0, pageCount: 1, lastReadTime: 0, size: 1,
+        } };
+      }
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_archives_page') {
+        const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
+        await new Promise<void>((resolve) => { releases.push(resolve); });
+        const rows = query.startsWith('artist:')
+          ? [{ serverId: 'scope-a', archiveId: 'by-same-artist', title: 'By same artist', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['artist:someone'] }]
+          : [{ serverId: 'scope-a', archiveId: 'strong', title: 'Strong match', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:futanari', 'category:manga'] }];
+        return { ok: true, value: { items: rows, total: rows.length, hasMore: false } };
+      }
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderDetail();
+
+    // While the searches are in flight the strip is already there, reading 推荐,
+    // with the creator segment collapsed out of the tab order.
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    expect(within(rail).getByRole('tab', { name: '推荐' })).toHaveAttribute('aria-selected', 'true');
+    // Out of the accessibility tree as well as out of the tab order, so the name
+    // is not even computable — assert the DOM state directly.
+    const creatorTab = rail.querySelector('.archive-recommendations-tab-creator');
+    expect(creatorTab).toBeDisabled();
+    expect(creatorTab).toHaveAttribute('aria-hidden', 'true');
+    expect(creatorTab).toHaveAttribute('tabindex', '-1');
+
+    act(() => releases.forEach((release) => release()));
+    await vi.waitFor(() => expect(within(rail).getByRole('tab', { name: '同作者' })).toBeEnabled());
+    // The strip carries the class the width animation keys off.
+    expect(document.querySelector('.archive-recommendations-tabs.has-creator')).not.toBeNull();
   });
 
   it('requests page thumbnails only when they approach the viewport', async () => {
@@ -378,7 +426,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 4 } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       if (command === 'load_archive_page_thumbnail') return { ok: true, value: [255, 216, 255, 224] };
       throw new Error(`Unexpected command: ${command} ${JSON.stringify(args)}`);
@@ -404,7 +452,7 @@ describe('archive detail route', () => {
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-a', label: 'EH', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'verified', createdAt: '', updatedAt: '' }] };
       if (command === 'get_eh_comments') return { ok: true, value: [] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
       throw new Error(`Unexpected command: ${command}`);
@@ -428,7 +476,7 @@ describe('archive detail route', () => {
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://e-hentai.org/g/12345/abc/' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-a', label: 'EH', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'error', createdAt: '', updatedAt: '' }] };
-      if (command === 'cache_read_image') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -454,7 +502,7 @@ describe('archive detail route', () => {
       throw new Error(`Unexpected command: ${command} ${(args as any)?.input ?? ''}`);
     });
     renderDetail();
-    const rail = await screen.findByRole('region', { name: '猜你喜欢' });
+    const rail = await screen.findByRole('region', { name: '推荐' });
     expect(within(rail).getByRole('link', { name: /Kept recommendation/ })).toBeInTheDocument();
     expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
   });
@@ -481,13 +529,13 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
 
     const first = renderDetail();
-    await screen.findByRole('region', { name: '猜你喜欢' });
+    await screen.findByRole('region', { name: '推荐' });
     await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length).toBeGreaterThan(0));
     const searches = adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length;
     first.unmount();
 
     const second = renderDetail();
-    const rail = await screen.findByRole('region', { name: '猜你喜欢' });
+    const rail = await screen.findByRole('region', { name: '推荐' });
     // A cached rail arrives with its cards already in it; one that had to search
     // again would still be a skeleton at this point.
     expect(within(rail).getByRole('link', { name: /命中/ })).toBeInTheDocument();
@@ -500,7 +548,7 @@ it('retains detail DOM and thumbnail requests across repeated tab switches', asy
   const adapter = vi.fn(async (command: string) => {
     if (command === 'list_servers') return { ok: true, value: [server] };
     if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'category:manga, uploader:sample, female:example', pageCount: 1 } };
-    if (command === 'cache_read_image') return { ok: true, value: { bytes: [255, 216, 255, 224], mime: 'image/jpeg' } };
+    if (command === 'cache_read_image') return { ok: true, value: [255, 216, 255, 224] };
     if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
     return { ok: true, value: [] };
   });
@@ -549,7 +597,7 @@ it('places recommendations between detail tags and page thumbnails', async () =>
   setInvokeAdapterForTests(async (command: string) => {
     if (command === 'list_servers') return { ok: true, value: [server] };
     if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 1, tags: 'artist:sample' } };
-    if (command === 'cache_read_image') return { ok: true, value: null };
+    if (command === 'cache_read_image') return { ok: true, value: [] };
     if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
     return { ok: true, value: [] };
   });

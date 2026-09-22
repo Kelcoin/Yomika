@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -278,7 +278,8 @@ describe('design system contract', () => {
     // 入场动画不能留填充值：translateY(0) 也是一个不是 none 的 transform，它会让
     // .workspace 同时变成层叠上下文和 position: fixed 子元素的包含块（浮层被裁到
     // 内容区，而不是盖住整个窗口）。backwards 只在动画开始前生效，结束后什么都不留。
-    expect(ruleBody(shell, '.workspace')).toMatch(/animation:\s*workspace-in 0\.28s cubic-bezier\(0\.32, 0\.72, 0, 1\) backwards/);
+    // 时长与曲线走 `--motion-standard`（原来手写的 0.28s + 同一条曲线，时长漂了）。
+    expect(ruleBody(shell, '.workspace')).toMatch(/animation:\s*workspace-in\s+var\(--motion-standard\)\s+backwards/);
     expect(ruleBody(shell, '.workspace')).not.toMatch(/animation:[^;]*\bboth\b/);
 
     // 层序本身也是合同：底栏 < 菜单 < 遮罩 < 模态。
@@ -1230,8 +1231,8 @@ describe('design system contract', () => {
       expect(sheet, path).not.toMatch(/font-weight:\s*\d/);
       expect(sheet, path).not.toMatch(/line-height:\s*1\.[0-9]/);
       expect(sheet, path).not.toMatch(/letter-spacing:\s*-?[0-9.]+(px|em)/);
-      expect(sheet, path).not.toMatch(/animation:[^;]*\d+ms/);
-      expect(sheet, path).not.toMatch(/animation:[^;]*\d+(\.\d+)?s/);
+      expect(sheet, path).not.toMatch(/animation:[^;]*\b\d+ms\b/);
+      expect(sheet, path).not.toMatch(/animation:[^;]*\b\d+(\.\d+)?s\b/);
     }
     const tokens = cssVariables(ruleBody(read('src/styles/tokens.css'), ':root'));
     for (const token of ['--weight-regular', '--weight-medium', '--weight-semibold', '--weight-bold',
@@ -1378,5 +1379,52 @@ describe('design system contract', () => {
     const longest = hints.reduce((worst, hint) => (hint.length > worst.length ? hint : worst), '');
     expect(hints.length).toBeGreaterThan(15);
     expect(longest.length, `longest hint: ${longest}`).toBeLessThanOrEqual(34);
+  });
+  it('keeps the loading mark moving under reduced motion', () => {
+    // 加载指示是**不确定进度**：它在说「还在跑」。base.css 的减弱动效通杀规则把每个
+    // 动画压成 `1ms` 一次，装饰性动效那样收掉是对的，但这一条会被收成一根冻住的弧
+    // ——看起来是「卡住了」，比动着的圈更糟。实测：reduce 下 1.4 秒的加载里 dashoffset
+    // 一直是 0。所以这里必须重新声明一个真的时长 + 无限的迭代次数（都得带 !important，
+    // 通杀规则就是用 !important 压下来的），并且只动透明度。
+    const shell = read('src/styles/shell.css');
+    // shell.css 里不止一个减弱动效块，所以从关键字眼后面的那一个开始找。
+    const marker = '@keyframes loading-indicator-breathe';
+    const start = shell.indexOf('@media (prefers-reduced-motion: reduce)', shell.indexOf(marker));
+    expect(start, '没有找到标记用的减弱动效块').toBeGreaterThan(0);
+    const open = shell.indexOf('{', start);
+    let depth = 0;
+    let end = -1;
+    for (let index = open; index < shell.length; index += 1) {
+      if (shell[index] === '{') depth += 1;
+      else if (shell[index] === '}' && (depth -= 1) === 0) { end = index; break; }
+    }
+    const block = shell.slice(open + 1, end);
+    // 两个标记（大圈与小圈）都要重新声明，且都必须压过通杀规则。
+    expect(block).toMatch(/\.loading-indicator svg,\s*\n\s*\.loading-mark svg\s*\{[^}]*animation-name:\s*loading-indicator-breathe\s*!important/);
+    expect(block).toMatch(/animation-duration:\s*var\(--duration-pulse\)\s*!important/);
+    expect(block).toMatch(/animation-iteration-count:\s*infinite\s*!important/);
+    // 位移与旋转在减弱动效里不出现：呼吸只动透明度。
+    const breathe = ruleBody(shell, marker);
+    expect(breathe).toMatch(/opacity/);
+    expect(breathe).not.toMatch(/transform|translate|rotate|scale/);
+    // 弧的形状动画关掉：形状每帧变是主线程重画，这里正好连它也免了。
+    expect(block).toMatch(/\.loading-indicator-arc\s*\{\s*animation:\s*none/);
+  });
+
+  it('decodes every fetched image off the main thread', () => {
+    // `decoding="async"` 不是装饰：默认的 `auto` 允许浏览器在"下一帧就要画它"时**在主线程上
+    // 同步解**那张图。这个应用里的图是几百万像素的漫画页与封面，而这一刻屏幕上往往正转着
+    // 加载圈（`stroke-dasharray` 动画，正是主线程画的）——同步解码就是"圈卡住"的一种成因。
+    // 卡片缩略图一直写着 async，几处大图（阅读页、封面大图、详情封面）漏着。
+    const offenders: string[] = [];
+    for (const name of readdirSync(resolve(root, 'src/components'))) {
+      if (!name.endsWith('.tsx')) continue;
+      // 先去掉注释：文档里提到 `<img src="…svg">` 的那些不算数。
+      const source = read(resolve('src/components', name)).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      const images = source.match(/<img/g)?.length ?? 0;
+      const async = source.match(/decoding="async"/g)?.length ?? 0;
+      if (images > async) offenders.push(`${name}: ${images} 张 <img>，只有 ${async} 张写了 decoding="async"`);
+    }
+    expect(offenders).toEqual([]);
   });
 });

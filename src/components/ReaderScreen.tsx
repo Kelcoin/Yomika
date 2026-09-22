@@ -1,7 +1,7 @@
 import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
@@ -97,16 +97,30 @@ function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void 
   );
 }
 
+/** The window's own size, read synchronously: the first paint needs it to know
+ * whether the viewport can hold a spread. */
+function readViewport() {
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, onVisiblePages }: ReaderScreenProps) {
   const pageActive = usePageActive();
   const reduceMotion = useReducedMotion();
   const goBack = useReturnNavigation();
+  const [viewport, setViewport] = useState(readViewport);
   // Built once. A different archive arrives as an unmount, not a prop change:
   // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
   // branch, which takes this component down with it. That is what keeps the page
   // index, the zoom and the per-index page shapes from leaking into the next
   // archive — so if that loading branch is ever removed, this needs a `key`.
-  const [state, setState] = useState(() => createReaderState({ archiveId, pageCount: pages.length, pageIndex: initialPage, direction, layout }));
+  const [state, setState] = useState(() => createReaderState({
+    archiveId,
+    pageCount: pages.length,
+    pageIndex: initialPage,
+    direction,
+    layout,
+    resolvedLayout: resolveReaderLayout(layout, { viewportWidth: viewport.width, viewportHeight: viewport.height }),
+  }));
   const readerStateRef = useRef(state);
   readerStateRef.current = state;
   // `state.layout` is the preference (which may be `auto`); this is what renders.
@@ -137,7 +151,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   /** Pages whose retries are spent, as state rather than a ref so the slot can
    * actually re-render into its failure state. */
   const [exhaustedPages, setExhaustedPages] = useState<ReadonlySet<number>>(() => new Set());
-  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
   const [webtoonWidth, setWebtoonWidth] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const rootRef = useRef<HTMLElement>(null);
@@ -255,20 +268,15 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   // `auto` used to be decided once, by the first page to load, and then never
   // revisited — so narrowing the window kept the spread it had chosen and
-  // squeezed two pages into half the width each. Re-decide from the page on
-  // screen whenever the viewport changes.
+  // squeezed two pages into half the width each. Re-decide whenever the viewport
+  // changes, and from the viewport alone: which pages share a slot is
+  // `planPageSpreads`'s answer (a wide page takes its own), and resolving from the
+  // page on screen made this a global decision that lagged a turn behind.
   useEffect(() => {
     if (state.layout !== 'auto') return;
-    const sample = pageSizes.get(state.pageIndex) ?? [...pageSizes.values()][0];
-    if (!sample) return;
-    const resolved = resolveReaderLayout('auto', {
-      viewportWidth: viewport.width,
-      viewportHeight: viewport.height,
-      pageWidth: sample.width,
-      pageHeight: sample.height,
-    });
+    const resolved = resolveReaderLayout('auto', { viewportWidth: viewport.width, viewportHeight: viewport.height });
     setState((current) => current.resolvedLayout === resolved ? current : { ...current, resolvedLayout: resolved });
-  }, [pageSizes, state.layout, state.pageIndex, viewport.height, viewport.width]);
+  }, [state.layout, viewport.height, viewport.width]);
 
   // Entering continuous mode lands on the page being read, once per entry. The
   // offsets are estimates at that moment, so this is approximate — `measurePage`
@@ -458,8 +466,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       return { ...current, shapes };
     });
     setPageSizes((current) => {
-      const existing = current.get(index);
-      if (existing && existing.width === width && existing.height === height) return current;
+      // The first measurement is the page's geometry for the rest of the session.
+      // An enhanced rendition is the same picture at up to twice the pixels, so
+      // letting it redefine the size would redraw the page larger — and a reader
+      // who was zoomed in would watch the magnification change the moment
+      // inference finished.
+      if (current.has(index)) return current;
       const next = new Map(current);
       next.set(index, { width, height });
       return next;
@@ -946,10 +958,24 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * the second arrived, shifting the page under the reader's eyes. */
   const renderSlot = (index: number) => {
     const source = derivedPages?.get(index) ?? loadedPages[index];
+    // Whatever rendition is on screen, the page draws at the size its first
+    // measurement established: an enhanced page must not be drawn larger than the
+    // plain one it replaced (see `.reader-page` in reader.css).
+    const size = pageSizes.get(index);
+    // `decoding="async"`：解码交给解码线程。默认的 `auto` 允许"下一帧就要画它"时在主线程上
+    // 同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈——它就是主线程画的。
     return (
       <div className="reader-slot" key={index}>
         {source
-          ? <img draggable={false} className="reader-page" alt={`第 ${index + 1} 页`} src={source} onLoad={(event) => measurePage(index, event.currentTarget)} />
+          ? <img
+            draggable={false}
+            className="reader-page"
+            alt={`第 ${index + 1} 页`}
+            src={source}
+            decoding="async"
+            style={size ? { '--reader-page-max-width': `${size.width}px`, '--reader-page-max-height': `${size.height}px` } as CSSProperties : undefined}
+            onLoad={(event) => measurePage(index, event.currentTarget)}
+          />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );

@@ -25,6 +25,16 @@ interface ReaderContext {
   paths: string[];
 }
 
+/** How much of the session's enhanced output stays in memory.
+ *
+ * Derived renditions used to be dropped as soon as their page left the reader's
+ * window — and because the page had already had its attempt, it came back
+ * *un*-enhanced and stayed that way for the rest of the sitting. They are held
+ * for the whole session now, under a budget: the shared image cache only evicts
+ * entries nobody holds a reference to, so holding everything would pin every
+ * upscaled page in memory and push the cache past its own limit. */
+const DERIVED_SESSION_BUDGET_BYTES = 64 * 1024 * 1024;
+
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
   const pageActiveRef = useRef(pageActive);
@@ -112,20 +122,45 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
 
+  /** The reader's eviction of a page that has left its window.
+   *
+   * Only the plain page goes: the derived rendition is kept for the session, so
+   * stepping back over a spread shows the enhanced page at once instead of
+   * running the model again. */
   const releasePage = useCallback((pageIndex: number) => {
     const handle = pageHandlesRef.current.get(pageIndex);
     pageHandlesRef.current.delete(pageIndex);
     if (handle) imageCache.release(handle);
-    const derived = derivedHandlesRef.current.get(pageIndex);
-    derivedHandlesRef.current.delete(pageIndex);
-    if (derived) imageCache.release(derived);
-    // Keep queued enhancement work alive when ReaderScreen evicts a page from
-    // the visual window; the worker may still finish it as a prefetch task.
-    // Only completed derived handles are released here.
+  }, []);
+
+  /** Hold a finished derived rendition for the session, dropping the oldest once
+   * the session is over its budget. */
+  const retainDerived = useCallback((pageIndex: number, handle: ImageHandle) => {
+    const held = derivedHandlesRef.current;
+    if (held.get(pageIndex)) {
+      imageCache.release(handle);
+      return;
+    }
+    held.set(pageIndex, handle);
+    let bytes = 0;
+    for (const entry of held.values()) bytes += entry.bytes;
+    const dropped: number[] = [];
+    while (bytes > DERIVED_SESSION_BUDGET_BYTES && held.size > 1) {
+      const oldest = held.keys().next();
+      if (oldest.done) break;
+      const evicted = held.get(oldest.value);
+      held.delete(oldest.value);
+      if (!evicted) break;
+      bytes -= evicted.bytes;
+      imageCache.release(evicted);
+      // Its attempt is un-spent again, or a page whose result was dropped for
+      // room would never be enhanced a second time.
+      derivedAttemptedRef.current.delete(oldest.value);
+      dropped.push(oldest.value);
+    }
     setDerivedPages((current) => {
-      if (!current.has(pageIndex)) return current;
-      const next = new Map(current);
-      next.delete(pageIndex);
+      const next = new Map(current).set(pageIndex, handle.url);
+      for (const index of dropped) next.delete(index);
       return next;
     });
   }, []);
@@ -267,8 +302,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
           }).catch(() => undefined)
           : undefined;
+        // 两条互斥：超分开着时 `censored` 根本不取值（去码是在超分调用内部做的），
+        // 所以这里只可能有一个产物，不需要给另一个收尾。
         const derived = enhanced ?? censored;
-        if (enhanced && censored) imageCache.release(censored);
         if (!derived) continue;
         if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
           imageCache.release(derived);
@@ -279,8 +315,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           imageCache.release(derived);
           continue;
         }
-        derivedHandlesRef.current.set(pageIndex, derived);
-        setDerivedPages((current) => new Map(current).set(pageIndex, derived.url));
+        retainDerived(pageIndex, derived);
         // Yield between pages so navigation/input can be serviced promptly on
         // slower devices while the native inference worker continues.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -288,7 +323,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     } finally {
       derivedBusyRef.current = false;
     }
-  }, [loadPage]);
+  }, [loadPage, retainDerived]);
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
   /** Called by the reader with the pages actually on screen. */

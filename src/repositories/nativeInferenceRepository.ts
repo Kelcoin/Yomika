@@ -3,11 +3,6 @@ import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridg
 import type { CommandResult } from '../domain/result';
 import { buildModelAssetUrl, mirrorPrefix, type ModelMirrorId } from '../domain/modelRelease';
 
-const CpuRgbaOutputSchema = z.object({
-  rgba: z.array(z.number().int().min(0).max(255)),
-  width: z.number().int().positive(),
-  height: z.number().int().positive(),
-});
 const InferenceCapabilitiesSchema = z.object({
   backends: z.array(z.string().min(1)), maxPixels: z.number().int().positive(), hardwareAcceleration: z.boolean(),
 });
@@ -58,16 +53,6 @@ export type InferenceCapabilities = z.infer<typeof InferenceCapabilitiesSchema>;
 export type InstalledModel = z.output<typeof InstalledModelSchema>;
 const InstalledModelResponse = InstalledModelSchema as unknown as z.ZodType<InstalledModel>;
 export type InferenceCacheClearResult = z.infer<typeof InferenceCacheClearResultSchema>;
-
-export interface CpuScaleInput {
-  rgba: number[];
-  width: number;
-  height: number;
-  scale: number;
-  maxPixels: number;
-}
-
-export type CpuRgbaOutput = z.infer<typeof CpuRgbaOutputSchema>;
 
 export class NativeInferenceRepository {
   validateReleaseManifest(manifest: unknown): Promise<CommandResult<void>> {
@@ -134,10 +119,6 @@ export class NativeInferenceRepository {
 
   probe(): Promise<CommandResult<InferenceCapabilities>> {
     return invokeCommand('inference_probe', {}, InferenceCapabilitiesSchema);
-  }
-
-  cpuScale(input: CpuScaleInput): Promise<CommandResult<CpuRgbaOutput>> {
-    return invokeCommand('inference_cpu_scale', { input }, CpuRgbaOutputSchema);
   }
 
   start(input: InferenceStartInput): Promise<CommandResult<InferenceJob>> { return invokeCommand('inference_start', { input }, InferenceJobSchema); }
