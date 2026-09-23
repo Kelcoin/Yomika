@@ -132,7 +132,7 @@ pub trait EhCookieStore {
     fn delete_cookie(&self, reference: &str) -> Result<(), String>;
 }
 
-struct SystemEhCookieStore;
+pub(crate) struct SystemEhCookieStore;
 impl EhCookieStore for SystemEhCookieStore {
     fn set_cookie(&self, reference: &str, cookie: &str) -> Result<(), String> {
         keyring::Entry::new(COOKIE_SERVICE, reference)
@@ -145,6 +145,17 @@ impl EhCookieStore for SystemEhCookieStore {
             .map_err(|e| e.to_string())?
             .delete_credential()
             .map_err(|e| e.to_string())
+    }
+}
+
+impl SystemEhCookieStore {
+    /// 读一条已存的 Cookie：导出凭据时要把它搬走。`EhCookieStore` 这个 trait 只有
+    /// 写与删（运行时路径只需要那两件事），所以这里按需补一个只读入口。
+    pub(crate) fn get_cookie(&self, reference: &str) -> Result<String, String> {
+        keyring::Entry::new(COOKIE_SERVICE, reference)
+            .map_err(|error| error.to_string())?
+            .get_password()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -227,21 +238,9 @@ pub fn save_eh_account_record(
             return CommandResult::failure("UNKNOWN", error, true);
         }
     };
-    // 账户条目进同步日志（全局范围）：名字、站点与用户名提示。Cookie 在凭据库里，
-    // 按设备各存各的，不上远端；别的设备拉到条目后需要重新登录一次。
-    // 同步日志尽力而为：目标库没有日志表时（例如只跑迁移子集的测试夹具）不该让
-    // 「保存账户」失败——真实应用里它总是在的。
-    let _ = crate::commands::sync::journal_global_object(
-        &transaction,
-        "eh_account",
-        &format!("eh/{}", account.id),
-        serde_json::json!({
-            "accountId": account.id,
-            "label": account.label,
-            "host": account.host,
-            "usernameHint": account.username_hint,
-        }),
-    );
+    // 账户条目**不进同步日志**：名字、站点与用户名提示与 Cookie 归同一类（都是这台
+    // 机器上的登录状态），凭据库按设备各存各的，别的设备拉到条目也没法用——需要重新
+    // 登录一次，所以它就不该上路。
     if let Err(error) = transaction.commit() {
         let _ = store.delete_cookie(&cookie_ref);
         return CommandResult::failure("UNKNOWN", error.to_string(), true);

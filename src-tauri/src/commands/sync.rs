@@ -46,21 +46,35 @@ struct SyncStateDocument {
 const SYNC_STATE_VERSION: i64 = 1;
 
 /// 一次同步能覆盖的数据类别。账户上勾了哪几类，同步就只推拉哪几类。
-pub(crate) const SYNC_SCOPE_CATEGORIES: [&str; 8] = [
+///
+/// 命名上有一处历史包袱：类别 `watchlist` 是「待看」（本地 `reading_list` 表），
+/// 与本地那张 `watchlist` 表（收藏夹）不是一回事——待看先用了这个词，改名字会让
+/// 老账户里存着的范围 JSON 少一项（解析时未知条目直接丢弃），所以留着。收藏夹本身
+/// **不是本机记录**：它镜像的是 LANraragi 服务器上的收藏分类，服务器才是它的真相
+/// 来源，所以它没有类别，也不进同步、不进导入导出。
+///
+/// **凭据不在这张表里**：服务器条目、E-H 账户与 API Key/Cookie/同步口令只在本机
+/// （凭据库按设备各存各的，别的设备拿到地址也连不上、拿到账户名还要重新登录）。
+/// 它们由「导入导出范围」单独管——同步永远不带凭据，而换机器要靠那份口令加密的
+/// 文件（见 `crate::data_transfer` 与 `credentials.rs`）。
+pub(crate) const SYNC_SCOPE_CATEGORIES: [&str; 6] = [
     "progress",
     "history",
     "watchlist",
     "search_presets",
     "dedup",
-    "lrr_servers",
-    "eh_account",
     "app_settings",
 ];
 
-/// 默认勾选：进度、历史、待看、搜索预设、非重复标记。新增的三类默认不勾——它们会
-/// 带着服务器地址、E-H 账号名与应用偏好上路，是否上远端该由使用者决定。
-pub(crate) const DEFAULT_SYNC_SCOPE: [&str; 5] =
-    ["progress", "history", "watchlist", "search_presets", "dedup"];
+/// 默认勾选：全部记录与设置（也就是全部可勾的类别）。
+pub(crate) const DEFAULT_SYNC_SCOPE: [&str; 6] = [
+    "progress",
+    "history",
+    "watchlist",
+    "search_presets",
+    "dedup",
+    "app_settings",
+];
 
 /// 不按某台服务器切分的数据（服务器列表、E-H 账户、应用设置）挂在固定 scope 上。
 const GLOBAL_SCOPE: &str = "__global__";
@@ -97,12 +111,13 @@ pub(crate) fn object_type_category(object_type: &str) -> Option<&'static str> {
     match object_type {
         "reading_progress" => Some("progress"),
         "history" => Some("history"),
+        // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。收藏夹
+        // （本地 watchlist 表）不在这里：它是服务器收藏分类的镜像，不进同步。
         "watchlist" => Some("watchlist"),
         "search_preset" => Some("search_presets"),
         "dedup_non_duplicate" | "legacy_non_duplicate" => Some("dedup"),
-        "lrr_server" => Some("lrr_servers"),
-        "eh_account" => Some("eh_account"),
         "app_setting" => Some("app_settings"),
+        // 服务器条目、E-H 账户与凭据都没有对象类型：地址、账号名与凭据只在本机。
         _ => None,
     }
 }
@@ -264,105 +279,17 @@ fn local_object_clock(
         .map_err(|error| error.to_string())
 }
 
-/// 服务器条目。同步的是「哪台服务器」——名字、地址与启用状态；API Key 在系统凭据
-/// 库里，按设备各存各的，不上远端（新设备拉到条目后需要自己填一次 Key）。
-fn apply_remote_server(
-    transaction: &rusqlite::Transaction<'_>,
-    object: &SyncStateObject,
-    payload: &serde_json::Value,
-) -> Result<bool, String> {
-    let scope_id = payload_text(payload, "scopeId")?;
-    let name = payload_text(payload, "name")?;
-    let base_url = payload_text(payload, "baseUrl")?;
-    let enabled = payload_bool(payload, "enabled").unwrap_or(false);
-    let updated = transaction
-        .query_row(
-            "SELECT updated_at FROM servers WHERE id = ?1",
-            params![scope_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let gate = match updated {
-        Some(updated) => remote_change_wins(
-            local_object_clock(transaction, &object.object_id)?,
-            &updated,
-            "",
-            object.logical_clock,
-            &object.wall_clock,
-            &object.device_id,
-        ),
-        None => true,
-    };
-    if !gate {
-        return Ok(false);
-    }
-    transaction
-        .execute(
-            "INSERT INTO servers (id, name, base_url, scope_id, enabled, updated_at)
-             VALUES (?1, ?2, ?3, ?1, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name, base_url = excluded.base_url,
-               enabled = excluded.enabled, updated_at = excluded.updated_at",
-            params![scope_id, name, base_url, enabled, object.wall_clock],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(true)
-}
-
-/// E-H 账户条目：同步名字、站点与用户名提示。Cookie 进凭据库，不上远端；新设备拉到
-/// 条目后需要重新登录，所以这里不把 remote 的 is_active 带过去。
-fn apply_remote_eh_account(
-    transaction: &rusqlite::Transaction<'_>,
-    object: &SyncStateObject,
-    payload: &serde_json::Value,
-) -> Result<bool, String> {
-    let account_id = payload_text(payload, "accountId")?;
-    let label = payload_text(payload, "label")?;
-    let host = payload_text(payload, "host")?;
-    let username_hint = payload_text(payload, "usernameHint").unwrap_or_default();
-    let updated = transaction
-        .query_row(
-            "SELECT updated_at FROM eh_accounts WHERE id = ?1",
-            params![account_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let gate = match updated {
-        Some(updated) => remote_change_wins(
-            local_object_clock(transaction, &object.object_id)?,
-            &updated,
-            "",
-            object.logical_clock,
-            &object.wall_clock,
-            &object.device_id,
-        ),
-        None => true,
-    };
-    if !gate {
-        return Ok(false);
-    }
-    transaction
-        .execute(
-            "INSERT INTO eh_accounts (id, label, host, username_hint, cookie_ref, is_active, updated_at)
-             VALUES (?1, ?2, ?3, ?4, '', 0, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-               label = excluded.label, host = excluded.host,
-               username_hint = excluded.username_hint, updated_at = excluded.updated_at",
-            params![account_id, label, host, username_hint, object.wall_clock],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(true)
-}
-
-/// 应用偏好：一份快照整个替换。界面读的是设置表，所以这里直接写它。
+/// 应用偏好：远端那份按字段并进本地快照，而不是整份替换。
+///
+/// 两件事都靠这一条：一是本机的下载目录与缓存上限不该被别的设备覆盖（那是「这台
+/// 机器」的事，见 settings::DEVICE_LOCAL_PREFERENCE_KEYS）；二是旧版本写上去的快照
+/// 少几个字段时，缺的那些留本机的值，而不是被还原成默认值。
 fn apply_remote_app_setting(
     transaction: &rusqlite::Transaction<'_>,
     object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
-    let updated = transaction
+    let stored = transaction
         .query_row(
             "SELECT value_json FROM settings WHERE key = 'preferences'",
             [],
@@ -370,7 +297,7 @@ fn apply_remote_app_setting(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let gate = match updated {
+    let gate = match stored {
         Some(_) => remote_change_wins(
             local_object_clock(transaction, &object.object_id)?,
             "",
@@ -384,11 +311,24 @@ fn apply_remote_app_setting(
     if !gate {
         return Ok(false);
     }
+    let local: serde_json::Value = stored
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let mut merged = local.as_object().cloned().unwrap_or_default();
+    if let Some(remote) = payload.as_object() {
+        for (key, value) in remote {
+            if crate::settings::DEVICE_LOCAL_PREFERENCE_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            merged.insert(key.clone(), value.clone());
+        }
+    }
     transaction
         .execute(
             "INSERT INTO settings (key, value_json, updated_at) VALUES ('preferences', ?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
-            params![payload.to_string(), object.wall_clock],
+            params![serde_json::Value::Object(merged).to_string(), object.wall_clock],
         )
         .map_err(|error| error.to_string())?;
     Ok(true)
@@ -487,7 +427,7 @@ pub trait WebdavCredentialStore {
     fn get_credential(&self, credential_ref: &str) -> Result<String, String>;
 }
 
-struct SystemWebdavCredentialStore;
+pub(crate) struct SystemWebdavCredentialStore;
 
 impl WebdavCredentialStore for SystemWebdavCredentialStore {
     fn set_credential(&self, credential_ref: &str, credential: &str) -> Result<(), String> {
@@ -533,6 +473,33 @@ pub struct SaveSyncAccountInput {
     /// 账户表单不再带它，缺省＝沿用已存的范围（新账户＝默认集合）。
     #[serde(default)]
     sync_scope: Option<String>,
+}
+
+impl SaveSyncAccountInput {
+    /// 只给凭据导入用：构造的是同一份输入，校验仍在 `save_sync_account_record` 里。
+    /// 那条路径负责把口令写进凭据库、把 `credential_ref` 写进行，导入不该另起一套。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        id: &str,
+        kind: &str,
+        label: &str,
+        base_url: &str,
+        bucket: &str,
+        username: &str,
+        credential: &str,
+        sync_scope: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+            base_url: base_url.to_string(),
+            bucket: bucket.to_string(),
+            username: username.to_string(),
+            credential: credential.to_string(),
+            sync_scope,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1181,15 +1148,14 @@ fn apply_remote_object(
             apply_remote_progress(transaction, scope_id, object, &object.payload)
         }
         "history" => apply_remote_history(transaction, scope_id, object, &object.payload),
-        // 待看（LRR 叫 watchlist）。收藏夹不在此列：它是服务器收藏分类的镜像。
+        // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。收藏夹是
+        // 服务器收藏分类的镜像，没有对象类型，也不会出现在文档里。
         "watchlist" => {
             apply_remote_list_entry(transaction, scope_id, object, &object.payload)
         }
         "search_preset" => {
             apply_remote_search_preset(transaction, scope_id, object, &object.payload)
         }
-        "lrr_server" => apply_remote_server(transaction, object, &object.payload),
-        "eh_account" => apply_remote_eh_account(transaction, object, &object.payload),
         "app_setting" => apply_remote_app_setting(transaction, object, &object.payload),
         "legacy_non_duplicate" => {
             apply_remote_legacy_non_duplicate(transaction, scope_id, object, &object.payload)
@@ -1417,18 +1383,15 @@ fn apply_remote_history(
     Ok(true)
 }
 
-/// Watchlist and reading list share the watchlist shape: a clocked tombstone
-/// set, where an old device's add must not resurrect a newer removal.
+/// 待看（本地 reading_list 表）：带时钟的墓碑集合，老设备的「加」不能复活新设备的
+/// 「删」。收藏夹不走这里——它是服务器收藏分类的镜像。
 fn apply_remote_list_entry(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
-    let table = match object.object_type.as_str() {
-        // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。
-        _ => "reading_list",
-    };
+    let table = "reading_list";
     let archive_id = payload_text(payload, "archiveId")?;
     let deleted = payload_bool(payload, "deleted")?;
     let gate = local_row_state(transaction, table, scope_id, &archive_id)?
@@ -1661,8 +1624,195 @@ pub fn sync_remote_scope(
     })
 }
 
-/// 把远端那份文档删掉（「重置远端」）。用于远端状态坏掉又不想动本地数据的情形——
-/// 比如口令换过、旧密文再也解不开：重置后下次同步会按本地重新写一份。
+/// 按勾选的同步范围导出的那份文件。
+///
+/// 里面装的就是同步文档本身（每个对象的最新一版，含墓碑），所以导入端跑的是同一条
+/// 合并规则，不必再维护一套「导出格式」：范围之外的类别在导出时就已滤掉，凭据任何
+/// 时候都不在其中——它们只在系统凭据库里。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopedDataExport {
+    kind: String,
+    schema_version: i64,
+    exported_at: String,
+    categories: Vec<String>,
+    document: SyncStateDocument,
+}
+
+const SCOPED_EXPORT_KIND: &str = "yomika-scope-export";
+const SCOPED_EXPORT_VERSION: i64 = 1;
+
+/// 本机全部数据范围：每台已配置服务器一个，加上不分服务器的那一个。
+fn local_scope_ids(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut scope_ids = vec![GLOBAL_SCOPE.to_string()];
+    let mut statement = connection
+        .prepare("SELECT scope_id FROM servers")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        scope_ids.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(scope_ids)
+}
+
+/// 导出的结果：那份文本，以及里面装了多少个对象、按哪几类筛的（界面据此报数）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedExportReport {
+    pub text: String,
+    pub objects: usize,
+    pub categories: Vec<String>,
+}
+
+/// 导出：把勾选类别里的本地数据折成一份 JSON。
+///
+/// 覆盖本机**所有**服务器范围，而不只是当前那台：同步一次只推当前服务器，是因为远端
+/// 文档是按账户走的；导出的用途是备份与换机器，漏掉别的服务器就等于漏掉一半记录。
+#[tauri::command]
+pub fn export_scoped_data(
+    categories: String,
+    database: State<'_, Database>,
+) -> CommandResult<ScopedExportReport> {
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let enabled = parse_sync_scope(&categories);
+    let scope_ids = match local_scope_ids(&connection) {
+        Ok(scope_ids) => scope_ids,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let refs: Vec<&str> = scope_ids.iter().map(String::as_str).collect();
+    let document = match build_local_state(&connection, &refs, &enabled) {
+        Ok(document) => document,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    let exported_at = connection
+        .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get::<_, String>(0))
+        .unwrap_or_default();
+    let objects = document.objects.len();
+    let envelope = ScopedDataExport {
+        kind: SCOPED_EXPORT_KIND.to_string(),
+        schema_version: SCOPED_EXPORT_VERSION,
+        exported_at,
+        categories: enabled.clone(),
+        document,
+    };
+    match serde_json::to_string_pretty(&envelope) {
+        Ok(text) => CommandResult::success(ScopedExportReport {
+            text,
+            objects,
+            categories: enabled,
+        }),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+/// 导入的结果：落地了几条，以及有多少条因为类别没勾而留在门外。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedImportReport {
+    pub applied: usize,
+    pub skipped: usize,
+    pub categories: Vec<String>,
+}
+
+/// 导入：把文件里的对象按同步的合并规则并进本地，再为落地的那几条写日志。
+///
+/// 合并而不是覆盖：文件可能来自另一台设备，也可能比本机旧——时钟大者胜这条规则在
+/// 这里同样成立，所以重复导入同一份文件是幂等的，旧文件也不会把新数据顶掉。
+///
+/// 写日志是必须的：不写，导入的数据就只活在这台机器上，下次同步推出去的文档里没有
+/// 它们，另一台设备也就永远看不到。类别没勾的不落地——勾选是「要不要这类数据」的
+/// 开关，导入不该绕过它。
+#[tauri::command]
+pub fn import_scoped_data(
+    payload: String,
+    categories: String,
+    database: State<'_, Database>,
+) -> CommandResult<ScopedImportReport> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&payload) {
+        Ok(value) => value,
+        Err(_) => {
+            return CommandResult::failure("INVALID_INPUT", "导入内容不是有效的 JSON", false)
+        }
+    };
+    // 信封与裸文档都收：前者是现在的导出，后者是手抄一份 objects 的场景。
+    let document: SyncStateDocument = match serde_json::from_value(value.clone()) {
+        Ok(document) => document,
+        Err(_) => match value.get("document") {
+            Some(inner) => match serde_json::from_value(inner.clone()) {
+                Ok(document) => document,
+                Err(error) => {
+                    return CommandResult::failure(
+                        "INVALID_INPUT",
+                        format!("导入内容的 document 结构不对：{error}"),
+                        false,
+                    )
+                }
+            },
+            None => {
+                return CommandResult::failure(
+                    "INVALID_INPUT",
+                    "导入内容里没有 objects（不是本应用导出的数据）",
+                    false,
+                )
+            }
+        },
+    };
+    let enabled = parse_sync_scope(&categories);
+    let objects: Vec<SyncStateObject> = document.objects.into_values().collect();
+    let outcome = (|| -> Result<(usize, usize), String> {
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let mut applied = 0;
+        let mut skipped = 0;
+        for object in &objects {
+            if !scope_includes(&enabled, &object.object_type) {
+                skipped += 1;
+                continue;
+            }
+            if !apply_remote_object(&transaction, &object.scope_id, object)? {
+                continue;
+            }
+            applied += 1;
+            let clock: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
+                     WHERE scope_id = ?1 AND object_id = ?2",
+                    params![object.scope_id, object.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            journal_object(
+                &transaction,
+                &object.scope_id,
+                &object.object_type,
+                &object.object_id,
+                clock,
+                object.payload.clone(),
+            )?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok((applied, skipped))
+    })();
+    match outcome {
+        Ok((applied, skipped)) => CommandResult::success(ScopedImportReport {
+            applied,
+            skipped,
+            categories: enabled,
+        }),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
 /// 「编辑」表单要回显已存的口令。凭据平时只在系统安全存储里，这里按需读一次。
 #[tauri::command]
 pub fn sync_account_credential(
@@ -1683,6 +1833,8 @@ pub fn sync_account_credential(
     }
 }
 
+/// 把远端那份文档删掉（「重置远端」）。用于远端状态坏掉又不想动本地数据的情形——
+/// 比如口令换过、旧密文再也解不开：重置后下次同步会按本地重新写一份。
 #[tauri::command]
 pub fn reset_remote_state(
     account_id: String,
@@ -2523,7 +2675,9 @@ mod tests {
             panic!("account save failed");
         };
 
-        // 与命令同一条路径：先归一化，再写回。
+        // 与命令同一条路径：先归一化，再写回。`lrr_servers` 是退役的类别 id（服务器
+        // 条目现在归「账户与服务器」，不参与同步），归一化时被丢掉——老账户里存着的
+        // 那个 id 不该在界面上以「已勾选但点不动」的样子出现。
         let serialized = serialize_sync_scope(&parse_sync_scope(r#"["progress","lrr_servers"]"#));
         connection
             .execute(
@@ -2534,7 +2688,7 @@ mod tests {
         let record = read_sync_account(&connection, "account-a").expect("record");
         assert_eq!(
             parse_sync_scope(&record.sync_scope),
-            vec!["progress".to_string(), "lrr_servers".to_string()]
+            vec!["progress".to_string()]
         );
         // 账户表单里的其它字段没被动过。
         assert_eq!(record.label, "Personal");
@@ -3441,6 +3595,221 @@ mod tests {
     }
 
     #[test]
+    fn the_credential_classes_are_not_sync_categories() {
+        // 凭据不进同步：服务器条目、E-H 账户与 API Key/Cookie/同步口令各有各的进出口
+        // （「导入导出范围」+ 口令加密的文件），所以它们连类别都不该有——老账户里存着
+        // 的那些 id 读回来会被丢掉，而不是以「已勾选」的样子留在界面上。
+        for retired in ["credentials", "lrr_servers", "eh_account", "favorite"] {
+            assert!(!SYNC_SCOPE_CATEGORIES.contains(&retired), "{retired} 不该是同步类别");
+            assert!(!DEFAULT_SYNC_SCOPE.contains(&retired), "{retired} 不该默认勾选");
+            assert_eq!(
+                parse_sync_scope(&format!("[\"progress\",\"{retired}\"]")),
+                vec!["progress".to_string()],
+                "{retired} 读回来该被丢掉"
+            );
+        }
+        // 也没有任何对象类型落在它们身上。
+        for object_type in ["favorite", "lrr_server", "eh_account"] {
+            assert_eq!(object_type_category(object_type), None, "{object_type} 不该有类别");
+        }
+    }
+
+    #[test]
+    fn the_default_scope_is_records_and_settings() {
+        // 默认集合＝记录与设置全勾，「账户与服务器」不勾。新增一类却忘了进默认集合，
+        // 就等于那类数据默认不同步——所以拿类别表本身来对。
+        for category in SYNC_SCOPE_CATEGORIES {
+            assert_eq!(
+                DEFAULT_SYNC_SCOPE.contains(&category),
+                category != "credentials",
+                "{category} 的默认勾选状态不对"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_preferences_merge_field_by_field_and_keep_this_devices_paths() {
+        // 偏好是「一份快照」：以前整份替换，于是别的设备的下载目录与本机缓存上限
+        // 会被写过来。现在按字段合并，属于本机的两项不动，缺的字段也留本机的值。
+        let mut connection = migrated_connection();
+        connection
+            .execute(
+                "INSERT INTO settings (key, value_json) VALUES ('preferences', ?1)",
+                [serde_json::json!({
+                    "theme": "light",
+                    "defaultLayout": "auto",
+                    "defaultDirection": "ltr",
+                    "cacheMaxBytes": 4_294_967_296_u64,
+                    "downloadDirectory": "E:/Downloads",
+                    "sfwMode": false,
+                })
+                .to_string()],
+            )
+            .expect("local preferences");
+        let remote = remote_objects(
+            GLOBAL_SCOPE,
+            vec![remote_object(
+                "app_setting",
+                "preferences",
+                2,
+                "2026-09-02 08:00:00",
+                serde_json::json!({
+                    "theme": "dark",
+                    "defaultLayout": "paged",
+                    "cacheMaxBytes": 1_073_741_824_u64,
+                    "downloadDirectory": "C:/Other/Downloads",
+                    "sfwMode": true,
+                }),
+            )],
+        );
+        assert_eq!(apply_remote_objects(&mut connection, &remote).expect("apply"), 1);
+        let stored: serde_json::Value = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = 'preferences'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|text| serde_json::from_str(&text).expect("preferences json"))
+            .expect("preferences row");
+        // 远端那几项落地。
+        assert_eq!(stored["theme"], "dark");
+        assert_eq!(stored["defaultLayout"], "paged");
+        assert_eq!(stored["sfwMode"], true);
+        // 属于本机的两项留在本机。
+        assert_eq!(stored["cacheMaxBytes"], 4_294_967_296_u64);
+        assert_eq!(stored["downloadDirectory"], "E:/Downloads");
+    }
+
+    #[test]
+    fn the_journaled_preferences_leave_out_this_devices_paths() {
+        // 推上去的那份也不该带着本机路径：远端一旦有它，别的设备就会把它当自己的。
+        let mut connection = migrated_connection();
+        crate::settings::save_preferences_to(&mut connection, crate::settings::PreferenceSnapshot {
+            download_directory: "E:\\Downloads".to_string(),
+            cache_max_bytes: 4_294_967_296,
+            ..Default::default()
+        })
+        .expect("save preferences");
+        let payload: String = connection
+            .query_row(
+                "SELECT payload_json FROM sync_journal WHERE object_type = 'app_setting'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("journaled preferences");
+        let payload: serde_json::Value = serde_json::from_str(&payload).expect("payload json");
+        assert!(payload.get("downloadDirectory").is_none());
+        assert!(payload.get("cacheMaxBytes").is_none());
+        assert!(payload.get("theme").is_some(), "其余字段仍要上路");
+    }
+
+    #[test]
+    fn scoped_export_and_import_round_trip_through_the_same_merge_rules() {
+        // 导出＝本地日志折成的同步文档，导入＝按同步的合并规则落地。所以换台机器
+        // 导入之后：记录在、能再推出去（写了日志）、而且重复导入是幂等的。
+        let mut source = migrated_connection();
+        source
+            .execute_batch(
+                "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a');
+                 INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
+                   VALUES ('scope-a', 'archive-a', 4, 20, 'paged', 'ltr', 'device-a', 1);
+                 INSERT INTO reading_list (scope_id, archive_id, device_id, revision) VALUES ('scope-a', 'archive-b', 'device-a', 1);
+                 INSERT INTO search_presets (scope_id, preset_id, name, device_id, revision) VALUES ('scope-a', 'preset-a', '标签：中文', 'device-a', 1);",
+            )
+            .expect("source rows");
+        let transaction = source.transaction().expect("transaction");
+        for (object_type, object_id) in [
+            ("reading_progress", "scope-a/archive-a"),
+            ("watchlist", "scope-a/archive-b"),
+            ("search_preset", "scope-a/preset-a"),
+        ] {
+            let payload = match object_type {
+                "reading_progress" => serde_json::json!({
+                    "archiveId": "archive-a", "pageIndex": 4, "pageCount": 20,
+                    "layout": "paged", "direction": "ltr", "coverAlone": null,
+                }),
+                "search_preset" => serde_json::json!({
+                    "presetId": "preset-a", "name": "标签：中文", "query": "", "deleted": false,
+                }),
+                _ => serde_json::json!({ "archiveId": "archive-b", "deleted": false }),
+            };
+            journal_object(&transaction, "scope-a", object_type, object_id, 1, payload)
+                .expect("journal");
+        }
+        transaction.commit().expect("commit journal");
+        let scope_ids = local_scope_ids(&source).expect("scope ids");
+        let refs: Vec<&str> = scope_ids.iter().map(String::as_str).collect();
+        let enabled = parse_sync_scope(&serde_json::to_string(&DEFAULT_SYNC_SCOPE).expect("scope json"));
+        let document = build_local_state(&source, &refs, &enabled).expect("export");
+        assert_eq!(document.objects.len(), 3, "三类记录都要进导出");
+
+        // 换个空的库导入。
+        let mut target = migrated_connection();
+        let objects: Vec<SyncStateObject> = document.objects.into_values().collect();
+        assert_eq!(
+            apply_remote_objects(&mut target, &objects).expect("apply"),
+            3
+        );
+        let counts: (i64, i64, i64) = target
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM reading_progress),
+                        (SELECT COUNT(*) FROM reading_list),
+                        (SELECT COUNT(*) FROM search_presets)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("imported rows");
+        assert_eq!(counts, (1, 1, 1));
+        // 幂等：同一份再导一次，没有新东西可落。
+        assert_eq!(
+            apply_remote_objects(&mut target, &objects).expect("apply again"),
+            0
+        );
+    }
+
+    #[test]
+    fn the_scoped_export_leaves_out_categories_that_are_not_checked() {
+        let mut connection = migrated_connection();
+        connection
+            .execute_batch(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                   VALUES ('scope-a', 'archive-a', 1, '2026-09-01 08:00:00', 'device-a', 1);
+                 INSERT INTO search_presets (scope_id, preset_id, name, device_id, revision) VALUES ('scope-a', 'preset-a', '标签：中文', 'device-a', 1);",
+            )
+            .expect("rows");
+        let transaction = connection.transaction().expect("transaction");
+        journal_object(
+            &transaction,
+            "scope-a",
+            "history",
+            "scope-a/archive-a",
+            1,
+            serde_json::json!({"archiveId": "archive-a", "pageIndex": 1, "visitedAt": "2026-09-01 08:00:00"}),
+        )
+        .expect("journal history");
+        journal_object(
+            &transaction,
+            "scope-a",
+            "search_preset",
+            "scope-a/preset-a",
+            1,
+            serde_json::json!({"presetId": "preset-a", "name": "标签：中文", "query": "", "deleted": false}),
+        )
+        .expect("journal preset");
+        transaction.commit().expect("commit journal");
+
+        let enabled = parse_sync_scope(r#"["history"]"#);
+        let document = build_local_state(&connection, &[GLOBAL_SCOPE, "scope-a"], &enabled)
+            .expect("export");
+        let types: Vec<&str> = document
+            .objects
+            .values()
+            .map(|object| object.object_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["history"], "没勾的检索预设不该进导出");
+    }
+
+    #[test]
     fn remote_search_preset_applies_and_tombstones_by_clock() {
         let mut connection = migrated_connection();
         let upsert = remote_objects(
@@ -3651,38 +4020,6 @@ mod tests {
             )
             .expect("imported mark");
         assert_eq!(exact_hash, "abc");
-    }
-
-    #[test]
-    fn a_global_server_entry_applies_without_touching_credential_refs() {
-        // 服务器条目带名字/地址/启用状态；API Key 的 credential_ref 是空值，
-        // 新设备拉到之后需要自己填一次 Key。
-        let mut connection = migrated_connection();
-        let entries = remote_objects(
-            GLOBAL_SCOPE,
-            vec![remote_object(
-                "lrr_server",
-                "server/scope-b",
-                1,
-                "2026-09-02 08:00:00",
-                serde_json::json!({
-                    "scopeId": "scope-b",
-                    "name": "NAS",
-                    "baseUrl": "https://lrr.example.com",
-                    "enabled": true,
-                }),
-            )],
-        );
-        assert_eq!(apply_remote_objects(&mut connection, &entries).expect("apply"), 1);
-        let (name, api_key_ref): (String, Option<String>) = connection
-            .query_row(
-                "SELECT name, api_key_ref FROM servers WHERE id='scope-b'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("server row");
-        assert_eq!(name, "NAS");
-        assert!(api_key_ref.is_none());
     }
 
     #[tokio::test]

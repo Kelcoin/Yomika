@@ -16,7 +16,7 @@ pub trait CredentialStore {
     fn set_server_api_key(&self, scope_id: &str, api_key: &str) -> Result<(), String>;
 }
 
-struct SystemCredentialStore;
+pub(crate) struct SystemCredentialStore;
 
 impl CredentialStore for SystemCredentialStore {
     fn set_server_api_key(&self, scope_id: &str, api_key: &str) -> Result<(), String> {
@@ -28,7 +28,7 @@ impl CredentialStore for SystemCredentialStore {
 }
 
 impl SystemCredentialStore {
-    fn get_server_api_key(&self, scope_id: &str) -> Result<String, String> {
+    pub(crate) fn get_server_api_key(&self, scope_id: &str) -> Result<String, String> {
         keyring::Entry::new(KEYRING_SERVICE, scope_id)
             .map_err(|error| error.to_string())?
             .get_password()
@@ -50,6 +50,18 @@ pub struct ServerInput {
     name: String,
     base_url: String,
     scope_id: String,
+}
+
+impl ServerInput {
+    /// 只给凭据导入用：构造的是同一份输入，校验仍在 `save_server_record` 里，所以
+    /// 「什么算一台合法的服务器」只有那一处。
+    pub(crate) fn new(name: &str, base_url: &str, scope_id: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            base_url: base_url.to_string(),
+            scope_id: scope_id.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5142,20 +5154,9 @@ pub fn save_server_record(
         Ok(record) => record,
         Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
     };
-    // 服务器条目进同步日志（全局范围）：地址与启用状态要在设备间一致；API Key 不在此列。
-    if let Err(error) = super::sync::journal_global_object(
-        &transaction,
-        "lrr_server",
-        &format!("server/{}", record.scope_id),
-        serde_json::json!({
-            "scopeId": record.scope_id,
-            "name": record.name,
-            "baseUrl": record.base_url,
-            "enabled": record.enabled,
-        }),
-    ) {
-        return CommandResult::failure("UNKNOWN", error, true);
-    }
+    // 服务器条目**不进同步日志**：地址与启用状态属于「本机怎么连上它」，而 API Key
+    // 在系统凭据库里按设备各存各的——条目本身在别的设备上不成立（没有 Key 就是一
+    // 行连不上的服务器），所以它和凭据归同一类，不上远端。
     if let Err(error) = transaction.commit() {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
@@ -5913,7 +5914,8 @@ fn set_watchlist_entry(
         )
         .map_err(|error| error.to_string())?;
     // 收藏夹不写同步日志：它镜像的是 LRR 服务器上的收藏分类，服务器才是它的真相
-    // 来源，把本机这份推给别的设备只会在两边打架（见 sync.rs 的 apply 分支）。
+    // 来源，本机这行只是那份镜像的落点。把它推给别的设备等于在两边各造一份本地记录，
+    // 而服务器上的分类才是该看的那份（见 sync.rs 的 object_type_category）。
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -6474,11 +6476,15 @@ pub struct PrunedRecords {
     pub watchlist: usize,
 }
 
-/// 一张记录表，以及它在同步日志里的对象类型。
-const DANGLING_RECORD_TABLES: [(&str, &str); 3] = [
-    ("reading_history", "history"),
-    ("reading_list", "watchlist"),
-    ("watchlist", "watchlist"),
+/// 一张记录表，以及它在同步日志里的对象类型。`None` 是「这张表不进同步」——收藏夹
+/// 镜像的是服务器上的收藏分类，本机这份只是镜像的落点，所以清掉它时不留墓碑：留一条
+/// 就意味着别的设备要跟着删，而它本来就没有别的设备那一份。这里写错类型的代价是实打
+/// 实的：曾经 `("watchlist", "watchlist")` 写的是**待看**的对象类型，于是清掉一条
+/// 收藏夹记录，别的设备上被删掉的是待看里同 id 的那条。
+const DANGLING_RECORD_TABLES: [(&str, Option<&str>); 3] = [
+    ("reading_history", Some("history")),
+    ("reading_list", Some("watchlist")),
+    ("watchlist", None),
 ];
 
 /// 删掉指向「已确认不在 LANraragi」的档案的历史、待看与收藏夹记录。
@@ -6506,9 +6512,9 @@ fn prune_dangling_records_for_server(
         )
         .map_err(|error| error.to_string())?;
     let mut pruned = PrunedRecords::default();
-    let mut prune_table = |connection: &mut Connection,
-                           table: &str,
-                           object_type: &str|
+    let prune_table = |connection: &mut Connection,
+                       table: &str,
+                       object_type: Option<&str>|
      -> Result<usize, String> {
         let doomed: Vec<String> = {
             let mut statement = connection
@@ -6537,6 +6543,9 @@ fn prune_dangling_records_for_server(
                     params![scope_id, archive_id],
                 )
                 .map_err(|error| error.to_string())?;
+            // 不进同步的表删掉就走：留一条墓碑等于告诉别的设备「这条没了」，而它们
+            // 本来就没有这一份（收藏夹的真相在服务器上）。
+            let Some(object_type) = object_type else { continue };
             let object_id = format!("{scope_id}/{archive_id}");
             let clock: i64 = transaction
                 .query_row(
@@ -7540,8 +7549,9 @@ mod tests {
 
     #[test]
     fn favlist_toggle_writes_tombstone_without_journal() {
-        // 收藏夹镜像的是 LRR 服务器的收藏分类，不属于本机可同步状态：本地墓碑与
-        // revision 照旧（列表要显示得出来），但同步日志一笔都不写。
+        // 收藏夹镜像的是 LRR 服务器上的收藏分类，不是本机记录：本地墓碑与 revision 照旧
+        // （列表要显示得出来、点掉要消失），但同步日志一笔都不写——它不上路，也不该在
+        // 别的设备上凭空多出一份。
         let mut connection = migrated_connection();
         let added = set_watchlist_entry(&mut connection, "scope-a", "archive-a", true)
             .expect("favlist add");
@@ -8419,19 +8429,30 @@ mod tests {
             .unwrap();
         assert_eq!(lists, 1, "the live one stays");
 
-        // 每条被清掉的都留下墓碑，别的设备下一次同步跟着删。
-        let tombstones: Vec<String> = {
+        // 每条被清掉的**同步中**记录都留下墓碑，别的设备下一次同步跟着删。
+        let tombstones: Vec<(String, String)> = {
             let mut statement = connection
-                .prepare("SELECT payload_json FROM sync_journal ORDER BY object_id")
+                .prepare("SELECT object_type, payload_json FROM sync_journal ORDER BY object_id, object_type")
                 .unwrap();
-            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
             rows.collect::<Result<Vec<_>, _>>().unwrap()
         };
-        assert_eq!(tombstones.len(), 3);
+        assert_eq!(tombstones.len(), 2, "历史与待看各一条；收藏夹不上路，没有墓碑");
         assert!(tombstones
             .iter()
-            .all(|payload| payload.contains("\"deleted\":true")
+            .all(|(_, payload)| payload.contains("\"deleted\":true")
                 && payload.contains("\"gone\"")));
+        // 两条墓碑的类型必须各归各的：待看与收藏夹曾经共用一个类型，于是清掉一条
+        // 收藏夹记录，别的设备上被删掉的是待看里同 id 的那条。
+        let mut types: Vec<&str> = tombstones.iter().map(|(object_type, _)| object_type.as_str()).collect();
+        types.sort_unstable();
+        assert_eq!(types, vec!["history", "watchlist"]);
+        let favorite_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM watchlist", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(favorite_rows, 0, "收藏夹那条本地删掉，但不留墓碑");
 
         // 幂等：再跑一次没有可删的。
         let again =

@@ -137,6 +137,15 @@ describe('readoshi worker v3 export', () => {
     expect(parsed).toMatchObject({ kind: 'invalid', reason: '导出内容缺少服务器指纹（serverScope）' });
   });
 
+  it('tells the passphrase-encrypted credential file apart from a data export', () => {
+    // 凭据文件有自己的 kind：导入端据此先要口令，而不是把它当记录去导。解不开口令
+    // 是原生侧的事，前端只负责分流。
+    expect(parseMigrationExport('{"kind":"yomika-credentials","schemaVersion":1,"salt":"c2FsdA==","nonce":"bm9uY2U=","payload":"Y2lwaGVy"}'))
+      .toEqual({ kind: 'credentials' });
+    expect(parseMigrationExport('{"kind":"yomika-scope-export","schemaVersion":1,"document":{"objects":{}}}'))
+      .toEqual({ kind: 'scoped' });
+  });
+
   it('rejects an unknown version field instead of misreading it as legacy', () => {
     expect(parseMigrationExport('{"version":4,"sections":{}}')).toMatchObject({ kind: 'invalid', reason: '不支持的 worker 导出结构' });
   });

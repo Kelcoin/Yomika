@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { invokeCommand } from '../bridge/invoke';
+import { DEFAULT_DATA_TRANSFER_SCOPE } from '../domain/dataTransferScope';
 import type { CommandResult } from '../domain/result';
 
 /** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
@@ -71,6 +72,9 @@ export const PreferenceSnapshotSchema = z.object({
   /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
    * 关掉就只剩设置里的「立即同步」。 */
   autoSync: z.boolean().default(true),
+  /** 导入导出范围：手动带走的文件里装哪几类（记录与设置，外加可勾的凭据）。
+   * 与同步范围无关，默认只勾记录与设置。 */
+  dataTransferScope: z.array(z.string().max(32)).max(12).default([...DEFAULT_DATA_TRANSFER_SCOPE]),
 }).strip();
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
@@ -113,6 +117,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
   autoSync: true,
+  dataTransferScope: [...DEFAULT_DATA_TRANSFER_SCOPE],
 };
 
 export class NativeSettingsRepository {

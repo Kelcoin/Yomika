@@ -112,11 +112,12 @@ export function useSyncSettings(enabled = true) {
     return () => { active = false; };
   }, [enabled]);
 
-  /** 同步范围是独立的一行：每次勾选就写回账户，没有"保存"按钮。 */
+  /** 同步范围是独立的一行：每次勾选就写回账户，没有"保存"按钮。
+   * 还没账户时只留在草稿里——导入导出用的是同一份勾选，没有账户也该能挑范围。 */
   async function saveScope(next: SyncScopeCategory[]) {
     const account = activeAccount;
-    if (!account) return;
     setScopeDraft(next);
+    if (!account) return;
     setScopeSaving(true);
     setError(undefined);
     try {
@@ -325,7 +326,9 @@ export function accountKindLabel(kind: SyncAccountKind): string {
 type SyncSettingsState = ReturnType<typeof useSyncSettings>;
 
 /** 同步范围的勾选行：「底栏项目」那套多选行，整行可点、尾部图标表示勾选。
- * 它是独立的一行（不再挂在账户表单里），勾一下就写回账户。 */
+ * 它是独立的一行（不再挂在账户表单里），勾一下就写回账户。
+ * 凭据不在这里：服务器、账户与 API Key/Cookie/同步口令只在本机，随「导入导出范围」
+ * 与那份口令加密的文件走，同步永远不带它们。 */
 export function SyncScopeChecks({ sync }: { sync: SyncSettingsState }) {
   return (
     <>
@@ -341,7 +344,7 @@ export function SyncScopeChecks({ sync }: { sync: SyncSettingsState }) {
           />
         ))}
       </CheckRowGroup>
-      <p className="sync-scope-hint">默认只同步前五项；后三项会带着本机信息上远端，默认不勾。</p>
+      <p className="sync-scope-hint">记录与设置默认全勾。服务器、账户与凭据只在本机，同步不带它们——要带走得在「导入导出范围」里勾上，再用口令文件导出。</p>
     </>
   );
 }

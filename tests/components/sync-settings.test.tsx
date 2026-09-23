@@ -168,19 +168,31 @@ describe('sync settings', () => {
     // 行与「底栏项目」同一种控件：整行是复选框，勾一下就写回账户。
     const watchlist = within(menu).getByRole('checkbox', { name: '同步待看' });
     expect(watchlist).toHaveClass('settings-menu-check', 'is-checked');
-    const servers = within(menu).getByRole('checkbox', { name: '同步LRR 服务器' });
-    expect(servers).not.toHaveClass('is-checked');
     await user.click(watchlist);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_sync_scope', {
       accountId: 'personal',
       syncScope: '["progress","history","search_presets","dedup"]',
     }));
-    await user.click(servers);
+    // 应用设置是可勾的记录/设置类里后补的一项：勾上就写回去。
+    const appSettings = within(menu).getByRole('checkbox', { name: '同步应用设置' });
+    expect(appSettings).not.toHaveClass('is-checked');
+    await user.click(appSettings);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_sync_scope', {
       accountId: 'personal',
-      syncScope: '["progress","history","search_presets","dedup","lrr_servers"]',
+      syncScope: '["progress","history","search_presets","dedup","app_settings"]',
     }));
-    expect(within(menu).queryByRole('checkbox', { name: '同步收藏夹' })).toBeNull();
+
+    // 凭据在这里连行都没有：API Key、Cookie 与同步口令在系统凭据库，服务器地址与
+    // 账户名在别的设备上也不成立（没有 Key 连不上、没有 Cookie 要重新登录）。它们
+    // 只随「导入导出范围」与那份口令加密的文件走，所以这里能断言的只有「没有」——
+    // 一行封着的凭据类都曾经让人以为「勾上就能同步」。
+    expect(within(menu).queryByRole('checkbox', { name: '同步账户与服务器' })).toBeNull();
+    expect(within(menu).queryByRole('checkbox', { name: '同步LRR 服务器' })).toBeNull();
+    expect(within(menu).queryByRole('checkbox', { name: '同步E-H 账户' })).toBeNull();
+    expect(within(menu).queryByRole('checkbox', { name: '同步凭据' })).toBeNull();
+    // 留下的六个全是记录与设置：没有一个是封着的。
+    expect(within(menu).getAllByRole('checkbox').filter((item) => item.hasAttribute('disabled'))).toEqual([]);
+    expect(menu).toHaveTextContent('只在本机');
 
     // 账户表单里不再有范围：它只管账户本身。
     await user.keyboard('{Escape}');

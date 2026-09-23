@@ -67,11 +67,30 @@ describe('native sync repository bridge', () => {
     });
   });
 
-  it('exposes only the account calls, the sync entry, and the remote reset', () => {
+  it('exposes only the account calls, the sync entry, the remote reset, and the scoped export', () => {
     const surface = Object.getOwnPropertyNames(NativeSyncRepository.prototype)
       .filter((name) => name !== 'constructor')
       .sort();
-    expect(surface).toEqual(['accountCredential', 'listAccounts', 'resetRemote', 'saveAccount', 'saveScope', 'syncRemoteScope', 'testAccount']);
+    expect(surface).toEqual(['accountCredential', 'exportScopedData', 'importScopedData', 'listAccounts', 'resetRemote', 'saveAccount', 'saveScope', 'syncRemoteScope', 'testAccount']);
+  });
+
+  it('exports and imports the checked scope through the sync document commands', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'export_scoped_data') return { ok: true, value: { text: '{"kind":"yomika-scope-export"}', objects: 3, categories: ['history'] } };
+      return { ok: true, value: { applied: 2, skipped: 1, categories: ['history'] } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeSyncRepository();
+
+    expect(await repository.exportScopedData('["history"]'))
+      .toEqual({ ok: true, value: { text: '{"kind":"yomika-scope-export"}', objects: 3, categories: ['history'] } });
+    expect(adapter).toHaveBeenCalledWith('export_scoped_data', { categories: '["history"]' });
+
+    expect(await repository.importScopedData('{"kind":"yomika-scope-export"}', '["history"]'))
+      .toEqual({ ok: true, value: { applied: 2, skipped: 1, categories: ['history'] } });
+    expect(adapter).toHaveBeenCalledWith('import_scoped_data', {
+      payload: '{"kind":"yomika-scope-export"}', categories: '["history"]',
+    });
   });
 
   it('resets the remote document through its own command', async () => {

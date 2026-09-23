@@ -2,8 +2,12 @@ import { z } from 'zod';
 
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import {
+  ScopedExportReportSchema,
+  ScopedImportReportSchema,
   SyncAccountSchema,
   type SaveSyncAccountInput,
+  type ScopedExportReport,
+  type ScopedImportReport,
   type SyncAccount,
 } from '../domain/syncWire';
 import type { CommandResult } from '../domain/result';
@@ -45,5 +49,16 @@ export class NativeSyncRepository {
   /** 删掉账户的远端文档；下次同步会按本地状态重新写一份。 */
   resetRemote(accountId: string): Promise<CommandResult<void>> {
     return invokeCommand('reset_remote_state', { accountId }, VoidResponseSchema);
+  }
+
+  /** 按勾选的同步范围导出本地数据：原生侧把本地日志折成同步文档（每个对象的最新
+   * 一版，含墓碑）再套一层信封，所以导入端跑的是同一条合并规则。 */
+  exportScopedData(categories: string): Promise<CommandResult<ScopedExportReport>> {
+    return invokeCommand('export_scoped_data', { categories }, ScopedExportReportSchema);
+  }
+
+  /** 导入那份导出文件：按同步的合并规则并进本地，并写日志让它能推给别的设备。 */
+  importScopedData(payload: string, categories: string): Promise<CommandResult<ScopedImportReport>> {
+    return invokeCommand('import_scoped_data', { payload, categories }, ScopedImportReportSchema);
   }
 }

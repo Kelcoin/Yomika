@@ -1345,7 +1345,12 @@ describe('design system contract', () => {
     expect(helper).toMatch(/a\.is_deleted = 1/);
     expect(helper).not.toMatch(/LEFT JOIN/);
     expect(helper).toMatch(/for \(table, object_type\) in DANGLING_RECORD_TABLES/);
-    expect(rust).toMatch(/\("reading_history", "history"\),\s*\("reading_list", "watchlist"\),\s*\("watchlist", "watchlist"\),/);
+    // 三张表里只有两张进同步：收藏夹镜像的是服务器上的收藏分类，本机这份只是镜像的
+    // 落点，删掉它不留墓碑。待看与收藏夹曾经共用一个对象类型，于是清掉一条收藏夹
+    // 记录会让别的设备删掉待看里同 id 的那条——所以这条断言盯的是「各归各的名字，
+    // 或者干脆没有名字」。
+    expect(rust).toMatch(/\("reading_history", Some\("history"\)\),\s*\("reading_list", Some\("watchlist"\)\),\s*\("watchlist", None\),/);
+    expect(read('src-tauri/src/commands/sync.rs')).toMatch(/"watchlist" => Some\("watchlist"\),\s*"search_preset" => Some\("search_presets"\),/);
     // Wired into both: the per-id verification, and the complete library walk.
     const verify = rust.slice(rust.indexOf('pub async fn verify_archives_exist'), rust.indexOf('pub fn save_reading_progress'));
     expect(verify).toMatch(/prune_dangling_records_for_server\(&mut connection, &server_id\)/);

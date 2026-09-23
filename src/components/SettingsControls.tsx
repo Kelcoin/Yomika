@@ -92,7 +92,17 @@ export function CheckRow({ label, checked, locked = false, disabled = false, ari
 }
 
 /** The set the check rows belong to. One wrapper so every group of them is the
- * same grid and the rows line up across panels. */
-export function CheckRowGroup({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="settings-menu-checks" role="group" aria-label={label}>{children}</div>;
+ * same grid and the rows line up across panels.
+ *
+ * `caption` is for panels that hold **two** groups: spacing alone does not say
+ * where one ends and the next begins. The words are the same as the group's
+ * accessible name, so the visible copy is hidden from screen readers rather
+ * than read out twice. */
+export function CheckRowGroup({ label, caption, children }: { label: string; caption?: string | undefined; children: ReactNode }) {
+  return (
+    <div className="settings-menu-checks" role="group" aria-label={label}>
+      {caption && <p className="settings-menu-checks-caption" aria-hidden="true">{caption}</p>}
+      {children}
+    </div>
+  );
 }

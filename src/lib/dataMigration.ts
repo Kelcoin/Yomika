@@ -1,12 +1,17 @@
+import { CREDENTIAL_EXPORT_KIND } from '../domain/credentialWire';
+
 /** Data migration payloads.
  *
- * Shape of the worker export: a `schemaVersion`, an
- * `exportedAt` stamp, the live `items`, the `deleted` tombstones and the
- * `lastSync` watermark. One envelope means one import control instead of the
- * separate "旧配置" and "完整本地数据" forms, and an unknown payload can still be
- * recognised as a legacy preferences blob rather than silently failing.
+ * 现在导出的是「按导入导出范围里记录那一半折出来的同步文档」（见 domain/syncWire 的
+ * ScopedExportReportSchema，由原生侧的 export_scoped_data 生成；凭据那一半走口令加密
+ * 的凭据文件），这里保留的是**导入**侧认识的所有形状：本机的同步文档、口令加密的凭据
+ * 文件、Readoshi worker v3、更早的 Yomika 统一信封，以及旧的偏好设置 blob。旧的导出
+ * 仍要能导进来——换过版本的人手里还留着那些文件。
  */
 export const MIGRATION_SCHEMA_VERSION = 1;
+
+/** 原生侧导出的信封标记（`kind`）。 */
+export const SCOPED_EXPORT_KIND = 'yomika-scope-export';
 
 export interface MigrationItem {
   archiveId: string;
@@ -20,9 +25,7 @@ export interface MigrationExport {
   exportedAt: string;
   scopeId: string;
   items: MigrationItem[];
-  /** 收藏夹 IS the LANraragi 🔖 Favorites category (server-side), so the
-   * local watchlist mirror is not exported; older envelopes may still carry
-   * tombstone ids and the importer tolerates them. */
+  /** 收藏夹曾经不在本机的导出里；旧信封可能还带着墓碑 id，导入端照收。 */
   deleted?: string[] | undefined;
   lastSync: number;
   /** 待看 (reading_list) — never part of the original Readoshi envelope;
@@ -36,6 +39,8 @@ export interface MigrationListEntry { archiveId: string; addedAt: string }
 export interface HistorySource { archiveId: string; pageIndex: number; visitedAt: string }
 export interface WatchlistSource { archiveId: string; addedAt: string; deleted: boolean }
 
+/** 更早那一版的导出信封（历史 + 待看 + 墓碑 id 列表）。现在不再由本应用生成——
+ * 导出走的是同步文档——但旧文件仍在导入路径上，测试也用它造样本。 */
 export function buildMigrationExport(input: {
   scopeId: string;
   history: readonly HistorySource[];
@@ -60,6 +65,8 @@ export function buildMigrationExport(input: {
 }
 
 export type ParsedMigration =
+  | { kind: 'credentials' }
+  | { kind: 'scoped' }
   | { kind: 'unified'; payload: MigrationExport }
   | { kind: 'workerV3'; payload: WorkerV3Payload }
   | { kind: 'legacy' }
@@ -254,6 +261,20 @@ export function parseMigrationExport(text: string): ParsedMigration {
     return { kind: 'invalid', reason: '导出内容必须是一个 JSON 对象' };
   }
   const record = value as Partial<MigrationExport> & UnknownRecord;
+  // 凭据文件（口令加密）：这里只认出它，解不开口令是原生侧的事。
+  if (record.kind === CREDENTIAL_EXPORT_KIND) return { kind: 'credentials' };
+  // 本机导出的那一份（同步文档信封）：原生侧的导入命令认它，这里只需要把它从别的
+  // 形状里分出来，结构上的校验留给原生侧——那边本来就要逐字段读一遍。
+  if (record.kind === SCOPED_EXPORT_KIND) {
+    if (record.schemaVersion !== MIGRATION_SCHEMA_VERSION) {
+      return { kind: 'invalid', reason: `不支持的导出版本：${String(record.schemaVersion)}` };
+    }
+    const document = record.document;
+    if (!document || typeof document !== 'object' || !('objects' in document)) {
+      return { kind: 'invalid', reason: '导出内容缺少 objects' };
+    }
+    return { kind: 'scoped' };
+  }
   // The Readoshi worker's v3 envelope uses `version`, not `schemaVersion` —
   // check it before the legacy fallback or it would be misread as a legacy
   // preferences blob and hit the wrong decoder.

@@ -1,7 +1,9 @@
 mod bundled_models;
 mod cache;
 mod commands;
+mod credentials;
 mod data_paths;
+mod data_transfer;
 mod db;
 mod dedup;
 mod diagnostics;
@@ -40,10 +42,12 @@ use commands::library::{
 };
 use commands::platform::{open_external_url, platform_capabilities, reveal_in_file_manager, write_clipboard_text};
 use commands::sync::{
-    append_sync_journal, claim_sync_journal, list_sync_accounts, list_sync_journal,
+    append_sync_journal, claim_sync_journal, export_scoped_data, import_scoped_data,
+    list_sync_accounts, list_sync_journal,
     reset_remote_state, save_sync_account, save_sync_scope, set_sync_journal_state,
     sync_account_credential, sync_remote_scope, test_sync_account,
 };
+use credentials::{export_credentials, import_credentials};
 use db::Database;
 use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
@@ -179,6 +183,10 @@ pub fn run() {
             test_sync_account,
             reset_remote_state,
             sync_account_credential,
+            export_scoped_data,
+            import_scoped_data,
+            export_credentials,
+            import_credentials,
             inference_probe,
             inference_start,
             inference_get_job,

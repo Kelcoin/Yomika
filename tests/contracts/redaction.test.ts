@@ -39,6 +39,21 @@ describe('sensitive data redaction', () => {
     expect(redacted).toContain('eh login failed');
   });
 
+  it('redacts the passphrase of a credential export', () => {
+    // 桥在命令失败时会把整个请求写进错误日志，而凭据导入导出收的就是口令：它在
+    // 键名与 `name=value` 两种形状下都不能漏进日志。
+    const redacted = redactSensitive({
+      passphrase: 'correct horse battery',
+      nested: { Passphrase: 'another-secret' },
+      note: 'passphrase=also-secret',
+    });
+
+    const serialized = JSON.stringify(redacted);
+    expect(serialized).not.toContain('correct horse battery');
+    expect(serialized).not.toContain('another-secret');
+    expect(serialized).not.toContain('also-secret');
+  });
+
   it('handles cyclic objects safely', () => {
     const value: Record<string, unknown> = { password: 'secret' };
     value.self = value;

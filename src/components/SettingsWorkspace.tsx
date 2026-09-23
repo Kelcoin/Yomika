@@ -18,24 +18,39 @@ import { YomikaMark } from './YomikaMark';
 import { EhMark } from './EhMark';
 import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
-import { autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
+import { SYNC_COMPLETED_EVENT, autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
 import { formatSyncAge } from '../lib/syncTime';
 import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow, SettingsRowBody } from './SettingsRow';
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
-import { parseSyncScope, scopeLabel } from '../domain/syncScope';
+import { scopeLabel } from '../domain/syncScope';
+import {
+  TRANSFER_CREDENTIAL_CATEGORIES,
+  TRANSFER_RECORD_CATEGORIES,
+  credentialScopeLabel,
+  credentialTransferScope,
+  parseDataTransferScope,
+  recordScopeLabel,
+  recordTransferScope,
+  transferScopeLabel,
+  type TransferCategory,
+} from '../domain/dataTransferScope';
+import { CREDENTIAL_EXPORT_KIND } from '../domain/credentialWire';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
 import type { CommandResult } from '../domain/result';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { NativeCredentialRepository } from '../repositories/nativeCredentialRepository';
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
+import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
+import { PassphraseDialog } from './PassphraseDialog';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { TextInputDialog } from './TextInputDialog';
 import { usePreferences } from '../app/preferences';
-import { buildMigrationExport, parseMigrationExport } from '../lib/dataMigration';
+import { parseMigrationExport } from '../lib/dataMigration';
 import { readoshiServerScope } from '../lib/readoshiScope';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { COLOR_SCHEMES, CSS_THEME_PRESETS } from '../lib/cssThemePresets';
@@ -224,6 +239,8 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
+const syncRepository = new NativeSyncRepository();
+const credentialRepository = new NativeCredentialRepository();
 const dedupRepository = new NativeDedupRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
@@ -314,13 +331,28 @@ function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
 }
 
 /** A model coming down: the backend reports bytes done out of a total, and falls
- * back to an indeterminate bar when the source does not announce a length. */
-function ModelDownloadStatus({ label, progress }: { label: string; progress?: { completed: number; total?: number | undefined } | undefined }) {
+ * back to an indeterminate bar when the source does not announce a length.
+ *
+ * 槽是**常驻挂载**的，用 `is-open` 开关，而不是条件渲染：卸载的节点没有过渡可放，
+ * 「消失」就只能是啪一下不见。行高从 0fr 走到 1fr 的过渡同时把菜单一起撑开/收回——
+ * 菜单的高度本来就是内容撑出来的，所以高度变化的动画不需要另量一次高度。
+ *
+ * 只画一条轨道，右边不写百分比：数字每隔几帧跳一次，比条本身还吵，而条的长短已经把
+ * 话说完了。后端没报 total 时走不定量扫光条。 */
+function ModelDownloadSlot({ open, label, progress }: { open: boolean; label: string; progress?: { completed: number; total?: number | undefined } | undefined }) {
   const percent = progress?.total ? Math.round((progress.completed / progress.total) * 100) : undefined;
   return (
-    <div className="model-download-status" role="status">
-      <progress max="100" value={percent} aria-label={`${label}下载进度`} />
-      <span className="model-download-percent">{percent === undefined ? '下载中…' : `${percent}%`}</span>
+    <div className={`model-download-slot${open ? ' is-open' : ''}`} aria-hidden={!open}>
+      <div
+        className="model-download-status"
+        role="progressbar"
+        aria-label={`${label}下载进度`}
+        {...(percent === undefined ? {} : { 'aria-valuenow': percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
+      >
+        <div className={`model-download-track${percent === undefined ? ' is-indeterminate' : ''}`}>
+          <div className="model-download-fill" style={percent === undefined ? undefined : { width: `${percent}%` }} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -381,12 +413,26 @@ export function SettingsWorkspace() {
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
+  /** 导入导出范围：与同步范围无关的一份勾选，存在偏好里（本机设置，不进同步）。
+   * 记录那一半喂同步文档的导入导出，凭据那一半喂口令加密的凭据文件。 */
+  const transferScope = useMemo(
+    () => parseDataTransferScope(preferenceDraft.dataTransferScope),
+    [preferenceDraft.dataTransferScope],
+  );
+  const transferRecords = useMemo(() => recordTransferScope(transferScope), [transferScope]);
+  const transferCredentials = useMemo(() => credentialTransferScope(transferScope), [transferScope]);
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
   const [migrationText, setMigrationText] = useState('');
   const [migrationPending, setMigrationPending] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState<string>();
   const [migrationError, setMigrationError] = useState(false);
+  /** 凭据的口令对话框：导出＝设口令（两遍），导入＝输文件的口令（一遍）。导入时
+   * `credentialText` 存着待导入的那份文本——它只在这一次导入里存在。 */
+  const [credentialMode, setCredentialMode] = useState<'export' | 'import'>();
+  const [credentialText, setCredentialText] = useState('');
+  const [credentialPending, setCredentialPending] = useState(false);
+  const [credentialProblem, setCredentialProblem] = useState<string>();
   const [platformName, setPlatformName] = useState<string>();
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -707,6 +753,40 @@ export function SettingsWorkspace() {
       setMigrationPending(false);
       return;
     }
+    if (parsed.kind === 'credentials') {
+      // 凭据文件是口令加密的：分类做完了，真正的工作在口令对话框里。这里不碰口令，
+      // 所以一次误点不会把口令喂给别的路径。
+      if (transferCredentials.length === 0) {
+        // 勾选是「要不要这类数据」的开关，导入也一样：一个凭据类都没勾就没什么好
+        // 解开的。与其开个注定空手而归的对话框，不如说清要先去勾上。
+        setMigrationMessage('这是凭据文件，但「导入导出范围」里一个凭据类都没勾——先勾上要导入的类别');
+        setMigrationError(true);
+        setMigrationPending(false);
+        return;
+      }
+      openCredentialDialog('import');
+      setMigrationPending(false);
+      return;
+    }
+    if (parsed.kind === 'scoped') {
+      // 本机导出的那一份：按同步的合并规则落地，导入导出范围里没勾的类别留在门外
+      // ——勾选是「要不要这类数据」的开关，导入不该绕过它。
+      const result = await syncRepository.importScopedData(migrationText.trim(), JSON.stringify(transferRecords));
+      if (!result.ok) {
+        setMigrationMessage(result.error.message);
+        setMigrationError(true);
+        setMigrationPending(false);
+        return;
+      }
+      setMigrationText('');
+      setMigrationMessage(
+        `已导入 ${result.value.applied} 项` +
+        (result.value.skipped > 0 ? `，跳过 ${result.value.skipped} 项（类别未勾选）` : ''),
+      );
+      invalidateRouteCache();
+      setMigrationPending(false);
+      return;
+    }
     if (parsed.kind === 'workerV3') {
       const payload = parsed.payload;
       // The export's serverScope is md5(normalized server URL) in Readoshi's
@@ -775,38 +855,25 @@ export function SettingsWorkspace() {
     setMigrationPending(false);
   }
 
+  /** 本机这一侧的导出：按勾选的导入导出范围折出同步文档（原生侧），所以导出的东西就是
+   * 同一套合并规则、同样的墓碑折出来的那些，没有第二份格式。 */
   async function runMigrationExport() {
     setMigrationPending(true);
     setMigrationMessage(undefined);
     setMigrationError(false);
-    const scopeId = servers[0]?.scopeId;
-    if (!scopeId) {
-      setMigrationMessage('尚未配置服务器，无法确定导出范围');
+    const categories = JSON.stringify(transferRecords);
+    const result = await syncRepository.exportScopedData(categories);
+    if (!result.ok) {
+      setMigrationMessage(result.error.message);
       setMigrationError(true);
       setMigrationPending(false);
       return;
     }
-    const [history, readingList] = await Promise.all([
-      repository.listHistory(scopeId),
-      repository.listReadingList(scopeId),
-    ]);
-    if (!history.ok) {
-      setMigrationMessage(history.error.message);
-      setMigrationError(true);
-      setMigrationPending(false);
-      return;
-    }
-    if (!readingList.ok) {
-      setMigrationMessage(readingList.error.message);
-      setMigrationError(true);
-      setMigrationPending(false);
-      return;
-    }
-    // 收藏夹 IS the LANraragi 🔖 Favorites category — server-side state, so it
-    // is not part of the local export at all.
-    const payload = buildMigrationExport({ scopeId, history: history.value, readingList: readingList.value });
-    setMigrationText(JSON.stringify(payload, null, 2));
-    setMigrationMessage(`已导出 ${payload.items.length + (payload.readingList?.length ?? 0) + (payload.readingListDeleted?.length ?? 0)} 项本地记录`);
+    setMigrationText(result.value.text);
+    setMigrationMessage(
+      `已按导入导出范围导出 ${result.value.objects} 项：${recordScopeLabel(transferScope)}` +
+      (transferCredentials.length > 0 ? '（凭据要单独用「导出凭据…」）' : ''),
+    );
     setMigrationPending(false);
   }
 
@@ -819,6 +886,60 @@ export function SettingsWorkspace() {
     } catch {
       showToast('复制失败，请手动选择导出内容复制', 'error');
     }
+  }
+
+  /** 导入导出范围的勾选：与「底栏项目」同一种控件，勾一下即存（autosave 会合并）。 */
+  function toggleTransferCategory(category: TransferCategory) {
+    const next = transferScope.includes(category)
+      ? transferScope.filter((item) => item !== category)
+      : [...transferScope, category];
+    editPreferences({ dataTransferScope: next });
+  }
+
+  /** 打开口令对话框。导出没有待处理的文本，导入把要导入的那份带进去。 */
+  function openCredentialDialog(mode: 'export' | 'import') {
+    setCredentialProblem(undefined);
+    setCredentialText(mode === 'import' ? migrationText.trim() : '');
+    setCredentialMode(mode);
+  }
+
+  /** 口令到手：导出生成那份加密文件，导入把它解开写回凭据库。 */
+  async function runCredentialTransfer(passphrase: string) {
+    setCredentialPending(true);
+    setCredentialProblem(undefined);
+    if (credentialMode === 'export') {
+      const result = await credentialRepository.exportAll(passphrase, JSON.stringify(transferCredentials));
+      setCredentialPending(false);
+      if (!result.ok) {
+        setCredentialProblem(result.error.message);
+        return;
+      }
+      setCredentialMode(undefined);
+      setMigrationText(result.value.text);
+      setMigrationMessage(
+        `已导出凭据：服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}` +
+        (result.value.skipped > 0 ? `（${result.value.skipped} 条读不到凭据，未包含）` : ''),
+      );
+      return;
+    }
+
+    const result = await credentialRepository.importAll(credentialText, passphrase, JSON.stringify(transferCredentials));
+    setCredentialPending(false);
+    if (!result.ok) {
+      // 口令不对／文件损坏就把对话框留着：让使用者再试一次，而不是重新粘一遍文件。
+      setCredentialProblem(result.error.message);
+      return;
+    }
+    setCredentialMode(undefined);
+    setMigrationText('');
+    setMigrationMessage(
+      `已导入凭据：服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}`,
+    );
+    // 服务器的行与同步账户的行都可能刚被写进来：前者重取一次列表，后者靠 hook 里
+    // 那条「同步完成」的监听重读。
+    setServerLoadAttempt((attempt) => attempt + 1);
+    window.dispatchEvent(new CustomEvent(SYNC_COMPLETED_EVENT));
+    invalidateRouteCache();
   }
 
   // Switching sections starts at the top, before the browser paints the new one.
@@ -1328,19 +1449,18 @@ export function SettingsWorkspace() {
             )}
             {selectedSettingsSection === 'settings-sync' && (
               /* 范围不再挂在账户表单里：它管的是「推拉哪几类」，与账户凭据无关，
-                 单独一行才看得清现在到底同步了什么。 */
+                 单独一行才看得清现在到底同步了什么。导入导出读的也是这一份勾选。 */
               <SettingsPanel
                 icon={<ListChecks />}
                 label="同步范围"
-                hint="没勾的类别既不上传也不落地"
+                hint={sync.activeAccount ? '没勾的类别既不上传也不落地' : '还没配置账户：这份勾选暂时没作用'}
                 ariaLabel="同步范围"
-                value={!sync.activeAccount ? '未配置账户' : scopeLabel(parseSyncScope(sync.activeAccount.syncScope))}
+                value={scopeLabel(sync.scopeDraft)}
               >
-                {!sync.activeAccount ? (
-                  <p className="settings-menu-desc">先在「同步账户」里添加一个账户，再来挑要同步的类别。</p>
-                ) : (
-                  <SyncScopeChecks sync={sync} />
+                {!sync.activeAccount && (
+                  <p className="settings-menu-desc">添加账户后，这份勾选会随账户保存并决定同步哪些类别。</p>
                 )}
+                <SyncScopeChecks sync={sync} />
               </SettingsPanel>
             )}
               </div>
@@ -1349,10 +1469,45 @@ export function SettingsWorkspace() {
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
             {selectedSettingsSection === 'settings-sync' && (
               <div className="settings-group">
+                {/* 导入导出范围独立于同步范围：同步范围决定设备之间自动流动什么，这一份
+                    决定文件里装什么。凭据在这里是可勾的（同步那边连类别都没有），导出
+                    它们要另外设口令。 */}
+                <SettingsPanel
+                  icon={<ArrowLeftRight />}
+                  label="导入导出范围"
+                  hint="决定文件里装什么，与同步范围无关"
+                  ariaLabel="导入导出范围"
+                  value={transferScopeLabel(transferScope)}
+                >
+                  <CheckRowGroup label="记录与设置" caption="记录与设置">
+                    {TRANSFER_RECORD_CATEGORIES.map((category) => (
+                      <CheckRow
+                        key={category.id}
+                        label={category.label}
+                        checked={transferScope.includes(category.id)}
+                        ariaLabel={`导入导出${category.label}`}
+                        onToggle={() => toggleTransferCategory(category.id)}
+                      />
+                    ))}
+                  </CheckRowGroup>
+                  <CheckRowGroup label="凭据" caption="凭据">
+                    {TRANSFER_CREDENTIAL_CATEGORIES.map((category) => (
+                      <CheckRow
+                        key={category.id}
+                        label={category.label}
+                        checked={transferScope.includes(category.id)}
+                        ariaLabel={`导入导出${category.label}`}
+                        onToggle={() => toggleTransferCategory(category.id)}
+                      />
+                    ))}
+                  </CheckRowGroup>
+                  <p className="sync-scope-hint">凭据类要另外设口令；不勾的类别既不进文件，也不会被导入。</p>
+                </SettingsPanel>
                 <SettingsPanel
                   icon={<FileDown />}
                   label="导出数据"
-                  hint="导出为 JSON，不含服务器凭据"
+                  hint="按导入导出范围勾选的记录与设置导出"
+                  value={recordScopeLabel(transferScope)}
                   onClose={() => setMigrationText('')}
                 >
                   <form className="legacy-import-form" onSubmit={(event) => event.preventDefault()}>
@@ -1367,8 +1522,14 @@ export function SettingsWorkspace() {
                       onChange={(event) => setMigrationText(event.target.value)}
                     />
                     <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
-                      <button className="secondary-action" type="button" disabled={migrationPending} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+                      <button className="secondary-action" type="button" disabled={migrationPending || transferRecords.length === 0} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
                         {migrationPending ? '处理中…' : '导出数据'}
+                      </button>
+                      {/* 凭据单走一条路：同步永远不带它们（API Key、Cookie 与同步口令在系统
+                          凭据库里按设备各存各的），但换台机器总得有个出口——出口是一个口令
+                          加密的文件。 */}
+                      <button className="secondary-action" type="button" disabled={migrationPending || transferCredentials.length === 0} onClick={() => openCredentialDialog('export')}>
+                        <KeyRound aria-hidden="true" />导出凭据…
                       </button>
                       <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
                         <Copy aria-hidden="true" />复制
@@ -1379,7 +1540,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel
                   icon={<FileUp />}
                   label="导入数据"
-                  hint="粘贴另一台设备导出的 JSON"
+                  hint="粘贴导出内容：本机导出的按范围落地"
                   onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
                 >
                   <form className="legacy-import-form" onSubmit={runMigrationImport}>
@@ -1394,8 +1555,11 @@ export function SettingsWorkspace() {
                       rows={6}
                     />
                     <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
-                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
+                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim() || transferRecords.length === 0} aria-busy={migrationPending}>
                         {migrationPending ? '处理中…' : '导入数据'}
+                      </button>
+                      <button className="secondary-action" type="button" disabled={!migrationText.trim() || transferCredentials.length === 0} onClick={() => openCredentialDialog('import')}>
+                        <KeyRound aria-hidden="true" />按凭据导入…
                       </button>
                     </div>
                   </form>
@@ -1476,9 +1640,11 @@ export function SettingsWorkspace() {
                     className="select-option-download"
                     onDownload={() => void downloadModel(option.value, option.label)}
                   />}
-                  optionStatus={(option) => pendingModel?.id === option.value
-                    ? <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
-                    : null}
+                  optionStatus={(option) => <ModelDownloadSlot
+                    open={pendingModel?.id === option.value}
+                    label={pendingModel?.label ?? option.label}
+                    progress={modelDownload}
+                  />}
                   rowAction={<ModelDownloadButton
                     option={selectedUpscaleOption}
                     installed={Boolean(runnableModels?.some((model) => model.id === upscaleSelectedModel))}
@@ -1487,9 +1653,6 @@ export function SettingsWorkspace() {
                     onDownload={() => void downloadModel(upscaleSelectedModel, selectedUpscaleOption.label)}
                   />}
                 />
-                {pendingModel && upscaleModelOptions.some((option) => option.value === pendingModel.id) && (
-                  <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
-                )}
                 <SettingsSwitch
                   icon={<WandSparkles />}
                   label="自动开启超分"
@@ -1549,15 +1712,14 @@ export function SettingsWorkspace() {
                         className="select-option-download"
                         onDownload={() => void downloadModel(option.value, option.label)}
                       />}
-                      optionStatus={(option) => pendingModel?.id === option.value
-                        ? <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
-                        : null}
+                      optionStatus={(option) => <ModelDownloadSlot
+                        open={pendingModel?.id === option.value}
+                        label={pendingModel?.label ?? option.label}
+                        progress={modelDownload}
+                      />}
                     />;
                   })}
                 </div>
-                {pendingModel && decensorBundles?.some((model) => model.id === pendingModel.id) && (
-                  <ModelDownloadStatus label={pendingModel.label} progress={modelDownload} />
-                )}
                 {!decensorBundles?.length && (
                   <StatusLine busy={!installedModels}>{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</StatusLine>
                 )}
@@ -1695,6 +1857,17 @@ export function SettingsWorkspace() {
         </div>
         )}
       </div>
+      {/* 口令对话框挂在页面这一层：它是这两条命令的入口，不属于某一个菜单——导出与
+          导入各自打开同一个对话框，mode 决定要一遍还是两遍。 */}
+      <PassphraseDialog
+        open={credentialMode !== undefined}
+        mode={credentialMode === 'export' ? 'export' : 'import'}
+        contents={credentialScopeLabel(transferScope)}
+        pending={credentialPending}
+        problem={credentialProblem}
+        onConfirm={(passphrase) => void runCredentialTransfer(passphrase)}
+        onOpenChange={(open) => { if (!open) { setCredentialMode(undefined); setCredentialProblem(undefined); } }}
+      />
     </div>
   );
 }

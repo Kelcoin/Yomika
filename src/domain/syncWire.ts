@@ -42,3 +42,21 @@ export type SaveSyncAccountInput = {
   /** 勾选的类别，JSON 数组字符串；缺省由原生侧回落默认集合。 */
   syncScope?: string;
 };
+
+/** 按「导入导出范围」里记录那一半导出：那份文本加上它装了多少个对象、按哪几类筛的。 */
+export const ScopedExportReportSchema = z.object({
+  text: z.string().min(1),
+  objects: z.number().int().nonnegative(),
+  categories: z.array(z.string()),
+});
+
+export type ScopedExportReport = z.infer<typeof ScopedExportReportSchema>;
+
+/** 导入的结果：落地几条，以及有多少条因为类别没勾而留在门外。 */
+export const ScopedImportReportSchema = z.object({
+  applied: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  categories: z.array(z.string()),
+});
+
+export type ScopedImportReport = z.infer<typeof ScopedImportReportSchema>;

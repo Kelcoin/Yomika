@@ -164,11 +164,67 @@ textarea,
 .select-option-download:active:not(:disabled) { transform: translateY(1px); }
 .select-option-download svg { width: 15px; height: 15px; }
 
-/* 下载中的进度行：与下载按钮同属模型选择项，所以放在同一处。 */.model-download-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4) var(--space-2); }
-.model-download-status progress { width: 100%; height: 4px; overflow: hidden; border: 0; border-radius: var(--radius-pill); background: var(--surface-muted); accent-color: var(--primary); }
-.model-download-status progress::-webkit-progress-bar { background: var(--surface-muted); }
-.model-download-status progress::-webkit-progress-value { background: var(--primary); }
-.model-download-percent { min-width: 4ch; color: var(--ink-secondary); font-family: var(--font-utility); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-align: right; }
+/* 下载进度：与下载按钮同属模型选择项，所以放在同一处。
+ *
+ * 槽常驻挂载、用 `is-open` 开关：0fr → 1fr 的行高过渡让进度条长出来/收回去，同时把
+ * 菜单一起撑开/收回（菜单高度本来就是内容撑的）。
+ *
+ * 两条容易踩空的：子元素必须自己写 `overflow: hidden`，否则 `fr` 轨道的自动最小尺寸
+ * 是内容的 min-content 高度，`0fr` 会被撑在内容高度上（收起时看着就是「没反应」）；
+ * 竖直内边距只能挂在**槽**上，不能挂在被裁的那个元素上——padding 的下限进 min-content，
+ * 挂在里面同样收不到 0。 */
+.model-download-slot {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  padding: 0 var(--space-4);
+  opacity: 0;
+  transition: grid-template-rows var(--motion-standard), padding-block var(--motion-standard), opacity var(--motion-standard);
+}
+
+.model-download-slot.is-open {
+  grid-template-rows: 1fr;
+  padding-block: var(--space-1) var(--space-2);
+  opacity: 1;
+}
+
+.model-download-slot > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* MD3 线性进度条：6px 圆头轨道 + primary 填充，与去重页那条同一套数值。后端没报
+   总数时走不定量扫光条，让人看出它还在动。 */
+.model-download-track {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-highest);
+}
+
+.model-download-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  transition: width var(--motion-standard);
+}
+
+.model-download-track.is-indeterminate .model-download-fill {
+  width: 40%;
+  animation: progress-sweep var(--duration-pulse) var(--ease-pulse) infinite;
+}
+
+@keyframes progress-sweep {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(260%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减弱动效：进度条直接出现/消失，不定量条改成一条静止的淡条。 */
+  .model-download-slot { transition: none; }
+  .model-download-track.is-indeterminate .model-download-fill { width: 100%; animation: none; opacity: 0.6; }
+}
 
 select {
   appearance: none;
