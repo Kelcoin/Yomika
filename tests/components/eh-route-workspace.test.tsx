@@ -57,6 +57,65 @@ describe('EH route workspace', () => {
     expect(adapter.mock.calls.map(([command]) => command)).not.toContain('check_eh_login_health');
   });
 
+  it('offers no web sign-in on mobile, where neither a second window nor an iframe can work', async () => {
+    // Android 上 tao 只会把新窗口挂到当前 activity，wry 建 webview 时对它调 setContentView
+    // ——应用自己的界面被换成登录页，关掉时应用跟着没了（闪退）。而 E-Hentai 给登录页发了
+    // `X-Frame-Options: SAMEORIGIN`（CSP 还是 `default-src 'none'`），所以也嵌不进应用内。
+    // 移动端干脆不给这个入口，并说明替代做法。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'platform_capabilities') return { ok: true, value: { platform: 'android', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: false } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
+    try {
+      renderEhRoute();
+
+      // 另外两条路仍在，只有「网页登录」不见了。
+      expect(await screen.findByRole('tab', { name: /账号登录/ })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /Cookie 导入/ })).toBeInTheDocument();
+      await vi.waitFor(() => expect(screen.queryByRole('tab', { name: /网页登录/ })).toBeNull());
+      expect(screen.getByText('移动端请用账号登录，或把 Cookie 粘进来。')).toBeInTheDocument();
+      expect(adapter.mock.calls.map(([command]) => command)).not.toContain('open_eh_login_window');
+    } finally {
+      delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  it('opens the sign-in window on the desktop and reads its cookie jar', async () => {
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'platform_capabilities') return { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: false } };
+      if (command === 'open_eh_login_window') return { ok: true, value: null };
+      if (command === 'capture_eh_login_cookies') return { ok: true, value: `ipb_member_id=7; ipb_pass_hash=${hash}` };
+      if (command === 'close_eh_login_window') return { ok: true, value: null };
+      if (command === 'save_eh_account') return { ok: true, value: { id: 'eh-7', label: 'E-Hentai 7', host: 'e-hentai.org', cookieRef: 'keyring://eh-7', isActive: true, status: 'verified', createdAt: '2026-09-23', updatedAt: '2026-09-23' } };
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
+    const user = userEvent.setup();
+    try {
+      renderEhRoute();
+
+      await user.click(await screen.findByRole('tab', { name: /网页登录/ }));
+      await user.click(screen.getByRole('button', { name: /打开登录页面/ }));
+
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_eh_login_window', {}));
+      // 窗口里的 Cookie 一到手就关掉窗口并保存，读的是那个窗口自己的 Cookie 罐。
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('capture_eh_login_cookies', {}), { timeout: 20_000 });
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('close_eh_login_window', {}), { timeout: 20_000 });
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_eh_account', {
+        input: expect.objectContaining({ cookie: `ipb_member_id=7; ipb_pass_hash=${hash}` }),
+      }), { timeout: 20_000 });
+    } finally {
+      delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  }, 30_000);
+
   it('signs in with a username and password and stores the returned cookie', async () => {
     const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
     const saved = { id: 'eh-77', label: 'E-Hentai 77', host: 'e-hentai.org', cookieRef: 'keyring://eh-77', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };

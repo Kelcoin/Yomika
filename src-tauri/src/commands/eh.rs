@@ -793,6 +793,22 @@ const COOKIE_ORIGINS: [&str; 3] = [
 #[tauri::command]
 pub async fn open_eh_login_window(app: tauri::AppHandle) -> Result<CommandResult<()>, String> {
     use tauri::Manager;
+    // 移动端**不开第二个 webview**：Android 上 tao 只会把新窗口挂到当前那个 activity
+    // （`next_available_activity` 永远返回主 activity——它的 `window_created` 从没被置位），
+    // 而 wry 建 webview 时会对这个 activity 调 `setContentView`，也就是把应用自己的界面
+    // 整个换成登录页；关掉登录窗口时那个 activity 就没有内容视图了，应用随即被系统杀掉
+    // ——「点网页登录，应用闪退」。手机上的登录页也没法嵌进应用内：E-Hentai 给登录页发了
+    // `X-Frame-Options: SAMEORIGIN`（加上 `default-src 'none'` 的 CSP），iframe 根本打不开。
+    // 所以移动端不提供这条路（界面上那个标签页也不出现），这里再直接拒绝一次，作为防线。
+    //
+    // 用 `cfg!` 而不是 `#[cfg]`：两边都参与类型检查，手机上这条也照样编译。
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return Ok(CommandResult::failure(
+            "PLATFORM_UNAVAILABLE",
+            "移动端不支持网页登录：用账号登录，或把 Cookie 粘进来",
+            false,
+        ));
+    }
     if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.set_focus();

@@ -396,6 +396,42 @@ describe('application shell', () => {
     }
   });
 
+  it('paints the compact bar already floating before preferences arrive', async () => {
+    // 悬浮是偏好里的一行，偏好却是 IPC 回来的：首帧按默认值画，等偏好到了再换成悬浮的
+    // ——开着悬浮的人每次启动都会先看到一下贴底栏。镜像（yomika.last-nav）在第一次渲染
+    // 之前就读出来了，所以首帧就是最终形态。这里的 load_preferences 永不返回，量的就是
+    // 「偏好还没到」的那一刻。
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === COMPACT_WIDTH_QUERY,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      window.localStorage.setItem('yomika.last-nav', JSON.stringify({
+        floatingNav: true,
+        bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
+      }));
+      setInvokeAdapterForTests(async (command) => {
+        if (command === 'load_preferences') return new Promise(() => {});
+        if (command === 'list_servers') return { ok: true, value: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      renderAt('/');
+
+      const bar = await screen.findByRole('navigation', { name: '移动导航' });
+      expect(bar).toHaveClass('is-floating');
+      expect(document.querySelector('.app-shell')).toHaveClass('is-floating-nav');
+    } finally {
+      window.matchMedia = original;
+    }
+  });
+
   it('parks the compact bar out of the way only while it floats', async () => {
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { EhWorkspace } from './EhWorkspace';
 import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
+import { getPlatformCapabilities } from '../bridge/platform';
 import { presentEhError, presentEhLoginError } from '../services/ehClient';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
@@ -67,6 +68,17 @@ function writeHealthCache(cache: EhHealthCache) {
 
 const ehRepository = new NativeEhRepository();
 
+/** 移动端那条注记：网页登录在手机上做不到（见 `open_eh_login_window` 与面板那一段），
+ * 说清楚替代做法，比留一个点下去会闪退的入口强。 */
+const MOBILE_LOGIN_NOTICE = '移动端请用账号登录，或把 Cookie 粘进来。';
+
+/** 手机上不能另开 webview 窗口（Android 上那会把应用自己的界面顶掉、关掉时应用跟着没了），
+ * 登录页要画在应用内。平台是异步命令：提示文案要它，而点下「打开登录页面」时也必须已经
+ * 知道答案——不然刚启动就点的人会走到那条会闪退的路上。每次挂载问一次、在组件内共用
+ * 同一个 promise（不跨组件实例缓存：平台不会变，但缓存住一个过期答案的代价更贵）。
+ *
+ * Rust 侧另有一道防线：`open_eh_login_window` 在移动端直接拒绝。 */
+
 /** How often the sign-in window's cookie jar is checked, and how long the wait
  * lasts. A Cloudflare challenge plus a password is a slow manual job, so the
  * ceiling is generous; the interval is only as tight as it needs to be to feel
@@ -84,6 +96,19 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
   const [accounts, setAccounts] = useState<EhAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [savingAccount, setSavingAccount] = useState(false);
+  /** 手机上不能另开 webview 窗口（会把应用自己的界面顶掉，关掉时应用跟着没了），
+   * 所以登录页改成应用内浮层。平台是异步命令，先按「桌面」画——按错的那一瞬间只影响
+   * 提示文案，点下去之前结果就回来了。 */
+  const [platformMobile, setPlatformMobile] = useState(false);
+  const platformMobileRef = useRef<Promise<boolean> | undefined>(undefined);
+  const isMobilePlatform = useCallback((): Promise<boolean> => {
+    platformMobileRef.current ??= getPlatformCapabilities().then(
+      (result) => result.ok && (result.value.platform === 'android' || result.value.platform === 'ios'),
+    );
+    return platformMobileRef.current;
+  }, []);
+
+  useEffect(() => { void isMobilePlatform().then(setPlatformMobile); }, [isMobilePlatform]);
 
   // The settings row reports the active account as its current value, so the
   // list state has to surface one level. 收起的行也要能看到登录的是谁：用户名，
@@ -233,11 +258,19 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         if (!result.ok) throw new Error(presentEhLoginError(result.error.code, result.error.message));
         return result.value;
       }}
-      onBrowserLogin={async (signal?: AbortSignal) => {
+      browserLoginNotice={platformMobile ? MOBILE_LOGIN_NOTICE : undefined}
+      /* 移动端不提供网页登录：Android 上第二个 webview 会把应用自己的界面顶掉（关掉时
+         应用跟着没了），而登录页发了 `X-Frame-Options: SAMEORIGIN`，也嵌不进应用内。
+         不传这个回调，面板里那个标签页就不出现——比给一个点下去会闪退的入口强。 */
+      onBrowserLogin={platformMobile ? undefined : async (signal?: AbortSignal) => {
         // Open E-Hentai's own page and wait for its cookie jar to hold a session.
         // Polling rather than an event: the user is the one who decides when the
         // challenge is cleared and the form submitted, and there is nothing on
         // the page to hook.
+        //
+        // 手机上登录页画在应用内（`EhLoginSheet`），读的也是应用自己那个 webview 的
+        // Cookie；桌面上才是另开一个窗口。
+        // 现场再确认一次平台：刚启动就点的人不能因为状态还没填上而走错路。
         const opened = await ehRepository.openLoginWindow();
         if (!opened.ok) throw new Error(presentEhError(opened.error.code, opened.error.message));
         const deadline = Date.now() + BROWSER_LOGIN_TIMEOUT_MS;
@@ -245,25 +278,23 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         // pre-existing cookie jar immediately can mistake stale credentials for
         // a completed login and close the window before it is usable.
         await new Promise((resolve) => window.setTimeout(resolve, BROWSER_LOGIN_GRACE_MS));
-        while (Date.now() < deadline) {
-          if (signal?.aborted) {
-            await ehRepository.closeLoginWindow();
-            throw new Error('已取消网页登录');
+        try {
+          while (Date.now() < deadline) {
+            if (signal?.aborted) throw new Error('已取消网页登录');
+            // 先查、再等：宽限结束时正好查第一次，不必再白等一个轮询间隔。
+            const captured = await ehRepository.captureLoginCookies();
+            if (!captured.ok) {
+              // The window is gone: closing it is how someone gives up.
+              if (captured.error.code === 'EH_LOGIN_WINDOW_CLOSED') throw new Error('登录窗口已关闭');
+              throw new Error(presentEhError(captured.error.code, captured.error.message));
+            }
+            if (captured.value) return captured.value;
+            await new Promise((resolve) => window.setTimeout(resolve, BROWSER_LOGIN_POLL_MS));
           }
-          await new Promise((resolve) => window.setTimeout(resolve, BROWSER_LOGIN_POLL_MS));
-          const captured = await ehRepository.captureLoginCookies();
-          if (!captured.ok) {
-            // The window is gone: closing it is how someone gives up.
-            if (captured.error.code === 'EH_LOGIN_WINDOW_CLOSED') throw new Error('登录窗口已关闭');
-            throw new Error(presentEhError(captured.error.code, captured.error.message));
-          }
-          if (captured.value) {
-            await ehRepository.closeLoginWindow();
-            return captured.value;
-          }
+          throw new Error('网页登录超时，请重试');
+        } finally {
+          await ehRepository.closeLoginWindow();
         }
-        await ehRepository.closeLoginWindow();
-        throw new Error('网页登录超时，请重试');
       }}
     />
   );

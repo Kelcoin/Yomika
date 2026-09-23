@@ -685,9 +685,14 @@ body::-webkit-scrollbar,
 
 /* 错误日志菜单里的内容：一行状态 + 刷新/导出，下面是本次运行的记录。菜单面板
    （.settings-choice-panel）已经是这一块的框，所以这里只排内容。 */.error-log-panel { display: grid; gap: var(--space-3); min-width: 0; }
-.error-log-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.error-log-summary { margin: 0; min-width: 0; color: var(--ink-secondary); font-size: var(--text-sm); }
-.error-log-actions { display: flex; flex: none; gap: var(--space-2); }
+.error-log-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.error-log-summary { margin: 0; min-width: 0; flex: 1 1 auto; color: var(--ink-secondary); font-size: var(--text-sm); }
+/* 两个动作共享整行：各占一半，加起来正好铺满面板。原来是按内容宽度排在右边，
+   一行状态加两个小按钮，点起来没有一个够大；面板里也只有这两个动作，没有理由让
+   它们挤在角落。 */.error-log-actions { display: flex; flex: 1 1 100%; gap: var(--space-2); }
+/* 选择器要到两个类这一层：`.primary-action` 自己的 padding 在文件后面（行内留白 20px），
+   只写 `> *` 会被它按源码顺序赢掉，两个按钮就差那 8px。 */.error-log-actions > .primary-action,
+.error-log-actions > .secondary-action { flex: 1 1 0; padding-inline: var(--space-4); }
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */.error-log-list {
   display: grid;
   max-height: min(52vh, 460px);
@@ -3139,27 +3144,12 @@ body::-webkit-scrollbar,
   box-shadow: var(--shadow-overlay);
 }
 
-.dialog-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-
-.dialog-heading h2 {
-  margin-bottom: var(--space-2);
-  font-size: var(--text-lg);
-}
-
-.dialog-heading p {
-  margin-bottom: var(--space-6);
-  color: var(--ink-secondary);
-  font-size: var(--text-sm);
-  line-height: var(--leading-relaxed);
-}
-
 .server-form {
   display: grid;
+  /* 说明紧跟着表单会连成一块：对话框里那句 supporting text 与第一个字段之间留一段。
+     原来这段间距挂在 .dialog-heading p 上，而那一层是给右上角的 ✕ 让位的，✕ 去掉后
+     标题与说明直接落在对话框里（见 .dialog-content > p）。 */
+  margin-block-start: var(--space-6);
   gap: var(--space-4);
 }
 
@@ -3264,7 +3254,9 @@ body::-webkit-scrollbar,
   color: var(--ink-secondary);
   font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
-}.eh-account-panel ul {
+}
+
+eh-account-panel ul {
   display: grid;
   margin: 0;
   padding: 0;
@@ -4040,8 +4032,10 @@ body::-webkit-scrollbar,
     padding: var(--space-6) 0;
   }
 
-  /* 引导在手机上不再是「图标 + 文案」两列：居中一列，卡片留白小一号，两个入口
-     竖排、各自占满一行（.primary-action 在这层已经是 100% 宽）。 */.first-run {
+  /* 引导在手机上不再是「图标 + 文案」两列：居中一列，卡片留白小一号。两个入口仍然
+     并排一行——竖排 + 各自满宽会让卡片里多出两条横幅，而它们是同一件事的两个做法。
+     `.primary-action` 在这一层是 100% 宽（表单里的提交按钮要的），这里按内容宽度
+     收回来。 */.first-run {
     justify-items: center;
     width: min(100%, 420px);
     text-align: center;
@@ -4062,10 +4056,8 @@ body::-webkit-scrollbar,
     height: 30px;
   }
 
-  .first-run-actions {
-    flex-direction: column;
-    align-items: stretch;
-    align-self: stretch;
+  .first-run-actions > .primary-action {
+    width: auto;
   }
 
   .primary-action {

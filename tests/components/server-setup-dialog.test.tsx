@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -68,6 +68,22 @@ describe('server setup dialog', () => {
     expect(pending).toHaveAttribute('aria-busy', 'true');
 
     resolveSave(ok({ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('closes on a click outside, with no ✕ or 取消 in the way', async () => {
+    const user = userEvent.setup();
+    render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} />);
+    await user.click(screen.getByRole('button', { name: '添加服务器' }));
+    const dialog = await screen.findByRole('dialog');
+
+    // 关闭只有一条路：点空白处（Esc 仍在）。右上角的 ✕ 与左下角的取消曾是另外两条，
+    // 而它们一个在标题行里占一角、一个把动作行撑成两颗按钮——这个表单真正要做的事
+    // 只有「保存服务器」一件。
+    expect(within(dialog).queryByRole('button', { name: '关闭' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '取消' })).toBeNull();
+
+    await user.click(document.querySelector('.dialog-overlay')!);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 

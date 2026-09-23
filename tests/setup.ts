@@ -21,13 +21,14 @@ vi.mock('@tauri-apps/api/event', async () => {
 
 // Cross-route snapshots are module-level, so one test's library state would
 // otherwise seed the next test's first render. The categories' localStorage
-// mirror leaks the same way.
+// mirror leaks the same way — and so does the nav mirror, which is read *before*
+// the first render (a leftover would decide the first frame of the next test).
 afterEach(() => {
   resetRouteCacheForTests();
   resetTauriEvents();
   for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
     const key = window.localStorage.key(index);
-    if (key?.startsWith('yomika:library-categories:')) window.localStorage.removeItem(key);
+    if (key?.startsWith('yomika:library-categories:') || key === 'yomika.last-nav') window.localStorage.removeItem(key);
   }
 });
 

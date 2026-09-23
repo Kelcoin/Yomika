@@ -25,6 +25,8 @@ interface EhAccountPanelProps {
   /** Opens E-Hentai's own page and resolves with the cookie header once the user
    * has signed in there. */
   onBrowserLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
+  /** 移动端没有网页登录时的一句注记（替代做法）。 */
+  browserLoginNotice?: string | undefined;
   saving?: boolean | undefined;
   onReadCookie?: ((accountId: string) => Promise<string | undefined>) | undefined;
   onLogout?: ((accountId: string) => Promise<void>) | undefined;
@@ -44,7 +46,7 @@ interface EhAccountPanelProps {
  * so the password form cannot pass it however correct the credentials are, and
  * before this the only way through was copying cookies out of another browser by
  * hand. */
-export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, saving, onReadCookie, onLogout, onEditUsername }: EhAccountPanelProps) {
+export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, browserLoginNotice, saving, onReadCookie, onLogout, onEditUsername }: EhAccountPanelProps) {
   const { showToast, clearToasts } = useToast();
   const [mode, setMode] = useState<'password' | 'browser' | 'cookie'>('password');
   const [browserPending, setBrowserPending] = useState(false);
@@ -182,6 +184,8 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
               <KeyRound aria-hidden="true" />Cookie 导入
             </button>
           </div>
+          {/* 移动端没有「网页登录」这一格：这里说一句为什么、以及怎么做。 */}
+          {browserLoginNotice && <p className="eh-login-hint">{browserLoginNotice}</p>}
           {mode === 'password' ? (
             <form className="eh-account-form" onSubmit={submitPassword}>
               <label>用户名<input name="ehUsername" required autoComplete="off" spellCheck={false} /></label>

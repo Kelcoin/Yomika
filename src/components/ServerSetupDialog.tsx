@@ -1,6 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil, Server } from 'lucide-react';
-import { X } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
@@ -123,20 +122,16 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
-          <div className="dialog-heading">
-            <div>
-              <Dialog.Title>{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
-              <Dialog.Description>连接信息保存在此设备；API Key 存于系统安全存储，已自动读入，可直接查看或替换。</Dialog.Description>
-            </div>
-            <Dialog.Close asChild><button className="icon-button" type="button" aria-label="关闭"><X aria-hidden="true" /></button></Dialog.Close>
-          </div>
+          {/* 标题与说明直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
+              而 ✕ 已经去掉了——关闭改走「点空白处」与 Esc（与设置项的二级菜单同一套）。 */}
+          <Dialog.Title>{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
+          <Dialog.Description>连接信息保存在此设备；API Key 存于系统安全存储，已自动读入，可直接查看或替换。</Dialog.Description>
           <form className="server-form" onSubmit={handleSubmit}>
             <label>名称（可选）<input aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
             <div className="dialog-actions">
-              <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
               <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}>{pending ? '保存中…' : '保存服务器'}</button>
             </div>
           </form>

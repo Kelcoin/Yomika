@@ -47,6 +47,7 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   else delete document.documentElement.dataset.sfw;
   try { window.localStorage.setItem('yomika.last-sfw-mode', String(preferences.sfwMode)); } catch { /* storage unavailable */ }
   applyCustomCss(preferences.customCss);
+  writeNavMirror(preferences);
 }
 
 const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
@@ -54,6 +55,47 @@ const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
  * without this mirror the first frames of every launch painted the default
  * scheme and then flipped — the mirror applies synchronously at import time. */
 const LAST_CUSTOM_CSS_KEY = 'yomika.last-custom-css';
+
+/** 底栏的形态也走镜像：悬浮还是贴底、显示哪几项，都是偏好里的一行，而偏好是 IPC 回来
+ * 的——不镜像的话每次启动都会先画一版贴底栏，等偏好到了再换成悬浮的（明明开着悬浮，
+ * 启动瞬间却闪一下固定栏）。写与读都在本地存储里，与自定义 CSS 那条镜像同一个理由。
+ *
+ * 存的是**形态**不是整份偏好：读回来的值只用来画第一帧，真正的偏一到就整份替换。 */
+const LAST_NAV_KEY = 'yomika.last-nav';
+
+type NavMirror = Pick<PreferenceSnapshot, 'floatingNav' | 'bottomNavItems'>;
+
+function writeNavMirror(preferences: PreferenceSnapshot) {
+  try {
+    window.localStorage.setItem(LAST_NAV_KEY, JSON.stringify({
+      floatingNav: preferences.floatingNav,
+      bottomNavItems: preferences.bottomNavItems,
+    }));
+  } catch { /* storage can be unavailable */ }
+}
+
+/** 首帧用的底栏形态。只认形状对得上的值：镜像被手改坏时宁可回落默认，也不要拿一个
+ * 不认识的东西去画底栏（真正的偏一到就整份覆盖）。 */
+function readNavMirror(): Partial<NavMirror> {
+  try {
+    const raw = window.localStorage.getItem(LAST_NAV_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const value = parsed as { floatingNav?: unknown; bottomNavItems?: unknown };
+    return {
+      ...(typeof value.floatingNav === 'boolean' ? { floatingNav: value.floatingNav } : {}),
+      // 元素只验到「是字符串」：认得哪几个 key 的是底栏自己（AppShell 的
+      // NAV_KEY_ROUTES），不认识的 key 在那边会被过滤掉——所以这里的断言安全，
+      // 也不必把路由表搬到 app 层来。
+      ...(Array.isArray(value.bottomNavItems)
+        ? { bottomNavItems: value.bottomNavItems.filter((item): item is string => typeof item === 'string') as PreferenceSnapshot['bottomNavItems'] }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
+}
 
 // Runs when the module is imported, before React renders anything.
 try {
@@ -83,7 +125,9 @@ function applyCustomCss(css: string) {
 }
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
-  const [preferences, setPreferences] = useState(DEFAULT_PREFERENCES);
+  // 首帧就用镜像里的底栏形态：`.is-floating-nav` 与底栏的 `is-floating` 都读它，
+  // 等 IPC 回来再整份替换（见 LAST_NAV_KEY）。
+  const [preferences, setPreferences] = useState<PreferenceSnapshot>(() => ({ ...DEFAULT_PREFERENCES, ...readNavMirror() }));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
 
