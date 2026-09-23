@@ -38,12 +38,18 @@ describe('data transfer scope', () => {
     expect(credentialTransferScope(scope)).toEqual(['lrr_servers', 'sync_accounts']);
   });
 
-  it('says in one line what a file would carry', () => {
-    expect(transferScopeLabel([...DEFAULT_DATA_TRANSFER_SCOPE])).toBe('记录与设置全选 · 不含凭据');
-    expect(transferScopeLabel([...TRANSFER_CREDENTIAL_CATEGORIES.map((entry) => entry.id)]))
-      .toBe('不含记录与设置 · 含全部凭据');
-    expect(transferScopeLabel(['history', 'lrr_servers'])).toBe('记录与设置 1 项 · 凭据 1 项');
-    expect(transferScopeLabel([])).toBe('不含记录与设置 · 不含凭据');
+  it('answers only whether credentials ride along, in a value short enough for one row', () => {
+    // 值不换行也不截断（.settings-row-value），长值会把标签挤成两行——手机上默认那个
+    // 状态最常被看到，它得是最短的。哪几类记录由「导出数据」那一行逐个列名字，这里
+    // 再数一遍只会把值撑长。
+    expect(transferScopeLabel([...DEFAULT_DATA_TRANSFER_SCOPE])).toBe('仅记录与设置');
+    expect(transferScopeLabel([...TRANSFER_CREDENTIAL_CATEGORIES.map((entry) => entry.id)])).toBe('仅凭据');
+    expect(transferScopeLabel(['history', 'lrr_servers'])).toBe('记录与设置 + 凭据');
+    expect(transferScopeLabel([])).toBe('什么都没勾');
+    for (const scope of [DEFAULT_DATA_TRANSFER_SCOPE, TRANSFER_CREDENTIAL_CATEGORIES.map((entry) => entry.id), ['history', 'lrr_servers'], []] as const) {
+      // 10 = 「记录与设置 + 凭据」，实测这一档在 390 宽下标签仍是一行。
+      expect(transferScopeLabel(scope).length).toBeLessThanOrEqual(10);
+    }
   });
 
   it('lists the credential classes by name for the passphrase dialog', () => {

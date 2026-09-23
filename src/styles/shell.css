@@ -935,38 +935,6 @@ body::-webkit-scrollbar,
   min-width: 0;
 }
 
-/* 一行设置外加它自己的动作。动作不能放进行里——行本身是一个按钮，按钮里再放按钮
-   就不是 HTML 了——所以它站在行旁边，和行一样高。 */
-.settings-item-with-action {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-
-.settings-row-action {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  margin-right: var(--space-3);
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--ink-secondary);
-  cursor: pointer;
-}
-
-.settings-row-action svg { width: 18px; height: 18px; }
-
-.settings-row-action:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-@media (hover: hover) {
-  .settings-row-action:hover:not(:disabled) { color: var(--ink-primary); }
-}
-
 /* 按下态在文件末尾那一块里（触屏按下去的颜色）：这一条只是把选择器记在这里，
    免得找它的时候以为漏了。 */
 
@@ -5371,9 +5339,6 @@ body::-webkit-scrollbar,
   }
 
   .scroll-to-top:is(.is-pressed, :active) { color: var(--brand-vermilion); }
-
-  /* 行上的模型下载按钮：悬停只让字形变正文色，按下去一样。 */
-  .settings-row-action:is(.is-pressed, :active):not(:disabled) { color: var(--ink-primary); }
 }
 
 /* ---- 本地档案页 ---------------------------------------------------------- */

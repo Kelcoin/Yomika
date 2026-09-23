@@ -46,8 +46,9 @@ describe('sync scope', () => {
     expect(parseSyncScope('["nonsense"]')).toEqual([...DEFAULT_SYNC_SCOPE]);
   });
 
-  it('names the whole selectable set as all data', () => {
-    expect(scopeLabel([...SELECTABLE_SYNC_SCOPE])).toBe('全部数据');
+  it('names the whole selectable set as records and settings, never "all data"', () => {
+    // 「全部数据」把凭据说进来了——它们不在同步里，所以全勾也只敢说记录与设置。
+    expect(scopeLabel([...SELECTABLE_SYNC_SCOPE])).toBe('记录与设置全选');
     expect(scopeLabel(['history', 'dedup'])).toBe('历史、非重复标记');
     expect(scopeLabel([])).toBe('不同步任何数据');
     expect(scopeSummary('["history"]')).toBe('同步：历史');

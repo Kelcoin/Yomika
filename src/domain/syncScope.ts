@@ -21,7 +21,7 @@ export const SYNC_SCOPE_CATEGORIES = [
 
 export type SyncScopeCategory = (typeof SYNC_SCOPE_CATEGORIES)[number]['id'];
 
-/** 能勾的那些：默认集合与「全部数据」都按它算。表里没有不可勾的类别，留这个名字是
+/** 能勾的那些：默认集合与「全选」都按它算。表里没有不可勾的类别，留这个名字是
  * 为了让调用方读起来仍然是「可选集合」。 */
 export const SELECTABLE_SYNC_SCOPE: readonly SyncScopeCategory[] =
   SYNC_SCOPE_CATEGORIES.map((entry) => entry.id);
@@ -45,8 +45,9 @@ export function parseSyncScope(value: string | undefined): SyncScopeCategory[] {
   }
 }
 
+/** 行上的摘要。全勾不叫「全部数据」——凭据不在同步里，那句话说满了。 */
 export function scopeLabel(scope: readonly SyncScopeCategory[]): string {
-  if (SELECTABLE_SYNC_SCOPE.every((id) => scope.includes(id))) return '全部数据';
+  if (SELECTABLE_SYNC_SCOPE.every((id) => scope.includes(id))) return '记录与设置全选';
   const labels = SYNC_SCOPE_CATEGORIES.filter((entry) => scope.includes(entry.id)).map((entry) => entry.label);
   return labels.length > 0 ? labels.join('、') : '不同步任何数据';
 }

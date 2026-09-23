@@ -344,7 +344,7 @@ export function SyncScopeChecks({ sync }: { sync: SyncSettingsState }) {
           />
         ))}
       </CheckRowGroup>
-      <p className="sync-scope-hint">记录与设置默认全勾。服务器、账户与凭据只在本机，同步不带它们——要带走得在「导入导出范围」里勾上，再用口令文件导出。</p>
+      <p className="sync-scope-hint">记录与设置默认全勾。凭据只在本机，要带走用「导入导出范围」。</p>
     </>
   );
 }

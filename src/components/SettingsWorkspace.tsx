@@ -105,7 +105,7 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
 
 
 /** A setting whose answer is one of a few. */
-function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, optionStatus, rowAction, children }: {
+function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, optionStatus, children }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
@@ -116,8 +116,6 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
   optionAction?: ((option: { value: string; label: string }) => ReactNode) | undefined;
   /** 挂在某一项下面的一行状态（模型下载进度）：它和那一项同处一层，点完就看得见。 */
   optionStatus?: ((option: { value: string; label: string }) => ReactNode) | undefined;
-  /** 这一行自己的动作，站在行旁边——行本身是一个按钮，动作放不进去。 */
-  rowAction?: ReactNode | undefined;
   /** The hidden compat input the tests and the old markup rely on. */
   children?: ReactNode;
 }) {
@@ -125,7 +123,7 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
   const selected = options.find((option) => option.value === value) ?? options[0];
   return (
     <>
-      <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} action={rowAction} />
+      <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} />
       {children}
       {open && (
         <SettingsMenu title={ariaLabel ?? label} onClose={() => setOpen(false)}>
@@ -379,7 +377,7 @@ function ModelDownloadButton({ option, installed, pending, className, onDownload
       aria-label={`下载${option.label}`}
       title="下载模型"
       disabled={pending}
-      // 菜单里那一个：不冒泡，否则点下载会顺手把菜单关掉，进度条刚出现就没了。
+      // 它只在二级菜单里出现：不冒泡，否则点下载会顺手把菜单关掉，进度条刚出现就没了。
       onClick={(event) => { event.stopPropagation(); onDownload(); }}
     ><Download aria-hidden="true" /></button>
   );
@@ -518,11 +516,8 @@ export function SettingsWorkspace() {
       .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
       .map((hosted) => ({ value: hosted.id, label: hosted.label })),
   ];
-  /** The model the row is showing, and the option that describes it: the row's own
-   * download button needs both the id and the name the catalog gave it. */
+  /** 这一行显示哪个模型。下载在二级菜单里按选项走，所以这里不需要配一份「当前选项」。 */
   const upscaleSelectedModel = preferenceDraft.upscaleModel || upscaleModelOptions[0]?.value || '';
-  const selectedUpscaleOption = upscaleModelOptions.find((option) => option.value === upscaleSelectedModel)
-    ?? { value: upscaleSelectedModel, label: upscaleSelectedModel };
   // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
   if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'waifu2x' });
   const statsRequestedRef = useRef(false);
@@ -1359,30 +1354,9 @@ export function SettingsWorkspace() {
             )}
             {selectedSettingsSection === 'settings-sync' && (
               <SettingsSwitch
-                icon={<HeartOff />}
-                label="同步删除 E-Hentai 收藏"
-                hint={ehAccountName ? '删除档案时一并删除 E-Hentai 收藏' : '登录 E-Hentai 后才能启用'}
-                checked={preferenceDraft.ehFavoriteDeleteSync}
-                /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
-                disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
-                onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
-              />
-            )}
-            {selectedSettingsSection === 'settings-sync' && (
-              <SettingsSwitch
-                icon={<ShieldCheck />}
-                label="默认开启收藏同步删除"
-                hint="删除确认弹窗里的开关默认勾选"
-                checked={preferenceDraft.confirmEhFavoriteDelete}
-                disabled={!preferenceDraft.ehFavoriteDeleteSync}
-                onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
-              />
-            )}
-            {selectedSettingsSection === 'settings-sync' && (
-              <SettingsSwitch
                 icon={<RefreshCw />}
                 label="自动同步"
-                hint="写入后、回前台、联网后与每 30 分钟自动同步"
+                hint="写入后、回前台、联网后与每 30 分钟"
                 checked={preferenceDraft.autoSync}
                 onToggle={() => editPreferences({ autoSync: !preferenceDraft.autoSync })}
               />
@@ -1391,7 +1365,7 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<Waypoints />}
                 label="同步账户"
-                hint="WebDAV 或 S3 兼容存储，同时只生效一套"
+                hint="WebDAV 或 S3 兼容存储"
                 ariaLabel="同步账户"
                 value={sync.loading ? '读取中…' : sync.activeAccount ? sync.activeAccount.label : '未配置'}
                 /* 关掉菜单就是离开这次编辑：再打开时应该是账号行加三个动作，而不是
@@ -1465,6 +1439,30 @@ export function SettingsWorkspace() {
             )}
               </div>
             )}
+            {/* 收藏删除这两个开关自己一组：它们管的是「删档案时要不要把 E-Hentai 上的
+                收藏一起删」，既不是 WebDAV 同步，也不是数据迁移。放在同步开关那一组里
+                会让人以为它们管的是同步本身，放在最前面又把真正的同步控件挤到了下面。 */}
+            {selectedSettingsSection === 'settings-sync' && (
+              <div className="settings-group">
+                <SettingsSwitch
+                  icon={<HeartOff />}
+                  label="同步删除 E-Hentai 收藏"
+                  hint={ehAccountName ? '删除弹窗里可逐次关掉' : '登录 E-Hentai 后才能启用'}
+                  checked={preferenceDraft.ehFavoriteDeleteSync}
+                  /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
+                  disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
+                  onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
+                />
+                <SettingsSwitch
+                  icon={<ShieldCheck />}
+                  label="默认开启收藏同步删除"
+                  hint="删除弹窗里的那个开关"
+                  checked={preferenceDraft.confirmEhFavoriteDelete}
+                  disabled={!preferenceDraft.ehFavoriteDeleteSync}
+                  onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
+                />
+              </div>
+            )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
             {selectedSettingsSection === 'settings-sync' && (
@@ -1475,7 +1473,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel
                   icon={<ArrowLeftRight />}
                   label="导入导出范围"
-                  hint="决定文件里装什么，与同步范围无关"
+                  hint="文件里装哪几类"
                   ariaLabel="导入导出范围"
                   value={transferScopeLabel(transferScope)}
                 >
@@ -1506,7 +1504,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel
                   icon={<FileDown />}
                   label="导出数据"
-                  hint="按导入导出范围勾选的记录与设置导出"
+                  hint="导出成可粘贴的文本"
                   value={recordScopeLabel(transferScope)}
                   onClose={() => setMigrationText('')}
                 >
@@ -1540,7 +1538,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel
                   icon={<FileUp />}
                   label="导入数据"
-                  hint="粘贴导出内容：本机导出的按范围落地"
+                  hint="粘贴导出的文本或凭据文件"
                   onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
                 >
                   <form className="legacy-import-form" onSubmit={runMigrationImport}>
@@ -1619,7 +1617,9 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<Sparkles />}
                   label="启用超分"
-                  hint={upscaleReady ? '用超分模型放大阅读画面' : '尚未安装可用的超分模型'}
+                  /* 模型还没读出来时说「正在读取」，读完才回答有没有——不然一行人
+                     打开页面就被告知「尚未安装」，而它只是还没查到。 */
+                  hint={installedModels === undefined ? '正在读取模型…' : upscaleReady ? '用超分模型放大阅读画面' : '尚未安装可用的超分模型'}
                   checked={upscaleOn}
                   onToggle={() => {
                     if (upscaleOn) { editPreferences({ upscaleBackend: 'off' }); return; }
@@ -1633,6 +1633,8 @@ export function SettingsWorkspace() {
                   value={upscaleSelectedModel}
                   options={upscaleModelOptions}
                   onChange={(value) => editPreferences({ upscaleModel: value })}
+                  /* 下载入口只在这里——二级菜单里每一个还没装上的选项自己那一行。行上
+                     不再另放一个：同一件事两个入口，而值那一格本来只放得下一句话。 */
                   optionAction={(option) => <ModelDownloadButton
                     option={option}
                     installed={Boolean(runnableModels?.some((model) => model.id === option.value))}
@@ -1644,13 +1646,6 @@ export function SettingsWorkspace() {
                     open={pendingModel?.id === option.value}
                     label={pendingModel?.label ?? option.label}
                     progress={modelDownload}
-                  />}
-                  rowAction={<ModelDownloadButton
-                    option={selectedUpscaleOption}
-                    installed={Boolean(runnableModels?.some((model) => model.id === upscaleSelectedModel))}
-                    pending={modelPending}
-                    className="settings-row-action"
-                    onDownload={() => void downloadModel(upscaleSelectedModel, selectedUpscaleOption.label)}
                   />}
                 />
                 <SettingsSwitch
@@ -1673,9 +1668,6 @@ export function SettingsWorkspace() {
                   disabled={!preferenceDraft.upscaleAutoEnable}
                   onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
-                {!runnableModels.length && (
-                  <StatusLine busy={!installedModels}>{installedModels ? '尚未安装可用的超分模型。' : '正在读取已安装模型…'}</StatusLine>
-                )}
               </div>
             )}
             {selectedSettingsSection === 'settings-advanced' && (
@@ -1683,7 +1675,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<Eraser />}
                   label="启用去码"
-                  hint={decensorReady ? '按流程逐级修补遮挡' : '去码模型不完整，无法启用'}
+                  hint={installedModels === undefined ? '正在读取模型…' : decensorReady ? '按流程逐级修补遮挡' : '去码模型不完整，无法启用'}
                   checked={decensorOn}
                   onToggle={() => {
                     if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
@@ -1720,9 +1712,6 @@ export function SettingsWorkspace() {
                     />;
                   })}
                 </div>
-                {!decensorBundles?.length && (
-                  <StatusLine busy={!installedModels}>{installedModels ? '尚未安装去码模型。' : '正在读取模型索引…'}</StatusLine>
-                )}
               </div>
             )}
             {selectedSettingsSection === 'settings-advanced' && (

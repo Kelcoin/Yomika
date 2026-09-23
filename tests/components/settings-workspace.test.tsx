@@ -295,6 +295,27 @@ describe('settings workspace', () => {
     expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(1);
   });
 
+  it('says the model list is still loading instead of claiming nothing is installed', async () => {
+    // 模型列表还没回来时，两个开关都只说「正在读取模型…」。以前卡片底部还有一行状态
+    // 文字说同一件事（同一个结论在卡片里出现两遍），现在状态只在开关自己那一行上——
+    // 而且不能反过来先报「尚未安装」：还没查完就先下结论是错的。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      // 永远不回：把「正在读取」这一刻留在屏幕上量。
+      if (command === 'inference_list_models') return new Promise(() => {});
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    const upscale = await screen.findByRole('switch', { name: '启用超分' });
+    expect(upscale.closest('.settings-row')).toHaveTextContent('正在读取模型…');
+    expect(screen.getByRole('switch', { name: '启用去码' }).closest('.settings-row')).toHaveTextContent('正在读取模型…');
+    expect(screen.queryByText(/尚未安装/)).toBeNull();
+    expect(screen.queryByText(/正在读取已安装模型|正在读取模型索引/)).toBeNull();
+  });
+
   it('blocks an incomplete decensor bundle with a toast instead of enabling it', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -809,8 +830,10 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
 
-    // 行上就有下载入口。以前只有二级菜单里那一个，于是「下载」这件事必须先打开菜单
-    // 才做得到——这条断言就是那个入口的存在性。
+    // 下载入口只有二级菜单里那一个。行上曾经还有一个：同一件事两个入口，而值那一格
+    // 本来只放得下一句话，多一个按钮就先把它挤没了。行负责选，下载在选项自己那一行。
+    expect(screen.queryByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' })).toBeNull();
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
     await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
 
@@ -819,7 +842,6 @@ describe('settings workspace', () => {
 
     // 进度挂在菜单里它自己那一项下面——也就是点「下载」的地方。以前进度画在设置项上，
     // 正好在菜单那层遮罩后面，点完下载根本看不到。
-    await user.click(screen.getByRole('button', { name: '超分模型' }));
     const menu = screen.getByRole('dialog', { name: '超分模型' });
     const status = menu.querySelector('.model-download-status');
     expect(status).not.toBeNull();

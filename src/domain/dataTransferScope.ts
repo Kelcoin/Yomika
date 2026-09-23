@@ -67,21 +67,17 @@ export function recordScopeLabel(scope: readonly TransferCategory[]): string {
   return labels.length > 0 ? labels.join('、') : '未选择记录与设置';
 }
 
-/** 面板行上的摘要：两半各自选了几类，一眼看得出文件里有没有凭据。 */
+/** 面板行上的摘要：这一行只回答一件事——**凭据在不在文件里**。具体哪几类记录看
+ * 「导出数据」那一行（`recordScopeLabel` 会挨个列名字），这里再数一遍只会把行上的值
+ * 撑长；而行上的值不换行也不截断，值一长标签就被挤成两行（手机上默认那个状态最常被
+ * 看到）。所以四种状态，最长的那个也只有 9 个字。 */
 export function transferScopeLabel(scope: readonly TransferCategory[]): string {
-  const records = recordTransferScope(scope).length;
-  const credentials = credentialTransferScope(scope).length;
-  const recordText = records === TRANSFER_RECORD_CATEGORIES.length
-    ? '记录与设置全选'
-    : records === 0
-      ? '不含记录与设置'
-      : `记录与设置 ${records} 项`;
-  const credentialText = credentials === 0
-    ? '不含凭据'
-    : credentials === TRANSFER_CREDENTIAL_CATEGORIES.length
-      ? '含全部凭据'
-      : `凭据 ${credentials} 项`;
-  return `${recordText} · ${credentialText}`;
+  const hasRecords = recordTransferScope(scope).length > 0;
+  const hasCredentials = credentialTransferScope(scope).length > 0;
+  if (hasRecords && hasCredentials) return '记录与设置 + 凭据';
+  if (hasRecords) return '仅记录与设置';
+  if (hasCredentials) return '仅凭据';
+  return '什么都没勾';
 }
 
 /** 勾了哪几类的名字，用来在口令对话框里说清「这个文件里装了什么」。 */
