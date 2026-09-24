@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
   <title id="title">Yomika mark</title>
-  <desc id="desc">Yomika mark without its rounded square: the foreground layer of the Android adaptive icon, and its monochrome layer. The black behind it comes from the manifest's bg_color.</desc>
-  <rect x="120" y="120" width="272" height="272" rx="16" stroke="#F5F5F5" stroke-width="10" fill="none"/>
-  <line x1="188" y1="188" x2="188" y2="324" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
-  <line x1="188" y1="188" x2="256" y2="188" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
-  <line x1="222" y1="188" x2="222" y2="256" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
-  <line x1="256" y1="222" x2="324" y2="222" stroke="#E8E8E8" stroke-width="10" stroke-linecap="round"/>
-  <circle cx="290" cy="290" r="16" fill="#E8E8E8"/>
+  <desc id="desc">Yomika mark without its rounded square: the foreground layer of the Android adaptive icon, and its monochrome layer. The black behind it comes from the manifest's bg_color. The mark is drawn at 42% of the canvas (not the 53% the print icon uses): Android only shows the middle 72dp of the 108dp adaptive canvas, so the same 53% would read as ~80% of the visible squircle and the frame would nearly touch its edges. 42% of the canvas = ~63% of what is actually visible, which leaves the ~17% margin launcher icons are drawn with. This padding is what `android_fg_scale` was supposed to do — it is inert in tauri-cli 2.11.4, measured: 50 changes nothing.</desc>
+  <g transform="translate(256 256) scale(0.8) translate(-256 -256)">
+    <rect x="120" y="120" width="272" height="272" rx="16" stroke="#F5F5F5" stroke-width="10" fill="none"/>
+    <line x1="188" y1="188" x2="188" y2="324" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
+    <line x1="188" y1="188" x2="256" y2="188" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
+    <line x1="222" y1="188" x2="222" y2="256" stroke="#F5F5F5" stroke-width="10" stroke-linecap="round"/>
+    <line x1="256" y1="222" x2="324" y2="222" stroke="#E8E8E8" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="290" cy="290" r="16" fill="#E8E8E8"/>
+  </g>
 </svg>

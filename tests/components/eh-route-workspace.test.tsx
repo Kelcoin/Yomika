@@ -57,30 +57,65 @@ describe('EH route workspace', () => {
     expect(adapter.mock.calls.map(([command]) => command)).not.toContain('check_eh_login_health');
   });
 
-  it('offers no web sign-in on mobile, where neither a second window nor an iframe can work', async () => {
-    // Android 上 tao 只会把新窗口挂到当前 activity，wry 建 webview 时对它调 setContentView
-    // ——应用自己的界面被换成登录页，关掉时应用跟着没了（闪退）。而 E-Hentai 给登录页发了
-    // `X-Frame-Options: SAMEORIGIN`（CSP 还是 `default-src 'none'`），所以也嵌不进应用内。
-    // 移动端干脆不给这个入口，并说明替代做法。
+  it('opens the in-app sign-in sheet on mobile and picks the cookie up by polling', async () => {
+    // Android 上应用自己的 webview 就是 activity 的内容视图：另开窗口会把它顶掉，顶层导航
+    // 等于把应用整个换掉（两条都闪退）。所以登录页画在原生侧的另一层 WebView 上——应用原地
+    // 不动，结果在这里轮询领回来。
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    let polls = 0;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'platform_capabilities') return { ok: true, value: { platform: 'android', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: false } };
+      if (command === 'start_eh_in_app_login') return { ok: true, value: null };
+      if (command === 'take_eh_in_app_login') {
+        polls += 1;
+        // 第一轮还没有会话（人还在登录页上），第二轮才有——轮询确实在轮。
+        return { ok: true, value: polls > 1 ? `ipb_member_id=42; ipb_pass_hash=${hash}` : null };
+      }
+      if (command === 'cancel_eh_in_app_login') return { ok: true, value: null };
+      if (command === 'save_eh_account') return { ok: true, value: { id: 'eh-42', label: 'E-Hentai 42', host: 'e-hentai.org', cookieRef: 'keyring://eh-42', isActive: true, status: 'verified', createdAt: '2026-09-23', updatedAt: '2026-09-23' } };
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
+    const user = userEvent.setup();
     try {
       renderEhRoute();
 
-      // 另外两条路仍在，只有「网页登录」不见了。
-      expect(await screen.findByRole('tab', { name: /账号登录/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /Cookie 导入/ })).toBeInTheDocument();
-      await vi.waitFor(() => expect(screen.queryByRole('tab', { name: /网页登录/ })).toBeNull());
-      expect(screen.getByText('移动端请用账号登录，或把 Cookie 粘进来。')).toBeInTheDocument();
+      // 三个登录方式都在；点「网页登录」给的是应用内那条路，不是另开窗口。
+      await user.click(await screen.findByRole('tab', { name: /网页登录/ }));
+      expect(screen.getByText(/在应用内的登录页完成登录/)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /打开登录页面/ }));
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('start_eh_in_app_login', {}));
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_eh_account', {
+        input: expect.objectContaining({ cookie: `ipb_member_id=42; ipb_pass_hash=${hash}` }),
+      }), { timeout: 5_000 });
       expect(adapter.mock.calls.map(([command]) => command)).not.toContain('open_eh_login_window');
     } finally {
       delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     }
+  });
+
+  it('picks up the in-app sign-in result after the app comes back', async () => {
+    // 顶层导航那条路（桌面、iOS）登录期间应用整页被登录页替换掉，回来时是重新加载：结果由
+    // 原生侧存着，这里重载后领一次。Android 上是原生浮层，这条兜底也不会把结果丢在地上。
+    const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'take_eh_in_app_login') return { ok: true, value: `ipb_member_id=42; ipb_pass_hash=${hash}` };
+      if (command === 'save_eh_account') return { ok: true, value: { id: 'eh-42', label: 'E-Hentai 42', host: 'e-hentai.org', cookieRef: 'keyring://eh-42', isActive: true, status: 'verified', createdAt: '2026-09-23', updatedAt: '2026-09-23' } };
+      if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderEhRoute();
+
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_eh_account', {
+      input: expect.objectContaining({ cookie: `ipb_member_id=42; ipb_pass_hash=${hash}` }),
+    }));
+    // 领走即清：同一个结果不会再被保存第二次。
+    expect(adapter.mock.calls.filter(([command]) => command === 'take_eh_in_app_login')).toHaveLength(1);
   });
 
   it('opens the sign-in window on the desktop and reads its cookie jar', async () => {

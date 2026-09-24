@@ -28,6 +28,36 @@ if (Test-Path -LiteralPath $ndk -PathType Container) {
     if ($newest) { $env:ANDROID_NDK_ROOT = $newest.FullName; Write-Host "Android NDK: $($newest.Name)" }
 }
 
+# 签名：release 变体只有在 `release.keystore` + 三个口令变量齐了才会被签名
+# （见 gen/android/app/build.gradle.kts）。没签名的 APK 装不上（Android 报
+# INSTALL_PARSE_FAILED_NO_CERTIFICATES: Attempt to get length of null array），
+# 所以这里把本地的口令文件读进来，缺了就明确说一声——「构建成功但装不上」是最没必要
+# 踩的坑。两个文件都进了 .gitignore，只存在于开发机上。
+if ($Release) {
+    $keystoreProperties = Join-Path $repoRoot "src-tauri/gen/android/keystore.local.properties"
+    if (Test-Path -LiteralPath $keystoreProperties) {
+        Get-Content -LiteralPath $keystoreProperties | ForEach-Object {
+            if ($_ -match '^\s*([^#=]+)=(.*)$') {
+                $name = $Matches[1].Trim()
+                $value = $Matches[2].Trim()
+                if ($name -eq 'storePassword') { $env:ANDROID_KEYSTORE_PASSWORD = $value }
+                elseif ($name -eq 'keyAlias') { $env:ANDROID_KEY_ALIAS = $value }
+                elseif ($name -eq 'keyPassword') { $env:ANDROID_KEY_PASSWORD = $value }
+            }
+        }
+    }
+    $keystore = Join-Path $repoRoot "src-tauri/gen/android/release.keystore"
+    $signingReady = (Test-Path -LiteralPath $keystore) -and $env:ANDROID_KEYSTORE_PASSWORD -and $env:ANDROID_KEY_ALIAS -and $env:ANDROID_KEY_PASSWORD
+    if ($signingReady) {
+        Write-Host "Signing with $keystore (alias $($env:ANDROID_KEY_ALIAS))"
+    } else {
+        Write-Warning "没有签名密钥：这次出来的 APK 是 unsigned 的，装不到手机上。"
+        Write-Warning "本地做一份能装的："
+        Write-Warning "  keytool -genkeypair -keystore src-tauri/gen/android/release.keystore -alias yomika-test -keyalg RSA -keysize 2048 -validity 10000 -storepass <口令> -keypass <口令> -dname CN=Yomika"
+        Write-Warning "  再把 storePassword / keyAlias / keyPassword 写进 src-tauri/gen/android/keystore.local.properties"
+    }
+}
+
 Push-Location $repoRoot
 try {
     $configuration = if ($Release) { "release" } else { "debug" }

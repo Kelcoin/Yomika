@@ -695,7 +695,7 @@ body::-webkit-scrollbar,
 .error-log-actions > .secondary-action { flex: 1 1 0; padding-inline: var(--space-4); }
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */.error-log-list {
   display: grid;
-  max-height: min(52vh, 460px);
+  max-height: min(52dvh, 460px);
   margin: 0;
   padding: 0;
   overflow: auto;
@@ -712,7 +712,8 @@ body::-webkit-scrollbar,
 .error-log-time { flex: none; font-variant-numeric: tabular-nums; }
 .error-log-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .error-log-message { color: var(--on-surface); font-size: var(--text-sm); line-height: var(--leading-normal); overflow-wrap: anywhere; }
-.error-log-detail { color: var(--ink-secondary); font-family: var(--font-utility); font-size: var(--text-xs); line-height: var(--leading-normal); overflow-wrap: anywhere; }
+/* `pre-wrap`：明细可能是多行的（Java 栈、命令行），塌成一行就没法看了。 */
+.error-log-detail { color: var(--ink-secondary); font-family: var(--font-utility); font-size: var(--text-xs); line-height: var(--leading-normal); overflow-wrap: anywhere; white-space: pre-wrap; }
 
 .settings-page {
   min-width: 0;
@@ -3641,7 +3642,7 @@ eh-account-panel ul {
 /* 对话框里的空态比整页的小一号：320px 的整页空态会把「扫描结果」这个弹窗撑成一屏，
    而这里要说的只是一句「还没有」。 */
 .dedup-history-dialog .empty-state { min-height: 180px; padding: var(--space-5) var(--space-4); }
-.dedup-history-list { display: grid; gap: var(--space-2); max-height: 46vh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
+.dedup-history-list { display: grid; gap: var(--space-2); max-height: 46dvh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
 .dedup-history-list strong { display: block; font-size: var(--text-sm); }
@@ -3756,7 +3757,7 @@ eh-account-panel ul {
    自己已经有了），只把宽度和高度算好。 */.archive-overview-dialog { width: min(960px, 94vw); }
 .archive-overview-dialog .reader-overview {
   width: 100%;
-  max-height: min(76vh, 720px);
+  max-height: min(76dvh, 720px);
   padding: 0;
   border: 0;
   background: transparent;
@@ -3776,7 +3777,7 @@ eh-account-panel ul {
   font-family: var(--font-body);
 }
 .dedup-relations-search:focus { border-color: var(--focus-ring); box-shadow: var(--focus-shadow); outline: none; }
-/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46vh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
+/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46dvh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-relation-pair { display: grid; grid-template-columns: 34px 34px minmax(0, 1fr); align-items: center; gap: var(--space-2); min-width: 0; }
 .dedup-relation-cover { display: block; }
@@ -4338,7 +4339,7 @@ eh-account-panel ul {
   display: grid;
   gap: 2px;
   width: min(100%, 420px);
-  max-height: min(70vh, 520px);
+  max-height: min(70dvh, 520px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-4);
@@ -4360,7 +4361,7 @@ eh-account-panel ul {
   flex-direction: column;
   gap: 2px;
   width: min(100%, 420px);
-  max-height: min(85vh, 760px);
+  max-height: min(85dvh, 760px);
   overflow: hidden;
   padding: var(--space-4);
   border: 1px solid var(--outline-variant);
@@ -4374,13 +4375,29 @@ eh-account-panel ul {
   flex: none;
 }
 
+/* 二级菜单的标题：居中，左边一枚图标（与它来源那一行是同一个），比正文稍大一点——
+   「这是从哪一行开出来的」看一眼就知道，不必回头认标题。 */
 .search-preset-title,
 .settings-choice-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
   margin: 0 0 var(--space-2);
   color: var(--on-surface);
-  font-size: var(--text-md);
+  font-size: var(--text-lg);
   font-weight: var(--weight-bold);
 }
+
+.settings-choice-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  color: var(--on-surface-variant);
+}
+
+.settings-choice-icon svg { width: 20px; height: 20px; }
 
 /* ---- Menu content: the second level every setting opens -------------------- */.settings-menu-body {
   display: grid;

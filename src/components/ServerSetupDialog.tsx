@@ -5,6 +5,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type { CommandResult } from '../domain/result';
 import { createServerIdentity, normalizeServerUrl, type ServerIdentity } from '../domain/server';
 import type { ServerRecord } from '../domain/library';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { SettingsRowBody } from './SettingsRow';
 
@@ -37,6 +38,9 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+
+  // 返回手势先关这一层（见 overlayBackGuard）。
+  useOverlayBackGuard(open, () => handleOpenChange(false));
 
   function handleOpenChange(next: boolean) {
     setOpen(next);

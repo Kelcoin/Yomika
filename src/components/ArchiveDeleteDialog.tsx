@@ -5,6 +5,7 @@ import type { ArchiveRecord } from '../domain/library';
 import { NativeSettingsRepository, type PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useToast } from './Toast';
 import { SwitchControl } from './SettingsControls';
 
@@ -32,6 +33,8 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
   /** 有没有可用的 E-Hentai 账户；undefined 表示还没读到（或读失败，按可用处理）。 */
   const [ehReady, setEhReady] = useState<boolean>();
   const [busy, setBusy] = useState(false);
+  // 挂载即打开；返回手势先关这一层（忙的时候拒绝，守卫会自己补回去）。
+  useOverlayBackGuard(true, () => { if (!busy) onClose(); });
   useEffect(() => {
     let active = true;
     void (async () => {

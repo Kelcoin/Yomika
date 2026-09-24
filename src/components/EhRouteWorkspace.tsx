@@ -5,6 +5,7 @@ import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { getPlatformCapabilities } from '../bridge/platform';
+import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '../lib/ehCookie';
 import { presentEhError, presentEhLoginError } from '../services/ehClient';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
@@ -68,10 +69,6 @@ function writeHealthCache(cache: EhHealthCache) {
 
 const ehRepository = new NativeEhRepository();
 
-/** 移动端那条注记：网页登录在手机上做不到（见 `open_eh_login_window` 与面板那一段），
- * 说清楚替代做法，比留一个点下去会闪退的入口强。 */
-const MOBILE_LOGIN_NOTICE = '移动端请用账号登录，或把 Cookie 粘进来。';
-
 /** 手机上不能另开 webview 窗口（Android 上那会把应用自己的界面顶掉、关掉时应用跟着没了），
  * 登录页要画在应用内。平台是异步命令：提示文案要它，而点下「打开登录页面」时也必须已经
  * 知道答案——不然刚启动就点的人会走到那条会闪退的路上。每次挂载问一次、在组件内共用
@@ -109,6 +106,32 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
   }, []);
 
   useEffect(() => { void isMobilePlatform().then(setPlatformMobile); }, [isMobilePlatform]);
+
+  /* 移动端的应用内登录有两条收尾路径：原生浮层那条由上面那次轮询直接领走结果；顶层导航
+     那条（桌面、iOS）会让应用整页重载，登录期间那个 promise 早就没了，所以重载后来领一次。
+     这里留着这条兜底，两条路都不会把结果丢在地上。 */
+  useEffect(() => {
+    let active = true;
+    void ehRepository.takeInAppLogin().then(async (result) => {
+      if (!active || !result.ok || !result.value) return;
+      const credentials = parseEhCookie(result.value);
+      if (!credentials) return;
+      const saved = await ehRepository.saveAccount({
+        id: ehAccountIdFor(credentials),
+        label: 'E-Hentai 账户',
+        host: ehHostFor(credentials),
+        cookie: formatEhCookieHeader(result.value),
+      });
+      if (!active) return;
+      if (!saved.ok) {
+        showToast(presentEhError(saved.error.code, saved.error.message), 'error');
+        return;
+      }
+      setAccounts((current) => [...current.filter((account) => account.id !== saved.value.id), { ...saved.value, status: 'verified' }]);
+      showToast('E-Hentai 登录成功', 'success');
+    });
+    return () => { active = false; };
+  }, [showToast]);
 
   // The settings row reports the active account as its current value, so the
   // list state has to surface one level. 收起的行也要能看到登录的是谁：用户名，
@@ -258,10 +281,29 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         if (!result.ok) throw new Error(presentEhLoginError(result.error.code, result.error.message));
         return result.value;
       }}
-      browserLoginNotice={platformMobile ? MOBILE_LOGIN_NOTICE : undefined}
-      /* 移动端不提供网页登录：Android 上第二个 webview 会把应用自己的界面顶掉（关掉时
-         应用跟着没了），而登录页发了 `X-Frame-Options: SAMEORIGIN`，也嵌不进应用内。
-         不传这个回调，面板里那个标签页就不出现——比给一个点下去会闪退的入口强。 */
+      /* 移动端与桌面两条路，形状一样：打开登录页 → 等 Cookie → 结果回来。
+         桌面另开一个窗口（那窗口的 Cookie 罐单独一份）；移动端开的是应用内的原生浮层
+         ——Android 上应用自己的 webview 就是 activity 的内容视图，另开窗口会把它顶掉、
+         顶层导航等于把应用整个换掉（两条都闪退），所以登录页画在原生侧的另一层 WebView
+         上，应用原地不动，登录完由这里领结果。 */
+      onInAppLogin={platformMobile ? async (signal?: AbortSignal) => {
+        const started = await ehRepository.startInAppLogin();
+        if (!started.ok) throw new Error(presentEhError(started.error.code, started.error.message));
+        const deadline = Date.now() + BROWSER_LOGIN_TIMEOUT_MS;
+        try {
+          while (Date.now() < deadline) {
+            if (signal?.aborted) throw new Error('已取消网页登录');
+            const taken = await ehRepository.takeInAppLogin();
+            if (!taken.ok) throw new Error(presentEhError(taken.error.code, taken.error.message));
+            if (taken.value) return taken.value;
+            await new Promise((resolve) => window.setTimeout(resolve, BROWSER_LOGIN_POLL_MS));
+          }
+          throw new Error('网页登录超时，请重试');
+        } finally {
+          // 收工就关掉浮层：把人留在登录页上是最没道理的一种结局。
+          await ehRepository.cancelInAppLogin();
+        }
+      } : undefined}
       onBrowserLogin={platformMobile ? undefined : async (signal?: AbortSignal) => {
         // Open E-Hentai's own page and wait for its cookie jar to hold a session.
         // Polling rather than an event: the user is the one who decides when the

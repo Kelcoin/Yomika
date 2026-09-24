@@ -16,8 +16,11 @@ So the first entry is the app's *small* icon: the one in the window's own title
 area and in the taskbar's hover preview. A 256×256 image in that slot is not
 scaled down, it simply fails to draw, which is how the hover preview lost its icon.
 
-The order is therefore 32×32 first, then the rest largest to smallest. Re-exporting
-this file from a design tool will silently reorder it; put 32×32 back in front.
+The order is therefore 32×32 first, then the rest. (`tauri icon` writes them ascending
+after the 32; the hand-made file that predates the manifest had them largest-first —
+Windows picks by size either way, and only the **first** entry is load-bearing.
+Re-exporting this file from a design tool will silently reorder it; put 32×32 back in
+front.
 
 ## Mobile icons
 
@@ -36,6 +39,15 @@ adaptive icon's foreground and monochrome layer, and `#0D0D0D` for the plate
 behind them. The separate foreground is what keeps Android from drawing the whole
 black square inside a white circle: the foreground is what gets scaled into the
 mask's safe area.
+
+`android-foreground.svg` 里的 mark 画在画布的 **42%**（`default` 那份 print 图标是 53%），
+外面套一层 `scale(0.8)`。原因是 Android 只显示 108dp 自适应画布**中间那 72dp**：同一份
+53% 的画落到可见范围里就是 ~80%，白框几乎贴着启动器遮罩的边缘（实测就是这样，用户报
+「四周边缘太小、图标占得太满」）。42% 落到可见范围约 63%，正好留出启动器图标惯常的那圈
+~17% 留白。
+
+`android_fg_scale` 这个 manifest 字段**在 tauri-cli 2.11.4 里是空的**：填 80、甚至填 50，
+生成出来的 `ic_launcher_foreground.png` 逐字节不变（量过）。缩放只能写在源 SVG 里。
 
 A regeneration also rewrites the desktop set, `icon.ico` included. That one comes
 out with 32×32 still in front, so it keeps working — the warning above is about

@@ -59,6 +59,7 @@ import { NativeDedupRepository, type DedupPairInput } from '../repositories/nati
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { openExternalUrl } from '../bridge/externalUrl';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
@@ -77,7 +78,9 @@ function PreferenceRadioFallback({ name, value, options, onChange }: { name: str
  * reads as the same thing, wherever it was opened from. Escape belongs to the
  * menu wherever the focus is: it can be lost to the row behind it, and a menu
  * that only answers a focused Escape is a trap. */
-function SettingsMenu({ title, description, onClose, children }: { title: string; description?: string | undefined; onClose: () => void; children: ReactNode }) {
+function SettingsMenu({ title, description, icon, onClose, children }: { title: string; description?: string | undefined; icon?: ReactNode; onClose: () => void; children: ReactNode }) {
+  // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
+  useOverlayBackGuard(true, onClose);
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', close);
@@ -94,7 +97,10 @@ function SettingsMenu({ title, description, onClose, children }: { title: string
           onClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
         >
-          <h2 className="settings-choice-title">{title}</h2>
+          <h2 className="settings-choice-title">
+            {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
+            {title}
+          </h2>
           {description && <p className="settings-menu-desc">{description}</p>}
           <div className="settings-menu-body">{children}</div>
         </div>
@@ -126,7 +132,7 @@ function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange
       <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} />
       {children}
       {open && (
-        <SettingsMenu title={ariaLabel ?? label} onClose={() => setOpen(false)}>
+        <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={() => setOpen(false)}>
           <div className="settings-choice-list">
             {options.map((option) => (
               <div className={`settings-choice-option${option.value === value ? ' is-active' : ''}`} key={option.value}>
@@ -169,7 +175,7 @@ function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, 
           above it unlocks. */}
       <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
       {open && (
-        <SettingsMenu title={label} description={hint} onClose={() => setOpen(false)}>
+        <SettingsMenu title={label} description={hint} icon={icon} onClose={() => setOpen(false)}>
           <div className="settings-menu-stepper">
             <button className="icon-action" type="button" aria-label={`减小${label}`} disabled={value <= min} onClick={() => onChange(clamp(value - step))}><Minus aria-hidden="true" /></button>
             <input
@@ -190,15 +196,16 @@ function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, 
   );
 }
 
-/** 关于页里的错误日志：和其他设置项同一套「一行 + 菜单」——行上显示本次运行记
- * 了几条，点开才读取列表并给出刷新、导出。 */
+/** 关于页里的错误日志：和其他设置项同一套「一行 + 菜单」——行上显示记了几条，点开才读取
+ * 列表并给出刷新、导出。行上和菜单里都没有说明文字：那两句（「本次运行记录到的错误；
+ * 每次启动重新记录」）既不准确（现在留两轮）又占着最显眼的位置，而下面那行计数已经说清
+ * 了状态。 */
 function ErrorLogSetting() {
   const errorLog = useErrorLog();
   const count = errorLog.entries?.length;
   return <SettingsPanel
     icon={<ScrollText />}
     label="错误日志"
-    hint="本次运行记录到的错误；每次启动重新记录"
     value={count === undefined ? '读取中' : `${count} 条`}
     ariaLabel="错误日志"
   >
@@ -225,7 +232,7 @@ function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children 
     <>
       <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
       {open && (
-        <SettingsMenu title={ariaLabel ?? label} description={hint} onClose={close}>
+        <SettingsMenu title={ariaLabel ?? label} description={hint} icon={icon} onClose={close}>
           {children}
         </SettingsMenu>
       )}

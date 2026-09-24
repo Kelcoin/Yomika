@@ -15,6 +15,7 @@ import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
 import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
 import { ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
@@ -157,6 +158,8 @@ export function LocalArchivesWorkspace() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // 返回手势先关确认框（忙的时候拒绝，守卫会自己补回去）。
+  useOverlayBackGuard(confirmingDelete, () => { if (!busy) setConfirmingDelete(false); });
   const [busy, setBusy] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string>();
   const [presetDialog, setPresetDialog] = useState<{ preset?: SearchPreset } | undefined>();

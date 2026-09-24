@@ -1,11 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
+import { setSystemBarStyle } from '../bridge/platform';
 import { SYNC_COMPLETED_EVENT, setAutoSyncEnabled, startAutoSync } from '../lib/autoSync';
 import { startHistoryMaintenance } from '../lib/historyMaintenance';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { setEhMyTagsPriorityEnabled } from '../lib/ehMyTags';
 import { upgradeCssThemePreset } from '../lib/cssThemePresets';
+import { syncSystemInsets } from '../lib/safeArea';
 import {
   DEFAULT_PREFERENCES,
   NativeSettingsRepository,
@@ -36,6 +38,10 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
   }
   const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
   themeColor.content = dark ? '#09090b' : '#f3eee4';
+  // 系统栏图标与窗口底色也跟着这个主题：Android 上系统栏是透明的（内容画到边），
+  // 图标明暗由应用说了算——跟着系统主题走的话，深色应用碰上浅色系统就是深色图标
+  // 落在深色栏上（「状态栏很突兀」有一半是它）。
+  void setSystemBarStyle(dark, themeColor.content);
 }
 
 function applyPreferences(preferences: PreferenceSnapshot) {
@@ -147,6 +153,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => { void reload(); }, [reload]);
+
+  // 系统栏高度只有原生侧有（见 lib/safeArea）：启动时问一次，之后原生自己写变量。
+  useEffect(() => { void syncSystemInsets(); }, []);
 
   // 自动同步与历史清理的触发点（启动、回前台、写入、联网、定时）在这里装上；
   // 拉回到别的设备的改动时，偏好得重读一次，否则界面上还是本机这份。

@@ -20,7 +20,9 @@ export class NativeErrorLogRepository {
     return invokeCommand('error_log_read', {}, z.array(ErrorLogEntrySchema));
   }
 
-  exportTo(path: string): Promise<CommandResult<string>> {
-    return invokeCommand('error_log_export', { path }, z.string());
+  /** 内容由调用方给：导出的就是界面上那一份，原生侧只负责写到用户选的位置
+   * （Android 上 `dialog.save` 给的是 SAF 的 `content://` URI，只有原生侧写得进去）。 */
+  exportTo(path: string, contents: string): Promise<CommandResult<string>> {
+    return invokeCommand('error_log_export', { path, contents }, z.string());
   }
 }

@@ -58,3 +58,8 @@ src-tauri/.npm-cache/
 Thumbs.db
 .idea/
 .vscode/
+
+# Android 签名：release 密钥与它在本地的口令文件都只在这台机器上。
+# CI 构建时会往这里写一份（从 secret 解出来），本地测试密钥也放这里——都不进仓库。
+/src-tauri/gen/android/release.keystore
+/src-tauri/gen/android/keystore.local.properties

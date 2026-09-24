@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import type { SearchPreset } from '../repositories/nativeLibraryRepository';
 
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { OverlayLayer } from './OverlayLayer';
 
 /** 检索预设：一个按钮加一层手写浮层。档案库和本地档案页共用它——两边的搜索框
@@ -16,6 +17,8 @@ export function SearchPresetField({ presets, onApply, onSave, onEdit, onDelete }
 }) {
   const [open, setOpen] = useState(false);
   const field = useRef<HTMLDivElement>(null);
+  // 返回手势先收起这个面板（见 overlayBackGuard）。
+  useOverlayBackGuard(open, () => setOpen(false));
 
   // The popover closes the way the select fields do. 浮层挂到 body 上以后，面板里的
   // 点击不再算「在 field 里」——那是浮层自己在管的事，这里放过，否则指针一按下按钮

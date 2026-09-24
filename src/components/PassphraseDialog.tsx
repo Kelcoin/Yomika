@@ -3,6 +3,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { MIN_PASSPHRASE_CHARS } from '../domain/credentialWire';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 
 /** 凭据文件的口令。导出要输两遍、导入只输一遍。
  *
@@ -30,6 +31,8 @@ export function PassphraseDialog({
   onConfirm: (passphrase: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
+  // 返回手势先关这一层（见 overlayBackGuard）：口令框开着时返回不该把页面带走。
+  useOverlayBackGuard(open, () => onOpenChange(false));
   const [passphrase, setPassphrase] = useState('');
   const [confirm, setConfirm] = useState('');
   const [reveal, setReveal] = useState(false);

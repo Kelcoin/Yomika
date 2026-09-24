@@ -11,13 +11,15 @@ mod domain;
 mod error_log;
 mod inference;
 mod model_release;
+#[cfg(target_os = "android")]
+mod mobile_host;
 mod network;
 mod settings;
 
 use cache::{
     cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats,
 };
-use commands::eh::{capture_eh_login_cookies, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
+use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
 use error_log::{error_log_append, error_log_append_batch, error_log_export, error_log_read};
 use commands::library::{
@@ -40,7 +42,7 @@ use commands::library::{
     set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
     use_metadata_plugin, verify_archives_exist,
 };
-use commands::platform::{open_external_url, platform_capabilities, reveal_in_file_manager, write_clipboard_text};
+use commands::platform::{open_external_url, platform_capabilities, reveal_in_file_manager, set_system_bar_style, system_insets, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, claim_sync_journal, export_scoped_data, import_scoped_data,
     list_sync_accounts, list_sync_journal,
@@ -76,16 +78,21 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    // 原生宿主只有 Android 有（登录面板 + SAF 写文件），别的平台那两条路走别的实现。
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(mobile_host::plugin());
+    builder
         .setup(|app| {
             data_paths::prepare(app.handle()).map_err(std::io::Error::other)?;
-            // 错误日志描述的是这一次运行：先清空，再挂上 panic 钩子。
-            error_log::reset(app.handle());
+            // 错误日志留两轮：先把「本轮」翻成「上一轮」（上一轮的现场是这次闪退唯一的
+            // 线索），再挂上 panic 钩子。
+            error_log::rotate(app.handle());
             error_log::install_panic_hook(app.handle());
             let database = Database::open(app.handle()).map_err(std::io::Error::other)?;
             app.manage(database);
             app.manage(DedupScanRegistry::default());
+            app.manage(InAppLoginState::default());
             let config = app
                 .config()
                 .app
@@ -112,6 +119,8 @@ pub fn run() {
             reveal_in_file_manager,
             open_external_url,
             write_clipboard_text,
+            system_insets,
+            set_system_bar_style,
             load_preferences,
             save_preferences,
             import_legacy_preferences,
@@ -218,6 +227,9 @@ pub fn run() {
             login_eh_account,
             open_eh_login_window,
             capture_eh_login_cookies,
+            start_eh_in_app_login,
+            take_eh_in_app_login,
+            cancel_eh_in_app_login,
             close_eh_login_window,
             list_eh_accounts,
             read_eh_account_cookie,

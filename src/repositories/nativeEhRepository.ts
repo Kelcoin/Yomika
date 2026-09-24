@@ -50,6 +50,20 @@ export class NativeEhRepository {
   closeLoginWindow(): Promise<CommandResult<void>> {
     return invokeCommand('close_eh_login_window', {}, VoidResponseSchema);
   }
+  /** 移动端：打开应用内的登录页。Android 上是原生浮层（应用自己不动，一直活着），其余
+   * 平台是顶层导航（应用会被那一页顶掉，完成后由 Rust 导航回来）。两条路都是「这个命令
+   * 只负责打开」，结果用 `takeInAppLogin` 轮询领取。 */
+  startInAppLogin(): Promise<CommandResult<void>> {
+    return invokeCommand('start_eh_in_app_login', {}, VoidResponseSchema);
+  }
+  /** 领这次应用内登录的结果：拿到会话 Cookie 就是成了（领走即清）。 */
+  takeInAppLogin(): Promise<CommandResult<string | null>> {
+    return invokeCommand('take_eh_in_app_login', {}, z.string().min(1).nullable());
+  }
+  /** 放弃这次登录：Android 上顺手把原生浮层关掉。 */
+  cancelInAppLogin(): Promise<CommandResult<void>> {
+    return invokeCommand('cancel_eh_in_app_login', {}, VoidResponseSchema);
+  }
   listAccounts(): Promise<CommandResult<EhAccount[]>> {
     return invokeCommand('list_eh_accounts', {}, z.array(EhAccountSchema));
   }

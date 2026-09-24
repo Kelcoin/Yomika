@@ -7,6 +7,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeDedupRepository, type DedupLoadResult, type DedupNonDuplicateRecord, type DedupScanProgress, type DedupSessionSummary } from '../repositories/nativeDedupRepository';
 import { ArchiveOverviewDialog } from './ArchiveOverviewDialog';
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { CardTagRows } from './CardTagRows';
 import { SelectField } from './SelectField';
@@ -195,11 +196,14 @@ export function DeduplicationWorkspace() {
   const [processedNonDuplicatePairKeys, setProcessedNonDuplicatePairKeys] = useState<Set<string>>(new Set());
   const [processedDeletedArchiveIds, setProcessedDeletedArchiveIds] = useState<Set<string>>(new Set());
   const [smartSelectPending, setSmartSelectPending] = useState(false);
+  useOverlayBackGuard(smartSelectPending, () => setSmartSelectPending(false));
   const [includeFilenameOnly, setIncludeFilenameOnly] = useState(false);
   const [pageGapWarningCount, setPageGapWarningCount] = useState(0);
   const [deleteSession, setDeleteSession] = useState<{ count: number }>();
   // 不重复关系面板：持久化的对（含历史墓碑）直接列出，可搜索、可撤销标记。
+  // 三处浮层都先吃返回手势（见 overlayBackGuard）：关系、历史、智能选择确认。
   const [relationsOpen, setRelationsOpen] = useState(false);
+  useOverlayBackGuard(relationsOpen, () => setRelationsOpen(false));
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);
   /** 从关系行打开的档案概览：就地看一眼，不离开查重页（筛选与选择都留着）。 */
   const [overviewArchiveId, setOverviewArchiveId] = useState<string>();
@@ -208,6 +212,7 @@ export function DeduplicationWorkspace() {
   const [relationsQuery, setRelationsQuery] = useState('');
   // 扫描结果：会话本来就会落库，这个对话框把它们列出来供随时载入。
   const [historyOpen, setHistoryOpen] = useState(false);
+  useOverlayBackGuard(historyOpen, () => setHistoryOpen(false));
   const [sessions, setSessions] = useState<DedupSessionSummary[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
   /** 有效不重复关系的条数（含导入的），显示在统计栏。 */

@@ -14,18 +14,18 @@ interface EhWorkspaceProps {
   /** Resolves with the cookie header once the user has signed in through the
    * page E-Hentai serves; the only route through a Cloudflare challenge. */
   onBrowserLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
-  /** 移动端不给网页登录时的一句注记：说明替代做法。 */
-  browserLoginNotice?: string | undefined;
+  /** 移动端：登录页画在应用内的原生浮层上，形状与 `onBrowserLogin` 一样——等 Cookie。 */
+  onInAppLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
   savingAccount?: boolean | undefined;
   onReadCookie?: ((accountId: string) => Promise<string | undefined>) | undefined;
   onLogout?: ((accountId: string) => Promise<void>) | undefined;
   onEditUsername?: ((accountId: string, username: string) => Promise<void>) | undefined;
 }
 
-export function EhWorkspace({ accounts, onCheckHealth, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, browserLoginNotice, savingAccount, onReadCookie, onLogout, onEditUsername }: EhWorkspaceProps) {
+export function EhWorkspace({ accounts, onCheckHealth, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, onInAppLogin, savingAccount, onReadCookie, onLogout, onEditUsername }: EhWorkspaceProps) {
   return (
     <div>
-      <EhAccountPanel accounts={accounts} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} browserLoginNotice={browserLoginNotice} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} onEditUsername={onEditUsername} />
+      <EhAccountPanel accounts={accounts} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} onInAppLogin={onInAppLogin} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} onEditUsername={onEditUsername} />
     </div>
   );
 }

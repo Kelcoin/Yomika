@@ -10,3 +10,11 @@ export const PlatformCapabilitiesSchema = z.object({
 });
 
 export type PlatformCapabilities = z.infer<typeof PlatformCapabilitiesSchema>;
+
+/** 系统栏（状态栏 / 手势条）占掉的高度，CSS 像素。 */
+export const SystemInsetsSchema = z.object({
+  top: z.number(),
+  bottom: z.number(),
+});
+
+export type SystemInsets = z.infer<typeof SystemInsetsSchema>;

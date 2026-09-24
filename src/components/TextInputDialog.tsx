@@ -1,6 +1,8 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useState } from 'react';
 
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+
 /** A drawn prompt, replacing `window.prompt`.
  *
  * The native prompt is unstyled, unpositioned, blocks the whole window, and on
@@ -30,6 +32,8 @@ export function TextInputDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const [value, setValue] = useState(defaultValue);
+  // 返回手势先关这一层（见 overlayBackGuard）：对话框开着时返回不该把页面带走。
+  useOverlayBackGuard(open, () => onOpenChange(false));
   // Reopening starts from the caller's default rather than the last edit.
   useEffect(() => { if (open) setValue(defaultValue); }, [defaultValue, open]);
 

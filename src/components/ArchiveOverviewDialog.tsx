@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 
 const imageCache = getNativeImageCache();
@@ -23,6 +24,8 @@ export function ArchiveOverviewDialog({ archive, scopeId, serverId, onClose }: {
   serverId: string;
   onClose: () => void;
 }) {
+  // 挂载即打开；返回手势先关这一层（见 overlayBackGuard）。
+  useOverlayBackGuard(true, onClose);
   const [cover, setCover] = useState<string>();
   const [previews, setPreviews] = useState<ReadonlyMap<number, string>>(() => new Map());
   const mounted = useRef(true);

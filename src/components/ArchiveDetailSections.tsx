@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { normalizeMyTagKey, prioritizeByMyTags, readableInkOnHex } from '../lib/ehMyTags';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
 import { TagSearchLink } from './TagSearchLink';
@@ -97,6 +98,8 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
  * 不用再管。 */
 export function ArchiveDetailCover({ title, cover, loading = false }: { title: string; cover?: string | undefined; loading?: boolean }) {
   const [previewOpen, setPreviewOpen] = useState(false);
+  // 返回手势先关预览这一层（见 overlayBackGuard）。
+  useOverlayBackGuard(previewOpen, () => setPreviewOpen(false));
   useEffect(() => {
     if (!previewOpen) return undefined;
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreviewOpen(false); };

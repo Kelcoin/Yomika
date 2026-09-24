@@ -52,41 +52,118 @@ pub fn write_clipboard_text(text: String) -> CommandResult<()> {
     }
 }
 
+/// 用系统浏览器打开一个网页链接。
+///
+/// 桌面各平台都有现成的命令行工具；**Android 只有 Intent 一条路**（`ACTION_VIEW`），
+/// 而那要原生代码——手机上的「打不开外部链接」就是这条分支曾经直接报
+/// `PLATFORM_UNAVAILABLE`（文档链接、来源链接、仓库地址全点不动）。现在借 `mobile_host`
+/// 那个原生宿主把它送出去。
+/// 系统栏（状态栏 / 手势条）占掉的高度，CSS 像素，与页面 1:1。
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
+pub struct SystemInsets {
+    #[serde(default)]
+    pub top: i32,
+    #[serde(default)]
+    pub bottom: i32,
+}
+
+/// 系统栏把页面推到哪儿了。
+///
+/// 应用在 Android 上是**边到边**的（内容画到屏幕边缘，见 `MainActivity` 的注释），
+/// 而 WebView 不会把状态栏高度交给 `env(safe-area-inset-*)`——那个只给刘海。所以高度由
+/// 原生侧量好交给页面（`--safe-top` / `--safe-bottom`），页面自己避开。桌面窗口没有系统
+/// 栏叠在页面上，一律 0。
 #[tauri::command]
-pub fn open_external_url(url: String) -> CommandResult<()> {
-    let parsed = match url::Url::parse(&url) {
-        Ok(value) if matches!(value.scheme(), "http" | "https") => value,
-        _ => {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                "Only HTTP and HTTPS links can be opened",
-                false,
-            )
+pub async fn system_insets(app: tauri::AppHandle) -> CommandResult<SystemInsets> {
+    #[cfg(target_os = "android")]
+    {
+        match crate::mobile_host::system_insets(&app).await {
+            Ok(insets) => CommandResult::success(insets),
+            Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
         }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = &app;
+        CommandResult::success(SystemInsets { top: 0, bottom: 0 })
+    }
+}
+
+/// 系统栏图标的明暗：跟着**应用主题**走，而不是跟着系统主题走——应用可以整体是深色的，
+/// 而系统设成浅色，那时状态栏图标会是深色，落在深色背景上等于看不见（「状态栏很突兀」
+/// 有一半是它）。其余平台没有这件事。
+#[tauri::command]
+pub async fn set_system_bar_style(app: tauri::AppHandle, dark: bool) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        match crate::mobile_host::set_system_bar_style(&app, dark).await {
+            Ok(()) => CommandResult::success(()),
+            Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, dark);
+        CommandResult::success(())
+    }
+}
+
+/// 只放 http/https 出去：别的 scheme 交给系统，等于把任意 Intent 交给页面。
+fn parse_web_url(url: &str) -> Result<url::Url, CommandResult<()>> {
+    match url::Url::parse(url) {
+        Ok(value) if matches!(value.scheme(), "http" | "https") => Ok(value),
+        _ => Err(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "Only HTTP and HTTPS links can be opened",
+            false,
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn open_external_url(app: tauri::AppHandle, url: String) -> CommandResult<()> {
+    let parsed = match parse_web_url(&url) {
+        Ok(parsed) => parsed,
+        Err(rejected) => return rejected,
     };
 
+    #[cfg(target_os = "android")]
+    let result = crate::mobile_host::open_external_url(&app, parsed.as_str()).await;
+    // 桌面各平台用现成的命令行工具，用不到 AppHandle——只有 Android 那条路要它。
+    #[cfg(not(target_os = "android"))]
+    let _ = &app;
     #[cfg(target_os = "windows")]
     let result = std::process::Command::new("rundll32")
         .arg("url.dll,FileProtocolHandler")
         .arg(parsed.as_str())
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open")
         .arg(parsed.as_str())
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
     #[cfg(target_os = "linux")]
     let result = std::process::Command::new("xdg-open")
         .arg(parsed.as_str())
-        .spawn();
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    let result: Result<(), String> = Err(String::from(
         "External links are unsupported on this platform",
     ));
 
     match result {
-        Ok(_) => CommandResult::success(()),
-        Err(error) => CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        Ok(()) => CommandResult::success(()),
+        Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
     }
 }
 
@@ -159,10 +236,10 @@ mod tests {
 
     #[test]
     fn external_url_rejects_non_web_schemes() {
-        assert!(matches!(
-            open_external_url("file:///tmp/private".into()),
-            CommandResult::Failure { .. }
-        ));
+        assert!(parse_web_url("file:///tmp/private").is_err());
+        assert!(parse_web_url("javascript:alert(1)").is_err());
+        assert!(parse_web_url("intent://evil#Intent;scheme=http;end").is_err());
+        assert!(parse_web_url("https://forums.e-hentai.org/index.php").is_ok());
     }
 
     #[cfg(target_os = "windows")]

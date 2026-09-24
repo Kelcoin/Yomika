@@ -12,6 +12,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
@@ -82,6 +84,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
    * also follow the link, so the click is swallowed once. */
   const [incognitoAsk, setIncognitoAsk] = useState(false);
+  // 返回手势先关这个确认框，而不是把页面带走（见 overlayBackGuard）。
+  useOverlayBackGuard(incognitoAsk, () => setIncognitoAsk(false));
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [detailPanel, setDetailPanel] = useState<'media' | 'comments'>('media');
   const [ehAccountId, setEhAccountId] = useState<string>();

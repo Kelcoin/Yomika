@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+
 function parse(value: string): Date {
   const parts = value.split('-').map(Number);
   const year = Number.isFinite(parts[0]) ? parts[0]! : new Date().getFullYear();
@@ -22,6 +24,8 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
   const [open, setOpen] = useState(false);
   /** 'days' 是日期网格，另外两档是快速跳年份/月份：只能靠左右箭头一个月一个
    * 月地挪，跨年份时要按几十下，等于没有导航。 */
+  // 返回手势先收起这一层（见 overlayBackGuard）。
+  useOverlayBackGuard(open, () => setOpen(false));
   const [pane, setPane] = useState<'days' | 'months' | 'years'>('days');
   const [month, setMonth] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
   const [yearPage, setYearPage] = useState(() => Math.floor(selected.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE);

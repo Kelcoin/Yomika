@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, vi } from 'vitest';
 
 import { resetRouteCacheForTests } from '../src/lib/routeCache';
+import { resetOverlayBackGuardForTests } from '../src/lib/overlayBackGuard';
 import { registerTauriListener, resetTauriEvents } from './tauriEvents';
 
 // jsdom 里没有 Tauri 的事件总线，`listen` 会 reject（应用里那句 `.catch` 把它咽掉），
@@ -26,6 +27,8 @@ vi.mock('@tauri-apps/api/event', async () => {
 afterEach(() => {
   resetRouteCacheForTests();
   resetTauriEvents();
+  // 浮层的返回栈也是模块级的：上一个用例留下的浮层会决定下一个用例的返回行为。
+  resetOverlayBackGuardForTests();
   for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
     const key = window.localStorage.key(index);
     if (key?.startsWith('yomika:library-categories:') || key === 'yomika.last-nav') window.localStorage.removeItem(key);

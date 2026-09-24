@@ -65,7 +65,7 @@ describe('settings workspace', () => {
     expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Kelcoin/Yomika' });
   });
 
-  it('shows this run\'s errors inside the About page and exports them', async () => {
+  it('shows this run\'s errors inside the About page and exports the same list', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
@@ -95,9 +95,45 @@ describe('settings workspace', () => {
     expect(within(menu).getByText(/本次运行记录到 1 条/)).toBeInTheDocument();
     expect(within(menu).getByText('bridge/list_archives')).toBeInTheDocument();
     expect(within(menu).getByText('LANraragi 不可达')).toBeInTheDocument();
+    // 顶上那两句说明文字已经去掉：留着的都是眼下的事实。
+    expect(menu.textContent).not.toContain('每次启动重新记录');
 
     await user.click(within(menu).getByRole('button', { name: '导出' }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_export', { path: 'C:/tmp/yomika-error.log' }));
+    // 导出的是界面这一份（同一次拼装）：内容由前端给，原生侧只管写。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_export', {
+      path: 'C:/tmp/yomika-error.log',
+      contents: expect.stringContaining('LANraragi 不可达'),
+    }));
+  });
+
+  it("keeps the last run's crash trail apart from this run", async () => {
+    // 崩溃现场（以及崩溃前那几步黑匣子记录）来自**上一次运行**：它们要显示，但不能混进
+    // 「本次运行」的计数里——看到的第一眼就该知道这不是这次记下的。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'error_log_read') {
+        return {
+          ok: true,
+          value: [
+            { at: 'epoch:1790000000000', level: 'warn', source: '上次运行 · eh/in-app-login', message: 'navigate：准备导航到登录页', detail: null },
+            { at: '2026-09-23T02:00:00.000Z', level: 'error', source: 'bridge/list_archives', message: 'LANraragi 不可达', detail: null },
+          ],
+        };
+      }
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('about');
+
+    const about = await screen.findByRole('region', { name: '关于' });
+    await user.click(within(about).getByRole('button', { name: '错误日志' }));
+    const menu = await screen.findByRole('dialog', { name: '错误日志' });
+
+    await vi.waitFor(() => expect(menu.textContent).toContain('本次运行 1 条，上次运行 1 条'));
+    expect(within(menu).getByText('上次运行 · eh/in-app-login')).toBeInTheDocument();
+    expect(within(menu).getByText('navigate：准备导航到登录页')).toBeInTheDocument();
   });
 
   it('shows only upload and dedup in tools', async () => {

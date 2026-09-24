@@ -781,6 +781,38 @@ async fn search_eh_galleries_request(cookie: &str, url: Url) -> CommandResult<Eh
 /// The sign-in window's label, so a second request focuses the window that is
 /// already open instead of stacking another one on top of it.
 const LOGIN_WINDOW_LABEL: &str = "eh-login";
+/// 移动端那条路的轮询节奏与上限：与桌面窗口同一套感觉（宽限、间隔、总时长）。
+const INAPP_LOGIN_POLL: std::time::Duration = std::time::Duration::from_millis(1_500);
+const INAPP_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// 主窗口的标签（应用自己那个 webview）。顶层导航那条路（非 Android）用它；Android
+/// 走原生浮层，应用自己的 webview 一动不动，所以那边这个常量用不上。
+#[cfg(not(target_os = "android"))]
+const MAIN_WINDOW_LABEL: &str = "main";
+/// 黑匣子的来源名：这几步都写进 `logs/crash.log`，下次启动在「错误日志」里能看到，
+/// 用来回答「它到底停在哪一步」——Android 上的闪退是 Java/原生层的，panic hook 抓不到。
+const INAPP_LOGIN_SOURCE: &str = "eh/in-app-login";
+
+fn mark(app: &tauri::AppHandle, step: &str) {
+    crate::error_log::record_step(app, INAPP_LOGIN_SOURCE, step);
+}
+
+/// 移动端的网页登录状态。
+///
+/// 两条实现，同一套「打开 → 后台读 Cookie → 结果放在这里等前端来领」：
+///
+/// - **Android**（`start_eh_in_app_login` 的应用内面板）：登录页在原生侧的另一层
+///   WebView 里，应用自己的界面原样在下面活着，Cookie 由原生侧读（`mobile_host`）。
+/// - **其余平台**（桌面、iOS）：应用自己的 webview 顶层导航到登录页，后台任务读它的
+///   Cookie 罐，拿到会话就导航回来。桌面上这么做没有代价（页面回来时应用重载一次），
+///   而 Android 上不行——那里的应用 webview 就是 activity 的内容视图，导航走等于把应用
+///   自己换掉，实际表现是闪退。
+#[derive(Default)]
+pub struct InAppLoginState {
+    /// 拿到手的会话 Cookie，等前端来取（取走即清）。
+    cookie: std::sync::Mutex<Option<String>>,
+    /// 登录期间要不要中止（用户点了取消）。
+    cancel: std::sync::atomic::AtomicBool,
+}
 const LOGIN_WINDOW_URL: &str = "https://forums.e-hentai.org/index.php?act=Login&CODE=00";
 /// Where the session cookies live. The forums set them for the whole domain, and
 /// `igneous` only ever comes from ExHentai.
@@ -802,10 +834,11 @@ pub async fn open_eh_login_window(app: tauri::AppHandle) -> Result<CommandResult
     // 所以移动端不提供这条路（界面上那个标签页也不出现），这里再直接拒绝一次，作为防线。
     //
     // 用 `cfg!` 而不是 `#[cfg]`：两边都参与类型检查，手机上这条也照样编译。
+    // 移动端走 `start_eh_in_app_login`，这里不开窗口。
     if cfg!(any(target_os = "android", target_os = "ios")) {
         return Ok(CommandResult::failure(
             "PLATFORM_UNAVAILABLE",
-            "移动端不支持网页登录：用账号登录，或把 Cookie 粘进来",
+            "移动端用应用内登录",
             false,
         ));
     }
@@ -882,13 +915,217 @@ pub async fn capture_eh_login_cookies(
         }
     }
     Ok(CommandResult::success(
-        cookie_header_from_all_pairs(
+        session_from_pairs(
             pairs
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str())),
-        )
-        .filter(|cookie| has_valid_authentication_cookie(cookie)),
+        ),
     ))
+}
+
+/// 在应用里打开登录页（移动端那条路）。Android 走原生浮层，其余平台走顶层导航。
+///
+/// 两边都是「打开 → 后台每 1.5 秒看一次会话 Cookie → 拿到就收工（关掉/导航回来），超时
+/// 或取消也一样」，结果放在 `InAppLoginState` 里等前端来领：Android 上前端一直活着，领
+/// 结果就是一次普通轮询；导航那条路上应用会整页重载，登录期间那个 promise 早就没了，所
+/// 以前端重载后再领一次。
+#[tauri::command]
+pub async fn start_eh_in_app_login(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, InAppLoginState>,
+) -> Result<CommandResult<()>, String> {
+    mark(&app, "start：进入应用内登录");
+    *state.cookie.lock().map_err(|error| error.to_string())? = None;
+    state.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "android")]
+    {
+        start_native_login_sheet(&app).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        start_login_navigation(&app).await
+    }
+}
+
+/// Android：登录页画在原生侧的另一层 WebView 上（`MobileHost`），应用自己的 webview
+/// 一动不动。之后每一轮问一次原生：看到会话了吗？还开着吗？
+#[cfg(target_os = "android")]
+async fn start_native_login_sheet(app: &tauri::AppHandle) -> Result<CommandResult<()>, String> {
+    mark(app, "panel：请求原生登录面板");
+    // 与桌面窗口、HTTP 重放同一套 UA：Cloudflare 的通行证是按 UA 绑定的，登录页用哪个
+    // UA 过的验证，后面重放时就得用哪个。
+    if let Err(error) =
+        crate::mobile_host::login_open(app, LOGIN_WINDOW_URL, EH_CLIENT_UA).await
+    {
+        mark(app, &format!("panel：打开失败（{error}）"));
+        return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error, false));
+    }
+    mark(app, "panel：已打开，开始轮询 Cookie");
+    let poller = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        let deadline = std::time::Instant::now() + INAPP_LOGIN_TIMEOUT;
+        let mut captured = false;
+        loop {
+            tokio::time::sleep(INAPP_LOGIN_POLL).await;
+            let cancelled = poller
+                .state::<InAppLoginState>()
+                .cancel
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if cancelled || std::time::Instant::now() >= deadline {
+                break;
+            }
+            let Ok(poll) = crate::mobile_host::login_poll(&poller).await else {
+                mark(&poller, "panel：问不到原生面板，收工");
+                break;
+            };
+            if let Some(cookie) = poll.cookie.as_deref().and_then(session_from_header) {
+                if let Ok(mut slot) = poller.state::<InAppLoginState>().cookie.lock() {
+                    *slot = Some(cookie);
+                }
+                captured = true;
+                break;
+            }
+            // 用户把面板关了：这次登录就到这里（结果可能是「没登录」）。
+            if !poll.open {
+                break;
+            }
+        }
+        mark(&poller, if captured { "panel：拿到会话，关闭面板" } else { "panel：没有会话，关闭面板" });
+        let _ = crate::mobile_host::login_close(&poller).await;
+    });
+    Ok(CommandResult::success(()))
+}
+
+/// 其余平台：应用自己的 webview 顶层导航到登录页，读完 Cookie 再导航回来。
+#[cfg(not(target_os = "android"))]
+async fn start_login_navigation(app: &tauri::AppHandle) -> Result<CommandResult<()>, String> {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        mark(app, "主窗口不可用");
+        return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", "主窗口不可用", false));
+    };
+    let Ok(url) = LOGIN_WINDOW_URL.parse::<Url>() else {
+        return Ok(CommandResult::failure("UNKNOWN", "登录地址无效", false));
+    };
+    let back = match window.url() {
+        Ok(url) => url,
+        Err(error) => return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false)),
+    };
+    mark(app, "navigate：准备导航到登录页");
+    let navigated = window.navigate(url);
+    mark(app, match &navigated { Ok(()) => "navigate 已发出", Err(_) => "navigate 失败" });
+    if let Err(error) = navigated {
+        return Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false));
+    }
+
+    let home = back.origin().ascii_serialization();
+    let poller = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        mark(&poller, "poller：开始轮询 Cookie");
+        let deadline = std::time::Instant::now() + INAPP_LOGIN_TIMEOUT;
+        let mut returned = false;
+        loop {
+            tokio::time::sleep(INAPP_LOGIN_POLL).await;
+            let cancelled = poller.state::<InAppLoginState>().cancel.load(std::sync::atomic::Ordering::SeqCst);
+            if cancelled || std::time::Instant::now() >= deadline {
+                break;
+            }
+            let Some(window) = poller.get_webview_window(MAIN_WINDOW_LABEL) else { break };
+            // 已经回到应用自己的页面了（用户按了系统返回键，或者我们上一轮导航回来了）：
+            // 这次登录到此为止，别再导航一次打断人正在做的事。
+            if window.url().map(|url| url.origin().ascii_serialization() == home).unwrap_or(false) {
+                returned = true;
+                break;
+            }
+            let Some(cookie) = read_session_cookie(&window) else { continue };
+            if let Ok(mut slot) = poller.state::<InAppLoginState>().cookie.lock() {
+                *slot = Some(cookie);
+            }
+            break;
+        }
+        // 无论哪条路都回到应用：留在登录页上等于把人困在里头。
+        mark(&poller, if returned { "poller：已经回到应用，收工" } else { "poller：导航回应用" });
+        if !returned {
+            if let Some(window) = poller.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.navigate(back);
+            }
+        }
+    });
+    Ok(CommandResult::success(()))
+}
+
+/// 前端在应用重新起来（导航那条路）或原生面板关掉（Android）之后领网页登录的结果：
+/// `Some(cookie)` 表示这次登录成了。
+#[tauri::command]
+pub async fn take_eh_in_app_login(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, InAppLoginState>,
+) -> Result<CommandResult<Option<String>>, String> {
+    if state.cookie.lock().map(|slot| slot.is_some()).unwrap_or(false) {
+        mark(&app, "前端回来领结果：拿到会话");
+    }
+    let mut slot = state.cookie.lock().map_err(|error| error.to_string())?;
+    let cookie = slot.take();
+    Ok(CommandResult::success(cookie))
+}
+
+/// 放弃这次应用内登录：Android 上顺手把原生面板关掉，其余平台靠后台任务下一轮导航回来。
+#[tauri::command]
+pub async fn cancel_eh_in_app_login(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, InAppLoginState>,
+) -> Result<CommandResult<()>, String> {
+    state.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "android")]
+    {
+        let _ = crate::mobile_host::login_close(&app).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = &app;
+    }
+    Ok(CommandResult::success(()))
+}
+
+/// 从一整段 Cookie 头里挑出会话（原生面板那边拿到的就是这个形状）。
+#[cfg(target_os = "android")]
+fn session_from_header(raw: &str) -> Option<String> {
+    session_from_pairs(
+        raw.split(';')
+            .filter_map(|part| part.trim().split_once('='))
+            .map(|(name, value)| (name.trim(), value.trim())),
+    )
+}
+
+/// 「这份 Cookie 里有没有会话」只有这一处答案：窗口、原生面板、顶层导航三条路都走它。
+fn session_from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    cookie_header_from_all_pairs(pairs).filter(|cookie| has_valid_authentication_cookie(cookie))
+}
+
+/// 读某个 webview 的 Cookie 罐里的会话 Cookie（三个域全读一遍，与窗口那条路同一套过滤）。
+/// 只有顶层导航那条路要它：Android 的 Cookie 由原生浮层读出来（见 `mobile_host`）。
+#[cfg(not(target_os = "android"))]
+fn read_session_cookie(window: &tauri::WebviewWindow) -> Option<String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for origin in COOKIE_ORIGINS {
+        let Ok(url) = origin.parse::<Url>() else {
+            continue;
+        };
+        if let Ok(cookies) = window.cookies_for_url(url) {
+            pairs.extend(
+                cookies
+                    .into_iter()
+                    .map(|cookie| (cookie.name().to_string(), cookie.value().to_string())),
+            );
+        }
+    }
+    session_from_pairs(
+        pairs
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    )
 }
 
 #[tauri::command]

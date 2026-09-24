@@ -324,6 +324,37 @@ describe('design system contract', () => {
     expect(cargo).toMatch(/keyring\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*['"]windows-native['"]/s);
   });
 
+  it('centers the second-level menu title with the row icon on its left', () => {
+    const shell = read('src/styles/shell.css');
+    const title = ruleBody(shell, '.settings-choice-title');
+    // 居中：菜单顶上的标题不再左对齐——它说的是「这是从哪一行开出来的」。
+    expect(title).toMatch(/justify-content:\s*center/);
+    expect(title).toMatch(/display:\s*flex/);
+    // 比正文大一点（原来是 --text-md）。
+    expect(title).toMatch(/font-size:\s*var\(--text-lg\)/);
+    expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*20px/);
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    // 图标是**来源那一行的同一个**：三个菜单容器都把 icon 传下去。
+    expect(settings).toMatch(/className="settings-choice-icon"/);
+    expect(settings.match(/<SettingsMenu[^>]*icon=\{icon\}/g) ?? []).toHaveLength(3);
+  });
+
+  it('closes overlays with the back gesture instead of leaving the page', () => {
+    // 返回手势（以及浏览器后退、iOS 侧滑）走的是 webview 历史：没有守卫的话，菜单开着按返回
+    // 会把**下面的页面**带走。每一个浮层都要挂上那道守卫（见 lib/overlayBackGuard）。
+    const components = readdirSync(resolve(root, 'src/components'));
+    const overlays = components.filter((name) => {
+      if (!name.endsWith('.tsx')) return false;
+      const source = read(`src/components/${name}`);
+      // JSX 属性那种写法（前面是空白），不是选择器字符串里的 `[role="dialog"]`。
+      return source.includes('Dialog.Root') || /\srole="dialog"/.test(source);
+    });
+    expect(overlays.length).toBeGreaterThan(6);
+    for (const name of overlays) {
+      expect(read(`src/components/${name}`), `${name} 少了 useOverlayBackGuard`).toContain('useOverlayBackGuard(');
+    }
+  });
+
   it('scrolls the settings menu body instead of clipping a tall form', () => {
     const shell = read('src/styles/shell.css');
     // 面板是 flex 列：只有 flex 会按 max-height 收内容盒，网格的自动行按内容撑开，
@@ -331,7 +362,9 @@ describe('design system contract', () => {
     const panel = ruleBody(shell, '.settings-choice-panel');
     expect(panel).toMatch(/display:\s*flex/);
     expect(panel).toMatch(/flex-direction:\s*column/);
-    expect(panel).toMatch(/max-height:\s*min\(85vh,\s*760px\)/);
+    // `dvh` 而不是 `vh`：键盘弹起时视口会变矮（Android 侧把视图压短），限高得跟着矮，
+    // 否则面板比可见区域还高——底部那一截按钮被键盘盖住。
+    expect(panel).toMatch(/max-height:\s*min\(85dvh,\s*760px\)/);
     expect(panel).toMatch(/overflow:\s*hidden/);
     const body = ruleBody(shell, '.settings-menu-body');
     expect(body).toMatch(/overflow-y:\s*auto/);
@@ -1027,8 +1060,8 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.search-preset-overlay,\n\.settings-choice-overlay \{/);
     // Both panels share one sheet shape, but a settings menu is allowed to be
     // taller than a preset list, so the panel rules are separate now.
-    expect(shell).toMatch(/\.search-preset-panel \{[^}]*max-height:\s*min\(70vh, 520px\)/);
-    expect(shell).toMatch(/\.settings-choice-panel \{[^}]*max-height:\s*min\(85vh, 760px\)/);
+    expect(shell).toMatch(/\.search-preset-panel \{[^}]*max-height:\s*min\(70dvh, 520px\)/);
+    expect(shell).toMatch(/\.settings-choice-panel \{[^}]*max-height:\s*min\(85dvh, 760px\)/);
     expect(read('src/components/SettingsRow.tsx')).toMatch(/export function SettingsRow\(/);
     expect(settings).toMatch(/function SettingsChoice\(/);
     // The selection is a mode with its own bar, not a checkbox glued to a card.

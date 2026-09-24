@@ -25,8 +25,9 @@ interface EhAccountPanelProps {
   /** Opens E-Hentai's own page and resolves with the cookie header once the user
    * has signed in there. */
   onBrowserLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
-  /** 移动端没有网页登录时的一句注记（替代做法）。 */
-  browserLoginNotice?: string | undefined;
+  /** 移动端：登录页画在应用内的原生浮层上（`MobileHost`），应用原地不动；形状与
+   * `onBrowserLogin` 一样——等 Cookie，等到就返回。 */
+  onInAppLogin?: ((signal?: AbortSignal) => Promise<string>) | undefined;
   saving?: boolean | undefined;
   onReadCookie?: ((accountId: string) => Promise<string | undefined>) | undefined;
   onLogout?: ((accountId: string) => Promise<void>) | undefined;
@@ -46,7 +47,7 @@ interface EhAccountPanelProps {
  * so the password form cannot pass it however correct the credentials are, and
  * before this the only way through was copying cookies out of another browser by
  * hand. */
-export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, browserLoginNotice, saving, onReadCookie, onLogout, onEditUsername }: EhAccountPanelProps) {
+export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPasswordLogin, onBrowserLogin, onInAppLogin, saving, onReadCookie, onLogout, onEditUsername }: EhAccountPanelProps) {
   const { showToast, clearToasts } = useToast();
   const [mode, setMode] = useState<'password' | 'browser' | 'cookie'>('password');
   const [browserPending, setBrowserPending] = useState(false);
@@ -55,6 +56,8 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
   const [usernameDraft, setUsernameDraft] = useState('');
   const [savingUsername, setSavingUsername] = useState(false);
   const browserAbortRef = useRef<AbortController>();
+  /** 移动端：登录页已经在应用内打开了（这时界面就是那个页面）。 */
+  const [inAppPending, setInAppPending] = useState(false);
   useEffect(() => () => browserAbortRef.current?.abort(), []);
 
   async function saveCookie(rawCookie: string) {
@@ -94,6 +97,23 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
       if (await saveCookie(String(data.get('ehCookie') ?? ''))) form.reset();
     } catch (error) {
       showToast(error instanceof Error ? error.message : '账户保存失败', 'error');
+    }
+  }
+
+  /** 移动端那条：登录页在应用内的原生浮层上，应用自己一直活着，所以这里和桌面一样等
+   * 结果——等到 Cookie 就保存，等到取消或超时就把浮层关掉。 */
+  async function startInAppLogin() {
+    if (!onInAppLogin || inAppPending) return;
+    const controller = new AbortController();
+    browserAbortRef.current = controller;
+    setInAppPending(true);
+    try {
+      await saveCookie(await onInAppLogin(controller.signal));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '打不开登录页', 'error');
+    } finally {
+      setInAppPending(false);
+      browserAbortRef.current = undefined;
     }
   }
 
@@ -169,13 +189,13 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
 
   return (
     <section className="eh-account-panel" aria-label="E-Hentai 账户">
-      {accounts.length === 0 && (onSave || onPasswordLogin || onBrowserLogin) && (
+      {accounts.length === 0 && (onSave || onPasswordLogin || onBrowserLogin || onInAppLogin) && (
         <div className="eh-login">
           <div className="eh-login-tabs" role="tablist" aria-label="登录方式">
             <button type="button" role="tab" aria-selected={mode === 'password'} className={`secondary-action${mode === 'password' ? ' is-active' : ''}`} onClick={() => setMode('password')}>
               <LogIn aria-hidden="true" />账号登录
             </button>
-            {onBrowserLogin && (
+            {(onBrowserLogin || onInAppLogin) && (
               <button type="button" role="tab" aria-selected={mode === 'browser'} className={`secondary-action${mode === 'browser' ? ' is-active' : ''}`} onClick={() => setMode('browser')}>
                 <KeyRound aria-hidden="true" />网页登录
               </button>
@@ -184,8 +204,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
               <KeyRound aria-hidden="true" />Cookie 导入
             </button>
           </div>
-          {/* 移动端没有「网页登录」这一格：这里说一句为什么、以及怎么做。 */}
-          {browserLoginNotice && <p className="eh-login-hint">{browserLoginNotice}</p>}
+
           {mode === 'password' ? (
             <form className="eh-account-form" onSubmit={submitPassword}>
               <label>用户名<input name="ehUsername" required autoComplete="off" spellCheck={false} /></label>
@@ -195,9 +214,22 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
           ) : mode === 'browser' ? (
             <div className="eh-account-form">
               <p className="eh-login-hint">
-                在弹出的窗口里完成 Cloudflare 验证并登录，凭据自动读取。
+                {onInAppLogin
+                  ? '在应用内的登录页完成登录（含 Cloudflare 验证），凭据自动读取。'
+                  : '在弹出的窗口里完成 Cloudflare 验证并登录，凭据自动读取。'}
               </p>
-              {browserPending ? (
+              {onInAppLogin ? (
+                inAppPending ? (
+                  <>
+                    <StatusLine busy>已打开登录页，完成登录后自动读取凭据…</StatusLine>
+                    <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}>取消登录</button>
+                  </>
+                ) : (
+                  <button className="primary-action" type="button" onClick={() => void startInAppLogin()} disabled={saving} aria-busy={saving}>
+                    <KeyRound aria-hidden="true" />打开登录页面
+                  </button>
+                )
+              ) : browserPending ? (
                 <>
                   <StatusLine busy>正在等待窗口中的登录…</StatusLine>
                   <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}>取消</button>
