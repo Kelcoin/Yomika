@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Pencil, Server } from 'lucide-react';
+import { Pencil, Save, Server } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
@@ -136,7 +136,7 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
             <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
             <div className="dialog-actions">
-              <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}>{pending ? '保存中…' : '保存服务器'}</button>
+              <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}><Save aria-hidden="true" />{pending ? '保存中…' : '保存服务器'}</button>
             </div>
           </form>
         </Dialog.Content>

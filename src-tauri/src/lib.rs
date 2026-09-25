@@ -42,7 +42,7 @@ use commands::library::{
     set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
     use_metadata_plugin, verify_archives_exist,
 };
-use commands::platform::{open_external_url, platform_capabilities, reveal_in_file_manager, set_system_bar_style, system_insets, write_clipboard_text};
+use commands::platform::{open_external_url, platform_capabilities, read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, claim_sync_journal, export_scoped_data, import_scoped_data,
     list_sync_accounts, list_sync_journal,
@@ -119,6 +119,8 @@ pub fn run() {
             reveal_in_file_manager,
             open_external_url,
             write_clipboard_text,
+            save_text_file,
+            read_text_file,
             system_insets,
             set_system_bar_style,
             load_preferences,

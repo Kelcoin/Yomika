@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeSettingsRepository, type PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -83,7 +83,7 @@ export function ArchiveDeletionConfirmation({ description, onClose, onConfirm }:
           </label>
         )}
         <div className="dialog-actions">
-          <button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="secondary-action" type="button" disabled={busy} onClick={onClose}><X aria-hidden="true" />取消</button>
           <button className="primary-action" type="button" disabled={busy || syncFavorite === undefined} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
         </div>
       </Dialog.Content>

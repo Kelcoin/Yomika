@@ -1,6 +1,6 @@
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -856,7 +856,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && !editingMetadata && (
                 <button className="secondary-action" type="button" onClick={() => {
                   setEditingMetadata(true);
-                }}>编辑元数据</button>
+                }}><Pencil aria-hidden="true" />编辑元数据</button>
               )}
               {onToggleFavorite && <button className="secondary-action" type="button" aria-pressed={isFavorite} onClick={() => void onToggleFavorite()}><Star aria-hidden="true" fill={isFavorite ? 'currentColor' : 'none'} />{isFavorite ? '已收藏' : '加入收藏'}</button>}
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && editingMetadata && (
@@ -876,11 +876,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   <label>标题<input name="title" aria-label="标题" autoComplete="off" defaultValue={metadata.title || selected.title} /></label>
                   <label>标签<input name="tags" aria-label="标签" autoComplete="off" spellCheck={false} defaultValue={metadata.tags} /></label>
                   <label>简介<textarea name="summary" aria-label="简介" defaultValue={metadata.summary ?? ''} /></label>
-                  <button className="primary-action" type="submit" disabled={savingMetadata} aria-busy={savingMetadata}>{savingMetadata ? '保存中…' : '保存元数据'}</button>
+                  <button className="primary-action" type="submit" disabled={savingMetadata} aria-busy={savingMetadata}><Save aria-hidden="true" />{savingMetadata ? '保存中…' : '保存元数据'}</button>
                 </form>
               )}
               {onDelete && (
-                <button className="secondary-action" type="button" onClick={() => void onDelete(selected)}>删除档案</button>
+                <button className="secondary-action" type="button" onClick={() => void onDelete(selected)}><Trash2 aria-hidden="true" />删除档案</button>
               )}
               <dl>
                 <div><dt>页数</dt><dd>{selected.pageCount}</dd></div>

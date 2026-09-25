@@ -1,4 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
+import { Check, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
@@ -65,8 +66,8 @@ export function TextInputDialog({
           {/* Says why the button is disabled instead of leaving it inert. */}
           {problem && <p className="form-error" role="alert">{problem}</p>}
           <div className="dialog-actions">
-            <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
-            <button className="primary-action" type="button" disabled={Boolean(problem)} onClick={submit}>{confirmLabel}</button>
+            <Dialog.Close asChild><button className="secondary-action" type="button"><X aria-hidden="true" />取消</button></Dialog.Close>
+            <button className="primary-action" type="button" disabled={Boolean(problem)} onClick={submit}><Check aria-hidden="true" />{confirmLabel}</button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

@@ -6,7 +6,9 @@ import {
   BookOpen,
   Heart,
   Download,
+  EyeOff,
   MoreVertical,
+  X,
   MessageCircle,
   Pencil,
   Trash2,
@@ -354,11 +356,11 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             <Dialog.Title>无痕阅读</Dialog.Title>
             <Dialog.Description>本次阅读不会记录进度，也不会写入历史。</Dialog.Description>
             <div className="dialog-actions">
-              <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
+              <Dialog.Close asChild><button className="secondary-action" type="button"><X aria-hidden="true" />取消</button></Dialog.Close>
               <button className="primary-action" type="button" onClick={() => {
                 setIncognitoAsk(false);
                 navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1${serverId ? `&server=${encodeURIComponent(serverId)}` : ''}`);
-              }}>无痕阅读</button>
+              }}><EyeOff aria-hidden="true" />无痕阅读</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

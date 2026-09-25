@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForTests, setSavePickerForTests } from '../../src/bridge/filePicker';
+import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForTests, setSavePickerForTests, setTextFilePickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { COLOR_SCHEMES } from '../../src/lib/cssThemePresets';
@@ -1066,6 +1066,37 @@ describe('settings workspace', () => {
     expect(JSON.parse(exported)).toMatchObject({ kind: 'yomika-scope-export', schemaVersion: 1 });
   });
 
+  it('writes the export to a file the user picks', async () => {
+    // 「导出为文件」与「复制」是两条并列的出口：手机上「可粘贴的文本」并不好用。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'export_scoped_data') {
+        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, objects: 2, categories: [] } };
+      }
+      if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
+    renderSettings('sync');
+
+    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('button', { name: '导出数据' }));
+    const menu = screen.getByRole('dialog', { name: '导出数据' });
+    await user.click(within(menu).getByRole('button', { name: '导出数据' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_scoped_data', expect.anything()));
+
+    await user.click(within(menu).getByRole('button', { name: '导出为文件' }));
+    // 写下去的就是框里那一份（与导出、复制同一份文本）。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_text_file', {
+      path: 'C:/tmp/yomika-export.json',
+      contents: SCOPED_EXPORT_TEXT,
+    }));
+  });
+
   it('imports a scoped export through the checked scope', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
@@ -1094,6 +1125,34 @@ describe('settings workspace', () => {
     }));
     // 类别没勾的留在门外，报数要说清楚——不然「导了一半」看着像丢了数据。
     expect(await screen.findByText('已导入 4 项，跳过 2 项（类别未勾选）')).toBeInTheDocument();
+  });
+
+  it('imports a file the user picks through the same import path', async () => {
+    // 「从文件导入」= 选文件 + 读回来 + 走同一次导入（认种类、认口令都是那一套）。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'read_text_file') return { ok: true, value: '{"kind":"yomika-scope-export","schemaVersion":1,"document":{"version":1,"epoch":0,"objects":{}}}' };
+      if (command === 'import_scoped_data') return { ok: true, value: { applied: 2, skipped: 0, categories: [] } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    setTextFilePickerForTests(async () => 'C:/tmp/yomika-export.json');
+    renderSettings('sync');
+
+    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('button', { name: '导入数据' }));
+    const menu = screen.getByRole('dialog', { name: '导入数据' });
+    await user.click(within(menu).getByRole('button', { name: '从文件导入' }));
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('read_text_file', { path: 'C:/tmp/yomika-export.json' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_scoped_data', expect.objectContaining({
+      payload: expect.stringContaining('yomika-scope-export'),
+    })));
+    // 导入成功之后框会清空（和粘贴那条路一样），所以看的是报数。
+    expect(await screen.findByText('已导入 2 项')).toBeInTheDocument();
   });
 
   it('exports records and credentials together through one passphrase, in one file', async () => {

@@ -7,6 +7,7 @@ let testMultiPicker: MultiFilePicker | undefined;
 let testDirectoryPicker: FilePicker | undefined;
 let testSavePicker: SavePicker | undefined;
 let testModelPicker: FilePicker | undefined;
+let testTextFilePicker: FilePicker | undefined;
 
 export function setModelPickerForTests(picker: FilePicker): void {
   testModelPicker = picker;
@@ -14,6 +15,10 @@ export function setModelPickerForTests(picker: FilePicker): void {
 
 export function setFilePickerForTests(picker: FilePicker): void {
   testPicker = picker;
+}
+
+export function setTextFilePickerForTests(picker: FilePicker): void {
+  testTextFilePicker = picker;
 }
 
 export function setArchiveFilesPickerForTests(picker: MultiFilePicker): void {
@@ -34,6 +39,7 @@ export function resetFilePickerForTests(): void {
   testDirectoryPicker = undefined;
   testSavePicker = undefined;
   testModelPicker = undefined;
+  testTextFilePicker = undefined;
 }
 
 /** 导出用：让用户挑一个保存位置，取消返回 null。 */
@@ -42,6 +48,16 @@ export async function pickSavePath(defaultName: string): Promise<string | null> 
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
   const { save } = await import('@tauri-apps/plugin-dialog');
   const selected = await save({ defaultPath: defaultName });
+  return typeof selected === 'string' ? selected : null;
+}
+
+/** 一份文本文件（导入导出）。不给扩展名过滤：导出的 JSON、旧的导出、别处的文本都应
+ *  当能选中——认不认得出内容由导入那一步说。 */
+export async function pickTextFile(): Promise<string | null> {
+  if (testTextFilePicker) return testTextFilePicker();
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({ multiple: false, directory: false });
   return typeof selected === 'string' ? selected : null;
 }
 

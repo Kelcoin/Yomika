@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, FileDown, FileUp, X } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useEffect, useState } from 'react';
 
@@ -162,8 +162,9 @@ export function PassphraseDialog({
             )}
           </AnimatePresence>
           <div className="dialog-actions">
-            <Dialog.Close asChild><button className="secondary-action" type="button">取消</button></Dialog.Close>
+            <Dialog.Close asChild><button className="secondary-action" type="button"><X aria-hidden="true" />取消</button></Dialog.Close>
             <button className="primary-action" type="button" disabled={pending} aria-busy={pending} onClick={submit}>
+              {mode === 'export' ? <FileDown aria-hidden="true" /> : <FileUp aria-hidden="true" />}
               {pending ? '处理中…' : mode === 'export' ? '导出' : '导入'}
             </button>
           </div>

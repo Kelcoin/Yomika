@@ -4,10 +4,10 @@ import {
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
-  Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
+  Paintbrush, Palette, PanelBottom, Pencil, Plus, RefreshCw, Rocket, RotateCcw, Save, Scale, Scan, ShieldCheck, X, Check,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText, History,
 } from 'lucide-react';
-import { pickDirectory, pickModelFile } from '../bridge/filePicker';
+import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
 import { EhRouteWorkspace } from './EhRouteWorkspace';
@@ -62,6 +62,7 @@ import { NativeInferenceRepository, type InstalledModel, type UpscaleCatalogMode
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { openExternalUrl } from '../bridge/externalUrl';
+import { readTextFromFile, saveTextToFile } from '../bridge/textFile';
 
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
@@ -729,12 +730,13 @@ export function SettingsWorkspace() {
   /** One control pair for both payload shapes: a unified export (the worker
    * envelope) goes to the native importer, anything else is treated as a legacy
    * preferences blob. */
-  async function runMigrationImport(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  /** 导入一份导出内容。文本由调用方给：粘贴进来的是框里那份，从文件导入的是刚读回来的
+   *  那份——两条路走的是同一次导入，认种类、认口令、报数都只有一套。 */
+  async function runMigrationImport(text: string) {
     setMigrationPending(true);
     setMigrationMessage(undefined);
     setMigrationError(false);
-    const parsed = parseMigrationExport(migrationText);
+    const parsed = parseMigrationExport(text);
     if (parsed.kind === 'invalid') {
       setMigrationMessage(parsed.reason);
       setMigrationError(true);
@@ -742,7 +744,7 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'legacy') {
-      const result = await preferenceState.importLegacy(migrationText.trim());
+      const result = await preferenceState.importLegacy(text.trim());
       if (result.ok) {
         setPreferenceDraft(result.value.preferences);
         setMigrationText('');
@@ -782,7 +784,7 @@ export function SettingsWorkspace() {
       }
       // 本机导出的那一份：按同步的合并规则落地，导入导出范围里没勾的类别留在门外
       // ——勾选是「要不要这类数据」的开关，导入不该绕过它。
-      const result = await syncRepository.importScopedData(migrationText.trim(), JSON.stringify(transferRecords));
+      const result = await syncRepository.importScopedData(text.trim(), JSON.stringify(transferRecords));
       if (!result.ok) {
         setMigrationMessage(result.error.message);
         setMigrationError(true);
@@ -854,7 +856,7 @@ export function SettingsWorkspace() {
       setMigrationPending(false);
       return;
     }
-    const result = await legacyRepository.importExport(scopeId, migrationText.trim());
+    const result = await legacyRepository.importExport(scopeId, text.trim());
     if (result.ok) {
       setMigrationText('');
       setMigrationMessage(`已导入 ${result.value} 项本地记录`);
@@ -901,6 +903,35 @@ export function SettingsWorkspace() {
     } catch {
       showToast('复制失败，请手动选择导出内容复制', 'error');
     }
+  }
+
+  /** 导出成文件：读的是框里那一份，所以与「导出数据」看到的是同一份内容。 */
+  async function saveMigrationToFile() {
+    const text = migrationText.trim();
+    if (!text) return;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const path = await pickSavePath(`yomika-export-${stamp}.json`);
+    if (!path) return;
+    const result = await saveTextToFile(path, text);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      return;
+    }
+    showToast(`已导出到 ${result.value}`, 'success');
+  }
+
+  /** 从文件导入：读回来放进框里（让人看见读了什么），再走同一次导入。 */
+  async function importMigrationFromFile() {
+    const path = await pickTextFile();
+    if (!path) return;
+    const result = await readTextFromFile(path);
+    if (!result.ok) {
+      setMigrationMessage(result.error.message);
+      setMigrationError(true);
+      return;
+    }
+    setMigrationText(result.value);
+    await runMigrationImport(result.value);
   }
 
   /** 导入导出范围的勾选：与「底栏项目」同一种控件，勾一下即存（autosave 会合并）。 */
@@ -1438,17 +1469,17 @@ export function SettingsWorkspace() {
                         {/* 编辑时动作与表单互为开关，收起/展开都有高度过渡。 */}
                         <div className={`sync-collapsible${sync.formTarget !== undefined ? '' : ' is-open'}`}>
                           <div className="settings-menu-account-actions">
-                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}>编辑</button>
+                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}><Pencil aria-hidden="true" />编辑</button>
                             <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined || autoSync.running || sync.servers.length === 0} aria-busy={sync.syncingId === account.id || autoSync.running} onClick={() => void sync.runSync(account)}>
                               <RefreshCw aria-hidden="true" />{sync.syncingId === account.id || autoSync.running ? '同步中…' : '立即同步'}
                             </button>
                             {sync.resetAccount?.id === account.id ? (
                               <>
-                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}>确认重置</button>
-                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>取消</button>
+                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}><Check aria-hidden="true" />确认重置</button>
+                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}><X aria-hidden="true" />取消</button>
                               </>
                             ) : (
-                              <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}>重置远端</button>
+                              <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}><RotateCcw aria-hidden="true" />重置远端</button>
                             )}
                           </div>
                         </div>
@@ -1566,7 +1597,11 @@ export function SettingsWorkspace() {
                           （记录在密文里面）。曾经那条「导出凭据…」是另一条路——同一次
                           迁移要点两次、还容易漏掉一半，2026-09-24 并进了这里。 */}
                       <button className="secondary-action" type="button" disabled={migrationPending || (transferRecords.length === 0 && transferCredentials.length === 0)} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
-                        {migrationPending ? '处理中…' : '导出数据'}
+                        <FileDown aria-hidden="true" />{migrationPending ? '处理中…' : '导出数据'}
+                      </button>
+                      {/* 导出成文件：与复制并列的一条出口——「可粘贴的文本」在手机上并不好用。 */}
+                      <button className="secondary-action" type="button" disabled={migrationPending || !migrationText.trim()} onClick={() => void saveMigrationToFile()}>
+                        <Download aria-hidden="true" />导出为文件
                       </button>
                       <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
                         <Copy aria-hidden="true" />复制
@@ -1580,7 +1615,7 @@ export function SettingsWorkspace() {
                   hint="粘贴导出的文本；加密文件会先问口令"
                   onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
                 >
-                  <form className="legacy-import-form" onSubmit={runMigrationImport}>
+                  <form className="legacy-import-form" onSubmit={(event) => { event.preventDefault(); void runMigrationImport(migrationText); }}>
                     <textarea
                       id="migration-json"
                       name="migrationJson"
@@ -1592,10 +1627,14 @@ export function SettingsWorkspace() {
                       rows={6}
                     />
                     <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
+                      {/* 选文件即导入：读回来放进框里（看得见读了什么），再走同一次导入。 */}
+                      <button className="secondary-action" type="button" disabled={migrationPending} onClick={() => void importMigrationFromFile()}>
+                        <FolderOpen aria-hidden="true" />从文件导入
+                      </button>
                       {/* 粘什么进来就导什么：记录、加密文件、旧版导出都由这一颗按钮认出来
                           ——加密的那份会接着弹口令。 */}
                       <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
-                        {migrationPending ? '处理中…' : '导入数据'}
+                        <FileUp aria-hidden="true" />{migrationPending ? '处理中…' : '导入数据'}
                       </button>
                     </div>
                   </form>

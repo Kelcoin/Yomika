@@ -1,4 +1,4 @@
-import { CloudDownload, FolderOpen, Play, Trash2, Upload } from 'lucide-react';
+import { CloudDownload, FolderOpen, Play, Plus, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
@@ -141,7 +141,7 @@ export function UploadPanel() {
           <strong>{dragging ? '松手即加入队列' : '把压缩包拖到窗口，或点击选择'}</strong>
           <span>ZIP、CBZ、RAR、CBR、7Z、PDF</span>
           <button className="secondary-action" type="button" disabled={picking} aria-busy={picking} onClick={() => void pick()}>
-            {picking ? '选择中…' : '选择文件'}
+            <FolderOpen aria-hidden="true" />{picking ? '选择中…' : '选择文件'}
           </button>
         </div>
       ) : (
@@ -159,7 +159,7 @@ export function UploadPanel() {
           <div className="upload-url-summary">
             <span>{parsedUrls.valid.length} 个有效链接</span>
             {parsedUrls.invalid.length > 0 && <span className="is-error">{parsedUrls.invalid.length} 个无法识别</span>}
-            <button className="secondary-action" type="button" disabled={parsedUrls.valid.length === 0} onClick={queueUrls}>加入队列</button>
+            <button className="secondary-action" type="button" disabled={parsedUrls.valid.length === 0} onClick={queueUrls}><Plus aria-hidden="true" />加入队列</button>
           </div>
           {/* The server picks the downloader, so there is no plugin to choose. */}
           <p className="upload-hint">链接交给 LANraragi 自己下载，由服务器决定使用哪个下载插件。</p>

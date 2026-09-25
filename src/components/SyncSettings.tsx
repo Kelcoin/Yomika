@@ -1,4 +1,4 @@
-import { PlugZap } from 'lucide-react';
+import { PlugZap, Save, X } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 
 import type { ServerRecord } from '../domain/library';
@@ -413,10 +413,10 @@ export function SyncAccountForm({ sync }: { sync: SyncSettingsState }) {
       /></label>
       {/* 保存前先能试：测试只读一次远端，不合适就改字段，不用先存一遍。 */}
       <div className="sync-form-actions">
-        <button className="secondary-action" type="submit" disabled={sync.saving || sync.testing} aria-busy={sync.saving}>{sync.saving ? '保存中…' : '保存'}</button>
+        <button className="secondary-action" type="submit" disabled={sync.saving || sync.testing} aria-busy={sync.saving}><Save aria-hidden="true" />{sync.saving ? '保存中…' : '保存'}</button>
         <button className="secondary-action" type="button" disabled={sync.saving || sync.testing} aria-busy={sync.testing} onClick={() => void sync.testAccount()}><PlugZap aria-hidden="true" />{sync.testing ? '测试中…' : '测试'}</button>
         {sync.accounts.length > 0 && (
-          <button className="secondary-action" type="button" disabled={sync.saving || sync.testing} onClick={sync.closeForm}>取消</button>
+          <button className="secondary-action" type="button" disabled={sync.saving || sync.testing} onClick={sync.closeForm}><X aria-hidden="true" />取消</button>
         )}
       </div>
     </form>

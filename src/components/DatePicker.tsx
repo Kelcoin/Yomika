@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CalendarDays, ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 
@@ -86,7 +86,7 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
         </div>
         <div className="date-picker-grid is-years">{years.map((year) => <button type="button" key={year} className={year === month.getFullYear() ? 'is-selected' : ''} onClick={() => { setMonth(new Date(year, month.getMonth(), 1)); setPane('months'); }}>{year}</button>)}</div>
       </>}
-      <div className="date-picker-footer"><button type="button" className="secondary-action" onClick={() => { onChange(format(new Date())); setOpen(false); }}>今天</button><button type="button" className="secondary-action" onClick={() => setOpen(false)}>取消</button></div>
+      <div className="date-picker-footer"><button type="button" className="secondary-action" onClick={() => { onChange(format(new Date())); setOpen(false); }}><CalendarDays aria-hidden="true" />今天</button><button type="button" className="secondary-action" onClick={() => setOpen(false)}><X aria-hidden="true" />取消</button></div>
     </div>}
   </div>;
 }

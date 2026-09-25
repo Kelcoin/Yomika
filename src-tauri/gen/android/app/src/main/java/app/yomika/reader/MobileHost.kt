@@ -43,6 +43,11 @@ class WriteTextFileArgs {
 }
 
 @InvokeArg
+class ReadTextFileArgs {
+  lateinit var path: String
+}
+
+@InvokeArg
 class OpenUrlArgs {
   lateinit var url: String
 }
@@ -197,6 +202,27 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
       invoke.resolve(JSObject().apply { put("bytes", bytes.size) })
     } catch (error: Throwable) {
       invoke.reject(error.message ?: "写入文件失败")
+    }
+  }
+
+  /**
+   * 读一份用户选定的文本（「从文件导入」）。与 `writeTextFile` 对称：SAF 给的是
+   * `content://` URI，只有 ContentResolver 读得动。
+   */
+  @Command
+  fun readTextFile(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(ReadTextFileArgs::class.java)
+      val bytes = if (args.path.startsWith("content://")) {
+        val stream = hostActivity.contentResolver.openInputStream(Uri.parse(args.path))
+          ?: throw IllegalStateException("无法读取所选文件")
+        stream.use { it.readBytes() }
+      } else {
+        File(args.path).readBytes()
+      }
+      invoke.resolve(JSObject().apply { put("contents", String(bytes, Charsets.UTF_8)) })
+    } catch (error: Throwable) {
+      invoke.reject(error.message ?: "读取文件失败")
     }
   }
 

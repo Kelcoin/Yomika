@@ -1,4 +1,4 @@
-import { KeyRound, LogIn, RefreshCw, Download, LogOut, Pencil } from 'lucide-react';
+import { KeyRound, LogIn, RefreshCw, Download, LogOut, Pencil, Save, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { writeClipboardText } from '../bridge/clipboard';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
@@ -209,7 +209,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
             <form className="eh-account-form" onSubmit={submitPassword}>
               <label>用户名<input name="ehUsername" required autoComplete="off" spellCheck={false} /></label>
               <label>密码<input name="ehPassword" required type="password" autoComplete="off" spellCheck={false} /></label>
-              <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '登录中…' : '登录 E-Hentai'}</button>
+              <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}><LogIn aria-hidden="true" />{saving ? '登录中…' : '登录 E-Hentai'}</button>
             </form>
           ) : mode === 'browser' ? (
             <div className="eh-account-form">
@@ -222,7 +222,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
                 inAppPending ? (
                   <>
                     <StatusLine busy>已打开登录页，完成登录后自动读取凭据…</StatusLine>
-                    <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}>取消登录</button>
+                    <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}><X aria-hidden="true" />取消登录</button>
                   </>
                 ) : (
                   <button className="primary-action" type="button" onClick={() => void startInAppLogin()} disabled={saving} aria-busy={saving}>
@@ -232,7 +232,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
               ) : browserPending ? (
                 <>
                   <StatusLine busy>正在等待窗口中的登录…</StatusLine>
-                  <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}>取消</button>
+                  <button className="secondary-action" type="button" onClick={() => browserAbortRef.current?.abort()}><X aria-hidden="true" />取消</button>
                 </>
               ) : (
                 <button className="primary-action" type="button" onClick={() => void startBrowserLogin()} disabled={saving} aria-busy={saving}>
@@ -245,7 +245,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
               <label>Cookie
                 <textarea name="ehCookie" required rows={3} spellCheck={false} placeholder="粘贴整段 Cookie，或 ipb_member_id 与 ipb_pass_hash" />
               </label>
-              <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}>{saving ? '保存中…' : '保存 Cookie'}</button>
+              <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}><Save aria-hidden="true" />{saving ? '保存中…' : '保存 Cookie'}</button>
             </form>
           )}
         </div>

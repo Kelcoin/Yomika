@@ -117,6 +117,18 @@ pub async fn write_text_file(app: &AppHandle, path: &str, contents: &str) -> Res
     .map(|_| ())
 }
 
+/// 通过 SAF 的 `content://` URI（或普通路径）读一份文本。
+pub async fn read_text_file(app: &AppHandle, path: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct ReadReply {
+        #[serde(default)]
+        contents: String,
+    }
+    call::<ReadReply>(app, "readTextFile", json!({ "path": path }))
+        .await
+        .map(|reply| reply.contents)
+}
+
 /// 用系统浏览器打开链接：Android 上只有 `Intent.ACTION_VIEW` 这一条路，而它要原生代码。
 pub async fn open_external_url(app: &AppHandle, url: &str) -> Result<(), String> {
     call::<serde_json::Value>(app, "openExternalUrl", json!({ "url": url }))

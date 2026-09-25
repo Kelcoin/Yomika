@@ -167,6 +167,60 @@ pub async fn open_external_url(app: tauri::AppHandle, url: String) -> CommandRes
     }
 }
 
+/// 把一段文本写到用户选定的位置（导入导出的「导出为文件」走这里）。
+///
+/// Android 上 `dialog.save` 交回来的是 SAF 的 `content://` URI（系统的「新建文档」已经
+/// 把文件建好了，零字节），`std::fs` 对它无能为力，得走原生那层 ContentResolver——
+/// 与错误日志导出是同一条路，所以那段实现留在 `mobile_host` 里，两边共用。
+#[tauri::command]
+pub async fn save_text_file(
+    app: tauri::AppHandle,
+    path: String,
+    contents: String,
+) -> CommandResult<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return CommandResult::failure("INVALID_INPUT", "导出路径为空", false);
+    }
+    #[cfg(target_os = "android")]
+    let written = crate::mobile_host::write_text_file(&app, trimmed, &contents).await;
+    #[cfg(not(target_os = "android"))]
+    let written = {
+        let _ = &app;
+        std::fs::write(trimmed, contents).map_err(|error| error.to_string())
+    };
+    match written {
+        Ok(()) => CommandResult::success(trimmed.to_string()),
+        Err(message) => CommandResult::failure("UNKNOWN", message, true),
+    }
+}
+
+/// 读回用户选定的文本文件（「从文件导入」走这里）。Android 上同样是 SAF 的
+/// `content://` URI，只有原生侧读得动。
+#[tauri::command]
+pub async fn read_text_file(app: tauri::AppHandle, path: String) -> CommandResult<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return CommandResult::failure("INVALID_INPUT", "文件路径为空", false);
+    }
+    #[cfg(target_os = "android")]
+    let read = crate::mobile_host::read_text_file(&app, trimmed).await;
+    #[cfg(not(target_os = "android"))]
+    let read: Result<String, String> = {
+        let _ = &app;
+        // 导出的文件是 UTF-8；不是的话就直说（旧版导出的编码没法猜），由调用方去报
+        // 「这不是本应用的导出」。
+        match std::fs::read(trimmed) {
+            Err(error) => Err(error.to_string()),
+            Ok(bytes) => String::from_utf8(bytes).map_err(|_| String::from("文件不是 UTF-8 文本")),
+        }
+    };
+    match read {
+        Ok(text) => CommandResult::success(text),
+        Err(message) => CommandResult::failure("UNKNOWN", message, true),
+    }
+}
+
 /// 在资源管理器里定位一个本机文件：文件夹打开且文件被选中。只有 Windows 有
 /// 这个动作（调用方按平台藏按钮，这里再兜底拒绝）；路径必须真实存在。
 #[tauri::command]

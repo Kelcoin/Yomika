@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { RotateCcw } from 'lucide-react';
 
 import { usePageActive } from '../app/RetainedPage';
 import type { ArchiveRecord } from '../domain/library';
@@ -582,7 +583,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           <p className="form-error">{error}</p>
           {needsCredentials && <Link className="secondary-action" to="/settings">打开设置重新保存 API Key</Link>}
         </div>
-            <button className="secondary-action" type="button" onClick={() => void loadLibrary().then(() => setReloadToken((value) => value + 1))}>重试读取档案库</button>
+            <button className="secondary-action" type="button" onClick={() => void loadLibrary().then(() => setReloadToken((value) => value + 1))}><RotateCcw aria-hidden="true" />重试读取档案库</button>
       </div>
     );
   }
