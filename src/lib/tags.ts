@@ -204,6 +204,21 @@ export function translateRawTag(raw: string): string {
 export function parseArchiveTagString(value: string): string[] {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
 }
+
+/** 两条标签是不是**同一条**：大小写、冒号两侧与值中间的空白、以及 LANraragi 的精确查询
+ * 后缀 `$` 都不算区别（`artist: somebody`、`Artist:Somebody`、`artist:somebody$` 是同一条）。
+ *
+ * 元数据编辑里加标签时用它去重：这几种写法在界面上译出来是同一枚 chip，放两条进去就是
+ * 用户看到的「重复标签」。存下来的仍是第一次写下的那个写法（判据只用来比较）。
+ */
+export function tagIdentity(tag: string): string {
+  return tag
+    .trim()
+    .toLowerCase()
+    .replace(/\s*:\s*/g, ':')
+    .replace(/\s+/g, ' ')
+    .replace(/\$$/, '');
+}
 export interface TagGroup { namespace: string; label: string; values: string[]; }
 export interface SearchableTag { label: string; query: string; }
 export interface SearchableTagGroup { namespace: string; label: string; values: SearchableTag[]; }

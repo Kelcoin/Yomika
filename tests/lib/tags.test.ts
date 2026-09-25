@@ -1,7 +1,21 @@
-import { categorizeSearchableTags, categorizeTags, categoryTagLabel, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
+import { categorizeSearchableTags, categorizeTags, categoryTagLabel, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, tagIdentity, translateTag } from '../../src/lib/tags';
 import { formatArchiveDate } from '../../src/lib/archiveCardPresentation';
 
 describe('tag translations', () => {
+  it('treats the same tag written differently as one tag', () => {
+    // 元数据编辑按这条去重：这几种写法在界面上译出来是同一枚 chip，两条都留下就是
+    // 用户看到的「重复标签」。
+    const identity = tagIdentity;
+    expect(identity('artist:somebody')).toBe(identity('Artist: Somebody'));
+    expect(identity('artist: somebody')).toBe(identity('artist:somebody'));
+    expect(identity('female:glasses$')).toBe(identity('female:glasses'));
+    expect(identity('  female:school   uniform  ')).toBe(identity('female:school uniform'));
+    // 不同的标签仍然是不同的。
+    expect(identity('female:glasses')).not.toBe(identity('female:glasses2'));
+    expect(identity('artist:somebody')).not.toBe(identity('group:somebody'));
+  });
+
+
   it('names the artist-cg category the way E-Hentai does', () => {
     // E-Hentai 的分类是 Artist CG：画师画的 CG 集。中文叫「作者 CG」是错译
     // （那会让它和 `artist:` 那个命名空间混在一起）。

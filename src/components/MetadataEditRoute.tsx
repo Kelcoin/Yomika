@@ -2,7 +2,7 @@ import { ArrowLeft, BookOpen, LoaderCircle, Play, Save, Trash2 } from 'lucide-re
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { parseArchiveTagString } from '../lib/tags';
+import { parseArchiveTagString, tagIdentity } from '../lib/tags';
 import { pickServer } from '../domain/server';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { useTagTranslations } from '../lib/tagTranslationService';
@@ -88,10 +88,16 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const setTagList = (next: readonly string[]) => {
     // The stored value stays the LANraragi tag string, because that is what the
     // API takes; the chips are a view of it rather than a parallel model.
+    // 去重按 `tagIdentity`：`artist: somebody` 与 `artist:somebody$` 在界面上是同一枚
+    // chip，两条都留下来就是用户看到的「重复标签」。
     const unique: string[] = [];
+    const seen = new Set<string>();
     for (const tag of next) {
       const trimmed = tag.trim();
-      if (trimmed && !unique.some((existing) => existing.toLowerCase() === trimmed.toLowerCase())) unique.push(trimmed);
+      const identity = tagIdentity(trimmed);
+      if (!trimmed || seen.has(identity)) continue;
+      seen.add(identity);
+      unique.push(trimmed);
     }
     setTags(unique.join(', '));
   };
@@ -176,7 +182,9 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
             />
             {/* Same suggestion list the library search uses, so a namespace does
                 not have to be typed from memory. */}
-            <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} onSelect={(tag) => commitTagDraft(tag)} />
+            {/* `exact={false}`：这里写进去的是标签本身。库检索那边要的是 `$` 结尾的精确
+                查询，元数据里带上它就等于存了一条别人认不出来的标签。 */}
+            <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} exact={false} onSelect={(tag) => commitTagDraft(tag)} />
           </label>
         </div>
         <label>简介<textarea value={summary} autoCapitalize="sentences" spellCheck onChange={(event) => setSummary(event.target.value)} rows={8} /></label>

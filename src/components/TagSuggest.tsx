@@ -7,9 +7,14 @@ interface TagSuggestProps {
   inputValue: string;
   anchorRef: RefObject<HTMLElement>;
   onSelect: (tag: string) => void;
+  /** 选中的值是否带精确查询后缀 `$`（LANraragi 的检索语法）。
+   *
+   * 库检索要它（`female:glasses$` 才是「正好是这条」）；元数据编辑不要——那里写进去的
+   * 就是标签本身，带上 `$` 等于存了一个别人认不出来的标签（`female:glasses$`）。 */
+  exact?: boolean;
 }
 
-export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps) {
+export function TagSuggest({ inputValue, anchorRef, onSelect, exact = true }: TagSuggestProps) {
   const pageActive = usePageActive();
   const panelId = useId();
   const optionId = (index: number) => `${panelId}-option-${index}`;
@@ -37,12 +42,12 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
       if (!suggestions.length) return;
       if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => (value + 1) % suggestions.length); }
       else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => (value - 1 + suggestions.length) % suggestions.length); }
-      else if (event.key === 'Enter' && suggestions[active]) { event.preventDefault(); onSelect(formatSuggestion(suggestions[active])); }
+      else if (event.key === 'Enter' && suggestions[active]) { event.preventDefault(); onSelect(formatSuggestion(suggestions[active], exact)); }
       else if (event.key === 'Escape') setPosition(undefined);
     };
     input.addEventListener('keydown', onKeyDown);
     return () => input.removeEventListener('keydown', onKeyDown);
-  }, [active, anchorRef, onSelect, suggestions]);
+  }, [active, anchorRef, exact, onSelect, suggestions]);
   // The anchor input belongs to the caller, so wire the combobox relationship
   // onto it here: without this a screen reader never hears the candidate list.
   useEffect(() => {
@@ -72,11 +77,11 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
           aria-selected={index === active}
           className={`tag-suggest-option${index === active ? ' is-active' : ''}`}
           onMouseEnter={() => setActive(index)}
-          onMouseDown={(event) => { event.preventDefault(); onSelect(formatSuggestion(suggestion)); }}
+          onMouseDown={(event) => { event.preventDefault(); onSelect(formatSuggestion(suggestion, exact)); }}
         >
           <span className={`tag-suggest-badge tag-group-${suggestion.namespace}`}>{NS_CN_LABELS[suggestion.namespace] ?? suggestion.namespace}</span>
           <span className="tag-suggest-label">{suggestion.label}</span>
-          <span className="tag-suggest-tag">{suggestion.namespace}:{suggestion.key}$</span>
+          <span className="tag-suggest-tag">{formatSuggestion(suggestion, exact)}</span>
         </button>
       ))}
     </div>,
@@ -84,6 +89,6 @@ export function TagSuggest({ inputValue, anchorRef, onSelect }: TagSuggestProps)
   );
 }
 
-function formatSuggestion(suggestion: TagSuggestion): string {
-  return `${suggestion.namespace}:${suggestion.key}$`;
+function formatSuggestion(suggestion: TagSuggestion, exact: boolean): string {
+  return `${suggestion.namespace}:${suggestion.key}${exact ? '$' : ''}`;
 }
