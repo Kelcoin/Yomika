@@ -63,11 +63,9 @@ export function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle 
 }
 
 /** One check row: a member of a set, toggled in place. The whole row is the hit
- * target and the control sits at the trailing edge, where every other row's value
- * lives: a **勾选框**（空框 / 填色带勾），不是一枚孤零零的 ✓——勾与不勾都在同一处，
- * 一眼能看出「这里可以勾」，而 ✓ 只在勾上之后才存在，等于什么都不说。
- * `locked` is the member that cannot be turned off (底栏的档案库与设置, 详情页的阅读)
- * — it keeps its tick, shows a lock instead, and is disabled. */
+ * target and the tick sits at the trailing edge, where every other row's value
+ * lives. `locked` is the member that cannot be turned off (底栏的档案库与设置,
+ * 详情页的阅读) — it keeps its tick, shows a lock instead, and is disabled. */
 export function CheckRow({ label, checked, locked = false, disabled = false, ariaLabel, onToggle }: {
   label: string;
   checked: boolean;
@@ -88,9 +86,7 @@ export function CheckRow({ label, checked, locked = false, disabled = false, ari
       onClick={onToggle}
     >
       <span>{label}</span>
-      {locked
-        ? <Lock aria-hidden="true" />
-        : <span className="settings-menu-check-mark" aria-hidden="true">{on && <Check aria-hidden="true" />}</span>}
+      {locked ? <Lock aria-hidden="true" /> : on && <Check aria-hidden="true" />}
     </button>
   );
 }

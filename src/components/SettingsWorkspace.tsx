@@ -1316,7 +1316,7 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<ListChecks />}
                 label="底栏项目"
-                hint="只影响移动端底栏，档案库固定显示"
+                hint="只影响移动端底栏，没勾的收进「更多」"
                 ariaLabel="底栏项目"
                 value={`${preferenceDraft.bottomNavItems.length} 项`}
               >
@@ -1335,7 +1335,6 @@ export function SettingsWorkspace() {
                     );
                   })}
                 </CheckRowGroup>
-                <p className="settings-menu-desc">带锁的档案库固定显示；取消勾选的项收进「更多」。</p>
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-appearance' && (
@@ -1477,7 +1476,7 @@ export function SettingsWorkspace() {
                 value={scopeLabel(sync.scopeDraft)}
               >
                 {!sync.activeAccount && (
-                  <p className="settings-menu-desc">添加账户后，这份勾选会随账户保存并决定同步哪些类别。</p>
+                  <p className="settings-menu-desc">添加账户后，这份勾选会随账户保存。</p>
                 )}
                 <SyncScopeChecks sync={sync} />
               </SettingsPanel>

@@ -1129,10 +1129,13 @@ describe('settings workspace', () => {
     // 文件里装的是刚勾的那几类——对话框自己说出来，省得回头翻范围。
     expect(within(dialog).getByText(/文件里有记录与设置、LRR 服务器、E-H 账户、同步账户/)).toBeInTheDocument();
     const passphrase = within(dialog).getByLabelText('口令', { exact: true });
-    const confirm = within(dialog).getByLabelText('确认口令', { exact: true });
+    const confirm = within(dialog).getByLabelText('再输一遍', { exact: true });
     await user.type(passphrase, 'a-long-passphrase');
     await user.type(confirm, 'a-different-one');
-    expect(within(dialog).getByText('两次输入的口令不一致')).toBeInTheDocument();
+    // 还在写就不教训人：第二个框刚打完也还不说，按了「导出」才说。
+    expect(within(dialog).queryByText('两次输入的口令不一致')).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: '导出' }));
+    expect(await within(dialog).findByText('两次输入的口令不一致')).toBeInTheDocument();
     expect(adapter).not.toHaveBeenCalledWith('export_credentials', expect.anything());
 
     await user.clear(confirm);
@@ -1198,7 +1201,7 @@ describe('settings workspace', () => {
     await user.click(within(await screen.findByRole('dialog', { name: '导出数据' })).getByRole('button', { name: '导出数据' }));
     const dialog = await screen.findByRole('dialog', { name: '给凭据文件设个口令' });
     await user.type(within(dialog).getByLabelText('口令', { exact: true }), 'a-long-passphrase');
-    await user.type(within(dialog).getByLabelText('确认口令', { exact: true }), 'a-long-passphrase');
+    await user.type(within(dialog).getByLabelText('再输一遍', { exact: true }), 'a-long-passphrase');
     await user.click(within(dialog).getByRole('button', { name: '导出' }));
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_credentials', {

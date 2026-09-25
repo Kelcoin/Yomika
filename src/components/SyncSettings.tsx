@@ -344,7 +344,8 @@ export function SyncScopeChecks({ sync }: { sync: SyncSettingsState }) {
           />
         ))}
       </CheckRowGroup>
-      <p className="sync-scope-hint">记录与设置默认全勾。凭据只在本机，要带走用「导入导出范围」。</p>
+      {/* 一句就够（原来这里是两句话、还和上面的提示重复）。 */}
+      <p className="sync-scope-hint">凭据只在本机，要从「导入导出范围」带走。</p>
     </>
   );
 }
