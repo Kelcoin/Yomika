@@ -355,6 +355,18 @@ describe('design system contract', () => {
     }
   });
 
+  it('keeps the collapsed recommendations tab from inflating the strip', () => {
+    // 折叠那一列只剩左右留白时，0 宽的内容盒子会把标签拆成三行——按钮跟着长到三倍行高
+    // （实测 39px），整条切换栏被撑到 45px，而加载完是 34px：用户看到的「加载中样式异常」。
+    const shell = read('src/styles/shell.css');
+    const button = ruleBody(shell, '.archive-recommendations-tabs button');
+    expect(button).toMatch(/white-space:\s*nowrap/);
+    const collapsed = ruleBody(shell, '.archive-recommendations-tabs .archive-recommendations-tab-creator');
+    expect(collapsed).toMatch(/padding-inline:\s*0/);
+    // 长出来的时候留白要还回去，否则两个标签会挤在一起。
+    expect(shell).toMatch(/\.archive-recommendations-tabs\.has-creator \.archive-recommendations-tab-creator \{[^}]*padding-inline:\s*var\(--space-4\)/);
+  });
+
   it('scrolls the settings menu body instead of clipping a tall form', () => {
     const shell = read('src/styles/shell.css');
     // 面板是 flex 列：只有 flex 会按 max-height 收内容盒，网格的自动行按内容撑开，
@@ -739,8 +751,13 @@ describe('design system contract', () => {
 
     const title = ruleBody(reader, '.reader-chrome-top strong');
     expect(title).toMatch(/font-size:\s*var\(--reader-title-size\)/);
-    expect(title).toMatch(/font-weight:\s*var\(--weight-regular\)/);
+    // M3 的 app bar 标题是 400，但这个应用自己的标题是粗的：同一个档案在详情页是粗体、在
+    // 阅读模式是常规体，来回切看着像两个应用。2026-09-25 起跟详情页走同一条字重。
+    expect(title).toMatch(/font-weight:\s*var\(--weight-bold\)/);
     expect(title).toMatch(/line-height:\s*var\(--reader-title-leading\)/);
+
+    // 出错那条横幅上的标题是同一个标题的另一种状态，字重不能各写各的。
+    expect(ruleBody(reader, '.reader-error-bar strong')).toMatch(/font-weight:\s*var\(--weight-bold\)/);
 
     const toolbar = ruleBody(reader, '.reader-toolbar');
     expect(toolbar).toMatch(/height:\s*calc\(var\(--reader-toolbar-height\) \+ var\(--safe-bottom\)\)/);

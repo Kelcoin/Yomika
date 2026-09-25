@@ -10,6 +10,7 @@ import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domai
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { LoadingIndicator } from './LoadingIndicator';
 import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
+import { decodeImage } from '../lib/decodeImage';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
@@ -84,6 +85,37 @@ interface ReaderScreenProps {
  * 失败" — which is why turning a page announced a failure and then quietly
  * showed the page. They are now distinct, and a page is only called failed once
  * its retries are actually spent. */
+/** 一页的图：换 `src` 之前先把新图解好。
+ *
+ * `<img>` 换 `src` 的那一帧，浏览器会先把旧图扔掉——旧图 → 空 → 新图。超分/去码算完正好
+ * 是这个动作（同一页从原图换成处理过的图），中间那一帧空档在阅读器的深色底上就是用户看到
+ * 的黑闪。所以这里保留正在显示的那一张，新图 `decode()` 完了再换（见 `lib/decodeImage`）。 */
+function ReaderPageImage({ index, source, size, onMeasured }: {
+  index: number;
+  source: string;
+  size: { width: number; height: number } | undefined;
+  onMeasured: (index: number, image: HTMLImageElement) => void;
+}) {
+  const [shown, setShown] = useState(source);
+  useEffect(() => {
+    if (source === shown) return;
+    let active = true;
+    void decodeImage(source).then(() => { if (active) setShown(source); });
+    return () => { active = false; };
+  }, [source, shown]);
+  return (
+    <img
+      draggable={false}
+      className="reader-page"
+      alt={`第 ${index + 1} 页`}
+      src={shown}
+      decoding="async"
+      style={size ? { '--reader-page-max-width': `${size.width}px`, '--reader-page-max-height': `${size.height}px` } as CSSProperties : undefined}
+      onLoad={(event) => onMeasured(index, event.currentTarget)}
+    />
+  );
+}
+
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
   // 同一个 M3 指示器，全应用只此一个（它自己的深色画布由 .reader-page-status 上色）。
   if (!failed) return <div className="reader-page-status"><LoadingIndicator /></div>;
@@ -962,20 +994,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // measurement established: an enhanced page must not be drawn larger than the
     // plain one it replaced (see `.reader-page` in reader.css).
     const size = pageSizes.get(index);
-    // `decoding="async"`：解码交给解码线程。默认的 `auto` 允许"下一帧就要画它"时在主线程上
-    // 同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈——它就是主线程画的。
+    // `decoding="async"` 与「先解码再换」都在 ReaderPageImage 里：默认的 `auto` 允许"下一
+    // 帧就要画它"时在主线程上同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈
+    // ——它就是主线程画的。
     return (
       <div className="reader-slot" key={index}>
         {source
-          ? <img
-            draggable={false}
-            className="reader-page"
-            alt={`第 ${index + 1} 页`}
-            src={source}
-            decoding="async"
-            style={size ? { '--reader-page-max-width': `${size.width}px`, '--reader-page-max-height': `${size.height}px` } as CSSProperties : undefined}
-            onLoad={(event) => measurePage(index, event.currentTarget)}
-          />
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );

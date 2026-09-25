@@ -2876,20 +2876,29 @@ body::-webkit-scrollbar,
   color: var(--ink-secondary);
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
+  /* 标签永不换行。折叠成一列时按钮只有 0 宽（见下），换行会把三个字拆成三行——
+     按钮跟着长到三倍行高（实测 39px），整条切换栏也被撑高（45px 对加载完的 34px）。
+     用户看到的就是「加载中的切换栏明显不对」。 */
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color var(--motion-standard), color var(--motion-standard);
 }
 
 /* Collapsed into a zero-width column, the button has to give up its min-content
-   width or it holds the track open. */
+   width or it holds the track open — and that min-content includes the horizontal
+   padding, so the padding has to go with it */
+/* （折叠时那 32px 的左右留白本身就是 min-content：不一起收掉，格子里会留着一条
+   32px 的空白，按钮的 0 宽内容盒子照样把标签拆成三行）。 */
 .archive-recommendations-tabs .archive-recommendations-tab-creator {
   min-width: 0;
+  padding-inline: 0;
   overflow: hidden;
   opacity: 0;
-  transition: opacity var(--motion-standard);
+  transition: opacity var(--motion-standard), padding-inline var(--motion-standard);
 }
 
 .archive-recommendations-tabs.has-creator .archive-recommendations-tab-creator {
+  padding-inline: var(--space-4);
   opacity: 1;
 }
 

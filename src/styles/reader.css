@@ -170,15 +170,16 @@
   background: var(--reader-chrome);
 }
 
-/* M3 title-large: 22sp/28sp at weight 400. The title is chrome, not a content
-   heading, so it does not take the project's bold-heading weight. */
+/* M3 title-large 是 22sp/28sp、字重 400，但 M3 的 app bar 标题在一个**自带加粗标题**的
+   应用里会显得没写完：同一个档案，详情页写的是粗体（`h2` 的 UA 字重）、阅读模式写的是
+   常规体，来回切看着像两个应用。所以这里跟详情页走同一条字重。 */
 .reader-error-bar strong {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-display);
   font-size: var(--reader-title-size);
-  font-weight: var(--weight-regular);
+  font-weight: var(--weight-bold);
   line-height: var(--reader-title-leading);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -244,15 +245,14 @@
   pointer-events: auto;
 }
 
-/* M3 title-large: 22sp/28sp at weight 400. Chrome, not a content heading, so
-   it does not take the project's bold-heading weight. */
+/* 与详情页的标题同一条字重（理由见上面 `.reader-error-bar strong` 那条）。 */
 .reader-chrome-top strong {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-display);
   font-size: var(--reader-title-size);
-  font-weight: var(--weight-regular);
+  font-weight: var(--weight-bold);
   line-height: var(--reader-title-leading);
   text-overflow: ellipsis;
   white-space: nowrap;

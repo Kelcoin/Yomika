@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, vi } from 'vitest';
 
+import { setImageDecoderForTests } from '../src/lib/decodeImage';
 import { resetRouteCacheForTests } from '../src/lib/routeCache';
 import { resetOverlayBackGuardForTests } from '../src/lib/overlayBackGuard';
 import { registerTauriListener, resetTauriEvents } from './tauriEvents';
@@ -29,6 +30,9 @@ afterEach(() => {
   resetTauriEvents();
   // 浮层的返回栈也是模块级的：上一个用例留下的浮层会决定下一个用例的返回行为。
   resetOverlayBackGuardForTests();
+  // 图片解码器同理：一个用例装上的假解码器会决定下一个用例换不换 src。复位到默认的
+  // 那个（见下），而不是 undefined——jsdom 里真解码会一直挂着。
+  setImageDecoderForTests(alreadyDecoded);
   for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
     const key = window.localStorage.key(index);
     if (key?.startsWith('yomika:library-categories:') || key === 'yomika.last-nav') window.localStorage.removeItem(key);
@@ -49,6 +53,12 @@ await Promise.all([
   import('../src/components/MetadataEditRoute'),
   import('../src/components/DeduplicationWorkspace'),
 ]);
+
+// jsdom 不解码图片：`new Image()` 上的 `decode()` 会一直挂着（也不是它没实现，而是没有
+// 加载这件事）。所以默认给一个「已经解好」的替身——换图那一步在测试里立刻生效；真正要验
+// 「解完才换」的用例自己装一个可控的（见 tests/components/reader-screen.test.tsx）。
+const alreadyDecoded = () => Promise.resolve();
+setImageDecoderForTests(alreadyDecoded);
 
 class TestResizeObserver implements ResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}

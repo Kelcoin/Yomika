@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import { App } from '../../src/app/App';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -32,6 +33,37 @@ function renderReader() {
 }
 
 describe('reader screen', () => {
+  it('keeps the plain page on screen until the processed one is decoded', async () => {
+    // 超分/去码算完是**同一页换 src**：浏览器在换的那一帧会先把旧图扔掉（旧图 → 空 → 新图），
+    // 阅读器底是深的，中间那一帧空档就是用户看到的黑闪。所以新图先解码，解好了才换上去。
+    let release: (() => void) | undefined;
+    setImageDecoderForTests(() => new Promise<void>((resolve) => { release = resolve; }));
+    const plain = 'data:image/gif;base64,plain';
+    const enhanced = 'data:image/gif;base64,enhanced';
+    const view = render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={[plain]} derivedPages={new Map()} />
+      </MemoryRouter>,
+    );
+    try {
+      const image = await screen.findByRole('img', { name: '第 1 页' });
+      expect(image).toHaveAttribute('src', plain);
+
+      view.rerender(
+        <MemoryRouter>
+          <ReaderScreen archiveId="a1" title="Test archive" pages={[plain]} derivedPages={new Map([[0, enhanced]])} />
+        </MemoryRouter>,
+      );
+      // 还没解完：屏幕上仍然是原图——不是空的那一帧。
+      expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', plain);
+
+      await act(async () => { release?.(); });
+      await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', enhanced));
+    } finally {
+      setImageDecoderForTests(undefined);
+    }
+  });
+
   it('continues panning with the remaining finger after a pinch', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
@@ -560,7 +592,7 @@ describe('reader screen', () => {
     expect(await screen.findByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
   });
 
-  it('swaps an enhanced page in without disturbing the zoom', () => {
+  it('swaps an enhanced page in without disturbing the zoom', async () => {
     const { container, rerender } = render(
       <MemoryRouter>
         <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
@@ -580,11 +612,12 @@ describe('reader screen', () => {
         <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map([[0, 'blob:enhanced-0']])} />
       </MemoryRouter>,
     );
-    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
+    // 换图要等新图解码完（先解码再换，见 lib/decodeImage），所以这里等一下而不是立刻断言。
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
   });
 
-  it('draws an enhanced page at the size the plain one measured', () => {
+  it('draws an enhanced page at the size the plain one measured', async () => {
     const { rerender } = render(
       <MemoryRouter>
         <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
@@ -609,8 +642,8 @@ describe('reader screen', () => {
         <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map([[0, 'blob:enhanced-0']])} />
       </MemoryRouter>,
     );
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     const enhanced = screen.getByRole('img', { name: '第 1 页' });
-    expect(enhanced).toHaveAttribute('src', 'blob:enhanced-0');
     measure(enhanced, 1400, 2000);
     expect(enhanced.style.getPropertyValue('--reader-page-max-width')).toBe('700px');
     expect(enhanced.style.getPropertyValue('--reader-page-max-height')).toBe('1000px');
