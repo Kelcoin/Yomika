@@ -80,6 +80,13 @@ export function transferScopeLabel(scope: readonly TransferCategory[]): string {
   return '什么都没勾';
 }
 
+/** 「导出数据」那一行上的值：记录与设置的名字；勾了凭据时补一句——那份文件会用口令加密。 */
+export function exportScopeLabel(scope: readonly TransferCategory[]): string {
+  const records = recordScopeLabel(scope);
+  if (credentialTransferScope(scope).length === 0) return records;
+  return records === '未选择记录与设置' ? '仅凭据' : `${records} + 凭据`;
+}
+
 /** 勾了哪几类的名字，用来在口令对话框里说清「这个文件里装了什么」。 */
 export function credentialScopeLabel(scope: readonly TransferCategory[]): string {
   return TRANSFER_CREDENTIAL_CATEGORIES

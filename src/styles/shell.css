@@ -4512,10 +4512,10 @@ eh-account-panel ul {
 /* 一个菜单里有两组多选行时的分组小标题：只有间距的话看不出分界在哪（比如「导入导出
    范围」分成记录与设置、凭据两组）。 */
 .settings-menu-checks-caption {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-1);
   color: var(--on-surface-variant);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
 }
 
 /* 第二组之前多留一段：分界靠这一段间距 + 自己的小标题一起说清楚。 */
@@ -4543,6 +4543,33 @@ eh-account-panel ul {
 
 .settings-menu-check:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .settings-menu-check svg { flex: none; width: 18px; height: 18px; color: var(--primary); }
+
+/* 勾选框：空框 = 未勾，填色带勾 = 勾上。整行可点，框只表达状态。
+   未勾时框里那枚 ✓ 只是因为透明而看不见——它一直在，尺寸就不会在勾的一瞬间跳。 */
+.settings-menu-check-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--outline);
+  border-radius: 7px;
+  color: transparent;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+
+.settings-menu-check-mark svg { width: 15px; height: 15px; color: inherit; }
+
+.settings-menu-check.is-checked .settings-menu-check-mark {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+@media (hover: hover) {
+  .settings-menu-check:not(:disabled):hover .settings-menu-check-mark { border-color: var(--primary); }
+}
+
 /* 固定项（档案库/设置）可读性不打折：保持全不透明，仅以锁形与禁用光标示意。 */.settings-menu-check.is-pinned svg { color: var(--on-surface-variant); }
 .settings-menu-check:disabled { cursor: default; opacity: 1; }
 
@@ -5216,6 +5243,9 @@ eh-account-panel ul {
 
    整块放在文件末尾是有意的：与静止态同特异性时后写的赢，不必靠 !important 抢。 */
 @media (hover: none) {
+  /* 勾选框的按下态：触屏没有 hover，按下就是唯一的反馈（与悬停那条成对）。 */
+  .settings-menu-check:not(:disabled):is(.is-pressed, :active) .settings-menu-check-mark { border-color: var(--primary); }
+
   /* 悬停填一层容器色，文字转成正文色。 */
   .icon-button:is(.is-pressed, :active),
   .nav-link:is(.is-pressed, :active),

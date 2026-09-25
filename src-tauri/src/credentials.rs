@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
-    data_transfer::is_credential_category,
+    data_transfer::{is_credential_category, record_transfer_scope},
     commands::{
         eh::{save_eh_account_record, SaveEhAccountInput, SystemEhCookieStore},
         library::{save_server_record, ServerInput, SystemCredentialStore},
@@ -73,6 +73,13 @@ struct CredentialBundle {
     eh_accounts: Vec<EhAccountCredential>,
     #[serde(default)]
     sync_accounts: Vec<SyncAccountCredential>,
+    /// 记录与设置那一半（`commands::sync` 那份本机导出的信封原样放进来）。
+    ///
+    /// 为什么放进**密文里面**而不是与凭据并排：范围里勾了凭据时，用户理解的文件是
+    /// 「一份设了口令的文件」——记录要是留在外面明文躺着，那个理解就是错的。反过来说，
+    /// 没勾凭据的导出仍然是明文（那份文件本来就不设口令），两种文件各有各的用途。
+    #[serde(default)]
+    records: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +128,8 @@ pub struct CredentialExportReport {
     pub servers: usize,
     pub eh_accounts: usize,
     pub sync_accounts: usize,
+    /// 一起装进这份加密文件的记录与设置条数（0 表示这次只带了凭据）。
+    pub records: usize,
     /// 凭据库里读不到的那几条（例如条目还在、密钥已被系统清理）。它们不会进文件，
     /// 所以报出来，而不是让使用者以为"全都带上了"。
     pub skipped: usize,
@@ -132,6 +141,11 @@ pub struct CredentialImportReport {
     pub servers: usize,
     pub eh_accounts: usize,
     pub sync_accounts: usize,
+    /// 文件里那一半记录与设置落地了几条。
+    pub records: usize,
+    /// 文件里装着记录，但这次一个记录类别都没勾——说清楚它们是被**跳过**的，
+    /// 而不是文件里没有。
+    pub records_skipped: bool,
 }
 
 fn random_bytes(length: usize) -> Result<Vec<u8>, String> {
@@ -390,6 +404,7 @@ fn parse_envelope(payload: &str) -> Result<CredentialEnvelope, String> {
 pub fn export_credentials(
     passphrase: String,
     categories: String,
+    records: Option<String>,
     database: State<'_, Database>,
 ) -> CommandResult<CredentialExportReport> {
     if let Err(error) = validate_passphrase(&passphrase) {
@@ -407,10 +422,28 @@ pub fn export_credentials(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let (bundle, skipped) = match collect_bundle(&connection, &enabled) {
+    let (mut bundle, skipped) = match collect_bundle(&connection, &enabled) {
         Ok(collected) => collected,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
+    // 记录那一半由调用方（`export_scoped_data` 已经折好的那份文本）交进来：折本机状态
+    // 是同步那边的活，这里只负责把它一起锁进口令里。
+    if let Some(text) = records.filter(|value| !value.trim().is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => bundle.records = Some(value),
+            Err(_) => {
+                return CommandResult::failure("INVALID_INPUT", "记录与设置的内容不是有效的 JSON", false)
+            }
+        }
+    }
+    let records = bundle
+        .records
+        .as_ref()
+        .and_then(|value| value.get("document"))
+        .and_then(|document| document.get("objects"))
+        .and_then(|objects| objects.as_object())
+        .map(|objects| objects.len())
+        .unwrap_or(0);
     let exported_at = connection
         .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get::<_, String>(0))
         .unwrap_or_default();
@@ -447,6 +480,7 @@ pub fn export_credentials(
             servers: bundle.servers.len(),
             eh_accounts: bundle.eh_accounts.len(),
             sync_accounts: bundle.sync_accounts.len(),
+            records,
             skipped,
         }),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
@@ -463,6 +497,7 @@ pub fn import_credentials(
     payload: String,
     passphrase: String,
     categories: String,
+    record_categories: String,
     database: State<'_, Database>,
 ) -> CommandResult<CredentialImportReport> {
     let enabled = parse_credential_scope(&categories);
@@ -504,6 +539,8 @@ pub fn import_credentials(
         servers: 0,
         eh_accounts: 0,
         sync_accounts: 0,
+        records: 0,
+        records_skipped: false,
     };
 
     // 文件里可能装着没勾的类（比如从别人的文件里导）：勾选是「要不要这类数据」的
@@ -591,6 +628,32 @@ pub fn import_credentials(
         }
     }
 
+    // 记录那一半：文件里装着，而且这次勾了记录类，就按同步那套合并规则落地（同一份
+    // 文件重复导入是幂等的）。没勾就明说被跳过了——不然界面上看起来像文件里没有。
+    if let Some(value) = bundle.records {
+        let records_enabled = record_transfer_scope(
+            &serde_json::from_str::<Vec<String>>(&record_categories).unwrap_or_default(),
+        );
+        if records_enabled.is_empty() {
+            report.records_skipped = true;
+        } else {
+            match crate::commands::sync::import_scoped_document(
+                &mut connection,
+                value,
+                &records_enabled,
+            ) {
+                Ok(applied) => report.records = applied.applied,
+                Err(error) => {
+                    return CommandResult::failure(
+                        "INVALID_INPUT",
+                        format!("记录与设置导入失败：{error}"),
+                        false,
+                    )
+                }
+            }
+        }
+    }
+
     CommandResult::success(report)
 }
 
@@ -621,6 +684,31 @@ mod tests {
         let other_salt = random_bytes(SALT_BYTES).expect("salt");
         let other = derive_key("correct horse battery", &other_salt, PBKDF2_ITERATIONS).expect("key");
         assert!(open(&other, &nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn a_bundle_can_carry_records_inside_the_same_ciphertext() {
+        // 范围里同时勾了记录与凭据时，记录**跟着凭据一起进密文**——文件外层只有密文，
+        // 没有一段明文躺在旁边（那会让人以为整份文件都被口令保护着）。这里验的是这条
+        // 路上的编解码：加密 → 解密 → 两个字段都还在。
+        let mut bundle = CredentialBundle::default();
+        bundle.records = Some(serde_json::json!({
+            "kind": "yomika-scope-export",
+            "document": { "objects": { "a": 1 } },
+        }));
+        let plaintext = serde_json::to_vec(&bundle).expect("encode");
+        let salt = random_bytes(SALT_BYTES).expect("salt");
+        let key = derive_key("a-long-passphrase", &salt, PBKDF2_ITERATIONS).expect("key");
+        let (nonce, ciphertext) = seal(&key, &plaintext).expect("seal");
+        let opened = open(&key, &nonce, &ciphertext).expect("open");
+        let decoded: CredentialBundle = serde_json::from_slice(&opened).expect("decode");
+        assert_eq!(decoded.records, bundle.records);
+
+        // 2026-09-24 之前导出的凭据文件里没有 records 那个字段：照样解得开，记录为空。
+        let legacy: CredentialBundle =
+            serde_json::from_str("{\"servers\":[],\"ehAccounts\":[],\"syncAccounts\":[]}")
+                .expect("legacy decode");
+        assert!(legacy.records.is_none());
     }
 
     #[test]

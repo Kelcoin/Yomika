@@ -1733,40 +1733,41 @@ pub fn import_scoped_data(
     categories: String,
     database: State<'_, Database>,
 ) -> CommandResult<ScopedImportReport> {
-    let mut connection = match database.connection.lock() {
-        Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
     let value: serde_json::Value = match serde_json::from_str(&payload) {
         Ok(value) => value,
         Err(_) => {
             return CommandResult::failure("INVALID_INPUT", "导入内容不是有效的 JSON", false)
         }
     };
-    // 信封与裸文档都收：前者是现在的导出，后者是手抄一份 objects 的场景。
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    let enabled = parse_sync_scope(&categories);
+    match import_scoped_document(&mut connection, value, &enabled) {
+        Ok(report) => CommandResult::success(report),
+        Err(error) => CommandResult::failure("INVALID_INPUT", error, false),
+    }
+}
+
+/// 导入的核心：一份**已经解析成 JSON** 的本机导出，并进本地。
+///
+/// 单独抽出来是因为它有第二个调用方：口令加密的那份文件里也能装记录（见
+/// `credentials::import_credentials`），而那边已经锁着连接——再走一次命令层就会自己
+/// 跟自己抢锁。信封与裸文档都收：前者是现在的导出，后者是手抄一份 objects 的场景。
+pub(crate) fn import_scoped_document(
+    connection: &mut Connection,
+    value: serde_json::Value,
+    enabled: &[String],
+) -> Result<ScopedImportReport, String> {
     let document: SyncStateDocument = match serde_json::from_value(value.clone()) {
         Ok(document) => document,
         Err(_) => match value.get("document") {
-            Some(inner) => match serde_json::from_value(inner.clone()) {
-                Ok(document) => document,
-                Err(error) => {
-                    return CommandResult::failure(
-                        "INVALID_INPUT",
-                        format!("导入内容的 document 结构不对：{error}"),
-                        false,
-                    )
-                }
-            },
-            None => {
-                return CommandResult::failure(
-                    "INVALID_INPUT",
-                    "导入内容里没有 objects（不是本应用导出的数据）",
-                    false,
-                )
-            }
+            Some(inner) => serde_json::from_value(inner.clone())
+                .map_err(|error| format!("导入内容的 document 结构不对：{error}"))?,
+            None => return Err(String::from("导入内容里没有 objects（不是本应用导出的数据）")),
         },
     };
-    let enabled = parse_sync_scope(&categories);
     let objects: Vec<SyncStateObject> = document.objects.into_values().collect();
     let outcome = (|| -> Result<(usize, usize), String> {
         let transaction = connection
@@ -1803,14 +1804,12 @@ pub fn import_scoped_data(
         transaction.commit().map_err(|error| error.to_string())?;
         Ok((applied, skipped))
     })();
-    match outcome {
-        Ok((applied, skipped)) => CommandResult::success(ScopedImportReport {
-            applied,
-            skipped,
-            categories: enabled,
-        }),
-        Err(error) => CommandResult::failure("UNKNOWN", error, true),
-    }
+    let (applied, skipped) = outcome?;
+    Ok(ScopedImportReport {
+        applied,
+        skipped,
+        categories: enabled.to_vec(),
+    })
 }
 
 /// 「编辑」表单要回显已存的口令。凭据平时只在系统安全存储里，这里按需读一次。

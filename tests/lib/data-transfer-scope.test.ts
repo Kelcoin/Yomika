@@ -5,6 +5,7 @@ import {
   TRANSFER_CREDENTIAL_CATEGORIES,
   TRANSFER_RECORD_CATEGORIES,
   credentialScopeLabel,
+  exportScopeLabel,
   credentialTransferScope,
   parseDataTransferScope,
   recordTransferScope,
@@ -50,6 +51,15 @@ describe('data transfer scope', () => {
       // 10 = 「记录与设置 + 凭据」，实测这一档在 390 宽下标签仍是一行。
       expect(transferScopeLabel(scope).length).toBeLessThanOrEqual(10);
     }
+  });
+
+  it('says on the export row that a passphrase will be needed', () => {
+    // 「导出数据」那一行：记录的名字照列，勾了凭据就补一句——那份文件会先要口令。
+    expect(exportScopeLabel([...DEFAULT_DATA_TRANSFER_SCOPE])).toBe('全部记录与设置');
+    expect(exportScopeLabel(['history', 'dedup'])).toBe('历史、非重复标记');
+    expect(exportScopeLabel(['history', 'lrr_servers'])).toBe('历史 + 凭据');
+    expect(exportScopeLabel([...TRANSFER_CREDENTIAL_CATEGORIES.map((entry) => entry.id)])).toBe('仅凭据');
+    expect(exportScopeLabel([])).toBe('未选择记录与设置');
   });
 
   it('lists the credential classes by name for the passphrase dialog', () => {

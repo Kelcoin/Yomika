@@ -47,6 +47,17 @@ pub(crate) fn is_credential_category(category: &str) -> bool {
     TRANSFER_CREDENTIAL_CATEGORIES.contains(&category)
 }
 
+/// 记录与设置那一半（喂 `export_scoped_data` / `import_scoped_data`）。
+///
+/// 与同步范围那边的 `parse_sync_scope` 有一处关键差别：**空就是空**，不回落默认。
+/// 「一类都不勾」是明确的选择；回落成默认会让「只带凭据」变成「什么都带」。
+pub(crate) fn record_transfer_scope(values: &[String]) -> Vec<String> {
+    normalize_transfer_scope(values)
+        .into_iter()
+        .filter(|item| !is_credential_category(item))
+        .collect()
+}
+
 /// 未知条目直接丢掉（旧版本可能存着已经改名的 id），其余原样保留。空结果**不**回落
 /// 默认：「一类都不勾」是使用者明确的选择，回落会让他在下次保存时看到勾又回来了。
 pub(crate) fn normalize_transfer_scope(values: &[String]) -> Vec<String> {
@@ -82,6 +93,20 @@ mod tests {
             assert!(is_credential_category(category));
         }
         assert!(!is_credential_category("history"));
+    }
+
+    #[test]
+    fn the_record_half_is_strict_about_an_empty_choice() {
+        // 与同步范围那边的 `parse_sync_scope` 有一处关键差别：空**不**回落默认。
+        // 「只带凭据」是明确的选择，回落会把它变成「什么都带」。
+        let records = record_transfer_scope(&[
+            "history".to_string(),
+            "lrr_servers".to_string(),
+            "nonsense".to_string(),
+        ]);
+        assert_eq!(records, vec!["history".to_string()]);
+        assert!(record_transfer_scope(&[]).is_empty());
+        assert!(record_transfer_scope(&["lrr_servers".to_string()]).is_empty());
     }
 
     #[test]

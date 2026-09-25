@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
-  HeartOff, ImageUpscale, Images, Info, Github, KeyRound, Layers, ListChecks, Minus,
+  HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
   Paintbrush, Palette, PanelBottom, Plus, RefreshCw, Rocket, RotateCcw, Scale, Scan, ShieldCheck,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText, History,
 } from 'lucide-react';
@@ -32,6 +32,7 @@ import {
   credentialScopeLabel,
   credentialTransferScope,
   parseDataTransferScope,
+  exportScopeLabel,
   recordScopeLabel,
   recordTransferScope,
   transferScopeLabel,
@@ -761,7 +762,7 @@ export function SettingsWorkspace() {
       if (transferCredentials.length === 0) {
         // 勾选是「要不要这类数据」的开关，导入也一样：一个凭据类都没勾就没什么好
         // 解开的。与其开个注定空手而归的对话框，不如说清要先去勾上。
-        setMigrationMessage('这是凭据文件，但「导入导出范围」里一个凭据类都没勾——先勾上要导入的类别');
+        setMigrationMessage('这是口令加密的导出文件：先在「导入导出范围」里勾上要导入的凭据类');
         setMigrationError(true);
         setMigrationPending(false);
         return;
@@ -771,6 +772,14 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'scoped') {
+      // 记录那一半没勾：这一份里只有记录，那就没什么可做的（**不要**当成「没筛过」把
+      // 整份倒进来——原生侧的同步范围解析在空列表上会回落默认）。
+      if (transferRecords.length === 0) {
+        setMigrationMessage('「导入导出范围」里没勾记录与设置，这份文件里的记录已跳过');
+        setMigrationError(true);
+        setMigrationPending(false);
+        return;
+      }
       // 本机导出的那一份：按同步的合并规则落地，导入导出范围里没勾的类别留在门外
       // ——勾选是「要不要这类数据」的开关，导入不该绕过它。
       const result = await syncRepository.importScopedData(migrationText.trim(), JSON.stringify(transferRecords));
@@ -858,8 +867,15 @@ export function SettingsWorkspace() {
   }
 
   /** 本机这一侧的导出：按勾选的导入导出范围折出同步文档（原生侧），所以导出的东西就是
-   * 同一套合并规则、同样的墓碑折出来的那些，没有第二份格式。 */
+   * 同一套合并规则、同样的墓碑折出来的那些，没有第二份格式。
+   *
+   * 范围里勾了凭据时**先要口令**：那份文件整个是加密的（见 `runCredentialTransfer`），
+   * 而口令没法事后补——文件一旦生成，里面的密文就定型了。 */
   async function runMigrationExport() {
+    if (transferCredentials.length > 0) {
+      openCredentialDialog('export');
+      return;
+    }
     setMigrationPending(true);
     setMigrationMessage(undefined);
     setMigrationError(false);
@@ -872,10 +888,7 @@ export function SettingsWorkspace() {
       return;
     }
     setMigrationText(result.value.text);
-    setMigrationMessage(
-      `已按导入导出范围导出 ${result.value.objects} 项：${recordScopeLabel(transferScope)}` +
-      (transferCredentials.length > 0 ? '（凭据要单独用「导出凭据…」）' : ''),
-    );
+    setMigrationMessage(`已导出 ${result.value.objects} 项：${recordScopeLabel(transferScope)}`);
     setMigrationPending(false);
   }
 
@@ -905,12 +918,28 @@ export function SettingsWorkspace() {
     setCredentialMode(mode);
   }
 
-  /** 口令到手：导出生成那份加密文件，导入把它解开写回凭据库。 */
+  /** 口令到手：导出把两半锁进同一份密文，导入把它解开、两半一起落地。
+   *
+   * 记录那一半**在密文里面**，不在文件外层：使用者理解的文件是「一份设了口令的文件」，
+   * 记录要是明文躺在旁边，那个理解就是错的。没勾凭据的导出仍然不设口令、也不加密。 */
   async function runCredentialTransfer(passphrase: string) {
     setCredentialPending(true);
     setCredentialProblem(undefined);
     if (credentialMode === 'export') {
-      const result = await credentialRepository.exportAll(passphrase, JSON.stringify(transferCredentials));
+      // 记录那一半先折出来（同一套合并规则），交进原生侧和凭据一起加密。
+      let recordsText: string | undefined;
+      let objects = 0;
+      if (transferRecords.length > 0) {
+        const records = await syncRepository.exportScopedData(JSON.stringify(transferRecords));
+        if (!records.ok) {
+          setCredentialPending(false);
+          setCredentialProblem(records.error.message);
+          return;
+        }
+        recordsText = records.value.text;
+        objects = records.value.objects;
+      }
+      const result = await credentialRepository.exportAll(passphrase, JSON.stringify(transferCredentials), recordsText);
       setCredentialPending(false);
       if (!result.ok) {
         setCredentialProblem(result.error.message);
@@ -919,13 +948,20 @@ export function SettingsWorkspace() {
       setCredentialMode(undefined);
       setMigrationText(result.value.text);
       setMigrationMessage(
-        `已导出凭据：服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}` +
-        (result.value.skipped > 0 ? `（${result.value.skipped} 条读不到凭据，未包含）` : ''),
+        '已导出一份口令加密的文件：' +
+        (objects > 0 ? `记录与设置 ${objects} 项 · ` : '') +
+        `服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}` +
+        (result.value.skipped > 0 ? `（${result.value.skipped} 条凭据读不到，未包含）` : ''),
       );
       return;
     }
 
-    const result = await credentialRepository.importAll(credentialText, passphrase, JSON.stringify(transferCredentials));
+    const result = await credentialRepository.importAll(
+      credentialText,
+      passphrase,
+      JSON.stringify(transferCredentials),
+      JSON.stringify(transferRecords),
+    );
     setCredentialPending(false);
     if (!result.ok) {
       // 口令不对／文件损坏就把对话框留着：让使用者再试一次，而不是重新粘一遍文件。
@@ -934,9 +970,11 @@ export function SettingsWorkspace() {
     }
     setCredentialMode(undefined);
     setMigrationText('');
-    setMigrationMessage(
-      `已导入凭据：服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}`,
-    );
+    setMigrationMessage([
+      result.value.records > 0 ? `已导入 ${result.value.records} 项记录与设置` : undefined,
+      result.value.recordsSkipped ? '文件里的记录与设置没在范围里，已跳过' : undefined,
+      `服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}`,
+    ].filter(Boolean).join(' · '));
     // 服务器的行与同步账户的行都可能刚被写进来：前者重取一次列表，后者靠 hook 里
     // 那条「同步完成」的监听重读。
     setServerLoadAttempt((attempt) => attempt + 1);
@@ -1475,12 +1513,11 @@ export function SettingsWorkspace() {
             {selectedSettingsSection === 'settings-sync' && (
               <div className="settings-group">
                 {/* 导入导出范围独立于同步范围：同步范围决定设备之间自动流动什么，这一份
-                    决定文件里装什么。凭据在这里是可勾的（同步那边连类别都没有），导出
-                    它们要另外设口令。 */}
+                    决定文件里装什么。勾了凭据，导出时就会先要口令——那一份文件整个是加密
+                    的（记录也跟着锁进去），所以不再有「另外导出凭据」这一步。 */}
                 <SettingsPanel
                   icon={<ArrowLeftRight />}
                   label="导入导出范围"
-                  hint="文件里装哪几类"
                   ariaLabel="导入导出范围"
                   value={transferScopeLabel(transferScope)}
                 >
@@ -1506,13 +1543,12 @@ export function SettingsWorkspace() {
                       />
                     ))}
                   </CheckRowGroup>
-                  <p className="sync-scope-hint">凭据类要另外设口令；不勾的类别既不进文件，也不会被导入。</p>
                 </SettingsPanel>
                 <SettingsPanel
                   icon={<FileDown />}
                   label="导出数据"
-                  hint="导出成可粘贴的文本"
-                  value={recordScopeLabel(transferScope)}
+                  hint="导出成可粘贴的文本；含凭据时先设口令"
+                  value={exportScopeLabel(transferScope)}
                   onClose={() => setMigrationText('')}
                 >
                   <form className="legacy-import-form" onSubmit={(event) => event.preventDefault()}>
@@ -1527,14 +1563,11 @@ export function SettingsWorkspace() {
                       onChange={(event) => setMigrationText(event.target.value)}
                     />
                     <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
-                      <button className="secondary-action" type="button" disabled={migrationPending || transferRecords.length === 0} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+                      {/* 一个按钮导完整个范围：勾了凭据就先要口令，然后一份文件装两半
+                          （记录在密文里面）。曾经那条「导出凭据…」是另一条路——同一次
+                          迁移要点两次、还容易漏掉一半，2026-09-24 并进了这里。 */}
+                      <button className="secondary-action" type="button" disabled={migrationPending || (transferRecords.length === 0 && transferCredentials.length === 0)} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
                         {migrationPending ? '处理中…' : '导出数据'}
-                      </button>
-                      {/* 凭据单走一条路：同步永远不带它们（API Key、Cookie 与同步口令在系统
-                          凭据库里按设备各存各的），但换台机器总得有个出口——出口是一个口令
-                          加密的文件。 */}
-                      <button className="secondary-action" type="button" disabled={migrationPending || transferCredentials.length === 0} onClick={() => openCredentialDialog('export')}>
-                        <KeyRound aria-hidden="true" />导出凭据…
                       </button>
                       <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
                         <Copy aria-hidden="true" />复制
@@ -1545,7 +1578,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel
                   icon={<FileUp />}
                   label="导入数据"
-                  hint="粘贴导出的文本或凭据文件"
+                  hint="粘贴导出的文本；加密文件会先问口令"
                   onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
                 >
                   <form className="legacy-import-form" onSubmit={runMigrationImport}>
@@ -1560,11 +1593,10 @@ export function SettingsWorkspace() {
                       rows={6}
                     />
                     <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
-                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim() || transferRecords.length === 0} aria-busy={migrationPending}>
+                      {/* 粘什么进来就导什么：记录、加密文件、旧版导出都由这一颗按钮认出来
+                          ——加密的那份会接着弹口令。 */}
+                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
                         {migrationPending ? '处理中…' : '导入数据'}
-                      </button>
-                      <button className="secondary-action" type="button" disabled={!migrationText.trim() || transferCredentials.length === 0} onClick={() => openCredentialDialog('import')}>
-                        <KeyRound aria-hidden="true" />按凭据导入…
                       </button>
                     </div>
                   </form>
@@ -1858,7 +1890,10 @@ export function SettingsWorkspace() {
       <PassphraseDialog
         open={credentialMode !== undefined}
         mode={credentialMode === 'export' ? 'export' : 'import'}
-        contents={credentialScopeLabel(transferScope)}
+        contents={[
+          transferRecords.length > 0 ? '记录与设置' : undefined,
+          credentialScopeLabel(transferScope) || undefined,
+        ].filter(Boolean).join('、')}
         pending={credentialPending}
         problem={credentialProblem}
         onConfirm={(passphrase) => void runCredentialTransfer(passphrase)}
