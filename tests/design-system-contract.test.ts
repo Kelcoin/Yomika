@@ -324,6 +324,18 @@ describe('design system contract', () => {
     expect(cargo).toMatch(/keyring\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*['"]windows-native['"]/s);
   });
 
+  it('keeps the toast above menus, their backdrop and dialogs', () => {
+    // toast 说的是刚刚发生的那件事：被二级菜单那道 fixed 遮罩盖住就等于没发生。
+    const tokens = read('src/styles/tokens.css');
+    const zIndexOf = (name: string) => Number(new RegExp(`${name}:\\s*([0-9]+)`).exec(tokens)?.[1] ?? -1);
+    expect(zIndexOf('--z-toast')).toBeGreaterThan(zIndexOf('--z-modal'));
+    expect(zIndexOf('--z-modal')).toBeGreaterThan(zIndexOf('--z-overlay'));
+    expect(ruleBody(read('src/styles/shell.css'), '.toast-stack')).toMatch(/z-index:\s*var\(--z-toast\)/);
+    // 并且要挂到 body 上：留在页面容器里，容器自己的层叠上下文会把它关在里面
+    //（浮层当初就是因为这个改用 portal 的）。
+    expect(read('src/components/Toast.tsx')).toMatch(/<OverlayLayer>\s*<div className="toast-stack"/);
+  });
+
   it('centers the passphrase dialog title and masks the fields itself', () => {
     const shell = read('src/styles/shell.css');
     // 标题居中：它和二级菜单是同一个家族（那些菜单的标题早就居中了）。

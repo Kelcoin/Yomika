@@ -372,6 +372,9 @@
     --z-overlay: 50;
     --z-modal: 51;
     --z-skip-link: 60;
+    /* toast 是最后要看到的一层：二级菜单的遮罩、对话框都不该盖住它（它说的是刚刚发生
+       的那件事，被盖住就等于没发生）。 */
+    --z-toast: 70;
     --z-reader-chrome: 3;
     --z-reader-overview: 4;
   }

@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 
+import { OverlayLayer } from './OverlayLayer';
+
 type ToastType = 'info' | 'success' | 'error';
 
 /** The three semantic marks, drawn rather than borrowed.
@@ -61,11 +63,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
   useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
   const value = useMemo(() => ({ showToast, clearToasts }), [clearToasts, showToast]);
-  return <ToastContext.Provider value={value}>{children}<div className="toast-stack" aria-live="polite">
+  // 挂到 body（`OverlayLayer`）：留在页面容器里，容器自己的层叠上下文（`.workspace` 的
+  // 入场 transform、列表的 z-index…）会把这个栈关在里面，二级菜单那道 `position: fixed`
+  // 的遮罩就会盖在它上面——浮层当初就是因为这个才改用 portal 的，toast 同理。
+  return <ToastContext.Provider value={value}>{children}<OverlayLayer><div className="toast-stack" aria-live="polite">
     {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} role={item.type === 'error' ? 'alert' : 'status'} key={item.id}>
       <span className="toast-icon" aria-hidden="true"><ToastMark type={item.type} /></span><span className="toast-text">{item.text}</span><button className="toast-close" type="button" aria-label="关闭提示" onClick={() => closeToast(item.id)}><X aria-hidden="true" /></button>
     </div>)}
-  </div></ToastContext.Provider>;
+  </div></OverlayLayer></ToastContext.Provider>;
 }
 export function useToast(): ToastContextValue {
   const value = useContext(ToastContext);
