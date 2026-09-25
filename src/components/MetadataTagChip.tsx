@@ -23,9 +23,12 @@ export function MetadataTagChip({ tag, sizes, onDelete }: { tag: string; sizes?:
   // A translation identical to the source has nothing to reveal and one width.
   const hasTranslation = translated !== tag;
   const measured = Boolean(sizes?.originalWidth && sizes?.translatedWidth);
+  // **向上**取整：量出来的是小数（`somebody` 61.05px），四舍五入到 61 就比文字窄了
+  // 零点零五个像素——`text-overflow: ellipsis` 立刻把最后一个字换成省略号。看起来
+  // 「明明放得下却被截断」就是这么来的（实测 8 枚里有 3 枚这样）。
   const style: CSSProperties | undefined = measured ? ({
-    '--tag-width-rest': `${Math.round(sizes!.translatedWidth)}px`,
-    '--tag-width-revealed': `${Math.round(sizes!.originalWidth)}px`,
+    '--tag-width-rest': `${Math.ceil(sizes!.translatedWidth)}px`,
+    '--tag-width-revealed': `${Math.ceil(sizes!.originalWidth)}px`,
   } as CSSProperties) : undefined;
 
   return (

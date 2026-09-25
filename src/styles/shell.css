@@ -1841,7 +1841,9 @@ body::-webkit-scrollbar,
 
 .metadata-tag-reveal {
   min-width: 0;
-  padding: 0 8px;
+  /* 左边 8px 是文字与边框的呼吸，右边 2px：那之后紧接着就是 ✕ 自己的空白，两边都留
+     8 会让「文字 ↔ ✕」之间空到 12px（实测），看起来像两块东西而不是一枚标签。 */
+  padding: 0 2px 0 8px;
   border: 0;
   background: transparent;
   color: var(--ink-secondary);
@@ -1853,15 +1855,16 @@ body::-webkit-scrollbar,
 /* The chip rests at its translation's width and grows to the original's on
    hover/press; the row wrapped on whichever label is wider, so the growth only
    shoves neighbours inside the row. Unmeasured chips keep their natural size. */.metadata-tag.is-measured .metadata-tag-reveal {
-  width: calc(var(--tag-width-rest) + 16px);
+  /* + 10px = 左右内边距（8 + 2），与上面那条 padding 一一对应。 */
+  width: calc(var(--tag-width-rest) + 10px);
   transition: width var(--motion-standard);
 }
 .metadata-tag.is-measured.is-revealed .metadata-tag-reveal {
-  width: calc(var(--tag-width-revealed) + 16px);
+  width: calc(var(--tag-width-revealed) + 10px);
 }
 @media (hover: hover) {
   .metadata-tag.is-measured:hover .metadata-tag-reveal {
-    width: calc(var(--tag-width-revealed) + 16px);
+    width: calc(var(--tag-width-revealed) + 10px);
   }
 }
 

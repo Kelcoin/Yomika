@@ -324,6 +324,26 @@ describe('design system contract', () => {
     expect(cargo).toMatch(/keyring\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*['"]windows-native['"]/s);
   });
 
+  it('keeps the tag chip tight to its delete button and never clips a fitting label', () => {
+    // 用户报的两件事都在这几行里：✕ 与文字之间空到 12px（两边都留 8），以及「明明放得下
+    // 却被截断」——量出来的是小数（`somebody` 61.05px），四舍五入到 61 就比文字窄，于是
+    // `text-overflow: ellipsis` 把最后一个字换成省略号。实测 8 枚里 3 枚这样。
+    const shell = read('src/styles/shell.css');
+    const reveal = ruleBody(shell, '.metadata-tag-reveal');
+    expect(reveal).toMatch(/padding:\s*0 2px 0 8px/);
+    // 宽度公式与那条 padding 一一对应（+10 = 左 8 + 右 2）。
+    expect(shell).toMatch(/\.metadata-tag\.is-measured \.metadata-tag-reveal \{[^}]*width:\s*calc\(var\(--tag-width-rest\) \+ 10px\)/);
+    expect(shell).toMatch(/\.metadata-tag\.is-measured\.is-revealed \.metadata-tag-reveal \{[^}]*width:\s*calc\(var\(--tag-width-revealed\) \+ 10px\)/);
+
+    const chip = read('src/components/MetadataTagChip.tsx');
+    expect(chip).toMatch(/\$\{Math\.ceil\(sizes!\.translatedWidth\)\}px/);
+    expect(chip).toMatch(/\$\{Math\.ceil\(sizes!\.originalWidth\)\}px/);
+    expect(chip).not.toMatch(/Math\.round\(sizes!/);
+
+    // 行的换行预留跟着 chip 的固定开销走：左 8 + 右 2 + ✕ 22 + 边框 2。
+    expect(read('src/components/MetadataTagRows.tsx')).toMatch(/Math\.max\(originalWidth, translatedWidth\) \+ 34/);
+  });
+
   it('centers the second-level menu title with the row icon on its left', () => {
     const shell = read('src/styles/shell.css');
     const title = ruleBody(shell, '.settings-choice-title');

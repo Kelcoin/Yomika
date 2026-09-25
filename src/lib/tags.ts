@@ -38,8 +38,9 @@ export function assignableCategories<T extends { name: string; search?: string |
 export const CATEGORY_TRANSLATIONS: Record<string, string> = {
   manga: '漫画',
   doujinshi: '同人志',
-  artistcg: '作者 CG',
-  'artist cg': '作者 CG',
+  // E-Hentai 的分类就叫 Artist CG：画师画的单张/短篇 CG，不是「作者」。
+  artistcg: '画师 CG',
+  'artist cg': '画师 CG',
   gamecg: '游戏 CG',
   'game cg': '游戏 CG',
   imageset: '图片集',

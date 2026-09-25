@@ -1,7 +1,21 @@
-import { categorizeSearchableTags, categorizeTags, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
+import { categorizeSearchableTags, categorizeTags, categoryTagLabel, installTagTranslations, normalizeTranslationDb, parseArchiveTagString, searchTags, translateTag } from '../../src/lib/tags';
 import { formatArchiveDate } from '../../src/lib/archiveCardPresentation';
 
 describe('tag translations', () => {
+  it('names the artist-cg category the way E-Hentai does', () => {
+    // E-Hentai 的分类是 Artist CG：画师画的 CG 集。中文叫「作者 CG」是错译
+    // （那会让它和 `artist:` 那个命名空间混在一起）。
+    expect(categoryTagLabel('artistcg')).toBe('画师 CG');
+    expect(categoryTagLabel('Artist CG')).toBe('画师 CG');
+    expect(categoryTagLabel('gamecg')).toBe('游戏 CG');
+    // 别的分类不受影响。
+    expect(categoryTagLabel('manga')).toBe('漫画');
+    expect(categoryTagLabel('doujinshi')).toBe('同人志');
+    // 认不出来的原样返回（卡片脚注、详情页都用这条）。
+    expect(categoryTagLabel('unknown category')).toBe('unknown category');
+  });
+
+
   it('replaces raw EH tags with the installed Chinese translation', () => {
     installTagTranslations({ female: { 'big breasts': '巨乳', 'dark skin': '黑皮' } });
     expect(categorizeTags(['female:big breasts', 'female:dark skin'])).toEqual([
