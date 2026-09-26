@@ -120,6 +120,24 @@ fn parse_web_url(url: &str) -> Result<url::Url, CommandResult<()>> {
     }
 }
 
+/// 桌面端首帧已提交：亮出主窗、收起开屏窗。移动端的主窗由原生壳持有，
+/// 主窗本来就在最前、也没有开屏窗——两个查询都落空，等于空操作。
+#[tauri::command]
+pub fn frontend_ready(app: tauri::AppHandle) -> CommandResult<()> {
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+        if let Some(splash) = app.get_webview_window("splashscreen") {
+            let _ = splash.close();
+        }
+    }
+    CommandResult::success(())
+}
+
 #[tauri::command]
 pub async fn open_external_url(app: tauri::AppHandle, url: String) -> CommandResult<()> {
     let parsed = match parse_web_url(&url) {

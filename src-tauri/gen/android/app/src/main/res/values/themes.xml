@@ -2,5 +2,7 @@
     <!-- Base application theme. -->
     <style name="Theme.yomika" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
+        <!-- 开屏画面（docs/30）：Canvas 底 + 居中印记，冷启动到 webview 首帧之间画的就是它。 -->
+        <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 </resources>

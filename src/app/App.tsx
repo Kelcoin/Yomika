@@ -7,6 +7,7 @@ import { PreferencesProvider, usePreferences } from './preferences';
 import { startTagTranslationUpdates, stopTagTranslationUpdates } from '../lib/tagTranslationService';
 import { installErrorLogging } from '../lib/errorLog';
 import { installPressFeedback } from '../lib/pressFeedback';
+import { frontendReady } from '../bridge/platform';
 import { ToastProvider } from '../components/Toast';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
@@ -36,6 +37,9 @@ export function App() {
   const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}`;
   if (reading) readers.current.set(readerKey, location);
   useEffect(() => {
+    // 首帧已提交：桌面端收起开屏窗、亮出主窗（docs/30）。只发一次；
+    // 移动端与浏览器里都是空操作。
+    void frontendReady();
     // 没人接住的错误要有地方去：设置页的「错误日志」读的就是这里记下的内容。
     const stopErrorLogging = installErrorLogging();
     // 触屏没有 hover，`is-pressed` 就是"按下去"那一瞬间的反馈。

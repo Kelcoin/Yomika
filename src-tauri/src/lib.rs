@@ -42,7 +42,7 @@ use commands::library::{
     set_reading_list, set_watchlist, update_archive_metadata, update_task, upload_archive,
     use_metadata_plugin, verify_archives_exist,
 };
-use commands::platform::{open_external_url, platform_capabilities, read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets, write_clipboard_text};
+use commands::platform::{frontend_ready, open_external_url, platform_capabilities, read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets, write_clipboard_text};
 use commands::sync::{
     append_sync_journal, claim_sync_journal, export_scoped_data, import_scoped_data,
     list_sync_accounts, list_sync_journal,
@@ -107,7 +107,35 @@ pub fn run() {
             // window frame to decorate — so the call has to carry the same gate,
             // or the iOS/Android targets fail to compile here.
             #[cfg(desktop)]
-            let builder = builder.decorations(cfg!(not(target_os = "windows")));
+            let mut builder = builder.decorations(cfg!(not(target_os = "windows")));
+            // 桌面端先立开屏窗、主窗藏着：webview 加载完成前屏幕上是品牌帧，
+            // 不是一块白板。前端首帧提交后经 frontend_ready 亮主窗、收开屏；
+            // 兜底线程保证前端崩了开屏也不会挂成永久的门面。
+            #[cfg(desktop)]
+            {
+                builder = builder.visible(false);
+                let _ = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "splashscreen",
+                    tauri::WebviewUrl::App("splashscreen.html".into()),
+                )
+                .title("Yomika")
+                .inner_size(420.0, 300.0)
+                .decorations(false)
+                .resizable(false)
+                .center()
+                .build();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    if let Some(main) = handle.get_webview_window("main") {
+                        let _ = main.show();
+                    }
+                    if let Some(splash) = handle.get_webview_window("splashscreen") {
+                        let _ = splash.close();
+                    }
+                });
+            }
             #[cfg(target_os = "windows")]
             let builder =
                 builder.data_directory(data_paths::data_dir(app.handle())?.join("webview"));
@@ -115,6 +143,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            frontend_ready,
             platform_capabilities,
             reveal_in_file_manager,
             open_external_url,

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 开屏画面（docs/30）：进程起到 webview 首帧之间，屏幕画的就是这个窗口背景。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_canvas" />
+    <item
+        android:gravity="center"
+        android:width="96dp"
+        android:height="96dp"
+        android:drawable="@mipmap/ic_launcher_foreground" />
+</layer-list>

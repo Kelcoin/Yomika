@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yomika</title>
+<style>
+  /* 开屏画面：Canvas 底 + 居中印章 + wordmark（见 docs/30-splash-screen.md）。
+     没有进度条、没有加载文案——它是一帧品牌，不是一个转圈。 */
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: grid;
+    place-items: center;
+    background: #0B0B0F;
+    color: #F3EEE4;
+    font-family: "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+  }
+  .brand {
+    display: grid;
+    justify-items: center;
+    gap: 20px;
+    animation: arrive 0.4s ease-out both;
+  }
+  .brand svg {
+    width: 128px;
+    height: 128px;
+    display: block;
+  }
+  .wordmark {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: 0.34em;
+    /* 字距放宽后最后一个字后面也拖着空隙，缩进回来让句点贴住词尾。 */
+    text-indent: 0.34em;
+    color: #F3EEE4;
+  }
+  /* 品牌记忆点：wordmark 后的一枚朱砂印点。 */
+  .wordmark i {
+    font-style: normal;
+    color: #B63A2E;
+  }
+  @keyframes arrive {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .brand { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="512" height="512" rx="112" fill="#0D0D0D"/>
+      <rect x="112" y="112" width="288" height="288" rx="20" stroke="#F5F5F5" stroke-width="18" fill="none"/>
+      <line x1="184" y1="184" x2="184" y2="328" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+      <line x1="184" y1="184" x2="264" y2="184" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+      <line x1="224" y1="184" x2="224" y2="264" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+      <line x1="264" y1="224" x2="328" y2="224" stroke="#E8E8E8" stroke-width="18" stroke-linecap="round"/>
+      <circle cx="288" cy="296" r="22" fill="#E8E8E8"/>
+    </svg>
+    <p class="wordmark">Yomika<i>.</i></p>
+  </div>
+</body>
+</html>
