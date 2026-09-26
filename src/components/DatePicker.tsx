@@ -63,9 +63,14 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
     {open && <div className="date-picker-popover" role="dialog" aria-label={`${label}选择器`}>
       {pane === 'days' && <>
         <div className="date-picker-header">
-          <button type="button" className="icon-button" aria-label="上一年" onClick={() => shiftYears(-1)}><ChevronLeft /><ChevronLeft aria-hidden="true" className="is-second" /></button>
-          <button type="button" className="date-picker-heading" aria-label="选择年月" onClick={() => setPane('months')}>{month.getFullYear()}年 {month.getMonth() + 1}月</button>
-          <button type="button" className="icon-button" aria-label="下一年" onClick={() => shiftYears(1)}><ChevronRight /><ChevronRight aria-hidden="true" className="is-second" /></button>
+          <button type="button" className="icon-button" aria-label="上一月" onClick={() => shiftMonths(-1)}><ChevronLeft /></button>
+          {/* 年份和月份是两个独立的快速入口：点年份跳年份网格，点月份跳月份
+              网格，不再共用一个「先月份、再年份」的标题按钮。 */}
+          <div className="date-picker-heading-group">
+            <button type="button" className="date-picker-heading" aria-label="选择年份" onClick={() => { setYearPage(Math.floor(month.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE); setPane('years'); }}>{month.getFullYear()}年</button>
+            <button type="button" className="date-picker-heading" aria-label="选择月份" onClick={() => setPane('months')}>{month.getMonth() + 1}月</button>
+          </div>
+          <button type="button" className="icon-button" aria-label="下一月" onClick={() => shiftMonths(1)}><ChevronRight /></button>
         </div>
         <div className="date-picker-weekdays">{labels.map((item) => <span key={item}>{item}</span>)}</div>
         <div className="date-picker-days">{days.map((day, index) => day === null ? <span key={`empty-${index}`} /> : <button type="button" key={day} className={day === selected.getDate() && month.getMonth() === selected.getMonth() && month.getFullYear() === selected.getFullYear() ? 'is-selected' : ''} onClick={() => { onChange(format(new Date(month.getFullYear(), month.getMonth(), day))); setOpen(false); }}>{day}</button>)}</div>

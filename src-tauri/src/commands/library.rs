@@ -610,6 +610,43 @@ fn lanraragi_client() -> Result<Client, String> {
         .clone()
 }
 
+/// `/api/categories` 的回包：一个数组，或把它包在 `data` / `categories` 里的对象
+/// （不同版本的写法）。`list_categories` 与 `read_favorites_category` 都吃这一份。
+fn parse_category_list(raw: &serde_json::Value) -> Result<Vec<CategoryWire>, String> {
+    let items = match raw {
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.clone()),
+        serde_json::Value::Object(object) => {
+            let mut object = object.clone();
+            object
+                .remove("data")
+                .or_else(|| object.remove("categories"))
+                .unwrap_or(serde_json::Value::Array(Vec::new()))
+        }
+        _ => serde_json::Value::Null,
+    };
+    if items.is_null() {
+        return serde_json::from_str("null").map_err(|error| error.to_string());
+    }
+    serde_json::from_value(items).map_err(|error| error.to_string())
+}
+
+/// 线上表示到本地记录：`pinned` 在不同版本里是布尔、0/1 或 "0"/"1"。
+fn category_record(category: CategoryWire) -> CategoryRecord {
+    let pinned = category
+        .pinned
+        .as_bool()
+        .or_else(|| category.pinned.as_i64().map(|value| value == 1))
+        .or_else(|| category.pinned.as_str().map(|value| value == "1"))
+        .unwrap_or(false);
+    CategoryRecord {
+        id: category.id,
+        name: category.name,
+        pinned,
+        search: category.search,
+        archives: normalize_category_archives(category.archives),
+    }
+}
+
 #[tauri::command]
 pub async fn list_categories(
     server_id: String,
@@ -672,53 +709,18 @@ pub async fn list_categories(
             ))
         }
     };
-    let wire_result: Result<Vec<CategoryWire>, String> = match raw_categories {
-        serde_json::Value::Array(items) => serde_json::from_value(serde_json::Value::Array(items)),
-        serde_json::Value::Object(mut object) => {
-            let items = object
-                .remove("data")
-                .or_else(|| object.remove("categories"))
-                .unwrap_or(serde_json::Value::Array(Vec::new()));
-            serde_json::from_value(items)
-        }
-        _ => serde_json::from_str("null"),
-    }
-    .map_err(|error| error.to_string());
-    let wire = match wire_result {
+    let wire = match parse_category_list(&raw_categories) {
         Ok(value) => value,
         Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error, false)),
     };
-    let mut categories: Vec<CategoryRecord> = wire
-        .into_iter()
-        .map(|category| {
-            let pinned = category
-                .pinned
-                .as_bool()
-                .or_else(|| category.pinned.as_i64().map(|value| value == 1))
-                .or_else(|| category.pinned.as_str().map(|value| value == "1"))
-                .unwrap_or(false);
-            CategoryRecord {
-                id: category.id,
-                name: category.name,
-                pinned,
-                search: category.search,
-                archives: normalize_category_archives(category.archives),
-            }
-        })
-        .collect();
+    let mut categories: Vec<CategoryRecord> = wire.into_iter().map(category_record).collect();
     // LANraragi leaves `archives` empty for dynamic categories. Resolve those
     // categories concurrently through their documented search expression so
     // one slow category cannot serialize the entire detail page.
     // Two at a time: each resolution is an unpaged full-library search, and a
     // library with many dynamic categories would otherwise fire them all at once.
-    const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
     let mut dynamic_categories = JoinSet::new();
     let mut resolved = Vec::new();
-    /// A whole-library search is not a page request. Ten seconds is enough for
-    /// `/api/categories` and nowhere near enough for `start=-1` on a large
-    /// library — and a timeout here is stored as an empty category, which reads
-    /// as "nothing is in it".
-    const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 45;
     let mut requested = 0usize;
     for (index, category) in categories.iter().enumerate() {
         if !category.archives.is_empty() {
@@ -737,27 +739,9 @@ pub async fn list_categories(
         let api_key = api_key.clone();
         requested += 1;
         dynamic_categories.spawn(async move {
-            let url = build_category_search_url(&base_url, &search).ok()?;
-            let response = reader_request_with_timeout(
-                reqwest::Method::GET,
-                url,
-                api_key,
-                CATEGORY_SEARCH_TIMEOUT_SECONDS,
-            )
-            .await
-            .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            let body = response.text().await.ok()?;
-            let archives = parse_search_response(&body).ok()?;
-            Some((
-                index,
-                archives
-                    .into_iter()
-                    .map(|archive| archive.archive_id)
-                    .collect::<Vec<_>>(),
-            ))
+            resolve_category_archives(&base_url, &api_key, &search)
+                .await
+                .map(|archives| (index, archives))
         });
         if dynamic_categories.len() >= MAX_PARALLEL_CATEGORY_SEARCHES {
             if let Some(Ok(Some(entry))) = dynamic_categories.join_next().await {
@@ -4291,6 +4275,38 @@ fn build_category_search_url(base_url: &str, filter: &str) -> Result<String, Str
     build_refresh_search_url(base_url, &params)
 }
 
+/// 一条动态分类的会员名单：`/api/search` 带上它的过滤表达式，不分页（`start=-1`）。
+///
+/// **贵**：回包里是每个命中档案的完整元数据，1.5 万档案的库上单条约 2.5 秒，一条
+/// 分类没有上限就是几十秒。所以只有真的要这条名单时才调它——静态分类的名单就在
+/// `/api/categories` 的回包里（`CategoryMetadataJson.archives`），不必搜索。
+async fn resolve_category_archives(
+    base_url: &str,
+    api_key: &str,
+    search: &str,
+) -> Option<Vec<String>> {
+    let url = build_category_search_url(base_url, search).ok()?;
+    let response = reader_request_with_timeout(
+        reqwest::Method::GET,
+        url,
+        api_key.to_string(),
+        CATEGORY_SEARCH_TIMEOUT_SECONDS,
+    )
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.text().await.ok()?;
+    let archives = parse_search_response(&body).ok()?;
+    Some(
+        archives
+            .into_iter()
+            .map(|archive| archive.archive_id)
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// How long a resolved category snapshot stays good. Long enough that browsing
 /// never re-resolves, short enough that a category edited in LANraragi shows up
 /// without a manual refresh.
@@ -4300,6 +4316,19 @@ const CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
 /// indistinguishable from "this category is empty" — keeping that for six hours
 /// hides every archive in it, so it is retried sooner instead.
 const PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 10 * 60;
+/// Two at a time: each resolution is an unpaged full-library search, and a
+/// library with many dynamic categories would otherwise fire them all at once.
+const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
+/// A whole-library search is not a page request. Ten seconds is enough for
+/// `/api/categories` and nowhere near enough for `start=-1` on a large
+/// library — and a timeout here is stored as an empty category, which reads
+/// as "nothing is in it".
+const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 45;
+
+/// The one category the shelves and the heart read: LANraragi's own 🔖 Favorites.
+/// Matched by name because that is what the API carries; the id is generated per
+/// server (`SET_…`), so it cannot be a constant.
+const FAVORITES_CATEGORY_NAME: &str = "\u{1f516} Favorites";
 
 fn category_cache_key(server_id: &str) -> String {
     format!("categories.cache.{server_id}")
@@ -4392,11 +4421,226 @@ fn invalidate_category_cache(
 ) -> Result<(), String> {
     connection
         .execute(
-            "DELETE FROM settings WHERE key = ?1",
-            [category_cache_key(server_id)],
+            "DELETE FROM settings WHERE key IN (?1, ?2)",
+            params![category_cache_key(server_id), favorites_cache_key(server_id)],
         )
         .map(|_| ())
         .map_err(|error| format!("清除分类缓存失败：{error}"))
+}
+
+/// 🔖 Favorites 这一条分类：书架、详情页的心、右键菜单与多选都只要它。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FavoritesCategoryRecord {
+    pub id: String,
+    pub archives: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FavoritesCacheEnvelope {
+    synced_at: i64,
+    category: FavoritesCategoryRecord,
+}
+
+fn favorites_cache_key(server_id: &str) -> String {
+    format!("categories.favorites.{server_id}")
+}
+
+fn favorites_from_categories(categories: &[CategoryRecord]) -> Option<FavoritesCategoryRecord> {
+    categories
+        .iter()
+        .find(|category| category.name == FAVORITES_CATEGORY_NAME)
+        .map(|category| FavoritesCategoryRecord {
+            id: category.id.clone(),
+            archives: category.archives.clone(),
+        })
+}
+
+/// 收藏快照的读法有两种：新鲜（6 小时）与不论年龄。后者只用在网络取不到的时候——
+/// 一份过期的收藏名单仍然能给出那条分类的 id（写入镜像要用），也仍然比「没有收藏」
+/// 更接近事实。
+fn read_favorites_cache_from(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    now: i64,
+    max_age: Option<i64>,
+) -> Result<Option<FavoritesCategoryRecord>, String> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [favorites_cache_key(server_id)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取收藏夹缓存失败：{error}"))?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let envelope: FavoritesCacheEnvelope = match serde_json::from_str(&stored) {
+        Ok(value) => value,
+        // 旧结构（或写坏了）当作没有：下一次请求会重新取。
+        Err(_) => return Ok(None),
+    };
+    if let Some(max_age) = max_age {
+        let age = now.saturating_sub(envelope.synced_at);
+        if age < 0 || age > max_age {
+            return Ok(None);
+        }
+    }
+    Ok(Some(envelope.category))
+}
+
+fn write_favorites_cache(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    category: &FavoritesCategoryRecord,
+) -> Result<(), String> {
+    let envelope = FavoritesCacheEnvelope {
+        synced_at: current_unix_seconds(),
+        category: category.clone(),
+    };
+    let payload = serde_json::to_string(&envelope)
+        .map_err(|error| format!("序列化收藏夹缓存失败：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![favorites_cache_key(server_id), payload],
+        )
+        .map_err(|error| format!("写入收藏夹缓存失败：{error}"))?;
+    Ok(())
+}
+
+/// 本机已有的两份快照怎么回答「收藏是哪一条」：共享分类快照（新鲜，静态分类的名单
+/// 就在里面）先答，它没有或过期了再问收藏自己那份。两个都没有才是 `None`——那才需要
+/// 去网络取一次。
+fn favorites_from_cached_snapshot(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+    now: i64,
+) -> Result<Option<FavoritesCategoryRecord>, String> {
+    if let Some(categories) = read_category_cache_from(connection, server_id, now)? {
+        if let Some(favorites) = favorites_from_categories(&categories) {
+            return Ok(Some(favorites));
+        }
+    }
+    read_favorites_cache_from(
+        connection,
+        server_id,
+        now,
+        Some(CATEGORY_CACHE_MAX_AGE_SECONDS),
+    )
+}
+
+/// `/api/categories` 里那一条 🔖 Favorites，**不做任何动态解析**。
+///
+/// 不能走 `list_categories`：那条路会把每条动态分类各跑一次不分页的全库搜索，
+/// 1.5 万档案的库上量到 23 秒——而收藏夹的书架、详情页的心、右键菜单与多选都只问
+/// 这一条**静态**分类，它的会员名单就在 `/api/categories` 的回包里（API 文档中
+/// `CategoryMetadataJson.archives`：静态分类直接给出 id 列表）。所以这里依次问：
+/// 共享分类快照（新鲜）→ 收藏自己的快照（新鲜）→ 现取一次 `/api/categories`。
+/// 都不成时退回不论年龄的收藏快照；再没有才是失败。
+///
+/// 现取的那一次会写进收藏自己的快照，而不是共享快照：共享快照的语义是「动态分类
+/// 都解析过了」，用一份没有解析的结果覆盖它，会让档案卡片在六小时里丢掉分类标签。
+#[tauri::command]
+pub async fn read_favorites_category(
+    server_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<Option<FavoritesCategoryRecord>>, String> {
+    {
+        let connection = match database.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+        };
+        match favorites_from_cached_snapshot(&connection, &server_id, current_unix_seconds()) {
+            Ok(Some(favorites)) => return Ok(CommandResult::success(Some(favorites))),
+            Ok(None) => {}
+            Err(error) => return Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+        }
+    }
+    let (base_url, scope_id) = match database
+        .connection
+        .lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|connection| server_connection(&connection, &server_id))
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(CommandResult::failure("LRR_NOT_FOUND", error, false)),
+    };
+    let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                credential_read_error(error),
+                false,
+            ))
+        }
+    };
+    let fetched = async {
+        let response = reader_request(
+            reqwest::Method::GET,
+            format!("{}/api/categories", base_url.trim_end_matches('/')),
+            api_key.clone(),
+        )
+        .await
+        .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let raw: serde_json::Value = response.json().await.ok()?;
+        Some(raw)
+    }
+    .await;
+    let favorites = match fetched {
+        None => None,
+        Some(raw) => match parse_category_list(&raw) {
+            Err(_) => None,
+            Ok(wire) => {
+                let categories = wire.into_iter().map(category_record).collect::<Vec<_>>();
+                // 静态收藏分类的名单是现成的；万一服务器上这条被改成了动态分类，
+                // 就为它跑一次它自己的搜索——只有这一条，不是每一条。
+                let mut found = favorites_from_categories(&categories);
+                let search = categories
+                    .iter()
+                    .find(|category| category.name == FAVORITES_CATEGORY_NAME)
+                    .and_then(|category| category.search.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                if let (Some(favorites), Some(search)) = (found.as_mut(), search) {
+                    if favorites.archives.is_empty() {
+                        if let Some(archives) =
+                            resolve_category_archives(&base_url, &api_key, &search).await
+                        {
+                            favorites.archives = archives;
+                        }
+                    }
+                }
+                found.take()
+            }
+        },
+    };
+    if let Some(favorites) = favorites {
+        if let Ok(connection) = database.connection.lock() {
+            // 尽力而为：写不进快照只是下一次多取一回，不该让这次读取失败。
+            let _ = write_favorites_cache(&connection, &server_id, &favorites);
+        }
+        return Ok(CommandResult::success(Some(favorites)));
+    }
+    let connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+    };
+    match read_favorites_cache_from(&connection, &server_id, current_unix_seconds(), None) {
+        Ok(Some(favorites)) => Ok(CommandResult::success(Some(favorites))),
+        Ok(None) => Ok(CommandResult::failure(
+            "REMOTE_UNAVAILABLE",
+            "读取 LANraragi 分类失败".to_string(),
+            true,
+        )),
+        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+    }
 }
 
 fn current_unix_seconds() -> i64 {
@@ -6453,6 +6697,72 @@ fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 删掉选中的历史记录，每条写一个同步墓碑：别的设备下一次同步就跟着删。
+///
+/// 与保留期清理（`prune_reading_history`）走同一条路：历史记录属于本机与其它设备的
+/// 共同事实，删掉一条就必须留墓碑，否则对面的文档会把它带回来。清理的是**记录**，
+/// 不是档案——档案本体与进度都不动。
+pub(crate) fn delete_history_records_in(
+    connection: &mut Connection,
+    scope_id: &str,
+    archive_ids: &[String],
+) -> Result<usize, String> {
+    if archive_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for archive_id in archive_ids {
+        let deleted = transaction
+            .execute(
+                "DELETE FROM reading_history WHERE scope_id = ?1 AND archive_id = ?2",
+                params![scope_id, archive_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if deleted == 0 {
+            continue;
+        }
+        removed += deleted;
+        let object_id = format!("{scope_id}/{archive_id}");
+        let clock: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
+                 WHERE scope_id = ?1 AND object_id = ?2",
+                params![scope_id, object_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        super::sync::journal_object(
+            &transaction,
+            scope_id,
+            "history",
+            &object_id,
+            clock,
+            serde_json::json!({ "archiveId": archive_id, "deleted": true }),
+        )?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn delete_history_records(
+    scope_id: String,
+    archive_ids: Vec<String>,
+    database: State<'_, Database>,
+) -> CommandResult<usize> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match delete_history_records_in(&mut connection, &scope_id, &archive_ids) {
+        Ok(removed) => CommandResult::success(removed),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
 }
 
 /// 历史自动清理的入口：启动后的巡检与设置里的「立即清理」都走它。
@@ -8811,6 +9121,170 @@ mod tests {
             .is_none(),
             "a partial snapshot must not last the full window"
         );
+    }
+
+    fn favorite_category(name: &str, id: &str, archives: &[&str], search: Option<&str>) -> CategoryRecord {
+        CategoryRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            pinned: false,
+            search: search.map(str::to_string),
+            archives: archives.iter().map(|value| value.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn favorites_reads_the_shared_snapshot_without_resolving_dynamic_categories() {
+        // 收藏那条是静态分类，名单就在共享快照里：这一路不发任何请求——动态分类
+        // 在别处（list_categories）才解析，那才是 23 秒的来源。
+        let connection = migrated_connection();
+        let categories = vec![
+            favorite_category("🔖 Favorites", "SET_fav", &["a1", "a2"], None),
+            favorite_category("同人志", "SET_big", &[], Some("category:doujinshi")),
+        ];
+        write_category_cache(&connection, "scope-f", &categories, false).expect("write");
+
+        let favorites = favorites_from_cached_snapshot(&connection, "scope-f", current_unix_seconds())
+            .expect("read")
+            .expect("favorites");
+        assert_eq!(favorites.id, "SET_fav");
+        assert_eq!(favorites.archives, vec!["a1".to_string(), "a2".to_string()]);
+    }
+
+    #[test]
+    fn favorites_falls_back_to_its_own_snapshot_and_expires_an_old_one() {
+        let connection = migrated_connection();
+        let favorites = FavoritesCategoryRecord {
+            id: "SET_fav".to_string(),
+            archives: vec!["a1".to_string()],
+        };
+        write_favorites_cache(&connection, "scope-f", &favorites).expect("write");
+
+        // 共享快照里没有收藏（或者整个快照过期）时，用收藏自己那份。
+        let cached = favorites_from_cached_snapshot(&connection, "scope-f", current_unix_seconds())
+            .expect("read")
+            .expect("favorites");
+        assert_eq!(cached.id, "SET_fav");
+
+        // 收藏自己的快照也有保质期：过期后宁可去网络取一次，也不拿一份旧的当新的。
+        let aged = favorites_from_cached_snapshot(
+            &connection,
+            "scope-f",
+            current_unix_seconds() + CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+        )
+        .expect("read aged");
+        assert!(aged.is_none(), "an aged favorites snapshot must be refetched");
+
+        // 但断网时它仍然是最好的答案（命令的最后一手是它，不看年龄）。
+        let stale = read_favorites_cache_from(
+            &connection,
+            "scope-f",
+            current_unix_seconds() + CATEGORY_CACHE_MAX_AGE_SECONDS + 1,
+            None,
+        )
+        .expect("read stale");
+        assert_eq!(stale.map(|value| value.id), Some("SET_fav".to_string()));
+
+        // 没有这条分类的服务器：两处都没有，就是 None（调用方退回本机收藏）。
+        assert!(
+            favorites_from_cached_snapshot(&connection, "scope-none", current_unix_seconds())
+                .expect("read none")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adding_or_removing_a_category_drops_both_snapshots() {
+        // 收藏那条分类的会员名单变了，两份快照都得作废：共享快照里也有它，
+        // 收藏那份是它的快路径。
+        let connection = migrated_connection();
+        write_favorites_cache(
+            &connection,
+            "scope-f",
+            &FavoritesCategoryRecord { id: "SET_fav".to_string(), archives: vec!["a1".to_string()] },
+        )
+        .expect("write favorites");
+        write_category_cache(
+            &connection,
+            "scope-f",
+            &[favorite_category("🔖 Favorites", "SET_fav", &["a1"], None)],
+            false,
+        )
+        .expect("write shared");
+
+        invalidate_category_cache(&connection, "scope-f").expect("invalidate");
+
+        assert!(
+            read_favorites_cache_from(&connection, "scope-f", current_unix_seconds(), None)
+                .expect("read favorites")
+                .is_none()
+        );
+        assert!(
+            read_category_cache_from(&connection, "scope-f", current_unix_seconds())
+                .expect("read shared")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn deleting_history_records_leaves_tombstones_and_spares_other_rows() {
+        let mut connection = migrated_connection();
+        for archive_id in ["a1", "a2", "a3"] {
+            connection
+                .execute(
+                    "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                     VALUES ('scope-h', ?1, 3, '2026-09-01T00:00:00Z', 'device-1', 1)",
+                    [archive_id],
+                )
+                .expect("insert history");
+        }
+        connection
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                 VALUES ('scope-other', 'a1', 3, '2026-09-01T00:00:00Z', 'device-1', 1)",
+                [],
+            )
+            .expect("insert other scope");
+
+        let removed = delete_history_records_in(
+            &mut connection,
+            "scope-h",
+            &["a1".to_string(), "a2".to_string(), "missing".to_string()],
+        )
+        .expect("delete");
+        assert_eq!(removed, 2, "每条真的删掉的记录各算一条");
+
+        let left: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM reading_history WHERE scope_id = 'scope-h'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 1, "没选中的那条记录还在");
+        let other: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM reading_history WHERE scope_id = 'scope-other'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count other");
+        assert_eq!(other, 1, "别的设备那一份不能被本机的清理带走");
+
+        let tombstones: Vec<(String, String)> = {
+            let mut statement = connection
+                .prepare("SELECT object_id, payload_json FROM sync_journal WHERE object_type = 'history'")
+                .expect("prepare journal");
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("journal rows");
+            rows.collect::<Result<Vec<_>, _>>().expect("collect")
+        };
+        assert_eq!(tombstones.len(), 2, "每条删掉的记录各留一个墓碑");
+        for (object_id, payload) in tombstones {
+            assert!(object_id.starts_with("scope-h/"), "{object_id}");
+            assert!(payload.contains("\"deleted\":true"), "{payload}");
+        }
     }
 
     #[test]

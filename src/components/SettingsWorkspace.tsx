@@ -5,7 +5,7 @@ import {
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
   Paintbrush, Palette, PanelBottom, Pencil, Plus, RefreshCw, Rocket, RotateCcw, Save, Scale, Scan, ShieldCheck, X, Check,
-  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText, History,
+  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
 } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
@@ -456,8 +456,6 @@ export function SettingsWorkspace() {
   const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
-  /** 手动清一次历史；自动清理由 lib/historyMaintenance 排程。 */
-  const [historyPruning, setHistoryPruning] = useState(false);
   /** 自动同步的进行状态：账户行据此显示「同步中」与上次同步时刻。 */
   const [autoSync, setAutoSync] = useState(autoSyncStatus());
   useEffect(() => subscribeAutoSync(setAutoSync), []);
@@ -577,17 +575,6 @@ export function SettingsWorkspace() {
     });
     return () => { active = false; };
   }, [serverLoadAttempt]);
-
-  async function pruneHistoryNow() {
-    setHistoryPruning(true);
-    try {
-      const result = await repository.pruneHistory();
-      if (!result.ok) { showToast(result.error.message, 'error'); return; }
-      showToast(result.value === 0 ? '没有需要清理的历史记录' : `已清理 ${result.value} 条历史记录`, 'success');
-    } finally {
-      setHistoryPruning(false);
-    }
-  }
 
   async function refreshCacheStats() {
     const result = await cacheRepository.stats();
@@ -1180,22 +1167,6 @@ export function SettingsWorkspace() {
                     }).catch(() => showToast('无法打开目录选择器', 'error'));
                   }}><FolderOpen aria-hidden="true" />选择目录</button>
                   <button className="secondary-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
-                </div>
-              </SettingsPanel>
-            )}
-            {selectedSettingsSection === 'settings-general' && (
-              <SettingsPanel
-                icon={<History />}
-                label="历史记录清理"
-                hint="已读完留 3 个月，未读完留 1 年，自动清理"
-                ariaLabel="历史记录清理"
-                value={historyPruning ? '清理中…' : '自动'}
-              >
-                <p className="settings-menu-desc">读到总页数 95% 以上算读完。清理会同步到其它设备。</p>
-                <div className="settings-menu-actions">
-                  <button className="secondary-action" type="button" disabled={historyPruning} aria-busy={historyPruning} onClick={() => void pruneHistoryNow()}>
-                    <Eraser aria-hidden="true" />{historyPruning ? '清理中…' : '立即清理'}
-                  </button>
                 </div>
               </SettingsPanel>
             )}

@@ -16,9 +16,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { parseArchiveTagString, FAVORITES_CATEGORY_NAME } from '../lib/tags';
+import { parseArchiveTagString } from '../lib/tags';
+import { mirrorFavorites } from '../lib/favoritesMirror';
 import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
@@ -68,6 +69,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   /** The server this archive belongs to, carried by the linking card; without
    * one the first configured server is the default. */
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const serverParam = searchParams.get('server');
   // The server scope is only known after listServers IPC. Keep a second,
   // archive-keyed pointer so a route remount can paint cached metadata on its
@@ -110,10 +112,18 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
   useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
 
+  /** 详情可能开在档案库，也可能开在某个书架上（`/history/…`、`/watchlist/…`、
+   *  `/to-read/…`）：返回与「档案没了」都要回到它来的那一边——一律送回档案库，
+   *  从书架点进来的人就换了一个页面。 */
+  const shelfBase = useMemo(() => {
+    const head = location.pathname.split('/')[1] ?? '';
+    return ['library', 'history', 'watchlist', 'to-read'].includes(head) ? `/${head}` : '/library';
+  }, [location.pathname]);
+
   /** Back means back. This was a hardcoded link to the library, so arriving from
    * the home shelves and pressing it took you somewhere you had never been.
    * A direct visit has nothing to return to, so that case still falls back. */
-  const goBack = useReturnNavigation();
+  const goBack = useReturnNavigation(shelfBase);
   const { showToast } = useToast();
   useTagTranslations();
 
@@ -178,7 +188,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           invalidateRouteCache('library:');
           invalidateRouteCache('state:');
           showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
-          navigate('/library', { replace: true });
+          navigate(shelfBase, { replace: true });
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
@@ -233,7 +243,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
   const [downloading, setDownloading] = useState(false);
   const { open: openMenu, menu } = useArchiveContextMenu({
     onMembershipChange: (_id, list, next) => list === 'reading' ? setInReadingList(next) : setFavorite(next),
-    onDeleted: () => navigate('/library', { replace: true }),
+    onDeleted: () => navigate(shelfBase, { replace: true }),
   });
 
   if (error && !metadata) {
@@ -323,13 +333,8 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             // mirrors the write there too — best effort, the local row stays
             // as the offline mirror and for WebDAV sync either way.
             if (!serverId) return;
-            void repository.listCategories(serverId).then((categories) => {
-              const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
-              if (!favorites) return;
-              const mirrored = !favorite
-                ? repository.addArchiveToCategory(serverId, favorites.id, archiveId)
-                : repository.removeArchiveFromCategory(serverId, favorites.id, archiveId);
-              void mirrored.then((mirrorResult) => { if (!mirrorResult.ok) setMessage('未能同步到服务器收藏夹'); });
+            void mirrorFavorites(serverId, [archiveId], !favorite).then((mirrored) => {
+              if (mirrored > 0) setMessage('未能同步到服务器收藏夹');
             });
           });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
@@ -342,7 +347,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
 
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
-          {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}</>
+          {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate(shelfBase, { replace: true })} />}</>
         )}
       </div>
 

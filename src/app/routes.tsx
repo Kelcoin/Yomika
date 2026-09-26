@@ -1,11 +1,11 @@
-import { Bookmark, BookOpen, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
+import { Bookmark, BookOpen, Eraser, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { RetainedPage } from './RetainedPage';
 import { EmptyState } from '../components/EmptyState';
-import { StatusLine } from '../components/StatusLine';
 import { LibraryShell } from '../components/LibraryShell';
+import { ShelfShell } from '../components/ShelfShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
 import { LoadingIndicator } from '../components/LoadingIndicator';
 import { pickServer } from '../domain/server';
@@ -25,11 +25,12 @@ const EhRouteWorkspace = lazy(() => import('../components/EhRouteWorkspace').the
 const MetadataEditRoute = lazy(() => import('../components/MetadataEditRoute').then((module) => ({ default: module.MetadataEditRoute })));
 const DeduplicationWorkspace = lazy(() => import('../components/DeduplicationWorkspace').then((module) => ({ default: module.DeduplicationWorkspace })));
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
 import { useArchiveSelection } from '../components/useArchiveSelection';
 import { TextInputDialog } from '../components/TextInputDialog';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 import { findMissingArchives } from '../lib/archiveExistence';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
@@ -335,7 +336,8 @@ interface ShelfSnapshot {
   favoritesIds?: string[];
 }
 
-function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) {
+function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist' | 'toRead'; detailBasePath: string }) {
+  const { showToast } = useToast();
   const [searchParams] = useSearchParams();
   const serverParam = searchParams.get('server');
   // Per-server cache: two servers keep two shelves, and a snapshot restored
@@ -369,7 +371,6 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
   // grid has no continuous vertical edge for that rail, so history always uses
   // the shared wide row presentation.
   const shelfCardStyle = name === 'history' ? 'wide' : cardStyle;
-  const [shelfMessage, setShelfMessage] = useState<string>();
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   // Removing an entry is here rather than in a toolbar: the multi-select bar that
@@ -382,6 +383,20 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
     setWatchlist((current) => current.filter((item) => !dropped.has(item.archiveId)));
     setArchives((current) => current.filter((archive) => !dropped.has(archive.archiveId)));
   }, []);
+  /** 历史的多选清理：清掉的是记录，档案留在书架上（历史页）也留在服务器上。 */
+  const [clearingHistory, setClearingHistory] = useState(false);
+  async function clearHistoryRecords() {
+    const ids = [...selection.props.selectedArchiveIds];
+    if (!scopeId || ids.length === 0) return;
+    const result = await repository.deleteHistoryRecords(scopeId, ids);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      throw new Error(result.error.message);
+    }
+    const dropped = new Set(ids);
+    setHistory((current) => current.filter((item) => !dropped.has(item.archiveId)));
+    showToast(`已清理 ${result.value} 条历史记录`, 'success');
+  }
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onMembershipChange: (archiveId, list, next) => {
       if (!next && ((name === 'toRead' && list === 'reading') || (name === 'watchlist' && list === 'favorites'))) {
@@ -418,14 +433,16 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       if (!server) { setHasServer(false); setLoading(false); return; }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      // 书架列表与分类列表相互独立，并行拉；只有收藏夹需要分类。
-      const [shelf, categories] = await Promise.all([
+      // 书架列表与收藏分类相互独立，并行拉；只有收藏夹需要那条分类——而且只要
+      // 那一条：`readFavoritesCategory` 一次两百毫秒，`listCategories` 在快照过期后
+      // 要为每条动态分类各跑一次不分页的全库搜索（1.5 万档案的库上 23 秒）。
+      const [shelf, favorites] = await Promise.all([
         name === 'history'
           ? repository.listHistory(server.scopeId)
           : name === 'toRead'
             ? repository.listReadingList(server.scopeId)
             : repository.listWatchlist(server.scopeId),
-        name === 'watchlist' ? repository.listCategories(server.id) : Promise.resolve(undefined),
+        name === 'watchlist' ? repository.readFavoritesCategory(server.id) : Promise.resolve(undefined),
       ] as const);
       if (!active) return;
       if (!shelf.ok) { setError(shelf.error.message); setLoading(false); return; }
@@ -437,12 +454,9 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
       let shelfIds = name === 'history'
         ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
         : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
-      if (name === 'watchlist' && categories?.ok) {
-        const favorites = categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME);
-        if (favorites) {
-          setFavoritesIds(favorites.archives);
-          shelfIds = favorites.archives;
-        }
+      if (name === 'watchlist' && favorites?.ok && favorites.value) {
+        setFavoritesIds(favorites.value.archives);
+        shelfIds = favorites.value.archives;
       }
       const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
       if (!active) return;
@@ -565,6 +579,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
               archives={[]}
               listLoading
               showDetail={false}
+              detailBasePath={detailBasePath}
               heading={null}
               showToolbar={false}
               cardStyle={shelfCardStyle}
@@ -576,7 +591,6 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
         </div>
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {shelfMessage && <StatusLine>{shelfMessage}</StatusLine>}
       {!loading && !error && !hasServer && <ServerRequiredPrompt />}
       {!loading && !error && hasServer && shelfArchives.length === 0 && (
         <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
@@ -592,6 +606,7 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
               heading={null}
               showToolbar={false}
               showDetail={false}
+              detailBasePath={detailBasePath}
               cardStyle={shelfCardStyle}
               {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
               searchQuery={query}
@@ -616,19 +631,34 @@ function StateWorkspace({ name }: { name: 'history' | 'watchlist' | 'toRead' }) 
               refreshing={pulling}
               onRefresh={() => { setPulling(true); setReloadToken((value) => value + 1); }}
               {...selection.props}
-              selectionActions={selection.actions}
-              {...(finishedArchiveIds && selection.props.onSelectionChange ? {
-                onSelectAllFinished: () => selection.props.onSelectionChange?.(
-                  new Set(visibleArchives.filter((archive) => finishedArchiveIds.has(archive.archiveId)).map((archive) => archive.archiveId)),
-                ),
-                finishedSelectableCount: visibleArchives.reduce((count, archive) => count + (finishedArchiveIds.has(archive.archiveId) ? 1 : 0), 0),
-              } : {})}
+              selectionActions={<>
+                {selection.actions}
+                {/* 历史的清理入口在这里：多选之后清掉的是**记录**（会同步到别的
+                    设备），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
+                    要清哪几条，只有看着列表的人知道。 */}
+                {name === 'history' && (
+                  <button className="secondary-action is-icon" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
+                    <Eraser aria-hidden="true" />
+                  </button>
+                )}
+              </>}
+              {...(finishedArchiveIds ? { finishedArchiveIds } : {})}
             />
           </section>
         </div>
       )}
       {contextMenu}
       {selection.dialogs}
+      {clearingHistory && (
+        <ConfirmDialog
+          title="清理历史记录"
+          description={`将从历史里移除选中的 ${selection.props.selectedArchiveIds.size} 条记录（档案本身不受影响），其它设备同步后也会移除。`}
+          confirmLabel="清理"
+          danger
+          onClose={() => setClearingHistory(false)}
+          onConfirm={clearHistoryRecords}
+        />
+      )}
       <TextInputDialog
         open={presetDialogOpen}
         onOpenChange={setPresetDialogOpen}
@@ -671,7 +701,10 @@ function UploadRoute() {
 export function WorkspaceRoutes() {
   const location = useLocation();
   const navigate = useNavigate();
-  const keyFor = (path: string) => /^\/library(?:\/[^/]+)?$/.test(path) ? '/library' : path;
+  /** 一条详情路由与它的列表同属一页：`/library/:id` 归 `/library`，三个书架的
+   * `/history/:id` 之类归各自的书架。保留页面按这个键复用（见 RetainedPage）。 */
+  const pageKeys: Record<string, string> = { library: '/library', history: '/history', watchlist: '/watchlist', 'to-read': '/to-read' };
+  const keyFor = (path: string) => pageKeys[path.split('/')[1] ?? ''] ?? path;
   const routeKey = keyFor(location.pathname);
   const visited = useRef(new Map<string, typeof location>());
   const previousKey = useRef(routeKey);
@@ -694,9 +727,12 @@ export function WorkspaceRoutes() {
           <Route path="/" element={<HomeWorkspace />} />
           <Route path="/library" element={<LibraryShell />} />
           <Route path="/library/:archiveId" element={<LibraryShell />} />
-          <Route path="/history" element={<StateWorkspace name="history" />} />
-          <Route path="/watchlist" element={<StateWorkspace name="watchlist" />} />
-          <Route path="/to-read" element={<StateWorkspace name="toRead" />} />
+          <Route path="/history" element={<ShelfShell name="history"><StateWorkspace name="history" detailBasePath="/history" /></ShelfShell>} />
+          <Route path="/history/:archiveId" element={<ShelfShell name="history"><StateWorkspace name="history" detailBasePath="/history" /></ShelfShell>} />
+          <Route path="/watchlist" element={<ShelfShell name="watchlist"><StateWorkspace name="watchlist" detailBasePath="/watchlist" /></ShelfShell>} />
+          <Route path="/watchlist/:archiveId" element={<ShelfShell name="watchlist"><StateWorkspace name="watchlist" detailBasePath="/watchlist" /></ShelfShell>} />
+          <Route path="/to-read" element={<ShelfShell name="toRead"><StateWorkspace name="toRead" detailBasePath="/to-read" /></ShelfShell>} />
+          <Route path="/to-read/:archiveId" element={<ShelfShell name="toRead"><StateWorkspace name="toRead" detailBasePath="/to-read" /></ShelfShell>} />
           <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
           <Route path="/eh" element={<EhRouteWorkspace />} />
           <Route path="/downloads" element={<LocalArchivesWorkspace />} />

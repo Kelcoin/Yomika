@@ -265,24 +265,19 @@ describe('settings workspace', () => {
     expect(within(menu).getByText('WebDAV · 30 分钟前同步')).toBeInTheDocument();
   });
 
-  it('prunes the reading history from the general section', async () => {
+  it('no longer offers a manual history prune in settings — that lives on the history shelf', async () => {
+    // 清理的入口在历史页：多选之后清掉选中的记录。设置里那条「立即清理」按年龄清，
+    // 要清哪几条只有看着列表的人知道，所以整行都撤了。
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'prune_history') return { ok: true, value: 4 };
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('general');
-
-    await user.click(await screen.findByRole('button', { name: '历史记录清理' }));
-    const menu = await screen.findByRole('dialog', { name: '历史记录清理' });
-    // 策略写在菜单里，用户点之前就能看到留多久。
-    expect(within(menu).getByText(/已读完留 3 个月，未读完留 1 年/)).toBeInTheDocument();
-    expect(within(menu).getByText(/读到总页数 95% 以上算读完/)).toBeInTheDocument();
-    await user.click(within(menu).getByRole('button', { name: '立即清理' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('prune_history', {}));
-    expect(await screen.findByText('已清理 4 条历史记录')).toBeInTheDocument();
+    await screen.findByRole('button', { name: '图片缓存' });
+    expect(screen.queryByRole('button', { name: '历史记录清理' })).toBeNull();
+    expect(adapter.mock.calls.some(([command]) => command === 'prune_history')).toBe(false);
   });
 
   it('loads models directly in advanced settings and toggles decensor', async () => {

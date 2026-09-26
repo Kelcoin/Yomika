@@ -3269,12 +3269,19 @@ body::-webkit-scrollbar,
   line-height: var(--leading-relaxed);
 }
 
-eh-account-panel ul {
+/* 账户列表：`<ul>` 自带 40px 的 padding-inline-start（给列表符号留的），不清掉的话
+   整块内容——头像、名字、资产行、动作行——都会比标题多缩进 40px，而右边贴着边缘：
+   「四周留空不一致，左侧异常大」。选择器从前掉了开头的点（`eh-account-panel ul`），
+   于是这几条一直没生效。 */.eh-account-panel ul {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
   margin: 0;
   padding: 0;
   list-style: none;
-}.eh-account-panel li {
+}
+
+.eh-account-panel li {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -3301,12 +3308,7 @@ eh-account-panel ul {
    account's actions are one row of the standard pill buttons, the same shape
    every other menu action uses. The full selector weight is required: the
    shared `.eh-account-panel li` rule above would flatten this block back into
-   a horizontal flex row otherwise. */.eh-account-panel ul {
-  display: grid;
-  gap: var(--space-3);
-}
-
-.eh-account-panel li.eh-account {
+   a horizontal flex row otherwise. */.eh-account-panel li.eh-account {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
@@ -3472,9 +3474,17 @@ eh-account-panel ul {
 .settings-menu-actions > .primary-action,
 .settings-menu-actions > .secondary-action,
 .archive-detail-actions > .primary-action,
-.archive-detail-actions > .secondary-action {
+.archive-detail-actions > .secondary-action,
+.dialog-actions > .primary-action,
+.dialog-actions > .secondary-action {
   flex: 1 1 0;
   min-width: 0;
+}
+
+/* 图标按钮不参与平分：它没有文字，铺满一整行只会看着像一个空框。它照旧贴在行尾
+   （对话框原先整体右对齐，留下的就是这个位置）。 */.dialog-actions > .is-icon {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
 }
 
 /* 同步范围：复用设置菜单的多选行（底栏项目那套），只是外面套一层表单里的字段标题。
@@ -3533,10 +3543,14 @@ eh-account-panel ul {
   font-weight: var(--weight-semibold);
 }
 
-.dialog-actions {
+/* 对话框的动作行与二级菜单同一种排法：按钮平分整行，一起铺满。
+   从前这里是右对齐，于是单个按钮（比如「保存服务器」）缩在右下角，而同一份设置里
+   的按钮都是铺满的——同一个应用里两套位置。平分规则与其它动作行共用（见上面的
+   `.dialog-actions > .primary-action`），图标按钮除外。 */.dialog-actions {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-3);
+  width: 100%;
   margin-top: var(--space-2);
 }
 
@@ -4308,13 +4322,16 @@ eh-account-panel ul {
 .date-picker-header, .date-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .date-picker-header strong { font-size: var(--text-sm); }
 .date-picker-header .icon-button { width: 28px; height: 28px; }
-/* 中间的年月是一个按钮：点开是月份面板，再点年份是年份面板，跨年不用按几十下。 */.date-picker-heading { padding: 4px 10px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: inherit; font: inherit; font-size: var(--text-sm); font-weight: var(--weight-semibold); cursor: pointer; }
+/* 年份与月份是两个并排的快速入口：点年份进年份网格，点月份进月份网格。 */
+.date-picker-heading-group { display: flex; align-items: center; gap: 2px; margin-inline: auto; }
+.date-picker-heading { padding: 4px 10px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: inherit; font: inherit; font-size: var(--text-sm); font-weight: var(--weight-semibold); cursor: pointer; }
 
 @media (hover: hover) {
   .date-picker-heading:hover { border-color: var(--outline-variant); background: var(--surface-container-high); }
 }
 
-/* 双向箭头表示「一次跳一年」，和单箭头的月份按钮区分开。 */.date-picker-header .icon-button svg.is-second { margin-left: -8px; }
+/* 底部动作与其它面板一致：等分占满整行，内容居中。 */
+.date-picker-footer > .secondary-action { flex: 1 1 0; min-width: 0; }
 .date-picker-grid { display: grid; gap: 4px; text-align: center; }
 .date-picker-grid.is-months { grid-template-columns: repeat(3, 1fr); }
 .date-picker-grid.is-years { grid-template-columns: repeat(4, 1fr); }

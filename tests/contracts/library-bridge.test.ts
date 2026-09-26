@@ -187,6 +187,30 @@ describe('native library repository bridge', () => {
     expect(adapter).toHaveBeenNthCalledWith(2, 'list_categories', { serverId: 'scope-a', force: true });
   });
 
+  it('reads the Favorites category on its own fast path', async () => {
+    const value = { id: 'SET_1785040778', archives: ['a1'] };
+    const adapter = vi.fn(async () => ({ ok: true, value }));
+    setInvokeAdapterForTests(adapter);
+
+    // 书架、详情页的心、右键菜单与多选只问这一条分类：它有自己的命令，不走
+    // list_categories 那条会把每条动态分类都解析一遍的路。
+    expect(await new NativeLibraryRepository().readFavoritesCategory('server-a')).toEqual({ ok: true, value });
+    expect(adapter).toHaveBeenCalledWith('read_favorites_category', { serverId: 'server-a' });
+
+    // 服务器上没有这条分类时就是 null，调用方据此退回本机那份收藏。
+    setInvokeAdapterForTests(vi.fn(async () => ({ ok: true, value: null })));
+    expect(await new NativeLibraryRepository().readFavoritesCategory('server-a')).toEqual({ ok: true, value: null });
+  });
+
+  it('clears specific reading-history records through the native command', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: 2 }));
+    setInvokeAdapterForTests(adapter);
+
+    // 清理的是记录（每条写同步墓碑），不是档案。
+    expect(await new NativeLibraryRepository().deleteHistoryRecords('scope-a', ['a1', 'a2'])).toEqual({ ok: true, value: 2 });
+    expect(adapter).toHaveBeenCalledWith('delete_history_records', { scopeId: 'scope-a', archiveIds: ['a1', 'a2'] });
+  });
+
   it('adds an archive to a category through the native command', async () => {
     const value = { operation: 'add_to_category', success: 1 };
     const adapter = vi.fn(async () => ({ ok: true, value }));

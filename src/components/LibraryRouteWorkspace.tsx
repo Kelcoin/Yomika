@@ -11,7 +11,8 @@ import { ServerRequiredPrompt } from './ServerRequiredPrompt';
 import { useArchiveSelection } from './useArchiveSelection';
 import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
+import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
+import { mirrorFavorites } from '../lib/favoritesMirror';
 import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
 
 /** 分类镜像一次性读取：注水只发生在挂载和换服务器时。原先这读写在
@@ -642,13 +643,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           // 收藏夹 shelf reads the LANraragi 🔖 Favorites category, so the heart
           // mirrors the write there too — best effort, the local row is kept for
           // the offline mirror and WebDAV sync either way.
-          const categories = await repository.listCategories(serverId);
-          const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
-          if (!favorites) return;
-          const mirrored = next
-            ? await repository.addArchiveToCategory(serverId, favorites.id, selectedArchiveId)
-            : await repository.removeArchiveFromCategory(serverId, favorites.id, selectedArchiveId);
-          if (!mirrored.ok) showToast('未能同步到服务器收藏夹', 'error');
+          const mirrored = await mirrorFavorites(serverId, [selectedArchiveId], next);
+          if (mirrored > 0) showToast('未能同步到服务器收藏夹', 'error');
         }}
         onLoadThumbnail={loadThumbnail}
         onReleaseThumbnail={releaseThumbnail}

@@ -120,6 +120,10 @@ interface LibraryWorkspaceProps {
   onCategoryFilterChange?: ((value: string) => void) | undefined;
   readingProgressByArchiveId?: ReadonlyMap<string, number> | undefined;
   showDetail?: boolean | undefined;
+  /** 列表里没有详情栏时（书架、档案库 Shell 的左栏），点卡片就是一次导航：
+   * 落到哪个前缀由调用方决定——书架要留在书架上（`/history/:id`），而不是把
+   * 左边那一栏换成档案库。 */
+  detailBasePath?: string | undefined;
   /** `null` renders no heading; watchlist/history supply their own. */
   heading?: string | null | undefined;
   /** Watchlist/history filter their own records, so the tag search is hidden. */
@@ -134,11 +138,10 @@ interface LibraryWorkspaceProps {
   onSelectionChange?: ((next: ReadonlySet<string>) => void) | undefined;
   /** What the selection bar can do, drawn by the page that can actually do it. */
   selectionActions?: ReactNode;
-  /** Selects the archive ids the page considers read to the end, e.g. the
-   * history's finished records. Supplied only where "finished" is meaningful;
-   * the count gates the button. */
-  onSelectAllFinished?: (() => void) | undefined;
-  finishedSelectableCount?: number | undefined;
+  /** The archive ids the page considers read to the end, e.g. the history's
+   * finished records. Supplied only where "finished" is meaningful; the button
+   * toggles exactly these, the way 全选当前 toggles the whole list. */
+  finishedArchiveIds?: ReadonlySet<string> | undefined;
   /** Opens the card context menu at the pointer; cards are the only elements
    * that answer a right click. */
   onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined;
@@ -167,7 +170,7 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, onSelectAllFinished, finishedSelectableCount, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -509,6 +512,22 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     onSelectionChange?.(next);
   };
 
+  /** 已读完的那些：与「全选当前」一样是一次开关——再点一次就把这一组取消掉。 */
+  const finishedVisible = useMemo(
+    () => (finishedArchiveIds ? archives.filter((archive) => finishedArchiveIds.has(archive.archiveId)) : []),
+    [archives, finishedArchiveIds],
+  );
+  const allFinishedSelected = finishedVisible.length > 0 && finishedVisible.every((archive) => selectedIds.has(archive.archiveId));
+  const toggleAllFinished = () => {
+    const next = new Set(selectedIds);
+    for (const archive of finishedVisible) {
+      if (allFinishedSelected) next.delete(archive.archiveId);
+      else next.add(archive.archiveId);
+    }
+    selectionAnchor.current = finishedVisible[0]?.archiveId;
+    onSelectionChange?.(next);
+  };
+
   const renderArchiveButton = (archive: ArchiveRecord, eager: boolean, dayLabel?: string) => {
     const isSelected = selectedIds.has(archive.archiveId);
     const openArchive = (event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -526,7 +545,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       }
       setSelectedId(archive.archiveId);
       onSelect?.(archive);
-      if (!showDetail) navigate(`/library/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`);
+      if (!showDetail) navigate(`${detailBasePath}/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`);
     };
     const openMenu = onArchiveContextMenu ? (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
       // Cards are the only elements with a menu; everything else keeps the
@@ -732,8 +751,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             <button className="secondary-action is-icon" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
               <SquareCheckBig aria-hidden="true" />
             </button>
-            {onSelectAllFinished && (
-              <button className="secondary-action is-icon" type="button" aria-label="全选已读完" title="全选已读完" onClick={onSelectAllFinished} disabled={(finishedSelectableCount ?? 0) === 0}>
+            {finishedArchiveIds && (
+              <button className="secondary-action is-icon" type="button" aria-pressed={allFinishedSelected} aria-label={allFinishedSelected ? '取消全选已读完' : '全选已读完'} title={allFinishedSelected ? '取消全选已读完' : '全选已读完'} onClick={toggleAllFinished} disabled={finishedVisible.length === 0}>
                 <ListTodo aria-hidden="true" />
               </button>
             )}

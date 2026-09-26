@@ -8,7 +8,7 @@ import { useToast } from './Toast';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository, type Category } from '../repositories/nativeLibraryRepository';
 import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
-import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
+import { mirrorFavorites } from '../lib/favoritesMirror';
 
 const repository = new NativeLibraryRepository();
 
@@ -72,13 +72,8 @@ export function useArchiveContextMenu(options: {
       // the write there too — best effort, the local row stays as the offline
       // mirror and for WebDAV sync either way.
       if (list === 'favorites') {
-        void repository.listCategories(archive.serverId).then((categories) => {
-          const favorites = categories.ok ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME) : undefined;
-          if (!favorites) return;
-          const mirrored = next
-            ? repository.addArchiveToCategory(archive.serverId, favorites.id, archive.archiveId)
-            : repository.removeArchiveFromCategory(archive.serverId, favorites.id, archive.archiveId);
-          void mirrored.then((mirrorResult) => { if (!mirrorResult.ok) showToast('未能同步到服务器收藏夹', 'error'); });
+        void mirrorFavorites(archive.serverId, [archive.archiveId], next).then((mirrored) => {
+          if (mirrored > 0) showToast('未能同步到服务器收藏夹', 'error');
         });
       }
     });

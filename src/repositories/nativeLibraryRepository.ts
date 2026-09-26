@@ -172,6 +172,22 @@ export class NativeLibraryRepository {
       return result;
     });
   }
+  /** 清理选中的历史记录（不是档案）：每条都写同步墓碑，别的设备跟着删。 */
+  deleteHistoryRecords(scopeId: string, archiveIds: string[]): Promise<CommandResult<number>> {
+    return invokeCommand('delete_history_records', { scopeId, archiveIds }, z.number().int().nonnegative()).then((result) => {
+      if (result.ok && result.value > 0) notifyLocalWrite();
+      return result;
+    });
+  }
+  /** LANraragi 的 🔖 Favorites 这一条分类（`null` = 服务器上没有这条）。
+   *
+   * 书架、详情页的心、右键菜单与多选都只问它，所以它有一条自己的快路：只读
+   * `/api/categories` 的回包里那条**静态**分类，不解析任何动态分类。走
+   * `listCategories` 的话，缓存一过期就要为每条动态分类各跑一次不分页的全库搜索
+   * （见 `read_favorites_category`）。 */
+  readFavoritesCategory(serverId: string): Promise<CommandResult<{ id: string; archives: string[] } | null>> {
+    return invokeCommand('read_favorites_category', { serverId }, z.object({ id: z.string(), archives: z.array(z.string()) }).nullable());
+  }
 
   loadArchiveMetadata(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ArchiveMetadataSchema>>> {
     return invokeCommand('load_archive_metadata', { serverId, archiveId }, ArchiveMetadataSchema);

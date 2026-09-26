@@ -3,7 +3,7 @@ import { BookmarkMinus, BookmarkPlus, Trash2 } from 'lucide-react';
 
 import type { ArchiveRecord } from '../domain/library';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
-import { FAVORITES_CATEGORY_NAME } from '../lib/tags';
+import { mirrorFavorites } from '../lib/favoritesMirror';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
 import { useToast } from './Toast';
@@ -69,19 +69,8 @@ export function useArchiveSelection(options: {
       // Mirror the favorites writes to the LANraragi 🔖 Favorites category: the
       // 收藏夹 shelf reads the category, so a local-only write would never show.
       if (membership?.list === 'favorites' && serverId) {
-        const categories = await repository.listCategories(serverId);
-        const favorites = categories.ok
-          ? categories.value.find((category) => category.name === FAVORITES_CATEGORY_NAME)
-          : undefined;
-        if (favorites) {
-          const ops = await Promise.all(selected.map((archive) => (
-            next
-              ? repository.addArchiveToCategory(serverId, favorites.id, archive.archiveId)
-              : repository.removeArchiveFromCategory(serverId, favorites.id, archive.archiveId)
-          )));
-          const mirrored = ops.filter((result) => !result.ok).length;
-          if (mirrored > 0) showToast(`${mirrored} 个档案未能同步到服务器收藏夹`, 'error');
-        }
+        const mirrored = await mirrorFavorites(serverId, selected.map((archive) => archive.archiveId), next);
+        if (mirrored > 0) showToast(`${mirrored} 个档案未能同步到服务器收藏夹`, 'error');
       }
       const failed = results.filter((result) => !result.ok).length;
       if (failed > 0) showToast(`${failed} 个档案未能更新`, 'error');

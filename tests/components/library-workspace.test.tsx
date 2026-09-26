@@ -464,22 +464,34 @@ describe('library workspace', () => {
     expect(onSelectionChange).toHaveBeenCalledWith(new Set(['archive-0', 'archive-1', 'archive-2', 'archive-3']));
   });
 
-  it('offers select-all-finished in the selection bar when the page can define it', async () => {
+  it('offers select-all-finished in the selection bar, and un-selects them on a second press', async () => {
     const user = userEvent.setup();
     const onSelectionChange = vi.fn();
-    const onSelectAllFinished = vi.fn(() => onSelectionChange(new Set(['archive-1', 'archive-3'])));
     renderWorkspace({
       archives: archives.slice(0, 4),
       selectionMode: true,
       onSelectionChange,
-      onSelectAllFinished,
-      finishedSelectableCount: 2,
+      finishedArchiveIds: new Set(['archive-1', 'archive-3']),
     });
 
     const button = screen.getByRole('button', { name: '全选已读完' });
     await user.click(button);
-    expect(onSelectAllFinished).toHaveBeenCalled();
     expect(onSelectionChange).toHaveBeenCalledWith(new Set(['archive-1', 'archive-3']));
+    // 选中态是按下态：再点一次取消，与「全选当前」同一个开关。
+    expect(button).toHaveAttribute('aria-pressed', 'false');
+
+    cleanup();
+    renderWorkspace({
+      archives: archives.slice(0, 4),
+      selectionMode: true,
+      selectedArchiveIds: new Set(['archive-1', 'archive-3']),
+      onSelectionChange,
+      finishedArchiveIds: new Set(['archive-1', 'archive-3']),
+    });
+    const pressed = screen.getByRole('button', { name: '取消全选已读完' });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+    await user.click(pressed);
+    expect(onSelectionChange).toHaveBeenLastCalledWith(new Set());
 
     // 没有已读完条目时按钮被禁用而不是消失——多选里少一个动作比动作闪现清楚。
     cleanup();
@@ -487,8 +499,7 @@ describe('library workspace', () => {
       archives: archives.slice(0, 2),
       selectionMode: true,
       onSelectionChange,
-      onSelectAllFinished,
-      finishedSelectableCount: 0,
+      finishedArchiveIds: new Set(),
     });
     expect(screen.getByRole('button', { name: '全选已读完' })).toBeDisabled();
   });
