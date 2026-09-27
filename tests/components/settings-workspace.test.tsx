@@ -9,7 +9,6 @@ import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForT
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { COLOR_SCHEMES } from '../../src/lib/cssThemePresets';
-import { DEFAULT_DATA_TRANSFER_SCOPE, TRANSFER_CREDENTIAL_CATEGORIES } from '../../src/domain/dataTransferScope';
 import { readoshiServerScope } from '../../src/lib/readoshiScope';
 import { emitTauriEvent } from '../tauriEvents';
 
@@ -28,26 +27,21 @@ function renderSettings(section?: string) {
   );
 }
 
-/** 勾上「导入导出范围」里的凭据类。它们默认不勾——带凭据的文件要额外设口令，该是一次
- * 明确的选择——所以每条凭据路径都得先跨过这一步，这本身也是被测的行为。
- *
- * 调用前要先关掉别的菜单：每个菜单都往 document 上挂了自己的 Escape 监听，一次 Escape
- * 会把当时开着的菜单全关掉。 */
-async function checkCredentialScope(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: '导入导出范围' }));
-  const panel = await screen.findByRole('dialog', { name: '导入导出范围' });
-  for (const category of TRANSFER_CREDENTIAL_CATEGORIES) {
-    const row = within(panel).getByRole('checkbox', { name: `导入导出${category.label}` });
-    if (row.getAttribute('aria-checked') === 'false') await user.click(row);
-  }
-  await user.keyboard('{Escape}');
-}
-
-/** 本机导出的那份记录文本：`export_scoped_data` 的回包与交给凭据加密的入参用它。 */
+/** 本机导出的那份记录文本：`export_scoped_data` 的回包，也是迁移文件里 records 的内容。 */
 const SCOPED_EXPORT_TEXT = '{"kind":"yomika-scope-export","schemaVersion":1,"document":{"version":1,"epoch":0,"objects":{"a":1,"b":2}}}';
 
-/** 凭据类按域的固定顺序进文件，所以断言里能直接写出这个数组。 */
-const CREDENTIAL_SCOPE = JSON.stringify(TRANSFER_CREDENTIAL_CATEGORIES.map((category) => category.id));
+/** 新版迁移文件（docs/30）：一份明文 JSON，装什么由导出弹层的勾选决定。 */
+const DATA_EXPORT_TEXT = JSON.stringify({
+  kind: 'yomika-export',
+  schemaVersion: 1,
+  exportedAt: '2026-09-26 10:00:00',
+  items: ['records', 'lrr_servers'],
+  records: JSON.parse(SCOPED_EXPORT_TEXT),
+  servers: [{ scopeId: 'scope-a', name: 'Home', baseUrl: 'https://lrr.test', enabled: true, apiKey: 'key-1' }],
+  ehAccounts: [],
+  syncAccounts: [],
+  skipped: 0,
+});
 
 describe('settings workspace', () => {
   it('opens About links through the native external browser command', async () => {
@@ -1032,12 +1026,17 @@ describe('settings workspace', () => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
-      if (command === 'export_scoped_data') {
+      if (command === 'export_data') {
         return {
           ok: true,
           value: {
-            text: '{"kind":"yomika-scope-export","schemaVersion":1,"exportedAt":"2026-09-22 10:00:00","categories":["history"],"document":{"version":1,"epoch":0,"objects":{}}}',
-            objects: 3,
+            text: '{"kind":"yomika-export","schemaVersion":1,"items":["records"],"records":{"kind":"yomika-scope-export"}}',
+            items: ['records'],
+            records: 3,
+            servers: 0,
+            ehAccounts: 0,
+            syncAccounts: 0,
+            skipped: 0,
             categories: ['history'],
           },
         };
@@ -1052,13 +1051,9 @@ describe('settings workspace', () => {
     const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
     await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
 
-    // 没账户时用默认集合：记录与设置全勾，凭证不勾（原生侧也没有属于它的对象）。
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_scoped_data', {
-      categories: JSON.stringify(DEFAULT_DATA_TRANSFER_SCOPE),
-    }));
-    expect(await screen.findByText('已导出 3 项：全部记录与设置')).toBeInTheDocument();
-    const exported = (within(exportMenu).getByLabelText('导出 JSON') as HTMLTextAreaElement).value;
-    expect(JSON.parse(exported)).toMatchObject({ kind: 'yomika-scope-export', schemaVersion: 1 });
+    // 默认勾选只有记录与设置：凭据默认不勾，勾上时界面会提醒敏感。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records'] }));
+    expect(await screen.findByText('已导出 记录与设置 3 项')).toBeInTheDocument();
   });
 
   it('writes the export to a file the user picks', async () => {
@@ -1068,8 +1063,8 @@ describe('settings workspace', () => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
-      if (command === 'export_scoped_data') {
-        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, objects: 2, categories: [] } };
+      if (command === 'export_data') {
+        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, items: ['records'], records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0, skipped: 0 } };
       }
       if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
       throw new Error(`Unexpected command: ${command}`);
@@ -1082,7 +1077,7 @@ describe('settings workspace', () => {
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const menu = screen.getByRole('dialog', { name: '导出数据' });
     await user.click(within(menu).getByRole('button', { name: '导出数据' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_scoped_data', expect.anything()));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', expect.anything()));
 
     await user.click(within(menu).getByRole('button', { name: '导出为文件' }));
     // 写下去的就是框里那一份（与导出、复制同一份文本）。
@@ -1116,10 +1111,9 @@ describe('settings workspace', () => {
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_scoped_data', {
       payload: scopedExport,
-      categories: JSON.stringify(DEFAULT_DATA_TRANSFER_SCOPE),
+      categories: JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
     }));
-    // 类别没勾的留在门外，报数要说清楚——不然「导了一半」看着像丢了数据。
-    expect(await screen.findByText('已导入 4 项，跳过 2 项（类别未勾选）')).toBeInTheDocument();
+    expect(await screen.findByText('已导入 4 项，跳过 2 项')).toBeInTheDocument();
   });
 
   it('imports a file the user picks through the same import path', async () => {
@@ -1150,20 +1144,14 @@ describe('settings workspace', () => {
     expect(await screen.findByText('已导入 2 项')).toBeInTheDocument();
   });
 
-  it('exports records and credentials together through one passphrase, in one file', async () => {
-    // 范围里勾了凭据，「导出数据」就先要口令，然后**一份**文件装两半：记录折好之后交给
-    // 原生侧，和凭据一起锁进同一份密文。曾经那是两颗按钮、两条路，同一次迁移要点两回。
+  it('warns about sensitive content when credentials are exported', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
-      if (command === 'export_scoped_data') {
-        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, objects: 2, categories: [] } };
-      }
-      if (command === 'export_credentials') {
-        return { ok: true, value: { text: '{"kind":"yomika-credentials","schemaVersion":1}', servers: 1, ehAccounts: 1, syncAccounts: 1, records: 2, skipped: 0 } };
+      if (command === 'export_data') {
+        return { ok: true, value: { text: DATA_EXPORT_TEXT, items: ['records', 'eh_account'], records: 2, servers: 0, ehAccounts: 1, syncAccounts: 0, skipped: 0 } };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -1171,109 +1159,31 @@ describe('settings workspace', () => {
     renderSettings('sync');
 
     await user.click(await screen.findByRole('link', { name: /同步/ }));
-    await checkCredentialScope(user);
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
-    const exportMenu = screen.getByRole('dialog', { name: '导出数据' });
-    // 没有「导出凭据…」这一步了：导出数据点下去，接着弹的就是口令。
-    expect(within(exportMenu).queryByRole('button', { name: /导出凭据/ })).toBeNull();
+    const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
+
+    // 默认只有记录与设置：导出不带敏感信息，也没有提醒。
     await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records'] }));
+    expect(within(exportMenu).queryByText(/切勿分享/)).toBeNull();
 
-    // 导出要输两遍：这个口令是文件唯一的防线，输错了文件就再也打不开。
-    const dialog = await screen.findByRole('dialog', { name: '给凭据文件设个口令' });
-    // 文件里装的是刚勾的那几类——对话框自己说出来，省得回头翻范围。
-    expect(within(dialog).getByText(/文件里有记录与设置、LRR 服务器、E-H 账户、同步账户/)).toBeInTheDocument();
-    const passphrase = within(dialog).getByLabelText('口令', { exact: true });
-    const confirm = within(dialog).getByLabelText('再输一遍', { exact: true });
-    await user.type(passphrase, 'a-long-passphrase');
-    await user.type(confirm, 'a-different-one');
-    // 还在写就不教训人：第二个框刚打完也还不说，按了「导出」才说。
-    expect(within(dialog).queryByText('两次输入的口令不一致')).toBeNull();
-    await user.click(within(dialog).getByRole('button', { name: '导出' }));
-    expect(await within(dialog).findByText('两次输入的口令不一致')).toBeInTheDocument();
-    expect(adapter).not.toHaveBeenCalledWith('export_credentials', expect.anything());
-
-    await user.clear(confirm);
-    await user.type(confirm, 'a-long-passphrase');
-    await user.click(within(dialog).getByRole('button', { name: '导出' }));
-
-    // 记录先折出来（同一套合并规则），再连着凭据一起加密。
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_scoped_data', {
-      categories: JSON.stringify(DEFAULT_DATA_TRANSFER_SCOPE),
-    }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_credentials', {
-      passphrase: 'a-long-passphrase',
-      categories: CREDENTIAL_SCOPE,
-      records: SCOPED_EXPORT_TEXT,
-    }));
-    expect(await screen.findByText('已导出一份口令加密的文件：记录与设置 2 项 · 服务器 1 · E-H 账户 1 · 同步账户 1')).toBeInTheDocument();
-    // 密文进了导出框，可以复制走。
-    expect((within(exportMenu).getByLabelText('导出 JSON') as HTMLTextAreaElement).value).toContain('yomika-credentials');
+    // 勾上 E-H 账户：面板立刻提醒包含敏感信息，导出完成后再用 toast 说一次。
+    await user.click(within(exportMenu).getByRole('checkbox', { name: '导出E-Hentai 账户' }));
+    expect(within(exportMenu).getByText(/切勿分享/)).toBeInTheDocument();
+    await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records', 'eh_account'] }));
+    expect(await screen.findByText(/包含凭据等敏感信息：请妥善保管，切勿分享/)).toBeInTheDocument();
   });
 
-  it('exports credentials only for the classes the transfer scope checks', async () => {
+  it('imports a data file through dynamically generated checkboxes', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
-      if (command === 'export_scoped_data') {
-        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, objects: 0, categories: [] } };
-      }
-      if (command === 'export_credentials') {
-        return { ok: true, value: { text: '{"kind":"yomika-credentials","schemaVersion":1}', servers: 0, ehAccounts: 1, syncAccounts: 0, records: 0, skipped: 0 } };
-      }
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
-
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
-
-    // 先看默认：一个凭据类都没勾，导出就是**明文**的记录那一份，不会弹口令
-    // （口令只在范围里勾了凭据时才要）。
-    await user.click(await screen.findByRole('button', { name: '导出数据' }));
-    const exportMenu = screen.getByRole('dialog', { name: '导出数据' });
-    await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_scoped_data', {
-      categories: JSON.stringify(DEFAULT_DATA_TRANSFER_SCOPE),
-    }));
-    expect(screen.queryByRole('dialog', { name: '给凭据文件设个口令' })).toBeNull();
-    expect(adapter).not.toHaveBeenCalledWith('export_credentials', expect.anything());
-    await user.keyboard('{Escape}');
-
-    // 只勾 E-H 账户：文件里就只有这一类，别的凭据不跟着走。
-    await user.click(await screen.findByRole('button', { name: '导入导出范围' }));
-    const panel = await screen.findByRole('dialog', { name: '导入导出范围' });
-    await user.click(within(panel).getByRole('checkbox', { name: '导入导出E-H 账户' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: expect.objectContaining({ dataTransferScope: [...DEFAULT_DATA_TRANSFER_SCOPE, 'eh_account'] }),
-    }));
-    await user.keyboard('{Escape}');
-
-    await user.click(await screen.findByRole('button', { name: '导出数据' }));
-    await user.click(within(await screen.findByRole('dialog', { name: '导出数据' })).getByRole('button', { name: '导出数据' }));
-    const dialog = await screen.findByRole('dialog', { name: '给凭据文件设个口令' });
-    await user.type(within(dialog).getByLabelText('口令', { exact: true }), 'a-long-passphrase');
-    await user.type(within(dialog).getByLabelText('再输一遍', { exact: true }), 'a-long-passphrase');
-    await user.click(within(dialog).getByRole('button', { name: '导出' }));
-
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_credentials', {
-      passphrase: 'a-long-passphrase',
-      categories: JSON.stringify(['eh_account']),
-      records: SCOPED_EXPORT_TEXT,
-    }));
-  });
-
-  it('asks for the passphrase before importing a credentials file', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
-      if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
-      if (command === 'import_credentials') {
-        return { ok: true, value: { servers: 1, ehAccounts: 0, syncAccounts: 1, records: 3, recordsSkipped: false } };
+      if (command === 'import_data') {
+        // 服务器在弹层里被取消勾选了：即使文件里有，也不会落地（报数为 0）。
+        return { ok: true, value: { records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0 } };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -1283,35 +1193,42 @@ describe('settings workspace', () => {
     await user.click(await screen.findByRole('link', { name: /同步/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
+    fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: DATA_EXPORT_TEXT } });
+    await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
+
+    // 解析出文件里实际装着的两类，默认全选；取消一个再导入，取消的类不落地。
+    expect(within(importMenu).getByRole('checkbox', { name: '导入记录与设置' })).toBeChecked();
+    const servers = within(importMenu).getByRole('checkbox', { name: '导入LANraragi 服务器' });
+    expect(servers).toBeChecked();
+    await user.click(servers);
+
+    await user.click(within(importMenu).getByRole('button', { name: '导入所选' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_data', {
+      payload: DATA_EXPORT_TEXT,
+      items: ['records'],
+    }));
+    expect(await screen.findByText('已导入：记录与设置 2 项')).toBeInTheDocument();
+  });
+
+  it('tells the user an old passphrase file is no longer supported', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'list_sync_accounts') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderSettings('sync');
+
+    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('button', { name: '导入数据' }));
+    const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     const envelope = '{"kind":"yomika-credentials","schemaVersion":1,"salt":"c2FsdA==","nonce":"bm9uY2U=","payload":"Y2lwaGVy"}';
     fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: envelope } });
-
-    // 一个凭据类都没勾：说清要去勾上，而不是开一个注定空手而归的口令对话框。
     await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
-    expect(await screen.findByText(/先在「导入导出范围」里勾上要导入的凭据类/)).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: '输入凭据文件的口令' })).toBeNull();
 
-    await user.keyboard('{Escape}');
-    await checkCredentialScope(user);
-
-    await user.click(await screen.findByRole('button', { name: '导入数据' }));
-    const retryMenu = await screen.findByRole('dialog', { name: '导入数据' });
-    fireEvent.change(within(retryMenu).getByLabelText('导出 JSON'), { target: { value: envelope } });
-    await user.click(within(retryMenu).getByRole('button', { name: '导入数据' }));
-
-    // 认出是凭据文件就先要口令，而不是把它当记录去导。
-    const dialog = await screen.findByRole('dialog', { name: '输入凭据文件的口令' });
-    await user.type(within(dialog).getByLabelText('口令', { exact: true }), 'a-long-passphrase');
-    await user.click(within(dialog).getByRole('button', { name: '导入' }));
-
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_credentials', {
-      payload: envelope,
-      passphrase: 'a-long-passphrase',
-      categories: CREDENTIAL_SCOPE,
-      recordCategories: JSON.stringify(DEFAULT_DATA_TRANSFER_SCOPE),
-    }));
-    // 文件里那一半记录与设置也一起落地了（口令解开之后两半同时写回）。
-    expect(await screen.findByText('已导入 3 项记录与设置 · 服务器 1 · E-H 账户 0 · 同步账户 1')).toBeInTheDocument();
+    // 口令链路移除了：旧加密文件明确说不再支持，而不是给一句看不懂的解析错误。
+    expect(await screen.findByText(/口令导入已移除/)).toBeInTheDocument();
   });
 
   it('imports a readoshi worker v3 export into the matching server scope', async () => {

@@ -120,8 +120,8 @@ fn parse_web_url(url: &str) -> Result<url::Url, CommandResult<()>> {
     }
 }
 
-/// 桌面端首帧已提交：亮出主窗、收起开屏窗。移动端的主窗由原生壳持有，
-/// 主窗本来就在最前、也没有开屏窗——两个查询都落空，等于空操作。
+/// 首帧信号：index.html 的品牌帧画完（rAF 之后）由内联脚本调用。
+/// 亮出主窗。移动端主窗由原生壳持有且始终可见，show 是无操作的。
 #[tauri::command]
 pub fn frontend_ready(app: tauri::AppHandle) -> CommandResult<()> {
     #[cfg(desktop)]
@@ -130,9 +130,6 @@ pub fn frontend_ready(app: tauri::AppHandle) -> CommandResult<()> {
         if let Some(main) = app.get_webview_window("main") {
             let _ = main.show();
             let _ = main.set_focus();
-        }
-        if let Some(splash) = app.get_webview_window("splashscreen") {
-            let _ = splash.close();
         }
     }
     CommandResult::success(())

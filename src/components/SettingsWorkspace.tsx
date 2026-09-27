@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import {
+import { Languages, ArrowDownWideNarrow, 
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
@@ -25,29 +25,19 @@ import { SettingsRow, SettingsRowBody } from './SettingsRow';
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
+import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
+import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
 import { scopeLabel } from '../domain/syncScope';
-import {
-  TRANSFER_CREDENTIAL_CATEGORIES,
-  TRANSFER_RECORD_CATEGORIES,
-  credentialScopeLabel,
-  credentialTransferScope,
-  parseDataTransferScope,
-  exportScopeLabel,
-  recordScopeLabel,
-  recordTransferScope,
-  transferScopeLabel,
-  type TransferCategory,
-} from '../domain/dataTransferScope';
-import { CREDENTIAL_EXPORT_KIND } from '../domain/credentialWire';
+import { DATA_EXPORT_ITEMS, isCredentialItem, dataExportItemLabel } from '../domain/dataExport';
+import { DATA_EXPORT_KIND } from '../domain/dataExport';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
 import type { CommandResult } from '../domain/result';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-import { NativeCredentialRepository } from '../repositories/nativeCredentialRepository';
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
-import { PassphraseDialog } from './PassphraseDialog';
+import { NativeSettingsRepository } from '../repositories/nativeSettingsRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { TextInputDialog } from './TextInputDialog';
 import { usePreferences } from '../app/preferences';
@@ -247,7 +237,7 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
 const syncRepository = new NativeSyncRepository();
-const credentialRepository = new NativeCredentialRepository();
+const settingsRepository = new NativeSettingsRepository();
 const dedupRepository = new NativeDedupRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
@@ -420,26 +410,15 @@ export function SettingsWorkspace() {
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
   const preferenceDraft = preferenceDraftOverride ?? preferenceState.preferences;
-  /** 导入导出范围：与同步范围无关的一份勾选，存在偏好里（本机设置，不进同步）。
-   * 记录那一半喂同步文档的导入导出，凭据那一半喂口令加密的凭据文件。 */
-  const transferScope = useMemo(
-    () => parseDataTransferScope(preferenceDraft.dataTransferScope),
-    [preferenceDraft.dataTransferScope],
-  );
-  const transferRecords = useMemo(() => recordTransferScope(transferScope), [transferScope]);
-  const transferCredentials = useMemo(() => credentialTransferScope(transferScope), [transferScope]);
   const [preferenceMessage, setPreferenceMessage] = useState<string>();
   const [preferenceError, setPreferenceError] = useState(false);
   const [migrationText, setMigrationText] = useState('');
   const [migrationPending, setMigrationPending] = useState(false);
-  const [migrationMessage, setMigrationMessage] = useState<string>();
-  const [migrationError, setMigrationError] = useState(false);
-  /** 凭据的口令对话框：导出＝设口令（两遍），导入＝输文件的口令（一遍）。导入时
-   * `credentialText` 存着待导入的那份文本——它只在这一次导入里存在。 */
-  const [credentialMode, setCredentialMode] = useState<'export' | 'import'>();
-  const [credentialText, setCredentialText] = useState('');
-  const [credentialPending, setCredentialPending] = useState(false);
-  const [credentialProblem, setCredentialProblem] = useState<string>();
+  /** 导出弹层的勾选：默认只带记录与设置；凭据默认不勾，勾上时提醒敏感（docs/30）。 */
+  const [exportItems, setExportItems] = useState<string[]>(['records']);
+  /** 导入弹层：解析后文件里实际装着的条目（勾选框按它动态生成，默认全选）。 */
+  const [importAvailable, setImportAvailable] = useState<string[]>([]);
+  const [importItems, setImportItems] = useState<string[]>([]);
   const [platformName, setPlatformName] = useState<string>();
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -456,6 +435,27 @@ export function SettingsWorkspace() {
   const showSectionContent = !compact || compactDrilled;
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
+  /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
+  const [tagTranslationVersion, setTagTranslationVersion] = useState(getTagTranslationSourceVersion());
+  const [tagCountVersion, setTagCountVersion] = useState(getTagCountVersion());
+  const [tagDataPending, setTagDataPending] = useState(false);
+  useEffect(() => {
+    const detachTranslation = subscribeTagTranslationService(() => setTagTranslationVersion(getTagTranslationSourceVersion()));
+    const detachCount = subscribeTagCountChanges(() => setTagCountVersion(getTagCountVersion()));
+    return () => { detachTranslation(); detachCount(); };
+  }, []);
+  const refreshTagData = async (kind: 'translation' | 'count') => {
+    setTagDataPending(true);
+    try {
+      if (kind === 'translation') await refreshTagTranslations();
+      else await refreshTagCounts();
+      showToast('标签数据已是最新', 'success');
+    } catch {
+      showToast('标签数据刷新失败，稍后会自动重试', 'error');
+    } finally {
+      setTagDataPending(false);
+    }
+  };
   /** 自动同步的进行状态：账户行据此显示「同步中」与上次同步时刻。 */
   const [autoSync, setAutoSync] = useState(autoSyncStatus());
   useEffect(() => subscribeAutoSync(setAutoSync), []);
@@ -537,9 +537,6 @@ export function SettingsWorkspace() {
   useEffect(() => {
     if (preferenceMessage) showToast(preferenceMessage, preferenceError ? 'error' : 'success');
   }, [preferenceError, preferenceMessage, showToast]);
-  useEffect(() => {
-    if (migrationMessage) showToast(migrationMessage, migrationError ? 'error' : 'success');
-  }, [migrationError, migrationMessage, showToast]);
   useEffect(() => {
     if (preferenceState.error) showToast(preferenceState.error, 'error');
   }, [preferenceState.error, showToast]);
@@ -714,19 +711,29 @@ export function SettingsWorkspace() {
   }, [platformName]);
 
 
-  /** One control pair for both payload shapes: a unified export (the worker
-   * envelope) goes to the native importer, anything else is treated as a legacy
-   * preferences blob. */
   /** 导入一份导出内容。文本由调用方给：粘贴进来的是框里那份，从文件导入的是刚读回来的
-   *  那份——两条路走的是同一次导入，认种类、认口令、报数都只有一套。 */
+   *  那份。新版文件（yomika-export）先解析出内容清单进勾选弹层，确认后再落地；旧格式
+   *  （同步文档、Readoshi worker、统一信封、旧偏好）保持原有路径；口令加密的旧凭据
+   *  文件随口令链路一并移除，不再支持。所有反馈走 toast（docs/30）。 */
   async function runMigrationImport(text: string) {
     setMigrationPending(true);
-    setMigrationMessage(undefined);
-    setMigrationError(false);
     const parsed = parseMigrationExport(text);
     if (parsed.kind === 'invalid') {
-      setMigrationMessage(parsed.reason);
-      setMigrationError(true);
+      showToast(parsed.reason, 'error');
+      setMigrationPending(false);
+      return;
+    }
+    if (parsed.kind === 'credentials') {
+      showToast('这是旧版口令加密的凭据文件：口令导入已移除，请在旧版本应用中导入后再升级', 'error');
+      setMigrationPending(false);
+      return;
+    }
+    if (parsed.kind === 'export') {
+      // 新版文件：文件里有什么就勾什么（默认全选），等使用者确认再落地。
+      setMigrationText(text.trim());
+      setImportAvailable(parsed.payload.items);
+      setImportItems([...parsed.payload.items]);
+      showToast(`文件里包含 ${parsed.payload.items.map(dataExportItemLabel).join('、')}`, 'info');
       setMigrationPending(false);
       return;
     }
@@ -735,53 +742,31 @@ export function SettingsWorkspace() {
       if (result.ok) {
         setPreferenceDraft(result.value.preferences);
         setMigrationText('');
-        setMigrationMessage(`已导入 ${result.value.importedCount} 项偏好设置`);
+        showToast(`已导入 ${result.value.importedCount} 项偏好设置`, 'success');
         // 首页书架的快照（90 秒内不重取）会盖住刚导入的数据，导入后立刻失效。
         invalidateRouteCache('home:');
       } else {
-        setMigrationMessage(result.error.message);
-        setMigrationError(true);
+        showToast(result.error.message, 'error');
       }
-      setMigrationPending(false);
-      return;
-    }
-    if (parsed.kind === 'credentials') {
-      // 凭据文件是口令加密的：分类做完了，真正的工作在口令对话框里。这里不碰口令，
-      // 所以一次误点不会把口令喂给别的路径。
-      if (transferCredentials.length === 0) {
-        // 勾选是「要不要这类数据」的开关，导入也一样：一个凭据类都没勾就没什么好
-        // 解开的。与其开个注定空手而归的对话框，不如说清要先去勾上。
-        setMigrationMessage('这是口令加密的导出文件：先在「导入导出范围」里勾上要导入的凭据类');
-        setMigrationError(true);
-        setMigrationPending(false);
-        return;
-      }
-      openCredentialDialog('import');
       setMigrationPending(false);
       return;
     }
     if (parsed.kind === 'scoped') {
-      // 记录那一半没勾：这一份里只有记录，那就没什么可做的（**不要**当成「没筛过」把
-      // 整份倒进来——原生侧的同步范围解析在空列表上会回落默认）。
-      if (transferRecords.length === 0) {
-        setMigrationMessage('「导入导出范围」里没勾记录与设置，这份文件里的记录已跳过');
-        setMigrationError(true);
-        setMigrationPending(false);
-        return;
-      }
-      // 本机导出的那一份：按同步的合并规则落地，导入导出范围里没勾的类别留在门外
-      // ——勾选是「要不要这类数据」的开关，导入不该绕过它。
-      const result = await syncRepository.importScopedData(text.trim(), JSON.stringify(transferRecords));
+      // 旧版独立导出的同步文档：按记录类全集落地（旧文件里没有凭据）。
+      const result = await syncRepository.importScopedData(
+        text.trim(),
+        JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
+      );
       if (!result.ok) {
-        setMigrationMessage(result.error.message);
-        setMigrationError(true);
+        showToast(result.error.message, 'error');
         setMigrationPending(false);
         return;
       }
       setMigrationText('');
-      setMigrationMessage(
+      showToast(
         `已导入 ${result.value.applied} 项` +
-        (result.value.skipped > 0 ? `，跳过 ${result.value.skipped} 项（类别未勾选）` : ''),
+        (result.value.skipped > 0 ? `，跳过 ${result.value.skipped} 项` : ''),
+        'success',
       );
       invalidateRouteCache();
       setMigrationPending(false);
@@ -795,15 +780,13 @@ export function SettingsWorkspace() {
       // the records into the wrong scope.
       const target = servers.find((server) => readoshiServerScope(server.baseUrl) === payload.serverScope);
       if (!target) {
-        setMigrationMessage('导出属于其他 LANraragi 服务器（指纹 ' + payload.serverScope + '），先在设置中添加该服务器再导入');
-        setMigrationError(true);
+        showToast('导出属于其他 LANraragi 服务器（指纹 ' + payload.serverScope + '），先在设置中添加该服务器再导入', 'error');
         setMigrationPending(false);
         return;
       }
       const result = await legacyRepository.importWorkerExport(target.scopeId, payload);
       if (!result.ok) {
-        setMigrationMessage(result.error.message);
-        setMigrationError(true);
+        showToast(result.error.message, 'error');
         setMigrationPending(false);
         return;
       }
@@ -826,11 +809,12 @@ export function SettingsWorkspace() {
         result.value.historyRemoved ? `清理阅读 ${result.value.historyRemoved}` : '',
         result.value.watchlistRemoved ? `墓碑 ${result.value.watchlistRemoved}` : '',
       ].filter(Boolean).join('，');
-      setMigrationMessage(
+      showToast(
         `已导入：阅读 ${result.value.history} · 待看 ${result.value.watchlist} · 重复关系 ${dedupePairs}` +
         (removed ? `（${removed}）` : '') +
         (skipped ? `，跳过 ${skipped} 条异常记录` : '') +
         dedupeNote,
+        result.value.history + result.value.watchlist > 0 ? 'success' : 'error',
       );
       invalidateRouteCache('home:');
       setMigrationPending(false);
@@ -838,47 +822,87 @@ export function SettingsWorkspace() {
     }
     const scopeId = parsed.payload.scopeId || servers[0]?.scopeId;
     if (!scopeId) {
-      setMigrationMessage('导出内容没有数据范围，且本机尚未配置服务器');
-      setMigrationError(true);
+      showToast('导出内容没有数据范围，且本机尚未配置服务器', 'error');
       setMigrationPending(false);
       return;
     }
     const result = await legacyRepository.importExport(scopeId, text.trim());
     if (result.ok) {
       setMigrationText('');
-      setMigrationMessage(`已导入 ${result.value} 项本地记录`);
+      showToast(`已导入 ${result.value} 项本地记录`, 'success');
       invalidateRouteCache('home:');
     } else {
-      setMigrationMessage(result.error.message);
-      setMigrationError(true);
+      showToast(result.error.message, 'error');
     }
     setMigrationPending(false);
   }
 
-  /** 本机这一侧的导出：按勾选的导入导出范围折出同步文档（原生侧），所以导出的东西就是
-   * 同一套合并规则、同样的墓碑折出来的那些，没有第二份格式。
-   *
-   * 范围里勾了凭据时**先要口令**：那份文件整个是加密的（见 `runCredentialTransfer`），
-   * 而口令没法事后补——文件一旦生成，里面的密文就定型了。 */
+  /** 导出：按弹层勾选折一份明文 JSON（docs/30）。勾了凭据时提醒「包含敏感信息」——
+   *  防泄漏的防线是导出前的知情确认，不再是一把口令。 */
   async function runMigrationExport() {
-    if (transferCredentials.length > 0) {
-      openCredentialDialog('export');
+    if (exportItems.length === 0) {
+      showToast('先勾选要导出的数据', 'error');
       return;
     }
     setMigrationPending(true);
-    setMigrationMessage(undefined);
-    setMigrationError(false);
-    const categories = JSON.stringify(transferRecords);
-    const result = await syncRepository.exportScopedData(categories);
+    const result = await settingsRepository.exportData(exportItems);
+    setMigrationPending(false);
     if (!result.ok) {
-      setMigrationMessage(result.error.message);
-      setMigrationError(true);
-      setMigrationPending(false);
+      showToast(result.error.message, 'error');
       return;
     }
     setMigrationText(result.value.text);
-    setMigrationMessage(`已导出 ${result.value.objects} 项：${recordScopeLabel(transferScope)}`);
+    if (exportItems.some(isCredentialItem)) {
+      showToast('导出文件包含凭据等敏感信息：请妥善保管，切勿分享', 'error');
+    } else {
+      const parts = [
+        result.value.records > 0 ? `记录与设置 ${result.value.records} 项` : '',
+        result.value.servers > 0 ? `服务器 ${result.value.servers}` : '',
+        result.value.ehAccounts > 0 ? `E-H 账户 ${result.value.ehAccounts}` : '',
+        result.value.syncAccounts > 0 ? `同步账户 ${result.value.syncAccounts}` : '',
+      ].filter(Boolean);
+      showToast(parts.length ? `已导出 ${parts.join(' · ')}` : '已导出（没有可带走的条目）', 'success');
+    }
+  }
+
+  /** 导入弹层的勾选：文件里有但没勾的类不会被落地。 */
+  function toggleImportItem(id: string) {
+    setImportItems((current) => current.includes(id)
+      ? current.filter((item) => item !== id)
+      : [...current, id]);
+  }
+
+  /** 导入弹层勾选确认：只把勾中的类落地，文件里有但没勾的如实跳过。 */
+  async function runSelectedImport() {
+    setMigrationPending(true);
+    const result = await settingsRepository.importData(migrationText, importItems);
     setMigrationPending(false);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      return;
+    }
+    const parts = [
+      result.value.records > 0 ? `记录与设置 ${result.value.records} 项` : '',
+      result.value.servers > 0 ? `服务器 ${result.value.servers}` : '',
+      result.value.ehAccounts > 0 ? `E-H 账户 ${result.value.ehAccounts}` : '',
+      result.value.syncAccounts > 0 ? `同步账户 ${result.value.syncAccounts}` : '',
+    ].filter(Boolean);
+    showToast(parts.length ? `已导入：${parts.join(' · ')}` : '勾选的类别在文件里都是空的，没有导入任何数据', parts.length ? 'success' : 'info');
+    setMigrationText('');
+    setImportAvailable([]);
+    setImportItems([]);
+    // 服务器的行与同步账户的行都可能刚被写进来：前者重取一次列表，后者靠
+    // 「同步完成」事件让 hook 重读。
+    setServerLoadAttempt((attempt) => attempt + 1);
+    window.dispatchEvent(new CustomEvent(SYNC_COMPLETED_EVENT));
+    invalidateRouteCache();
+  }
+
+  /** 导出弹层的勾选：默认只带记录与设置，凭据要使用者自己勾上。 */
+  function toggleExportItem(id: string) {
+    setExportItems((current) => current.includes(id)
+      ? current.filter((item) => item !== id)
+      : [...current, id]);
   }
 
   /** The export is only useful on another machine, so copying it out is part of
@@ -913,91 +937,11 @@ export function SettingsWorkspace() {
     if (!path) return;
     const result = await readTextFromFile(path);
     if (!result.ok) {
-      setMigrationMessage(result.error.message);
-      setMigrationError(true);
+      showToast(result.error.message, 'error');
       return;
     }
     setMigrationText(result.value);
     await runMigrationImport(result.value);
-  }
-
-  /** 导入导出范围的勾选：与「底栏项目」同一种控件，勾一下即存（autosave 会合并）。 */
-  function toggleTransferCategory(category: TransferCategory) {
-    const next = transferScope.includes(category)
-      ? transferScope.filter((item) => item !== category)
-      : [...transferScope, category];
-    editPreferences({ dataTransferScope: next });
-  }
-
-  /** 打开口令对话框。导出没有待处理的文本，导入把要导入的那份带进去。 */
-  function openCredentialDialog(mode: 'export' | 'import') {
-    setCredentialProblem(undefined);
-    setCredentialText(mode === 'import' ? migrationText.trim() : '');
-    setCredentialMode(mode);
-  }
-
-  /** 口令到手：导出把两半锁进同一份密文，导入把它解开、两半一起落地。
-   *
-   * 记录那一半**在密文里面**，不在文件外层：使用者理解的文件是「一份设了口令的文件」，
-   * 记录要是明文躺在旁边，那个理解就是错的。没勾凭据的导出仍然不设口令、也不加密。 */
-  async function runCredentialTransfer(passphrase: string) {
-    setCredentialPending(true);
-    setCredentialProblem(undefined);
-    if (credentialMode === 'export') {
-      // 记录那一半先折出来（同一套合并规则），交进原生侧和凭据一起加密。
-      let recordsText: string | undefined;
-      let objects = 0;
-      if (transferRecords.length > 0) {
-        const records = await syncRepository.exportScopedData(JSON.stringify(transferRecords));
-        if (!records.ok) {
-          setCredentialPending(false);
-          setCredentialProblem(records.error.message);
-          return;
-        }
-        recordsText = records.value.text;
-        objects = records.value.objects;
-      }
-      const result = await credentialRepository.exportAll(passphrase, JSON.stringify(transferCredentials), recordsText);
-      setCredentialPending(false);
-      if (!result.ok) {
-        setCredentialProblem(result.error.message);
-        return;
-      }
-      setCredentialMode(undefined);
-      setMigrationText(result.value.text);
-      setMigrationMessage(
-        '已导出一份口令加密的文件：' +
-        (objects > 0 ? `记录与设置 ${objects} 项 · ` : '') +
-        `服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}` +
-        (result.value.skipped > 0 ? `（${result.value.skipped} 条凭据读不到，未包含）` : ''),
-      );
-      return;
-    }
-
-    const result = await credentialRepository.importAll(
-      credentialText,
-      passphrase,
-      JSON.stringify(transferCredentials),
-      JSON.stringify(transferRecords),
-    );
-    setCredentialPending(false);
-    if (!result.ok) {
-      // 口令不对／文件损坏就把对话框留着：让使用者再试一次，而不是重新粘一遍文件。
-      setCredentialProblem(result.error.message);
-      return;
-    }
-    setCredentialMode(undefined);
-    setMigrationText('');
-    setMigrationMessage([
-      result.value.records > 0 ? `已导入 ${result.value.records} 项记录与设置` : undefined,
-      result.value.recordsSkipped ? '文件里的记录与设置没在范围里，已跳过' : undefined,
-      `服务器 ${result.value.servers} · E-H 账户 ${result.value.ehAccounts} · 同步账户 ${result.value.syncAccounts}`,
-    ].filter(Boolean).join(' · '));
-    // 服务器的行与同步账户的行都可能刚被写进来：前者重取一次列表，后者靠 hook 里
-    // 那条「同步完成」的监听重读。
-    setServerLoadAttempt((attempt) => attempt + 1);
-    window.dispatchEvent(new CustomEvent(SYNC_COMPLETED_EVENT));
-    invalidateRouteCache();
   }
 
   // Switching sections starts at the top, before the browser paints the new one.
@@ -1513,80 +1457,48 @@ export function SettingsWorkspace() {
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
             {selectedSettingsSection === 'settings-sync' && (
               <div className="settings-group">
-                {/* 导入导出范围独立于同步范围：同步范围决定设备之间自动流动什么，这一份
-                    决定文件里装什么。勾了凭据，导出时就会先要口令——那一份文件整个是加密
-                    的（记录也跟着锁进去），所以不再有「另外导出凭据」这一步。 */}
-                <SettingsPanel
-                  icon={<ArrowLeftRight />}
-                  label="导入导出范围"
-                  ariaLabel="导入导出范围"
-                  value={transferScopeLabel(transferScope)}
-                >
-                  <CheckRowGroup label="记录与设置" caption="记录与设置">
-                    {TRANSFER_RECORD_CATEGORIES.map((category) => (
-                      <CheckRow
-                        key={category.id}
-                        label={category.label}
-                        checked={transferScope.includes(category.id)}
-                        ariaLabel={`导入导出${category.label}`}
-                        onToggle={() => toggleTransferCategory(category.id)}
-                      />
-                    ))}
-                  </CheckRowGroup>
-                  <CheckRowGroup label="凭据" caption="凭据">
-                    {TRANSFER_CREDENTIAL_CATEGORIES.map((category) => (
-                      <CheckRow
-                        key={category.id}
-                        label={category.label}
-                        checked={transferScope.includes(category.id)}
-                        ariaLabel={`导入导出${category.label}`}
-                        onToggle={() => toggleTransferCategory(category.id)}
-                      />
-                    ))}
-                  </CheckRowGroup>
-                </SettingsPanel>
                 <SettingsPanel
                   icon={<FileDown />}
                   label="导出数据"
-                  hint="导出成可粘贴的文本；含凭据时先设口令"
-                  value={exportScopeLabel(transferScope)}
+                  hint="勾选要带走的数据，导出成明文 JSON 文件"
+                  value={exportItems.length > 0 ? `${exportItems.length} 类` : '未选择'}
                   onClose={() => setMigrationText('')}
                 >
-                  <form className="legacy-import-form" onSubmit={(event) => event.preventDefault()}>
-                    <textarea
-                      id="migration-export"
-                      aria-label="导出 JSON"
-                      className="is-selectable"
-                      readOnly
-                      rows={6}
-                      spellCheck={false}
-                      value={migrationText}
-                      onChange={(event) => setMigrationText(event.target.value)}
-                    />
-                    <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
-                      {/* 一个按钮导完整个范围：勾了凭据就先要口令，然后一份文件装两半
-                          （记录在密文里面）。曾经那条「导出凭据…」是另一条路——同一次
-                          迁移要点两次、还容易漏掉一半，2026-09-24 并进了这里。 */}
-                      <button className="secondary-action" type="button" disabled={migrationPending || (transferRecords.length === 0 && transferCredentials.length === 0)} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
-                        <FileDown aria-hidden="true" />{migrationPending ? '处理中…' : '导出数据'}
-                      </button>
-                      {/* 导出成文件：与复制并列的一条出口——「可粘贴的文本」在手机上并不好用。 */}
-                      <button className="secondary-action" type="button" disabled={migrationPending || !migrationText.trim()} onClick={() => void saveMigrationToFile()}>
-                        <Download aria-hidden="true" />导出为文件
-                      </button>
-                      <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
-                        <Copy aria-hidden="true" />复制
-                      </button>
-                    </div>
-                  </form>
+                  {/* 勾选在导出弹层里当场做：没有「范围」偏好要提前配置。勾了凭据类，
+                      下面那行提醒与导出完成后的 toast 都会说一次「切勿分享」。 */}
+                  <CheckRowGroup label="要导出的数据">
+                    {DATA_EXPORT_ITEMS.map((item) => (
+                      <CheckRow
+                        key={item.id}
+                        label={item.label}
+                        checked={exportItems.includes(item.id)}
+                        ariaLabel={`导出${item.label}`}
+                        onToggle={() => toggleExportItem(item.id)}
+                      />
+                    ))}
+                  </CheckRowGroup>
+                  {exportItems.some(isCredentialItem) && (
+                    <p className="form-error" role="alert">勾选的类别包含 API Key、Cookie 等敏感信息：导出文件请妥善保管，切勿分享。</p>
+                  )}
+                  <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
+                    <button className="secondary-action" type="button" disabled={migrationPending || exportItems.length === 0} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
+                      <FileDown aria-hidden="true" />{migrationPending ? '处理中…' : '导出数据'}
+                    </button>
+                    <button className="secondary-action" type="button" disabled={migrationPending || !migrationText.trim()} onClick={() => void saveMigrationToFile()}>
+                      <Download aria-hidden="true" />导出为文件
+                    </button>
+                    <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
+                      <Copy aria-hidden="true" />复制
+                    </button>
+                  </div>
                 </SettingsPanel>
                 <SettingsPanel
                   icon={<FileUp />}
                   label="导入数据"
-                  hint="粘贴导出的文本；加密文件会先问口令"
-                  onClose={() => { setMigrationText(''); setMigrationMessage(undefined); setMigrationError(false); }}
+                  hint="粘贴或选择导出文件，勾选要导入的内容"
+                  onClose={() => { setMigrationText(''); setImportAvailable([]); setImportItems([]); }}
                 >
-                  <form className="legacy-import-form" onSubmit={(event) => { event.preventDefault(); void runMigrationImport(migrationText); }}>
+                  <form className="legacy-import-form" onSubmit={(event) => { event.preventDefault(); if (importAvailable.length > 0) void runSelectedImport(); else void runMigrationImport(migrationText); }}>
                     <textarea
                       id="migration-json"
                       name="migrationJson"
@@ -1594,18 +1506,31 @@ export function SettingsWorkspace() {
                       autoComplete="off"
                       spellCheck={false}
                       value={migrationText}
-                      onChange={(event) => setMigrationText(event.target.value)}
+                      onChange={(event) => { setMigrationText(event.target.value); setImportAvailable([]); }}
                       rows={6}
                     />
+                    {importAvailable.length > 0 && (
+                      /* 解析后动态生成的勾选框：文件里有什么就列出什么，默认全选。 */
+                      <CheckRowGroup label="文件里包含的数据">
+                        {importAvailable.map((id) => (
+                          <CheckRow
+                            key={id}
+                            label={dataExportItemLabel(id)}
+                            checked={importItems.includes(id)}
+                            ariaLabel={`导入${dataExportItemLabel(id)}`}
+                            onToggle={() => toggleImportItem(id)}
+                          />
+                        ))}
+                      </CheckRowGroup>
+                    )}
                     <div className="settings-menu-actions" role="group" aria-label="数据导入操作">
-                      {/* 选文件即导入：读回来放进框里（看得见读了什么），再走同一次导入。 */}
                       <button className="secondary-action" type="button" disabled={migrationPending} onClick={() => void importMigrationFromFile()}>
                         <FolderOpen aria-hidden="true" />从文件导入
                       </button>
-                      {/* 粘什么进来就导什么：记录、加密文件、旧版导出都由这一颗按钮认出来
-                          ——加密的那份会接着弹口令。 */}
-                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim()} aria-busy={migrationPending}>
-                        <FileUp aria-hidden="true" />{migrationPending ? '处理中…' : '导入数据'}
+                      {/* 解析出来的新文件先勾选再导入；粘贴的旧格式（同步文档、Readoshi、
+                          统一信封、旧偏好）仍由这一颗按钮直接认出来走各自的路。 */}
+                      <button className="primary-action" type="submit" disabled={migrationPending || !migrationText.trim() || (importAvailable.length > 0 && importItems.length === 0)} aria-busy={migrationPending}>
+                        <FileUp aria-hidden="true" />{migrationPending ? '处理中…' : importAvailable.length > 0 ? '导入所选' : '导入数据'}
                       </button>
                     </div>
                   </form>
@@ -1894,20 +1819,6 @@ export function SettingsWorkspace() {
         </div>
         )}
       </div>
-      {/* 口令对话框挂在页面这一层：它是这两条命令的入口，不属于某一个菜单——导出与
-          导入各自打开同一个对话框，mode 决定要一遍还是两遍。 */}
-      <PassphraseDialog
-        open={credentialMode !== undefined}
-        mode={credentialMode === 'export' ? 'export' : 'import'}
-        contents={[
-          transferRecords.length > 0 ? '记录与设置' : undefined,
-          credentialScopeLabel(transferScope) || undefined,
-        ].filter(Boolean).join('、')}
-        pending={credentialPending}
-        problem={credentialProblem}
-        onConfirm={(passphrase) => void runCredentialTransfer(passphrase)}
-        onOpenChange={(open) => { if (!open) { setCredentialMode(undefined); setCredentialProblem(undefined); } }}
-      />
     </div>
   );
 }

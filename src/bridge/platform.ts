@@ -36,15 +36,6 @@ export async function setSystemBarStyle(dark: boolean, background: string): Prom
   return invokeCommand('set_system_bar_style', { dark, background }, VoidResponseSchema);
 }
 
-/** 桌面端首帧已提交：亮主窗、收开屏窗（docs/30）。移动端是空操作；
- * 浏览器/测试环境没有原生桥，静默忽略。 */
-export function frontendReady(): Promise<CommandResult<void>> {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
-    return Promise.resolve(ok(undefined));
-  }
-  return invokeCommand('frontend_ready', {}, VoidResponseSchema).catch(() => ok(undefined));
-}
-
 /** 在资源管理器里定位一个本机文件。仅 Windows 实现；别的平台返回失败，
  * 调用方应当按平台先藏掉入口。 */
 export function revealInFileManager(path: string): Promise<CommandResult<void>> {

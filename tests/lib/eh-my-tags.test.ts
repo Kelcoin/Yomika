@@ -53,11 +53,31 @@ describe('E-Hentai my tags presentation', () => {
     expect(prioritizeByMyTags(['b', 'a'], { priority: [], colors: new Map() })).toEqual(['b', 'a']);
   });
 
-  it('picks ink by the preset colour’s luminance', () => {
-    expect(readableInkOnHex('#ffffff')).toBe('#1c1c1e');
+  it('picks the highest-contrast ink for the preset colour', () => {
+    expect(readableInkOnHex('#ffffff')).toBe('#000000');
     expect(readableInkOnHex('#000000')).toBe('#ffffff');
-    expect(readableInkOnHex('#ff8800')).toBe('#1c1c1e');
+    expect(readableInkOnHex('#ff8800')).toBe('#000000');
     expect(readableInkOnHex('#112233')).toBe('#ffffff');
     expect(readableInkOnHex('nope')).toBe('');
+  });
+
+  it('keeps every mid-tone background at or above WCAG small-text contrast', () => {
+    const contrast = (bg: string, fg: string) => {
+      const parse = (hex: string) => [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255);
+      const linear = (channel: number) => (channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+      const [r1, g1, b1] = parse(bg).map(linear) as [number, number, number];
+      const [r2, g2, b2] = parse(fg).map(linear) as [number, number, number];
+      const l1 = 0.2126 * r1 + 0.7152 * g1 + 0.0722 * b1;
+      const l2 = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    };
+    // 旧阈值在中明度带（L 0.25–0.40）会配出 2.8–4.5:1 的白墨——那段全部失守。
+    for (let l100 = 20; l100 <= 90; l100 += 5) {
+      const scaled = l100 / 100;
+      const channel = Math.round(255 * (scaled > 0.04045 ? (scaled * 1.055 - 0.055) ** (1 / 2.4) : scaled * 12.92));
+      const bg = `#${channel.toString(16).padStart(2, '0').repeat(3)}`;
+      const ink = readableInkOnHex(bg);
+      expect(contrast(bg, ink), `bg ${bg} ink ${ink}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

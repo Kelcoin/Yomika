@@ -1,4 +1,5 @@
 import pinyin from 'tiny-pinyin';
+import { getTagCountForSort } from './tagCountService';
 
 import { formatArchiveDate } from './archiveCardPresentation';
 
@@ -163,6 +164,13 @@ export function installTagTranslations(value: TranslationMap): void {
   for (const listener of listeners) listener();
 }
 
+/** 关闭标签翻译：回到原始标签文本。数据缓存保留，重新打开时秒级恢复。 */
+export function clearTagTranslations(): void {
+  translations = {};
+  rebuildSearchIndex();
+  for (const listener of listeners) listener();
+}
+
 export function isDBReady(): boolean { return searchIndex.length > 0; }
 
 export function searchTags(query: string, limit = 30): TagSuggestion[] {
@@ -187,7 +195,12 @@ export function searchTags(query: string, limit = 30): TagSuggestion[] {
                       : 0;
     if (score) matches.push({ namespace: item.namespace, key: item.key, label: item.label, score });
   }
-  return matches.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label)).slice(0, limit);
+  return matches
+    .sort((a, b) =>
+      b.score - a.score ||
+      getTagCountForSort(`${a.namespace}:${a.key}`) - getTagCountForSort(`${b.namespace}:${b.key}`) ||
+      a.label.localeCompare(b.label))
+    .slice(0, limit);
 }
 
 export function translateTag(namespace: string, value: string): string {

@@ -22,7 +22,8 @@
         "y": 420,
         "minWidth": 760,
         "minHeight": 560,
-        "resizable": true
+        "resizable": true,
+        "backgroundColor": "#0B0B0F"
       }
     ],
     "security": {

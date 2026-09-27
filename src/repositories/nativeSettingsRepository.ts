@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { invokeCommand } from '../bridge/invoke';
-import { DEFAULT_DATA_TRANSFER_SCOPE } from '../domain/dataTransferScope';
+import { DataExportReportSchema, DataImportReportSchema, type DataExportReport, type DataImportReport } from '../domain/dataExport';
 import type { CommandResult } from '../domain/result';
 
 /** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
@@ -72,9 +72,10 @@ export const PreferenceSnapshotSchema = z.object({
   /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
    * 关掉就只剩设置里的「立即同步」。 */
   autoSync: z.boolean().default(true),
+  tagTranslationEnabled: z.boolean().default(true),
+  tagCountOrderEnabled: z.boolean().default(true),
   /** 导入导出范围：手动带走的文件里装哪几类（记录与设置，外加可勾的凭据）。
    * 与同步范围无关，默认只勾记录与设置。 */
-  dataTransferScope: z.array(z.string().max(32)).max(12).default([...DEFAULT_DATA_TRANSFER_SCOPE]),
 }).strip();
 
 export type PreferenceSnapshot = z.output<typeof PreferenceSnapshotSchema>;
@@ -117,7 +118,8 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
   autoSync: true,
-  dataTransferScope: [...DEFAULT_DATA_TRANSFER_SCOPE],
+  tagTranslationEnabled: true,
+  tagCountOrderEnabled: true,
 };
 
 export class NativeSettingsRepository {
@@ -138,5 +140,16 @@ export class NativeSettingsRepository {
 
   importLegacy(encoded: string): Promise<CommandResult<LegacyPreferenceImport>> {
     return invokeCommand('import_legacy_preferences', { encoded }, LegacyPreferenceImportResponse);
+  }
+
+  /** 数据迁移（docs/30）：按勾选的条目导出一份明文 JSON；凭据以明文进文件，
+   * 勾选时的敏感信息提醒由界面负责。 */
+  exportData(items: string[]): Promise<CommandResult<DataExportReport>> {
+    return invokeCommand('export_data', { items }, DataExportReportSchema);
+  }
+
+  /** 导入：`items` 是用户在导入弹层里勾选的条目，文件里有但没勾的类如实跳过。 */
+  importData(payload: string, items: string[]): Promise<CommandResult<DataImportReport>> {
+    return invokeCommand('import_data', { payload, items }, DataImportReportSchema);
   }
 }

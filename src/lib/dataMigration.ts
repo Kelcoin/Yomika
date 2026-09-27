@@ -1,3 +1,4 @@
+import { DATA_EXPORT_KIND } from '../domain/dataExport';
 import { CREDENTIAL_EXPORT_KIND } from '../domain/credentialWire';
 
 /** Data migration payloads.
@@ -65,6 +66,7 @@ export function buildMigrationExport(input: {
 }
 
 export type ParsedMigration =
+  | { kind: 'export'; payload: { items: string[] } }
   | { kind: 'credentials' }
   | { kind: 'scoped' }
   | { kind: 'unified'; payload: MigrationExport }
@@ -261,7 +263,18 @@ export function parseMigrationExport(text: string): ParsedMigration {
     return { kind: 'invalid', reason: '导出内容必须是一个 JSON 对象' };
   }
   const record = value as Partial<MigrationExport> & UnknownRecord;
-  // 凭据文件（口令加密）：这里只认出它，解不开口令是原生侧的事。
+  // 新版数据迁移文件（docs/30）：结构校验很轻——items 是勾选框的依据，
+  // 其余字段的校验在原生侧 import_data 里逐类做。
+  if (record.kind === DATA_EXPORT_KIND) {
+    if (record.schemaVersion !== MIGRATION_SCHEMA_VERSION) {
+      return { kind: 'invalid', reason: `不支持的导出版本：${String(record.schemaVersion)}` };
+    }
+    const items = Array.isArray(record.items)
+      ? (record.items as unknown[]).filter((item): item is string => typeof item === 'string')
+      : [];
+    return { kind: 'export', payload: { items } };
+  }
+  // 旧版口令加密的凭据文件：口令链路已移除，只认出来给一句明确的说明。
   if (record.kind === CREDENTIAL_EXPORT_KIND) return { kind: 'credentials' };
   // 本机导出的那一份（同步文档信封）：原生侧的导入命令认它，这里只需要把它从别的
   // 形状里分出来，结构上的校验留给原生侧——那边本来就要逐字段读一遍。

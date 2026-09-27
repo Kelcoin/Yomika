@@ -31,8 +31,8 @@ const preferences = {
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,
   autoSync: true,
-  // 导入导出范围：记录与设置默认全勾，凭据默认不勾（见 domain/dataTransferScope）。
-  dataTransferScope: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+  tagTranslationEnabled: true,
+  tagCountOrderEnabled: true,
 };
 
 describe('native settings bridge', () => {

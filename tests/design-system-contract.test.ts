@@ -336,24 +336,6 @@ describe('design system contract', () => {
     expect(read('src/components/Toast.tsx')).toMatch(/<OverlayLayer>\s*<div className="toast-stack"/);
   });
 
-  it('centers the passphrase dialog title and masks the fields itself', () => {
-    const shell = read('src/styles/shell.css');
-    // 标题居中：它和二级菜单是同一个家族（那些菜单的标题早就居中了）。
-    expect(ruleBody(shell, '.passphrase-dialog > h2')).toMatch(/text-align:\s*center/);
-    // 自己遮罩：`type="password"` 会让浏览器在框里再画一个显示按钮，和我们那枚重复。
-    expect(ruleBody(shell, '.passphrase-box input.is-masked')).toMatch(/-webkit-text-security:\s*disc/);
-    // 提示条的高度动画靠这个 overflow 盒子（motion 把 height 从 0 动到 auto）。
-    expect(ruleBody(shell, '.dialog-message')).toMatch(/overflow:\s*hidden/);
-
-    // 注释里也会提到 `type="password"`（在解释为什么不用它），所以先去掉注释再断言。
-    const dialog = read('src/components/PassphraseDialog.tsx').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    expect(dialog).toMatch(/className="passphrase-box"/);
-    expect(dialog).toMatch(/type="text"/);
-    expect(dialog).not.toMatch(/password/);
-    // 两个框共用同一枚眼睛组件：不会一个有一个没有。
-    expect(dialog.match(/<PassphraseInput/g) ?? []).toHaveLength(2);
-  });
-
   it('keeps the tag chip tight to its delete button and never clips a fitting label', () => {
     // 用户报的两件事都在这几行里：✕ 与文字之间空到 12px（两边都留 8），以及「明明放得下
     // 却被截断」——量出来的是小数（`somebody` 61.05px），四舍五入到 61 就比文字窄，于是

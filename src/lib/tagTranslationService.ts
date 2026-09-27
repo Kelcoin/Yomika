@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import {
+  clearTagTranslations,
   installTagTranslations,
   normalizeTranslationDb,
   subscribeTagTranslations,
@@ -34,6 +35,11 @@ export interface TagTranslationService {
   refresh(): Promise<void>;
   start(): void;
   stop(): void;
+  /** 功能开关（docs/30 设置项）：关闭时停更并卸载翻译，打开时从缓存秒级恢复。 */
+  setEnabled(enabled: boolean): void;
+  isEnabled(): boolean;
+  getSourceVersion(): string | undefined;
+  subscribe(listener: () => void): () => void;
 }
 
 function isTranslationMap(value: unknown): value is TranslationMap {
@@ -80,6 +86,9 @@ export function createTagTranslationService(options: TagTranslationServiceOption
     }
   })();
   const fetcher = options.fetcher ?? window.fetch.bind(window);
+  let enabled = true;
+  const serviceListeners = new Set<() => void>();
+  const notifyService = () => { for (const listener of [...serviceListeners]) listener(); };
   const now = options.now ?? Date.now;
   const retryDelays = options.retryDelays ?? [500, 1_500, 3_000, 5_000];
   const requestTimeoutMs = options.requestTimeoutMs ?? TAG_TRANSLATION_REQUEST_TIMEOUT_MS;
@@ -163,6 +172,7 @@ export function createTagTranslationService(options: TagTranslationServiceOption
           // The downloaded database remains usable for this session.
         }
         installTagTranslations(next.translations);
+        notifyService();
       })
       .catch(() => undefined)
       .finally(() => {
@@ -201,6 +211,7 @@ export function createTagTranslationService(options: TagTranslationServiceOption
     initialize,
     refresh,
     start() {
+      if (!enabled) return;
       if (active) {
         scheduleNextUpdate();
         return;
@@ -223,6 +234,26 @@ export function createTagTranslationService(options: TagTranslationServiceOption
       requestController = undefined;
       inFlight = undefined;
     },
+    setEnabled(next: boolean) {
+      if (enabled === next) return;
+      enabled = next;
+      if (next) {
+        // 与 start() 同一套生命周期：从缓存恢复 + 按需刷新 + 排程。
+        active = true;
+        void initialize().finally(scheduleNextUpdate);
+        return;
+      }
+      // 关闭：停更并卸载翻译（数据缓存保留，重新打开秒级恢复）。
+      stop();
+      clearTagTranslations();
+      notifyService();
+    },
+    isEnabled: () => enabled,
+    getSourceVersion: () => cache?.sourceVersion,
+    subscribe(listener: () => void) {
+      serviceListeners.add(listener);
+      return () => serviceListeners.delete(listener);
+    },
   };
 }
 
@@ -232,6 +263,11 @@ export const initializeTagTranslations = () => tagTranslationService.initialize(
 export const refreshTagTranslations = () => tagTranslationService.refresh();
 export const startTagTranslationUpdates = () => tagTranslationService.start();
 export const stopTagTranslationUpdates = () => tagTranslationService.stop();
+export const setTagTranslationServiceEnabled = (enabled: boolean) => tagTranslationService.setEnabled(enabled);
+export const getTagTranslationSourceVersion = () => tagTranslationService.getSourceVersion();
+export function subscribeTagTranslationService(listener: () => void): () => void {
+  return tagTranslationService.subscribe(listener);
+}
 
 export function useTagTranslations(): void {
   const [, setRevision] = useState(0);

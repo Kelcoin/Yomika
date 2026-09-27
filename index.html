@@ -17,9 +17,86 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#f3eee4" />
     <title>Yomika</title>
+    <style>
+      /* 首帧开屏（docs/30）：与 SplashFrame 同一构图，颜色走应用令牌——
+         主题预设与自定义样式都会改写这些令牌，开屏跟着变。回退值只在
+         令牌样式尚未就绪的那一拍出现。 */
+      .app-splash-static {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: var(--surface-canvas, #0B0B0F);
+        color: var(--ink-primary, #F3EEE4);
+        font-family: 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif;
+        user-select: none;
+      }
+      .app-splash-static .brand { display: grid; justify-items: center; gap: 20px; }
+      .app-splash-static svg { width: 128px; height: 128px; display: block; }
+      .app-splash-static .wordmark {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: var(--tracking-splash, 0.34em);
+        text-indent: var(--tracking-splash, 0.34em);
+      }
+      .app-splash-static .wordmark i { font-style: normal; color: var(--brand-vermilion, #B63A2E); }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- 首帧开屏（docs/30）：这段静态品牌帧随 HTML 本身立即上屏，React 首次
+         render 时整体替换。没有第二窗口、没有转圈——主窗的第一帧就是品牌。 -->
+    <div id="root">
+      <div class="app-splash-static">
+        <div class="brand">
+          <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect width="512" height="512" rx="112" fill="#0D0D0D"/>
+            <rect x="112" y="112" width="288" height="288" rx="20" stroke="#F5F5F5" stroke-width="18" fill="none"/>
+            <line x1="184" y1="184" x2="184" y2="328" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+            <line x1="184" y1="184" x2="264" y2="184" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+            <line x1="224" y1="184" x2="224" y2="264" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round"/>
+            <line x1="264" y1="224" x2="328" y2="224" stroke="#E8E8E8" stroke-width="18" stroke-linecap="round"/>
+            <circle cx="288" cy="296" r="22" fill="#E8E8E8"/>
+          </svg>
+          <p class="wordmark">Yomika<i>.</i></p>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // 品牌帧已随 HTML 上屏：rAF 两跳 = 首帧真的被呈现，此刻亮出主窗
+      // （桌面端主窗创建时隐藏，见 src-tauri lib.rs）。IPC 未就绪时按 250ms
+      // 重试，最多 20 次；移动端与浏览器里是空操作。失败由 Rust 侧 10 秒兜底。
+      (function () {
+        var attempts = 0;
+        function ready() {
+          try {
+            window.__TAURI_INTERNALS__.invoke('frontend_ready');
+            return true;
+          } catch (e) { return false; }
+        }
+        function tick() {
+          attempts += 1;
+          if (attempts > 20 || ready()) return;
+          setTimeout(function () { requestAnimationFrame(tick); }, 250);
+        }
+        requestAnimationFrame(function () { requestAnimationFrame(tick); });
+      })();
+    </script>
+    <script>
+      // 自定义样式镜像在首帧前预置（与 preferences.tsx 的模块级应用同一份键、
+      // 同一个 CSSStyleSheet 实例）：静态开屏帧因此跟着用户的主题预设与自定义
+      // CSS 走。必须走 adoptedStyleSheets（CSSOM）——Tauri 给 CSP 注入 nonce 后
+      // 运行时创建的 <style> 会被 style-src 拦截。
+      try {
+        var cached = localStorage.getItem('yomika.last-custom-css');
+        if (cached) {
+          var sheet = new CSSStyleSheet();
+          sheet.replaceSync(cached);
+          document.adoptedStyleSheets = [sheet].concat(document.adoptedStyleSheets ?? []);
+          window.__yomikaCustomSheet = sheet;
+        }
+      } catch (e) { /* storage unavailable */ }
+    </script>
   </body>
 </html>

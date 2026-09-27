@@ -1666,7 +1666,37 @@ pub struct ScopedExportReport {
     pub categories: Vec<String>,
 }
 
-/// 导出：把勾选类别里的本地数据折成一份 JSON。
+/// 折本机状态成同步文档信封的核心：导出命令与数据迁移（credentials::export_data）
+/// 共用这一份，保证「导出的东西」永远是同一套合并规则折出来的那些。
+pub(crate) fn export_scoped_document(
+    connection: &Connection,
+) -> Result<(serde_json::Value, usize), String> {
+    let enabled: Vec<String> = SYNC_SCOPE_CATEGORIES
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+    let scope_ids = local_scope_ids(connection)?;
+    let refs: Vec<&str> = scope_ids.iter().map(String::as_str).collect();
+    let document = build_local_state(connection, &refs, &enabled)?;
+    let exported_at = connection
+        .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get::<_, String>(0))
+        .unwrap_or_default();
+    let objects = document.objects.len();
+    let envelope = ScopedDataExport {
+        kind: SCOPED_EXPORT_KIND.to_string(),
+        schema_version: SCOPED_EXPORT_VERSION,
+        exported_at,
+        categories: enabled,
+        document,
+    };
+    Ok((
+        serde_json::to_value(&envelope).map_err(|error| error.to_string())?,
+        objects,
+    ))
+}
+
+/// 导出：把本地数据折成一份 JSON。数据迁移（docs/30）把这份信封原样嵌进导出文件，
+/// 这条命令保留为独立导出入口（categories 由调用方给，用于裁剪文档里的类别）。
 ///
 /// 覆盖本机**所有**服务器范围，而不只是当前那台：同步一次只推当前服务器，是因为远端
 /// 文档是按账户走的；导出的用途是备份与换机器，漏掉别的服务器就等于漏掉一半记录。

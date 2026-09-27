@@ -31,7 +31,8 @@ const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
-const DATA_TRANSFER_SCOPE_KEY: &str = "preferences.data_transfer_scope";
+const TAG_TRANSLATION_ENABLED_KEY: &str = "preferences.tag_translation_enabled";
+const TAG_COUNT_ORDER_ENABLED_KEY: &str = "preferences.tag_count_order_enabled";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -153,20 +154,12 @@ pub struct PreferenceSnapshot {
     /// 关掉就只剩「立即同步」按钮。
     #[serde(default = "default_true")]
     pub auto_sync: bool,
-    /// 导入导出范围：手动带走的文件里装哪几类（记录与设置、凭据）。
-    ///
-    /// 它与同步范围**无关**：同步范围决定设备之间自动流动什么，这一份决定文件里装
-    /// 什么。凭据类在这里是可选项（同步那边连类别都没有），导出它们要另外设口令。
-    /// 它也是本机设置（见 `DEVICE_LOCAL_PREFERENCE_KEYS`）：这是「我这次要带走什么」，
-    /// 别的设备上没有任何意义。
-    #[serde(default = "default_data_transfer_scope")]
-    pub data_transfer_scope: Vec<String>,
+    #[serde(default = "default_true")]
+    pub tag_translation_enabled: bool,
+    #[serde(default = "default_true")]
+    pub tag_count_order_enabled: bool,
 }
 
-/// 默认勾选由 `data_transfer` 那份词表决定（记录与设置全勾、凭据不勾）。
-fn default_data_transfer_scope() -> Vec<String> {
-    crate::data_transfer::default_transfer_scope()
-}
 
 fn default_detail_actions() -> Vec<String> {
     ["read", "readingList", "favorites", "download"].into_iter().map(String::from).collect()
@@ -211,8 +204,8 @@ fn default_bottom_nav_items() -> Vec<String> {
 ///
 /// 名字是快照序列化后的键（camelCase），因为判断发生在 JSON 上：日志里存的是那份
 /// JSON，远端来的也是 JSON。
-pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 3] =
-    ["downloadDirectory", "cacheMaxBytes", "dataTransferScope"];
+pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 2] =
+    ["downloadDirectory", "cacheMaxBytes"];
 
 impl Default for PreferenceSnapshot {
     fn default() -> Self {
@@ -243,7 +236,8 @@ impl Default for PreferenceSnapshot {
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
             auto_sync: true,
-            data_transfer_scope: default_data_transfer_scope(),
+            tag_translation_enabled: true,
+            tag_count_order_enabled: true,
         }
     }
 }
@@ -288,8 +282,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "delete"))
         || !matches!(value.detail_date_kind.as_str(), "added" | "published")
         // 导入导出范围：条目数与长度都设上限，避免一行手改的配置把界面撑坏。
-        || value.data_transfer_scope.len() > 12
-        || value.data_transfer_scope.iter().any(|item| item.len() > 32)
+
     {
         return Err("Invalid preference snapshot".into());
     }
@@ -298,7 +291,6 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     Ok(PreferenceSnapshot {
         detail_actions: ["read", "readingList", "favorites", "download", "edit", "delete"].into_iter().filter(|item| value.detail_actions.iter().any(|value| value == item)).map(String::from).collect(),
         bottom_nav_items: normalized,
-        data_transfer_scope: crate::data_transfer::normalize_transfer_scope(&value.data_transfer_scope),
         ..value.clone()
     })
 }
@@ -417,14 +409,8 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         floating_nav: map_value(&stored, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: map_value(&stored, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
         auto_sync: map_value(&stored, AUTO_SYNC_KEY, defaults.auto_sync)?,
-        // 旧版本没有这一项：存着的值可能带着已改名的 id，读出来先归一化；没存过则
-        // 用默认集合（记录与设置全勾、凭据不勾）。
-        data_transfer_scope: match stored.get(DATA_TRANSFER_SCOPE_KEY) {
-            Some(raw) => crate::data_transfer::normalize_transfer_scope(
-                &serde_json::from_str::<Vec<String>>(raw).unwrap_or_default(),
-            ),
-            None => defaults.data_transfer_scope,
-        },
+        tag_translation_enabled: map_value(&stored, TAG_TRANSLATION_ENABLED_KEY, defaults.tag_translation_enabled)?,
+        tag_count_order_enabled: map_value(&stored, TAG_COUNT_ORDER_ENABLED_KEY, defaults.tag_count_order_enabled)?,
     };
     validate_preferences(&value)
 }
@@ -515,10 +501,8 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.bottom_nav_items),
         ),
         (AUTO_SYNC_KEY, serde_json::to_string(&value.auto_sync)),
-        (
-            DATA_TRANSFER_SCOPE_KEY,
-            serde_json::to_string(&value.data_transfer_scope),
-        ),
+        (TAG_TRANSLATION_ENABLED_KEY, serde_json::to_string(&value.tag_translation_enabled)),
+        (TAG_COUNT_ORDER_ENABLED_KEY, serde_json::to_string(&value.tag_count_order_enabled)),
     ] {
         transaction
             .execute(
@@ -718,7 +702,6 @@ mod tests {
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
             auto_sync: false,
             // 导入导出范围要能存住「只带一部分」这件事：记录 + 一类凭据。
-            data_transfer_scope: vec!["history".into(), "lrr_servers".into()],
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");
         assert_eq!(

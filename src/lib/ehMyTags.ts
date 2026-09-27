@@ -72,12 +72,43 @@ export function prioritizeByMyTags(tags: readonly string[], presentation: EhMyTa
 /** Ink that stays readable on an arbitrary preset colour: the mytags page
  * stores plain hex, so the chip recolours exactly like the site does and the
  * text follows the fill's luminance instead of the theme. */
+/** WCAG 相对亮度（sRGB 线性化）。入参为 0–255 通道值。 */
+function relativeLuminance(rgb: readonly [number, number, number]): number {
+  const channels = rgb.map((channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
+
+function contrastRatio(a: readonly [number, number, number], b: readonly [number, number, number]): number {
+  const pair = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  const la = pair[0]!;
+  const lb = pair[1]!;
+  return (la + 0.05) / (lb + 0.05);
+}
+
+/** 标签 chip 的墨色：在三个候选里选对底色对比度最高的一个。
+ *
+ * 旧实现按亮度阈值（0.35）二选一，中明度底色（L≈0.25–0.40）会被配上白墨，
+ * 对比度掉到 2.8–4.5:1（WCAG 小字要求 4.5:1）——可读性差的根源。三候选择优后
+ * 全亮度带 ≥ 4.5:1；纯黑 (#000000) 在中明度底色上比 #1c1c1e 高出 3–4 个点。 */
+const INK_CANDIDATES: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 0, 0],
+  [28, 28, 30],
+  [255, 255, 255],
+];
+const INK_CANDIDATE_HEX = ['#000000', '#1c1c1e', '#ffffff'];
+
 export function readableInkOnHex(hex: string): string {
   const value = hex.replace('#', '');
   if (value.length !== 6 || /[^0-9a-fA-F]/.test(value)) return '';
-  const channels = [0, 2, 4].map((offset) => parseInt(value.slice(offset, offset + 2), 16) / 255).map((channel) => (
-    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-  ));
-  const luminance = 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
-  return luminance > 0.35 ? '#1c1c1e' : '#ffffff';
+  const background = [0, 2, 4].map((offset) => parseInt(value.slice(offset, offset + 2), 16)) as [number, number, number];
+  let bestIndex = 0;
+  let bestContrast = -1;
+  INK_CANDIDATES.forEach((candidate, index) => {
+    const ratio = contrastRatio(background, candidate);
+    if (ratio > bestContrast) { bestContrast = ratio; bestIndex = index; }
+  });
+  return INK_CANDIDATE_HEX[bestIndex]!;
 }

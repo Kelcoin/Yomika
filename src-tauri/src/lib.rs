@@ -49,7 +49,7 @@ use commands::sync::{
     reset_remote_state, save_sync_account, save_sync_scope, set_sync_journal_state,
     sync_account_credential, sync_remote_scope, test_sync_account,
 };
-use credentials::{export_credentials, import_credentials};
+use credentials::{export_data, import_data};
 use db::Database;
 use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
@@ -108,34 +108,21 @@ pub fn run() {
             // or the iOS/Android targets fail to compile here.
             #[cfg(desktop)]
             let mut builder = builder.decorations(cfg!(not(target_os = "windows")));
-            // 桌面端先立开屏窗、主窗藏着：webview 加载完成前屏幕上是品牌帧，
-            // 不是一块白板。前端首帧提交后经 frontend_ready 亮主窗、收开屏；
-            // 兜底线程保证前端崩了开屏也不会挂成永久的门面。
+            // 桌面端主窗先藏着：webview 画出 index.html 的品牌帧后再亮窗
+            // （frontend_ready / 10 秒兜底），「纯色空窗」那一段就不再存在。
+            // 移动端没有这个空窗（原生壳自带启动画面），保持直出。
             #[cfg(desktop)]
             {
                 builder = builder.visible(false);
-                let _ = tauri::WebviewWindowBuilder::new(
-                    app,
-                    "splashscreen",
-                    tauri::WebviewUrl::App("splashscreen.html".into()),
-                )
-                .title("Yomika")
-                .inner_size(420.0, 300.0)
-                .decorations(false)
-                .resizable(false)
-                .center()
-                .build();
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     if let Some(main) = handle.get_webview_window("main") {
                         let _ = main.show();
                     }
-                    if let Some(splash) = handle.get_webview_window("splashscreen") {
-                        let _ = splash.close();
-                    }
                 });
             }
+
             #[cfg(target_os = "windows")]
             let builder =
                 builder.data_directory(data_paths::data_dir(app.handle())?.join("webview"));
@@ -227,8 +214,8 @@ pub fn run() {
             sync_account_credential,
             export_scoped_data,
             import_scoped_data,
-            export_credentials,
-            import_credentials,
+            export_data,
+            import_data,
             inference_probe,
             inference_start,
             inference_get_job,

@@ -6,6 +6,8 @@ import { SYNC_COMPLETED_EVENT, setAutoSyncEnabled, startAutoSync } from '../lib/
 import { startHistoryMaintenance } from '../lib/historyMaintenance';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { setEhMyTagsPriorityEnabled } from '../lib/ehMyTags';
+import { initializeTagTranslations, setTagTranslationServiceEnabled } from '../lib/tagTranslationService';
+import { refreshTagCounts, setTagCountOrderEnabled } from '../lib/tagCountService';
 import { upgradeCssThemePreset } from '../lib/cssThemePresets';
 import { syncSystemInsets } from '../lib/safeArea';
 import {
@@ -53,6 +55,11 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   else delete document.documentElement.dataset.sfw;
   try { window.localStorage.setItem('yomika.last-sfw-mode', String(preferences.sfwMode)); } catch { /* storage unavailable */ }
   applyCustomCss(preferences.customCss);
+  // 标签翻译与补全排序的开关（docs/30）：镜像给下一帧用，服务开关即时生效。
+  const tagTranslationOn = preferences.tagTranslationEnabled;
+  setTagTranslationServiceEnabled(tagTranslationOn);
+  setTagCountOrderEnabled(preferences.tagCountOrderEnabled);
+  try { window.localStorage.setItem('yomika.last-tag-translation', String(tagTranslationOn)); } catch { /* storage unavailable */ }
   writeNavMirror(preferences);
 }
 
@@ -61,6 +68,27 @@ const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
  * without this mirror the first frames of every launch painted the default
  * scheme and then flipped — the mirror applies synchronously at import time. */
 const LAST_CUSTOM_CSS_KEY = 'yomika.last-custom-css';
+
+/** 自定义样式走 **adoptedStyleSheets**（CSSOM），不走 `<style>` 元素：Tauri 启动时
+ * 给 CSP 的 style-src 注入 nonce，`'unsafe-inline'` 随之失效，运行时创建的
+ * `<style>` 会被 CSP 全部拒绝（自定义样式因此整体失效过一次）。构造样式表不是
+ * 内联样式，CSP 不检查，且在文档样式中排最后——恰好保证覆盖应用令牌。
+ * 回退：环境没有 adoptedStyleSheets（旧 jsdom）时仍走 `<style>` 元素。 */
+function applyCustomCssSheet(css: string): boolean {
+  if (typeof CSSStyleSheet === 'undefined' || !('replaceSync' in CSSStyleSheet.prototype)) return false;
+  if (!('adoptedStyleSheets' in document)) return false;
+  const existing = (window as { __yomikaCustomSheet?: CSSStyleSheet }).__yomikaCustomSheet;
+  if (existing) {
+    existing.replaceSync(css);
+    return true;
+  }
+  if (!css.trim()) return true;
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(css);
+  (window as { __yomikaCustomSheet?: CSSStyleSheet }).__yomikaCustomSheet = sheet;
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  return true;
+}
 
 /** 底栏的形态也走镜像：悬浮还是贴底、显示哪几项，都是偏好里的一行，而偏好是 IPC 回来
  * 的——不镜像的话每次启动都会先画一版贴底栏，等偏好到了再换成悬浮的（明明开着悬浮，
@@ -108,6 +136,13 @@ try {
   if (window.localStorage.getItem('yomika.last-sfw-mode') === 'true') document.documentElement.dataset.sfw = 'true';
   const cached = window.localStorage.getItem(LAST_CUSTOM_CSS_KEY);
   if (cached) applyCustomCss(cached);
+  // 标签翻译必须在 React 首帧前就位，否则已上屏的卡片带着原始标签等重渲染
+  // ——「启动后部分没生效」的根源。镜像关闭时 setEnabled 会卸载并保持原样。
+  if (window.localStorage.getItem('yomika.last-tag-translation') !== 'false') {
+    setTagTranslationServiceEnabled(true);
+    void initializeTagTranslations();
+    void refreshTagCounts().catch(() => undefined);
+  }
 } catch { /* storage can be unavailable */ }
 
 /** User CSS goes into one managed <style> at the end of head, so it overrides
@@ -119,6 +154,10 @@ function applyCustomCss(css: string) {
   try {
     if (window.localStorage.getItem(LAST_CUSTOM_CSS_KEY) !== css) window.localStorage.setItem(LAST_CUSTOM_CSS_KEY, css);
   } catch { /* storage can be unavailable */ }
+  if (applyCustomCssSheet(css)) {
+    document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.remove();
+    return;
+  }
   const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);
   if (!css.trim()) {
     existing?.remove();

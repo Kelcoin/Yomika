@@ -305,6 +305,9 @@
     --tracking-normal: 0;
     --tracking-wide: 0.04em;
     --tracking-wider: 0.08em;
+    /* 开屏画面 wordmark 的字距（docs/30）。颜色不设常量：开屏走应用的
+       surface/ink/brand 令牌，主题预设与自定义样式改写令牌即可同步开屏。 */
+    --tracking-splash: 0.34em;
 
     /* ---- Spacing (4px base) -------------------------------------------- */
     --space-1: 4px;
@@ -507,6 +510,10 @@
   }
 
   :root[data-theme='dark'] {
+    /* 标签 chip 配对（docs/30 可读性）：底色加深一档、墨色提亮，
+       深色下默认 chip 对比度 4.0:1 → 5.3:1（WCAG 小字 4.5:1）。 */
+    --chip-background: color-mix(in srgb, var(--secondary) 20%, var(--secondary-container));
+    --chip-ink: #dcf0e8;
     color-scheme: dark;
     --primary: #ffb4a9;
     --on-primary: #5f120d;
