@@ -19,16 +19,11 @@ body::-webkit-scrollbar,
 
 .app-shell {
   display: grid;
-  /* Windows: the app-drawn title bar spans the full width above the two
-     columns; elsewhere the grid is just the columns. */
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas:
-    "titlebar titlebar"
-    "sidebar main";
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "sidebar main";
   grid-template-columns: 248px minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
-  transition: grid-template-columns var(--motion-standard);
 }
 
 /* The app-drawn title bar (Windows): a themed drag surface with the brand
@@ -3815,10 +3810,10 @@ body::-webkit-scrollbar,
 .archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
 .archive-thumb-card-body { position: relative; display: grid; align-content: start; justify-items: start; grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
-.archive-card-progress { position: absolute; inset: -4px 0 auto; display: block; height: 4px; overflow: hidden; background: var(--surface-container-highest); pointer-events: none; }
-.archive-card-progress-fill { display: block; height: 100%; background: var(--primary); transition: width var(--motion-medium); }
+.archive-card-progress { position: absolute; inset: -5px 6px auto; display: block; height: 5px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-container-highest); box-shadow: var(--shadow-progress); pointer-events: none; }
+.archive-card-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--primary); transition: width var(--motion-medium); }
 .archive-row-copy { position: relative; }
-.archive-row-copy > .archive-card-progress { inset: auto 0 -1px; height: 3px; }
+.archive-row-copy > .archive-card-progress { inset: auto 6px -1px; height: 4px; }
 .settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: vertical; font: inherit; }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

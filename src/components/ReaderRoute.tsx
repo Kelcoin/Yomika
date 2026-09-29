@@ -176,15 +176,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // from upscaling, dense pages do. The size loads with the optional overview
   // facts, so this runs whenever that lands, and only before a manual choice.
   useEffect(() => {
-    if (!upscaleConfigured || !preferences.upscaleAutoEnable || upscaleChosenRef.current) return;
+    if (!upscaleConfigured || upscaleChosenRef.current) return;
+    if (!preferences.upscaleAutoEnable) { setUpscaleWanted(false); return; }
     if (!info?.sizeBytes || !info.tags || pages.length === 0) return;
-    if (shouldAutoEnableUpscale(info.tags, {
+    setUpscaleWanted(shouldAutoEnableUpscale(info.tags, {
       enabled: true, pageCount: pages.length, sizeBytes: info.sizeBytes,
+      tagMode: preferences.upscaleAutoTagMode,
       thresholdBytes: preferences.upscaleAutoThresholdBytes,
       whitelist: preferences.upscaleAutoWhitelist,
       blacklist: preferences.upscaleAutoBlacklist,
-    })) setUpscaleWanted(true);
-  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoThresholdBytes, preferences.upscaleAutoWhitelist, preferences.upscaleAutoBlacklist, info?.sizeBytes, info?.tags, pages.length]);
+    }));
+  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoTagMode, preferences.upscaleAutoThresholdBytes, preferences.upscaleAutoWhitelist, preferences.upscaleAutoBlacklist, info?.sizeBytes, info?.tags, pages.length]);
   const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());

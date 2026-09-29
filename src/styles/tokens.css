@@ -227,6 +227,7 @@
     /* Selected disc: a wider, softer halo instead of a tick — the state has to
        read against a bright cover without drawing a glyph on the disc. */
     --shadow-check-selected: 0 2px 10px rgb(0 0 0 / 0.55);
+    --shadow-progress: 0 -2px 3px rgb(0 0 0 / 0.3), 2px 0 3px rgb(0 0 0 / 0.3), 0 2px 3px rgb(0 0 0 / 0.3);
 
     /* ---- Controls ------------------------------------------------------- */
     --control-background: #f5f2ed;

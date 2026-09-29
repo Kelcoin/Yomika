@@ -17,7 +17,6 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
 import { StatusBar } from './StatusBar';
-import { TitleBar } from './TitleBar';
 import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
 
@@ -141,10 +140,6 @@ export function AppShell({ children }: AppShellProps) {
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
   // top — brings it back.
   const [compactNavHidden, setCompactNavHidden] = useState(false);
-  /** 自绘标题栏是 Windows 专属：Windows 关了原生装饰、由应用自己画；macOS 有
-   * 自己的红绿灯，iOS/Android 根本没有窗口按钮可点。平台探测是异步命令，先用
-   * UA 判断一次，免得手机上一进应用先闪一条没有用的栏。 */
-  const [showTitleBar, setShowTitleBar] = useState(() => !isMobileShell());
   /** 跳过链接是给键盘用户准备的。触屏上它没有用处，而 WebKit 会被点按命中
    * :focus-visible，把它常驻成状态栏那一角的胶囊；CSS 那边按 (hover/pointer)
    * 挡了一层，这里再按平台挡一层——拿到的是原生探测结果，不依赖媒体特性。 */
@@ -152,7 +147,6 @@ export function AppShell({ children }: AppShellProps) {
   useEffect(() => {
     void getPlatformCapabilities().then((result) => {
       if (!result.ok) return;
-      setShowTitleBar(result.value.platform === 'windows');
       setShowSkipLink(result.value.platform !== 'android' && result.value.platform !== 'ios');
     });
   }, []);
@@ -233,7 +227,6 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
-      {showTitleBar && <TitleBar />}
       {showSkipLink && <a className="skip-link" href="#main-content">跳到主内容</a>}
       <aside className="sidebar" aria-label="应用侧栏">
         <NavLink className="brand" to="/" aria-label="Yomika 首页">

@@ -164,11 +164,10 @@ describe('design system contract', () => {
     }
     // 移动端要读出非零安全区，view 声明必须带 viewport-fit=cover。
     expect(read('index.html')).toMatch(/viewport-fit=cover/);
-    // 自绘标题栏只属于 Windows，且自己吃掉顶部安全区。
-    const titlebar = ruleBody(read('src/styles/shell.css'), '.titlebar');
-    expect(titlebar).toMatch(/height:\s*calc\(44px \+ var\(--safe-top\)\)/);
+    // Windows uses the native frame so moving and resizing do not depend on WebView events.
+    expect(read('src-tauri/src/lib.rs')).toMatch(/builder\.decorations\(true\)/);
     expect(ruleBody(read('src/styles/shell.css'), '.app-main')).toMatch(/background:\s*var\(--surface-panel\)/);
-    expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
+    expect(read('src/components/AppShell.tsx')).not.toMatch(/<TitleBar\s*\/>/);
   });
 
   it('pins the page scale and keeps text controls off the focus-zoom threshold', () => {

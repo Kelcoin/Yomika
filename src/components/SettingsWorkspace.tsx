@@ -1562,13 +1562,13 @@ export function SettingsWorkspace() {
                     progress={modelDownload}
                   />}
                 />
-                <SettingsSwitch
+                <SettingsChoice
                   icon={<WandSparkles />}
                   label="自动开启超分"
-                  hint="超过阈值时，进入阅读自动开启"
-                  disabled={!upscaleOn}
-                  checked={preferenceDraft.upscaleAutoEnable}
-                  onToggle={() => editPreferences({ upscaleAutoEnable: !preferenceDraft.upscaleAutoEnable })}
+                  hint="按标签规则与图片体积决定是否自动开启"
+                  value={preferenceDraft.upscaleAutoEnable ? preferenceDraft.upscaleAutoTagMode : 'off'}
+                  options={[{ value: 'off', label: '关闭' }, { value: 'whitelist', label: '仅白名单' }, { value: 'blacklist', label: '排除黑名单' }]}
+                  onChange={(value) => editPreferences({ upscaleAutoEnable: value !== 'off', upscaleAutoTagMode: value === 'blacklist' ? 'blacklist' : 'whitelist' })}
                 />
                 <SettingsNumber
                   icon={<Gauge />}
@@ -1582,12 +1582,13 @@ export function SettingsWorkspace() {
                   disabled={!preferenceDraft.upscaleAutoEnable}
                   onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
-                <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '不限'}>
-                  <textarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
-                </SettingsPanel>
-                <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；优先于白名单" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
-                  <textarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
-                </SettingsPanel>
+                {preferenceDraft.upscaleAutoEnable && (preferenceDraft.upscaleAutoTagMode === 'whitelist'
+                  ? <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '无'}>
+                    <textarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
+                  </SettingsPanel>
+                  : <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；匹配的档案不会自动开启" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
+                    <textarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
+                  </SettingsPanel>)}
               </div>
             )}
             {selectedSettingsSection === 'settings-advanced' && (

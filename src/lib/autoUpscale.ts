@@ -1,5 +1,6 @@
 interface AutoUpscaleOptions {
   enabled: boolean;
+  tagMode: 'whitelist' | 'blacklist';
   pageCount: number;
   sizeBytes: number;
   thresholdBytes: number;
@@ -14,8 +15,7 @@ function tagSet(value: string): Set<string> {
 export function shouldAutoEnableUpscale(tags: readonly string[], options: AutoUpscaleOptions): boolean {
   if (!options.enabled || options.pageCount <= 0 || options.sizeBytes / options.pageCount < options.thresholdBytes) return false;
   const present = new Set(tags.map((tag) => tag.trim().toLocaleLowerCase()));
-  const denied = tagSet(options.blacklist);
-  if ([...denied].some((tag) => present.has(tag))) return false;
-  const allowed = tagSet(options.whitelist);
-  return allowed.size === 0 || [...allowed].some((tag) => present.has(tag));
+  const selected = tagSet(options.tagMode === 'whitelist' ? options.whitelist : options.blacklist);
+  const matches = [...selected].some((tag) => present.has(tag));
+  return options.tagMode === 'whitelist' ? matches : !matches;
 }

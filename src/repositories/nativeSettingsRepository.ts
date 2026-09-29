@@ -34,6 +34,7 @@ export const PreferenceSnapshotSchema = z.object({
    * average page size (bytes/page) reaches the threshold. Needs a model; the
    * switch locks while upscale itself is off. */
   upscaleAutoEnable: z.boolean().default(false),
+  upscaleAutoTagMode: z.enum(['whitelist', 'blacklist']).default('whitelist'),
   upscaleAutoWhitelist: z.string().max(2000).default('category:doujinshi\ncategory:manga'),
   upscaleAutoBlacklist: z.string().max(2000).default('other:3d\ncategory:cosplay\ncategory:asian porn'),
   /** The auto-enable threshold in bytes per page. Default 500 KB. */
@@ -127,6 +128,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   upscaleBackend: 'off',
   upscaleModel: '',
   upscaleAutoEnable: false,
+  upscaleAutoTagMode: 'whitelist',
   upscaleAutoWhitelist: 'category:doujinshi\ncategory:manga',
   upscaleAutoBlacklist: 'other:3d\ncategory:cosplay\ncategory:asian porn',
   upscaleAutoThresholdBytes: 512_000,

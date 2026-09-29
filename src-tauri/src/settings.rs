@@ -19,6 +19,7 @@ const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
 const UPSCALE_AUTO_ENABLE_KEY: &str = "preferences.upscale_auto_enable";
+const UPSCALE_AUTO_TAG_MODE_KEY: &str = "preferences.upscale_auto_tag_mode";
 const UPSCALE_AUTO_WHITELIST_KEY: &str = "preferences.upscale_auto_whitelist";
 const UPSCALE_AUTO_BLACKLIST_KEY: &str = "preferences.upscale_auto_blacklist";
 const UPSCALE_AUTO_THRESHOLD_KEY: &str = "preferences.upscale_auto_threshold_bytes";
@@ -117,6 +118,8 @@ pub struct PreferenceSnapshot {
     /// 选择；关闭超分时该开关一并锁定。
     #[serde(default)]
     pub upscale_auto_enable: bool,
+    #[serde(default = "default_upscale_auto_tag_mode")]
+    pub upscale_auto_tag_mode: String,
     #[serde(default = "default_upscale_auto_whitelist")]
     pub upscale_auto_whitelist: String,
     #[serde(default = "default_upscale_auto_blacklist")]
@@ -243,6 +246,7 @@ fn default_upscale_backend() -> String {
 fn default_upscale_auto_threshold() -> u64 {
     500 * 1024
 }
+fn default_upscale_auto_tag_mode() -> String { "whitelist".into() }
 fn default_upscale_auto_whitelist() -> String { "category:doujinshi\ncategory:manga".into() }
 fn default_upscale_auto_blacklist() -> String { "other:3d\ncategory:cosplay\ncategory:asian porn".into() }
 fn default_compute_center_port() -> u16 {
@@ -293,6 +297,7 @@ impl Default for PreferenceSnapshot {
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
             upscale_auto_enable: false,
+            upscale_auto_tag_mode: default_upscale_auto_tag_mode(),
             upscale_auto_whitelist: default_upscale_auto_whitelist(),
             upscale_auto_blacklist: default_upscale_auto_blacklist(),
             upscale_auto_threshold_bytes: default_upscale_auto_threshold(),
@@ -350,6 +355,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
         || value.upscale_auto_whitelist.len() > 2000
+        || !matches!(value.upscale_auto_tag_mode.as_str(), "whitelist" | "blacklist")
         || value.upscale_auto_blacklist.len() > 2000
         // 每页平均体积阈值：低于 64 KB 的封面图不值得判据，8 MB 以上整页
         // 都会超分失去意义。与设置页步进器的范围一致。
@@ -456,6 +462,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             UPSCALE_AUTO_ENABLE_KEY,
             defaults.upscale_auto_enable,
         )?,
+        upscale_auto_tag_mode: map_value(&stored, UPSCALE_AUTO_TAG_MODE_KEY, defaults.upscale_auto_tag_mode)?,
         upscale_auto_whitelist: map_value(&stored, UPSCALE_AUTO_WHITELIST_KEY, defaults.upscale_auto_whitelist)?,
         upscale_auto_blacklist: map_value(&stored, UPSCALE_AUTO_BLACKLIST_KEY, defaults.upscale_auto_blacklist)?,
         upscale_auto_threshold_bytes: map_value(
@@ -579,6 +586,7 @@ pub fn save_preferences_to(
             UPSCALE_AUTO_ENABLE_KEY,
             serde_json::to_string(&value.upscale_auto_enable),
         ),
+        (UPSCALE_AUTO_TAG_MODE_KEY, serde_json::to_string(&value.upscale_auto_tag_mode)),
         (UPSCALE_AUTO_WHITELIST_KEY, serde_json::to_string(&value.upscale_auto_whitelist)),
         (UPSCALE_AUTO_BLACKLIST_KEY, serde_json::to_string(&value.upscale_auto_blacklist)),
         (
@@ -863,6 +871,7 @@ mod tests {
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
             upscale_auto_enable: true,
+            upscale_auto_tag_mode: "blacklist".into(),
             upscale_auto_threshold_bytes: 1024 * 1024,
             upscale_auto_whitelist: "category:manga".into(),
             upscale_auto_blacklist: "other:3d".into(),

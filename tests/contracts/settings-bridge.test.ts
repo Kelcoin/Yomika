@@ -19,6 +19,7 @@ const preferences = {
   upscaleBackend: 'off' as const,
   upscaleModel: '', decensorModel: '',
   upscaleAutoEnable: false,
+  upscaleAutoTagMode: 'whitelist' as const,
   upscaleAutoThresholdBytes: 512_000,
   upscaleAutoWhitelist: 'category:doujinshi\ncategory:manga',
   upscaleAutoBlacklist: 'other:3d\ncategory:cosplay\ncategory:asian porn',

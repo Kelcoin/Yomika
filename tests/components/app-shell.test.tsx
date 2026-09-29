@@ -49,9 +49,7 @@ describe('application shell', () => {
     expect(translationLifecycle.stop).toHaveBeenCalledTimes(2);
   });
 
-  it('draws the app-drawn title bar on Windows only', async () => {
-    // Windows 关了原生装饰，那条栏是应用自己画的；macOS 有自己的红绿灯，
-    // iOS/Android 没有窗口按钮可点——只有 Windows 该出现这排按钮。
+  it('leaves window controls to the native frame on desktop', async () => {
     const adapter = (platform: string) => vi.fn(async (command: string) => {
       if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
@@ -62,12 +60,11 @@ describe('application shell', () => {
 
     // 平台探测只在原生运行时里问命令（浏览器里直接答 browser），所以这里造一个
     // 原生运行时标记，让这次探测真的走到适配器上。
-    // invoke 是自绘标题栏自己的窗口 API 走的通道（它不问应用适配器）。
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => false } });
     try {
       setInvokeAdapterForTests(adapter('windows'));
       renderAt();
-      expect(await screen.findByRole('button', { name: '最小化' })).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByRole('button', { name: '最小化' })).not.toBeInTheDocument());
       // 跳过链接是给键盘用户的，桌面照旧保留。
       expect(screen.getByRole('link', { name: '跳到主内容' })).toBeInTheDocument();
 

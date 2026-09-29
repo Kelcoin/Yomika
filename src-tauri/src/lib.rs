@@ -150,15 +150,10 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
             let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
-            // Windows draws its own themed title bar (TitleBar.tsx); other
-            // desktop platforms keep their native window chrome. `decorations`
-            // only exists in Tauri's desktop build — the mobile runtime has no
-            // window frame to decorate — so the call has to carry the same gate,
-            // or the iOS/Android targets fail to compile here.
+            // Keep the system frame on Windows. Native hit testing and the OS
+            // move/resize loop must not wait for WebView pointer events or IPC.
             #[cfg(desktop)]
-            let mut builder = builder.decorations(cfg!(not(target_os = "windows")));
-            #[cfg(target_os = "windows")]
-            { builder = builder.shadow(false); }
+            let mut builder = builder.decorations(true);
             // 桌面端主窗先藏着：webview 画出 index.html 的品牌帧后再亮窗
             // （frontend_ready / 10 秒兜底），「纯色空窗」那一段就不再存在。
             // 移动端没有这个空窗（原生壳自带启动画面），保持直出。
@@ -188,21 +183,6 @@ pub fn run() {
             // 就是那一个组，Windows 自己会挑合适的那一档尺寸。
             #[cfg(target_os = "windows")]
             set_big_window_icon(&main_window);
-            #[cfg(target_os = "windows")]
-            if let Ok(hwnd) = main_window.hwnd() {
-                use windows::Win32::{Foundation::HWND, Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE}};
-                let border_color = DWMWA_COLOR_NONE;
-                // DWM draws a separate border outside the WebView. This leaves
-                // Tao's resize hit testing and taskbar auto-hide inset intact.
-                unsafe {
-                    let _ = DwmSetWindowAttribute(
-                        HWND(hwnd.0),
-                        DWMWA_BORDER_COLOR,
-                        &border_color as *const u32 as *const std::ffi::c_void,
-                        std::mem::size_of::<u32>() as u32,
-                    );
-                }
-            }
             let _ = main_window;
             Ok(())
         })
