@@ -98,6 +98,29 @@ describe('UnifiedImageCache', () => {
     expect(urls.revoke).toHaveBeenCalledWith(first.url);
   });
 
+  it('never takes a page away from a consumer that is still holding it', async () => {
+    // 内存里留下的都是**有引用**的条目：谁手上还拿着 handle，回收就不动它（阅读器
+    // 的会话派生图就是这么存的）。上限只是兜底，真正的边界来自调用方放手的时机——
+    // 所以这里验的是「不会把别人正在看的那一页撤掉」。
+    const urls = blobUrlFactory();
+    const repo = repository(new Uint8Array([1, 2, 3, 4]));
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 4, maxEntries: 1 });
+    const identity = (archiveId: string) => ({ scopeId: 'scope-a', archiveId, rendition: 'reader-page' as const, pageIndex: 0 });
+
+    const held = await cache.load(identity('a'));
+    const alsoHeld = await cache.load(identity('b'));
+
+    expect(urls.revoke).not.toHaveBeenCalled();
+    expect(held.url).toBe('blob:test-0');
+    expect(alsoHeld.url).toBe('blob:test-1');
+
+    // 最后一放手就立刻撤掉（撤销 URL 与实现里那句「释放到 0 引用即撤销」同一条）。
+    cache.release(held);
+    cache.release(alsoHeld);
+    expect(urls.revoke).toHaveBeenCalledWith(held.url);
+    expect(urls.revoke).toHaveBeenCalledWith(alsoHeld.url);
+  });
+
   it('supports consumer cancellation without leaving an in-flight request behind', async () => {
     const urls = blobUrlFactory();
     const repo = repository();

@@ -215,7 +215,10 @@ pub fn capabilities(model_data: &Path, data: &Path) -> Vec<Capability> {
 #[cfg(windows)]
 fn dlssnr_capability(data: &Path) -> Capability {
     let status = crate::dlssnr::status(data);
-    match crate::dlssnr::last_probe() {
+    // Probe results are process-global, but validity is tied to the exact data
+    // directory and DLL. A different profile (or test fixture) must not make
+    // this capability report DLSS5 as ready here.
+    match crate::dlssnr::last_probe_for(data) {
         Some(probe) if probe.supported => Capability {
             id: "dlssnr".to_string(),
             label: "DLSS5".to_string(),
@@ -361,22 +364,49 @@ struct Request {
     body: Vec<u8>,
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
+/// 请求读失败的原因：状态码、机器可读的码、给人看的一句话。
+///
+/// 以前所有读失败都回同一个 400 `INVALID_RESPONSE`，于是一个被截断的请求体和一
+/// 个格式错乱的头长得一模一样——对面看到的是「模糊的图片解码错误」（§2.6）。
+struct RequestError {
+    status: u16,
+    reason: &'static str,
+    code: &'static str,
+    message: String,
+}
+
+impl RequestError {
+    fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: 400,
+            reason: "Bad Request",
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+async fn read_request(stream: &mut TcpStream) -> Result<Request, RequestError> {
     let mut buffer = Vec::with_capacity(8 * 1024);
     let header_end = loop {
         if let Some(at) = find_headers_end(&buffer) {
             break at;
         }
         if buffer.len() > MAX_HEADER {
-            return Err("请求头太长".to_string());
+            return Err(RequestError::bad_request(
+                "INVALID_RESPONSE",
+                "请求头太长",
+            ));
         }
         let mut chunk = [0u8; 8 * 1024];
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|error| format!("读请求失败：{error}"))?;
+        let read = stream.read(&mut chunk).await.map_err(|error| {
+            RequestError::bad_request("INVALID_RESPONSE", format!("读请求失败：{error}"))
+        })?;
         if read == 0 {
-            return Err("连接提前关了".to_string());
+            return Err(RequestError::bad_request(
+                "INVALID_RESPONSE",
+                "连接提前关了",
+            ));
         }
         buffer.extend_from_slice(&chunk[..read]);
     };
@@ -388,31 +418,72 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     let method = parts.next().unwrap_or_default().to_ascii_uppercase();
     let path = parts.next().unwrap_or("/").to_string();
     let mut headers = HashMap::new();
+    let mut content_length_seen = false;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        // 这一层解析器只认「一个 Content-Length + 定长体」。重复的长度头、分块传输
+        // 都是它读不对的东西：读错了会去截一个不存在的长度，然后拿半张图去解码。
+        // 与其猜，不如当场说清楚。
+        if name == "content-length" {
+            if content_length_seen {
+                return Err(RequestError::bad_request(
+                    "INVALID_RESPONSE",
+                    "重复的 Content-Length：这一版协议只认一个",
+                ));
+            }
+            content_length_seen = true;
         }
+        if name == "transfer-encoding" {
+            return Err(RequestError::bad_request(
+                "INVALID_RESPONSE",
+                "不支持 Transfer-Encoding（分块请求）：请发送定长的 Content-Length",
+            ));
+        }
+        headers.insert(name, value.trim().to_string());
     }
 
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
+    let content_length = match headers.get("content-length") {
+        Some(value) => value.parse::<usize>().map_err(|_| {
+            RequestError::bad_request(
+                "INVALID_RESPONSE",
+                format!("Content-Length 不是数字：{value}"),
+            )
+        })?,
+        None => 0,
+    };
     if content_length > MAX_BODY {
-        return Err(format!("请求体太大（{content_length} 字节）"));
+        return Err(RequestError {
+            status: 413,
+            reason: "Payload Too Large",
+            code: "INVALID_RESPONSE",
+            message: format!("请求体太大（{content_length} 字节，上限 {MAX_BODY}）"),
+        });
     }
 
     let mut body = buffer[header_end + 4..].to_vec();
     while body.len() < content_length {
         let mut chunk = vec![0u8; (content_length - body.len()).min(64 * 1024)];
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|error| format!("读请求体失败：{error}"))?;
+        let read = stream.read(&mut chunk).await.map_err(|error| {
+            RequestError::bad_request("INCOMPLETE_BODY", format!("读请求体失败：{error}"))
+        })?;
         if read == 0 {
             break;
         }
         body.extend_from_slice(&chunk[..read]);
+    }
+    // 短读：对面说的长度没读满（连接断了）。以前这里直接 `truncate` 就当收到一个
+    // 完整请求，处理失败时给出的是一条与真因无关的解码错误。
+    if body.len() < content_length {
+        return Err(RequestError::bad_request(
+            "INCOMPLETE_BODY",
+            format!(
+                "请求体不完整：声明 {content_length} 字节，只收到 {}",
+                body.len()
+            ),
+        ));
     }
     body.truncate(content_length);
 
@@ -497,8 +568,8 @@ async fn handle_connection(
     let request = match read_request(&mut stream).await {
         Ok(request) => request,
         Err(error) => {
-            let body = error_body("INVALID_RESPONSE", &error);
-            write_json(&mut stream, 400, "Bad Request", &body).await?;
+            let body = error_body(error.code, &error.message);
+            write_json(&mut stream, error.status, error.reason, &body).await?;
             return Ok(());
         }
     };
@@ -617,28 +688,45 @@ pub fn remote_capabilities(url: &str, token: &str) -> Result<RemoteCapabilities,
 }
 
 /// 把一段图片字节发给远端处理，取回 PNG 字节。
+///
+/// 失败分成两类，因为对面能做的事不一样：**超时**（对面还在算、或者卡住了）与
+/// **其它**（连不上、被拒、回的不是图）。以前两者都压成一个字符串，本地只好一律
+/// 报「网络错误」——而超时是可重试的，该退到本机那一版继续读下去。
 pub fn remote_process(
     url: &str,
     token: &str,
     params: &ProcessParams,
     bytes: Vec<u8>,
-) -> Result<Vec<u8>, String> {
-    let base = normalize_base(url)?;
+) -> Result<Vec<u8>, RemoteFailure> {
+    let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
     let encoded = {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(params).map_err(|error| error.to_string())?)
+        base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_vec(params)
+                .map_err(|error| RemoteFailure::protocol(error.to_string()))?,
+        )
     };
-    let response = blocking_client()?
+    // 一页大图 + 一个模型的推理，给足时间；再长就该考虑把图切小。
+    const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let response = blocking_client()
+        .map_err(RemoteFailure::transport)?
         .post(format!("{base}/v1/process"))
         .header("x-yomika-token", token)
         .header("x-yomika-params", encoded)
         .header("content-type", "application/octet-stream")
-        // 一页大图 + 一个模型的推理，给足时间；再长就该考虑把图切小。
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(PROCESS_TIMEOUT)
         .body(bytes)
         .send()
-        .map_err(|error| format!("发给 {base} 失败：{error}"))?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                RemoteFailure::timeout(format!(
+                    "对面 {} 秒没有回话（一页大图 + 一个模型）：可以重试，或者把图切小、改用本机处理",
+                    PROCESS_TIMEOUT.as_secs()
+                ))
+            } else {
+                RemoteFailure::transport(format!("发给 {base} 失败：{error}"))
+            }
+        })?;
     let status = response.status();
     let content_type = response
         .headers()
@@ -648,18 +736,56 @@ pub fn remote_process(
         .to_string();
     let body = response
         .bytes()
-        .map_err(|error| format!("读回包失败：{error}"))?
+        .map_err(|error| RemoteFailure::transport(format!("读回包失败：{error}")))?
         .to_vec();
     if !status.is_success() {
-        return Err(describe_error(
-            status.as_u16(),
-            &String::from_utf8_lossy(&body),
-        ));
+        return Err(RemoteFailure {
+            code: "REMOTE_UNAVAILABLE",
+            message: describe_error(status.as_u16(), &String::from_utf8_lossy(&body)),
+            // 5xx 是那边的事，重试有意义；4xx 是我们发错了（令牌、参数）。
+            retryable: status.is_server_error(),
+        });
     }
     if !content_type.starts_with("image/") {
-        return Err(format!("对面回的不是图片（{content_type}）"));
+        return Err(RemoteFailure::protocol(format!(
+            "对面回的不是图片（{content_type}）"
+        )));
     }
     Ok(body)
+}
+
+/// 远端那一步的失败：给调用方的码、人话，以及能不能重试。
+#[derive(Debug)]
+pub struct RemoteFailure {
+    pub code: &'static str,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl RemoteFailure {
+    fn timeout(message: String) -> Self {
+        Self {
+            code: "REMOTE_TIMEOUT",
+            message,
+            retryable: true,
+        }
+    }
+
+    fn transport(message: String) -> Self {
+        Self {
+            code: "REMOTE_UNAVAILABLE",
+            message,
+            retryable: true,
+        }
+    }
+
+    fn protocol(message: String) -> Self {
+        Self {
+            code: "REMOTE_UNAVAILABLE",
+            message,
+            retryable: false,
+        }
+    }
 }
 
 /// 用户会填 `192.168.1.5`、`192.168.1.5:47653`、`http://192.168.1.5:47653` 这几种；
@@ -840,7 +966,9 @@ pub fn compute_center_configure(
             data: data.clone(),
         };
         if let Err(error) = center.start(context, snapshot.compute_center_port) {
-            return CommandResult::failure("NETWORK_ERROR", error, true);
+            // 端口被占、绑不上：这是本机的一次网络动作失败（前端错误码表里是 `NETWORK`）。
+            // 别用表里没有的码——发出去整条错误会被桥当成无效响应。
+            return CommandResult::failure("NETWORK", error, true);
         }
     } else {
         center.stop();
@@ -870,7 +998,9 @@ pub async fn remote_compute_capabilities(
 ) -> CommandResult<RemoteCapabilities> {
     match tauri::async_runtime::spawn_blocking(move || remote_capabilities(&url, &token)).await {
         Ok(Ok(capabilities)) => CommandResult::success(capabilities),
-        Ok(Err(error)) => CommandResult::failure("NETWORK_ERROR", error, true),
+        // 连不上就是「这个地址这一刻没有服务」：`NETWORK_ERROR` 不在前端的错误码表里，
+        // 发出去整条错误会被桥当成无效响应，真正的信息反而看不到。
+        Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
 }
@@ -888,6 +1018,15 @@ pub struct RemoteProcessInput {
     /// 从哪一版开始发：`reader-page` / `decensored` / `enhanced`。
     #[serde(default)]
     pub source: Option<String>,
+    /// 起点那一版是哪两个模型产出的（与 DLSS5 那条路同一个规矩：起点按产出它的
+    /// 模型存，要算出同一个 revision 才读得到）。
+    #[serde(default)]
+    pub decensor_model: Option<String>,
+    #[serde(default)]
+    pub upscale_model: Option<String>,
+    /// 前端给这次任务起的号：翻页之后就不必再发出去了。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 #[tauri::command]
@@ -922,18 +1061,24 @@ fn remote_process_cached_page(
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
     }
     let rendition = input.source.as_deref().unwrap_or("reader-page");
-    match rendition {
-        "reader-page" | "decensored" | "enhanced" => {}
-        other => {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                format!("Unsupported source rendition: {other}"),
-                false,
-            )
-        }
+    let revision = match crate::inference::source_revision(
+        data_dir,
+        rendition,
+        input.decensor_model.as_deref(),
+        input.upscale_model.as_deref(),
+    ) {
+        Ok(revision) => revision,
+        Err(error) => return CommandResult::failure(error.code, error.message, false),
+    };
+    // 取消牌先登记：等全局闸的时候用户可能已经翻页了，那就不必再把这一页发出去
+    // （远端那一次要跑很久，本机这段时间只允许一件重活）。
+    let guard = crate::inference::cancel::begin(input.task_id.as_deref());
+    if guard.cancelled() {
+        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
     }
-    let identity =
+    let mut identity =
         CacheImageIdentity::new(&input.scope_id, &input.archive_id, rendition, input.page_index);
+    identity.revision = revision;
     let connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
@@ -944,10 +1089,17 @@ fn remote_process_cached_page(
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
     drop(connection);
+    // 已经发出去的那一次没法从这一侧掐断（阻塞式 HTTP），所以只保证「取消之后不再
+    // 发出新的」。发出去之后的结果仍然按正常路径回来，只是前端已经不要了。
+    if guard.cancelled() {
+        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
+    }
 
     match remote_process(&input.url, &input.token, &input.params, page.bytes) {
         Ok(bytes) => CommandResult::success(bytes),
-        Err(error) => CommandResult::failure("NETWORK_ERROR", error, true),
+        // 远端那一步的失败带着自己的码：超时是可重试的（本地可以退到本机那一版
+        // 继续读），4xx 是我们发错了、不该原样重试。
+        Err(error) => CommandResult::failure(error.code, error.message, error.retryable),
     }
 }
 
@@ -1053,5 +1205,81 @@ mod tests {
         assert!(!capabilities[0].ready, "没有模型时超分不该是 ready");
         assert!(!capabilities[1].ready);
         assert!(capabilities[0].detail.contains("超分模型"));
+    }
+
+    /// 对服务说一段原始 HTTP。客户端的库不会发出坏请求，所以协议层的严格性只能
+    /// 这样验——这一层以前把「声明 100 字节、只收到 10」当成一个完整请求处理。
+    fn raw_request(port: u16, request: &[u8]) -> String {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("连上服务");
+        let _ = stream.write_all(request);
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    fn server_for(dir: &std::path::Path) -> (ComputeCenter, u16) {
+        let context = ServerContext {
+            model_data: dir.to_path_buf(),
+            data: dir.to_path_buf(),
+        };
+        let center = ComputeCenter::new();
+        center.set_token("token-123");
+        let port = center.start(context, 0).expect("起服务");
+        (center, port)
+    }
+
+    #[test]
+    fn a_truncated_body_is_refused_with_a_reason_instead_of_being_processed() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let response = raw_request(
+            port,
+            b"POST /v1/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\ncontent-length: 100\r\n\r\n0123456789",
+        );
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(response.contains("INCOMPLETE_BODY"), "{response}");
+        center.stop();
+    }
+
+    #[test]
+    fn an_unsupported_or_ambiguous_framing_is_refused_at_the_door() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let head = |extra: &str| {
+            format!(
+                "POST /v1/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\n{extra}\r\n"
+            )
+        };
+        // 重复的长度头：读哪一个都可能错，所以不猜。
+        let duplicated = raw_request(
+            port,
+            head("content-length: 1\r\ncontent-length: 2\r\n").as_bytes(),
+        );
+        assert!(duplicated.starts_with("HTTP/1.1 400"), "{duplicated}");
+        assert!(duplicated.contains("重复的 Content-Length"), "{duplicated}");
+
+        // 分块传输：这一版解析器读不对，明确拒绝好过读成一个 0 字节的体。
+        let chunked = raw_request(
+            port,
+            head("transfer-encoding: chunked\r\n").as_bytes(),
+        );
+        assert!(chunked.starts_with("HTTP/1.1 400"), "{chunked}");
+        assert!(chunked.contains("Transfer-Encoding"), "{chunked}");
+
+        // 长度不是数字：以前被静默当成 0，然后拿一个空体去处理。
+        let garbage = raw_request(port, head("content-length: abc\r\n").as_bytes());
+        assert!(garbage.starts_with("HTTP/1.1 400"), "{garbage}");
+        assert!(garbage.contains("不是数字"), "{garbage}");
+
+        // 超过上限：413，而且说清楚上限是多少。
+        let oversized = raw_request(
+            port,
+            head(&format!("content-length: {}\r\n", MAX_BODY + 1)).as_bytes(),
+        );
+        assert!(oversized.starts_with("HTTP/1.1 413"), "{oversized}");
+        assert!(oversized.contains(&MAX_BODY.to_string()), "{oversized}");
+        center.stop();
     }
 }

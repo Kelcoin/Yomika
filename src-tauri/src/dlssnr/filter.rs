@@ -52,31 +52,26 @@ impl DlssnrImage {
 /// NGX 的尺寸下限：太小的图它自己会拒绝，先挡下来并给出人话。
 const MIN_EDGE: u32 = 32;
 
+/// 取消时返回的错误串。这条链路的错误类型是 `String`，所以用一句可辨认的串，
+/// 由调用方翻译成 `INFERENCE_CANCELLED`。
+pub const CANCELLED: &str = "dlssnr: cancelled";
+
 /// 把一张图跑一遍 DLSS5。
 pub fn apply(
     data_dir: &Path,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
 ) -> Result<DlssnrImage, String> {
-    if image.width < MIN_EDGE || image.height < MIN_EDGE {
-        return Err(format!(
-            "图太小（{}x{}）：DLSS5 至少要 {MIN_EDGE}×{MIN_EDGE}",
-            image.width, image.height
-        ));
-    }
-    let settings = settings.clone().normalized();
-    with_context(data_dir, |context| run(context, image, &settings))
+    apply_with_token(data_dir, image, settings, &super::super::inference::cancel::CancelToken::none())
 }
 
-/// 与 [`apply`] 相同，但 DLL 由调用方点名。
-///
-/// 测试用它指着 `docs/DLSSNR-DLL-Options-310.8.0.0/…` 里的那一份 165MB 的 DLL
-/// （拷进临时数据目录太浪费）；应用自己走的是数据目录里用户导入的那一份。
-pub fn apply_with_dll(
+/// 同上，但带取消牌：层与层之间查一次。阅读器用它——一张 4K 图一层几百毫秒，
+/// 切页之后没必要把剩下的层跑完。
+pub fn apply_with_token(
     data_dir: &Path,
-    dll: &Path,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
+    cancel: &super::super::inference::cancel::CancelToken,
 ) -> Result<DlssnrImage, String> {
     if image.width < MIN_EDGE || image.height < MIN_EDGE {
         return Err(format!(
@@ -85,13 +80,48 @@ pub fn apply_with_dll(
         ));
     }
     let settings = settings.clone().normalized();
-    super::device::with_context_at(data_dir, dll, |context| run(context, image, &settings))
+    with_context(data_dir, |context| run(context, image, &settings, cancel))
+}
+
+/// 与 [`apply`] 相同，但 DLL 由调用方点名。**只有测试用**：它指着
+/// `docs/DLSSNR-DLL-Options-310.8.0.0/…` 里那一份 165MB 的 DLL（拷进临时数据目录太
+/// 浪费）；应用自己走的是数据目录里用户导入的那一份（[`apply`]）。
+#[cfg(test)]
+pub fn apply_with_dll(
+    data_dir: &Path,
+    dll: &Path,
+    image: &DlssnrImage,
+    settings: &DlssnrSettings,
+) -> Result<DlssnrImage, String> {
+    apply_with_dll_token(data_dir, dll, image, settings, &super::super::inference::cancel::CancelToken::none())
+}
+
+#[cfg(test)]
+pub fn apply_with_dll_token(
+    data_dir: &Path,
+    dll: &Path,
+    image: &DlssnrImage,
+    settings: &DlssnrSettings,
+    cancel: &super::super::inference::cancel::CancelToken,
+) -> Result<DlssnrImage, String> {
+    if image.width < MIN_EDGE || image.height < MIN_EDGE {
+        return Err(format!(
+            "图太小（{}x{}）：DLSS5 至少要 {MIN_EDGE}×{MIN_EDGE}",
+            image.width, image.height
+        ));
+    }
+    if cancel.cancelled() {
+        return Err(CANCELLED.to_string());
+    }
+    let settings = settings.clone().normalized();
+    super::device::with_context_at(data_dir, dll, |context| run(context, image, &settings, cancel))
 }
 
 fn run(
     context: &mut super::device::GpuContext,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
+    cancel: &super::super::inference::cancel::CancelToken,
 ) -> Result<DlssnrImage, String> {
     let width = image.width;
     let height = image.height;
@@ -117,6 +147,10 @@ fn run(
     ensure_features(context, width, height, pass_count)?;
 
     for index in 0..pass_count {
+        // 层与层之间是取消点：切页之后剩下的层不再跑（每层都要上传、评估、回读）。
+        if cancel.cancelled() {
+            return Err(CANCELLED.to_string());
+        }
         let pass = settings.passes[index];
         // 这一层的输出：不是最后一层就写中间图。
         let target = if index + 1 == pass_count {

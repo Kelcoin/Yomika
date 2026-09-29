@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
 import { setSystemBarStyle } from '../bridge/platform';
@@ -175,6 +175,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [preferences, setPreferences] = useState<PreferenceSnapshot>(() => ({ ...DEFAULT_PREFERENCES, ...readNavMirror() }));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  // Saves carry complete snapshots for backwards compatibility with the native
+  // command. Serialize them so an automatic safety write (for example, turning
+  // off an unavailable DLSSNR capability) cannot race a user edit and lose the
+  // later intent.
+  const saveQueueRef = useRef(Promise.resolve());
 
   /** 读一次原生偏好并落到界面上：启动时一次，同步拉回别处的改动后再来一次。 */
   const reload = useCallback(async () => {
@@ -212,14 +217,20 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { setAutoSyncEnabled(preferences.autoSync); }, [preferences.autoSync]);
 
-  async function save(input: PreferenceSnapshot): Promise<CommandResult<PreferenceSnapshot>> {
-    const result = await repository.save(input);
-    if (result.ok) {
-      setPreferences(result.value);
-      applyPreferences(result.value);
-      setError(undefined);
-    }
-    return result;
+  function save(input: PreferenceSnapshot): Promise<CommandResult<PreferenceSnapshot>> {
+    const operation = saveQueueRef.current.then(async () => {
+      const result = await repository.save(input);
+      if (result.ok) {
+        setPreferences(result.value);
+        applyPreferences(result.value);
+        setError(undefined);
+      }
+      return result;
+    });
+    // Keep the queue alive after a failed save while preserving the failure for
+    // the caller that initiated this particular operation.
+    saveQueueRef.current = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   async function importLegacy(encoded: string): Promise<CommandResult<LegacyPreferenceImport>> {

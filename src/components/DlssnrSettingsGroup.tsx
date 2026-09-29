@@ -174,7 +174,11 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   // 拆成一个变量：直接对着 `status.probe?.supported` 做别名会让 TS 把另一个分支
   // 收窄成 null，`probe.error` 就读不出来了。
   const probe = status.probe ?? undefined;
-  const probed = probe?.supported === true;
+  /** 跑通过 **并且** 那份结论是现在这一份片段上测出来的：换过 DLL 之后旧结论作废
+   * （`probeValid`），开关要重新锁上——不然界面显示「检测通过」而进程里跑的是换之前
+   * 那一份。 */
+  const probed = probe?.supported === true && status.probeValid;
+  const probeStale = probe?.supported === true && !status.probeValid;
   const layerCount = passes.length;
 
   return (
@@ -185,15 +189,24 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         hint={
           probed
             ? `${status.variantLabel ?? 'nvngx_dlssnr'} · ${status.gpuName}${probe ? ` · 检测 ${probe.elapsedMs}ms` : ''}`
-            : status.dllPresent
-              ? '先检测一次：跑通了才允许打开（这台机器上的驱动与 NGX 说了算）'
-              : '还没有片段：先在下面挑一种下载'
+            : probeStale
+              ? `换过片段：先重启应用，再点一次「检测」（现在这份结论是换之前那一份测出来的）`
+              : status.dllPresent
+                ? '先检测一次：跑通了才允许打开（这台机器上的驱动与 NGX 说了算）'
+                : '还没有片段：先在下面挑一种下载'
         }
         disabled={!probed}
         checked={preferences.dlssnrEnabled}
         onToggle={() => {
           if (!probed) {
-            showToast(status.dllPresent ? '先点一次「检测 DLSS5」' : '先在下面下载一种片段', 'error');
+            showToast(
+              probeStale
+                ? '换过片段：重启应用后再检测一次'
+                : status.dllPresent
+                  ? '先点一次「检测 DLSS5」'
+                  : '先在下面下载一种片段',
+              'error',
+            );
             return;
           }
           editPreferences({ dlssnrEnabled: !preferences.dlssnrEnabled });

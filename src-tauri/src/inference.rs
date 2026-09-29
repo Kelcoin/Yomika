@@ -1,10 +1,19 @@
 use tauri::Manager;
+
+/// 取消在 `Result<_, String>` 那一层的样子：`run_decensor_bytes` 这类函数把
+/// `InferenceError` 压成字符串交给上层，而取消要和「真的失败」分开——调用方据此
+/// 回 `INFERENCE_CANCELLED`，而不是记一条用户看不懂的错误。
+pub(crate) const CANCELLED_ERROR: &str = "cancelled";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum InferenceError {
     InvalidInput(String),
     PixelBudgetExceeded { pixels: usize, max_pixels: usize },
     InvalidManifest(String),
     CacheBusy,
+    /// 任务被取消：切页、关开关、离开阅读器。不是失败，调用方不要记成错误，
+    /// 也不要把它写进任何缓存。
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -332,6 +341,7 @@ pub fn install_model_archive(
 }
 
 pub mod anime4k;
+pub mod cancel;
 pub mod decensor;
 pub mod detect;
 pub mod inpaint;
@@ -969,6 +979,12 @@ pub fn inference_install_model(
             "Inference cache is in use",
             true,
         ),
+        // 安装模型这条路上没有取消点，但错误枚举多了一格，这里必须有个说法。
+        Err(InferenceError::Cancelled) => crate::domain::result::CommandResult::failure(
+            "INFERENCE_CANCELLED",
+            "任务已取消",
+            false,
+        ),
     }
 }
 
@@ -1339,15 +1355,156 @@ pub struct UpscalePageInput {
     pub tile_size: Option<u32>,
     #[serde(default)]
     pub tile_sleep_ms: Option<u64>,
-    /// When set, the upscaler reads this page's de-censored rendition instead of
-    /// the plain one, so the two pipelines chain in the order that matters: fill
-    /// the censored regions at the original scale — which is what the detector and
-    /// the inpainter were trained on — and enlarge the finished page afterwards.
-    /// Upscaling first would hand the inpainter interpolated pixels and smeared
-    /// mosaic blocks.
+    /// Which rendition this call reads: `reader-page` (the plain page, the
+    /// default) or `decensored` (the de-censoring step's output).
+    ///
+    /// The two enhancements are **consecutive steps, not one call**: the reader
+    /// asks for the de-censored page first, shows it when it lands, and then asks
+    /// for the enlarged version of it. That is what makes each step's result
+    /// visible on its own — a page whose upscale failed still shows its
+    /// de-censored version, and one whose de-censoring failed is still enlarged.
+    /// Chaining them inside one call (the previous shape, through
+    /// `decensor_model`) threw the first step's result away whenever the second
+    /// one failed.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// When `source` is `decensored`: the bundle that produced it. Only its
+    /// identity is needed here — it is what the de-censored rendition is keyed
+    /// by, so the upscaler reads the page *this* bundle wrote and not one left by
+    /// a different version.
     #[serde(default)]
     pub decensor_model: Option<String>,
+    /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
+
+/// 派生版本（去码 / 超分产物）的缓存 revision。
+///
+/// 模型换了就不能再服务旧产物：revision 是模型指纹，两条链（写的那一步与读的那
+/// 一步）各自算出同一个串——前端只知道模型 id，指纹要在这里查。
+fn decensor_fingerprint(models_data: &std::path::Path, model_id: &str) -> Option<String> {
+    resolve_installed_bundle(models_data, model_id).map(|(_bundle, manifest)| manifest.sha256)
+}
+
+fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
+    match resolved {
+        Some(ResolvedUpscaler::Onnx(_path, manifest)) => {
+            format!("onnx:{}:{}:{}", manifest.id, manifest.version, manifest.sha256)
+        }
+        Some(ResolvedUpscaler::Anime4k(preset)) => {
+            format!("anime4k:{}:{}", preset.id, preset.version)
+        }
+        None => "nearest".to_string(),
+    }
+}
+
+/// `enhanced` 的 revision：超分模型指纹，加上它读的是哪一版起点（原图 / 某一版
+/// 去码产物）。同一页在同一起点上跑同一个模型是同一张图，所以命中可以直接给。
+fn enhanced_revision(resolved: &Option<ResolvedUpscaler>, decensor: Option<&str>) -> String {
+    match decensor {
+        Some(fingerprint) => format!("{}|from:decensored:{fingerprint}", upscaler_fingerprint(resolved)),
+        None => format!("{}|from:reader-page", upscaler_fingerprint(resolved)),
+    }
+}
+
+/// 起点那一版的身份。`decensored` 要带上产出它的那一份去码模型的指纹。
+fn source_identity(
+    input: &UpscalePageInput,
+    source_rendition: &str,
+    decensor_revision: Option<&str>,
+) -> crate::cache::CacheImageIdentity {
+    let mut identity = crate::cache::CacheImageIdentity::new(
+        &input.scope_id,
+        &input.archive_id,
+        source_rendition,
+        input.page_index,
+    );
+    identity.revision = decensor_revision.map(|value| value.to_string());
+    identity
+}
+
+/// 读某一步的输入时，那一版是按什么 revision 存的。
+///
+/// 链上每一步的输入都是说得出名字的一版，而一版是按**产出它的模型**存的：
+/// `decensored` 属于某一份去码包，`enhanced` 属于某个超分模型（外加它读的是哪一版
+/// 起点）。调用方手上只有模型 id，指纹要在这里查；查不到的模型包要当场说清楚，而不是
+/// 拿一个空的 revision 去读一份不知道是谁写的图。
+pub(crate) struct SourceRevisionError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+pub(crate) fn source_revision(
+    models_data: &std::path::Path,
+    rendition: &str,
+    decensor_model: Option<&str>,
+    upscale_model: Option<&str>,
+) -> Result<Option<String>, SourceRevisionError> {
+    let decensor_fingerprint_of =
+        |model_id: Option<&str>| -> Result<Option<String>, SourceRevisionError> {
+            let Some(model_id) = model_id.filter(|value| !value.is_empty()) else {
+                return Ok(None);
+            };
+            decensor_fingerprint(models_data, model_id)
+                .map(Some)
+                .ok_or_else(|| SourceRevisionError {
+                    code: "INFERENCE_UNAVAILABLE",
+                    message: format!("没有装这个去码模型包：{model_id}"),
+                })
+        };
+    match rendition {
+        "reader-page" => Ok(None),
+        "decensored" => match decensor_fingerprint_of(decensor_model)? {
+            Some(fingerprint) => Ok(Some(fingerprint)),
+            None => Err(SourceRevisionError {
+                code: "INVALID_RESPONSE",
+                message: "读去码产物要说明是哪一份去码模型包产出的".to_string(),
+            }),
+        },
+        "enhanced" => {
+            let upscale = upscale_model
+                .filter(|value| !value.is_empty())
+                .and_then(|id| resolve_upscaler(models_data, id));
+            let decensor = decensor_fingerprint_of(decensor_model)?;
+            Ok(Some(enhanced_revision(&upscale, decensor.as_deref())))
+        }
+        other => Err(SourceRevisionError {
+            code: "INVALID_RESPONSE",
+            message: format!("Unsupported source rendition: {other}"),
+        }),
+    }
+}
+
+/// 从缓存里取一版派生结果；没有就是 `None`（不是错误——第一次跑本来就没有）。
+fn cached_derived(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    identity: &crate::cache::CacheImageIdentity,
+) -> Option<Vec<u8>> {
+    let connection = database.connection.lock().ok()?;
+    crate::cache::load_image_cache(&connection, app_data, identity)
+        .ok()
+        .flatten()
+        .map(|image| image.bytes)
+}
+
+/// 把派生结果写回缓存。失败只记一笔：缓存写不进去不该让这一页白跑（用户手上已
+/// 经有图了），而磁盘配额、权限之类的原因不是这一页的错。
+fn store_derived(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    identity: &crate::cache::CacheImageIdentity,
+    bytes: &[u8],
+) {
+    let Ok(connection) = database.connection.lock() else {
+        return;
+    };
+    if let Err(error) = crate::cache::store_image_cache(&connection, app_data, identity, "image/png", bytes) {
+        eprintln!("yomika: derived cache write failed: {error}");
+    }
+}
+
 
 // A single heavy job at a time bounds memory across reader remounts. Acquire
 // asynchronously; never queue behind inference on the window or database thread.
@@ -1417,12 +1574,30 @@ fn upscale_cached_page_with_models(
     models_data: &std::path::Path,
     input: &UpscalePageInput,
 ) -> crate::domain::result::CommandResult<Vec<u8>> {
-    use crate::cache::{load_image_cache, CacheImageIdentity};
     use crate::domain::result::CommandResult;
 
     if input.page_index < 0 {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
     }
+    // 取消牌先登记：任务可能是在等全局闸的时候被取消的（用户已经翻页），那时候
+    // 连模型都不该打开。
+    let guard = cancel::begin(input.task_id.as_deref());
+    if guard.cancelled() {
+        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
+    }
+    // 这一步读哪一版：原图，或者上一步（去码）的产物。别的都不认——链上每一
+    // 步的输入都必须是说得出名字的一版。
+    let source_rendition = match input.source.as_deref() {
+        None | Some("") | Some("reader-page") => "reader-page",
+        Some("decensored") => "decensored",
+        Some(other) => {
+            return CommandResult::failure(
+                "INVALID_RESPONSE",
+                format!("Unsupported source rendition: {other}"),
+                false,
+            )
+        }
+    };
     // A model's scale is fixed by the model, so it wins over the requested one.
     // Only the model-free path is free to honour the request.
     let resolved = input
@@ -1430,39 +1605,60 @@ fn upscale_cached_page_with_models(
         .as_deref()
         .filter(|id| !id.is_empty())
         .and_then(|id| resolve_upscaler(models_data, id));
+    // An explicit model selection is a contract: silently switching to nearest
+    // neighbour makes a missing or removed model look like a poor model result.
+    if let Some(model_id) = input.model_id.as_deref().filter(|id| !id.is_empty()) {
+        if resolved.is_none() {
+            return CommandResult::failure(
+                "INFERENCE_UNAVAILABLE",
+                format!("没有装这个超分模型：{model_id}"),
+                false,
+            );
+        }
+    }
     let scale = match &resolved {
         Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.scale.clamp(1, 4),
         Some(ResolvedUpscaler::Anime4k(preset)) => preset.scale,
         None => input.scale.unwrap_or(2).clamp(1, 4),
     };
-    let source = CacheImageIdentity::new(
-        &input.scope_id,
-        &input.archive_id,
-        "reader-page",
-        input.page_index,
-    );
-
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    // 去码那一步的产物是按「哪一份模型包的指纹」存的：读它的时候要算出同一个串，
+    // 不然会读到另一份模型包写下的图（或者读不到）。
+    let decensor_revision = match source_revision(
+        models_data,
+        source_rendition,
+        input.decensor_model.as_deref(),
+        input.model_id.as_deref(),
+    ) {
+        Ok(revision) => revision,
+        Err(error) => return CommandResult::failure(error.code, error.message, false),
     };
-    let page = match load_image_cache(&connection, app_data, &source) {
-        Ok(Some(image)) => image,
+    let revision = enhanced_revision(&resolved, decensor_revision.as_deref());
+
+    // 同一页 + 同一起点 + 同一个模型 = 同一张图。第一次跑完之后再问（重挂阅读器、
+    // 内存缓存被挤掉）就直接给缓存里那一份，不再让模型跑一遍。
+    let enhanced_identity = {
+        let mut identity = crate::cache::CacheImageIdentity::new(
+            &input.scope_id,
+            &input.archive_id,
+            "enhanced",
+            input.page_index,
+        );
+        identity.revision = Some(revision.clone());
+        identity
+    };
+    if let Some(hit) = cached_derived(database, app_data, &enhanced_identity) {
+        return CommandResult::success(hit);
+    }
+
+    let source = source_identity(input, source_rendition, decensor_revision.as_deref());
+    let page = match cached_derived(database, app_data, &source) {
+        Some(bytes) => bytes,
         // Retryable on purpose: when chaining, the de-censored page may still be
         // being produced, and the caller asks again once it lands.
-        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
-        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+        None => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
     };
 
-    drop(connection);
-    let source_bytes = match input.decensor_model.as_deref().filter(|id| !id.is_empty()) {
-        Some(model_id) => match run_decensor_bytes(models_data, model_id, &page.bytes) {
-            Ok(bytes) => bytes,
-            Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
-        },
-        None => page.bytes,
-    };
-    let decoded = match image::load_from_memory(&source_bytes) {
+    let decoded = match image::load_from_memory(&page) {
         Ok(value) => value.to_rgba8(),
         Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
     };
@@ -1513,6 +1709,7 @@ fn upscale_cached_page_with_models(
             .max(16),
         tile_sleep_ms: input.tile_sleep_ms.unwrap_or(0),
         max_pixels,
+        cancel: Some(guard.flag()),
         ..upscale::UpscaleOptions::default()
     };
     let upscaled = match upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options) {
@@ -1523,6 +1720,9 @@ fn upscale_cached_page_with_models(
                 format!("Image pixel budget exceeded: {pixels} > {max_pixels}"),
                 false,
             )
+        }
+        Err(InferenceError::Cancelled) => {
+            return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
         }
         Err(error) => {
             return CommandResult::failure("INVALID_RESPONSE", format!("{error:?}"), false)
@@ -1555,6 +1755,9 @@ fn upscale_cached_page_with_models(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     }
+    // 产物落盘：DLSS5 / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
+    // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。
+    store_derived(database, app_data, &enhanced_identity, &encoded);
     CommandResult::success(encoded)
 }
 
@@ -1566,6 +1769,9 @@ pub struct DecensorPageInput {
     pub page_index: i64,
     /// The installed de-censoring bundle to run.
     pub model_id: String,
+    /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 #[tauri::command]
@@ -1742,6 +1948,15 @@ pub(crate) fn run_decensor_bytes(
     model_id: &str,
     source: &[u8],
 ) -> Result<Vec<u8>, String> {
+    run_decensor_bytes_cancellable(models_data, model_id, source, &cancel::CancelToken::none())
+}
+
+pub(crate) fn run_decensor_bytes_cancellable(
+    models_data: &std::path::Path,
+    model_id: &str,
+    source: &[u8],
+    cancel: &cancel::CancelToken,
+) -> Result<Vec<u8>, String> {
     let Some((bundle, _manifest)) = resolve_installed_bundle(models_data, model_id) else {
         return Err("No complete de-censoring bundle is installed under that id".into());
     };
@@ -1751,8 +1966,11 @@ pub(crate) fn run_decensor_bytes(
     let (width, height) = (decoded.width(), decoded.height());
     let mut rgba = decoded.into_raw();
     let engines = decensor_engines_for(&bundle).map_err(|error| format!("{error:?}"))?;
-    decensor::decensor_page(&engines, &mut rgba, width, height)
-        .map_err(|error| format!("{error:?}"))?;
+    decensor::decensor_page(&engines, &mut rgba, width, height, cancel).map_err(|error| match error
+    {
+        InferenceError::Cancelled => CANCELLED_ERROR.to_string(),
+        other => format!("{other:?}"),
+    })?;
     let mut encoded = Vec::new();
     use image::ImageEncoder;
     image::codecs::png::PngEncoder::new(&mut encoded)
@@ -1767,33 +1985,74 @@ fn decensor_cached_page(
     models_data: &std::path::Path,
     input: &DecensorPageInput,
 ) -> crate::domain::result::CommandResult<Vec<u8>> {
-    use crate::cache::{load_image_cache, CacheImageIdentity};
     use crate::domain::result::CommandResult;
 
     if input.page_index < 0 {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
     }
-    let source = CacheImageIdentity::new(
+    // 同超分那一步：取消牌先登记，等闸期间被取消的任务连模型都不打开。
+    let guard = cancel::begin(input.task_id.as_deref());
+    if guard.cancelled() {
+        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
+    }
+    // 产物按模型包的指纹存：换了一份模型包之后不能再拿旧那一份的图（前端的缓存键
+    // 里有模型 id，原生这边用指纹，两条链各自算出同一个串）。
+    let Some(fingerprint) = decensor_fingerprint(models_data, &input.model_id) else {
+        return CommandResult::failure(
+            "INFERENCE_UNAVAILABLE",
+            format!("没有装这个去码模型包：{}", input.model_id),
+            false,
+        );
+    };
+    let mut identity = crate::cache::CacheImageIdentity::new(
+        &input.scope_id,
+        &input.archive_id,
+        "decensored",
+        input.page_index,
+    );
+    identity.revision = Some(fingerprint);
+    // 已经跑过就直接给：同一页 + 同一份模型包是同一张图。
+    if let Some(hit) = cached_derived(database, app_data, &identity) {
+        return CommandResult::success(hit);
+    }
+
+    let source = crate::cache::CacheImageIdentity::new(
         &input.scope_id,
         &input.archive_id,
         "reader-page",
         input.page_index,
     );
+    let page = match cached_derived(database, app_data, &source) {
+        Some(bytes) => bytes,
+        None => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
+    };
+    let encoded = match run_decensor_bytes_cancellable(
+        models_data,
+        &input.model_id,
+        &page,
+        &guard.token(),
+    ) {
+        Ok(encoded) => encoded,
+        Err(error) if error == CANCELLED_ERROR => {
+            return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
+        }
+        Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
+    };
+    drop(guard);
+    // 去码产物是链路的**中间结果**：超分那一步读它，DLSS5 / 远端也以它为起点。
+    // 只在这里落盘，取消掉的任务不写。
+    store_derived(database, app_data, &identity, &encoded);
+    CommandResult::success(encoded)
+}
 
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
-    let page = match load_image_cache(&connection, app_data, &source) {
-        Ok(Some(image)) => image,
-        Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
-        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
-    };
-    drop(connection);
-    match run_decensor_bytes(models_data, &input.model_id, &page.bytes) {
-        Ok(encoded) => CommandResult::success(encoded),
-        Err(error) => CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
-    }
+/// 取消一个阅读器推理任务（切页、关开关、离开阅读器）。
+///
+/// 前端的 `AbortSignal` 只丢结果：原生那一侧照旧跑完，而全局只允许一件重活，于是
+/// 用户要看的那一页排在旧任务后面。这个命令让取消真的传到循环里（见
+/// `inference::cancel` 与各 pipeline 的检查点）。
+#[tauri::command]
+pub fn inference_cancel_page(task_id: String) -> crate::domain::result::CommandResult<bool> {
+    crate::domain::result::CommandResult::success(cancel::cancel(&task_id))
 }
 
 /// CPU 最近邻缩放是**内部**兜底：`upscale.rs` / `onnx.rs` / `anime4k.rs` 在模型不可用时
@@ -2172,6 +2431,8 @@ mod tests {
             tile_size: Some(32),
             tile_sleep_ms: Some(30),
             decensor_model: None,
+            source: None,
+            task_id: None,
         };
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| upscale_cached_page(&database, &root, &input));
@@ -2364,12 +2625,12 @@ mod tests {
     }
 
     #[test]
-    fn upscaling_reads_the_plain_source_without_a_derived_cache() {
-        // The order matters and only one order is right: the detector and the
-        // inpainter were trained at page scale, so the regions are filled first and
-        // the finished page is what gets enlarged. This proves the chain by leaving
-        // the plain rendition out of the cache entirely — an upscaler that still
-        // read `reader-page` could not produce anything at all.
+    fn upscaling_takes_its_input_from_the_de_censored_step_and_nothing_else() {
+        // The two enhancements are consecutive steps: the reader asks for the
+        // de-censored page first, and then for the enlarged version **of that
+        // page**. This proves the second step reads the first one's output by
+        // leaving the plain rendition out of the cache entirely — an upscaler that
+        // fell back to `reader-page` could not produce anything at all.
         use crate::cache::{store_image_cache, CacheImageIdentity};
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         for migration in [
@@ -2381,7 +2642,11 @@ mod tests {
         ] {
             connection.execute_batch(migration).unwrap();
         }
-        let app_data = std::env::temp_dir().join(format!("yomika-chain-{}", std::process::id()));
+        let app_data = std::env::temp_dir().join(format!(
+            "yomika-chain-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&app_data);
         // An installed bundle: the four files are what makes a directory a bundle,
         // and none of them is opened on this path.
@@ -2405,7 +2670,6 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-
         let mut page = Vec::new();
         {
             use image::ImageEncoder;
@@ -2414,30 +2678,22 @@ mod tests {
                 .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
                 .unwrap();
         }
-        // Only the de-censored rendition exists, under the revision the de-censoring
-        // command writes.
+        // Only the de-censored rendition exists, under the revision the
+        // de-censoring command writes for this bundle.
         let mut decensored = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 0);
-        decensored.revision = Some(format!(
-            "aletheia@1:{}:pipeline-2",
-            model_fingerprint(&install).unwrap()
-        ));
+        decensored.revision = decensor_fingerprint(&app_data, "aletheia");
+        assert!(
+            decensored.revision.is_some(),
+            "an installed bundle has a fingerprint"
+        );
         store_image_cache(&connection, &app_data, &decensored, "image/png", &page).unwrap();
-        let (_, resolved) = resolve_installed_bundle(&app_data, "aletheia").unwrap();
-        assert_eq!(resolved.id, "aletheia");
-        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
-        store_image_cache(&connection, &app_data, &source, "image/png", &page).unwrap();
-
-        let mut legacy = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 1);
-        legacy.revision = Some(format!(
-            "aletheia@1:{}",
-            model_fingerprint(&install).unwrap()
-        ));
-        store_image_cache(&connection, &app_data, &legacy, "image/png", &page).unwrap();
 
         let database = crate::db::Database {
             connection: std::sync::Mutex::new(connection),
         };
-        let stale = upscale_cached_page(
+        // Page 1 has no de-censored rendition: that step has not run yet, which is a
+        // retryable miss rather than a failure.
+        let not_yet = upscale_cached_page(
             &database,
             &app_data,
             &UpscalePageInput {
@@ -2448,13 +2704,22 @@ mod tests {
                 model_id: None,
                 tile_size: None,
                 tile_sleep_ms: None,
-                decensor_model: None,
+                decensor_model: Some("aletheia".into()),
+                source: Some("decensored".into()),
+                task_id: None,
             },
         );
-        assert!(
-            matches!(stale, crate::domain::result::CommandResult::Failure { .. }),
-            "old pipeline output must be regenerated"
-        );
+        match not_yet {
+            crate::domain::result::CommandResult::Failure { error, .. } => {
+                assert_eq!(error.code, "LRR_NOT_FOUND");
+                assert!(error.retryable, "上一步可能还在跑，要能再问一次");
+            }
+            crate::domain::result::CommandResult::Success { .. } => {
+                panic!("a page with no de-censored rendition cannot be chained")
+            }
+        }
+        // Page 0 has one, and only one: the enlargement succeeds without the plain
+        // rendition ever being written.
         let chained = upscale_cached_page(
             &database,
             &app_data,
@@ -2466,39 +2731,25 @@ mod tests {
                 model_id: None,
                 tile_size: None,
                 tile_sleep_ms: None,
-                decensor_model: None,
+                decensor_model: Some("aletheia".into()),
+                source: Some("decensored".into()),
+                task_id: None,
             },
         );
         let bytes = match chained {
             crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("upscaling did not read the plain page: {other:?}"),
+            other => panic!("upscaling did not read the de-censored page: {other:?}"),
         };
         assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 4);
-
-        // Re-running uses the source again; derived output is never persisted.
-        let unchained = upscale_cached_page(
-            &database,
-            &app_data,
-            &UpscalePageInput {
-                scope_id: "scope-a".into(),
-                archive_id: "archive-a".into(),
-                page_index: 0,
-                scale: Some(2),
-                model_id: None,
-                tile_size: None,
-                tile_sleep_ms: None,
-                decensor_model: None,
-            },
-        );
-        assert!(matches!(
-            unchained,
-            crate::domain::result::CommandResult::Success { .. }
-        ));
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
     #[test]
-    fn upscaling_a_cached_page_does_not_store_an_enhanced_rendition() {
+    fn an_enhanced_page_is_cached_under_its_model_revision() {
+        // Each step's output is addressable: DLSS5 and the compute centre read the
+        // `enhanced` rendition as their own input, and a reader that comes back to
+        // the page does not pay for the model twice. The key carries the model, so
+        // switching models cannot serve the previous one's output.
         use crate::cache::{load_image_cache, store_image_cache, CacheImageIdentity};
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         for migration in [
@@ -2510,7 +2761,12 @@ mod tests {
         ] {
             connection.execute_batch(migration).unwrap();
         }
-        let app_data = std::env::temp_dir().join(format!("yomika-upscale-{}", std::process::id()));
+        let app_data = std::env::temp_dir().join(format!(
+            "yomika-upscale-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&app_data);
         std::fs::create_dir_all(&app_data).unwrap();
 
         // A tiny red PNG stands in for a cached reader page.
@@ -2539,6 +2795,8 @@ mod tests {
             tile_size: None,
             tile_sleep_ms: None,
             decensor_model: None,
+            source: None,
+            task_id: None,
         };
 
         let first = match upscale_cached_page(&database, &app_data, &input) {
@@ -2552,61 +2810,36 @@ mod tests {
             "a 2x model doubles both axes"
         );
 
-        // The result stays in the reader's memory and never enters the image cache.
+        // The result is on disk under the revision this command computes for the
+        // model it ran — and another model's key does not answer for it.
         let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
-        enhanced.revision = Some("x2:nearest".into());
+        enhanced.revision = Some(enhanced_revision(&None, None));
         let connection = database.connection.lock().unwrap();
-        assert!(load_image_cache(&connection, &app_data, &enhanced)
-            .unwrap()
-            .is_none());
+        assert!(
+            load_image_cache(&connection, &app_data, &enhanced)
+                .unwrap()
+                .is_some(),
+            "the step's own output has to be addressable"
+        );
+        let mut other_model = enhanced.clone();
+        other_model.revision = Some("onnx:someone-else:1:deadbeef|from:reader-page".into());
+        assert!(
+            load_image_cache(&connection, &app_data, &other_model)
+                .unwrap()
+                .is_none(),
+            "another model's revision must not answer for this one"
+        );
+        // Drop the source: only a cache hit can still answer.
+        connection
+            .execute("DELETE FROM cache_entries WHERE kind='reader-page'", [])
+            .unwrap();
         drop(connection);
 
         let second = match upscale_cached_page(&database, &app_data, &input) {
             crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("expected cache hit, got {other:?}"),
+            other => panic!("expected a cache hit, got {other:?}"),
         };
-        assert_eq!(first, second);
-        std::fs::remove_dir_all(app_data).unwrap();
-    }
-
-    #[test]
-    fn upscaling_reports_a_page_that_is_not_cached_yet() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        for migration in [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_local_library.sql"),
-            include_str!("../migrations/0010_cache_path_sharing.sql"),
-            include_str!("../migrations/0013_unified_image_cache.sql"),
-            include_str!("../migrations/0014_cache_archive_scope.sql"),
-        ] {
-            connection.execute_batch(migration).unwrap();
-        }
-        let app_data =
-            std::env::temp_dir().join(format!("yomika-upscale-missing-{}", std::process::id()));
-        std::fs::create_dir_all(&app_data).unwrap();
-        let database = crate::db::Database {
-            connection: std::sync::Mutex::new(connection),
-        };
-
-        let result = upscale_cached_page(
-            &database,
-            &app_data,
-            &UpscalePageInput {
-                scope_id: "scope-a".into(),
-                archive_id: "archive-a".into(),
-                page_index: 0,
-                scale: None,
-                model_id: None,
-                tile_size: None,
-                tile_sleep_ms: None,
-                decensor_model: None,
-            },
-        );
-
-        assert!(matches!(
-            result,
-            crate::domain::result::CommandResult::Failure { .. }
-        ));
+        assert_eq!(first, second, "the cached page must be the same image");
         std::fs::remove_dir_all(app_data).unwrap();
     }
 

@@ -36,6 +36,9 @@ export const DlssnrStatusSchema = z.object({
       error: z.string().nullable(),
     })
     .nullable(),
+  /** 上面那份结论是不是对**现在这一份 DLL** 跑的。换过片段之后就不算数了：阅读器
+   * 不该据旧结论排队，设置页也该请用户重新检测（换过 DLL 还要重启）。 */
+  probeValid: z.boolean(),
   /** 差什么：不是 N 卡、没装 DLL、没有核心…… */
   error: z.string().nullable(),
 });
@@ -157,13 +160,20 @@ export class NativeDlssnrRepository {
     return invokeCommand('dlssnr_download_variant', { variantId }, InstalledDllSchema);
   }
 
-  /** 拿缓存里的一页跑一遍，回 PNG 字节。 */
+  /** 拿缓存里的一页跑一遍，回 PNG 字节。
+   *
+   * `source` 说从哪一版开始：原图，或者本地那两步（去码 / 超分）的产物。起点是按
+   * 「产出它的模型」存的，所以读去码/超分产物时要把那两个模型 id 一并给出——原生
+   * 那侧据此算出同一个 revision，才不会读到别的模型写下的图。 */
   applyPage(input: {
     scopeId: string;
     archiveId: string;
     pageIndex: number;
     source?: 'reader-page' | 'decensored' | 'enhanced';
+    decensorModel?: string;
+    upscaleModel?: string;
     settings: { passes: DlssnrPass[] };
+    taskId?: string;
   }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('dlssnr_apply_page', { input });
   }

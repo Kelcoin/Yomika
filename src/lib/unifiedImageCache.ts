@@ -32,9 +32,7 @@ export interface UnifiedImageCacheOptions {
 }
 
 interface MemoryEntry extends ImageHandle {
-  identity: ImageCacheIdentity;
   refs: number;
-  lastUsed: number;
 }
 
 interface PendingEntry {
@@ -63,6 +61,23 @@ export class UnifiedImageCache {
   private readonly pending = new Map<string, PendingEntry>();
   private memoryBytes = 0;
 
+  /** 命中一次：增加引用，并把这一项挪到 LRU 队列的**末尾**。
+   *
+   * 队列顺序就是 `memory` 这个 Map 的插入顺序——真正的 LRU 靠「先删再插」。以前
+   * 每次回收都 `Array.from(...).sort(...)` 扫全表：一次 200 多张图的排序，而阅读器
+   * 每翻一页都会触发一次回收。 */
+  private touch(entry: MemoryEntry): void {
+    entry.refs += 1;
+    this.memory.delete(entry.key);
+    this.memory.set(entry.key, entry);
+  }
+
+  private forget(entry: MemoryEntry): void {
+    this.memory.delete(entry.key);
+    this.memoryBytes -= entry.bytes;
+    this.options.revokeObjectURL(entry.url);
+  }
+
   async load(identity: ImageCacheIdentity, options: { signal?: AbortSignal } = {}): Promise<ImageHandle> {
     const key = createImageCacheKey(identity);
     // Check the signal before the memory fast path: a consumer that already
@@ -71,8 +86,7 @@ export class UnifiedImageCache {
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const existing = this.memory.get(key);
     if (existing) {
-      existing.refs += 1;
-      existing.lastUsed = Date.now();
+      this.touch(existing);
       return { key, url: existing.url, bytes: existing.bytes };
     }
 
@@ -97,8 +111,7 @@ export class UnifiedImageCache {
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const cached = this.memory.get(key);
     if (cached) {
-      cached.refs += 1;
-      cached.lastUsed = Date.now();
+      this.touch(cached);
       return { key, url: cached.url, bytes: cached.bytes };
     }
     // 直接把字节交给 Blob：`Uint8Array.from(...).buffer` 在多一份完整拷贝——一页
@@ -106,7 +119,7 @@ export class UnifiedImageCache {
     // 它的存储，视图的部分用不上第二份。
     const blob = new Blob([data.bytes], { type: data.mime || 'application/octet-stream' });
     const url = this.options.createObjectURL(blob);
-    const entry: MemoryEntry = { key, identity, url, bytes: data.bytes.byteLength, refs: 1, lastUsed: Date.now() };
+    const entry: MemoryEntry = { key, url, bytes: data.bytes.byteLength, refs: 1 };
     this.memory.set(key, entry);
     this.memoryBytes += entry.bytes;
     this.evictMemory();
@@ -117,11 +130,8 @@ export class UnifiedImageCache {
     const entry = this.memory.get(handle.key);
     if (!entry) return;
     entry.refs = Math.max(0, entry.refs - 1);
-    entry.lastUsed = Date.now();
     if (entry.refs === 0) {
-      this.memory.delete(entry.key);
-      this.memoryBytes -= entry.bytes;
-      this.options.revokeObjectURL(entry.url);
+      this.forget(entry);
       return;
     }
     this.evictMemory();
@@ -164,17 +174,20 @@ export class UnifiedImageCache {
     });
   }
 
+  /** 回收：从 LRU 队列（`memory` 的插入顺序）最前面开始丢，跳过还有引用的。
+   *
+   * 表里留着的条目**都是**有引用的（释放到 0 引用当场就撤掉了），所以这一步实际是
+   * 兜底：超过上限时先丢最久没被碰过的那张，而且永远不动别人手上还拿着的那一张。
+   * 顺序由 `touch` 维护，这里不再排序——以前每次回收都要 `Array.from(...).sort(...)`
+   * 扫全表，而阅读器每翻一页都会触发一次。 */
   private evictMemory(): void {
     const maxBytes = Math.max(1, this.options.maxBytes);
     const maxEntries = Math.max(1, this.options.maxEntries ?? 128);
-    while (this.memoryBytes > maxBytes || this.memory.size > maxEntries) {
-      const candidate = Array.from(this.memory.values())
-        .filter((entry) => entry.refs === 0)
-        .sort((left, right) => left.lastUsed - right.lastUsed)[0];
-      if (!candidate) break;
-      this.memory.delete(candidate.key);
-      this.memoryBytes -= candidate.bytes;
-      this.options.revokeObjectURL(candidate.url);
+    if (this.memoryBytes <= maxBytes && this.memory.size <= maxEntries) return;
+    for (const entry of Array.from(this.memory.values())) {
+      if (this.memoryBytes <= maxBytes && this.memory.size <= maxEntries) break;
+      if (entry.refs > 0) continue;
+      this.forget(entry);
     }
   }
 }

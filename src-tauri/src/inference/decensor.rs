@@ -159,6 +159,13 @@ pub struct CropWindow {
 /// than the graph's own 256, and never larger than the page's shorter side. It is
 /// centred on the detection and then translated back inside the page rather than
 /// clipped, because clipping would make it non-square again.
+///
+/// The detection has to be **inside** the page, all four edges of it: a box whose
+/// far edge runs past the page is a corrupt detection, and translating it back
+/// inside would turn it into a plausible-looking window around the wrong pixels.
+/// Every coordinate here is calculated with checked arithmetic — a width of
+/// `u32::MAX` used to wrap in release builds and produce a window that looked
+/// legal.
 pub fn inpaint_window(
     region: &CensorRegion,
     image_width: u32,
@@ -170,17 +177,32 @@ pub fn inpaint_window(
     if region.width == 0 || region.height == 0 {
         return Err(InferenceError::InvalidInput("region has no pixels".into()));
     }
-    if region.x >= image_width || region.y >= image_height {
-        return Err(InferenceError::InvalidInput(
-            "region starts outside the page".into(),
-        ));
+    let right = region
+        .x
+        .checked_add(region.width)
+        .ok_or_else(|| InferenceError::InvalidInput("region width overflows".into()))?;
+    let bottom = region
+        .y
+        .checked_add(region.height)
+        .ok_or_else(|| InferenceError::InvalidInput("region height overflows".into()))?;
+    if right > image_width || bottom > image_height {
+        return Err(InferenceError::InvalidInput(format!(
+            "region {}x{}+{}+{} leaves the {image_width}x{image_height} page",
+            region.width, region.height, region.x, region.y
+        )));
     }
     let longest = region.width.max(region.height);
     let wanted = ((f64::from(longest) * 1.5).round() as u32).max(INPAINT_WINDOW_MIN);
     let side = wanted.min(image_width.min(image_height));
 
-    let center_x = region.x + region.width / 2;
-    let center_y = region.y + region.height / 2;
+    let center_x = region
+        .x
+        .checked_add(region.width / 2)
+        .ok_or_else(|| InferenceError::InvalidInput("region width overflows".into()))?;
+    let center_y = region
+        .y
+        .checked_add(region.height / 2)
+        .ok_or_else(|| InferenceError::InvalidInput("region height overflows".into()))?;
     let x = center_x.saturating_sub(side / 2).min(image_width - side);
     let y = center_y.saturating_sub(side / 2).min(image_height - side);
     Ok(CropWindow {
@@ -196,6 +218,19 @@ pub fn inpaint_window(
 /// detail before the model has seen anything.
 const INPAINT_WINDOW_MIN: u32 = 256;
 
+/// Whether a window lies inside a page of this size, without any coordinate
+/// arithmetic that can wrap.
+pub fn window_inside_page(window: &CropWindow, image_width: u32, image_height: u32) -> bool {
+    window
+        .x
+        .checked_add(window.width)
+        .is_some_and(|right| right <= image_width)
+        && window
+            .y
+            .checked_add(window.height)
+            .is_some_and(|bottom| bottom <= image_height)
+}
+
 /// Copies a window out of an RGBA page.
 pub fn crop_rgba(
     rgba: &[u8],
@@ -208,7 +243,7 @@ pub fn crop_rgba(
             "RGBA page dimensions do not match".into(),
         ));
     }
-    if window.x + window.width > image_width || window.y + window.height > image_height {
+    if !window_inside_page(window, image_width, image_height) {
         return Err(InferenceError::InvalidInput(
             "crop window leaves the page".into(),
         ));
@@ -252,7 +287,7 @@ pub fn paste_masked_rgba(
             "mask dimensions do not match the window".into(),
         ));
     }
-    if window.x + window.width > image_width || window.y + window.height > image_height {
+    if !window_inside_page(window, image_width, image_height) {
         return Err(InferenceError::InvalidInput(
             "crop window leaves the page".into(),
         ));
@@ -333,13 +368,17 @@ pub fn decensor_page(
     rgba: &mut [u8],
     width: u32,
     height: u32,
+    cancel: &super::cancel::CancelToken,
 ) -> Result<usize, InferenceError> {
+    cancel.check()?;
     let regions = engines.detector.detect(rgba, width, height)?;
+    cancel.check()?;
     inpaint_detections(
         rgba,
         width,
         height,
         &regions,
+        cancel,
         |kind, crop, window, censored| {
             engines
                 .inpainter(kind)?
@@ -353,6 +392,7 @@ fn inpaint_detections(
     width: u32,
     height: u32,
     regions: &[super::detect::Detection],
+    cancel: &super::cancel::CancelToken,
     mut inpaint: impl FnMut(CensorKind, &[u8], &CropWindow, &[u8]) -> Result<Vec<u8>, InferenceError>,
 ) -> Result<usize, InferenceError> {
     if regions.is_empty() {
@@ -361,6 +401,13 @@ fn inpaint_detections(
     let original = rgba.to_vec();
     let mut filled = 0;
     for detection in regions {
+        // 一个检测框一次模型运行，一页可能有几十个：取消点在框与框之间，切页
+        // 之后不会先把剩下十几个框跑完。
+        cancel.check()?;
+        // Every detection is validated before anything is allocated from it: an
+        // out-of-page box, an overflowing coordinate or a mask that does not match
+        // its own box is a corrupt detection, not a slightly-off one.
+        validate_detection(detection, width, height)?;
         let window = inpaint_window(&detection.region, width, height)?;
         let censored = detection.mask_in_window(&window);
         if censored.iter().all(|&value| value == 0) {
@@ -392,6 +439,48 @@ fn inpaint_detections(
     Ok(filled)
 }
 
+/// The checks a detection has to pass before its geometry is used for anything.
+///
+/// `decode_detections` already clamps what the model produced, so this is aimed at
+/// the other producers — a corrupted response, a hand-built detection, a future
+/// detector — where the box is the only thing between the pipeline and a wrong
+/// window: `crop_rgba`'s own check cannot help, because the window it is handed
+/// has already been translated back inside the page.
+pub fn validate_detection(
+    detection: &super::detect::Detection,
+    image_width: u32,
+    image_height: u32,
+) -> Result<(), InferenceError> {
+    let region = &detection.region;
+    if region.width == 0 || region.height == 0 {
+        return Err(InferenceError::InvalidInput("region has no pixels".into()));
+    }
+    let right = region
+        .x
+        .checked_add(region.width)
+        .ok_or_else(|| InferenceError::InvalidInput("region width overflows".into()))?;
+    let bottom = region
+        .y
+        .checked_add(region.height)
+        .ok_or_else(|| InferenceError::InvalidInput("region height overflows".into()))?;
+    if right > image_width || bottom > image_height {
+        return Err(InferenceError::InvalidInput(format!(
+            "region {}x{}+{}+{} leaves the {image_width}x{image_height} page",
+            region.width, region.height, region.x, region.y
+        )));
+    }
+    // The mask is one byte per box pixel; a shorter one would be read past its end
+    // while projecting it into the window.
+    let expected = region.width as usize * region.height as usize;
+    if detection.mask.len() != expected || !detection.score.is_finite() {
+        return Err(InferenceError::InvalidInput(format!(
+            "detection mask is {} bytes, its box needs {expected}",
+            detection.mask.len()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,19 +504,26 @@ mod tests {
             })
             .collect();
         let mut calls = 0;
-        let count = inpaint_detections(&mut page, 4, 4, &detections, |_, crop, _, mask| {
-            assert_eq!(
-                crop, original,
-                "generated pixels must never become input context"
-            );
-            assert_eq!(
-                mask.iter().filter(|&&value| value != 0).count(),
-                2,
-                "both damaged areas must be unknown"
-            );
-            calls += 1;
-            Ok([200, 210, 220, 255].repeat(16))
-        })
+        let count = inpaint_detections(
+            &mut page,
+            4,
+            4,
+            &detections,
+            &super::super::cancel::CancelToken::none(),
+            |_, crop, _, mask| {
+                assert_eq!(
+                    crop, original,
+                    "generated pixels must never become input context"
+                );
+                assert_eq!(
+                    mask.iter().filter(|&&value| value != 0).count(),
+                    2,
+                    "both damaged areas must be unknown"
+                );
+                calls += 1;
+                Ok([200, 210, 220, 255].repeat(16))
+            },
+        )
         .unwrap();
         assert_eq!((count, calls), (2, 2));
         for index in 0..16 {
@@ -632,6 +728,96 @@ mod tests {
         assert!(inpaint_window(&region(0, 0, 0, 10), 100, 100).is_err());
         assert!(inpaint_window(&region(100, 0, 10, 10), 100, 100).is_err());
         assert!(inpaint_window(&region(0, 0, 10, 10), 0, 100).is_err());
+    }
+
+    /// The far edge matters as much as the near one. A region whose right or bottom
+    /// edge runs past the page used to be translated back inside and run as if it
+    /// were a real detection — the inpainter then filled a window around the wrong
+    /// pixels, which reads as "de-censoring ruined this page" rather than as an
+    /// error anybody could find.
+    #[test]
+    fn a_region_has_to_fit_inside_the_page_on_both_edges() {
+        // Exactly the right edge: legal.
+        let edge = inpaint_window(&region(90, 90, 10, 10), 100, 100).expect("edge region");
+        assert!(edge.x + edge.width <= 100 && edge.y + edge.height <= 100);
+
+        // One pixel past it: not a clipped region, a rejected one.
+        assert!(inpaint_window(&region(91, 90, 10, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(90, 91, 10, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(95, 0, 10, 10), 100, 100).is_err());
+    }
+
+    /// Coordinates are u32, so a corrupt detector value can overflow. Wrapping in
+    /// release builds produced a window that passed every later check; in debug it
+    /// panicked. Both are wrong: this is a rejected region.
+    #[test]
+    fn an_overflowing_region_is_rejected_rather_than_wrapped() {
+        assert!(inpaint_window(&region(u32::MAX, 0, 10, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(0, 0, u32::MAX, 10), 100, 100).is_err());
+        assert!(inpaint_window(&region(0, 0, 10, u32::MAX), 100, 100).is_err());
+        // The centre is computed from the same numbers and could overflow on its
+        // own even when the box fits: x + width/2 with a huge x.
+        assert!(inpaint_window(&region(u32::MAX - 1, 5, 4, 4), 100, 100).is_err());
+    }
+
+    /// A detection whose mask does not cover its own box used to be read past the
+    /// end of its buffer while being projected into the window.
+    #[test]
+    fn a_detection_whose_mask_does_not_match_its_box_is_rejected() {
+        let short = super::super::detect::Detection {
+            region: region(0, 0, 2, 2),
+            score: 1.0,
+            mask: vec![1, 1, 1],
+        };
+        assert!(validate_detection(&short, 4, 4).is_err());
+        let mismatched = super::super::detect::Detection {
+            region: region(0, 0, 2, 2),
+            score: 1.0,
+            mask: vec![1, 1, 1, 1, 1],
+        };
+        assert!(validate_detection(&mismatched, 4, 4).is_err());
+        let good = super::super::detect::Detection {
+            region: region(0, 0, 2, 2),
+            score: 1.0,
+            mask: vec![1, 0, 0, 1],
+        };
+        assert!(validate_detection(&good, 4, 4).is_ok());
+        // A non-finite score is a broken detection too: it says nothing about how
+        // much the model believed this box.
+        let not_a_number = super::super::detect::Detection {
+            region: region(0, 0, 2, 2),
+            score: f32::NAN,
+            mask: vec![1, 0, 0, 1],
+        };
+        assert!(validate_detection(&not_a_number, 4, 4).is_err());
+    }
+
+    /// Cancelling has to stop the page's remaining regions: a page can hold dozens,
+    /// and the global inference gate is held for as long as they run.
+    #[test]
+    fn a_cancelled_task_stops_between_regions() {
+        let mut page = vec![0_u8; 64 * 64 * 4];
+        let detections: Vec<_> = (0..4)
+            .map(|index| super::super::detect::Detection {
+                region: region(index * 8, 0, 4, 4),
+                score: 1.0,
+                mask: vec![1; 16],
+            })
+            .collect();
+        let guard = super::super::cancel::begin(Some("decensor-cancel-test"));
+        let cancel = guard.token();
+        let mut runs = 0;
+        let error = inpaint_detections(&mut page, 64, 64, &detections, &cancel, |_, _, window, _| {
+            runs += 1;
+            // 第二个框跑到一半时用户切了页。
+            if runs == 2 {
+                super::super::cancel::cancel("decensor-cancel-test");
+            }
+            Ok(vec![255, 0, 0, 255].repeat((window.width * window.height) as usize))
+        })
+        .expect_err("cancel must surface as Cancelled");
+        assert_eq!(error, crate::inference::InferenceError::Cancelled);
+        assert_eq!(runs, 2, "the third region must not start");
     }
 
     #[test]

@@ -46,7 +46,33 @@ pub struct FeatureSlot {
 // D3D12 的对象是 agile 的（windows crate 已经给它们 Send/Sync），指针都由这把锁串起来。
 unsafe impl Send for GpuContext {}
 
-static CONTEXT: OnceLock<Mutex<Option<GpuContext>>> = OnceLock::new();
+static CONTEXT: OnceLock<Mutex<Option<(ContextKey, GpuContext)>>> = OnceLock::new();
+
+/// 这份上下文是按哪一份 DLL / 哪个数据目录建出来的。
+///
+/// NGX 的 `Init_Ext` 只认一块设备，进程内只初始化一次；而 DLL 是可以被换掉的
+/// （用户导入另一种变体、或者从目录里换一份）。换过之后不能继续用旧上下文——那会
+/// 让界面显示「已换成 community 版」而显存里跑的还是刚才那一份。大小与修改时间
+/// 足以认出来（165MB 的哈希每次算一遍太贵，而换文件必然两者都变）。
+#[derive(Clone, PartialEq, Eq)]
+struct ContextKey {
+    data_dir: PathBuf,
+    dll: PathBuf,
+    dll_bytes: u64,
+    dll_modified: Option<std::time::SystemTime>,
+}
+
+impl ContextKey {
+    fn of(data_dir: &std::path::Path, dll: &std::path::Path) -> Self {
+        let metadata = std::fs::metadata(dll).ok();
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            dll: dll.to_path_buf(),
+            dll_bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+            dll_modified: metadata.and_then(|value| value.modified().ok()),
+        }
+    }
+}
 
 /// 拿到全局上下文（第一次调用时建）。失败会被记住：第二次调用直接报同一个错，
 /// 不会反复去初始化 NGX（它出错之后进程内就不该再试）。
@@ -64,12 +90,24 @@ pub fn with_context_at<T>(
     dll: &std::path::Path,
     use_context: impl FnOnce(&mut GpuContext) -> Result<T, String>,
 ) -> Result<T, String> {
+    let key = ContextKey::of(data_dir, dll);
     let cell = CONTEXT.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().map_err(|_| "DLSS5 上下文锁失败".to_string())?;
-    if guard.is_none() {
-        *guard = Some(GpuContext::create(data_dir, dll)?);
+    if let Some((existing, context)) = guard.as_mut() {
+        if *existing != key {
+            // 旧上下文还活着，NGX 也已经在进程里初始化过了：这时候换一份 DLL 是
+            // 换不掉的。宁可明确报错，也不要让用户以为自己在跑新导入的那一份。
+            return Err(format!(
+                "DLSS5 已经为另一份片段初始化过（{} 字节，数据目录 {}）：换过 DLL 之后要重启应用才会用新的那一份",
+                existing.dll_bytes,
+                existing.data_dir.display()
+            ));
+        }
+        return use_context(context);
     }
-    use_context(guard.as_mut().expect("context just created"))
+    let context = GpuContext::create(data_dir, dll)?;
+    let context = &mut guard.insert((key, context)).1;
+    use_context(context)
 }
 
 impl GpuContext {

@@ -93,7 +93,7 @@ mod release;
 mod settings;
 
 #[cfg(windows)]
-pub use filter::{apply, apply_with_dll, DlssnrImage};
+pub use filter::{apply, DlssnrImage};
 #[cfg(windows)]
 pub use gpu::GpuInfo;
 #[cfg(windows)]
@@ -132,6 +132,12 @@ pub struct DlssnrStatus {
     pub available: bool,
     /// 真机跑过一遍的结论（这一份报告里没有——`probe` 才给）。
     pub probe: Option<ProbeReport>,
+    /// 上面那份结论是不是对**现在这一份 DLL** 跑的。
+    ///
+    /// 换过片段（导入另一种变体、从目录里换一份）之后旧结论就不算数了：开关不能
+    /// 再据此解锁，阅读器也不该照旧排队。为假而 DLL 又在时，正确的动作是重新检测
+    /// （换过 DLL 的进程还必须重启，见 `device.rs`）。
+    pub probe_valid: bool,
     /// 出错时说清楚卡在哪一步（不是 N 卡、没装片段、没有核心、……）。
     pub error: Option<String>,
 }
@@ -177,6 +183,7 @@ pub fn status(data_dir: &std::path::Path) -> DlssnrStatus {
         installable: false,
         available: false,
         probe: None,
+        probe_valid: false,
         error: None,
     };
 
@@ -422,26 +429,82 @@ pub fn apply_rgba(
 
 /// 已经跑过的那一次探针：设置页显示它、算力中心的能力清单也看它（探针本身要一秒
 /// 多，不能每次开设置页都跑）。
+///
+/// 结论与**跑它的那一份 DLL** 绑在一起：换过片段之后旧结论必须作废，否则界面会
+/// 显示「上次检测通过」而显存里跑的是换之前的片段。
 #[cfg(windows)]
-static LAST_PROBE: std::sync::Mutex<Option<ProbeReport>> = std::sync::Mutex::new(None);
+static LAST_PROBE: std::sync::Mutex<Option<(ProbeKey, ProbeReport)>> = std::sync::Mutex::new(None);
+
+/// 认一份 DLL：数据目录 + 字节数 + 修改时间。165MB 的内容哈希（`status` 认变体时
+/// 算的那一份）在每次跑图前算一遍太贵，而换文件必然把后两个都变掉；带上目录是因为
+/// 表是进程级的，而测试与应用会指向不同的数据目录。
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeKey {
+    data_dir: std::path::PathBuf,
+    bytes: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+#[cfg(windows)]
+fn probe_key(data_dir: &std::path::Path) -> ProbeKey {
+    let metadata = std::fs::metadata(dll_path(data_dir)).ok();
+    ProbeKey {
+        data_dir: data_dir.to_path_buf(),
+        bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+        modified: metadata.and_then(|value| value.modified().ok()),
+    }
+}
 
 #[cfg(windows)]
 pub fn last_probe() -> Option<ProbeReport> {
-    LAST_PROBE.lock().ok().and_then(|guard| guard.clone())
+    LAST_PROBE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|(_, report)| report.clone()))
+}
+
+/// 上次的结论，但只在它是对现在这一份 DLL 跑的时候才算。
+#[cfg(windows)]
+pub fn last_probe_for(data_dir: &std::path::Path) -> Option<ProbeReport> {
+    LAST_PROBE.lock().ok().and_then(|guard| {
+        guard.as_ref().and_then(|(key, report)| {
+            (*key == probe_key(data_dir)).then(|| report.clone())
+        })
+    })
+}
+
+/// 上次那份结论还算不算数（没跑过、或换过 DLL 都不算）。
+#[cfg(windows)]
+pub fn probe_is_valid(data_dir: &std::path::Path) -> bool {
+    LAST_PROBE
+        .lock()
+        .map(|guard| {
+            guard
+                .as_ref()
+                .is_some_and(|(key, _)| *key == probe_key(data_dir))
+        })
+        .unwrap_or(false)
 }
 
 /// 跑一遍探针并记住结论。`force` 为假且已经跑过时直接给上次的——设置页每次打开
-/// 都调，不能每次都真跑。
+/// 都调，不能每次都真跑。换过 DLL 之后旧结论不算数，会真跑一遍（那本来就是用户
+/// 换完片段要看的东西）。
 #[cfg(windows)]
 pub fn probe_cached(data_dir: &std::path::Path, force: bool) -> ProbeReport {
+    let key = probe_key(data_dir);
     if !force {
-        if let Some(report) = last_probe() {
+        if let Some(report) = LAST_PROBE.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|(stored, report)| (*stored == key).then(|| report.clone()))
+        }) {
             return report;
         }
     }
     let report = probe(data_dir);
     if let Ok(mut guard) = LAST_PROBE.lock() {
-        guard.replace(report.clone());
+        *guard = Some((key, report.clone()));
     }
     report
 }
@@ -451,6 +514,39 @@ pub fn probe_cached(data_dir: &std::path::Path, force: bool) -> ProbeReport {
 pub fn forget_probe() {
     if let Ok(mut guard) = LAST_PROBE.lock() {
         *guard = None;
+    }
+}
+
+/// 阅读器／算力中心在**真跑图之前**的二次校验。
+///
+/// 前端那个开关只是「用户想用」；能不能用是这台机器此刻的事实，而事实只有这一侧
+/// 说得准：偏好是持久化的，昨天在另一台机器上打开过、或者 DLL 被换掉、驱动更新过，
+/// 前端都看不到。所以每次跑图前都问一遍这里——便宜（枚举显卡、看文件、比对探针
+/// 的时间戳），挡住的是「反复调用一个跑不起来的东西」。
+#[cfg(windows)]
+pub fn runtime_gate(data_dir: &std::path::Path) -> Result<(), String> {
+    let report = status(data_dir);
+    if !report.dll_present {
+        return Err(report
+            .error
+            .unwrap_or_else(|| "还没有导入 nvngx_dlssnr.dll".to_string()));
+    }
+    if !report.core_available {
+        return Err(report
+            .error
+            .unwrap_or_else(|| "这个构建没有链上 NGX 核心".to_string()));
+    }
+    if report.recommended_variant.is_none() || report.gpu.is_none() {
+        return Err(report
+            .error
+            .unwrap_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string()));
+    }
+    match last_probe_for(data_dir) {
+        Some(probe) if probe.supported => Ok(()),
+        Some(probe) => Err(probe
+            .error
+            .unwrap_or_else(|| "上次检测没有通过，请在设置页重新检测".to_string())),
+        None => Err("这台机器还没有跑通 DLSS5 检测，请在设置页先检测一次".to_string()),
     }
 }
 
@@ -569,6 +665,61 @@ mod tests {
         println!("status: {}", serde_json::to_string(&status).expect("json"));
     }
 
+    /// 换过 DLL 之后，旧的那份「检测通过」不能再算数：开关会解锁、阅读器会排队，
+    /// 而显存里跑的是换之前那一份片段。
+    #[test]
+    fn a_probe_stops_counting_once_its_dll_changes() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let dll = dll_path(dir.path());
+        std::fs::create_dir_all(dll.parent().expect("dlssnr 目录")).expect("建目录");
+        std::fs::write(&dll, vec![0_u8; 4096]).expect("写片段");
+
+        // 没有跑过探针：不算数，阅读器也没有结论可用。
+        assert!(!probe_is_valid(dir.path()));
+        assert!(last_probe_for(dir.path()).is_none());
+
+        // 假装此刻跑通了一遍。
+        let report = ProbeReport {
+            supported: true,
+            width: 96,
+            height: 96,
+            elapsed_ms: 5,
+            difference: 3.2,
+            error: None,
+        };
+        *LAST_PROBE.lock().expect("探针表") = Some((probe_key(dir.path()), report));
+        assert!(probe_is_valid(dir.path()));
+        assert!(last_probe_for(dir.path()).is_some());
+
+        // 换成另一份片段：大小变了，旧结论作废。
+        std::fs::write(&dll, vec![0_u8; 8192]).expect("换片段");
+        assert!(!probe_is_valid(dir.path()), "换过 DLL 之后旧结论不能继续算数");
+        assert!(last_probe_for(dir.path()).is_none());
+
+        // 另一个数据目录里那份结论也不是这一份的。
+        let elsewhere = tempfile::tempdir().expect("另一个临时目录");
+        assert!(!probe_is_valid(elsewhere.path()));
+        forget_probe();
+    }
+
+    /// 门控：这台机器上跑不起来时，命令层必须自己拒绝——偏好在另一台机器上打开过
+    /// 也好、昨天打开过也好，都不是此刻的事实。
+    #[test]
+    fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        forget_probe();
+        // 什么都没有（没片段、没探针）：必须给一句人话，而且不是 Ok。
+        let error = runtime_gate(dir.path()).expect_err("没有片段时不该放行");
+        assert!(!error.is_empty());
+
+        // 有片段但没跑通探针：也不放行。
+        let dll = dll_path(dir.path());
+        std::fs::create_dir_all(dll.parent().expect("dlssnr 目录")).expect("建目录");
+        std::fs::write(&dll, vec![0_u8; 4096]).expect("写片段");
+        let error = runtime_gate(dir.path()).expect_err("没有检测过就不该放行");
+        assert!(!error.is_empty());
+    }
+
     /// 真机跑一遍：没有 NVIDIA 卡、没有 DLL、没有核心就打印原因并跳过；能跑就断言
     /// 它真的改了图。这条同时是「核心 → 片段 → 参数对象 → 评估 → 回读」的端到端。
     #[test]
@@ -583,7 +734,7 @@ mod tests {
         let image = synthetic_image(160, 128);
         let settings = DlssnrSettings::default();
         let started = std::time::Instant::now();
-        let output = match apply_with_dll(&dir, &dll, &image, &settings) {
+        let output = match filter::apply_with_dll(&dir, &dll, &image, &settings) {
             Ok(output) => output,
             Err(error) => {
                 // 初始化失败是 DLL/驱动/卡三方之一的事，测试只报告，不当失败：
@@ -610,7 +761,7 @@ mod tests {
         let two = DlssnrSettings {
             passes: vec![PassSettings::default(), PassSettings { intensity: 1.2, ..PassSettings::default() }],
         };
-        let stacked = apply_with_dll(&dir, &dll, &image, &two).expect("两层叠加");
+        let stacked = filter::apply_with_dll(&dir, &dll, &image, &two).expect("两层叠加");
         assert_eq!(stacked.rgba.len(), image.rgba.len());
         let stacked_difference = mean_absolute_difference(&image.rgba, &stacked.rgba);
         println!("两层：平均逐通道差 {stacked_difference:.2}");

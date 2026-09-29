@@ -32,6 +32,8 @@ function dlssnrStatus(overrides: Record<string, unknown> = {}) {
     installable: true,
     available: true,
     probe: null,
+    /** 上次那份结论是不是对现在这一份片段跑的（换过 DLL 之后就不算数了）。 */
+    probeValid: true,
     error: null,
     ...overrides,
   };
@@ -141,6 +143,28 @@ describe('DLSS5 settings group', () => {
 
     await user.click(toggle);
     await waitFor(() => expect(edits).toContainEqual({ dlssnrEnabled: true }));
+  });
+
+  it('keeps the switch locked when the last probe belongs to a different snippet', async () => {
+    // 换过片段之后旧结论作废：界面不能显示「检测通过、可以打开」，因为进程里跑的还是
+    // 换之前那一份（NGX 一个进程只加载一份，换片段的那个进程要重启）。
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({
+        ok: true,
+        value: dlssnrStatus({
+          probe: { supported: true, width: 96, height: 96, elapsedMs: 1200, difference: 12.5, error: null },
+          probeValid: false,
+        }),
+      }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSS5' });
+    const toggle = within(group).getByRole('switch', { name: '启用 DLSS5' });
+    expect(toggle).toBeDisabled();
+    expect(within(group).getByText(/换过片段：先重启应用，再点一次「检测」/)).toBeTruthy();
+    await user.click(toggle);
   });
 
   it('lists the downloadable variants, marks the installed one, and switches to another', async () => {

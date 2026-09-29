@@ -296,13 +296,30 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // the continuous-scroll slot heights.
   useEffect(() => {
     if (!pageActive) return;
-    const measure = () => {
-      setViewport({ width: window.innerWidth, height: window.innerHeight });
-      setWebtoonWidth(webtoonRef.current?.clientWidth ?? 0);
+    // 拖窗口时 resize 事件一秒钟能来上百个，而每一次都 setState 两遍就是上百次重渲染
+    // （`auto` 的判定与连续阅读的槽位高度都要跟着重算）。合并到每帧一次，并且只在
+    // 尺寸真的变了时才写 state——同样的数字写进去也是一个新对象，照样重渲染。
+    let frame: number | undefined;
+    const measureNow = () => {
+      frame = undefined;
+      setViewport((current) => (current.width === window.innerWidth && current.height === window.innerHeight
+        ? current
+        : { width: window.innerWidth, height: window.innerHeight }));
+      setWebtoonWidth((current) => {
+        const width = webtoonRef.current?.clientWidth ?? 0;
+        return current === width ? current : width;
+      });
     };
-    measure();
+    const measure = () => {
+      if (frame !== undefined) return;
+      frame = requestAnimationFrame(measureNow);
+    };
+    measureNow();
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
   }, [effectiveLayout, pageActive]);
 
   // `auto` used to be decided once, by the first page to load, and then never
@@ -857,9 +874,24 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     finishDrag(dx, Date.now() - start.time);
   }, []);
 
+  /** 连续阅读的滚动：一帧只认一次。
+   *
+   * 每次 scroll 事件都 setState 意味着一条惯性滚动会连着渲染几十次，而窗口（`first`
+   * 与 `last` 两个页号）在一帧里只可能有一个答案。位置先记进 ref，帧回调再写 state；
+   * 同一帧里后来的事件只是覆盖那个数，不再各自排一次渲染。 */
+  const webtoonOffsetRef = useRef(0);
+  const webtoonScrollFrameRef = useRef<number>();
   const handleWebtoonScroll = useCallback((event: UIEvent<HTMLElement>) => {
     webtoonScrolledRef.current = true;
-    setScrollTop(event.currentTarget.scrollTop);
+    webtoonOffsetRef.current = event.currentTarget.scrollTop;
+    if (webtoonScrollFrameRef.current !== undefined) return;
+    webtoonScrollFrameRef.current = requestAnimationFrame(() => {
+      webtoonScrollFrameRef.current = undefined;
+      setScrollTop(webtoonOffsetRef.current);
+    });
+  }, []);
+  useEffect(() => () => {
+    if (webtoonScrollFrameRef.current !== undefined) cancelAnimationFrame(webtoonScrollFrameRef.current);
   }, []);
 
   /** Jump to a page from the overview grid. Continuous mode has to be scrolled as
@@ -1078,7 +1110,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </div>
         </section>
       ) : (
-        <div ref={trackRef} className="reader-track" style={dragStyle}>
+        <div ref={trackRef} className={`reader-track${drag || panning ? ' is-moving' : ''}`} style={dragStyle}>
           {([
             { offset: -1, indexes: neighbourIndexes.previous },
             { offset: 0, indexes: visibleIndexes },

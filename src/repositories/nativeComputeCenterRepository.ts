@@ -101,7 +101,10 @@ export class NativeComputeCenterRepository {
     return invokeCommand('remote_compute_capabilities', { url, token }, RemoteCapabilitiesSchema);
   }
 
-  /** 把本机缓存里的一页发给远端处理，取回 PNG 字节。 */
+  /** 把本机缓存里的一页发给远端处理，取回 PNG 字节。
+   *
+   * `source` 是起点那一版；它是本地某一步的产物时，产出它的模型 id 要一并给出
+   * （与 DLSS5 那条路同一个规矩：起点按模型指纹存，算不出同一个 revision 就读不到）。 */
   remoteProcess(input: {
     url: string;
     token: string;
@@ -115,6 +118,9 @@ export class NativeComputeCenterRepository {
     archiveId: string;
     pageIndex: number;
     source?: 'reader-page' | 'decensored' | 'enhanced';
+    decensorModel?: string;
+    upscaleModel?: string;
+    taskId?: string;
   }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('remote_compute_process', { input });
   }

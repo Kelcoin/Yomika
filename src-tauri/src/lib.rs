@@ -72,7 +72,7 @@ use dedup::{
     DedupScanRegistry,
 };
 use inference::{
-    inference_cancel, inference_checkpoint, inference_clear_cache,
+    inference_cancel, inference_cancel_page, inference_checkpoint, inference_clear_cache,
     inference_decensor_page, inference_get_job, inference_import_model_path,
     inference_install_decensor_bundle, inference_install_model, inference_list_models,
     inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page,
@@ -286,6 +286,7 @@ pub fn run() {
             model_release_validate_local,
             inference_upscale_page,
             inference_decensor_page,
+            inference_cancel_page,
             save_eh_account,
             login_eh_account,
             open_eh_login_window,

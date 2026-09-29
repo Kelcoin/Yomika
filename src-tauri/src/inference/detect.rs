@@ -67,6 +67,11 @@ impl Detection {
     /// The mask projected into a crop window, which is the coordinate space the
     /// inpainting stage works in. Pixels of the window outside this detection's
     /// box are not censored, so they stay zero.
+    ///
+    /// The mask is expected to hold one byte per box pixel, and
+    /// `decensor::validate_detection` is what checks that before a page runs. The
+    /// reads here stay in bounds regardless: a short mask must not read past its
+    /// end and take the process down in the middle of a page.
     pub fn mask_in_window(&self, window: &CropWindow) -> Vec<u8> {
         let mut projected = vec![0_u8; window.width as usize * window.height as usize];
         for row in 0..self.region.height {
@@ -80,7 +85,7 @@ impl Detection {
                     continue;
                 }
                 let source = (row * self.region.width + column) as usize;
-                if self.mask[source] == 0 {
+                if self.mask.get(source).copied().unwrap_or(0) == 0 {
                     continue;
                 }
                 let target = (page_y - window.y) as usize * window.width as usize

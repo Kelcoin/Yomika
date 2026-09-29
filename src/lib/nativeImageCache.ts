@@ -42,6 +42,19 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   }
 
   async fetch(identity: ImageCacheIdentity, signal?: AbortSignal): Promise<CachedImageData> {
+    // 取消要传到原生那侧：前端丢掉结果不等于它停手，而一页 4K 在 CPU 上要十几秒，
+    // 全局又只允许一件重活——不叫停的话，用户真正要看的那一页排在旧任务后面。
+    const cancelNative = () => {
+      if (!identity.taskId) return;
+      void this.inference.cancelPage(identity.taskId).catch(() => undefined);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        cancelNative();
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      signal.addEventListener('abort', cancelNative, { once: true });
+    }
     try {
       return await this.load(identity, signal);
     } catch (error) {
@@ -56,6 +69,8 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         });
       }
       throw error;
+    } finally {
+      signal?.removeEventListener('abort', cancelNative);
     }
   }
 
@@ -63,31 +78,38 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (!identity.serverId) throw new Error('Image request is missing a server ID');
     if (identity.rendition === 'enhanced') {
-      // Upscaling reads the cached reader page, so the plain rendition has to be
-      // loaded first; a miss here simply leaves the reader on the plain page.
+      // Upscaling reads a cached rendition, so that rendition has to be loaded
+      // first; a miss here simply leaves the reader on the page it already shows.
+      const source = identity.source === 'decensored' ? 'decensored' as const : 'reader-page' as const;
       const upscaled = await this.inference.upscalePage({
         scopeId: identity.scopeId,
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         ...(identity.modelId ? { modelId: identity.modelId } : {}),
-        // Present when de-censoring is also on: the upscaler then reads the
-        // de-censored page, so the regions are filled at the scale the models were
-        // trained on and the finished page is what gets enlarged.
-        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
+        // 起点是去码那一步的产物时，它按「哪一份去码包」存：id 一并给出，原生那侧
+        // 才算得出同一个 revision。
+        ...(source === 'decensored' && identity.decensorModelId
+          ? { source, decensorModel: identity.decensorModelId }
+          : {}),
+        ...(identity.taskId ? { taskId: identity.taskId } : {}),
       });
       if (!upscaled.ok) throw new Error(upscaled.error.message);
       const bytes = new Uint8Array(upscaled.value);
       return { bytes, mime: detectImageMime(bytes) };
     }
     if (identity.rendition === 'dlssnr') {
-      // DLSS5：起点由 `transform` 说明（本地超分/去码跑过就从它们的产物接着跑），
-      // 层参数也在里面——它同时是缓存键的一部分，改参数就拿不到旧结果。
+      // DLSS5：起点由 `transform` 说明（本地去码/超分跑过就从它们的产物接着跑），
+      // 层参数也在里面——它同时是缓存键的一部分，改参数就拿不到旧结果。起点是按
+      // 「产出它的模型」存的，两个模型 id 一并送过去。
       const { source, passes } = parseDlssnrTransform(identity.transform);
       const processed = await this.dlssnr.applyPage({
         scopeId: identity.scopeId,
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         source,
+        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
+        ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+        ...(identity.taskId ? { taskId: identity.taskId } : {}),
         settings: { passes: parseDlssnrPasses(passes) },
       });
       if (!processed.ok) throw new Error(processed.error.message);
@@ -116,6 +138,9 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         source: remote.source,
+        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
+        ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+        ...(identity.taskId ? { taskId: identity.taskId } : {}),
       });
       if (!processed.ok) throw new Error(processed.error.message);
       const bytes = new Uint8Array(processed.value);
@@ -130,6 +155,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         modelId: identity.modelId ?? '',
+        ...(identity.taskId ? { taskId: identity.taskId } : {}),
       });
       if (!filled.ok) throw new Error(filled.error.message);
       const bytes = new Uint8Array(filled.value);

@@ -28,8 +28,10 @@ pub fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<DlssnrStatus> {
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
     };
     let mut status = super::status(&data);
-    // 上次检测的结论跟着一起给：设置页据此决定开关解不解锁。
-    status.probe = super::last_probe();
+    // 上次检测的结论跟着一起给：设置页据此决定开关解不解锁。**并且说明那份结论
+    // 是不是对现在这一份 DLL 跑的**——换过片段之后它就不算数了。
+    status.probe = super::last_probe_for(&data);
+    status.probe_valid = super::probe_is_valid(&data);
     CommandResult::success(status)
 }
 
@@ -120,9 +122,19 @@ pub struct DlssnrPageInput {
     /// 从哪一版开始跑：`reader-page`（原图）/ `decensored` / `enhanced`。
     #[serde(default)]
     pub source: Option<String>,
+    /// 起点那一版是哪两个模型产出的。起点是按「产出它的模型」存的（去码产物按去码
+    /// 包的指纹，超分产物按超分模型的指纹），所以要算出同一个 revision 才读得到；
+    /// `reader-page` 起点不需要它们。
+    #[serde(default)]
+    pub decensor_model: Option<String>,
+    #[serde(default)]
+    pub upscale_model: Option<String>,
     /// 层参数由前端给（设置页那份就是唯一真相）。
     #[serde(default)]
     pub settings: Option<DlssnrSettings>,
+    /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 #[tauri::command]
@@ -158,18 +170,29 @@ fn apply_cached_page(
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
     }
     let rendition = input.source.as_deref().unwrap_or("reader-page");
-    let source = match rendition {
-        "reader-page" | "decensored" | "enhanced" => {
-            CacheImageIdentity::new(&input.scope_id, &input.archive_id, rendition, input.page_index)
-        }
-        other => {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                format!("Unsupported source rendition: {other}"),
-                false,
-            )
-        }
+    // 起点那一版属于哪个模型：读的是别人写的产物，就得按同一个 revision 去找
+    // （`reader-page` 是服务端拉下来的原图，没有模型，也就没有 revision）。
+    let revision = match crate::inference::source_revision(
+        data_dir,
+        rendition,
+        input.decensor_model.as_deref(),
+        input.upscale_model.as_deref(),
+    ) {
+        Ok(revision) => revision,
+        Err(error) => return CommandResult::failure(error.code, error.message, false),
     };
+    let mut source = CacheImageIdentity::new(
+        &input.scope_id,
+        &input.archive_id,
+        rendition,
+        input.page_index,
+    );
+    source.revision = revision;
+    // 二次校验：前端那个布尔值只是「用户想用」，跑不跑得起来是这台机器此刻的
+    // 事实。放在取页之前——跑不起来时连缓存都不该碰。
+    if let Err(error) = super::runtime_gate(data_dir) {
+        return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false);
+    }
 
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -188,11 +211,30 @@ fn apply_cached_page(
         Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
     };
     let (width, height) = (decoded.width(), decoded.height());
+    // 尺寸下限是 DLL 自己的要求（`filter::MIN_EDGE`）：小图在排队前就该被挡下来，
+    // 不该等一次原生失败再靠日志去发现。这里报的是「这张图不适用」，不是错误。
+    if width < DLSSNR_MIN_EDGE || height < DLSSNR_MIN_EDGE {
+        return CommandResult::failure(
+            "INVALID_RESPONSE",
+            format!("这一页太小（{width}×{height}）：DLSS5 至少要 {DLSSNR_MIN_EDGE}×{DLSSNR_MIN_EDGE}"),
+            false,
+        );
+    }
     let settings = input.settings.clone().unwrap_or_default().normalized();
-    let processed = match super::apply_rgba(data_dir, decoded.into_raw(), width, height, &settings) {
+    let image = match super::filter::DlssnrImage::new(width, height, decoded.into_raw()) {
         Ok(value) => value,
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error, false),
+    };
+    let guard = crate::inference::cancel::begin(input.task_id.as_deref());
+    let processed = match super::filter::apply_with_token(data_dir, &image, &settings, &guard.token())
+    {
+        Ok(value) => value,
+        Err(error) if error == super::filter::CANCELLED => {
+            return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
+        }
         Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
     };
+    drop(guard);
 
     let mut encoded = Vec::new();
     {
@@ -209,6 +251,9 @@ fn apply_cached_page(
     }
     CommandResult::success(encoded)
 }
+
+/// `filter::MIN_EDGE` 的同一条下限（命令这一层用它给出人话）。
+const DLSSNR_MIN_EDGE: u32 = 32;
 
 #[cfg(test)]
 mod tests {
@@ -231,6 +276,9 @@ mod tests {
             page_index: 0,
             source: Some("nonsense".into()),
             settings: None,
+            task_id: None,
+            decensor_model: None,
+            upscale_model: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         let error = expect_failure(result);
@@ -248,9 +296,34 @@ mod tests {
             page_index: -1,
             source: None,
             settings: None,
+            task_id: None,
+            decensor_model: None,
+            upscale_model: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         assert_eq!(expect_failure(result).code, "INVALID_RESPONSE");
+    }
+
+    /// 这台机器跑不起来时（没导入片段 / 没检测过），命令必须自己拒绝：偏好里那个
+    /// 开关是持久化的，昨天的、别台机器的、或者换过 DLL 的值都可能写着 true，前端
+    /// 那张布尔值不能当作事实。这里报的是「跑不起来」，也不是一次缓存未命中。
+    #[test]
+    fn the_native_side_refuses_to_run_when_this_machine_cannot() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        let input = DlssnrPageInput {
+            scope_id: "scope".into(),
+            archive_id: "archive".into(),
+            page_index: 0,
+            source: None,
+            settings: None,
+            task_id: Some("reader-task".into()),
+            decensor_model: None,
+            upscale_model: None,
+        };
+        let error = expect_failure(apply_cached_page(&database, dir.path(), &input));
+        assert_eq!(error.code, "INFERENCE_UNAVAILABLE");
+        assert!(!error.retryable, "重试不会让这台机器长出 N 卡：{}", error.message);
     }
 
     #[test]
@@ -263,10 +336,18 @@ mod tests {
             page_index: 3,
             source: None,
             settings: None,
+            task_id: None,
+            decensor_model: None,
+            upscale_model: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         let error = expect_failure(result);
-        assert_eq!(error.code, "LRR_NOT_FOUND");
-        assert!(error.retryable);
+        // 这台机器能不能跑 DLSS5 决定了这条路径从哪一步开始失败：能跑时是缓存没命中
+        // （可重试），不能跑时是门控（不可重试）。两种都对，但要说清楚是哪一种。
+        match error.code {
+            "LRR_NOT_FOUND" => assert!(error.retryable),
+            "INFERENCE_UNAVAILABLE" => assert!(error.message.contains("DLSS5") || !error.retryable),
+            other => panic!("unexpected code {other}: {}", error.message),
+        }
     }
 }

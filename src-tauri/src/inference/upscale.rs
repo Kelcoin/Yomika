@@ -152,7 +152,7 @@ impl UpscaleEngine for NearestNeighbourEngine {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct UpscaleOptions {
     pub tile_size: u32,
     pub tile_padding: u32,
@@ -160,6 +160,9 @@ pub struct UpscaleOptions {
     /// thermal-throttling through a long chapter.
     pub tile_sleep_ms: u64,
     pub max_pixels: usize,
+    /// 取消牌：每块之间查一次。切页之后没必要把剩下的几百块跑完——全局只允许
+    /// 一件重活，跑完的那些块用户根本看不到。
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for UpscaleOptions {
@@ -169,10 +172,26 @@ impl Default for UpscaleOptions {
             tile_padding: DEFAULT_TILE_PADDING,
             tile_sleep_ms: 0,
             max_pixels: 64_000_000,
+            cancel: None,
         }
     }
 }
 
+impl UpscaleOptions {
+    /// 任务被取消时返回 `Cancelled`。
+    fn check_cancelled(&self) -> Result<(), InferenceError> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(InferenceError::Cancelled);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub struct UpscaledImage {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -227,6 +246,7 @@ pub fn upscale_rgba(
     );
     let mut destination = vec![0_u8; pixels * 4];
     for tile in &tiles {
+        options.check_cancelled()?;
         let input = crop_rgba(
             source,
             width,
@@ -380,5 +400,63 @@ mod tests {
             blit_tile(&mut destination, 64, &tile, 2, &[0_u8; 16]),
             Err(InferenceError::InvalidInput(_)),
         ));
+    }
+
+    /// 取消点是块与块之间：切页之后剩下的块不再跑。这里用一个会数自己被打了几次
+    /// 的引擎——一页 4K 图有几百块，跑完它们要几分钟，而用户已经翻到下一页了。
+    #[test]
+    fn a_cancelled_task_stops_between_tiles() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct Counting {
+            scale: u32,
+            calls: Arc<AtomicUsize>,
+            cancel: Arc<AtomicBool>,
+        }
+        impl UpscaleEngine for Counting {
+            fn scale(&self) -> u32 {
+                self.scale
+            }
+            fn upscale_tile(
+                &self,
+                _rgba: &[u8],
+                width: u32,
+                height: u32,
+            ) -> Result<Vec<u8>, InferenceError> {
+                let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+                // 第三块跑完之后用户切页。
+                if call == 3 {
+                    self.cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(vec![
+                    0_u8;
+                    (width * self.scale * height * self.scale * 4) as usize
+                ])
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = Counting {
+            scale: 2,
+            calls: Arc::clone(&calls),
+            cancel: Arc::clone(&cancel),
+        };
+        let error = upscale_rgba(
+            &engine,
+            &gradient(64, 64),
+            64,
+            64,
+            UpscaleOptions {
+                tile_size: 16,
+                tile_padding: 0,
+                cancel: Some(Arc::clone(&cancel)),
+                ..UpscaleOptions::default()
+            },
+        )
+        .expect_err("cancel must surface as Cancelled");
+        assert_eq!(error, InferenceError::Cancelled);
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "the fourth tile must not start");
     }
 }

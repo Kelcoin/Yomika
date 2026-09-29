@@ -459,6 +459,21 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
+      // 这台机器看着能跑（偏好里开着，检测也通过）：阅读器据此排队，失败发生在
+      // 真正跑那一步的时候。
+      if (command === 'dlssnr_status') {
+        return {
+          ok: true,
+          value: {
+            dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 165_840_496,
+            gpu: { name: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community' },
+            gpuName: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版',
+            coreAvailable: true, installable: true, available: true,
+            probe: { supported: true, width: 96, height: 96, elapsedMs: 1200, difference: 12.5, error: null },
+            probeValid: true, error: null,
+          },
+        };
+      }
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
 
@@ -469,5 +484,208 @@ describe('reader route', () => {
 
     const image = screen.getByRole('img', { name: '第 1 页' });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
+  });
+
+  it('auto-disables DLSS5 when this machine cannot actually run it', async () => {
+    // 偏好里那个开关是**持久化**的：另一台机器上打开过、或者 DLL 换过，本机这一刻
+    // 跑不起来。阅读器不能照旧排队（每次都是一次原生失败），而该关掉并说清楚。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => ({
+      key: `${identity.rendition}-${identity.pageIndex}`,
+      url: `blob:${identity.rendition}-${identity.pageIndex}`,
+      bytes: 1,
+    }));
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const saved: Array<Partial<{ dlssnrEnabled: boolean }>> = [];
+    const commands: string[] = [];
+    setInvokeAdapterForTests(async (command: string, args) => {
+      commands.push(command);
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+      }
+      if (command === 'save_preferences') {
+        const input = (args?.input ?? {}) as Partial<{ dlssnrEnabled: boolean }>;
+        saved.push(input);
+        return { ok: true, value: input };
+      }
+      if (command === 'dlssnr_status') {
+        return {
+          ok: true,
+          value: {
+            dllPresent: false, variant: null, variantLabel: null, dllBytes: null, gpu: null,
+            gpuName: '', recommendedVariant: null, recommendedLabel: null, coreAvailable: false,
+            installable: false, available: false, probe: null, probeValid: false,
+            error: '没有找到 NVIDIA 显卡',
+          },
+        };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+
+    // 说清楚为什么，并且把偏好写回 false（不然每次进阅读器都要重问一遍）。
+    expect(await screen.findByText(/DLSS5 不可用：没有找到 NVIDIA 显卡/)).toBeInTheDocument();
+    await waitFor(() => expect(saved).toContainEqual(expect.objectContaining({ dlssnrEnabled: false })));
+    // 也没有任何一步真的去跑它。
+    expect(commands).not.toContain('dlssnr_apply_page');
+  });
+
+  it('shows the de-censored page first and swaps in the enlarged one when it lands', async () => {
+    // 双开时这是**两步**：去码先出来（几秒），超分再它之上换成最终那一版。以前两步
+    // 折在一次调用里，用户要么等全程、要么在超分失败时连去码结果一起丢。
+    const cache = getNativeImageCache();
+    const sources: Array<string | undefined> = [];
+    let releaseUpscale: ((handle: ImageHandle) => void) | undefined;
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition === 'enhanced') {
+        sources.push(identity.source);
+        return new Promise<ImageHandle>((resolve) => {
+          releaseUpscale = (handle) => resolve(handle);
+        });
+      }
+      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+    });
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    const image = screen.getByRole('img', { name: '第 1 页' });
+    // 第一步的产物先上屏。
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
+    // 超分读的正是这一步的产物（不是原图）。
+    await waitFor(() => expect(sources).toContain('decensored'));
+    await act(async () => { releaseUpscale?.({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 }); });
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
+  });
+
+  it('still enlarges the plain page when the de-censoring step fails', async () => {
+    // 四种组合里这是最容易出错的一种：去码失败不该把超分一起带走。这一版没有去码，
+    // 但它是可用的结果，而且用户会被告知去码那一步没跑成。
+    const cache = getNativeImageCache();
+    const sources: Array<string | undefined> = [];
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition === 'decensored') throw new Error('去码模型包没装齐');
+      if (identity.rendition === 'enhanced') {
+        sources.push(identity.source);
+        return { key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 };
+      }
+      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+    });
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    const image = screen.getByRole('img', { name: '第 1 页' });
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
+    // 起点退回原图：没有去码产物可读。
+    expect(sources).toEqual(['reader-page']);
+    expect(await screen.findByText(/去码这一步没跑成/)).toBeInTheDocument();
+  });
+
+  it('keeps the de-censored page and its URL when the upscale step fails', async () => {
+    // 去码结果先上屏，超分再失败——这时候页面上留着的就是去码那一版。它已经被入册
+    // 过一次，第二次落到同一个句柄时**不能**当成「换新版」把它释放掉：释放到 0 引用
+    // 会把 blob URL 撤销，页面上那一张就成了坏图。
+    const cache = getNativeImageCache();
+    const censored: ImageHandle = { key: 'decensored-0', url: 'blob:decensored-0', bytes: 1 };
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition === 'decensored') return censored;
+      if (identity.rendition === 'enhanced') throw new Error('超分模型跑不起来');
+      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+    });
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens' } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    const image = screen.getByRole('img', { name: '第 1 页' });
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
+    await waitFor(() => expect(screen.getByText(/超分这一步没跑成/)).toBeInTheDocument());
+    expect(release).not.toHaveBeenCalledWith(censored);
+    expect(image).toHaveAttribute('src', 'blob:decensored-0');
+  });
+
+  it('cancels the native task when the reader stops wanting it', async () => {
+    // 前端丢掉结果不等于原生停手：一页 4K 在 CPU 上要十几秒，而全局只允许一件重活。
+    // 离开阅读器 / 关掉开关时，那个任务号要发回原生让循环停下来。
+    const calls: Array<{ command: string; args?: Record<string, unknown> | undefined }> = [];
+    setInvokeAdapterForTests(async (command: string, args) => {
+      calls.push({ command, args });
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan' } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
+      // 超分这一步一直不回来（在 CPU 上就是这样），直到被取消。
+      if (command === 'inference_upscale_page') return new Promise(() => undefined);
+      if (command === 'inference_cancel_page') return { ok: true, value: true };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    const upscale = await waitFor(() => {
+      const call = calls.find((entry) => entry.command === 'inference_upscale_page');
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const taskId = (upscale.args?.input as { taskId?: string } | undefined)?.taskId;
+    expect(taskId).toBeTruthy();
+
+    view.unmount();
+    await waitFor(() => expect(calls.filter((entry) => entry.command === 'inference_cancel_page')).toContainEqual(
+      expect.objectContaining({ args: { taskId } }),
+    ));
   });
 });

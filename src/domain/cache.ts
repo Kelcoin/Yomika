@@ -26,6 +26,13 @@ export interface ImageCacheIdentity {
    * says the upscaler read the de-censored page rather than the plain one, so the
    * two pipelines chain; part of the key for the same reason as `modelId`. */
   decensorModelId?: string;
+  /** Which rendition a derived step reads as its input: the plain page, the
+   * de-censored one, or the enlarged one. Part of the key — the same model over a
+   * different source is a different picture. */
+  source?: 'reader-page' | 'decensored' | 'enhanced';
+  /** 原生那侧这次任务号：前端给它起名，切页 / 关开关时拿它取消正在跑的推理。
+   * **不进缓存键**——它只说明「这一次请求」，同一张图的两次请求是两个任务号。 */
+  taskId?: string;
   transform?: string;
 }
 
@@ -41,6 +48,7 @@ export function createImageCacheKey(identity: ImageCacheIdentity): string {
     identity.sourcePath ?? '',
     identity.modelId ?? '',
     identity.decensorModelId ?? '',
+    identity.source ?? '',
     identity.transform ?? '',
   ];
   return `image:v1:${fields.map((value) => `${value.length}:${value}`).join('')}`;

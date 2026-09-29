@@ -38,7 +38,6 @@
 /* Three frames on one track: the slot being read, and the two a swipe reveals.
    The track carries the drag offset, so a neighbour slides in from exactly where
    it will land — the gesture used to drag the page off an empty background. */.reader-track {
-  will-change: transform;
   /* Layout containment only: `paint` clipped every descendant to the track's
      own box, and the swipe-neighbour frames live at translateX(±100%) — they
      were invisible for their whole life, so a drag slid the page over black. */
@@ -49,10 +48,17 @@
   height: 100%;
 }
 
+/* 只在拖动 / 翻页动画期间提升这一层。常驻的 `will-change: transform` 意味着一屏里
+   三个大图层（本页 + 两侧各一页）永远占着显存，而低端设备上合成开销就花在这上面。 */
+.reader-track.is-moving {
+  will-change: transform;
+}
+
 .reader-frame {
   position: absolute;
   inset: 0;
-  will-change: transform;
+  /* 帧自己的 transform 是固定的（`translateX(±100%)`，内联写死），提升它只是白占
+     一层；跟着动的是轨道那一层，由上面的 `is-moving` 负责。 */
   backface-visibility: hidden;
 }
 
@@ -682,4 +688,15 @@
 .reader-overview-tags,
 .reader-overview-thumbnails {
   overscroll-behavior: contain;
+}
+
+/* 「减少透明度」下不需要模糊：半透明模糊是合成最贵的一类效果（每一帧都要重新采样
+   背后的内容），而它的观感在系统要求减少透明度时反而更差。底色本来就有 0.82/0.86
+   的不透明度，去掉模糊几乎看不出区别，合成开销少一大截。 */
+@media (prefers-reduced-transparency: reduce) {
+  .reader-chrome-top,
+  .reader-toolbar,
+  .reader-overview-backdrop {
+    backdrop-filter: none;
+  }
 }

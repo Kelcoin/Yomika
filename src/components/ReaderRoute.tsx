@@ -9,6 +9,7 @@ import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
 import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
+import { checkDlssnrAvailability } from '../lib/dlssnrGate';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
 import { parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
@@ -44,10 +45,50 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [searchParams] = useSearchParams();
   const goBack = useReturnNavigation();
   const { showToast } = useToast();
-  const { preferences } = usePreferences();
+  const { preferences, save } = usePreferences();
   /** DLSS5 与远端算力都是「设置里开了就用」：它们的门控（N 卡 + DLL + 检测通过 /
-   * 地址与令牌齐全）在设置页那边，不像超分那样还需要一个会话开关。 */
-  const dlssnrConfigured = preferences.dlssnrEnabled;
+   * 地址与令牌齐全）在设置页那边，不像超分那样还需要一个会话开关。
+   *
+   * 但「设置里开了」只是一句**持久化**的意图：它可能来自另一台机器、或者那个 DLL
+   * 已经被换掉。本地超分/去码的模型在不在问得出来，DLSS5 能不能跑要问原生（见下）。 */
+  const [dlssnrReady, setDlssnrReady] = useState(false);
+  const dlssnrRequested = preferences.dlssnrEnabled;
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
+  /** 已经就「这台机器跑不了 DLSS5」说过一次的那句话：同一条理由只说一遍，不然每翻
+   * 一页都弹一次。 */
+  const dlssnrNoticeRef = useRef<string>();
+  useEffect(() => {
+    if (!dlssnrRequested) {
+      setDlssnrReady(false);
+      dlssnrNoticeRef.current = undefined;
+      return;
+    }
+    let cancelled = false;
+    void checkDlssnrAvailability(true).then((availability) => {
+      if (cancelled) return;
+      setDlssnrReady(availability.ready);
+      if (availability.ready) {
+        dlssnrNoticeRef.current = undefined;
+        return;
+      }
+      const reason = availability.reason ?? '这台机器现在跑不了 DLSS5';
+      if (dlssnrNoticeRef.current === reason) return;
+      dlssnrNoticeRef.current = reason;
+      if (!availability.disable) {
+        // 问不到现状：这一次不排队，也不动那个开关——它在别的设备上可能是有效的，
+        // 而偏好是同步的。
+        showToast(`DLSS5 这一步这次跳过：${reason}`, 'error');
+        return;
+      }
+      showToast(`DLSS5 不可用：${reason}。已自动关闭，可在设置页重新检测后再打开。`, 'error');
+      // 写回偏好：留在 true 的话每次进阅读器都要重问一遍，而且开关看着是开的。
+      const current = preferencesRef.current;
+      void save({ ...current, dlssnrEnabled: false });
+    });
+    return () => { cancelled = true; };
+  }, [dlssnrRequested, save, showToast]);
+  const dlssnrConfigured = dlssnrRequested && dlssnrReady;
   const remoteOps = useMemo(
     () => parseRemoteOps(preferences.remoteComputeOps),
     [preferences.remoteComputeOps],
@@ -154,6 +195,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local' }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
+  /** 每页一次任务的取消牌（正在跑或正在排队的那一个）。切页、换开关、离开阅读器时
+   * 全部 abort——前端 abort 会顺着 `taskId` 叫停原生那侧的循环（见 nativeImageCache）。 */
+  const derivedAbortsRef = useRef(new Map<number, AbortController>());
+  /** 任务号的来源：同一页重跑（换模型、改层参数）必须是新的号，否则旧任务的取消会
+   * 误伤新任务。 */
+  const derivedTaskSeqRef = useRef(0);
+  /** 已经说过一次的「某一档没跑成」：按阶段 + 模型去重。 */
+  const censoredFailureRef = useRef(new Set<string>());
+  const upscaleFailureRef = useRef(new Set<string>());
+  const dlssnrFailureRef = useRef(new Set<string>());
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -169,24 +220,41 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, []);
 
   /** Hold a finished derived rendition for the session, dropping the oldest once
-   * the session is over its budget. */
+   * the session is over its budget.
+   *
+   * The same page can gain a *better* rendition while the session runs — with both
+   * enhancements on, the de-censored page arrives first and the enlarged one
+   * replaces it a few seconds later — so this is also the place that swaps one in.
+   * The order inside matters: the new handle is registered and rendered first, and
+   * the old one is released after that. The other way round the page would point at
+   * a revoked URL for however long the two updates are apart.
+   *
+   * `derivedBytesRef` is carried incrementally rather than recomputed: the old
+   * version walked the whole map on every insert, and with a session holding
+   * dozens of pages that is exactly the O(n²) work the reader does not need. The
+   * map's insertion order *is* the LRU order — a page that gains a new rendition
+   * moves to the end. */
+  const derivedBytesRef = useRef(0);
   const retainDerived = useCallback((pageIndex: number, handle: ImageHandle) => {
     const held = derivedHandlesRef.current;
-    if (held.get(pageIndex)) {
-      imageCache.release(handle);
-      return;
+    const existing = held.get(pageIndex);
+    // 已经是这一版了：不动。第二次落到同一个句柄只可能是「先给去码结果、超分那一步
+    // 再失败，留下的就是它」——这时候既不该换，也不该把它释放掉。
+    if (existing === handle) return;
+    if (existing) {
+      held.delete(pageIndex);
+      derivedBytesRef.current -= existing.bytes;
     }
     held.set(pageIndex, handle);
-    let bytes = 0;
-    for (const entry of held.values()) bytes += entry.bytes;
+    derivedBytesRef.current += handle.bytes;
     const dropped: number[] = [];
-    while (bytes > DERIVED_SESSION_BUDGET_BYTES && held.size > 1) {
+    while (derivedBytesRef.current > DERIVED_SESSION_BUDGET_BYTES && held.size > 1) {
       const oldest = held.keys().next();
       if (oldest.done) break;
       const evicted = held.get(oldest.value);
       held.delete(oldest.value);
       if (!evicted) break;
-      bytes -= evicted.bytes;
+      derivedBytesRef.current -= evicted.bytes;
       imageCache.release(evicted);
       // Its attempt is un-spent again, or a page whose result was dropped for
       // room would never be enhanced a second time.
@@ -198,13 +266,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       for (const index of dropped) next.delete(index);
       return next;
     });
+    // 旧的句柄最后再放：上面那次 state 更新已经指向新的 URL 了。
+    if (existing) imageCache.release(existing);
   }, []);
 
   const releaseAllPages = useCallback(() => {
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
+    // 离开阅读器时把正在跑的原生推理也掐掉：那一件重活占着全局闸，而用户已经在别处了。
+    for (const controller of derivedAbortsRef.current.values()) controller.abort();
+    derivedAbortsRef.current.clear();
     for (const handle of derivedHandlesRef.current.values()) imageCache.release(handle);
     derivedHandlesRef.current.clear();
+    derivedBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
     derivedGenerationRef.current += 1;
@@ -314,13 +388,33 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
 
   const releaseDerived = useCallback(() => {
     derivedGenerationRef.current += 1;
+    for (const controller of derivedAbortsRef.current.values()) controller.abort();
+    derivedAbortsRef.current.clear();
     for (const handle of derivedHandlesRef.current.values()) imageCache.release(handle);
     derivedHandlesRef.current.clear();
+    derivedBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
+    // 设置换了就是新的一轮：上一轮说过的「某一档没跑成」不该让这一轮闭嘴。
+    censoredFailureRef.current.clear();
+    upscaleFailureRef.current.clear();
+    dlssnrFailureRef.current.clear();
     setDerivingPages((current) => current.size === 0 ? current : new Set());
     setDerivedPages((current) => current.size === 0 ? current : new Map());
   }, []);
+
+  /** 某一档失败了就说一次：对应用户明确打开的那个开关。
+   *
+   * 每档只报一次（按阶段 + 模型去重），不然每一页都会再弹一遍；失败细节仍在错误日志
+   * 里（`nativeImageCache` 对阅读器那几版都记）。四开组合里「去码失败、超分成功」这类
+   * 结果因此是**可见的降级**，不是静默换图。 */
+  const noticeStageFailure = useCallback((stage: 'decensor' | 'upscale' | 'dlssnr', model: string, seen: Set<string>) => {
+    const key = `${stage}:${model}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const label = stage === 'decensor' ? '去码' : stage === 'upscale' ? '超分' : 'DLSS5';
+    showToast(`${label}这一步没跑成，这一页显示的是可用的那一版（细节在错误日志里）。`, 'error');
+  }, [showToast]);
 
   const runDerivedQueue = useCallback(async () => {
     if (derivedBusyRef.current) return;
@@ -336,29 +430,65 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (!await loadPage(pageIndex) || job.generation !== derivedGenerationRef.current) continue;
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
+        // 一次任务一个取消牌：切页 / 换开关 / 离开阅读器时把它掐掉。原生那侧一次只
+        // 允许一件重活，不掐的话用户要看的那一页排在旧任务后面。
+        const taskBase = `${context.generation}:${job.generation}:${pageIndex}:${derivedTaskSeqRef.current += 1}`;
+        const controller = new AbortController();
+        derivedAbortsRef.current.set(pageIndex, controller);
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
-          // Both on: de-censor first, then enlarge the finished page. The detector
-          // and the inpainter were trained at page scale, so upscaling first would
-          // hand the inpainter interpolated pixels and smeared mosaic blocks.
-          const censored = job.decensorModel && !job.upscaleModel
-            ? await imageCache.load({ ...identity, rendition: 'decensored', modelId: job.decensorModel }).catch(() => undefined)
+          /** 第一步：去码（双开时也单独跑，不再塞进超分那一次调用里）。
+           *
+           * 这两步是**先后两件事**，不是一件事：去码产物先上屏（几秒就能看到），
+           * 超分再它之上换成最终那一版。以前去码被折进超分调用内部，于是「去码成功、
+           * 超分失败」时前端手上什么都没有——页面上还是原图。 */
+          const censored = job.decensorModel
+            ? await imageCache.load(
+              { ...identity, rendition: 'decensored', modelId: job.decensorModel, taskId: `${taskBase}:decensor` },
+              { signal: controller.signal },
+            ).catch(() => undefined)
             : undefined;
-          const enhanced = job.generation === derivedGenerationRef.current && job.upscaleModel
+          // Abort is a lifecycle transition, not a failed processing stage. Do
+          // not continue into fallback/notice handling after the controller has
+          // been cancelled while the native request was in flight.
+          if (controller.signal.aborted) {
+            if (censored) imageCache.release(censored);
+            continue;
+          }
+          if (censored && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
+            retainDerived(pageIndex, censored);
+          }
+          const stillCurrent = job.generation === derivedGenerationRef.current;
+          // 第二步：超分。起点是上一步的产物；去码没跑成（或没开）就从原图放大——
+          // 一次「只有超分」的降级，页面上会写明这一点（见下面的 notice）。
+          const enhanced = stillCurrent && job.upscaleModel
             ? await imageCache.load({
               ...identity,
               rendition: 'enhanced',
               modelId: job.upscaleModel,
-              ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
-            }).catch(() => undefined)
+              ...(censored && job.decensorModel
+                ? { decensorModelId: job.decensorModel, source: 'decensored' as const }
+                : { source: 'reader-page' as const }),
+              taskId: `${taskBase}:enhanced`,
+            }, { signal: controller.signal }).catch(() => undefined)
             : undefined;
-          // 两条互斥：超分开着时 `censored` 根本不取值（去码是在超分调用内部做的），
-          // 所以这里只可能有一个产物，不需要给另一个收尾。
+          if (controller.signal.aborted) {
+            if (enhanced) imageCache.release(enhanced);
+            continue;
+          }
+          // 优先级就是结果本身：超分 > 去码 > 原图。两条互不依赖，所以四种组合各有
+          // 一版能显示的东西，不再有「两样都开着时什么都看不到」。
           const local = enhanced ?? censored;
+          if (job.decensorModel && !censored) {
+            noticeStageFailure('decensor', job.decensorModel, censoredFailureRef.current);
+          }
+          if (job.upscaleModel && !enhanced) {
+            noticeStageFailure('upscale', job.upscaleModel, upscaleFailureRef.current);
+          }
           /** 远端 / DLSS5 那一步的输入：本地做了什么就从那一步的产物接着做。 */
-          const baseRendition: DlssnrSource = job.upscaleModel
+          const baseRendition: DlssnrSource = enhanced
             ? 'enhanced'
-            : job.decensorModel
+            : censored
               ? 'decensored'
               : 'reader-page';
           let derived = local;
@@ -372,6 +502,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
                   parseDlssnrPasses(dlssnrPassesRef.current),
                 )),
+                // 起点是按「产出它的模型」存的：两个 id 一并送过去，原生那侧才算得出
+                // 同一个 revision。
+                ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
+                ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
+                taskId: `${taskBase}:${job.engine}`,
               }
               : {
                 ...identity,
@@ -383,37 +518,47 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                   scale: remoteOpsRef.current.op.scale,
                   passes: JSON.stringify(remoteOpsRef.current.op.dlssnrPasses),
                 }),
-              }).catch(() => undefined);
+                ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
+                ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
+                taskId: `${taskBase}:${job.engine}`,
+              }, { signal: controller.signal }).catch(() => undefined);
+            if (controller.signal.aborted) {
+              if (processed) imageCache.release(processed);
+              continue;
+            }
             if (processed) {
               if (local) imageCache.release(local);
               derived = processed;
+            } else if (job.engine === 'dlssnr') {
+              // DLSS5 这一档失败时本地那一版顶上（没有本地版本就是原图），并且要说一
+              // 次原因：不然用户看到的是「开着却没反应」。
+              noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
             }
-            // 那一档失败（没装片段、对面连不上、远端模型缺失）就退到本机这一版：
-            // 从前这里把 `local` 一起丢掉，页面上还是原图——超分/去码看起来就是
-            // 「失效了」，而失败原因只在缓存层留过一笔。
+            // 不写「远端失败」的提示：远端地址与令牌的失败在错误日志里，而且那一档本
+            // 来就是本机处理的可选替代（本机这一版已经画出来了）。
           }
           if (!derived) continue;
           if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
             imageCache.release(derived);
             continue;
           }
-          const occupied = derivedHandlesRef.current.get(pageIndex);
-          if (occupied) {
-            imageCache.release(derived);
-            continue;
-          }
+          // 落到这里第二次只可能是「先把去码结果给用户看、再换成超分结果」那条渐进
+          // 路径：`retainDerived` 会把这一页换到更好的那一版（同一版则什么都不做），
+          // 而不是把更好的那一版丢掉。
           retainDerived(pageIndex, derived);
           // Yield between pages so navigation/input can be serviced promptly on
           // slower devices while the native inference worker continues.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         } finally {
+          derivedAbortsRef.current.delete(pageIndex);
           markDeriving(pageIndex, false);
         }
       }
     } finally {
       derivedBusyRef.current = false;
     }
-  }, [loadPage, retainDerived, markDeriving]);
+  }, [loadPage, retainDerived, markDeriving, noticeStageFailure]);
+
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
   /** Called by the reader with the pages actually on screen. */
