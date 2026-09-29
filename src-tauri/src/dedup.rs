@@ -3326,7 +3326,7 @@ fn command_error<T>(result: Result<T, String>) -> crate::domain::result::Command
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_start_scan(
     input: DedupStartScanInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -3339,7 +3339,7 @@ pub fn dedup_start_scan(
             .and_then(|mut connection| start_scan(&mut connection, input)),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_scan_chunk(
     input: DedupScanChunkInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -3352,7 +3352,7 @@ pub fn dedup_scan_chunk(
             .and_then(|mut connection| scan_chunk(&mut connection, input)),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_cancel_scan(
     session_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -3365,7 +3365,7 @@ pub fn dedup_cancel_scan(
             .and_then(|mut connection| cancel_scan(&mut connection, session_id)),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_resume_scan(
     session_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -3378,7 +3378,7 @@ pub fn dedup_resume_scan(
             .and_then(|mut connection| resume_scan(&mut connection, session_id)),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_load_result(
     session_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -3391,7 +3391,7 @@ pub fn dedup_load_result(
             .and_then(|connection| load_result(&connection, &session_id)),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_save_non_duplicate(
     input: DedupNonDuplicateInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -3428,7 +3428,7 @@ pub struct DedupNonDuplicateBatchInput {
 /// 一批两两标记一次落库：整组执行时前端按 C(m,2) 逐对发 IPC，
 /// 一组五人就是十次串行往返。按输入顺序逐条回 bool：前端只把成功的对
 /// 记作已处理，部分失败不会把没落库的组从视图里误删。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_save_non_duplicates(
     input: DedupNonDuplicateBatchInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -3464,7 +3464,7 @@ pub fn dedup_save_non_duplicates(
             }),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_remove_non_duplicate(
     input: DedupNonDuplicateInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -3492,7 +3492,7 @@ pub fn dedup_remove_non_duplicate(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_list_non_duplicates(
     scope_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -3658,7 +3658,7 @@ pub async fn dedup_delete_selected(
 ) -> Result<crate::domain::result::CommandResult<DedupDeleteSelectedResult>, String> {
     Ok(dedup_delete_selected_impl(input, sync_favorite.unwrap_or(false), database).await)
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_import_readoshi(
     input: DedupImportInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -4113,7 +4113,7 @@ pub fn dedup_scan_progress(
     command_error(Ok(registry.read(&session_id)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_list_sessions(
     scope_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -4127,7 +4127,7 @@ pub fn dedup_list_sessions(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_save_selection(
     session_id: String,
     selected_archive_ids: Vec<String>,
@@ -4144,7 +4144,7 @@ pub fn dedup_save_selection(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_delete_session(
     session_id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -4174,7 +4174,7 @@ pub struct DedupFileInput {
     pub path: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_check_file(
     input: DedupFileInput,
 ) -> crate::domain::result::CommandResult<ExactHashResult> {
@@ -4212,7 +4212,7 @@ pub struct DedupFeatureInput {
     pub size: u64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_save_feature(
     input: DedupFeatureInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -4258,7 +4258,7 @@ pub struct DedupFeatureRecord {
     pub size: u64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dedup_find_exact(
     scope_id: String,
     exact_hash: String,

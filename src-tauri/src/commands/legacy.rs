@@ -559,7 +559,7 @@ pub fn import_worker_sections(
     Ok(report)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_worker_export(
     input: WorkerImportInput,
     database: State<'_, Database>,
@@ -574,7 +574,7 @@ pub fn import_worker_export(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_legacy_export(
     input: LegacyImportInput,
     database: State<'_, Database>,

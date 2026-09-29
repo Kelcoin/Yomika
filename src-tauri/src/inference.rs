@@ -479,7 +479,7 @@ pub struct ModelValidationInput {
     pub model: Vec<u8>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_validate_model(
     input: ModelValidationInput,
 ) -> crate::domain::result::CommandResult<()> {
@@ -867,7 +867,7 @@ pub fn listed_upscale_models_in(app_data_dir: &std::path::Path) -> Vec<Installed
 
 /// Lets the settings page offer the models that are actually installed instead
 /// of asking the user to type a model name and hope.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_list_models(
     app: tauri::AppHandle,
 ) -> crate::domain::result::CommandResult<Vec<InstalledModel>> {
@@ -886,7 +886,7 @@ pub fn inference_list_models(
 /// Installs a de-censoring bundle by copying one out of an existing Aletheia-Lens
 /// directory, since it is far too large to hand over as bytes. See
 /// `decensor::install_bundle_from` for why.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_install_decensor_bundle(
     app: tauri::AppHandle,
     source_dir: String,
@@ -931,7 +931,7 @@ pub fn inference_install_decensor_bundle(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_install_model(
     app: tauri::AppHandle,
     input: ModelInstallInput,
@@ -1270,7 +1270,7 @@ pub fn clear_inference_cache(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_clear_cache(
     app: tauri::AppHandle,
     database: tauri::State<'_, crate::db::Database>,
@@ -2191,7 +2191,7 @@ pub struct InferenceCheckpointInput {
     pub output_path: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_checkpoint(
     input: InferenceCheckpointInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -2244,7 +2244,7 @@ fn transition_command(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_pause(
     id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -2252,7 +2252,7 @@ pub fn inference_pause(
     transition_command(id, "paused", database)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_resume(
     id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -2260,7 +2260,7 @@ pub fn inference_resume(
     transition_command(id, "running", database)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_start(
     input: InferenceStartInput,
     database: tauri::State<'_, crate::db::Database>,
@@ -2283,7 +2283,7 @@ pub fn inference_start(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_get_job(
     id: String,
     database: tauri::State<'_, crate::db::Database>,
@@ -2304,7 +2304,7 @@ pub fn inference_get_job(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inference_cancel(
     id: String,
     database: tauri::State<'_, crate::db::Database>,

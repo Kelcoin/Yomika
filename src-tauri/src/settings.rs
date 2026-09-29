@@ -744,7 +744,7 @@ pub fn import_legacy_preferences_from(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_preferences(database: tauri::State<'_, Database>) -> CommandResult<PreferenceSnapshot> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -758,7 +758,7 @@ pub fn load_preferences(database: tauri::State<'_, Database>) -> CommandResult<P
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_preferences(
     input: PreferenceSnapshot,
     database: tauri::State<'_, Database>,
@@ -804,7 +804,7 @@ fn update_windows_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(),
     if output.status.success() { Ok(()) } else { Err(format!("更新开机自启失败：{}", String::from_utf8_lossy(&output.stderr))) }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_legacy_preferences(
     encoded: String,
     database: tauri::State<'_, Database>,

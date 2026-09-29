@@ -346,7 +346,7 @@ fn read_all(app: &tauri::AppHandle) -> Result<Vec<ErrorLogEntry>, String> {
     Ok(entries)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn error_log_append(
     app: tauri::AppHandle,
     input: ErrorLogAppendInput,
@@ -371,7 +371,7 @@ pub fn error_log_append(
 
 /// 一批一次落盘：错误风暴时前端是整批交过来的，逐条 IPC 往返
 /// 只会让桥上全是日志流量。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn error_log_append_batch(
     app: tauri::AppHandle,
     inputs: Vec<ErrorLogAppendInput>,
@@ -416,7 +416,7 @@ fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> Com
 ///
 /// 删文件而不是截断成空：`rotate` 靠「文件在不在」判断哪一轮有没有东西（见它的注释），
 /// 留一个空文件会让「上次运行」那一栏永远是有的。返回删掉了几条，界面拿它说一声。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn error_log_clear(app: tauri::AppHandle) -> CommandResult<usize> {
     let dropped = read_all(&app).map(|entries| entries.len()).unwrap_or(0);
     let Ok(directory) = log_dir(&app) else {
@@ -442,7 +442,7 @@ fn remove_log_files(directory: &Path) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn error_log_read(app: tauri::AppHandle) -> CommandResult<Vec<ErrorLogEntry>> {
     match read_all(&app) {
         Ok(entries) => CommandResult::success(entries),

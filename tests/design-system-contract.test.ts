@@ -164,10 +164,13 @@ describe('design system contract', () => {
     }
     // 移动端要读出非零安全区，view 声明必须带 viewport-fit=cover。
     expect(read('index.html')).toMatch(/viewport-fit=cover/);
-    // Windows uses the native frame so moving and resizing do not depend on WebView events.
-    expect(read('src-tauri/src/lib.rs')).toMatch(/builder\.decorations\(true\)/);
+    // 自绘标题栏只属于 Windows，且自己吃掉顶部安全区。窗口的拖动与缩放由原生那侧
+    // 负责（decorations 关掉系统边框），所以这一条盯的是几何，不是性能开关。
+    const titlebar = ruleBody(read('src/styles/shell.css'), '.titlebar');
+    expect(titlebar).toMatch(/height:\s*calc\(44px \+ var\(--safe-top\)\)/);
+    expect(read('src-tauri/src/lib.rs')).toMatch(/builder\.decorations\(cfg!\(not\(target_os = "windows"\)\)\)/);
     expect(ruleBody(read('src/styles/shell.css'), '.app-main')).toMatch(/background:\s*var\(--surface-panel\)/);
-    expect(read('src/components/AppShell.tsx')).not.toMatch(/<TitleBar\s*\/>/);
+    expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
   });
 
   it('pins the page scale and keeps text controls off the focus-zoom threshold', () => {
@@ -323,6 +326,23 @@ describe('design system contract', () => {
   it('enables the native Windows credential backend for release builds', () => {
     const cargo = read('src-tauri/Cargo.toml');
     expect(cargo).toMatch(/keyring\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*['"]windows-native['"]/s);
+  });
+
+  it('keeps the reader off an animation runtime', () => {
+    // 两条栏的淡入淡出曾经用 `motion` 的 `AnimatePresence`，代价是整个动画运行时跟着
+    // 阅读器那一个 chunk 走：`ReaderRoute-*.js` 从 170KB（55KB gzip）掉到 45KB
+    // （15KB gzip）就是把这一条依赖拿掉的结果。入场是 CSS 动画，出场是一个 260ms
+    // 的延迟状态（`useDelayedUnmount`），两样都不需要运行时。
+    const reader = read('src/components/ReaderScreen.tsx');
+    expect(reader).not.toMatch(/from 'motion/);
+    const pkg = JSON.parse(read('package.json')) as { dependencies?: Record<string, string> };
+    expect(Object.keys(pkg.dependencies ?? {})).not.toContain('motion');
+    // 两条栏的出入场确实落在 CSS 里，而不是又被搬回 JS。
+    const css = read('src/styles/reader.css');
+    expect(css).toMatch(/@keyframes reader-chrome-top-in/);
+    expect(css).toMatch(/@keyframes reader-chrome-bottom-out/);
+    expect(ruleBody(css, '.reader-chrome-top')).toMatch(/animation:\s*reader-chrome-top-in/);
+    expect(css).toMatch(/\.reader-chrome-top\.is-leaving \{\s*animation:\s*reader-chrome-top-out/);
   });
 
   it('keeps the toast above menus, their backdrop and dialogs', () => {

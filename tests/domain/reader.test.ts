@@ -8,6 +8,7 @@ import {
   createZoomState,
   effectiveReaderLayout,
   filterArchivesByQuery,
+  fitPageSize,
   getPrefetchPages,
   getVisiblePageIndexes,
   planPageSpreads,
@@ -15,6 +16,7 @@ import {
   settleZoom,
   shouldCommitPageTurn,
   sortArchivesByTitle,
+  sweepOrder,
   toggleDoubleTapZoom,
   toggleReaderChrome,
   webtoonWindow,
@@ -237,6 +239,42 @@ describe('reader domain', () => {
     expect(getPrefetchPages(3, 8, 0)).toEqual([]);
     // Bounds still hold at both ends.
     expect(getPrefetchPages(7, 8, 4)).toEqual([5, 6]);
+  });
+
+  it('fits a page to its slot without ever changing its aspect ratio', () => {
+    const box = { width: 1024, height: 768 };
+    // 小图放大：宽度由高度定，比例保持。
+    expect(fitPageSize({ width: 300, height: 400 }, box)).toEqual({ width: 576, height: 768 });
+    // 大图缩小：贴住较紧的那一条边。
+    expect(fitPageSize({ width: 2000, height: 1000 }, box)).toEqual({ width: 1024, height: 512 });
+    // 刚好同比例时四个数都不动。
+    expect(fitPageSize({ width: 1024, height: 768 }, box)).toEqual({ width: 1024, height: 768 });
+    // 双页那一格是半个视口宽。
+    expect(fitPageSize({ width: 700, height: 1000 }, { width: 512, height: 768 })).toEqual({ width: 512, height: 731 });
+    // 连续滚动：高度不设限，只有宽度在起作用。
+    expect(fitPageSize({ width: 800, height: 1600 }, { width: 900, height: Number.POSITIVE_INFINITY })).toEqual({ width: 900, height: 1800 });
+    // 自然尺寸还不知道的页不该被写死大小。
+    expect(fitPageSize(undefined, box)).toBeUndefined();
+    expect(fitPageSize({ width: 0, height: 100 }, box)).toBeUndefined();
+    // 格子还没量出来（宽度 0）时同理。
+    expect(fitPageSize({ width: 100, height: 100 }, { width: 0, height: 768 })).toBeUndefined();
+  });
+
+  it('sweeps the whole archive outwards from the page being read', () => {
+    // 整本预处理的顺序。可见页 + 预取窗口之外的那些页按这条顺序处理，所以「接着会
+    // 读到哪儿」必须排在前面：从当前页往前一直走到卷尾，再回头补前面的。
+    expect(sweepOrder(0, 5)).toEqual([0, 1, 2, 3, 4]);
+    expect(sweepOrder(3, 6)).toEqual([3, 4, 5, 2, 1, 0]);
+    expect(sweepOrder(5, 6)).toEqual([5, 4, 3, 2, 1, 0]);
+    // 每一页都恰好出现一次——预处理漏掉一页，那一页翻到时就要现算。
+    for (const anchor of [0, 1, 4, 9]) {
+      const order = sweepOrder(anchor, 10);
+      expect([...order].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+    // 越界的锚点与空档案都不该产生越界的页号。
+    expect(sweepOrder(9, 0)).toEqual([]);
+    expect(sweepOrder(99, 3)).toEqual([2, 1, 0]);
+    expect(sweepOrder(-5, 3)).toEqual([0, 1, 2]);
   });
 
   it('keeps the cover standalone and pairs all subsequent pages', () => {

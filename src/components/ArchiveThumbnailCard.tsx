@@ -23,7 +23,10 @@ export function ArchiveProgressBar({ page, pageCount, visibility }: { page?: num
   const mode = visibility ?? preferredVisibility ?? 'history';
   if (mode === 'none' || (mode === 'history' && page == null)) return null;
   const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round(((page ?? 0) / pageCount) * 100))) : 0;
-  return <span className="archive-card-progress" role="progressbar" aria-label="阅读进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+  /** 画到 100% 时前端已经顶到卡片边缘，圆头会在这里留下一小块轨道底色——看着像
+   * 没读完。所以只有「还在读」的那一段带前缘圆角（见 shell.css 里那两条规则）。 */
+  const complete = percent >= 100;
+  return <span className={`archive-card-progress${complete ? ' is-complete' : ''}`} role="progressbar" aria-label="阅读进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
     <span className="archive-card-progress-fill" style={{ width: `${percent}%` }} />
   </span>;
 }
@@ -52,12 +55,17 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
   children?: ReactNode;
 }) {
   const [src, setSrc] = useState<string>();
+  /** 封面取不回来（服务器 202、图已删、离线）时不是「还在加载」。两者都用同一个
+   * 占位块占着位置，但只有真的还在等的那一个该闪——闪动动的是 background-position，
+   * 属主线程每帧重画，一屏几十张失败的封面就是几十个元素一直在画，而它们永远不会
+   * 变成图。 */
+  const [failed, setFailed] = useState(false);
   const [node, setNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!node) return undefined;
     const controller = new AbortController();
     let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
-    const load = () => void imageCache.load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => undefined);
+    const load = () => void imageCache.load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal }).then((value) => { handle = value; setSrc(value.url); }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
     // 观察器按 rootMargin 分桶共享：书架/去重页一屏就是几十上百张卡，
     // 每卡一个 observer 实例的开销跟着页数走。
     const stopObserving = observeOnceInScroll(node, load, '480px');
@@ -67,7 +75,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     {src ? <img src={src} alt="" loading="lazy" decoding="async" onLoad={(event) => {
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
-    }} /> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
+    }} /> : <span className={`archive-thumb-card-skeleton${failed ? ' is-failed' : ''}`} aria-hidden="true" />}
     {children}
   </div>;
 }

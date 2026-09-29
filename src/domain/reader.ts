@@ -386,6 +386,57 @@ export function getPrefetchPages(pageIndex: number, pageCount: number, distance 
   return pages;
 }
 
+/** 一页在给定的格子里按 contain 缩放后的尺寸（比例不变）。
+ *
+ * 阅读器要的是「贴合视口」：小图放大到贴住高度或宽度，大图缩到贴住另一条边。
+ * 单靠 CSS 做不到——`max-width`/`max-height` 只会**缩小**，一张 300×400 的图在
+ * 1280×900 的视口里仍然画成 300×400，四周全是黑边。所以尺寸在这里算好、写进元素
+ * 自己的宽高（元素的盒子因此就是画出来的矩形，页码胶囊靠这一点量位置）。
+ *
+ * 比例取自**第一次**量到的自然尺寸：超分那一版是同一张图的多倍像素，按它自己的
+ * 像素算会让放大倍数在推理完成的那一刻跳一下。
+ *
+ * 返回 `undefined` 表示这一页的自然尺寸还不知道（图还没到）——那一刻不该写死尺寸，
+ * 让它先按原本大小上屏，量到之后再换成贴合尺寸。
+ */
+export function fitPageSize(
+  natural: { width: number; height: number } | undefined,
+  box: { width: number; height: number },
+): { width: number; height: number } | undefined {
+  if (!natural || !(natural.width > 0) || !(natural.height > 0)) return undefined;
+  if (!(box.width > 0)) return undefined;
+  const byWidth = { width: box.width, height: (box.width * natural.height) / natural.width };
+  // 高度不限（连续滚动的格子）时只有宽度在起作用。
+  const fit = Number.isFinite(box.height) && box.height > 0 && byWidth.height > box.height
+    ? { width: (box.height * natural.width) / natural.height, height: box.height }
+    : byWidth;
+  return { width: Math.max(1, Math.round(fit.width)), height: Math.max(1, Math.round(fit.height)) };
+}
+
+/** 整本预处理的顺序：从当前这一页起往前，再往回。
+ *
+ * `getPrefetchPages` 管的是「窗口里那几页要不要先取进来」，这一条管的是「整本档案
+ * 按什么次序处理完」——阅读器里开着超分 / 去码 / DLSSNR 时，只有窗口里那几页有结果
+ * 是不够的：翻到下一页仍然要现算。读漫画是一条直线，所以「接下来会读到哪儿」是唯一
+ * 值得提前算的方向，前面那些页从近到远排，往回的那一段只是补课、排在最后。
+ *
+ * 已经算过的页由调用方在取件时跳过（它们可能在重排之间已经被处理过），所以这里不必
+ * 先去重，也不必知道哪些页做过。 */
+export function sweepOrder(anchor: number, pageCount: number): number[] {
+  const count = Math.max(0, Math.floor(pageCount));
+  const start = Math.min(Math.max(0, Math.floor(anchor)), Math.max(0, count - 1));
+  const order: number[] = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const ahead = start + offset;
+    if (ahead < count) order.push(ahead);
+  }
+  for (let offset = 1; offset < count; offset += 1) {
+    const behind = start - offset;
+    if (behind >= 0) order.push(behind);
+  }
+  return order;
+}
+
 function clampPage(pageIndex: number, pageCount: number): number {
   if (pageCount <= 0) return 0;
   return Math.min(pageCount - 1, Math.max(0, Math.floor(pageIndex)));

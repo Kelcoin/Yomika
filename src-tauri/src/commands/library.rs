@@ -2903,7 +2903,7 @@ pub fn list_local_archives(
 
 /// 删除选中的本地档案：删的是磁盘上的文件，服务器上的那份档案不动。只认下载
 /// 目录里的直接子文件——这个命令的输入来自前端，不能变成「删任意路径」的接口。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_local_archives(
     app: tauri::AppHandle,
     paths: Vec<String>,
@@ -2939,7 +2939,7 @@ pub fn delete_local_archives(
 }
 
 /// 暂停：写信号，正在跑的那次传输会在下一块之前停下来，半份文件留在 `.part`。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pause_download(task_id: String, database: State<'_, Database>) -> CommandResult<()> {
     set_download_signal(&task_id, DownloadSignal::Paused);
     // 没在跑的任务（比如重启之后停下的那些）也要落到 paused，界面上的状态和
@@ -2955,7 +2955,7 @@ pub fn pause_download(task_id: String, database: State<'_, Database>) -> Command
 }
 
 /// 中止：删掉半份文件，任务收成 cancelled。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_download(task_id: String, database: State<'_, Database>) -> CommandResult<()> {
     set_download_signal(&task_id, DownloadSignal::Aborted);
     if let Ok(connection) = database.connection.lock() {
@@ -4227,7 +4227,7 @@ pub struct ReplaceArchivesInput {
     search_response_json: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn replace_archives(
     input: ReplaceArchivesInput,
     database: State<'_, Database>,
@@ -5481,7 +5481,7 @@ pub fn set_server_enabled_record(
     CommandResult::success(record)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_server_enabled(
     server_id: String,
     enabled: bool,
@@ -5603,7 +5603,7 @@ pub async fn save_server(
 
 /// 编辑已配置的服务器时把系统安全存储里的 API Key 读回来，让用户能看见自己
 /// 之前配置的值。Key 只在本机弹窗中展示，不经过网络。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_server_api_key(scope_id: String) -> CommandResult<String> {
     match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => CommandResult::success(value),
@@ -5615,7 +5615,7 @@ pub fn read_server_api_key(scope_id: String) -> CommandResult<String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
@@ -5744,7 +5744,7 @@ pub async fn check_server_status(
     Ok(CommandResult::success(statuses))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_archives(
     server_id: String,
     database: State<'_, Database>,
@@ -5771,7 +5771,7 @@ pub struct ArchiveIdentity {
 
 /// 去重页只读这五个字段（id/标题/标签/页数/体积）。整库返回全字段记录
 /// 会让序列化体积和前端的逐条 zod 校验跟着不相关的字段一起涨。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_archive_identities(
     server_id: String,
     database: State<'_, Database>,
@@ -5806,7 +5806,7 @@ pub fn list_archive_identities(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_archives_page(
     input: ArchiveQueryInput,
     database: State<'_, Database>,
@@ -5824,7 +5824,7 @@ pub fn list_archives_page(
 /// The shelves (home, history, favourites, to-read) hold a handful of archive
 /// ids and need the records behind them. Reading the whole library to resolve
 /// fourteen titles scaled with the library instead of with the shelf.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_archives_by_ids(
     server_id: String,
     archive_ids: Vec<String>,
@@ -6351,7 +6351,7 @@ fn read_search_preset(
 /// Saved searches: the library toolbar state under a name. Stored per scope and
 /// journalled like the watchlist, so a preset made on one device arrives on the
 /// next sync instead of living only in local settings.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_search_preset(
     input: SearchPresetInput,
     database: State<'_, Database>,
@@ -6374,7 +6374,7 @@ pub fn save_search_preset(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_search_preset(
     scope_id: String,
     preset_id: String,
@@ -6407,7 +6407,7 @@ pub fn delete_search_preset(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_search_presets(
     scope_id: String,
     database: State<'_, Database>,
@@ -6452,7 +6452,7 @@ pub fn list_search_presets(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_reading_list(
     scope_id: String,
     archive_id: String,
@@ -6478,7 +6478,7 @@ pub struct ArchiveMembershipStatus {
 
 /// 右键菜单要的两个布尔（在待看？在收藏？）。原先为了它们把整个待看列表
 /// 和整个收藏列表都拉过来——数据量跟着库走，而两个 PK 点查就够。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_archive_membership(
     scope_id: String,
     archive_id: String,
@@ -6512,7 +6512,7 @@ pub fn get_archive_membership(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_reading_list(
     scope_id: String,
     database: State<'_, Database>,
@@ -6550,7 +6550,7 @@ pub fn list_reading_list(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_watchlist(
     scope_id: String,
     archive_id: String,
@@ -6567,7 +6567,7 @@ pub fn set_watchlist(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_watchlist(
     scope_id: String,
     database: State<'_, Database>,
@@ -6755,7 +6755,7 @@ pub(crate) fn delete_history_records_in(
     Ok(removed)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_history_records(
     scope_id: String,
     archive_ids: Vec<String>,
@@ -6772,7 +6772,7 @@ pub fn delete_history_records(
 }
 
 /// 历史自动清理的入口：启动后的巡检与设置里的「立即清理」都走它。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn prune_history(database: State<'_, Database>) -> CommandResult<usize> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
@@ -6898,7 +6898,7 @@ fn prune_dangling_records_for_server(
 ///
 /// 正常路径用不着它：`verify_archives_exist` 与 `refresh_archives` 各自在拿到确定
 /// 答案之后顺手清理。留着它是为了让「清理」这件事本身可以被测试和手动触发。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn prune_dangling_records(
     server_id: String,
     database: State<'_, Database>,
@@ -6954,7 +6954,7 @@ pub fn list_reading_history(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_reading_progress(
     scope_id: String,
     archive_id: String,
@@ -6982,7 +6982,7 @@ pub fn load_reading_progress(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_task(task: TaskInput, database: State<'_, Database>) -> CommandResult<TaskRecord> {
     if !matches!(
         task.kind.as_str(),
@@ -7024,7 +7024,7 @@ fn query_tasks(connection: &rusqlite::Connection) -> Result<Vec<TaskRecord>, Str
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tasks(database: State<'_, Database>) -> CommandResult<Vec<TaskRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
@@ -7136,7 +7136,7 @@ fn validate_upload_path(file_path: &str) -> Result<(std::path::PathBuf, String),
     Ok((path, filename))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_task(
     id: String,
     update: TaskUpdateInput,
@@ -7172,7 +7172,7 @@ pub fn update_task(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn retry_task(id: String, database: State<'_, Database>) -> CommandResult<TaskRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,

@@ -24,13 +24,17 @@
    An enhanced page is the same picture at up to twice the pixels, and an image
    sized by its own natural size is therefore drawn twice as large wherever the
    source was smaller than the fit box — so a zoomed page changed magnification
-   the moment inference finished. The pin is a `min()` rather than a bare
-   max-width so the clamps here still apply: a page larger than its slot is still
-   scaled down to it. */
+   the moment inference finished. 尺寸由 `domain/reader.ts:fitPageSize` 算好写进
+   `--reader-page-fit-width/height`：小图会被**放大**到贴合视口（`max-width` 只能
+   缩小，300×400 的图在 1280×900 里只会保持原样、四周全是黑边），所以这里写的是
+   `width`/`height` 而不是 `max-`。`min(100%, …)` 只兜住布局意外——算出来的尺寸本来
+   就不会超过它那一格。 */
 .reader-page {
   display: block;
-  max-width: min(100%, var(--reader-page-max-width, 100%));
-  max-height: min(100dvh, var(--reader-page-max-height, 100dvh));
+  width: min(100%, var(--reader-page-fit-width, 100%));
+  /* 兜底用 `100dvh` 而不是 `100%`：格子（`.reader-slot`）的高度是内容撑开的，
+     对它写百分比高度等于 auto，整条声明会被丢掉。 */
+  height: min(100dvh, var(--reader-page-fit-height, 100dvh));
   object-fit: contain;
   user-select: none;
 }
@@ -148,6 +152,9 @@
 
 .reader-webtoon .reader-page {
   max-width: min(100%, 900px);
+  /* 连续滚动里高度由宽度和比例定，不能被视口高度截断——`fitPageSize` 给的是一个
+     宽度、无限高的格子，算出来的高度就是槽位高度用的那一个。 */
+  height: auto;
   max-height: none;
 }
 
@@ -266,10 +273,23 @@
   pointer-events: none;
 }
 
+/* 两条栏的出入场。入场是一条 CSS 动画（挂上去就播），出场由 `is-leaving` 触发，
+   播完再由 React 摘掉（见 `ReaderScreen` 的 `useDelayedUnmount`）。
+   填充值用 `backwards` 而不是 `both`：动画结束后留着的那点 opacity/transform 也是
+   「非 none 的 transform」，会把元素变成 `position: fixed` 子元素的包含块。
+   「减少动效」由 base.css 那条通杀规则收掉，这里不必再写一份。 */
+@keyframes reader-chrome-top-in { from { opacity: 0; transform: translateY(-8px); } }
+@keyframes reader-chrome-top-out { to { opacity: 0; transform: translateY(-8px); } }
+@keyframes reader-chrome-bottom-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes reader-chrome-bottom-out { to { opacity: 0; transform: translateY(8px); } }
+
 /* M3 small top app bar: a 64dp container (plus the safe area), 4dp of inline
    padding (TopAppBarHorizontalPadding), a 4dp inset before the title, and 24dp
    icons. Deliberately taller than the shell's 44px window title bar: the reader
-   is its own full-bleed mode, and its chrome is the only chrome on screen. */
+   is its own full-bleed mode, and its chrome is the only chrome on screen.
+   半透明的底色单独用是不够的：条下面压的是任意亮度的画面，透出来的边缘与笔触
+   会和标题、图标抢注意力。模糊抹掉那层纹理，底色保证对比度（见 tokens.css
+   `--reader-chrome` 那条注释）——两者是一件事的两半，只写一半就是「看不清」。 */
 .reader-chrome-top {
   position: absolute;
   top: 0;
@@ -281,8 +301,12 @@
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
   background: var(--reader-chrome);
+  backdrop-filter: blur(18px);
+  animation: reader-chrome-top-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
+
+.reader-chrome-top.is-leaving { animation: reader-chrome-top-out var(--duration-exit) var(--ease-exit) forwards; }
 
 /* 与详情页的标题同一条字重（理由见上面 `.reader-error-bar strong` 那条）。 */
 .reader-chrome-top strong {
@@ -413,7 +437,7 @@
    padding, actions as standard icon buttons with no gap between their boxes
    (IconButtonSpace = 0 — each box carries its own padding). The container is
    surface-container, one tonal step above the top bar, so the two ends of the
-   screen are not the same flat black. */
+   screen are not the same flat black. 模糊的理由与顶栏同一条。 */
 .reader-toolbar {
   position: absolute;
   right: 0;
@@ -428,8 +452,12 @@
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   background: var(--reader-bar-container);
+  backdrop-filter: blur(18px);
+  animation: reader-chrome-bottom-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
+
+.reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; }
 
 .reader-toolbar-group {
   display: flex;
@@ -729,8 +757,9 @@
 }
 
 /* 「减少透明度」下不需要模糊：半透明模糊是合成最贵的一类效果（每一帧都要重新采样
-   背后的内容），而它的观感在系统要求减少透明度时反而更差。底色本来就有 0.82/0.86
-   的不透明度，去掉模糊几乎看不出区别，合成开销少一大截。 */
+   背后的内容），而它的观感在系统要求减少透明度时反而更差。这时候缺的那一半由令牌
+   补上——tokens.css 在这条查询里把 --reader-chrome / --reader-bar-container 收成
+   不透明，所以下面只需要摘掉模糊本身。 */
 @media (prefers-reduced-transparency: reduce) {
   .reader-chrome-top,
   .reader-toolbar,

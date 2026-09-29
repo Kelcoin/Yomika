@@ -6,7 +6,7 @@ import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
-import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
+import { getPrefetchPages, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
 import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
@@ -38,6 +38,14 @@ interface ReaderContext {
  * entries nobody holds a reference to, so holding everything would pin every
  * upscaled page in memory and push the cache past its own limit. */
 const DERIVED_SESSION_BUDGET_BYTES = 64 * 1024 * 1024;
+
+/** 一页派生结果的三档，顺序就是优先级。
+ *
+ * `visible` 是屏幕上那一页，`neighbour` 是预取窗口里的，`background` 是整本预处理
+ * 顺手做的。用户看不见的那些页算得再快，也不该让正在看的那一页等一等——取件顺序
+ * 见 `runDerivedQueue`。 */
+type DerivedTier = 'visible' | 'neighbour' | 'background';
+const DERIVED_TIER_ORDER: Record<DerivedTier, number> = { visible: 0, neighbour: 1, background: 2 };
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
@@ -199,10 +207,28 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分/去码。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
    * 结果）；本地超分/去码是前两者的输入。 */
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; prefetch: boolean }>>([]);
+  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; tier: DerivedTier }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
-  const activeDerivedRef = useRef<{ pageIndex: number; prefetch: boolean; controller: AbortController }>();
+  const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
+  /** 正在跑 / 排队的那一页属于哪一档。叫停的时候要按档位判断：后台预处理那一档
+   * 按定义就不在可见页的范围内，不能因为它「不在范围内」被掐掉。 */
+  const derivedTierRef = useRef(new Map<number, DerivedTier>());
+  /** 这本档案里还没轮到、也还没算过的页，按 `sweepOrder` 摆好。
+   *
+   * 做成游标而不是两百条队列项，是因为队列每次可见页变化都要重排一遍：两百条会
+   * 跟着每一次翻页重扫。游标一次只交出一页，重排永远是常数级。 */
+  const derivedSweepRef = useRef<{ generation: number; anchor: number; order: number[] }>();
+  /** 后台预处理已经算出来的页。
+   *
+   * 它只用来让**预处理自己**不重复捡起同一页：翻页会让游标按新位置重排，重排出来
+   * 的顺序里还留在后退方向上的那些页就是已经做过的。前台请求不看这一份——预算把
+   * 结果挤出会话之后，用户真的翻到那一页时仍然要重新算给他看（尝试记录那时已经被
+   * `retainDerived` 还回去了），否则页面上还是原图。 */
+  const derivedWarmedRef = useRef(new Set<number>());
+  /** 当前这一轮的模型与档位。后台任务是从游标上补进队列的，取不到 `requestDerived`
+   * 的局部变量，所以在排这一轮的时候在这里留一份。 */
+  const derivedConfigRef = useRef<{ decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local' }>({ decensorModel: '', upscaleModel: '', engine: 'local' });
   /** 每页一次任务的取消牌（正在跑或正在排队的那一个）。切页、换开关、离开阅读器时
    * 全部 abort——前端 abort 会顺着 `taskId` 叫停原生那侧的循环（见 nativeImageCache）。 */
   const derivedAbortsRef = useRef(new Map<number, AbortController>());
@@ -270,7 +296,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         for (const handle of retired) imageCache.release(handle);
       }
       // Its attempt is un-spent again, or a page whose result was dropped for
-      // room would never be enhanced a second time.
+      // room would never be enhanced a second time. 后台预处理过的页也一样：它只是
+      // 不再被预处理重复捡起来（见 `derivedWarmedRef`），用户真的翻回去时仍然要
+      // 重新算给他看。
       derivedAttemptedRef.current.delete(oldest);
       dropped.push(oldest);
     }
@@ -312,6 +340,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
+    derivedTierRef.current.clear();
+    derivedSweepRef.current = undefined;
+    derivedWarmedRef.current.clear();
     visiblePagesRef.current = new Set();
     derivedGenerationRef.current += 1;
     setDerivedPages((current) => current.size === 0 ? current : new Map());
@@ -435,6 +466,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
+    derivedTierRef.current.clear();
+    derivedSweepRef.current = undefined;
+    derivedWarmedRef.current.clear();
     // 设置换了就是新的一轮：上一轮说过的「某一档没跑成」不该让这一轮闭嘴。
     censoredFailureRef.current.clear();
     upscaleFailureRef.current.clear();
@@ -457,11 +491,39 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     showToast(`${label}这一步没跑成，这一页显示的是可用的那一版（细节在错误日志里）。`, 'error');
   }, [showToast]);
 
+  /** 把后台游标上的下一页放进队列。
+   *
+   * 整本预处理是一件一件做的：队列里同时只有一条后台任务，剩下的还在游标上。这样
+   * 「翻一页就重排一次队列」永远是常数级的——把整本排成任务列表的话，每次可见页
+   * 变化都要重扫两百条。 */
+  const pumpSweep = useCallback(() => {
+    const context = contextRef.current;
+    const sweep = derivedSweepRef.current;
+    if (!context || !sweep || sweep.generation !== derivedGenerationRef.current) return;
+    const config = derivedConfigRef.current;
+    while (sweep.order.length > 0) {
+      const pageIndex = sweep.order.shift();
+      if (pageIndex === undefined) break;
+      if (derivedAttemptedRef.current.has(pageIndex) || derivedWarmedRef.current.has(pageIndex)) continue;
+      if (derivedQueueRef.current.some((job) => job.pageIndex === pageIndex)) continue;
+      derivedQueueRef.current.push({ pageIndex, generation: sweep.generation, ...config, tier: 'background' });
+      return;
+    }
+  }, []);
+
   const runDerivedQueue = useCallback(async () => {
     if (derivedBusyRef.current) return;
     derivedBusyRef.current = true;
     try {
-      while (derivedQueueRef.current.length > 0) {
+      for (;;) {
+        // 用户已经离开阅读器（路由被留在后面）时不该再占着那一道全局推理闸：整本
+        // 预处理是这次阅读起的头，人不在就没有理由继续跑下去。
+        if (!pageActiveRef.current) break;
+        // 队列空了就从后台游标补一件。前台任务永远排在它前面——预处理是顺手做的，
+        // 不是承诺：正在读的那一页等不到结果，这个功能就是坏的。
+        if (derivedQueueRef.current.length === 0) pumpSweep();
+        if (derivedQueueRef.current.length === 0) break;
+        derivedQueueRef.current.sort((a, b) => DERIVED_TIER_ORDER[a.tier] - DERIVED_TIER_ORDER[b.tier]);
         const job = derivedQueueRef.current.shift();
         if (!job) break;
         const { pageIndex } = job;
@@ -477,7 +539,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const taskBase = `${context.generation}:${job.generation}:${pageIndex}:${derivedTaskSeqRef.current += 1}`;
         const controller = new AbortController();
         derivedAbortsRef.current.set(pageIndex, controller);
-        activeDerivedRef.current = { pageIndex, prefetch: job.prefetch, controller };
+        derivedTierRef.current.set(pageIndex, job.tier);
+        activeDerivedRef.current = { pageIndex, tier: job.tier, controller };
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
           /** 第一步：去码（双开时也单独跑，不再塞进超分那一次调用里）。
@@ -594,13 +657,22 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           // 路径：`retainDerived` 会把这一页换到更好的那一版（同一版则什么都不做），
           // 而不是把更好的那一版丢掉。
           retainDerived(pageIndex, derived);
+          // 后台预处理这一页就算做完了，记一笔：内存预算以后把它挤出会话时不再重算
+          // （整本预处理要是有「做完又重做」的页，它永远走不到后面）。
+          if (job.tier === 'background') derivedWarmedRef.current.add(pageIndex);
           // Yield between pages so navigation/input can be serviced promptly on
           // slower devices while the native inference worker continues.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         } finally {
           if (activeDerivedRef.current?.controller === controller) activeDerivedRef.current = undefined;
-          if (controller.signal.aborted) derivedAttemptedRef.current.delete(pageIndex);
+          if (controller.signal.aborted) {
+            derivedAttemptedRef.current.delete(pageIndex);
+            // 被「让位」掐掉的后台任务退回游标队首：整本预处理不该因为让了一次路就
+            // 永远漏掉这一页（让位只发生在用户翻页时，所以它很快会再轮到）。
+            if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
+          }
           derivedAbortsRef.current.delete(pageIndex);
+          derivedTierRef.current.delete(pageIndex);
           markDeriving(pageIndex, false);
           setDerivingStage(undefined);
         }
@@ -612,15 +684,27 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
-  /** Called by the reader with the pages actually on screen. */
+  /** Called by the reader with the pages actually on screen.
+   *
+   * 这个函数只负责「屏幕上这几页 + 预取窗口」——它说的就是可见范围，改不得。整本
+   * 预处理是**另一件事**：可见页排完之后，从游标上继续往后做（见 `pumpSweep`），
+   * 所以一本两百页的档案不会只剩视口里那几页有结果。 */
   const requestDerived = useCallback((indexes: readonly number[]) => {
     visiblePagesRef.current = new Set(indexes);
-    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured && !remoteConfigured) return;
+    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured && !remoteConfigured) {
+      // 增强全关：这一轮连同后台预处理一起作废，重新打开时从头排一次。
+      derivedSweepRef.current = undefined;
+      return;
+    }
     const engine: 'remote' | 'dlssnr' | 'local' = remoteConfigured
       ? 'remote'
       : dlssnrConfigured
         ? 'dlssnr'
         : 'local';
+    const decensorModel = decensorEnabled ? preferences.decensorModel : '';
+    const upscaleModel = upscaleEnabled ? preferences.upscaleModel : '';
+    // 后台任务从游标补进队列时取不到这里的局部变量，所以在排这一轮的时候留一份。
+    derivedConfigRef.current = { decensorModel, upscaleModel, engine };
     let queued = false;
     const context = contextRef.current;
     // Only pages already inside the reader's configured preload window enter
@@ -631,27 +715,49 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       : [];
     const wanted = [...new Set([...indexes, ...neighbours])];
     const active = activeDerivedRef.current;
-    if (active?.prefetch && !indexes.includes(active.pageIndex) && indexes.some((index) => !derivedAttemptedRef.current.has(index))) {
-      active.controller.abort();
+    if (active) {
+      // 不在这次要的范围内就叫停——后台预处理那一件除外：它按定义就不在可见页的
+      // 范围里，拿 `wanted` 去筛它等于整本预处理永远只做第一页。这也是原来「只处理
+      // 视口内的图片」的另一半原因。
+      if (active.tier !== 'background' && !wanted.includes(active.pageIndex)) active.controller.abort();
+      // 用户翻到了一页还没有结果的页：正在跑的那一件让开。预处理是顺手做的，不是承诺。
+      if (active.tier === 'background' && indexes.some((index) => !derivedAttemptedRef.current.has(index))) {
+        active.controller.abort();
+      }
     }
-    derivedQueueRef.current = derivedQueueRef.current.filter((job) => wanted.includes(job.pageIndex));
+    // 只重排「看得见的那一档」：后台预处理排好的队不该因为滚了一下就被丢掉。
+    derivedQueueRef.current = derivedQueueRef.current.filter((job) => job.tier === 'background' || wanted.includes(job.pageIndex));
     for (const [index, controller] of derivedAbortsRef.current) {
-      if (!wanted.includes(index)) controller.abort();
+      if (wanted.includes(index)) continue;
+      if (derivedTierRef.current.get(index) === 'background') continue;
+      controller.abort();
     }
+    const visible = new Set(indexes);
     for (const index of wanted) {
+      // `derivedWarmedRef` 故意不参与这里：后台算过、又被内存预算挤掉的页，用户真的
+      // 翻到它时必须重新给一次结果——跳过它就等于页面上还是原图。
       if (derivedAttemptedRef.current.has(index) || derivedQueueRef.current.some((job) => job.pageIndex === index)) continue;
       derivedQueueRef.current.push({
         pageIndex: index,
         generation: derivedGenerationRef.current,
-        decensorModel: decensorEnabled ? preferences.decensorModel : '',
-        upscaleModel: upscaleEnabled ? preferences.upscaleModel : '',
+        decensorModel,
+        upscaleModel,
         engine,
-        prefetch: !indexes.includes(index),
+        tier: visible.has(index) ? 'visible' : 'neighbour',
       });
       queued = true;
     }
-    derivedQueueRef.current.sort((a, b) => Number(a.prefetch) - Number(b.prefetch));
-    if (queued) void runDerivedQueue();
+    // 整本预处理的游标。位置变了就重排一次：顺序跟着「接下来会读到哪儿」走，而不是
+    // 跟着打开这本档案时的那一页走。已经算过的页在取件时会被跳过。
+    const anchor = indexes[0];
+    if (context && anchor !== undefined) {
+      const sweep = derivedSweepRef.current;
+      if (!sweep || sweep.generation !== derivedGenerationRef.current || sweep.anchor !== anchor) {
+        derivedSweepRef.current = { generation: derivedGenerationRef.current, anchor, order: sweepOrder(anchor, context.paths.length) };
+      }
+    }
+    // 队列里可能已经有后台那一档的活，所以这里不能只看 `queued`。
+    if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
   }, [decensorEnabled, dlssnrConfigured, prefetchDistance, preferences.decensorModel, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
 
   // A switch above the canvas changed what the derived renditions would be, so

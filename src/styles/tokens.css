@@ -188,11 +188,15 @@
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
     --reader-primary: #ffb4a9;
-    --reader-chrome: rgb(5 5 7 / 0.82);
+    --reader-chrome: rgb(5 5 7 / 0.9);
     /* Translucency plus backdrop blur stands in for M3's tonal elevation (see
        docs/03-visual-system.md §3.6): the container is surface-container, and
-       the blur keeps the artwork legible underneath it. */
-    --reader-bar-container: rgb(26 27 30 / 0.86);
+       the blur keeps the artwork legible underneath it.
+       底色与模糊是一件事的两半，不能只留一半：条下面压的是任意亮度的画面，
+       单靠底色透出来的高频边缘会和标题、图标抢注意力（看着就是「看不清」）。
+       0.9/0.92 是模糊之外再补的一档——blur 抹掉画面的纹理，底色保证文字与图标
+       的对比度不随翻到哪一页而变。 */
+    --reader-bar-container: rgb(26 27 30 / 0.92);
     --reader-border: rgb(244 241 248 / 0.24);
     --reader-border-muted: rgb(244 241 248 / 0.16);
     /* State layer over a control. M3 asks for 8% on hover and 10% on press;
@@ -227,7 +231,10 @@
     /* Selected disc: a wider, softer halo instead of a tick — the state has to
        read against a bright cover without drawing a glyph on the disc. */
     --shadow-check-selected: 0 2px 10px rgb(0 0 0 / 0.55);
-    --shadow-progress: 0 -2px 3px rgb(0 0 0 / 0.3), 2px 0 3px rgb(0 0 0 / 0.3), 0 2px 3px rgb(0 0 0 / 0.3);
+    /* 卡片进度条落在封面与正文的接缝上，两端顶到卡片边缘。它要的是「分开这两层」，
+       不是「浮在卡片上面」：原来三面各一圈 0.3 的投影在封面上糊出一道黑边，进度条
+       看着像贴上去的另一件东西。只留向下的一道浅影，勾出接缝就够。 */
+    --shadow-progress: 0 1px 2px rgb(0 0 0 / 0.18);
 
     /* ---- Controls ------------------------------------------------------- */
     --control-background: #f5f2ed;
@@ -625,5 +632,17 @@
     --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.52);
     --shadow-tooltip: 0 6px 16px rgb(0 0 0 / 0.42);
     --shadow-card: 0 4px 12px rgb(0 0 0 / 0.34);
+  }
+
+  /* 「减少透明度」：系统替用户说的是「别拿透视当装饰」，而模糊正是这一档效果的
+     本体（见 reader.css 那条媒体查询）。少了一半就得把另一半补回去——底色收成不
+     透明，文字与图标的对比度才不依赖读者背后翻到哪一页。在令牌这一层收口，是因为
+     所有阅读器条状物（顶栏、底栏、页码胶囊、处理中胶囊）都从这两个变量取值：
+     逐个元素去改，迟早漏掉一个，而漏掉的那个正好落在画面上。 */
+  @media (prefers-reduced-transparency: reduce) {
+    :root {
+      --reader-chrome: #0b0b0e;
+      --reader-bar-container: #1b1c1f;
+    }
   }
 }

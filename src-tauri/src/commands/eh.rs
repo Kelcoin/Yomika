@@ -260,7 +260,7 @@ fn uuid_suffix() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_eh_account(
     input: SaveEhAccountInput,
     database: State<'_, Database>,
@@ -272,7 +272,7 @@ pub fn save_eh_account(
     save_eh_account_record(&mut connection, &SystemEhCookieStore, input)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_eh_accounts(database: State<'_, Database>) -> CommandResult<Vec<EhAccountRecord>> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -305,7 +305,7 @@ pub fn list_eh_accounts(database: State<'_, Database>) -> CommandResult<Vec<EhAc
     CommandResult::success(rows.filter_map(Result::ok).collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_eh_account_cookie(
     account_id: String,
     database: State<'_, Database>,
@@ -320,7 +320,7 @@ pub fn read_eh_account_cookie(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_eh_account(account_id: String, database: State<'_, Database>) -> CommandResult<()> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -2468,7 +2468,7 @@ pub async fn fetch_eh_forum_username(
 }
 
 /// 手动设定账户显示名（网页登录抓取失败或用其它方式登录时，用户自行填写）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_eh_username_hint(
     account_id: String,
     username: String,
@@ -2687,7 +2687,7 @@ pub async fn fetch_eh_my_tags(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_eh_my_tags(
     account_id: String,
     database: State<'_, Database>,

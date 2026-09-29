@@ -995,6 +995,10 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
 }) {
   const [src, setSrc] = useState<string>();
   const [retry, setRetry] = useState(0);
+  /** 重试用尽之后它就不是「还在加载」了。占位块照旧占着位置，但不该再闪：
+   * `skeleton-shimmer` 动的是 background-position，是主线程每帧重画——一屏几十张
+   * 取不回来的封面，就是几十个元素永远在画，而这正是窗口拖动/缩放之外的常驻开销。 */
+  const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const handleRef = useRef<ImageHandle>();
   useEffect(() => {
@@ -1004,6 +1008,7 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
     let observer: IntersectionObserver | undefined;
     const controller = new AbortController();
     setSrc(undefined);
+    setFailed(false);
 
     const start = () => {
       void onLoad(archive, controller.signal).then((handle) => {
@@ -1016,6 +1021,8 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
           setSrc(handle.url);
         } else if (retry < 2) {
           retryTimer = window.setTimeout(() => setRetry((value) => value + 1), 1200 * (retry + 1));
+        } else {
+          setFailed(true);
         }
       });
     };
@@ -1041,7 +1048,7 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
       handleRef.current = undefined;
     };
   }, [archive, eager, onLoad, onRelease, retry]);
-  return <div ref={ref} className={`archive-row-thumb${!src ? ' is-skeleton' : ''}`}>{src ? <img src={src} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" onLoad={(event) => {
+  return <div ref={ref} className={`archive-row-thumb${src ? '' : ` is-skeleton${failed ? ' is-failed' : ''}`}`}>{src ? <img src={src} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" onLoad={(event) => {
     const image = event.currentTarget;
     if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
   }} /> : <span aria-hidden="true" />}</div>;

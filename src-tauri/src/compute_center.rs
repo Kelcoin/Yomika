@@ -1170,7 +1170,7 @@ pub fn restore_on_launch(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 算力中心的现状：开没开、端口、地址、令牌。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCenterStatus> {
     let center = match center_of(&app) {
         Ok(center) => center,
@@ -1193,7 +1193,7 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
 
 /// 打开 / 关掉算力中心，或者换端口、换令牌。
 ///
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compute_center_configure(
     app: tauri::AppHandle,
     enabled: bool,
@@ -1279,7 +1279,7 @@ pub fn compute_center_configure(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compute_center_revoke_pairing(app: tauri::AppHandle, id: String) -> CommandResult<ComputeCenterStatus> {
     let center = match center_of(&app) {
         Ok(center) => center,

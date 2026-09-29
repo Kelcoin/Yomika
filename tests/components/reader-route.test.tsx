@@ -41,6 +41,39 @@ describe('reader route', () => {
     expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
     await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
+  it('preprocesses the whole archive, not just the pages in the viewport', async () => {
+    // 用户报的问题：开着 DLSSNR，只有视口里那几页会被处理，后面的页要翻到才现算。
+    // 队列原来每次可见页变化都把自己筛回「可见页 + 预取窗口」，所以整本档案里其余
+    // 的页永远不会被排上。可见页那一档后面现在接着一条后台队列，这一条盯的就是它。
+    const cache = getNativeImageCache();
+    const pageCount = 12;
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'sweep', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/sweep']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:dlssnr-0'));
+
+    // 只翻过一页，可见页那一档碰得到的只有第 1、2 页；剩下的十页只有后台预处理会做。
+    const dlssnrPages = () => load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex);
+    await waitFor(() => {
+      expect(new Set(dlssnrPages())).toEqual(new Set(Array.from({ length: pageCount }, (_, index) => index)));
+    }, { timeout: 10_000 });
+    // 可见的那一页排在后台那些页前面——预处理不该让正在读的这页等。
+    expect(dlssnrPages()[0]).toBe(0);
+  });
+
   function enhancedReader(pageCount: number, enhanced: (index: number) => Promise<ImageHandle>) {
     const cache = getNativeImageCache();
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'enhanced'

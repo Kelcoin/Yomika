@@ -614,7 +614,7 @@ pub fn model_release_url(
     crate::domain::result::CommandResult::success(asset_url(&prefix, &owner_repo, &tag, &path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_fetch_manifest(
     prefix: String,
     owner_repo: String,
@@ -670,7 +670,7 @@ pub struct ModelBundleDownloadInput {
     pub destination: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_download_bundle(
     app: tauri::AppHandle,
     input: ModelBundleDownloadInput,
@@ -764,7 +764,7 @@ pub fn model_release_download_bundle(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_list_upscalers() -> crate::domain::result::CommandResult<UpscaleCatalog> {
     match fetch_upscale_catalog_with_fallback(MODEL_RELEASE_REPO) {
         Ok(catalog) => crate::domain::result::CommandResult::success(catalog),
@@ -938,7 +938,7 @@ fn download_default(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_download(
     app: tauri::AppHandle,
     input: ModelDownloadInput,
@@ -983,7 +983,7 @@ pub struct ModelImportInput {
     pub manifest: ModelReleaseManifest,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_validate_import(
     input: ModelImportInput,
 ) -> crate::domain::result::CommandResult<()> {
@@ -1002,7 +1002,7 @@ pub struct ModelArchiveImportInput {
     pub manifest: ModelReleaseManifest,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_validate_archive(
     app: tauri::AppHandle,
     input: ModelArchiveImportInput,
@@ -1025,7 +1025,7 @@ pub struct ModelLocalImportInput {
     pub manifest: ModelReleaseManifest,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_validate_local(
     app: tauri::AppHandle,
     input: ModelLocalImportInput,
@@ -1059,7 +1059,7 @@ pub struct ModelActivateInput {
     pub install: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_release_activate(
     input: ModelActivateInput,
 ) -> crate::domain::result::CommandResult<()> {

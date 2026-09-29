@@ -629,10 +629,12 @@ describe('reader screen', () => {
       fireEvent.load(element);
     };
 
+    // 这一套用例的视口是 390×844（见文件顶部），单页那一格就是它。700×1000 按
+    // contain 贴合：贴住宽度（390），高度按比例 557。
     const plain = screen.getByRole('img', { name: '第 1 页' });
     measure(plain, 700, 1000);
-    expect(plain.style.getPropertyValue('--reader-page-max-width')).toBe('700px');
-    expect(plain.style.getPropertyValue('--reader-page-max-height')).toBe('1000px');
+    expect(plain.style.getPropertyValue('--reader-page-fit-width')).toBe('390px');
+    expect(plain.style.getPropertyValue('--reader-page-fit-height')).toBe('557px');
 
     // The enhanced rendition is the same picture at twice the pixels. Sized by its
     // own natural size it would be drawn twice as large, so a zoomed reader watched
@@ -645,8 +647,25 @@ describe('reader screen', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     const enhanced = screen.getByRole('img', { name: '第 1 页' });
     measure(enhanced, 1400, 2000);
-    expect(enhanced.style.getPropertyValue('--reader-page-max-width')).toBe('700px');
-    expect(enhanced.style.getPropertyValue('--reader-page-max-height')).toBe('1000px');
+    expect(enhanced.style.getPropertyValue('--reader-page-fit-width')).toBe('390px');
+    expect(enhanced.style.getPropertyValue('--reader-page-fit-height')).toBe('557px');
+  });
+
+  it('blows a page smaller than the viewport up to fill it', () => {
+    render(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
+      </MemoryRouter>,
+    );
+    const page = screen.getByRole('img', { name: '第 1 页' });
+    // 300×400 的小图在 390×844 里按 contain 贴合 = 390×520：**两个方向都比自然尺寸大**。
+    // 只写 `max-width`/`max-height` 是做不到的——它们只能缩小，这张图会保持 300×400、
+    // 四周全是黑边，那正是用户报的那一条。
+    Object.defineProperty(page, 'naturalWidth', { configurable: true, value: 300 });
+    Object.defineProperty(page, 'naturalHeight', { configurable: true, value: 400 });
+    fireEvent.load(page);
+    expect(page.style.getPropertyValue('--reader-page-fit-width')).toBe('390px');
+    expect(page.style.getPropertyValue('--reader-page-fit-height')).toBe('520px');
   });
 
   it('asks for enhancement only for the pages on screen', async () => {

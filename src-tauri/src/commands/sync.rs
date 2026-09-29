@@ -421,7 +421,12 @@ fn decode_sync_state(key: &[u8; 32], bytes: &[u8]) -> Result<SyncStateDocument, 
 
 const WEBDAV_KEYRING_SERVICE: &str = "app.yomika.webdav";
 
-pub trait WebdavCredentialStore {
+/// `Sync` 是 `async` 命令逼出来的要求，不是这里的设计偏好：`sync_remote_scope` 现在
+/// 是真正的 `async fn`（原来用 `block_on`，在运行时内部会 panic），而它把
+/// `&dyn WebdavCredentialStore` 一路带进 `sync_scope_impl` 的 `.await`——Tauri 要求命令
+/// 返回的 future 是 `Send`，而 `&T` 只有在 `T: Sync` 时才是 `Send`。两个实现都是
+/// 纯句柄（没有内部可变性），本来就满足。
+pub trait WebdavCredentialStore: Sync {
     fn set_credential(&self, credential_ref: &str, credential: &str) -> Result<(), String>;
     fn delete_credential(&self, credential_ref: &str) -> Result<(), String>;
     fn get_credential(&self, credential_ref: &str) -> Result<String, String>;
@@ -717,7 +722,7 @@ pub fn save_sync_account_record(
     CommandResult::success(record)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_sync_account(
     input: SaveSyncAccountInput,
     database: State<'_, Database>,
@@ -767,88 +772,101 @@ fn query_sync_accounts(connection: &Connection) -> Result<Vec<SyncAccountRecord>
 /// 不写任何东西：WebDAV 只做一次 PROPFIND，对象存储只做一次 HeadBucket；如果远端
 /// 已经有同步文档，再用当前凭据解开它——那一步同时证明了「这份文档当初就是这套凭据
 /// 加的密」，也就是换口令之后最常踩的那个坑。
+///
+/// 是真正的 `async fn`，不是 `block_on`：这个包装跑在 tokio worker 上，在运行时
+/// 内部再 `block_on` 会 panic「Cannot start a runtime from within a runtime」
+/// （`data/logs/crash.log` 里有记录），响应也就永远发不出去。
 #[tauri::command]
-pub fn test_sync_account(
+pub async fn test_sync_account(
+    input: SaveSyncAccountInput,
+    database: State<'_, Database>,
+) -> Result<CommandResult<String>, String> {
+    Ok(test_sync_account_inner(input, database).await)
+}
+
+/// 命令体。拆出来是因为宏的限制：带生命周期参数的 `async fn` 命令必须返回真正的
+/// `Result`，不能返回 `CommandResult`。里面的 `return CommandResult::failure(..)`
+/// 与原来在 `block_on` 闭包里时同意——它们从这个函数返回，包装再把结果交出去。
+
+async fn test_sync_account_inner(
     input: SaveSyncAccountInput,
     database: State<'_, Database>,
 ) -> CommandResult<String> {
-    tauri::async_runtime::block_on(async move {
-        let kind = match input.kind.trim() {
-            "s3" => "s3",
-            _ => "webdav",
-        };
-        if input.base_url.trim().is_empty()
-            || (kind == "s3" && input.bucket.trim().is_empty())
-            || (kind == "s3" && input.username.trim().is_empty())
-        {
-            return CommandResult::failure("INVALID_RESPONSE", "先填好地址、桶与 Access Key ID", false);
-        }
-        // 表单里可能是空凭据（编辑时留空＝沿用）：那就取库里那一份。
-        let credential = if input.credential.is_empty() {
-            let stored = {
-                let connection = match database.connection.lock() {
-                    Ok(connection) => connection,
-                    Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-                };
-                connection
-                    .query_row(
-                        "SELECT credential_ref FROM sync_accounts WHERE id = ?1",
-                        params![input.id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok()
+    let kind = match input.kind.trim() {
+        "s3" => "s3",
+        _ => "webdav",
+    };
+    if input.base_url.trim().is_empty()
+        || (kind == "s3" && input.bucket.trim().is_empty())
+        || (kind == "s3" && input.username.trim().is_empty())
+    {
+        return CommandResult::failure("INVALID_RESPONSE", "先填好地址、桶与 Access Key ID", false);
+    }
+    // 表单里可能是空凭据（编辑时留空＝沿用）：那就取库里那一份。
+    let credential = if input.credential.is_empty() {
+        let stored = {
+            let connection = match database.connection.lock() {
+                Ok(connection) => connection,
+                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
             };
-            match stored.and_then(|reference| SystemWebdavCredentialStore.get_credential(&reference).ok()) {
-                Some(credential) => credential,
-                None => {
-                    return CommandResult::failure("INVALID_RESPONSE", "请先填写凭据再测试", false)
-                }
-            }
-        } else {
-            input.credential.clone()
+            connection
+                .query_row(
+                    "SELECT credential_ref FROM sync_accounts WHERE id = ?1",
+                    params![input.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
         };
+        match stored.and_then(|reference| SystemWebdavCredentialStore.get_credential(&reference).ok()) {
+            Some(credential) => credential,
+            None => {
+                return CommandResult::failure("INVALID_RESPONSE", "请先填写凭据再测试", false)
+            }
+        }
+    } else {
+        input.credential.clone()
+    };
 
-        let store = match RemoteStore::connect(
-            kind,
-            input.base_url.trim().trim_end_matches('/'),
-            input.bucket.trim().trim_matches('/'),
-            input.username.trim(),
-            &credential,
-        ) {
-            Ok(store) => store,
-            Err(error) => return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false),
-        };
-        if let Err(error) = store.probe().await {
-            let (code, message) = describe_probe_error(error);
-            return CommandResult::failure(code, message, false);
-        }
-        let account_id = if input.id.trim().is_empty() {
-            input.label.trim().to_string()
-        } else {
-            input.id.clone()
-        };
-        let key = derive_sync_key(&account_id, &credential);
-        match store.get_state(&account_id).await {
-            Ok(Some(remote)) => match decode_sync_state(&key, &remote.ciphertext) {
-                Ok(state) => CommandResult::success(format!(
-                    "连接正常：远端已有同步文档（{} 个对象），当前凭据可以解开",
-                    state.objects.len()
-                )),
-                Err(_) => CommandResult::failure(
-                    "INVALID_RESPONSE",
-                    "连接正常，但远端文档解不开：这台设备上的凭据和当初上传时不一致。换成当初那串口令，或在账户菜单里「重置远端」后按本机重写一份。",
-                    false,
-                ),
-            },
-            Ok(None) => CommandResult::success(
-                "连接正常：远端还没有同步文档，第一次同步会创建它".to_string(),
+    let store = match RemoteStore::connect(
+        kind,
+        input.base_url.trim().trim_end_matches('/'),
+        input.bucket.trim().trim_matches('/'),
+        input.username.trim(),
+        &credential,
+    ) {
+        Ok(store) => store,
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false),
+    };
+    if let Err(error) = store.probe().await {
+        let (code, message) = describe_probe_error(error);
+        return CommandResult::failure(code, message, false);
+    }
+    let account_id = if input.id.trim().is_empty() {
+        input.label.trim().to_string()
+    } else {
+        input.id.clone()
+    };
+    let key = derive_sync_key(&account_id, &credential);
+    match store.get_state(&account_id).await {
+        Ok(Some(remote)) => match decode_sync_state(&key, &remote.ciphertext) {
+            Ok(state) => CommandResult::success(format!(
+                "连接正常：远端已有同步文档（{} 个对象），当前凭据可以解开",
+                state.objects.len()
+            )),
+            Err(_) => CommandResult::failure(
+                "INVALID_RESPONSE",
+                "连接正常，但远端文档解不开：这台设备上的凭据和当初上传时不一致。换成当初那串口令，或在账户菜单里「重置远端」后按本机重写一份。",
+                false,
             ),
-            Err(error) => {
-                let (code, message) = describe_probe_error(error);
-                CommandResult::failure(code, message, false)
-            }
+        },
+        Ok(None) => CommandResult::success(
+            "连接正常：远端还没有同步文档，第一次同步会创建它".to_string(),
+        ),
+        Err(error) => {
+            let (code, message) = describe_probe_error(error);
+            CommandResult::failure(code, message, false)
         }
-    })
+    }
 }
 
 /// 把探测失败翻译成使用者能照着修的说法：401/403 是凭据与权限，其余照原样报。
@@ -872,7 +890,7 @@ fn describe_probe_error(error: crate::network::remote::RemoteError) -> (&'static
 }
 
 /// 「同步范围」是一个独立的设置行：勾选后立刻写回账户，不必再走账户表单。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_sync_scope(
     account_id: String,
     sync_scope: String,
@@ -899,7 +917,7 @@ pub fn save_sync_scope(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sync_accounts(
     database: State<'_, Database>,
 ) -> CommandResult<Vec<SyncAccountRecord>> {
@@ -1587,62 +1605,73 @@ pub(crate) fn recover_stuck_sync_journal(connection: &Connection) -> Result<usiz
     Ok(recovered)
 }
 
-/// (async) 整个网络同步最长可达分钟级（WebDAV/S3 超时 30/60s），
-/// 不能让 block_on 占着主线程把 UI 冻住。
-#[tauri::command(async)]
-pub fn sync_remote_scope(
+/// 把一个账户的一个范围推到远端并合回来。
+///
+/// 是真正的 `async fn`，不是 `block_on`：整个网络同步最长可达分钟级（WebDAV/S3
+/// 超时 30/60s），在运行时内部 `block_on` 会直接 panic，而占着调用线程跑就是冻住
+/// 窗口。
+#[tauri::command]
+pub async fn sync_remote_scope(
+    account_id: String,
+    scope_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<usize>, String> {
+    Ok(sync_remote_scope_inner(account_id, scope_id, database).await)
+}
+
+/// 命令体。拆出来的理由同 `test_sync_account_inner`。
+
+async fn sync_remote_scope_inner(
     account_id: String,
     scope_id: String,
     database: State<'_, Database>,
 ) -> CommandResult<usize> {
-    tauri::async_runtime::block_on(async move {
-        let (account, key, local_state, pending, enabled) = {
-            let connection = match database.connection.lock() {
-                Ok(connection) => connection,
-                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-            };
-            let account = match read_sync_account(&connection, &account_id) {
-                Ok(account) => account,
-                Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
-            };
-            let key = match load_sync_key(&connection, &SystemWebdavCredentialStore, &account_id) {
-                Ok(key) => key,
-                Err(error) => return CommandResult::failure("UNKNOWN", error, false),
-            };
-            // 要推的是本地这一侧的全部对象（日志折叠而来，含墓碑），不只是本批新增：
-            // 远端文档是「当前状态」，缺了旧对象就等于把它们删掉了。类别上只带上账户
-            // 勾选的：没勾的既不出门，也不落地。
-            let enabled = parse_sync_scope(&account.sync_scope);
-            // 折叠前先把冗余行收掉：每个对象只留最后一版，更早的行仅当已推完
-            // （completed）才删。折叠结果不变，同步与日志体积都不再随历史线性涨。
-            let _ = compact_journal(&connection, &[&scope_id, GLOBAL_SCOPE]);
-            let local_state =
-                match build_local_state(&connection, &[&scope_id, GLOBAL_SCOPE], &enabled) {
-                    Ok(state) => state,
-                    Err(error) => return CommandResult::failure("UNKNOWN", error, true),
-                };
-            let mut pending = match pending_journal_entries(&connection, &scope_id) {
-                Ok(records) => records,
+    let (account, key, local_state, pending, enabled) = {
+        let connection = match database.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        };
+        let account = match read_sync_account(&connection, &account_id) {
+            Ok(account) => account,
+            Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
+        };
+        let key = match load_sync_key(&connection, &SystemWebdavCredentialStore, &account_id) {
+            Ok(key) => key,
+            Err(error) => return CommandResult::failure("UNKNOWN", error, false),
+        };
+        // 要推的是本地这一侧的全部对象（日志折叠而来，含墓碑），不只是本批新增：
+        // 远端文档是「当前状态」，缺了旧对象就等于把它们删掉了。类别上只带上账户
+        // 勾选的：没勾的既不出门，也不落地。
+        let enabled = parse_sync_scope(&account.sync_scope);
+        // 折叠前先把冗余行收掉：每个对象只留最后一版，更早的行仅当已推完
+        // （completed）才删。折叠结果不变，同步与日志体积都不再随历史线性涨。
+        let _ = compact_journal(&connection, &[&scope_id, GLOBAL_SCOPE]);
+        let local_state =
+            match build_local_state(&connection, &[&scope_id, GLOBAL_SCOPE], &enabled) {
+                Ok(state) => state,
                 Err(error) => return CommandResult::failure("UNKNOWN", error, true),
             };
-            if let Ok(global_pending) = pending_journal_entries(&connection, GLOBAL_SCOPE) {
-                pending.extend(global_pending);
-            }
-            (account, key, local_state, pending, enabled)
+        let mut pending = match pending_journal_entries(&connection, &scope_id) {
+            Ok(records) => records,
+            Err(error) => return CommandResult::failure("UNKNOWN", error, true),
         };
+        if let Ok(global_pending) = pending_journal_entries(&connection, GLOBAL_SCOPE) {
+            pending.extend(global_pending);
+        }
+        (account, key, local_state, pending, enabled)
+    };
 
-        sync_scope_impl(
-            &database,
-            &account,
-            &key,
-            &scope_id,
-            local_state,
-            pending,
-            &enabled,
-            &SystemWebdavCredentialStore,
-        )
-        .await
-    })
+    sync_scope_impl(
+        &database,
+        &account,
+        &key,
+        &scope_id,
+        local_state,
+        pending,
+        &enabled,
+        &SystemWebdavCredentialStore,
+    )
+    .await
 }
 
 /// 按勾选的同步范围导出的那份文件。
@@ -1721,7 +1750,7 @@ pub(crate) fn export_scoped_document(
 ///
 /// 覆盖本机**所有**服务器范围，而不只是当前那台：同步一次只推当前服务器，是因为远端
 /// 文档是按账户走的；导出的用途是备份与换机器，漏掉别的服务器就等于漏掉一半记录。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_scoped_data(
     categories: String,
     database: State<'_, Database>,
@@ -1778,7 +1807,7 @@ pub struct ScopedImportReport {
 /// 写日志是必须的：不写，导入的数据就只活在这台机器上，下次同步推出去的文档里没有
 /// 它们，另一台设备也就永远看不到。类别没勾的不落地——勾选是「要不要这类数据」的
 /// 开关，导入不该绕过它。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_scoped_data(
     payload: String,
     categories: String,
@@ -1864,7 +1893,7 @@ pub(crate) fn import_scoped_document(
 }
 
 /// 「编辑」表单要回显已存的口令。凭据平时只在系统安全存储里，这里按需读一次。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn sync_account_credential(
     account_id: String,
     database: State<'_, Database>,
@@ -1885,39 +1914,49 @@ pub fn sync_account_credential(
 
 /// 把远端那份文档删掉（「重置远端」）。用于远端状态坏掉又不想动本地数据的情形——
 /// 比如口令换过、旧密文再也解不开：重置后下次同步会按本地重新写一份。
+///
+/// 是真正的 `async fn`，不是 `block_on`：理由同 `test_sync_account`——在运行时
+/// 内部 `block_on` 会 panic，而占着调用线程跑就是整个网络往返期间窗口冻住。
 #[tauri::command]
-pub fn reset_remote_state(
+pub async fn reset_remote_state(
+    account_id: String,
+    database: State<'_, Database>,
+) -> Result<CommandResult<()>, String> {
+    Ok(reset_remote_state_inner(account_id, database).await)
+}
+
+/// 命令体。拆出来的理由同 `test_sync_account_inner`。
+
+async fn reset_remote_state_inner(
     account_id: String,
     database: State<'_, Database>,
 ) -> CommandResult<()> {
-    tauri::async_runtime::block_on(async move {
-        let (account, credential) = {
-            let connection = match database.connection.lock() {
-                Ok(connection) => connection,
-                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-            };
-            let account = match read_sync_account(&connection, &account_id) {
-                Ok(account) => account,
-                Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
-            };
-            let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref)
-            {
-                Ok(credential) => credential,
-                Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
-            };
-            (account, credential)
+    let (account, credential) = {
+        let connection = match database.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
         };
-        let store = match RemoteStore::for_account(&account, &credential) {
-            Ok(store) => store,
-            Err(error) => {
-                return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false)
-            }
+        let account = match read_sync_account(&connection, &account_id) {
+            Ok(account) => account,
+            Err(error) => return CommandResult::failure("NOT_FOUND", error, false),
         };
-        match store.delete_state(&account.id).await {
-            Ok(()) => CommandResult::success(()),
-            Err(error) => CommandResult::failure("NETWORK", sync_error(error), true),
+        let credential = match SystemWebdavCredentialStore.get_credential(&account.credential_ref)
+        {
+            Ok(credential) => credential,
+            Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
+        };
+        (account, credential)
+    };
+    let store = match RemoteStore::for_account(&account, &credential) {
+        Ok(store) => store,
+        Err(error) => {
+            return CommandResult::failure("INVALID_RESPONSE", sync_error(error), false)
         }
-    })
+    };
+    match store.delete_state(&account.id).await {
+        Ok(()) => CommandResult::success(()),
+        Err(error) => CommandResult::failure("NETWORK", sync_error(error), true),
+    }
 }
 
 /// 远端存储的两种实现。同一份同步引擎（合并、条件写、重试）对两者完全一样，
@@ -2397,7 +2436,7 @@ fn claim_journal_entries(
     Ok(records)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn claim_sync_journal(
     scope_id: String,
     limit: i64,
@@ -2413,7 +2452,7 @@ pub fn claim_sync_journal(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn append_sync_journal(
     entry: SyncJournalInput,
     database: State<'_, Database>,
@@ -2428,7 +2467,7 @@ pub fn append_sync_journal(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sync_journal(
     scope_id: String,
     status: Option<String>,
@@ -2444,7 +2483,7 @@ pub fn list_sync_journal(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_sync_journal_state(
     input: SyncJournalStateInput,
     database: State<'_, Database>,

@@ -1,17 +1,17 @@
 import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
-import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, fitPageSize, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
 import { decodeImage } from '../lib/decodeImage';
+import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
@@ -36,6 +36,31 @@ const CHROME_AUTO_HIDE_MS = 4_500;
 /** Readoshi's page pill only borrows a moment over the artwork after a page
  * turn; long enough to read "3–4 / 82" and short enough to get out of the way. */
 const INDICATOR_FLASH_MS = 1_800;
+/** 两条栏的出场时长，与 `--duration-exit` 同一个数：CSS 动画播完才把元素摘掉。 */
+const CHROME_EXIT_MS = 260;
+
+/** 一条栏的「淡出之后才摘」。
+ *
+ * 入场是一条 CSS 动画（挂上去就播），出场要先把元素留在树上把动画播完。这件事原来
+ * 交给 `motion` 的 `AnimatePresence`，而它为两条淡入淡出把整个动画运行时拉进了阅读器
+ * 这一个 chunk（`ReaderRoute-*.js` 实测含 `motion` 的 visualElement / MotionConfig，
+ * 约 55KB gzip）。这里只要一个布尔值和一次定时器。 */
+function useDelayedUnmount(visible: boolean, ms: number): { mounted: boolean; leaving: boolean } {
+  const [state, setState] = useState({ mounted: visible, leaving: false });
+  useEffect(() => {
+    if (visible) {
+      setState((current) => current.mounted && !current.leaving ? current : { mounted: true, leaving: false });
+      return undefined;
+    }
+    setState((current) => current.mounted && !current.leaving ? { mounted: true, leaving: true } : current);
+    const timer = window.setTimeout(
+      () => setState((current) => current.mounted || current.leaving ? { mounted: false, leaving: false } : current),
+      ms,
+    );
+    return () => window.clearTimeout(timer);
+  }, [visible, ms]);
+  return state;
+}
 
 /** One of the two derived renditions, as the reader sees it. */
 export interface EnhancementSwitch {
@@ -99,8 +124,12 @@ interface ReaderScreenProps {
  *
  * `<img>` 换 `src` 的那一帧，浏览器会先把旧图扔掉——旧图 → 空 → 新图。超分/去码算完正好
  * 是这个动作（同一页从原图换成处理过的图），中间那一帧空档在阅读器的深色底上就是用户看到
- * 的黑闪。所以这里保留正在显示的那一张，新图 `decode()` 完了再换（见 `lib/decodeImage`）。 */
-function ReaderPageImage({ index, source, size, onMeasured, onDisplayed }: {
+ * 的黑闪。所以这里保留正在显示的那一张，新图 `decode()` 完了再换（见 `lib/decodeImage`）。
+ *
+ * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
+ * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
+ */
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
@@ -121,14 +150,14 @@ function ReaderPageImage({ index, source, size, onMeasured, onDisplayed }: {
       alt={`第 ${index + 1} 页`}
       src={shown}
       decoding="async"
-      style={size ? { '--reader-page-max-width': `${size.width}px`, '--reader-page-max-height': `${size.height}px` } as CSSProperties : undefined}
+      style={size ? { '--reader-page-fit-width': `${size.width}px`, '--reader-page-fit-height': `${size.height}px` } as CSSProperties : undefined}
       onLoad={(event) => {
         onMeasured(index, event.currentTarget);
         onDisplayed?.(index, shown);
       }}
     />
   );
-}
+});
 
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
   // 同一个 M3 指示器，全应用只此一个（它自己的深色画布由 .reader-page-status 上色）。
@@ -151,7 +180,7 @@ function readViewport() {
 
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
   const pageActive = usePageActive();
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   const goBack = useReturnNavigation();
   const [viewport, setViewport] = useState(readViewport);
   // Built once. A different archive arrives as an unmount, not a prop change:
@@ -180,15 +209,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const pinchStart = useRef<{ distance: number; x: number; y: number; zoom: ZoomState }>();
 
   function viewportPoint(x: number, y: number) {
-    const rect = rootRef.current?.getBoundingClientRect();
-    return { x: x - (rect?.left ?? 0) - (rect?.width || window.innerWidth) / 2, y: y - (rect?.top ?? 0) - (rect?.height || window.innerHeight) / 2 };
+    const box = rootBox();
+    return { x: x - box.left - box.width / 2, y: y - box.top - box.height / 2 };
   }
 
   function dragZoom(x: number, y: number) {
     const start = panStart.current;
     if (!start) return;
     gestureMovedRef.current ||= Math.abs(x - start.x) + Math.abs(y - start.y) > 5;
-    setZoom(panZoom(start.zoom, x - start.x, y - start.y, rootRef.current?.clientWidth || window.innerWidth, rootRef.current?.clientHeight || window.innerHeight));
+    const box = rootBox();
+    setZoom(panZoom(start.zoom, x - start.x, y - start.y, box.width, box.height));
   }
   const [thumbnails, setThumbnails] = useState<ReadonlyMap<number, string>>(() => new Map());
   /** Natural size per page index, recorded as images load. Feeds both the `auto`
@@ -200,6 +230,25 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [webtoonWidth, setWebtoonWidth] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const rootRef = useRef<HTMLElement>(null);
+  /** 画布自己的盒子，跟着 resize 量一次。
+   *
+   * 鼠标每移动一像素、每一次拖动、每一个滚轮刻度都要问「指到哪里 / 画布多宽」，
+   * 而 `getBoundingClientRect()` 与 `clientWidth` 在样式刚被改过时是一次**强制
+   * 布局**——每帧对着三张大图重排一次就是拖动跟手与否的差别。这块盒子只在窗口改
+   * 尺寸、换布局时才变，所以量一次存下来（下面那个 rAF 合并过的 resize effect 里）；
+   * 拿不到时再退回现场量。 */
+  const rootBoxRef = useRef<{ left: number; top: number; width: number; height: number }>({ left: 0, top: 0, width: 0, height: 0 });
+  const readRootBox = useCallback(() => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    const width = rect?.width || rootRef.current?.clientWidth || window.innerWidth;
+    const height = rect?.height || rootRef.current?.clientHeight || window.innerHeight;
+    rootBoxRef.current = { left: rect?.left ?? 0, top: rect?.top ?? 0, width, height };
+    return rootBoxRef.current;
+  }, []);
+  const rootBox = () => {
+    const box = rootBoxRef.current;
+    return box.width > 0 ? box : readRootBox();
+  };
   const webtoonRef = useRef<HTMLElement>(null);
   const zoomScaleRef = useRef(1);
   const layoutRef = useRef(effectiveLayout);
@@ -222,6 +271,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
   const [hoverChrome, setHoverChrome] = useState<'top' | 'bottom' | null | undefined>();
+  /** 同上，但给「每一次鼠标移动都会来的那条回调」用：同一个值写进 state 也是一次
+   * 调度，翻过这一层比较再写，静止在一条带里就不再重渲染。 */
+  const hoverChromeRef = useRef<'top' | 'bottom' | null | undefined>(undefined);
+  const setHover = useCallback((next: 'top' | 'bottom' | null | undefined) => {
+    if (hoverChromeRef.current === next) return;
+    hoverChromeRef.current = next;
+    setHoverChrome(next);
+  }, []);
   /** Bumped by any press inside the chrome, which restarts its auto-hide. */
   const [chromeKeepAlive, setChromeKeepAlive] = useState(0);
   const loadingPagesRef = useRef(new Set<number>());
@@ -309,6 +366,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     let frame: number | undefined;
     const measureNow = () => {
       frame = undefined;
+      readRootBox();
       setViewport((current) => (current.width === window.innerWidth && current.height === window.innerHeight
         ? current
         : { width: window.innerWidth, height: window.innerHeight }));
@@ -327,7 +385,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       window.removeEventListener('resize', measure);
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
-  }, [effectiveLayout, pageActive]);
+  }, [effectiveLayout, pageActive, readRootBox]);
 
   // `auto` used to be decided once, by the first page to load, and then never
   // revisited — so narrowing the window kept the spread it had chosen and
@@ -643,10 +701,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   /** Whether a click landed in one of the bands that summon the chrome. */
   function isInChromeBand(event: MouseEvent<HTMLElement>): boolean {
-    const element = rootRef.current;
-    const rect = element?.getBoundingClientRect();
-    const height = rect?.height || window.innerHeight;
-    const offset = event.clientY - (rect?.top ?? 0);
+    const rect = rootBox();
+    const height = rect.height;
+    const offset = event.clientY - rect.top;
     const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
     return offset <= band || offset >= height - band;
   }
@@ -678,7 +735,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
     dragFrame.current = undefined;
     const track = trackRef.current;
-    const width = rootRef.current?.clientWidth || window.innerWidth;
+    const width = rootBox().width;
     const intent = dx < 0 ? 'next' : 'previous';
     const current = readerStateRef.current;
     const sample = dragSample.current;
@@ -717,7 +774,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       setDrag(null);
       return;
     }
-    const width = rootRef.current?.clientWidth || window.innerWidth;
+    const width = rootBox().width;
     const previous = dragSample.current;
     const dt = elapsed - (previous?.elapsed ?? 0);
     dragSample.current = { dx, elapsed, velocity: dt > 0 ? (dx - (previous?.dx ?? 0)) / dt : (previous?.velocity ?? 0) };
@@ -732,7 +789,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   const handleTouchStart = useCallback((event: TouchEvent) => {
-    setHoverChrome(undefined);
+    setHover(undefined);
     if (sliding.current) return;
     if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview')) return;
     dragSample.current = undefined;
@@ -769,7 +826,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       const scale = Math.min(ZOOM_RUBBER_MAX, Math.max(ZOOM_RUBBER_MIN, raw < 1 ? 1 + (raw - 1) * 0.22 : raw));
       const point = viewportPoint(pinch.x, pinch.y);
       const anchored = zoomAtPoint(pinch.zoom, scale, point.x, point.y);
-      setZoom(panZoom(anchored, (first.clientX + second.clientX) / 2 - pinch.x, (first.clientY + second.clientY) / 2 - pinch.y, rootRef.current?.clientWidth || window.innerWidth, rootRef.current?.clientHeight || window.innerHeight));
+      const box = rootBox();
+      setZoom(panZoom(anchored, (first.clientX + second.clientX) / 2 - pinch.x, (first.clientY + second.clientY) / 2 - pinch.y, box.width, box.height));
       return;
     }
     if (panStart.current && event.touches[0]) { dragZoom(event.touches[0].clientX, event.touches[0].clientY); return; }
@@ -845,18 +903,19 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   const handleMouseMove = useCallback((event: MouseEvent<HTMLElement>) => {
     if (!event.buttons) {
-      const rect = rootRef.current?.getBoundingClientRect();
-      const height = rect?.height || window.innerHeight;
-      const y = event.clientY - (rect?.top ?? 0);
+      const rect = rootBox();
+      const height = rect.height;
+      const y = event.clientY - rect.top;
       const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
       const target = event.target as Element;
-      setHoverChrome(target.closest('.reader-toolbar') ? 'bottom' : target.closest('.reader-chrome-top') ? 'top' : y <= band ? 'top' : y >= height - band ? 'bottom' : null);
+      const next: 'top' | 'bottom' | null = target.closest('.reader-toolbar') ? 'bottom' : target.closest('.reader-chrome-top') ? 'top' : y <= band ? 'top' : y >= height - band ? 'bottom' : null;
+      setHover(next);
     }
     if (panStart.current && event.buttons === 1) { dragZoom(event.clientX, event.clientY); return; }
     const start = pointerStartRef.current;
     if (!start || event.buttons !== 1) return;
     trackDrag(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
-  }, [trackDrag]);
+  }, [setHover, trackDrag]);
 
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
     if (panStart.current) {
@@ -932,6 +991,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const chromeVisible = state.phase === 'chrome-visible';
   const topChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'top';
   const bottomChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'bottom';
+  const topPresence = useDelayedUnmount(topChromeVisible, CHROME_EXIT_MS);
+  const bottomPresence = useDelayedUnmount(bottomChromeVisible, CHROME_EXIT_MS);
   // The reader route has no app title bar, so on Windows it carries its own
   // window maximize control, top-right — rendered only inside the chrome
   // header, so an unobstructed read never shows window chrome over the page.
@@ -1031,15 +1092,40 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     transform: 'translate3d(0,0,0)',
   } as const;
 
+  /** 每页的显示尺寸：自然尺寸 contain 进它所在的那一格。
+   *
+   * 两张表按「这一格站几页」分：单页那一格的宽度是整个视口，双页那一格是半个。
+   * 表本身 memo 过，所以翻页时尺寸对象只有真的换了才换——`ReaderPageImage` 是
+   * `memo` 的，靠这一点把每次翻页的重渲染收在真正变了的那一两页上。 */
+  const fitSizes = useMemo(() => {
+    const single = new Map<number, { width: number; height: number }>();
+    const pair = new Map<number, { width: number; height: number }>();
+    const webtoon = effectiveLayout === 'webtoon';
+    // 连续滚动里高度不设限：宽度贴满那一列，高度由比例定，槽位高度用的也是这个式子。
+    const singleBox = webtoon
+      ? { width: webtoonSlotWidth, height: Number.POSITIVE_INFINITY }
+      : { width: viewport.width, height: viewport.height };
+    const pairBox = { width: viewport.width / 2, height: viewport.height };
+    // 只遍历量过的页：没量到的页没有可算的尺寸，遍历整本只是白走一遍。
+    for (const [index, natural] of pageSizes) {
+      const one = fitPageSize(natural, singleBox);
+      if (one) single.set(index, one);
+      if (webtoon) continue;
+      const two = fitPageSize(natural, pairBox);
+      if (two) pair.set(index, two);
+    }
+    return { single, pair };
+  }, [effectiveLayout, pageSizes, viewport.height, viewport.width, webtoonSlotWidth]);
+
   /** One page: the image, or why it is not there yet. Always a slot, even when
    * empty — a spread whose halves appeared one at a time used to re-centre when
    * the second arrived, shifting the page under the reader's eyes. */
-  const renderSlot = (index: number) => {
+  const renderSlot = (index: number, pagesInSlot = 1) => {
     const source = derivedPages?.get(index) ?? loadedPages[index];
     // Whatever rendition is on screen, the page draws at the size its first
     // measurement established: an enhanced page must not be drawn larger than the
     // plain one it replaced (see `.reader-page` in reader.css).
-    const size = pageSizes.get(index);
+    const size = (pagesInSlot > 1 ? fitSizes.pair : fitSizes.single).get(index);
     // `decoding="async"` 与「先解码再换」都在 ReaderPageImage 里：默认的 `auto` 允许"下一
     // 帧就要画它"时在主线程上同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈
     // ——它就是主线程画的。
@@ -1072,7 +1158,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         // middle of a page cannot flash the bars over what is being read. Hiding
         // is not: the bars swallow their own clicks, so if only the bands
         // dismissed there would be nowhere left to press.
-        if (chromeVisible || isInChromeBand(event)) { setHoverChrome(undefined); setState(toggleReaderChrome); }
+        if (chromeVisible || isInChromeBand(event)) { setHover(undefined); setState(toggleReaderChrome); }
       }}
       onDoubleClick={() => { if (effectiveLayout !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current)); }}
       onKeyDown={handleKeyDown}
@@ -1088,7 +1174,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       // Pointer capture keeps delivering the gesture after the cursor leaves the
       // canvas. Do not clear the start point here: doing so made a normal edge
       // drag cancel halfway through and made the release look like a jump.
-      onMouseLeave={() => { setHoverChrome(null); if (!pointerStartRef.current && !panStart.current && drag) finishDrag(0, 0); }}
+      onMouseLeave={() => { setHover(null); if (!pointerStartRef.current && !panStart.current && drag) finishDrag(0, 0); }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -1137,7 +1223,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                   className={`${spreadClass(indexes)}${drag ? ' is-dragging' : ''}${drag?.commits ? ' will-turn' : ''}`}
                   {...(offset === 0 ? { style: zoomStyle } : {})}
                 >
-                  {indexes.map((index) => renderSlot(index))}
+                  {indexes.map((index) => renderSlot(index, indexes.length))}
                 </div>
               </section>
             );
@@ -1147,41 +1233,31 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
       {/* Two bars, two directions. They used to be one animated element, so the
           bottom bar slid in from the top of the screen — which is where it does
-          not live. */}
+          not live. 出入场是纯 CSS（见 reader.css 那四条 keyframes），只留一个
+          「播完再摘」的延迟状态；`motion` 的两条淡入淡出不值一个动画运行时。 */}
       <div className="reader-chrome">
         {(effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes).some((index) => derivingPages?.has(index)) && (
           <p className="reader-deriving" role="status"><LoadingIndicator label={derivingLabel} size="sm" inline />{derivingLabel}</p>
         )}
-        <AnimatePresence>
-          {topChromeVisible && (
-            <motion.header
-              key="reader-chrome-top"
-              className="reader-chrome-top"
-              initial={reduceMotion ? false : { opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
-              transition={{ duration: reduceMotion ? 0 : 0.22 }}
-              onClick={stopChromeToggle}
-            >
-                <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-              <strong>{title}</strong>
-              {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
-              {renderWindowMaximize()}
-              <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
-            </motion.header>
-          )}
-          {bottomChromeVisible && (
-            <motion.div
-              key="reader-chrome-bottom"
-              className="reader-toolbar"
-              role="toolbar"
-              aria-label="阅读控制"
-              initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
-              transition={{ duration: reduceMotion ? 0 : 0.22 }}
-              onClick={stopChromeToggle}
-            >
+        {topPresence.mounted && (
+          <header
+            className={`reader-chrome-top${topPresence.leaving ? ' is-leaving' : ''}`}
+            onClick={stopChromeToggle}
+          >
+              <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
+            <strong>{title}</strong>
+            {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
+            {renderWindowMaximize()}
+            <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
+          </header>
+        )}
+        {bottomPresence.mounted && (
+          <div
+            className={`reader-toolbar${bottomPresence.leaving ? ' is-leaving' : ''}`}
+            role="toolbar"
+            aria-label="阅读控制"
+            onClick={stopChromeToggle}
+          >
               <div className="reader-toolbar-group reader-toolbar-pages">
                 <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
                 <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
@@ -1232,9 +1308,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                 {isFullscreen ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
               </button>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+          </div>
+        )}
       </div>
       {thumbnailPanelOpen && (
         /* Centred overlay rather than a side drawer: it doubles as the archive

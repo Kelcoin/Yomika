@@ -375,8 +375,14 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
         .map_err(|error| error.to_string())?;
+    // 这一遍扫描同时给出总量：每条路径只算一次 MAX(size)，把它们加起来就是
+    // `indexed_cache_bytes`——原来这里再跑一遍同样的聚合（19k 条实测 124ms），
+    // 而两次的答案必然相同。
+    let mut bytes = 0_u64;
     for row in rows {
-        let (bytes, priority) = row.map_err(|error| error.to_string())?;
+        let (size, priority) = row.map_err(|error| error.to_string())?;
+        let size = u64::try_from(size).map_err(|_| "Invalid cache size".to_string())?;
+        bytes = bytes.saturating_add(size);
         let kind = match priority {
             0 => "cover",
             1 => "page-thumbnail",
@@ -387,19 +393,21 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
             _ => "other",
         };
         if let Some(value) = by_rendition.get_mut(kind) {
-            value.bytes = value.bytes.saturating_add(
-                u64::try_from(bytes).map_err(|_| "Invalid cache size".to_string())?,
-            );
+            value.bytes = value.bytes.saturating_add(size);
         }
     }
     Ok(CacheStats {
-        bytes: indexed_cache_bytes(connection)?,
+        bytes,
         entries: usize::try_from(entries).map_err(|_| "Invalid cache entry count".to_string())?,
         by_rendition,
     })
 }
 
-#[tauri::command]
+/// async：这条查询在实测的 210MB 库（19k 条缓存记录）上要 273ms。同步命令的命令体
+/// 是在 **WebView2 的 UI 线程**上就地跑的（tauri 的 `body_blocking`），而状态栏每
+/// 10 秒、每次窗口获得焦点、以及每次有图片落缓存都要问它一次——窗口拖动/缩放的消息
+/// 就排在这 273ms 后面，表现正是「拖不动，过一会儿才响应」。
+#[tauri::command(async)]
 pub fn cache_stats(database: tauri::State<'_, Database>) -> CommandResult<CacheStats> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
@@ -610,7 +618,10 @@ pub fn invalidate_archive_cache(
     })
 }
 
-#[tauri::command]
+/// async：命令体是逐个 `rename` + `remove_file` 的循环，全程还持着全局 DB 锁。
+/// 同步命令就地跑在 WebView2 的 UI 线程上，几千个文件的删除期间窗口拖动与缩放
+/// （以及任何要读库的命令）都会排在它后面。
+#[tauri::command(async)]
 pub fn cache_clear_images(
     app: tauri::AppHandle,
     database: tauri::State<'_, Database>,
@@ -635,7 +646,8 @@ pub fn cache_clear_images(
     }
 }
 
-#[tauri::command]
+/// async：同 `cache_clear_images`——同样是持着全局 DB 锁的删文件循环。
+#[tauri::command(async)]
 pub fn cache_invalidate_archive(
     scope_id: String,
     archive_id: String,
@@ -799,7 +811,9 @@ pub fn maintain_image_cache_quota(
     Ok(())
 }
 
-#[tauri::command]
+/// async：配额回收一个批次最多 256 条路径，每条都要 `symlink_metadata` + `rename`
+/// + `remove_file`，而且全程持着全局 DB 锁。同步跑就是让 UI 线程陪着它一起等磁盘。
+#[tauri::command(async)]
 pub fn cache_evict(
     input: CacheEvictionInput,
     app: tauri::AppHandle,

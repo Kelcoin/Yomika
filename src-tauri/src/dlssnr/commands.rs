@@ -53,7 +53,7 @@ pub async fn dlssnr_probe(app: tauri::AppHandle, force: Option<bool>) -> Command
 }
 
 /// 导入一份 `nvngx_dlssnr.dll`（用户在文件选择器里指的那一份）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dlssnr_import_dll(app: tauri::AppHandle, path: String) -> CommandResult<InstalledDll> {
     let data = match data_dir(&app) {
         Ok(value) => value,
@@ -73,7 +73,7 @@ pub fn dlssnr_import_dll(app: tauri::AppHandle, path: String) -> CommandResult<I
 ///
 /// 装没装由 [`DlssnrStatus::variant`] 回答，所以这里只报目录——前端把两者对上
 /// 就得出每一条的「下载 / 使用中」。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dlssnr_catalog() -> CommandResult<DlssnrCatalog> {
     match release::fetch_catalog_with_fallback(crate::model_release::MODEL_RELEASE_REPO) {
         Ok(catalog) => CommandResult::success(catalog),

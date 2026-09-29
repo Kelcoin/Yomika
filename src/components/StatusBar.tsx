@@ -10,6 +10,14 @@ const repository = new NativeLibraryRepository();
 const syncRepository = new NativeSyncRepository();
 const cacheRepository = new NativeCacheRepository();
 
+/** 缓存字节数跟着 `yomika:cache-changed` 重量的最小间隔。
+ *
+ * 那个事件每落一张封面、每读一页都会发一次，所以它是「一边刷图一边量缓存」的节奏；
+ * 而缓存统计要扫整张 cache_entries（实测 19k 条 273ms），且要跟读者的翻页读取抢
+ * 同一把全局库锁。字节数不是秒级指标，半分钟一次足够。
+ */
+const STATS_THROTTLE_MS = 30_000;
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ['KiB', 'MiB', 'GiB', 'TiB'];
@@ -92,18 +100,20 @@ export function StatusBar() {
     const timer = window.setInterval(refresh, 10_000);
     window.addEventListener('focus', refresh);
     // 封面一落缓存就触发一次这个事件：首屏几十张封面就是几十次 stats IPC。
-    // 节流到一秒一次，缓存字节数不差这一秒。
+    // 以前节流到一秒一次——那正好是「一边刷封面一边量缓存」的节奏，一次缓存统计
+    // 在实测的库上要 273ms，而且它要跟读者的翻页读取抢同一把全局库锁。字节数不是
+    // 秒级指标：半分钟一次、或者切回这个窗口时量一次就够。
     let lastStats = 0;
     let throttleTimer: number | undefined;
     let pending = false;
     const onCacheChanged = () => {
       pending = true;
       const now = Date.now();
-      if (now - lastStats < 1_000) {
+      if (now - lastStats < STATS_THROTTLE_MS) {
         throttleTimer ??= window.setTimeout(() => {
           throttleTimer = undefined;
           if (pending) { pending = false; lastStats = Date.now(); refresh(); }
-        }, 1_000 - (now - lastStats));
+        }, STATS_THROTTLE_MS - (now - lastStats));
         return;
       }
       pending = false;
