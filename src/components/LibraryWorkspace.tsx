@@ -24,6 +24,7 @@ import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
 import { TagSearchLink } from './TagSearchLink';
 import { ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
 import { useEhMyTags } from './useEhMyTags';
+import '../styles/library-loading.css';
 
 /** Chips a thumbnail card offers. Generous on purpose: the fill waterfall drops
  * whatever the two visible rows cannot hold, so the limit only has to exceed
@@ -171,6 +172,16 @@ interface LibraryWorkspaceProps {
 }
 
 export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+  const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
+  useEffect(() => {
+    if (listLoading && archives.length === 0) {
+      setSkeletonVisible(true);
+      return;
+    }
+    if (!skeletonVisible) return;
+    const timer = window.setTimeout(() => setSkeletonVisible(false), 180);
+    return () => window.clearTimeout(timer);
+  }, [archives.length, listLoading, skeletonVisible]);
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -808,9 +819,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               {/* An in-flight request is not an empty library. These shared one
                   branch, so arriving at the library flashed 暂无档案库 before the
                   first page landed. */}
-              {filteredArchives.length === 0 && (listLoading
-                ? <ArchiveListSkeleton mode={displayMode} />
-                : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
+              {filteredArchives.length === 0 && !listLoading && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
+              {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} exiting={!listLoading} /></div>}
               {displayMode === 'thumbnail' ? (
                 <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
                   {thumbnailRows.getVirtualItems().map((virtualRow) => (
@@ -922,7 +932,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
 }
 
-function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
+function ArchiveListSkeleton({ mode, exiting = false }: { mode: 'thumbnail' | 'wide'; exiting?: boolean }) {
   /* A fixed count left tall windows with a strip of bare canvas under the last
      card. Count from the viewport instead: row heights mirror the CSS (158px
      wide rows, 350px thumbnail cards, plus one gap), and the old counts stay
@@ -936,7 +946,7 @@ function ArchiveListSkeleton({ mode }: { mode: 'thumbnail' | 'wide' }) {
     return Math.max(minimum, Math.ceil(available / rowHeight));
   })();
   return (
-    <div className={`archive-list-skeleton is-${mode}`} role="status" aria-label="正在读取档案">
+    <div className={`archive-list-skeleton is-${mode}${exiting ? ' is-exiting' : ''}`} role={exiting ? undefined : 'status'} aria-label={exiting ? undefined : '正在读取档案'} aria-hidden={exiting || undefined}>
       {mode === 'thumbnail'
         ? Array.from({ length: count }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
         : Array.from({ length: count }, (_, index) => (

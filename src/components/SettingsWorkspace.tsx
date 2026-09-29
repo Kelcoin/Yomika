@@ -57,6 +57,17 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { readTextFromFile, saveTextToFile } from '../bridge/textFile';
 
+function readAdvancedCache<T>(key: string): T[] | undefined {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) ?? 'null');
+    return Array.isArray(value) ? value as T[] : undefined;
+  } catch { return undefined; }
+}
+
+function writeAdvancedCache(key: string, value: unknown[]): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+
 function PreferenceRadioFallback({ name, value, options, onChange }: { name: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return <div className="select-compat-radios" aria-hidden="false">{options.map(([option, label]) => <label key={option}><input type="radio" name={`${name}-compat`} value={option} checked={value === option} onChange={() => onChange(option)} /><span>{label}</span></label>)}</div>;
 }
@@ -369,9 +380,10 @@ export function SettingsWorkspace() {
   const activeScheme = COLOR_SCHEMES.find((scheme) => scheme.css !== '' && scheme.css === preferenceDraft.customCss);
   const customValue = activeScheme ? activeScheme.label : preferenceDraft.customCss ? '高级自定义' : '默认';
 
-  const [installedModels, setInstalledModels] = useState<InstalledModel[]>();
+  const [installedModels, setInstalledModels] = useState<InstalledModel[] | undefined>(() => readAdvancedCache<InstalledModel>('yomika.advanced-models'));
   /** The hosted catalog. `undefined` = not fetched yet, `[]` = fetch failed. */
-  const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[]>();
+  const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[] | undefined>(() => readAdvancedCache<UpscaleCatalogModel>('yomika.advanced-upscale-catalog'));
+  const [modelsVerified, setModelsVerified] = useState(false);
   // A model with no recorded scale cannot be run, so it is not a choice; nor is a
   // de-censoring bundle, which is not an upscaler. One row per id: see firstPerId.
   const runnableModels = firstPerId(installedModels?.filter((model) => model.scale && model.kind === 'upscale') ?? []);
@@ -478,17 +490,24 @@ export function SettingsWorkspace() {
   }
 
   useEffect(() => {
-    if (selectedSettingsSection !== 'settings-advanced' || installedModels) return;
+    if (selectedSettingsSection !== 'settings-advanced') return;
     void inferenceRepository.listModels().then((result) => {
-      setInstalledModels(result.ok ? result.value : []);
+      if (result.ok) {
+        setInstalledModels(result.value);
+        writeAdvancedCache('yomika.advanced-models', result.value);
+      }
+      setModelsVerified(result.ok);
       if (!result.ok) showToast(result.error.message, 'error');
     });
     // 目录要走网络，慢、而且离线时必然失败：拿不到只是「没有新的可下载」，
     // 已经装在盘上的模型照样可选，所以不弹错、也不挡住上面的模型列表。
     void inferenceRepository.listUpscaleCatalog().then((result) => {
-      setUpscaleCatalog(result.ok ? result.value.models : []);
+      if (result.ok) {
+        setUpscaleCatalog(result.value.models);
+        writeAdvancedCache('yomika.advanced-upscale-catalog', result.value.models);
+      }
     });
-  }, [installedModels, selectedSettingsSection, showToast]);
+  }, [selectedSettingsSection, showToast]);
 
   /** Saves a change straight away. The old form had a 保存偏好 button, which meant
    * a toggle could look applied and silently not be. Rapid edits (typing in the
@@ -524,7 +543,10 @@ export function SettingsWorkspace() {
 
   async function refreshModels() {
     const models = await inferenceRepository.listModels();
-    if (models.ok) setInstalledModels(models.value);
+    if (models.ok) {
+      setInstalledModels(models.value);
+      writeAdvancedCache('yomika.advanced-models', models.value);
+    }
   }
 
   async function importModelFromPath(path: string) {
@@ -1472,7 +1494,7 @@ export function SettingsWorkspace() {
             {selectedSettingsSection === 'settings-advanced' && (
               <ComputeCenterSettingsGroup preferences={preferenceDraft} editPreferences={editPreferences} />
             )}
-            {/* DLSS5：只在 Windows 桌面、支持系列的 N 卡且这个构建有 NGX 核心时
+            {/* DLSSNR：只在 Windows 桌面、支持系列的 N 卡且这个构建有 NGX 核心时
                 才画出来（组件自己按 status 判断；还没装片段的机器正是来挑一种下载的）。 */}
             {selectedSettingsSection === 'settings-advanced' && (
               <DlssnrSettingsGroup preferences={preferenceDraft} editPreferences={editPreferences} visible={platformName === 'windows'} />
@@ -1486,6 +1508,7 @@ export function SettingsWorkspace() {
                      打开页面就被告知「尚未安装」，而它只是还没查到。 */
                   hint={installedModels === undefined ? '正在读取模型…' : upscaleReady ? '用超分模型放大阅读画面' : '尚未安装可用的超分模型'}
                   checked={upscaleOn}
+                  disabled={!modelsVerified}
                   onToggle={() => {
                     if (upscaleOn) { editPreferences({ upscaleBackend: 'off' }); return; }
                     if (!upscaleReady) { showToast('超分模型未安装，无法启用', 'error'); return; }
@@ -1542,6 +1565,7 @@ export function SettingsWorkspace() {
                   label="启用去码"
                   hint={installedModels === undefined ? '正在读取模型…' : decensorReady ? '按流程逐级修补遮挡' : '去码模型不完整，无法启用'}
                   checked={decensorOn}
+                  disabled={!modelsVerified}
                   onToggle={() => {
                     if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
                     if (!decensorReady) { showToast('去码模型不完整，无法启用', 'error'); return; }

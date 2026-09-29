@@ -92,13 +92,13 @@ pub fn with_context_at<T>(
 ) -> Result<T, String> {
     let key = ContextKey::of(data_dir, dll);
     let cell = CONTEXT.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().map_err(|_| "DLSS5 上下文锁失败".to_string())?;
+    let mut guard = cell.lock().map_err(|_| "DLSSNR 上下文锁失败".to_string())?;
     if let Some((existing, context)) = guard.as_mut() {
         if *existing != key {
             // 旧上下文还活着，NGX 也已经在进程里初始化过了：这时候换一份 DLL 是
             // 换不掉的。宁可明确报错，也不要让用户以为自己在跑新导入的那一份。
             return Err(format!(
-                "DLSS5 已经为另一份片段初始化过（{} 字节，数据目录 {}）：换过 DLL 之后要重启应用才会用新的那一份",
+                "DLSSNR 已经为另一份片段初始化过（{} 字节，数据目录 {}）：换过 DLL 之后要重启应用才会用新的那一份",
                 existing.dll_bytes,
                 existing.data_dir.display()
             ));
@@ -142,7 +142,7 @@ impl GpuContext {
             unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|error| format!("创建栅栏失败：{error}"))?;
 
         // NGX 只认一块设备：初始化跟着设备走，一次。
-        std::fs::create_dir_all(data_dir).map_err(|error| format!("创建 DLSS5 数据目录失败：{error}"))?;
+        std::fs::create_dir_all(data_dir).map_err(|error| format!("创建 DLSSNR 数据目录失败：{error}"))?;
 
         Ok(Self {
             core,

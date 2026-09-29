@@ -1,4 +1,4 @@
-//! 算力中心：把桌面端的超分 / 去码 / DLSS5 借给局域网里的移动端用。
+//! 算力中心：把桌面端的超分 / 去码 / DLSSNR 借给局域网里的移动端用。
 //!
 //! 两个方向都在这一个模块里：
 //!
@@ -66,6 +66,16 @@ pub struct ComputeCenterStatus {
     pub capabilities: Vec<Capability>,
     /// 保留旧字段供前端状态解析；服务可以在尚未安装模型时启动。
     pub can_start: bool,
+    pub paired_clients: Vec<PairedClient>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedClient {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    token: String,
 }
 
 /// 移动端看到的远端能力清单。
@@ -91,18 +101,21 @@ pub struct ComputeCenter {
 #[derive(Default)]
 struct PairingState {
     pending: Mutex<Option<PendingPair>>,
+    clients: Mutex<Vec<PairedClient>>,
+    storage: Mutex<Option<std::path::PathBuf>>,
 }
 
 struct PendingPair {
     request_id: String,
     code: String,
     peer: String,
+    name: String,
     expires: std::time::Instant,
     attempts: u8,
 }
 
 impl PairingState {
-    fn begin(&self, peer: &str) -> Result<(String, String), String> {
+    fn begin(&self, peer: &str, name: &str) -> Result<(String, String), String> {
         let mut pending = self.pending.lock().map_err(|_| "配对状态不可用")?;
         if pending.as_ref().is_some_and(|item| item.expires > std::time::Instant::now()) {
             return Err("已有配对请求，请稍后重试".into());
@@ -115,13 +128,14 @@ impl PairingState {
             request_id: request_id.clone(),
             code: code.clone(),
             peer: peer.to_string(),
+            name: name.chars().take(80).collect(),
             expires: std::time::Instant::now() + std::time::Duration::from_secs(90),
             attempts: 0,
         });
         Ok((request_id, code))
     }
 
-    fn confirm(&self, peer: &str, request_id: &str, code: &str) -> Result<(), String> {
+    fn confirm(&self, peer: &str, request_id: &str, code: &str) -> Result<String, String> {
         let mut pending = self.pending.lock().map_err(|_| "配对状态不可用")?;
         let item = pending.as_mut().ok_or("没有待确认的配对请求")?;
         if item.expires <= std::time::Instant::now() {
@@ -136,7 +150,74 @@ impl PairingState {
             if item.attempts >= 5 { *pending = None; }
             return Err("配对码错误".into());
         }
+        let name = item.name.clone();
         *pending = None;
+        let token = fresh_token();
+        let mut clients = self.clients.lock().map_err(|_| "配对列表不可用")?;
+        let mut next = clients.clone();
+        next.push(PairedClient { id: fresh_token(), name, address: peer.to_string(), token: token.clone() });
+        self.persist(&next)?;
+        *clients = next;
+        Ok(token)
+    }
+
+    fn set_storage(&self, data: &Path) {
+        let path = data.join("compute-center-clients.json");
+        let Ok(mut storage) = self.storage.lock() else { return; };
+        if storage.as_ref() == Some(&path) { return; }
+        *storage = Some(path.clone());
+        drop(storage);
+        let backup = path.with_extension("json.bak");
+        if !path.exists() && backup.exists() { let _ = std::fs::rename(&backup, &path); }
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(saved) = serde_json::from_slice::<Vec<PairedClient>>(&bytes) {
+                if let Ok(mut clients) = self.clients.lock() { *clients = saved; }
+            }
+        }
+    }
+
+    fn persist(&self, clients: &[PairedClient]) -> Result<(), String> {
+        let path = self.storage.lock().map_err(|_| "配对路径不可用")?.clone();
+        if let Some(path) = path {
+            let bytes = serde_json::to_vec(clients).map_err(|error| error.to_string())?;
+            let temporary = path.with_extension("json.tmp");
+            let backup = path.with_extension("json.bak");
+            std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+            if path.exists() {
+                if backup.exists() { std::fs::remove_file(&backup).map_err(|error| error.to_string())?; }
+                std::fs::rename(&path, &backup).map_err(|error| error.to_string())?;
+            }
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                if backup.exists() { let _ = std::fs::rename(&backup, &path); }
+                return Err(error.to_string());
+            }
+            if backup.exists() { let _ = std::fs::remove_file(backup); }
+        }
+        Ok(())
+    }
+
+    fn listed(&self) -> Vec<PairedClient> {
+        self.clients.lock().map(|clients| clients.iter().cloned().map(|mut client| { client.token.clear(); client }).collect()).unwrap_or_default()
+    }
+
+    fn authorized(&self, token: &str) -> bool {
+        self.clients.lock().map(|clients| clients.iter().any(|client| token_matches(&client.token, token))).unwrap_or(false)
+    }
+
+    fn revoke(&self, id: &str) -> Result<(), String> {
+        let mut clients = self.clients.lock().map_err(|_| "配对列表不可用")?;
+        let previous = clients.len();
+        let next: Vec<_> = clients.iter().filter(|client| client.id != id).cloned().collect();
+        if next.len() == previous { return Err("找不到这台已配对设备".into()); }
+        self.persist(&next)?;
+        *clients = next;
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        let mut clients = self.clients.lock().map_err(|_| "配对列表不可用")?;
+        self.persist(&[])?;
+        clients.clear();
         Ok(())
     }
 }
@@ -144,6 +225,7 @@ impl PairingState {
 struct Running {
     port: u16,
     stop: Arc<AtomicBool>,
+    discovery: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ComputeCenter {
@@ -167,6 +249,7 @@ impl ComputeCenter {
 
     /// 开服务。`port` 为 0 或占着就报错——这里不替用户改端口，改端口是设置页的事。
     pub fn start(&self, context: ServerContext, port: u16) -> Result<u16, String> {
+        self.pairing.set_storage(&context.data);
         let mut guard = self.inner.lock().map_err(|_| "算力中心锁失败".to_string())?;
         if let Some(running) = guard.as_ref() {
             return Ok(running.port);
@@ -194,11 +277,13 @@ impl ComputeCenter {
             };
             serve(listener, token, Arc::clone(&pairing), stop_for_task, context).await;
         });
-        if port != 0 {
+        let discovery = if port != 0 {
             let discovery_stop = Arc::clone(&stop);
-            std::thread::spawn(move || serve_discovery(bound, discovery_stop));
-        }
-        *guard = Some(Running { port: bound, stop });
+            Some(std::thread::spawn(move || serve_discovery(bound, discovery_stop)))
+        } else {
+            None
+        };
+        *guard = Some(Running { port: bound, stop, discovery });
         Ok(bound)
     }
 
@@ -208,6 +293,12 @@ impl ComputeCenter {
         if let Some(running) = running {
             running.stop.store(true, Ordering::SeqCst);
             let _ = std::net::TcpStream::connect(("127.0.0.1", running.port));
+            if let Some(discovery) = running.discovery {
+                if let Ok(socket) = std::net::UdpSocket::bind("127.0.0.1:0") {
+                    let _ = socket.send_to(b"STOP", ("127.0.0.1", DISCOVERY_PORT));
+                }
+                let _ = discovery.join();
+            }
         }
     }
 }
@@ -274,7 +365,7 @@ pub fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
 
 /// 能力清单：三类各自查一遍「齐不齐」。
 ///
-/// `model_data` 是模型目录（`inference` 那一套的安装根），`data` 是数据目录（DLSS5
+/// `model_data` 是模型目录（`inference` 那一套的安装根），`data` 是数据目录（DLSSNR
 /// 的 DLL 与日志在那里）。
 pub fn capabilities(model_data: &Path, data: &Path) -> Vec<Capability> {
     let runnable = crate::inference::runnable_models(model_data);
@@ -326,12 +417,12 @@ fn dlssnr_capability(data: &Path) -> Capability {
     let status = crate::dlssnr::status(data);
     Capability {
         id: "dlssnr".to_string(),
-        label: "DLSS5".to_string(),
+        label: "DLSSNR".to_string(),
         ready: status.available,
         detail: if status.available {
             status.variant_label.unwrap_or_else(|| "已导入".into())
         } else {
-            status.error.unwrap_or_else(|| "DLSS5 不可用".into())
+            status.error.unwrap_or_else(|| "DLSSNR 不可用".into())
         },
     }
 }
@@ -340,9 +431,9 @@ fn dlssnr_capability(data: &Path) -> Capability {
 fn dlssnr_capability(_data: &Path) -> Capability {
     Capability {
         id: "dlssnr".to_string(),
-        label: "DLSS5".to_string(),
+        label: "DLSSNR".to_string(),
         ready: false,
-        detail: "DLSS5 只在 Windows 桌面端可用".to_string(),
+        detail: "DLSSNR 只在 Windows 桌面端可用".to_string(),
     }
 }
 
@@ -358,7 +449,7 @@ pub struct ProcessParams {
     /// 放大倍数（模型为空时的最近邻路径用）。
     #[serde(default)]
     pub scale: Option<u32>,
-    /// DLSS5 的 1–3 层参数。
+    /// DLSSNR 的 1–3 层参数。
     #[serde(default)]
     pub dlssnr: Option<serde_json::Value>,
 }
@@ -402,7 +493,7 @@ fn dlssnr_process(data: &Path, params: &ProcessParams, bytes: &[u8]) -> Result<V
 
     let settings: DlssnrSettings = match &params.dlssnr {
         Some(value) => serde_json::from_value::<DlssnrSettings>(value.clone())
-            .map_err(|error| format!("DLSS5 参数不对：{error}"))?
+            .map_err(|error| format!("DLSSNR 参数不对：{error}"))?
             .normalized(),
         None => DlssnrSettings::default(),
     };
@@ -426,7 +517,7 @@ fn dlssnr_process(data: &Path, params: &ProcessParams, bytes: &[u8]) -> Result<V
 
 #[cfg(not(windows))]
 fn dlssnr_process(_data: &Path, _params: &ProcessParams, _bytes: &[u8]) -> Result<Vec<u8>, String> {
-    Err("DLSS5 只在 Windows 桌面端可用".to_string())
+    Err("DLSSNR 只在 Windows 桌面端可用".to_string())
 }
 
 /// 令牌比较：长度不同直接否，长度相同按位累积异或——不给「逐字节试」留时间差。
@@ -667,7 +758,9 @@ async fn handle_connection(
     // 配对入口只给出临时请求号；凭据必须凭被配对端显示的六位码取得。
     if request.path == "/v2/pair/request" && request.method == "POST" {
         let peer = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_string();
-        return match pairing.begin(&peer) {
+        let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let name = payload.get("name").and_then(|value| value.as_str()).filter(|name| !name.trim().is_empty()).unwrap_or(&peer);
+        return match pairing.begin(&peer, name) {
             Ok((request_id, code)) => {
                 if let Some(app) = &context.app {
                     use tauri_plugin_dialog::DialogExt;
@@ -687,9 +780,8 @@ async fn handle_connection(
         let request_id = payload.get("requestId").and_then(|value| value.as_str()).unwrap_or_default();
         let code = payload.get("code").and_then(|value| value.as_str()).unwrap_or_default();
         return match pairing.confirm(&peer, request_id, code) {
-            Ok(()) => {
-                let current_token = token.read().map(|guard| guard.clone()).unwrap_or_default();
-                write_json(&mut stream, 200, "OK", &serde_json::json!({ "token": current_token, "name": host_name() }).to_string()).await
+            Ok(client_token) => {
+                write_json(&mut stream, 200, "OK", &serde_json::json!({ "token": client_token, "name": host_name() }).to_string()).await
             }
             Err(error) => write_json(&mut stream, 403, "Forbidden", &error_body("UNAUTHORIZED", &error)).await,
         };
@@ -707,7 +799,7 @@ async fn handle_connection(
         .get("x-yomika-token")
         .cloned()
         .unwrap_or_default();
-    if !token_matches(&expected, &presented) {
+    if !token_matches(&expected, &presented) && !pairing.authorized(&presented) {
         let body = error_body("UNAUTHORIZED", "令牌不对（在桌面端设置页复制一份）");
         return write_json(&mut stream, 401, "Unauthorized", &body).await;
     }
@@ -830,6 +922,7 @@ pub fn request_pairing(url: &str) -> Result<PairRequest, String> {
     let base = normalize_base(url)?;
     let response = blocking_client()?
         .post(format!("{base}/v2/pair/request"))
+        .json(&serde_json::json!({ "name": host_name() }))
         .timeout(std::time::Duration::from_secs(8))
         .send().map_err(|error| format!("连不上 {base}：{error}"))?;
     let status = response.status();
@@ -1083,6 +1176,7 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
+    if let Ok((_, data)) = paths(&app) { center.pairing.set_storage(&data); }
     let token = preferences(&app)
         .map(|snapshot| snapshot.compute_center_token)
         .unwrap_or_default();
@@ -1093,6 +1187,7 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
         token,
         capabilities: Vec::new(),
         can_start: true,
+        paired_clients: center.pairing.listed(),
     })
 }
 
@@ -1133,12 +1228,19 @@ pub fn compute_center_configure(
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    if center.running_port().is_some_and(|running| port.is_some_and(|port| port != running)) {
-        return CommandResult::failure(
-            "INVALID_RESPONSE",
-            "请先关闭算力中心，再修改端口",
-            false,
-        );
+    center.pairing.set_storage(&data);
+    if rotate_token.unwrap_or(false) {
+        if let Err(error) = center.pairing.clear() {
+            return CommandResult::failure("UNKNOWN", error, true);
+        }
+    }
+    let previous_port = center.running_port();
+    let changing_port = enabled && previous_port.is_some_and(|running| running != snapshot.compute_center_port);
+    if changing_port {
+        if let Err(error) = std::net::TcpListener::bind(("0.0.0.0", snapshot.compute_center_port)) {
+            return CommandResult::failure("NETWORK", format!("端口不可用：{error}"), true);
+        }
+        center.stop();
     }
     if enabled {
         let context = ServerContext {
@@ -1147,6 +1249,12 @@ pub fn compute_center_configure(
             app: Some(app.clone()),
         };
         if let Err(error) = center.start(context, snapshot.compute_center_port) {
+            if let Some(old_port) = previous_port {
+                if changing_port {
+                    let fallback = ServerContext { model_data, data, app: Some(app.clone()) };
+                    let _ = center.start(fallback, old_port);
+                }
+            }
             // 端口被占、绑不上：这是本机的一次网络动作失败（前端错误码表里是 `NETWORK`）。
             // 别用表里没有的码——发出去整条错误会被桥当成无效响应。
             return CommandResult::failure("NETWORK", error, true);
@@ -1167,7 +1275,20 @@ pub fn compute_center_configure(
         token: saved.compute_center_token,
         capabilities: Vec::new(),
         can_start: true,
+        paired_clients: center.pairing.listed(),
     })
+}
+
+#[tauri::command]
+pub fn compute_center_revoke_pairing(app: tauri::AppHandle, id: String) -> CommandResult<ComputeCenterStatus> {
+    let center = match center_of(&app) {
+        Ok(center) => center,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    if let Err(error) = center.pairing.revoke(&id) {
+        return CommandResult::failure("UNKNOWN", error, false);
+    }
+    compute_center_status(app)
 }
 
 /// 连一次远端，拿它的能力清单（移动端「连接」按钮）。
@@ -1225,7 +1346,7 @@ pub struct RemoteProcessInput {
     /// 从哪一版开始发：`reader-page` / `decensored` / `enhanced`。
     #[serde(default)]
     pub source: Option<String>,
-    /// 起点那一版是哪两个模型产出的（与 DLSS5 那条路同一个规矩：起点按产出它的
+    /// 起点那一版是哪两个模型产出的（与 DLSSNR 那条路同一个规矩：起点按产出它的
     /// 模型存，要算出同一个 revision 才读得到）。
     #[serde(default)]
     pub decensor_model: Option<String>,
@@ -1317,12 +1438,44 @@ mod tests {
     #[test]
     fn pairing_codes_expire_and_cannot_be_replayed() {
         let pairing = PairingState::default();
-        let (request_id, code) = pairing.begin("127.0.0.1").expect("start pairing");
+        let (request_id, code) = pairing.begin("127.0.0.1", "Phone").expect("start pairing");
         assert_ne!(request_id, code);
         assert!(pairing.confirm("127.0.0.1", &request_id, "invalid").is_err());
         assert!(pairing.confirm("127.0.0.2", &request_id, &code).is_err());
         assert!(pairing.confirm("127.0.0.1", &request_id, &code).is_ok());
         assert!(pairing.confirm("127.0.0.1", &request_id, &code).is_err());
+    }
+
+    #[test]
+    fn paired_clients_keep_distinct_tokens_and_one_can_be_revoked() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let pairing = PairingState::default();
+        pairing.set_storage(dir.path());
+        let (first_request, first_code) = pairing.begin("127.0.0.1", "Phone").unwrap();
+        let first = pairing.confirm("127.0.0.1", &first_request, &first_code).unwrap();
+        let (second_request, second_code) = pairing.begin("127.0.0.2", "Tablet").unwrap();
+        let second = pairing.confirm("127.0.0.2", &second_request, &second_code).unwrap();
+        assert_ne!(first, second);
+        let listed = pairing.listed();
+        assert_eq!(listed.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), vec!["Phone", "Tablet"]);
+        pairing.revoke(&listed[0].id).unwrap();
+        assert!(!pairing.authorized(&first));
+        assert!(pairing.authorized(&second));
+
+        let restarted = PairingState::default();
+        restarted.set_storage(dir.path());
+        assert!(!restarted.authorized(&first));
+        assert!(restarted.authorized(&second));
+    }
+
+    #[test]
+    fn failed_pairing_write_does_not_authorize_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = PairingState::default();
+        pairing.set_storage(&dir.path().join("missing"));
+        let (request, code) = pairing.begin("127.0.0.1", "Phone").unwrap();
+        assert!(pairing.confirm("127.0.0.1", &request, &code).is_err());
+        assert!(pairing.listed().is_empty());
     }
 
     #[test]

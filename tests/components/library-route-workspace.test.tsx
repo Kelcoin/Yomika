@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -27,6 +28,69 @@ function servedPage(items: unknown[]) {
 }
 
 describe('library route workspace', () => {
+  it('shows an old in-memory page while revalidating it', async () => {
+    const now = Date.now();
+    writeRouteCache('library:workspace:default', {
+      archives: [{ serverId: 'scope-a', archiveId: 'cached', title: 'Cached Archive', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }],
+      fetchedCount: 1,
+      categories: [],
+      selectedArchiveId: undefined,
+      totalArchives: 1,
+      hasMoreArchives: false,
+      searchQuery: '',
+      sortMode: 'added',
+      sortOrder: 'desc',
+      categoryFilter: '',
+    });
+    vi.spyOn(Date, 'now').mockReturnValue(now + 11 * 60_000);
+    let resolvePage!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return new Promise((resolve) => { resolvePage = resolve; });
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    renderLibrary();
+    expect(screen.getByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
+    await waitFor(() => expect(resolvePage).toBeDefined());
+    expect(screen.getByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+
+    await act(async () => resolvePage(servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Fresh Archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' }])));
+    expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
+  });
+
+  it('does not show a cached page for a different URL query', async () => {
+    writeRouteCache('library:workspace:default', {
+      archives: [{ serverId: 'scope-a', archiveId: 'cached', title: 'Old Query', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }],
+      fetchedCount: 1,
+      categories: [],
+      selectedArchiveId: undefined,
+      totalArchives: 1,
+      hasMoreArchives: false,
+      searchQuery: 'artist:old',
+      sortMode: 'added',
+      sortOrder: 'desc',
+      categoryFilter: '',
+    });
+    let resolvePage!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return new Promise((resolve) => { resolvePage = resolve; });
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    renderLibrary('/library?q=artist%3Anew');
+    await waitFor(() => expect(resolvePage).toBeDefined());
+    expect(screen.queryByRole('button', { name: /^Old Query\b/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '正在读取档案' })).toBeInTheDocument();
+    await act(async () => resolvePage(servedPage([])));
+  });
+
   it('keeps the library shell mounted and shows card skeletons during the first request', async () => {
     let resolveServers!: (value: unknown) => void;
     setInvokeAdapterForTests(async (command) => {

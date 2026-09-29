@@ -1,4 +1,4 @@
-//! 一张图的 DLSS5 处理：上传 → 跑 1–3 个 NGX pass → 读回。
+//! 一张图的 DLSSNR 处理：上传 → 跑 1–3 个 NGX pass → 读回。
 //!
 //! 顺序（照 NGX 对这几个参数的读法来，反汇编复核过）：
 //! 输入颜色按 `NON_PIXEL_SHADER_RESOURCE`、输出按 `UNORDERED_ACCESS`，运动与深度
@@ -56,7 +56,7 @@ const MIN_EDGE: u32 = 32;
 /// 由调用方翻译成 `INFERENCE_CANCELLED`。
 pub const CANCELLED: &str = "dlssnr: cancelled";
 
-/// 把一张图跑一遍 DLSS5。
+/// 把一张图跑一遍 DLSSNR。
 pub fn apply(
     data_dir: &Path,
     image: &DlssnrImage,
@@ -75,7 +75,7 @@ pub fn apply_with_token(
 ) -> Result<DlssnrImage, String> {
     if image.width < MIN_EDGE || image.height < MIN_EDGE {
         return Err(format!(
-            "图太小（{}x{}）：DLSS5 至少要 {MIN_EDGE}×{MIN_EDGE}",
+            "图太小（{}x{}）：DLSSNR 至少要 {MIN_EDGE}×{MIN_EDGE}",
             image.width, image.height
         ));
     }
@@ -106,7 +106,7 @@ pub fn apply_with_dll_token(
 ) -> Result<DlssnrImage, String> {
     if image.width < MIN_EDGE || image.height < MIN_EDGE {
         return Err(format!(
-            "图太小（{}x{}）：DLSS5 至少要 {MIN_EDGE}×{MIN_EDGE}",
+            "图太小（{}x{}）：DLSSNR 至少要 {MIN_EDGE}×{MIN_EDGE}",
             image.width, image.height
         ));
     }

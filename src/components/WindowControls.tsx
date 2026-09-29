@@ -37,12 +37,17 @@ export function useWindowMaximized(api: WindowApi | undefined): boolean {
   useEffect(() => {
     if (!api) return undefined;
     let active = true;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const refresh = () => {
       void api.isMaximized().then((value) => { if (active) setMaximized(Boolean(value)); }).catch(() => { /* the window may be closing */ });
     };
     refresh();
-    window.addEventListener('resize', refresh);
-    return () => { active = false; window.removeEventListener('resize', refresh); };
+    const onResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(refresh, 100);
+    };
+    window.addEventListener('resize', onResize);
+    return () => { active = false; clearTimeout(resizeTimer); window.removeEventListener('resize', onResize); };
   }, [api]);
   return maximized;
 }

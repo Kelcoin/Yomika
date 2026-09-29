@@ -5718,7 +5718,7 @@ body::-webkit-scrollbar,
 }
 
 /* ---------------------------------------------------------------------------
-   DLSS5 与算力中心那两组：层级标题、行尾的小字说明、行内输入。
+   DLSSNR 与远端处理那两组：层级标题、行尾的小字说明、行内输入。
    都用现成的 token，跟其它设置行同一套值。 */
 
 .settings-row-note {
@@ -5769,7 +5769,7 @@ body::-webkit-scrollbar,
   outline-offset: 1px;
 }
 
-/* 一层 DLSS5 是一小组：给个标题，参数才有「这是第几层」的归属感。 */
+/* 一层 DLSSNR 是一小组：给个标题，参数才有「这是第几层」的归属感。 */
 .settings-subgroup {
   border-top: 1px solid var(--outline-variant, currentColor);
   padding-top: var(--space-2);

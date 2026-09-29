@@ -32,6 +32,16 @@ function scrollable(element: HTMLElement, metrics: { scrollTop: number; clientHe
 }
 
 describe('library workspace', () => {
+  it('fades the first-load skeleton over the arriving cards', async () => {
+    const view = renderWorkspace({ archives: [], listLoading: true });
+    expect(screen.getByRole('status', { name: '正在读取档案' })).toBeInTheDocument();
+
+    view.rerender(<MemoryRouter><LibraryWorkspace archives={[archives[0]!]} listLoading={false} /></MemoryRouter>);
+    expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton.is-exiting')).not.toBeNull();
+    await waitFor(() => expect(document.querySelector('.archive-list-skeleton')).toBeNull());
+  });
+
   it('keeps a useful empty state', () => {
     renderWorkspace({ archives: [] });
     expect(screen.getByRole('heading', { name: '暂无档案库' })).toBeInTheDocument();

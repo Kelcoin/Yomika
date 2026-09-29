@@ -19,8 +19,12 @@ import {
 const OP_OPTIONS = [
   { value: 'upscale', label: '超分' },
   { value: 'decensor', label: '去码' },
-  { value: 'dlssnr', label: 'DLSS5' },
+  { value: 'dlssnr', label: 'DLSSNR' },
 ];
+
+function cacheDisplayStatus(status: ComputeCenterStatus): void {
+  try { localStorage.setItem('yomika.compute-center-status', JSON.stringify({ ...status, token: '' })); } catch { /* storage unavailable */ }
+}
 
 interface Props {
   preferences: PreferenceSnapshot;
@@ -30,7 +34,7 @@ interface Props {
 /** 算力中心：本机对外提供算力（桌面端），以及把一页交给远端算（任意端）。
  *
  * 两边的设置互不影响：远端那一份（`remoteComputeOps`）只描述「这次处理怎么做」，
- * 既不写进本机的超分/去码/DLSS5 设置，也不会去改远端机器上的设置——远端收到的
+ * 既不写进本机的超分/去码/DLSSNR 设置，也不会去改远端机器上的设置——远端收到的
  * 只是一次带参数的请求。 */
 export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Props) {
   const { showToast } = useToast();
@@ -48,6 +52,11 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
   const [requestId, setRequestId] = useState('');
   const [code, setCode] = useState('');
   const [pairBusy, setPairBusy] = useState(false);
+  const [localPairMenu, setLocalPairMenu] = useState(false);
+  const [selectedClient, setSelectedClient] = useState<string>();
+  const [portMenu, setPortMenu] = useState(false);
+  const [portDraft, setPortDraft] = useState(preferences.computeCenterPort);
+  const [verified, setVerified] = useState(false);
 
   const remoteOps = useMemo(() => parseRemoteOps(preferences.remoteComputeOps), [preferences.remoteComputeOps]);
   const updateRemoteOps = (patch: Partial<typeof remoteOps>) =>
@@ -57,10 +66,22 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
 
   const refresh = useCallback(async () => {
     const result = await repository.status();
-    if (result.ok) setStatus(result.value);
+    if (result.ok) {
+      setStatus(result.value);
+      setVerified(true);
+      cacheDisplayStatus(result.value);
+    }
   }, [repository]);
 
   useEffect(() => {
+    try {
+      const cached = localStorage.getItem('yomika.compute-center-status');
+      if (cached) {
+        const display = { ...(JSON.parse(cached) as ComputeCenterStatus), token: '' };
+        setStatus(display);
+        localStorage.setItem('yomika.compute-center-status', JSON.stringify(display));
+      }
+    } catch { /* stale or unavailable cache */ }
     void refresh();
   }, [refresh]);
 
@@ -78,6 +99,8 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       return;
     }
     setStatus(result.value);
+    setVerified(true);
+    cacheDisplayStatus(result.value);
     editPreferences({
       computeCenterEnabled: next,
       computeCenterToken: result.value.token,
@@ -99,8 +122,30 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       return;
     }
     setStatus(result.value);
+    cacheDisplayStatus(result.value);
     editPreferences({ computeCenterToken: result.value.token });
-    showToast('已换一份新令牌：移动端要重新填', 'success');
+    showToast('已撤销所有配对，设备需要重新配对', 'success');
+  }
+
+  async function revokeClient(id: string) {
+    const result = await repository.revokePairing(id);
+    if (!result.ok) { showToast(result.error.message, 'error'); return; }
+    setStatus(result.value);
+    cacheDisplayStatus(result.value);
+    setSelectedClient(undefined);
+    showToast('配对已撤销', 'success');
+  }
+
+  async function savePort() {
+    if (!Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535) return;
+    setBusy(true);
+    const result = await repository.configure({ enabled: true, port: portDraft });
+    setBusy(false);
+    if (!result.ok) { showToast(result.error.message, 'error'); void refresh(); return; }
+    setStatus(result.value);
+    cacheDisplayStatus(result.value);
+    editPreferences({ computeCenterPort: result.value.port });
+    setPortMenu(false);
   }
 
   async function connectRemote(url = preferences.remoteComputeUrl, token = preferences.remoteComputeToken) {
@@ -160,49 +205,50 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       <div className="settings-group" role="region" aria-label="算力中心">
         <SettingsSwitch
           icon={<Server />}
-          label="作为算力中心"
+          label="开启本机服务"
           hint={
-            status?.running ? '局域网内提供远端处理服务' : '允许其他设备配对并使用本机处理服务'
+            status?.running ? '这台设备正在为局域网内的其他设备处理图片' : '允许其他设备连接这台设备处理图片'
           }
-          disabled={busy}
+          disabled={busy || !verified}
           checked={status?.running ?? false}
           onToggle={() => void toggleServing(!(status?.running ?? false))}
         />
-        <SettingsRow
+        {status?.running && <SettingsRow
           icon={<Server />}
           label="端口"
           hint={
             status && status.addresses.length > 0
               ? `移动端填：${status.addresses[0]}:${status.port}`
-              : '没有找到局域网地址（先连上 Wi-Fi / 网线）'
+              : '没有找到局域网地址，请连接 Wi-Fi 或网线'
           }
-          control={
-            <input
-              className="settings-number"
-              type="number"
-              min={1024}
-              max={65535}
-              disabled={status?.running}
-              value={preferences.computeCenterPort}
-              aria-label="算力中心端口"
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                if (Number.isFinite(value) && value >= 1024 && value <= 65535) {
-                  editPreferences({ computeCenterPort: Math.round(value) });
-                }
-              }}
-            />
-          }
-        />
-        {status?.running && <SettingsRow icon={<RefreshCw />} label="撤销旧配对" hint="重新生成访问凭据，已配对设备需要重新配对" control={<button className="secondary-action" type="button" disabled={rotating} onClick={() => void rotateToken()}>重置</button>} />}
+          value={String(status.port)}
+          onClick={verified ? () => { setPortDraft(status.port); setPortMenu(true); } : undefined}
+        />}
+        {portMenu && <SettingsMenu title="端口" onClose={() => setPortMenu(false)}>
+          <input className="settings-number" type="number" min={1024} max={65535} value={portDraft} aria-label="算力中心端口" onChange={(event) => setPortDraft(Number(event.target.value))} />
+          <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}>保存</button>
+        </SettingsMenu>}
+        {status?.running && <SettingsRow icon={<Server />} label="配对管理" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => setLocalPairMenu(true) : undefined} />}
+        {localPairMenu && <SettingsMenu title={selectedClient ? status?.pairedClients?.find((client) => client.id === selectedClient)?.name ?? '设备' : '配对管理'} onClose={() => { if (selectedClient) setSelectedClient(undefined); else setLocalPairMenu(false); }}>
+          {selectedClient ? <>
+            <p className="settings-menu-desc">{status?.pairedClients?.find((client) => client.id === selectedClient)?.address}</p>
+            <button className="secondary-action" type="button" onClick={() => void revokeClient(selectedClient)}>撤销配对</button>
+          </> : <>
+            <div className="settings-choice-list">
+              {status?.pairedClients?.map((client) => <button className="settings-choice-option-main" key={client.id} type="button" onClick={() => setSelectedClient(client.id)}>{client.name} · {client.address}</button>)}
+              {status?.pairedClients?.length === 0 && <p className="settings-choice-empty">暂无已配对设备</p>}
+            </div>
+            <button className="secondary-action" type="button" disabled={rotating || !status?.pairedClients?.length} onClick={() => void rotateToken()}>撤销全部配对</button>
+          </>}
+        </SettingsMenu>}
       </div>
 
       {/* 远端算力：把这一页交给另一台设备处理。 */}
       {status && !status.running && <div className="settings-group" role="region" aria-label="远端算力">
         <SettingsSwitch
           icon={<Wand2 />}
-          label="使用远端算力"
-          hint="把这一页交给已配对设备处理，结果回到本机显示"
+          label="使用其他设备处理"
+          hint="由已配对设备处理图片，结果在这台设备显示"
           disabled={!remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)}
           checked={remoteOps.enabled}
           onToggle={() => updateRemoteOps({ enabled: !remoteOps.enabled })}

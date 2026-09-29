@@ -1,4 +1,4 @@
-//! 显卡探测：跑 DLSS5 之前要知道这台机器上有没有 NVIDIA 的卡、是哪一代。
+//! 显卡探测：跑 DLSSNR 之前要知道这台机器上有没有 NVIDIA 的卡、是哪一代。
 //!
 //! 判定「能不能用」不靠型号猜：那是 NGX 自己的事（[`crate::dlssnr::ngx`] 用
 //! `GetFeatureRequirements` 问 DLL）。这里拿到的是设置页要显示的东西——卡名、

@@ -98,7 +98,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       return { bytes, mime: detectImageMime(bytes) };
     }
     if (identity.rendition === 'dlssnr') {
-      // DLSS5：起点由 `transform` 说明（本地去码/超分跑过就从它们的产物接着跑），
+      // DLSSNR：起点由 `transform` 说明（本地去码/超分跑过就从它们的产物接着跑），
       // 层参数也在里面——它同时是缓存键的一部分，改参数就拿不到旧结果。起点是按
       // 「产出它的模型」存的，两个模型 id 一并送过去。
       const { source, passes } = parseDlssnrTransform(identity.transform);

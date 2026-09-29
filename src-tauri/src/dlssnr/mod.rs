@@ -1,4 +1,4 @@
-//! DLSS5（NVIDIA 的 `nvngx_dlssnr.dll`）滤镜。
+//! DLSSNR（NVIDIA 的 `nvngx_dlssnr.dll`）滤镜。
 //!
 //! 这是桌面端把一页图交给 NVIDIA 的神经渲染网络做一次同分辨率增强的路径：读入
 //! RGBA、把图与运动/深度引导传进 NGX、取回增强后的 RGBA。参数、风格与多层叠加
@@ -16,7 +16,7 @@
 #[cfg(windows)]
 pub mod commands;
 
-/// 非 Windows 上的同名命令：设置页在这些平台上根本不显示 DLSS5，但
+/// 非 Windows 上的同名命令：设置页在这些平台上根本不显示 DLSSNR，但
 ///  要求命令在所有平台上都存在，所以留一组只会回「不可用」的
 /// 壳。（命令名与参数要和 Windows 那份一致，前端只按名字调。）
 #[cfg(not(windows))]
@@ -26,7 +26,7 @@ pub mod commands {
     fn unavailable() -> CommandResult<serde_json::Value> {
         CommandResult::failure(
             "PLATFORM_UNAVAILABLE",
-            "DLSS5 只在 Windows 桌面端可用",
+            "DLSSNR 只在 Windows 桌面端可用",
             false,
         )
     }
@@ -73,7 +73,7 @@ pub mod commands {
         Ok(crate::domain::result::into_binary_response(
             CommandResult::<Vec<u8>>::failure(
                 "PLATFORM_UNAVAILABLE",
-                "DLSS5 只在 Windows 桌面端可用",
+                "DLSSNR 只在 Windows 桌面端可用",
                 false,
             ),
         ))
@@ -99,7 +99,7 @@ pub use gpu::GpuInfo;
 #[cfg(windows)]
 pub use settings::{DlssnrSettings, PassSettings, DEFAULT_PASS_COUNT, MAX_PASS_COUNT};
 
-/// 这台机器上 DLSS5 的现状：设置页据此决定显示什么、能不能开。
+/// 这台机器上 DLSSNR 的现状：设置页据此决定显示什么、能不能开。
 ///
 /// 这里全是**便宜**的事实（枚举显卡、看文件在不在、认 DLL 哈希），不建 D3D12 设备、
 /// 不碰 NGX：设置页打开就能读。真跑一遍的结论在 [`probe`]。
@@ -144,7 +144,7 @@ pub struct DlssnrStatus {
 
 /// 真机跑一遍的结论：一张合成图过完整条链路（核心 → 片段 → 评估 → 回读）。
 ///
-/// 这是唯一权威的「这台机器能不能跑 DLSS5」：显卡型号只决定「该装哪一种变体」，
+/// 这是唯一权威的「这台机器能不能跑 DLSSNR」：显卡型号只决定「该装哪一种变体」，
 /// 驱动与 NGX 自己还有话说。
 #[cfg(windows)]
 #[derive(Debug, Clone, serde::Serialize)]
@@ -166,8 +166,7 @@ pub fn status(data_dir: &std::path::Path) -> DlssnrStatus {
     let gpu = gpu::detect_gpu().ok().flatten();
     let dll = dll_path(data_dir);
     let dll_bytes = std::fs::metadata(&dll).ok().map(|metadata| metadata.len());
-    let variant = dll_bytes
-        .and_then(|bytes| file_sha256(&dll).and_then(|digest| variant_of(bytes as usize, &digest)));
+    let variant = cached_variant(&dll);
     let core = ngx::NgxCore::available(data_dir);
     let recommended = gpu.as_ref().and_then(|value| value.recommended_variant());
     let mut report = DlssnrStatus {
@@ -194,7 +193,7 @@ pub fn status(data_dir: &std::path::Path) -> DlssnrStatus {
     }
     if report.recommended_variant.is_none() {
         report.error = Some(format!(
-            "{} 这一代不在 DLSS5 的支持范围（支持的是 RTX 20/30/40/50 系）",
+            "{} 这一代不在 DLSSNR 的支持范围（支持的是 RTX 20/30/40/50 系）",
             report.gpu_name
         ));
         return report;
@@ -280,7 +279,7 @@ pub fn mean_absolute_difference(left: &[u8], right: &[u8]) -> f64 {
     total as f64 / left.len() as f64
 }
 
-/// 这一台设备上是否可能存在 DLSS5 路径（编译期）。
+/// 这一台设备上是否可能存在 DLSSNR 路径（编译期）。
 pub const fn is_supported_platform() -> bool {
     cfg!(windows)
 }
@@ -346,9 +345,30 @@ pub fn variant_of(bytes: usize, sha256_hex: &str) -> Option<Variant> {
 pub fn installed_variant(data_dir: &std::path::Path) -> Option<(Variant, u64)> {
     let path = dll_path(data_dir);
     let bytes = std::fs::metadata(&path).ok()?;
-    let digest = file_sha256(&path)?;
-    let variant = variant_of(bytes.len() as usize, &digest)?;
+    let variant = cached_variant(&path)?;
     Some((variant, bytes.len()))
+}
+
+#[cfg(windows)]
+fn cached_variant(path: &std::path::Path) -> Option<Variant> {
+    use std::sync::{Mutex, OnceLock};
+    type CacheEntry = (std::path::PathBuf, u64, Option<std::time::SystemTime>, Option<Variant>);
+    static CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached_path, bytes, cached_modified, variant)) = guard.as_ref() {
+            if cached_path == path && *bytes == metadata.len() && *cached_modified == modified {
+                return *variant;
+            }
+        }
+    }
+    let variant = file_sha256(path).and_then(|digest| variant_of(metadata.len() as usize, &digest));
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((path.to_path_buf(), metadata.len(), modified, variant));
+    }
+    variant
 }
 
 /// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、拷到数据目录、认清是哪一种变体。
@@ -363,7 +383,7 @@ pub fn install_dll(source: &std::path::Path, data_dir: &std::path::Path) -> Resu
         return Err("选中的不是一个文件".to_string());
     }
     if metadata.len() < 1_000_000 {
-        return Err(format!("这个文件只有 {} 字节，不像是 DLSS5 的 DLL", metadata.len()));
+        return Err(format!("这个文件只有 {} 字节，不像是 DLSSNR 的 DLL", metadata.len()));
     }
     // 只认 PE：`MZ` 头 + PE 签名。用户很容易误选到别的文件（说明文档、压缩包），
     // 这时候要当场说清楚，别等 NGX 加载失败。
@@ -412,7 +432,7 @@ pub struct InstalledDll {
     pub variant_label: Option<String>,
 }
 
-/// 一段 RGBA 走一遍 DLSS5（阅读器与算力中心都从这里进）。
+/// 一段 RGBA 走一遍 DLSSNR（阅读器与算力中心都从这里进）。
 ///
 /// 尺寸小于 [`filter::MIN_EDGE`] 会直接报错——那是 DLL 自己的要求，不是我们加的。
 #[cfg(windows)]
@@ -522,21 +542,16 @@ pub fn forget_probe() {
 /// 每次跑图前检查这台机器当前是否具备显卡、核心与组件。
 #[cfg(windows)]
 pub fn runtime_gate(data_dir: &std::path::Path) -> Result<(), String> {
-    let report = status(data_dir);
-    if !report.dll_present {
-        return Err(report
-            .error
-            .unwrap_or_else(|| "还没有导入 nvngx_dlssnr.dll".to_string()));
+    if !dll_path(data_dir).is_file() {
+        return Err("还没有导入 nvngx_dlssnr.dll".to_string());
     }
-    if !report.core_available {
-        return Err(report
-            .error
-            .unwrap_or_else(|| "这个构建没有链上 NGX 核心".to_string()));
+    if !ngx::NgxCore::available(data_dir) {
+        return Err("这个构建没有链上 NGX 核心".to_string());
     }
-    if report.recommended_variant.is_none() || report.gpu.is_none() {
-        return Err(report
-            .error
-            .unwrap_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string()));
+    let gpu = gpu::detect_gpu().map_err(|error| error.to_string())?
+        .ok_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string())?;
+    if gpu.recommended_variant().is_none() {
+        return Err(format!("{} 这一代不在 DLSSNR 的支持范围", gpu.name));
     }
     Ok(())
 }
@@ -698,7 +713,7 @@ mod tests {
     ///
     /// 判据是**这台机器的事实**（有没有片段、有没有 NGX 核心、有没有那块卡），
     /// 手动检测只用于诊断，不参与门控：探针结论只活在进程内存里，要是拿它当门，
-    /// 每次重开应用都得先去设置页点一遍「检测」，否则 DLSS5 静悄悄地不再生效。
+    /// 每次重开应用都得先去设置页点一遍「检测」，否则 DLSSNR 静悄悄地不再生效。
     /// 真跑失败由原生处理链报回来（一次失败 + 一条日志），比「什么都没发生」好。
     #[test]
     fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
@@ -754,7 +769,7 @@ mod tests {
             Err(error) => {
                 // 初始化失败是 DLL/驱动/卡三方之一的事，测试只报告，不当失败：
                 // 这台机器上真能用的时候才会走到断言。
-                println!("跳过：DLSS5 没跑起来 —— {error}");
+                println!("跳过：DLSSNR 没跑起来 —— {error}");
                 return;
             }
         };

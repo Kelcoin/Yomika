@@ -99,7 +99,6 @@
   min-width: 0;
   max-width: 100%;
   max-height: 100%;
-  /* 处理中的胶囊要压在页面上，锚点是这一格。 */
   position: relative;
 }
 
@@ -109,9 +108,10 @@
    pointer-events: none，翻页、缩放照旧。 */
 .reader-deriving {
   position: absolute;
-  top: var(--space-3);
+  top: calc(var(--safe-top) + var(--space-3));
   left: 50%;
   transform: translateX(-50%);
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -129,6 +129,7 @@
   white-space: nowrap;
   pointer-events: none;
 }
+.reader-chrome:has(.reader-chrome-top) .reader-deriving { top: calc(var(--safe-top) + 68px); }
 
 .reader-deriving .loading-mark { display: flex; }
 /* 指示器落在阅读器自己的深色画布上，用亮墨（与 .reader-page-status 同一条）。 */
@@ -280,7 +281,6 @@
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
   background: var(--reader-chrome);
-  backdrop-filter: blur(14px);
   pointer-events: auto;
 }
 
@@ -422,15 +422,29 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0;
+  gap: var(--space-2);
   height: calc(var(--reader-toolbar-height) + var(--safe-bottom));
   padding: 0 var(--space-1) var(--safe-bottom);
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   background: var(--reader-bar-container);
-  backdrop-filter: blur(14px);
   pointer-events: auto;
 }
+
+.reader-toolbar-group {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+  min-height: 48px;
+  padding: 2px 4px;
+  border-radius: var(--radius-pill);
+  background: var(--reader-control-hover);
+}
+.reader-toolbar-pages {
+  background: color-mix(in srgb, var(--reader-primary) 12%, var(--reader-bar-container));
+}
+.reader-toolbar-processing:empty { display: none; }
 
 /* M3 disabled: the icon drops to on-surface at 38%. */
 .reader-toolbar button:disabled {
@@ -679,7 +693,31 @@
   .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {
     justify-content: flex-start;
+    gap: var(--space-1);
   }
+}
+
+@media (max-width: 610px) {
+  .reader-toolbar {
+    --reader-toolbar-height: 112px;
+    flex-wrap: wrap;
+    align-content: center;
+    justify-content: space-evenly;
+    overflow: hidden;
+  }
+  .reader-toolbar-group { min-height: 44px; }
+  .reader-toolbar-pages { order: 0; }
+  .reader-toolbar-layout { order: 1; }
+  .reader-toolbar-processing { order: 2; }
+  .reader-toolbar-view { order: 3; }
+}
+
+@media (max-width: 420px) {
+  .reader-toolbar {
+    --reader-toolbar-height: 160px;
+    gap: 0 var(--space-1);
+  }
+  .reader-toolbar-group { min-height: 42px; }
 }
 
 /* The reader's own scrollers, for the same reason as the shell's: a webtoon that

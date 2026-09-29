@@ -8,6 +8,7 @@ import { flushSync } from 'react-dom';
 import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
+import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
 import { decodeImage } from '../lib/decodeImage';
@@ -66,6 +67,7 @@ interface ReaderScreenProps {
    * seen on the page in front of you instead of only in settings. */
   upscale?: EnhancementSwitch | undefined;
   decensor?: EnhancementSwitch | undefined;
+  dlssnr?: EnhancementSwitch | undefined;
   /** Bumped by the caller when what `loadPage` would return has changed — a
    * switch above, for instance. Every loaded page is dropped and the window
    * refetched; without it a toggle changed nothing already on screen. */
@@ -84,6 +86,7 @@ interface ReaderScreenProps {
   /** The pages actually on screen, so the caller can enhance those and not the
    * whole prefetch window. */
   onVisiblePages?: ((indexes: readonly number[]) => void) | undefined;
+  onDerivedDisplayed?: ((pageIndex: number, url: string) => void) | undefined;
 }
 
 /** Why a page is not on screen yet: still coming, or given up on.
@@ -97,11 +100,12 @@ interface ReaderScreenProps {
  * `<img>` 换 `src` 的那一帧，浏览器会先把旧图扔掉——旧图 → 空 → 新图。超分/去码算完正好
  * 是这个动作（同一页从原图换成处理过的图），中间那一帧空档在阅读器的深色底上就是用户看到
  * 的黑闪。所以这里保留正在显示的那一张，新图 `decode()` 完了再换（见 `lib/decodeImage`）。 */
-function ReaderPageImage({ index, source, size, onMeasured }: {
+function ReaderPageImage({ index, source, size, onMeasured, onDisplayed }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
   onMeasured: (index: number, image: HTMLImageElement) => void;
+  onDisplayed?: ((index: number, url: string) => void) | undefined;
 }) {
   const [shown, setShown] = useState(source);
   useEffect(() => {
@@ -118,7 +122,10 @@ function ReaderPageImage({ index, source, size, onMeasured }: {
       src={shown}
       decoding="async"
       style={size ? { '--reader-page-max-width': `${size.width}px`, '--reader-page-max-height': `${size.height}px` } as CSSProperties : undefined}
-      onLoad={(event) => onMeasured(index, event.currentTarget)}
+      onLoad={(event) => {
+        onMeasured(index, event.currentTarget);
+        onDisplayed?.(index, shown);
+      }}
     />
   );
 }
@@ -142,7 +149,7 @@ function readViewport() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
   const pageActive = usePageActive();
   const reduceMotion = useReducedMotion();
   const goBack = useReturnNavigation();
@@ -1039,13 +1046,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     return (
       <div className="reader-slot" key={index}>
         {source
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} />
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
-        {/* 处理中的那一页压一枚安静的小胶囊：本机跑一页要好几秒（两个模型一起
-            ~20 秒），没有它，用户按下「去码」后看到的就是「什么都没发生」。 */}
-        {derivingPages?.has(index) && (
-          <p className="reader-deriving" role="status"><LoadingIndicator label={derivingLabel} size="sm" inline />{derivingLabel}</p>
-        )}
       </div>
     );
   };
@@ -1147,6 +1149,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           bottom bar slid in from the top of the screen — which is where it does
           not live. */}
       <div className="reader-chrome">
+        {(effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes).some((index) => derivingPages?.has(index)) && (
+          <p className="reader-deriving" role="status"><LoadingIndicator label={derivingLabel} size="sm" inline />{derivingLabel}</p>
+        )}
         <AnimatePresence>
           {topChromeVisible && (
             <motion.header
@@ -1177,16 +1182,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               transition={{ duration: reduceMotion ? 0 : 0.22 }}
               onClick={stopChromeToggle}
             >
-              <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
-              <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
-              <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
+              <div className="reader-toolbar-group reader-toolbar-pages">
+                <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
+                <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
+                <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
+              </div>
               {/* One control, cycling 自动 → 单页 → 双页 → webtoon. Three separate
                   buttons spent three toolbar slots to express one choice, and
                   none of them could select 自动 once you left it. */}
-              <button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
+              <div className="reader-toolbar-group reader-toolbar-layout"><button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
                 {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
               </button>
               <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button></div>
+              <div className="reader-toolbar-group reader-toolbar-processing">
               {/* The two derived renditions, switchable from here. Both were
                   settings-only, so there was no way to see what either one did to
                   the page you were looking at. */}
@@ -1210,14 +1219,19 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                   onClick={decensor.toggle}
                 ><Eraser aria-hidden="true" /></button>
               )}
+              {dlssnr?.configured && (
+                <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon /></button>
+              )}
+              </div>
+              <div className="reader-toolbar-group reader-toolbar-view">
               <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
               {/* No `aria-pressed`: direction is a choice between two, not a
                   switch that is on, and the pressed styling made the button look
                   permanently hovered whenever the answer was right-to-left. */}
-              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
               <button type="button" aria-label={isFullscreen ? '退出全屏' : '全屏'} onClick={toggleFullscreen}>
                 {isFullscreen ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
               </button>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>

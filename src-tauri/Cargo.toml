@@ -55,7 +55,7 @@ custom-protocol = ["tauri/custom-protocol"]
 arboard = "3"
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
 
 # 发布构建不带符号表。
 #

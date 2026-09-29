@@ -172,7 +172,7 @@ pub struct PreferenceSnapshot {
     pub tag_translation_enabled: bool,
     #[serde(default = "default_true")]
     pub tag_count_order_enabled: bool,
-    /// DLSS5：在阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染（仅 Windows 桌面、
+    /// DLSSNR：在阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染（仅 Windows 桌面、
     /// 且装了 DLL、检测通过时设置页才显示这一组）。
     #[serde(default)]
     pub dlssnr_enabled: bool,
@@ -195,7 +195,7 @@ pub struct PreferenceSnapshot {
     #[serde(default)]
     pub remote_compute_token: String,
     /// 远端处理用的参数，JSON 对象。**只作用于远端**：不改本机自己的超分/去码/
-    /// DLSS5 设置，也不去动远端那台机器上的设置。
+    /// DLSSNR 设置，也不去动远端那台机器上的设置。
     #[serde(default)]
     pub remote_compute_ops: String,
 }

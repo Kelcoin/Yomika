@@ -1,4 +1,4 @@
-//! DLSS5 的参数：与设置页、偏好、算力中心共用同一份形状。
+//! DLSSNR 的参数：与设置页、偏好、算力中心共用同一份形状。
 //!
 //! 名称与范围都对着 NGX 认的参数表来（`DLSSNR.Style` / `DLSSNR.Intensity` / … ），
 //! 我们只是转手传下去。刻意**只做 NGX 认的那些**：还有一族用法是「先把图缩到低
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_PASS_COUNT: u32 = 3;
 pub const DEFAULT_PASS_COUNT: u32 = 1;
 
-/// 一层 DLSS5 的参数。
+/// 一层 DLSSNR 的参数。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PassSettings {

@@ -1510,7 +1510,7 @@ fn store_derived(
 // asynchronously; never queue behind inference on the window or database thread.
 static READER_INFERENCE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-/// 全局只允许一件重活：阅读器的超分/去码、DLSS5、算力中心收到的请求都走这里。
+/// 全局只允许一件重活：阅读器的超分/去码、DLSSNR、远端处理收到的请求都走这里。
 /// 不这么收，两张图同时进来就会各开一份模型，内存直接翻倍。
 pub(crate) async fn run_heavy<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
@@ -1755,7 +1755,7 @@ fn upscale_cached_page_with_models(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     }
-    // 产物落盘：DLSS5 / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
+    // 产物落盘：DLSSNR / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
     // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。
     store_derived(database, app_data, &enhanced_identity, &encoded);
     CommandResult::success(encoded)
@@ -2039,7 +2039,7 @@ fn decensor_cached_page(
         Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
     };
     drop(guard);
-    // 去码产物是链路的**中间结果**：超分那一步读它，DLSS5 / 远端也以它为起点。
+    // 去码产物是链路的**中间结果**：超分那一步读它，DLSSNR / 远端也以它为起点。
     // 只在这里落盘，取消掉的任务不写。
     store_derived(database, app_data, &identity, &encoded);
     CommandResult::success(encoded)
@@ -2746,7 +2746,7 @@ mod tests {
 
     #[test]
     fn an_enhanced_page_is_cached_under_its_model_revision() {
-        // Each step's output is addressable: DLSS5 and the compute centre read the
+        // Each step's output is addressable: DLSSNR and remote processing read the
         // `enhanced` rendition as their own input, and a reader that comes back to
         // the page does not pay for the model twice. The key carries the model, so
         // switching models cannot serve the previous one's output.

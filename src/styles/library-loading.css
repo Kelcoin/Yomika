@@ -1,0 +1,21 @@
+.archive-list-skeleton-layer {
+  position: relative;
+  z-index: 1;
+  background: var(--surface-container);
+  pointer-events: none;
+}
+
+.archive-list-skeleton-layer.is-exiting {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
+  animation: library-skeleton-exit 180ms ease-out both;
+}
+
+@keyframes library-skeleton-exit {
+  to { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .archive-list-skeleton-layer.is-exiting { animation: none; opacity: 0; }
+}

@@ -3,14 +3,14 @@ import { z } from 'zod';
 import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 
-/** 一台能用的 N 卡（DLSS5 的显卡信息）。 */
+/** 一台能用的 N 卡（DLSSNR 的显卡信息）。 */
 export const DlssnrGpuSchema = z.object({
   name: z.string(),
   /** 这一代该用哪一种变体（`official` / `community` / `sf-v2`）。 */
   recommendedVariant: z.string().nullable().optional(),
 });
 
-/** 这台机器上 DLSS5 的现状。全是便宜事实：枚举显卡、看文件在不在、认哈希。 */
+/** 这台机器上 DLSSNR 的现状。全是便宜事实：枚举显卡、看文件在不在、认哈希。 */
 export const DlssnrStatusSchema = z.object({
   dllPresent: z.boolean(),
   variant: z.string().nullable(),
@@ -90,7 +90,7 @@ const InstalledDllSchema = z.object({
   variantLabel: z.string().nullable(),
 });
 
-/** 一层 DLSS5 的参数：与后端 `dlssnr::PassSettings` 一一对应。 */
+/** 一层 DLSSNR 的参数：与后端 `dlssnr::PassSettings` 一一对应。 */
 export const DlssnrPassSchema = z
   .object({
     /** 0 默认 / 1 自然 / 2 电影。 */

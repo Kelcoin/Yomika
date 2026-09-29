@@ -7,9 +7,8 @@ import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowCont
  * its own traffic lights and never mounts this bar.
  *
  * Dragging and double-click-to-maximize belong to Tauri's own drag-region
- * script — every draggable surface carries `data-tauri-drag-region` itself
- * (the bare header and the two text spans), and this component adds nothing
- * on top. A React onDoubleClick used to live here as well, and the two fought:
+ * script. `deep` includes the mark's SVG descendants; the controls explicitly
+ * opt out. A React onDoubleClick used to live here as well, and the two fought:
  * a double click that started on a control button bubbled to the header and
  * toggle-maximized after the button's own action, so 最小化 looked like it
  * needed two presses (down, restore, down again) and 最大化 flipped twice. */
@@ -18,11 +17,11 @@ export function TitleBar() {
   const maximized = useWindowMaximized(api);
 
   return (
-    <header className="titlebar" data-tauri-drag-region>
-      <span className="titlebar-mark" data-tauri-drag-region>
+    <header className="titlebar" data-tauri-drag-region="deep">
+      <span className="titlebar-mark">
         <YomikaMark size={18} />
       </span>
-      <span className="titlebar-name" data-tauri-drag-region>Yomika</span>
+      <span className="titlebar-name">Yomika</span>
       {/* 按钮区显式退出拖拽区域（Tauri 的拖拽脚本认这个属性），并拦住 mousedown
           与双击：落在标题栏上的手势处理不该盖过按钮本身的一次点击，否则表现
           就是「有时要点两下」。 */}

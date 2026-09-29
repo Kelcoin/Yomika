@@ -89,7 +89,7 @@ export async function pickModelFile(): Promise<string | null> {
 
 const DLL_EXTENSIONS = ['dll'];
 
-/** DLSS5 的 `nvngx_dlssnr.dll`：从用户手上的那份变体里选一个。 */
+/** DLSSNR 的 `nvngx_dlssnr.dll`：从用户手上的那份变体里选一个。 */
 export async function pickDllFile(): Promise<string | null> {
   if (testModelPicker) return testModelPicker();
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;

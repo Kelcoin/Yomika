@@ -7,7 +7,7 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 
 /** 设置行背后那套「一行 + 浮层菜单」的控件：选择、数字步进。
  *
- * 原先它们是设置页里的局部组件；DLSS5 与算力中心两组也要用同一套，就挪出来
+ * 原先它们是设置页里的局部组件；DLSSNR 与远端处理两组也要用同一套，就挪出来
  * 导出——外观与行为一字未改。 */
 
 /** The floating menu a row opens. One masked sheet for every kind of control —

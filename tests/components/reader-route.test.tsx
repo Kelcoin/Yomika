@@ -14,6 +14,33 @@ afterEach(() => {
 });
 
 describe('reader route', () => {
+  it('starts DLSSNR only from its reader control and keeps the final rendition', async () => {
+    const cache = getNativeImageCache();
+    const processed = { key: 'dlssnr-0', url: 'blob:dlssnr-0', bytes: 1 };
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? processed
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr')).toBe(false);
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:decensored-0'));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', processed.url));
+    expect(release).not.toHaveBeenCalledWith(processed);
+    expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
+    await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1]));
+  });
   function enhancedReader(pageCount: number, enhanced: (index: number) => Promise<ImageHandle>) {
     const cache = getNativeImageCache();
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'enhanced'
@@ -531,7 +558,7 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' });
 
     // 说清楚为什么，并且把偏好写回 false（不然每次进阅读器都要重问一遍）。
-    expect(await screen.findByText(/DLSS5 不可用：没有找到 NVIDIA 显卡/)).toBeInTheDocument();
+    expect(await screen.findByText(/DLSSNR 不可用：没有找到 NVIDIA 显卡/)).toBeInTheDocument();
     await waitFor(() => expect(saved).toContainEqual(expect.objectContaining({ dlssnrEnabled: false })));
     // 也没有任何一步真的去跑它。
     expect(commands).not.toContain('dlssnr_apply_page');
@@ -542,6 +569,7 @@ describe('reader route', () => {
     // 折在一次调用里，用户要么等全程、要么在超分失败时连去码结果一起丢。
     const cache = getNativeImageCache();
     const sources: Array<string | undefined> = [];
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
     let releaseUpscale: ((handle: ImageHandle) => void) | undefined;
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
       if (identity.rendition === 'enhanced') {
@@ -552,7 +580,6 @@ describe('reader route', () => {
       }
       return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
     });
-    vi.spyOn(cache, 'release').mockImplementation(() => {});
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
@@ -576,6 +603,9 @@ describe('reader route', () => {
     await waitFor(() => expect(sources).toContain('decensored'));
     await act(async () => { releaseUpscale?.({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 }); });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
+    fireEvent.load(image);
+    expect(release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
   });
 
   it('still enlarges the plain page when the de-censoring step fails', async () => {

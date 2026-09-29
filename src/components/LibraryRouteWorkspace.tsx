@@ -13,7 +13,7 @@ import { useArchiveContextMenu } from './useArchiveContextMenu';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
 import { mirrorFavorites } from '../lib/favoritesMirror';
-import { readRouteCache, routeCacheAge, writeRouteCache } from '../lib/routeCache';
+import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 
 /** 分类镜像一次性读取：注水只发生在挂载和换服务器时。原先这读写在
  * 组件体里无条件执行，搜索每敲一键、卡片每次悬停都要 parse 一遍。 */
@@ -41,11 +41,6 @@ const imageCache = getNativeImageCache();
 function librarySnapshotKey(requestedServer: string | null): string {
   return `library:workspace:${requestedServer ?? 'default'}`;
 }
-
-/** How long a restored list is trusted without a re-fetch. Long enough that
- * switching to settings and back is free; short enough that an archive added on
- * the server shows up on the next visit rather than the next hour. */
-const LIBRARY_SNAPSHOT_FRESH_MS = 90_000;
 
 /** The offline mirror has no page size of its own, so it borrows one. Only the
  * fallback path uses it: online, the page size is LANraragi's to decide. */
@@ -91,13 +86,16 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const serverParam = urlSearchParams.get('server');
   // Snapshot from the last visit: switching to another route and back used to
   // start from an empty list and a closed detail pane.
-  const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam));
-  const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
-  const [loading, setLoading] = useState(!snapshot);
+  // The route cache is memory-only. Even an old page can be shown immediately
+  // while the server refreshes it, provided it belongs to the active query.
+  const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam), Infinity);
+  const cachedPage = requestedQuery === undefined || requestedQuery === snapshot?.searchQuery ? snapshot : undefined;
+  const [archives, setArchives] = useState<ArchiveRecord[]>(cachedPage?.archives ?? []);
+  const [loading, setLoading] = useState(!cachedPage);
   /** True while any first-page request is outstanding. Separate from `loading`,
    * which only covers the very first one so that refiltering does not unmount the
    * search field. */
-  const [pageLoading, setPageLoading] = useState(!snapshot);
+  const [pageLoading, setPageLoading] = useState(!cachedPage);
   const [error, setError] = useState<string>();
   const [needsCredentials, setNeedsCredentials] = useState(false);
   const [serverId, setServerId] = useState<string>();
@@ -120,7 +118,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
    * 静默进行；骨架只保留给第一无所知的加载。 */
   const categoriesOnScreen = useRef(Boolean(snapshot?.categories?.length || persistedCategories?.length));
   const [categoryError, setCategoryError] = useState<string>();
-  const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(snapshot?.selectedArchiveId);
+  const [selectedArchiveId, setSelectedArchiveId] = useState<string | undefined>(cachedPage?.selectedArchiveId);
   const [metadataMessage, setMetadataMessage] = useState<string>();
   const [thumbnail, setThumbnailUrl] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
@@ -128,8 +126,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   // True when the list came from the local mirror because LANraragi could not be
   // reached. Worth saying out loud: the list is then as old as the last sync.
   const [offline, setOffline] = useState(false);
-  const [totalArchives, setTotalArchives] = useState(snapshot?.totalArchives ?? 0);
-  const [hasMoreArchives, setHasMoreArchives] = useState(snapshot?.hasMoreArchives ?? false);
+  const [totalArchives, setTotalArchives] = useState(cachedPage?.totalArchives ?? 0);
+  const [hasMoreArchives, setHasMoreArchives] = useState(cachedPage?.hasMoreArchives ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [readingList, setReadingList] = useState<import('../domain/library').WatchlistRecord[]>([]);
@@ -139,13 +137,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const loadingMoreRef = useRef(false);
   /** Rows the server has handed over, which is the offset the next page asks for.
    * The rendered list can be shorter once duplicates are dropped. */
-  const fetchedCount = useRef(snapshot?.fetchedCount ?? snapshot?.archives.length ?? 0);
-  const initialArchivesLoaded = useRef(Boolean(snapshot));
-  const snapshotIsFresh = useRef(
-    Boolean(snapshot?.archives.length)
-      && (requestedQuery === undefined || requestedQuery === snapshot?.searchQuery)
-      && (routeCacheAge(librarySnapshotKey(serverParam)) ?? Infinity) < LIBRARY_SNAPSHOT_FRESH_MS,
-  );
+  const fetchedCount = useRef(cachedPage?.fetchedCount ?? cachedPage?.archives.length ?? 0);
+  const initialArchivesLoaded = useRef(Boolean(cachedPage));
+  const snapshotOnScreen = useRef(Boolean(cachedPage?.archives.length));
   const [searchQuery, setSearchQuery] = useState(requestedQuery ?? snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
@@ -395,8 +389,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         setError(undefined);
         // 删除一条档案之后，屏幕上那份列表仍然是要看的那份（只是少一行），所以让首页
         // 重读落在它后面而不是把它清空重建——清空会闪一次骨架，比那行自己消失难看得多。
-        // 这里借用的正是「快照还新鲜」那条分支：列表留在原处，重读回来再换。
-        if (prefix === 'library:') snapshotIsFresh.current = true;
+        // 这里借用快照在屏时的分支：列表留在原处，重读回来再换。
+        if (prefix === 'library:') snapshotOnScreen.current = true;
         void loadLibrary().then(() => setReloadToken((value) => value + 1));
       }
     };
@@ -468,15 +462,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   useEffect(() => {
     if (!serverId) return;
-    // Re-runs whenever the query, sort or category changes, because all three are
-    // resolved by the server now. A list restored from a fresh snapshot skips the
-    // *visible* load — the page it would fetch is the page already on screen — but
-    // not the request itself: "fresh" is a 90-second guess, and the library is
-    // exactly where an archive added since the last visit has to turn up. So the
-    // restored page stays on screen and the same page is re-read behind it, and
-    // the list is replaced only once the server has answered.
-    const restored = snapshotIsFresh.current;
-    snapshotIsFresh.current = false;
+    // A matching cached page remains visible while its first page is re-read.
+    // A changed query still clears the old rows, since they describe a different
+    // result set.
+    const restored = snapshotOnScreen.current;
+    snapshotOnScreen.current = false;
     void loadFirstPage(serverId, restored ? { background: true } : { clear: true });
   }, [loadFirstPage, reloadToken, serverId]);
 

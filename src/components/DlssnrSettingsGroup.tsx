@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { AlertTriangle, Download, FileText, ImageUpscale, Layers, Loader2, Minus, Plus, RefreshCw, Scan, Sparkles, Upload } from 'lucide-react';
+import { Download, ImageUpscale, Layers, Loader2, Plus, Scan, Sparkles, Upload } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
+import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
 import { pickDllFile } from '../bridge/filePicker';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
@@ -26,8 +27,6 @@ const STYLE_OPTIONS = [
   { value: '2', label: '电影' },
 ];
 
-const STYLE_LABELS: Record<number, string> = { 0: '默认', 1: '自然', 2: '电影' };
-
 const MEGABYTE = 1024 * 1024;
 
 function megabytes(bytes: number): string {
@@ -36,28 +35,39 @@ function megabytes(bytes: number): string {
 
 /** 换片段之后要重启才生效：NGX 一个进程只加载一份片段，这次已经跑过的话，手上这份
  *  还是上一份。这句话跟着两条换片段的提示一起给用户。 */
-const RESTART_NOTE = '；若这次已经跑过 DLSS5，重启应用后才会换成它';
+const RESTART_NOTE = '；若这次已经跑过 DLSSNR，重启应用后才会换成它';
 
 interface Props {
   preferences: PreferenceSnapshot;
   editPreferences: (patch: Partial<PreferenceSnapshot>) => void;
-  /** 只有 Windows 桌面端显示这一组（DLSS5 走 D3D12 + NGX）。 */
+  /** 只有 Windows 桌面端显示这一组（DLSSNR 走 D3D12 + NGX）。 */
   visible: boolean;
 }
 
-/** DLSS5 设置组：组件、开关与 1–3 层参数。检测是可选的诊断操作。 */
+/** DLSSNR 设置组：组件、开关与 1–3 层参数。 */
 export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: Props) {
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeDlssnrRepository(), []);
-  const [status, setStatus] = useState<DlssnrStatus>();
-  const [probing, setProbing] = useState(false);
+  const [status, setStatus] = useState<DlssnrStatus | undefined>(() => {
+    try {
+      const cached = localStorage.getItem('yomika.dlssnr-status');
+      return cached ? (JSON.parse(cached) as DlssnrStatus) : undefined;
+    } catch { return undefined; }
+  });
+  const [verified, setVerified] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [catalog, setCatalog] = useState<DlssnrCatalog>();
+  const [catalog, setCatalog] = useState<DlssnrCatalog | undefined>(() => {
+    try {
+      const cached = localStorage.getItem('yomika.dlssnr-catalog');
+      return cached ? (JSON.parse(cached) as DlssnrCatalog) : undefined;
+    } catch { return undefined; }
+  });
   const [catalogError, setCatalogError] = useState<string>();
   /** 正在下载的那一条变体 id（同一时刻只有一条：后端那条下载路径也只跑一件）。 */
   const [downloading, setDownloading] = useState<string>();
   const [download, setDownload] = useState<{ completed: number; total?: number | undefined }>();
   const [selectedLayer, setSelectedLayer] = useState<number | undefined>();
+  const [draftPass, setDraftPass] = useState<DlssnrPass>();
   const [layerMenu, setLayerMenu] = useState(false);
   const [variantMenu, setVariantMenu] = useState(false);
 
@@ -65,8 +75,10 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     const result = await repository.status();
     if (result.ok) {
       setStatus(result.value);
+      setVerified(true);
+      try { localStorage.setItem('yomika.dlssnr-status', JSON.stringify(result.value)); } catch { /* storage unavailable */ }
     } else {
-      setStatus(undefined);
+      setVerified(false);
     }
   }, [repository]);
 
@@ -74,9 +86,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     const result = await repository.catalog();
     if (result.ok) {
       setCatalog(result.value);
+      try { localStorage.setItem('yomika.dlssnr-catalog', JSON.stringify(result.value)); } catch { /* storage unavailable */ }
       setCatalogError(undefined);
     } else {
-      setCatalog(undefined);
       setCatalogError(result.error.message);
     }
   }, [repository]);
@@ -106,26 +118,19 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
 
   const passes = useMemo(() => parseDlssnrPasses(preferences.dlssnrPasses), [preferences.dlssnrPasses]);
   const updatePasses = (next: DlssnrPass[]) => editPreferences({ dlssnrPasses: serializeDlssnrPasses(next) });
-  const updatePass = (index: number, patch: Partial<DlssnrPass>) => {
-    updatePasses(passes.map((pass, at) => (at === index ? { ...pass, ...patch } : pass)));
+  const updateDraftPass = (patch: Partial<DlssnrPass>) => setDraftPass((current) => current ? { ...current, ...patch } : current);
+  const openLayer = (index: number) => { setSelectedLayer(index); setDraftPass({ ...passes[index]! }); };
+  const saveLayer = () => {
+    if (selectedLayer !== undefined && draftPass) updatePasses(passes.map((pass, index) => index === selectedLayer ? draftPass : pass));
+    setSelectedLayer(undefined);
+    setDraftPass(undefined);
   };
-
-  async function runProbe() {
-    setProbing(true);
-    const result = await repository.probe(true);
-    setProbing(false);
-    if (!result.ok) {
-      showToast(result.error.message, 'error');
-      return;
-    }
-    await refresh();
-    showToast(
-      result.value.supported
-        ? `DLSS5 跑通了（${result.value.elapsedMs}ms）`
-        : result.value.error ?? 'DLSS5 在这台机器上跑不起来',
-      result.value.supported ? 'success' : 'error',
-    );
-  }
+  const deleteLayer = () => {
+    if (selectedLayer === undefined || passes.length <= 1) return;
+    updatePasses(passes.filter((_, index) => index !== selectedLayer));
+    setSelectedLayer(undefined);
+    setDraftPass(undefined);
+  };
 
   async function importDll() {
     const selected = await pickDllFile();
@@ -159,8 +164,8 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   if (!visible) return null;
   if (!status) {
     return (
-      <div className="settings-group" role="region" aria-label="DLSS5">
-        <SettingsRow icon={<Sparkles />} label="DLSS5" hint="正在检测这台机器…" control={<Loader2 className="spin" aria-hidden="true" />} />
+      <div className="settings-group" role="region" aria-label="DLSSNR">
+        <SettingsRow icon={<DlssnrIcon />} label="DLSSNR" hint="正在读取这台机器…" control={<Loader2 className="spin" aria-hidden="true" />} />
       </div>
     );
   }
@@ -171,21 +176,20 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
 
   // 拆成一个变量：直接对着 `status.probe?.supported` 做别名会让 TS 把另一个分支
   // 收窄成 null，`probe.error` 就读不出来了。
-  const probe = status.probe ?? undefined;
   const probed = status.available;
   const layerCount = passes.length;
 
   return (
-    <div className="settings-group" role="region" aria-label="DLSS5">
+    <div className="settings-group" role="region" aria-label="DLSSNR">
       <SettingsSwitch
-        icon={<Sparkles />}
-        label="启用 DLSS5"
+        icon={<DlssnrIcon />}
+        label="启用 DLSSNR"
         hint={
             probed
              ? `${status.variantLabel ?? 'nvngx_dlssnr'} · ${status.gpuName}`
              : '还没有片段：先在下面选择或导入组件'
         }
-        disabled={!probed}
+        disabled={!probed || !verified}
         checked={preferences.dlssnrEnabled}
         onToggle={() => {
           if (!probed) {
@@ -198,28 +202,12 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           editPreferences({ dlssnrEnabled: !preferences.dlssnrEnabled });
         }}
       />
-      <SettingsRow
-        icon={<Scan />}
-        label="检测 DLSS5"
-        hint={probe
-          ? probe.supported
-            ? `跑通：${probe.width}×${probe.height}，${probe.elapsedMs}ms`
-            : probe.error ?? '跑不起来'
-          : '用一张合成图跑完整条链路'}
-        control={
-          <button className="secondary-action" type="button" disabled={probing} aria-busy={probing} onClick={() => void runProbe()}>
-            <RefreshCw aria-hidden="true" />
-            {probing ? '检测中…' : '检测'}
-          </button>
-        }
-      />
-
       {/* 片段本身：官方原版与社区版在模型仓库里各一条资产，分开维护，用哪一条用户自己挑。
           装的是哪一条由后端认哈希回答（`status.variant`）。子组标题只写中文：这一行的
           样式会把拉丁字母转成大写，文件名的大小写就丢了（导入那一行里写着原名）。 */}
-      <SettingsRow icon={<Download />} label="DLSS5 组件" value={status.variantLabel ?? '未安装'} onClick={() => setVariantMenu(true)} />
-      {variantMenu && <SettingsMenu title="DLSS5 组件" onClose={() => setVariantMenu(false)}>
-      <div className="settings-subgroup" role="group" aria-label="DLSS5 片段">
+      <SettingsRow icon={<Download />} label="DLSSNR 组件" value={status.variantLabel ?? '未安装'} onClick={() => setVariantMenu(true)} />
+      {variantMenu && <SettingsMenu title="DLSSNR 组件" onClose={() => setVariantMenu(false)}>
+      <div className="settings-subgroup" role="group" aria-label="DLSSNR 片段">
         {catalog === undefined && (
           <SettingsRow
             icon={<Download />}
@@ -271,72 +259,19 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             </button>
           }
         />
-        {catalog?.license && (
-          <SettingsRow
-            icon={<FileText />}
-            label="片段许可"
-            hint={`${catalog.license.name}：片段内嵌 NVIDIA 的 DLSS SDK，许可全文随 Release 一起发布（${catalog.license.asset}）`}
-            control={<span className="settings-row-note">下载前先读一遍</span>}
-          />
-        )}
       </div>
       </SettingsMenu>}
 
-      {probe && !probe.supported && probe.error && (
-        <SettingsRow
-          icon={<AlertTriangle />}
-          label="上一次检测的结论"
-          hint={probe.error}
-          control={<span className="settings-row-note">修好之后再检测一次</span>}
-        />
-      )}
-
       {/* 层数：同一张图串行跑几个 pass（1–3 层，往上收益很小）。 */}
       <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
-      {layerMenu && <SettingsMenu title="DLSS5 层数" onClose={() => setLayerMenu(false)}>
-          <div className="settings-menu-stepper">
-            <button
-              className="icon-action"
-              type="button"
-              aria-label="减少一层"
-              disabled={layerCount <= 1}
-              onClick={() => updatePasses(passes.slice(0, layerCount - 1))}
-            >
-              <Minus aria-hidden="true" />
-            </button>
-            <input
-              className="settings-number"
-              aria-label="DLSS5 层数"
-              type="number"
-              min={1}
-              max={MAX_DLSSNR_PASSES}
-              value={layerCount}
-              readOnly
-            />
-            <button
-              className="icon-action"
-              type="button"
-              aria-label="增加一层"
-              disabled={layerCount >= MAX_DLSSNR_PASSES}
-              onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}
-            >
-              <Plus aria-hidden="true" />
-            </button>
-          </div>
-
-        <div className="settings-inline-actions">
-          {passes.map((_, index) => (
-            <button key={index} className="secondary-action" type="button" onClick={() => { setLayerMenu(false); setSelectedLayer(index); }}>
-              第 {index + 1} 层
-            </button>
-          ))}
-        </div>
-      </SettingsMenu>}
-
-      {selectedLayer !== undefined && passes[selectedLayer] && (() => {
+      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
+      {selectedLayer === undefined ? <>
+        {passes.map((pass, index) => <SettingsRow key={index} icon={<Layers />} label={`第 ${index + 1} 层`} value={STYLE_OPTIONS[pass.style]?.label ?? '默认'} onClick={() => openLayer(index)} />)}
+        <button className="secondary-action" type="button" disabled={layerCount >= MAX_DLSSNR_PASSES} onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}><Plus aria-hidden="true" />添加层</button>
+      </> : draftPass && (() => {
         const index = selectedLayer;
-        const pass = passes[index]!;
-        return <SettingsMenu title={`第 ${index + 1} 层`} onClose={() => setSelectedLayer(undefined)}>
+        const pass = draftPass;
+        return <>
         <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`}>
           <p className="settings-subgroup-title">第 {index + 1} 层{index === 0 ? '（起点）' : ''}</p>
           <SettingsChoice
@@ -344,7 +279,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             label="风格"
             value={String(pass.style)}
             options={STYLE_OPTIONS}
-            onChange={(value) => updatePass(index, { style: Number(value) })}
+            onChange={(value) => updateDraftPass({ style: Number(value) })}
           />
           <SettingsNumber
             icon={<Sparkles />}
@@ -355,7 +290,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             max={2}
             step={0.05}
             format={(value) => value.toFixed(2)}
-            onChange={(value) => updatePass(index, { intensity: value })}
+            onChange={(value) => updateDraftPass({ intensity: value })}
           />
           <SettingsNumber
             icon={<Sparkles />}
@@ -365,7 +300,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             max={2}
             step={0.05}
             format={(value) => value.toFixed(2)}
-            onChange={(value) => updatePass(index, { localToneStrength: value })}
+            onChange={(value) => updateDraftPass({ localToneStrength: value })}
           />
           <SettingsNumber
             icon={<Sparkles />}
@@ -375,7 +310,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             max={2}
             step={0.05}
             format={(value) => value.toFixed(2)}
-            onChange={(value) => updatePass(index, { localStructureStrength: value })}
+            onChange={(value) => updateDraftPass({ localStructureStrength: value })}
           />
           <SettingsNumber
             icon={<Sparkles />}
@@ -386,31 +321,26 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             max={2}
             step={0.05}
             format={(value) => value.toFixed(2)}
-            onChange={(value) => updatePass(index, { skinStructureStrength: value })}
+            onChange={(value) => updateDraftPass({ skinStructureStrength: value })}
           />
           <SettingsSwitch
             icon={<Scan />}
             label="自动遮罩"
             hint="让网络自己圈出该处理的区域"
             checked={pass.autoMask}
-            onToggle={() => updatePass(index, { autoMask: !pass.autoMask })}
+            onToggle={() => updateDraftPass({ autoMask: !pass.autoMask })}
           />
           <SettingsSwitch
             icon={<Scan />}
             label="界面修正"
             hint="文字与线条保持原样（拟声词、边框）"
             checked={pass.uiCorrection}
-            onToggle={() => updatePass(index, { uiCorrection: !pass.uiCorrection })}
+            onToggle={() => updateDraftPass({ uiCorrection: !pass.uiCorrection })}
           />
-          <button className="secondary-action" type="button" onClick={() => setSelectedLayer(undefined)}>完成</button>
-        </div></SettingsMenu>;
+          <div className="settings-inline-actions"><button className="secondary-action" type="button" disabled={layerCount <= 1} onClick={deleteLayer}>删除</button><button className="primary-action" type="button" onClick={saveLayer}>保存</button></div>
+        </div></>;
       })()}
-      <SettingsRow
-        icon={<Sparkles />}
-        label="当前配方"
-        hint={`${passes.map((pass) => `${STYLE_LABELS[pass.style] ?? pass.style}·${pass.intensity.toFixed(2)}`).join(' → ')}`}
-        control={<span className="settings-row-note">设置里开了它在阅读器里就会生效</span>}
-      />
+      </SettingsMenu>}
     </div>
   );
 }

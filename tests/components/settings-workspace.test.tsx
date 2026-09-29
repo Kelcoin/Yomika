@@ -344,6 +344,8 @@ describe('settings workspace', () => {
   });
 
   it('says the model list is still loading instead of claiming nothing is installed', async () => {
+    localStorage.removeItem('yomika.advanced-models');
+    localStorage.removeItem('yomika.advanced-upscale-catalog');
     // 模型列表还没回来时，两个开关都只说「正在读取模型…」。以前卡片底部还有一行状态
     // 文字说同一件事（同一个结论在卡片里出现两遍），现在状态只在开关自己那一行上——
     // 而且不能反过来先报「尚未安装」：还没查完就先下结论是错的。
@@ -362,6 +364,22 @@ describe('settings workspace', () => {
     expect(screen.getByRole('switch', { name: '启用去码' }).closest('.settings-row')).toHaveTextContent('正在读取模型…');
     expect(screen.queryByText(/尚未安装/)).toBeNull();
     expect(screen.queryByText(/正在读取已安装模型|正在读取模型索引/)).toBeNull();
+  });
+
+  it('shows cached model detection while refreshing after a restart', async () => {
+    localStorage.setItem('yomika.advanced-models', '[]');
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return new Promise(() => {});
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+    const upscale = await screen.findByRole('switch', { name: '启用超分' });
+    expect(upscale.closest('.settings-row')).toHaveTextContent('尚未安装可用的超分模型');
+    expect(upscale).toBeDisabled();
+    expect(adapter).toHaveBeenCalledWith('inference_list_models', {});
   });
 
   it('blocks an incomplete decensor bundle with a toast instead of enabling it', async () => {

@@ -802,8 +802,9 @@ describe('design system contract', () => {
     const toolbar = ruleBody(reader, '.reader-toolbar');
     expect(toolbar).toMatch(/height:\s*calc\(var\(--reader-toolbar-height\) \+ var\(--safe-bottom\)\)/);
     expect(toolbar).toMatch(/padding:\s*0 var\(--space-1\) var\(--safe-bottom\)/);
-    // IconButtonSpace = 0：动作之间不留缝，间距由每个按钮自己的触控面提供。
-    expect(toolbar).toMatch(/gap:\s*0/);
+    // 功能组之间留 8dp；组内图标仍由各自的触控面提供间距。
+    expect(toolbar).toMatch(/gap:\s*var\(--space-2\)/);
+    expect(ruleBody(reader, '.reader-toolbar-group')).toMatch(/display:\s*flex/);
     expect(toolbar).toMatch(/background:\s*var\(--reader-bar-container\)/);
 
     // 图标按钮是 M3 的 full shape，不是 8px 圆角；图标 24dp。

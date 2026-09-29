@@ -7,7 +7,7 @@ export type ImageRendition =
   | 'page-thumbnail'
   | 'reader-page'
   | 'decensored'
-  /** DLSS5 跑过一页的产物（Windows 桌面）。 */
+  /** DLSSNR 跑过一页的产物（Windows 桌面）。 */
   | 'dlssnr'
   /** 交给局域网里那台桌面端处理后的产物。 */
   | 'remote';

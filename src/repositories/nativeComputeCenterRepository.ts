@@ -22,6 +22,7 @@ export const ComputeCenterStatusSchema = z.object({
   capabilities: z.array(ComputeCapabilitySchema),
   /** 保留的状态字段；允许先启动再安装模型。 */
   canStart: z.boolean(),
+  pairedClients: z.array(z.object({ id: z.string(), name: z.string(), address: z.string() })).default([]),
 });
 
 export type ComputeCenterStatus = z.output<typeof ComputeCenterStatusSchema>;
@@ -48,7 +49,7 @@ export const RemoteOpSchema = z
     op: z.enum(['upscale', 'decensor', 'dlssnr']).default('upscale'),
     modelId: z.string().max(128).default(''),
     scale: z.number().int().min(1).max(4).default(2),
-    /** DLSS5 的层参数，形状与本地那份一致。 */
+    /** DLSSNR 的层参数，形状与本地那份一致。 */
     dlssnrPasses: z.array(z.record(z.string(), z.union([z.number(), z.boolean()]))).max(3).default([]),
   })
   .strip();
@@ -110,6 +111,10 @@ export class NativeComputeCenterRepository {
     rotateToken?: boolean;
   }): Promise<CommandResult<ComputeCenterStatus>> {
     return invokeCommand('compute_center_configure', input, ComputeCenterStatusSchema);
+  }
+
+  revokePairing(id: string): Promise<CommandResult<ComputeCenterStatus>> {
+    return invokeCommand('compute_center_revoke_pairing', { id }, ComputeCenterStatusSchema);
   }
 
   /** 连一次远端，拿它的能力清单。 */

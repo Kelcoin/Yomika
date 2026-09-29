@@ -1,4 +1,4 @@
-//! DLSS5 对前端与算力中心的入口（Tauri 命令）。
+//! DLSSNR 对前端与算力中心的入口（Tauri 命令）。
 //!
 //! 形状照 `inference.rs` 里超分/去码那几条命令：状态与检测是便宜的调用，真正跑
 //! 图的那条走 `run_heavy`（全局只允许一件重活），返回二进制 PNG。
@@ -18,21 +18,24 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     crate::data_paths::data_dir(app).map_err(|error| error.to_string())
 }
 
-/// 把这台机器上的 DLSS5 现状说清楚：显卡、装了哪一种 DLL、最近一次检测的结论。
+/// 把这台机器上的 DLSSNR 现状说清楚：显卡、装了哪一种 DLL、最近一次检测的结论。
 ///
 /// **不跑图**：设置页一打开就调它，所以只做枚举显卡、看文件、认哈希这些便宜事。
 #[tauri::command]
-pub fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<DlssnrStatus> {
+pub async fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<DlssnrStatus> {
     let data = match data_dir(&app) {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
     };
-    let mut status = super::status(&data);
-    // 上次检测的结论跟着一起给：设置页据此决定开关解不解锁。**并且说明那份结论
-    // 是不是对现在这一份 DLL 跑的**——换过片段之后它就不算数了。
-    status.probe = super::last_probe_for(&data);
-    status.probe_valid = super::probe_is_valid(&data);
-    CommandResult::success(status)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let mut status = super::status(&data);
+        status.probe = super::last_probe_for(&data);
+        status.probe_valid = super::probe_is_valid(&data);
+        status
+    }).await {
+        Ok(status) => CommandResult::success(status),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
 }
 
 /// 真机跑一遍（合成图走完整条链路）。`force` 为假时给上次的结论。
@@ -112,7 +115,7 @@ pub async fn dlssnr_download_variant(
     }
 }
 
-/// 阅读器的页面入口：拿缓存里的一页（或它的某个派生版本），跑 1–3 层 DLSS5，回 PNG。
+/// 阅读器的页面入口：拿缓存里的一页（或它的某个派生版本），跑 1–3 层 DLSSNR，回 PNG。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DlssnrPageInput {
@@ -158,7 +161,7 @@ pub async fn dlssnr_apply_page(
     Ok(crate::domain::result::into_binary_response(result))
 }
 
-/// 缓存页 → DLSS5 → PNG。抽出来是为了能在测试里直接调（不用起 Tauri）。
+/// 缓存页 → DLSSNR → PNG。抽出来是为了能在测试里直接调（不用起 Tauri）。
 fn apply_cached_page(
     database: &crate::db::Database,
     data_dir: &std::path::Path,
@@ -216,7 +219,7 @@ fn apply_cached_page(
     if width < DLSSNR_MIN_EDGE || height < DLSSNR_MIN_EDGE {
         return CommandResult::failure(
             "INVALID_RESPONSE",
-            format!("这一页太小（{width}×{height}）：DLSS5 至少要 {DLSSNR_MIN_EDGE}×{DLSSNR_MIN_EDGE}"),
+            format!("这一页太小（{width}×{height}）：DLSSNR 至少要 {DLSSNR_MIN_EDGE}×{DLSSNR_MIN_EDGE}"),
             false,
         );
     }
@@ -342,11 +345,11 @@ mod tests {
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         let error = expect_failure(result);
-        // 这台机器能不能跑 DLSS5 决定了这条路径从哪一步开始失败：能跑时是缓存没命中
+        // 这台机器能不能跑 DLSSNR 决定了这条路径从哪一步开始失败：能跑时是缓存没命中
         // （可重试），不能跑时是门控（不可重试）。两种都对，但要说清楚是哪一种。
         match error.code {
             "LRR_NOT_FOUND" => assert!(error.retryable),
-            "INFERENCE_UNAVAILABLE" => assert!(error.message.contains("DLSS5") || !error.retryable),
+            "INFERENCE_UNAVAILABLE" => assert!(error.message.contains("DLSSNR") || !error.retryable),
             other => panic!("unexpected code {other}: {}", error.message),
         }
     }

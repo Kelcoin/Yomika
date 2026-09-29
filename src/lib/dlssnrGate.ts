@@ -15,7 +15,7 @@ export interface DlssnrAvailability {
   disable: boolean;
 }
 
-/** 这台机器此刻能不能跑 DLSS5。
+/** 这台机器此刻能不能跑 DLSSNR。
  *
  * `preferences.dlssnrEnabled` 只说明「用户想用」，而它是**持久化**的：昨天在台式机上
  * 打开过、今天换到没有 N 卡的机器上照样是 true。阅读器据此排队会反复调用一个跑不起来的东西（每次都是一次原生失败 + 一条
@@ -31,7 +31,7 @@ export async function checkDlssnrAvailability(preferenceEnabled: boolean): Promi
   if (!result.ok) return { ready: false, reason: result.error.message, disable: false };
   const status = result.value;
   if (!status.available) {
-    return { ready: false, reason: status.error ?? '这台机器现在跑不了 DLSS5', disable: true };
+    return { ready: false, reason: status.error ?? '这台机器现在跑不了 DLSSNR', disable: true };
   }
   return { ready: true, disable: false };
 }

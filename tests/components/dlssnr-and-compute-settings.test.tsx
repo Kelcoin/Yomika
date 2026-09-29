@@ -115,7 +115,7 @@ describe('DLSS5 settings group', () => {
         <DlssnrSettingsGroup preferences={{ ...DEFAULT_PREFERENCES }} editPreferences={() => {}} visible={false} />
       </ToastProvider>,
     );
-    await waitFor(() => expect(container.querySelector('[aria-label="DLSS5"]')).toBeNull());
+    await waitFor(() => expect(container.querySelector('[aria-label="DLSSNR"]')).toBeNull());
     // 平台不满足时连 status 都不问：省一次往返，也不会闪一行「正在检测」。
     expect(setInvokeAdapterForTests).toBeTruthy();
   });
@@ -135,8 +135,8 @@ describe('DLSS5 settings group', () => {
     const edits: Array<Partial<PreferenceSnapshot>> = [];
     renderDlssnr({ editPreferences: (patch) => edits.push(patch) });
 
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
-    const toggle = within(group).getByRole('switch', { name: '启用 DLSS5' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const toggle = within(group).getByRole('switch', { name: '启用 DLSSNR' });
     await user.click(toggle);
     await waitFor(() => expect(edits).toContainEqual({ dlssnrEnabled: true }));
   });
@@ -156,8 +156,8 @@ describe('DLSS5 settings group', () => {
     }));
     renderDlssnr();
 
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
-    const toggle = within(group).getByRole('switch', { name: '启用 DLSS5' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const toggle = within(group).getByRole('switch', { name: '启用 DLSSNR' });
     await user.click(toggle);
   });
 
@@ -173,16 +173,15 @@ describe('DLSS5 settings group', () => {
     setInvokeAdapterForTests(adapter);
     renderDlssnr();
 
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
-    await user.click(within(group).getByRole('button', { name: 'DLSS5 组件' }));
-    const snippets = await screen.findByRole('group', { name: 'DLSS5 片段' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 片段' });
     // 三条都在：官方版与社区版各占一行，装的是哪一条由后端认哈希回答。
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
     expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
     expect(within(snippets).getByText('FP16 兼容版（RTX 20 / 30 系，性能较低）')).toBeTruthy();
     expect(within(snippets).getByText('当前这一份')).toBeTruthy();
-    // 许可要念出来：片段内嵌 NVIDIA 的 DLSS SDK。
-    expect(within(snippets).getByText(/NVIDIA DLSS SDK License/)).toBeTruthy();
+    expect(within(snippets).queryByText(/NVIDIA DLSS SDK License/)).toBeNull();
 
     // 只有没装上的那两条可以点（下载完的替换由后端负责）。
     const buttons = within(snippets).getAllByRole('button', { name: '下载并使用' });
@@ -199,10 +198,10 @@ describe('DLSS5 settings group', () => {
     }));
     renderDlssnr();
 
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
-    expect(within(group).getByRole('switch', { name: '启用 DLSS5' })).toBeDisabled();
-    await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSS5 组件' }));
-    const snippets = await screen.findByRole('group', { name: 'DLSS5 片段' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    expect(within(group).getByRole('switch', { name: '启用 DLSSNR' })).toBeDisabled();
+    await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 片段' });
     expect(within(snippets).getAllByRole('button', { name: '下载并使用' })).toHaveLength(3);
     // 还没有片段就没有「当前这一份」，导入那一行改说「按显卡系列选一种变体」。
     expect(within(snippets).queryByText('当前这一份')).toBeNull();
@@ -219,9 +218,9 @@ describe('DLSS5 settings group', () => {
     const edits: Array<Partial<PreferenceSnapshot>> = [];
     renderDlssnr({ editPreferences: (patch) => edits.push(patch) });
 
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
-    await user.click(within(await screen.findByRole('dialog', { name: 'DLSS5 层数' })).getByRole('button', { name: '增加一层' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '添加层' }));
     await waitFor(() => expect(edits.some((patch) => typeof patch.dlssnrPasses === 'string')).toBe(true));
     const saved = edits.find((patch) => typeof patch.dlssnrPasses === 'string')?.dlssnrPasses ?? '';
     const passes = parseDlssnrPasses(saved);
@@ -251,11 +250,23 @@ describe('DLSS5 settings group', () => {
       })} visible /></ToastProvider>;
     }
     render(<Harness />);
-    const group = await screen.findByRole('region', { name: 'DLSS5' });
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
-    await user.click(within(await screen.findByRole('dialog', { name: 'DLSS5 层数' })).getByRole('button', { name: '第 2 层' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 2 层' }));
     await user.click(within(await screen.findByRole('dialog', { name: '第 2 层' })).getByRole('switch', { name: '自动遮罩' }));
+    await user.click(within(screen.getByRole('dialog', { name: '第 2 层' })).getByRole('button', { name: '保存' }));
     await waitFor(() => expect(parseDlssnrPasses(latest).map((pass) => pass.autoMask)).toEqual([false, true]));
+  });
+
+  it('keeps one overlay while entering and leaving a layer editor', async () => {
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+    const user = userEvent.setup();
+    await user.click(within(await screen.findByRole('region', { name: 'DLSSNR' })).getByRole('button', { name: '层数' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '第 1 层' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '保存' }));
+    expect(screen.getByRole('dialog', { name: 'DLSSNR 层数' })).toBeInTheDocument();
   });
 });
 
@@ -273,7 +284,7 @@ describe('compute center settings group', () => {
     }));
     renderAdvanced();
     const group = await screen.findByRole('region', { name: '算力中心' });
-    expect(within(group).getByRole('switch', { name: '作为算力中心' })).toBeEnabled();
+    expect(within(group).getByRole('switch', { name: '开启本机服务' })).toBeEnabled();
   });
 
   it('starts the server with the configured port and shows the LAN address', async () => {
@@ -287,12 +298,51 @@ describe('compute center settings group', () => {
     renderAdvanced();
 
     const group = await screen.findByRole('region', { name: '算力中心' });
-    // 地址与端口一起念给用户：移动端就填这两个。
+    expect(within(group).queryByText(/192\.168\.1\.5:47653/)).toBeNull();
+    await user.click(within(group).getByRole('switch', { name: '开启本机服务' }));
     await waitFor(() => expect(within(group).getByText(/192\.168\.1\.5:47653/)).toBeTruthy());
-    await user.click(within(group).getByRole('switch', { name: '作为算力中心' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', expect.objectContaining({ enabled: true, port: 47_653 })));
     await waitFor(() => expect(screen.queryByRole('region', { name: '远端算力' })).toBeNull());
-    expect(within(group).getByRole('spinbutton', { name: '算力中心端口' })).toBeDisabled();
+    expect(within(group).getByRole('button', { name: '端口' })).toBeEnabled();
+    expect(localStorage.getItem('yomika.compute-center-status')).not.toContain('abcdef0123456789abcdef0123456789');
+  });
+
+  it('changes a running service port through its menu', async () => {
+    const adapter = adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running: true }) }),
+      compute_center_configure: (args) => ({ ok: true, value: computeStatus({ running: true, port: args?.port }) }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderAdvanced();
+    const user = userEvent.setup();
+    const group = await screen.findByRole('region', { name: '算力中心' });
+    await user.click(within(group).getByRole('button', { name: '端口' }));
+    const menu = screen.getByRole('dialog', { name: '端口' });
+    const input = within(menu).getByRole('spinbutton', { name: '算力中心端口' });
+    await user.clear(input);
+    await user.type(input, '47655');
+    await user.click(within(menu).getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', { enabled: true, port: 47655 }));
+  });
+
+  it('shows server details only while running and revokes one paired client', async () => {
+    const clients = [{ id: 'client-1', name: 'Phone', address: '192.168.1.9' }, { id: 'client-2', name: 'Tablet', address: '192.168.1.10' }];
+    const adapter = adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ pairedClients: clients }) }),
+      compute_center_configure: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients }) }),
+      compute_center_revoke_pairing: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients.slice(1) }) }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderAdvanced();
+    const user = userEvent.setup();
+    const group = await screen.findByRole('region', { name: '算力中心' });
+    expect(within(group).queryByText('端口')).toBeNull();
+    await user.click(within(group).getByRole('switch', { name: '开启本机服务' }));
+    await user.click(within(group).getByRole('button', { name: '配对管理' }));
+    await user.click(within(screen.getByRole('dialog', { name: '配对管理' })).getByRole('button', { name: /Phone/ }));
+    await user.click(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_revoke_pairing', { id: 'client-1' }));
+    expect(screen.getByRole('dialog', { name: '配对管理' })).toBeInTheDocument();
   });
 
   it('keeps remote processing locked until pairing succeeds', async () => {
@@ -318,7 +368,7 @@ describe('compute center settings group', () => {
     renderAdvanced();
 
     const group = await screen.findByRole('region', { name: '远端算力' });
-    const toggle = within(group).getByRole('switch', { name: '使用远端算力' });
+    const toggle = within(group).getByRole('switch', { name: '使用其他设备处理' });
     expect(toggle).toBeDisabled();
 
     await user.click(within(group).getByRole('button', { name: '添加设备' }));

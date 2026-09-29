@@ -90,7 +90,7 @@ use dlssnr::commands::{
     dlssnr_status,
 };
 use compute_center::{
-    compute_center_configure, compute_center_status, compute_discover, compute_pair_request,
+    compute_center_configure, compute_center_revoke_pairing, compute_center_status, compute_discover, compute_pair_request,
     compute_pair_confirm, remote_compute_capabilities, remote_compute_process,
 };
 use tauri::Manager;
@@ -126,8 +126,8 @@ pub fn run() {
             {
                 use tauri::{menu::MenuBuilder, tray::TrayIconBuilder};
                 let menu = MenuBuilder::new(app)
-                    .text("show", "打开 Yomika")
-                    .text("quit", "退出 Yomika")
+                    .text("show", "打开")
+                    .text("quit", "退出")
                     .build()?;
                 let mut tray = TrayIconBuilder::new()
                     .menu(&menu)
@@ -157,6 +157,8 @@ pub fn run() {
             // or the iOS/Android targets fail to compile here.
             #[cfg(desktop)]
             let mut builder = builder.decorations(cfg!(not(target_os = "windows")));
+            #[cfg(target_os = "windows")]
+            { builder = builder.shadow(false); }
             // 桌面端主窗先藏着：webview 画出 index.html 的品牌帧后再亮窗
             // （frontend_ready / 10 秒兜底），「纯色空窗」那一段就不再存在。
             // 移动端没有这个空窗（原生壳自带启动画面），保持直出。
@@ -186,21 +188,42 @@ pub fn run() {
             // 就是那一个组，Windows 自己会挑合适的那一档尺寸。
             #[cfg(target_os = "windows")]
             set_big_window_icon(&main_window);
+            #[cfg(target_os = "windows")]
+            if let Ok(hwnd) = main_window.hwnd() {
+                use windows::Win32::{Foundation::HWND, Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE}};
+                let border_color = DWMWA_COLOR_NONE;
+                // DWM draws a separate border outside the WebView. This leaves
+                // Tao's resize hit testing and taskbar auto-hide inset intact.
+                unsafe {
+                    let _ = DwmSetWindowAttribute(
+                        HWND(hwnd.0),
+                        DWMWA_BORDER_COLOR,
+                        &border_color as *const u32 as *const std::ffi::c_void,
+                        std::mem::size_of::<u32>() as u32,
+                    );
+                }
+            }
             let _ = main_window;
             Ok(())
         })
         .on_window_event(|window, event| {
             #[cfg(target_os = "windows")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle();
-                let close_to_tray = app.try_state::<Database>()
-                    .and_then(|database| database.connection.lock().ok()
-                        .and_then(|connection| settings::load_preferences_from(&connection).ok()))
-                    .is_some_and(|snapshot| snapshot.close_to_tray);
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+                if window.label() != "main" { return; }
+                api.prevent_close();
+                let window = window.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let app = window.app_handle();
+                    let close_to_tray = app.try_state::<Database>()
+                        .and_then(|database| database.connection.lock().ok()
+                            .and_then(|connection| settings::load_preferences_from(&connection).ok()))
+                        .is_some_and(|snapshot| snapshot.close_to_tray);
+                    if close_to_tray {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.destroy();
+                    }
+                });
             }
             #[cfg(not(target_os = "windows"))]
             let _ = (window, event);
@@ -301,6 +324,7 @@ pub fn run() {
             dlssnr_apply_page,
             compute_center_status,
             compute_center_configure,
+            compute_center_revoke_pairing,
             compute_discover,
             compute_pair_request,
             compute_pair_confirm,
