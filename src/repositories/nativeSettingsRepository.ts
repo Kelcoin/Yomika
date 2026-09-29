@@ -74,6 +74,23 @@ export const PreferenceSnapshotSchema = z.object({
   autoSync: z.boolean().default(true),
   tagTranslationEnabled: z.boolean().default(true),
   tagCountOrderEnabled: z.boolean().default(true),
+  /** DLSS5：阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染。只有 Windows 桌面、
+   * 装了 DLL 且检测通过时才在设置页出现（后端 dlssnr_status 说了算）。 */
+  dlssnrEnabled: z.boolean().default(false),
+  /** 每层参数的 JSON 数组（形状见 dlssnr 的 PassSettings）。存字符串是为了让后端
+   * 保持平台无关：非 Windows 的构建也能原样存住这份偏好。 */
+  dlssnrPasses: z.string().max(4000).default(''),
+  /** 本机作为算力中心：局域网里让移动端借这台机器的超分/去码/DLSS5。 */
+  computeCenterEnabled: z.boolean().default(false),
+  computeCenterPort: z.number().int().min(1024).max(65535).default(47653),
+  /** 算力中心的令牌：要能显示给用户抄到移动端上，所以明文存在本机设置里。 */
+  computeCenterToken: z.string().max(128).default(''),
+  /** 远端算力：这一页发给哪台桌面端处理（空 = 不用远端）。 */
+  remoteComputeUrl: z.string().max(256).default(''),
+  remoteComputeToken: z.string().max(128).default(''),
+  /** 远端处理用的参数（JSON 对象）。只作用于远端那一侧的处理，不改本机自己的
+   * 超分/去码/DLSS5 设置，也不去改远端机器上的设置。 */
+  remoteComputeOps: z.string().max(4000).default(''),
   /** 导入导出范围：手动带走的文件里装哪几类（记录与设置，外加可勾的凭据）。
    * 与同步范围无关，默认只勾记录与设置。 */
 }).strip();
@@ -120,6 +137,14 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   autoSync: true,
   tagTranslationEnabled: true,
   tagCountOrderEnabled: true,
+  dlssnrEnabled: false,
+  dlssnrPasses: '',
+  computeCenterEnabled: false,
+  computeCenterPort: 47_653,
+  computeCenterToken: '',
+  remoteComputeUrl: '',
+  remoteComputeToken: '',
+  remoteComputeOps: '',
 };
 
 export class NativeSettingsRepository {

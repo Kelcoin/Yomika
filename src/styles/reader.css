@@ -93,7 +93,40 @@
   min-width: 0;
   max-width: 100%;
   max-height: 100%;
+  /* 处理中的胶囊要压在页面上，锚点是这一格。 */
+  position: relative;
 }
+
+/* 「去码 / 超分处理中」：这一页的图先照常画着，等本机把那一版算出来再换上去。
+   算一页要好几秒（两个模型一起近二十秒），从前这段时间屏幕上没有任何动静——
+   按下去像没反应，功能看起来就是坏的。胶囊只说在算，不拦任何操作：它
+   pointer-events: none，翻页、缩放照旧。 */
+.reader-deriving {
+  position: absolute;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: calc(100% - var(--space-6));
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--reader-border-muted);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--reader-bar-container) 88%, transparent);
+  color: var(--reader-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.reader-deriving .loading-mark { display: flex; }
+/* 指示器落在阅读器自己的深色画布上，用亮墨（与 .reader-page-status 同一条）。 */
+.reader-deriving .loading-indicator { color: var(--reader-ink); }
 
 /* Keep the incoming and outgoing pages visually identical at the handoff. */.reader-single.is-dragging,
 .reader-spread.is-dragging {

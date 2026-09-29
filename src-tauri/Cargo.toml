@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 把 NGX 核心的垫片（vendor/ngx/ngx_shim.c，/MT）编成一个小 DLL：我们的 Rust 是
+# /MD，直接链 SDK 那份静态库会被链接器按 LNK2038 挡下来。
+cc = "1"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +53,9 @@ custom-protocol = ["tauri/custom-protocol"]
 # clipboard as unavailable there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = "3"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
 
 # 发布构建不带符号表。
 #

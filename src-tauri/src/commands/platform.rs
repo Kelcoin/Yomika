@@ -325,6 +325,84 @@ mod tests {
     }
 }
 
+/// 出问题时最先要问的几件事：哪个版本、什么时候编的、哪个提交、跑在哪台机器上。
+///
+/// 编译时间与提交号由 `build.rs` 写进环境变量（`cargo:rustc-env`）——它们只在**重新
+/// 编译**时更新，而那正是「这一份二进制是哪来的」这个问题的答案。取不到就留空，界面
+/// 按缺项处理，不编假值。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBuildInfo {
+    pub version: &'static str,
+    /// 编译时刻，unix 秒的字符串（Rust 侧没有本地时间格式化，界面按需转）。
+    pub build_time: &'static str,
+    pub commit: &'static str,
+    /// `release` 或 `debug`。
+    pub profile: &'static str,
+    /// 打包标识（tauri.conf.json 的 identifier）。
+    pub identifier: String,
+    pub platform: &'static str,
+    pub os: &'static str,
+    pub arch: &'static str,
+}
+
+#[tauri::command]
+pub fn app_build_info(app: tauri::AppHandle) -> CommandResult<AppBuildInfo> {
+    use tauri::Manager;
+    CommandResult::success(AppBuildInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        build_time: option_env!("YOMIKA_BUILD_TIME").unwrap_or(""),
+        commit: option_env!("YOMIKA_BUILD_COMMIT").unwrap_or(""),
+        profile: if cfg!(debug_assertions) { "debug" } else { "release" },
+        identifier: app.config().identifier.clone(),
+        platform: current_platform(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+    })
+}
+
+/// 任务栏按钮与 Alt+Tab 的大图标槽位。
+///
+/// tao 设窗口图标时只发 `WM_SETICON` + `ICON_SMALL`（`set_window_icon`），
+/// `ICON_BIG` 谁也不设，窗口类里也没挂图标——任务栏按钮与 Alt+Tab 于是落到系统的
+/// 兜底上，画出来就是通用的「窗口」占位图（用户报的「项目任务栏图标丢失」）。
+/// 图标组本身已经由 tauri-build 编进 exe 了，这里把它显式放进大图标槽。
+///
+/// 资源 id 是 **32512**（`IDI_APPLICATION` 那一格）：tauri-build 用 `tauri-winres`
+/// 生成 `.rc`，写的正是 `32512 ICON "icons/icon.ico"`——换 id 的只有它，所以这里
+/// 跟着它写，而不是自己另挑一个号（写 1 会静默地什么也不做）。组里各档尺寸都在
+/// （16/24/32/48/64/256），任务栏自己会挑。
+#[cfg(target_os = "windows")]
+pub fn set_big_window_icon(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        LoadIconW, SendMessageW, ICON_BIG, IDI_APPLICATION, WM_SETICON,
+    };
+
+    let Ok(hwnd) = window.hwnd() else { return };
+    let Ok(module) = (unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }) else {
+        return;
+    };
+    // tauri 用的是 windows 0.61 那一版 `HWND`，本 crate 是 0.62：跨版本只认里面的
+    // 裸指针（两个包装类型各自的 `.0` 就是它）。
+    let hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+    let Ok(icon) = (unsafe {
+        LoadIconW(
+            Some(windows::Win32::Foundation::HINSTANCE(module.0)),
+            IDI_APPLICATION,
+        )
+    }) else {
+        return;
+    };
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(windows::Win32::Foundation::WPARAM(ICON_BIG as usize)),
+            Some(windows::Win32::Foundation::LPARAM(icon.0 as isize)),
+        );
+    }
+}
+
 fn current_platform() -> &'static str {
     #[cfg(target_os = "windows")]
     return "windows";

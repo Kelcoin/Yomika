@@ -25,4 +25,9 @@ export class NativeErrorLogRepository {
   exportTo(path: string, contents: string): Promise<CommandResult<string>> {
     return invokeCommand('error_log_export', { path, contents }, z.string());
   }
+
+  /** 清空本次与上次两轮的全部记录（含崩溃现场），返回删掉了几条。 */
+  clear(): Promise<CommandResult<number>> {
+    return invokeCommand('error_log_clear', {}, z.number().int().nonnegative());
+  }
 }

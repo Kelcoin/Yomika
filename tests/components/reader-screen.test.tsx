@@ -793,6 +793,33 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
   });
 
+  it('says the page is being processed instead of looking like nothing happened', async () => {
+    // 去码/超分在本机跑一页要好几秒，两样一起近二十秒。这段时间屏幕上从前什么
+    // 都没有——按下去像没反应，用户看到的就是「去码失效了」。胶囊只说在算。
+    const view = render(
+      <MemoryRouter>
+        <ReaderScreen
+          archiveId="a1"
+          title="Test archive"
+          pages={pages}
+          derivedPages={new Map()}
+          derivingPages={new Set([0])}
+          derivingLabel="去码处理中…"
+        />
+      </MemoryRouter>,
+    );
+    const pill = await screen.findByRole('status');
+    expect(pill).toHaveTextContent('去码处理中…');
+
+    // 处理完了（产物换上去、或者失败退到原图）就不再压着那句话。
+    view.rerender(
+      <MemoryRouter>
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map()} derivingPages={new Set()} derivingLabel="去码处理中…" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument();
+  });
+
   it('enters and exits fullscreen via toolbar button', async () => {
     let fullscreenElement: Element | null = null;
     const requestFullscreen = vi.fn(() => { fullscreenElement = document.documentElement; return Promise.resolve(); });

@@ -13,7 +13,7 @@ describe('native shell configuration', () => {
   it('registers both model release and reader inference commands', () => {
     const lib = read('../../src-tauri/src/lib.rs');
     const handlers = lib.split('tauri::generate_handler![')[1]?.split(']')[0] ?? '';
-    for (const command of ['inference_install_decensor_bundle', 'inference_upscale_page', 'inference_decensor_page', 'model_release_download_bundle']) {
+    for (const command of ['inference_install_decensor_bundle', 'inference_upscale_page', 'inference_decensor_page', 'model_release_download_bundle', 'dlssnr_catalog', 'dlssnr_download_variant']) {
       expect(handlers.split(',').map((item) => item.trim())).toContain(command);
     }
   });

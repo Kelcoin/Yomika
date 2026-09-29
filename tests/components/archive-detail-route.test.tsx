@@ -208,6 +208,26 @@ describe('archive detail route', () => {
     expect(screen.getByRole('status')).toHaveTextContent('该档案已从 LANraragi 移除');
   });
 
+  it('keeps the cached detail on screen while the server is unreachable', async () => {
+    // 之前访问过这一份档案（两份快照都在），然后服务器离线：这就是用户报的
+    // 「点开缓存里的档案，整个页面变成一块纯色」。
+    writeRouteCache('archive-detail:last:archive-a', { ...metadata, title: '离线缓存' });
+    writeRouteCache('archive-detail:last:server-a:archive-a', { ...metadata, title: '离线缓存' });
+    writeRouteCache('archive-detail:server-a:archive-a', { ...metadata, title: '离线缓存' });
+    const offline = { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '服务器连不上', retryable: true } };
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      // 本地那几条（账户、书架记录）照常回答，远端的一律失败。
+      if (command === 'list_categories') return { ok: true, value: [] };
+      return offline;
+    });
+
+    renderDetail();
+
+    expect(await screen.findByRole('heading', { name: '离线缓存' })).toBeInTheDocument();
+    expect(screen.getByRole('toolbar', { name: '档案操作' })).toBeInTheDocument();
+  });
+
   it('uses an image MIME type for LANraragi thumbnail bytes', async () => {
     const createObjectUrl = vi.spyOn(URL, 'createObjectURL');
     setInvokeAdapterForTests(async (command) => {

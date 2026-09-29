@@ -154,6 +154,7 @@ pub fn rotate(app: &tauri::AppHandle) {
         (CRASH_LOG, CRASH_PREVIOUS),
         (JAVA_CRASH_LOG, JAVA_CRASH_PREVIOUS),
     ];
+    // 三对之间一一对应，名单本身见 LOG_FILES（清空那边用的是同一批文件）。
     for (current, previous) in pairs {
         let previous_path = directory.join(previous);
         let current_path = directory.join(current);
@@ -411,6 +412,36 @@ fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> Com
     }
 }
 
+/// 清空两轮的全部记录。
+///
+/// 删文件而不是截断成空：`rotate` 靠「文件在不在」判断哪一轮有没有东西（见它的注释），
+/// 留一个空文件会让「上次运行」那一栏永远是有的。返回删掉了几条，界面拿它说一声。
+#[tauri::command]
+pub fn error_log_clear(app: tauri::AppHandle) -> CommandResult<usize> {
+    let dropped = read_all(&app).map(|entries| entries.len()).unwrap_or(0);
+    let Ok(directory) = log_dir(&app) else {
+        return CommandResult::failure("UNKNOWN", "Error log unavailable", true);
+    };
+    remove_log_files(&directory);
+    CommandResult::success(dropped)
+}
+
+/// 两轮的全部记录文件。
+const LOG_FILES: [&str; 6] = [
+    ERROR_LOG,
+    ERROR_PREVIOUS,
+    CRASH_LOG,
+    CRASH_PREVIOUS,
+    JAVA_CRASH_LOG,
+    JAVA_CRASH_PREVIOUS,
+];
+
+fn remove_log_files(directory: &Path) {
+    for name in LOG_FILES {
+        let _ = fs::remove_file(directory.join(name));
+    }
+}
+
 #[tauri::command]
 pub fn error_log_read(app: tauri::AppHandle) -> CommandResult<Vec<ErrorLogEntry>> {
     match read_all(&app) {
@@ -501,6 +532,27 @@ mod tests {
         assert_eq!(entries[0].message, "attempt to unwrap None");
         assert_eq!(entries[0].detail.as_deref(), Some("src/commands/eh.rs:900"));
         assert_eq!(entries[1].message, "second");
+    }
+
+    #[test]
+    fn clearing_removes_both_rounds_and_the_black_box() {
+        let dir = std::env::temp_dir().join(format!("yomika-clear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        for name in LOG_FILES {
+            fs::write(dir.join(name), "2026-09-28T00:00:00Z	error	b	m
+").expect("seed");
+        }
+        remove_log_files(&dir);
+        for name in LOG_FILES {
+            assert!(!dir.join(name).exists(), "{name} 还在");
+        }
+        // 清空之后再写一条：文件按需重建（rotate 靠「文件在不在」认这一轮有没有东西）。
+        let path = dir.join(ERROR_LOG);
+        append_lines(&path, &[String::from("2026-09-28T00:00:01Z	error	b	m
+")]).expect("append");
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

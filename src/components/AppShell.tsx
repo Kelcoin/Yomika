@@ -266,7 +266,12 @@ export function AppShell({ children }: AppShellProps) {
           // workspace container too. With a separate one their compact layout
           // clamped at a fixed height with `overflow: hidden`, which left the last
           // card behind the bottom nav with nothing able to scroll it into view.
-          className={`workspace${/^\/(library(?:\/[^/]+)?|downloads|history|watchlist|to-read)$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          //
+          // 详情路由（`/history/:id` 之类）也算在内：它们和列表同一页，只是右边多了一
+          // 栏。原来只给 `library` 放行子路径，于是从书架点开一张卡时这一页立刻换成
+          // 「普通工作区」——1320px 上限 + 48px 内边距 + 居中，两栏被挤进一个四周留
+          // 空的盒子里，「四周有异常空隙」就是这一条。
+          className={`workspace${/^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}
         >

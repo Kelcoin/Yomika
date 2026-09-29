@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -177,6 +178,10 @@ describe('local archives workspace', () => {
       if (command === 'list_local_archives') {
         return { ok: true, value: [{ ...localFile, tags: ['language:chinese', 'source:https://e-hentai.org/g/1/abc', 'category:doujinshi', 'date_added:1758000000', 'female:glasses'] }] };
       }
+      // 这一条测的是**标签的挑选与排序**，不是翻译：把翻译关掉，chip 上就一定是
+      // 原文。否则同一进程里别的用例加载过词典之后，这里会按中文渲染，断言就成了
+      // 「谁先跑」（`vitest.config.ts` 关掉了文件级隔离，模块级状态是共享的）。
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, tagTranslationEnabled: false } };
       if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });

@@ -245,6 +245,16 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     onMembershipChange: (_id, list, next) => list === 'reading' ? setInReadingList(next) : setFavorite(next),
     onDeleted: () => navigate(shelfBase, { replace: true }),
   });
+  const title = metadata?.title || '';
+  /** Title fitting: at most two lines, stepping the font down a notch at a
+   * time when the text still overflows, and letting the CSS line-clamp cut the
+   * rest to an ellipsis only when even the smallest size cannot fit.
+   *
+   * 它必须在下面那个早退之前：服务器离线时第一次渲染走的是完整骨架（全部挂钩都
+   * 在），metadata 请求失败后第二次渲染落到「读不到」那一支——若这一支少调一个
+   * 挂钩，React 会抛 #300（「Rendered fewer hooks than expected」）并**整个应用
+   * 一起卸载**，页面就成了一块纯色。 */
+  const titleRef = useTwoLineTitle(title);
 
   if (error && !metadata) {
     return (
@@ -255,7 +265,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
     );
   }
 
-  const title = metadata?.title || '';
   const tags = metadataTags;
   const ehGallery = ehGalleryFromTags(tags);
   // The category (and reclass, its override) moved down into the fact grid —
@@ -273,10 +282,6 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
       ? { kind: 'added' as const, label: '添加时间', value: detailTagTime(tags, 'date_added') }
       : { kind: 'published' as const, label: '发布时间', value: detailTagTime(tags, 'timestamp') },
   ];
-  /** Title fitting: at most two lines, stepping the font down a notch at a
-   * time when the text still overflows, and letting the CSS line-clamp cut the
-   * rest to an ellipsis only when even the smallest size cannot fit. */
-  const titleRef = useTwoLineTitle(title);
 
   return (
     <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">

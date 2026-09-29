@@ -265,11 +265,13 @@ describe('design system contract', () => {
     // 之上。Radix 的对话框（Dialog.Portal）和标签建议一直是挂到 body 的，手写浮层
     // 现在也走同一条路。
     const shell = read('src/styles/shell.css');
-    const settings = read('src/components/SettingsWorkspace.tsx');
+    // 菜单容器（SettingsMenu 与它的两个控件）现在住在 SettingsValueControls 里：
+    // 设置页与 DLSS5 / 算力中心两组共用同一套，标记本身没变。
+    const controls = read('src/components/SettingsValueControls.tsx');
     const preset = read('src/components/SearchPresetField.tsx');
 
     expect(read('src/components/OverlayLayer.tsx')).toMatch(/createPortal\(children, document\.body\)/);
-    expect(settings).toMatch(/<OverlayLayer>\s*<div className="settings-choice-overlay"/);
+    expect(controls).toMatch(/<OverlayLayer>\s*<div className="settings-choice-overlay"/);
     expect(preset).toMatch(/<OverlayLayer>\s*<div className="search-preset-overlay"/);
     // 浮层挂出去以后，面板里的点击不再算「在 field 里」，外点关闭必须放过它，
     // 否则指针一按下按钮就被卸载，click 永远到不了按钮。
@@ -366,9 +368,15 @@ describe('design system contract', () => {
     expect(title).toMatch(/font-size:\s*var\(--text-lg\)/);
     expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*20px/);
     const settings = read('src/components/SettingsWorkspace.tsx');
-    // 图标是**来源那一行的同一个**：三个菜单容器都把 icon 传下去。
-    expect(settings).toMatch(/className="settings-choice-icon"/);
-    expect(settings.match(/<SettingsMenu[^>]*icon=\{icon\}/g) ?? []).toHaveLength(3);
+    const controls = read('src/components/SettingsValueControls.tsx');
+    // 图标是**来源那一行的同一个**：三个菜单容器都把 icon 传下去。其中选择与数字
+    // 两个已经挪到 SettingsValueControls，第三个（SettingsPanel）还在设置页里。
+    expect(controls).toMatch(/className="settings-choice-icon"/);
+    const menuIcons = [
+      ...(settings.match(/<SettingsMenu[^>]*icon=\{icon\}/g) ?? []),
+      ...(controls.match(/<SettingsMenu[^>]*icon=\{icon\}/g) ?? []),
+    ];
+    expect(menuIcons).toHaveLength(3);
   });
 
   it('closes overlays with the back gesture instead of leaving the page', () => {
@@ -1112,7 +1120,8 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.search-preset-panel \{[^}]*max-height:\s*min\(70dvh, 520px\)/);
     expect(shell).toMatch(/\.settings-choice-panel \{[^}]*max-height:\s*min\(85dvh, 760px\)/);
     expect(read('src/components/SettingsRow.tsx')).toMatch(/export function SettingsRow\(/);
-    expect(settings).toMatch(/function SettingsChoice\(/);
+    // 选择控件住在 SettingsValueControls：设置页只是它的调用方。
+    expect(read('src/components/SettingsValueControls.tsx')).toMatch(/export function SettingsChoice\(/);
     // The selection is a mode with its own bar, not a checkbox glued to a card.
     expect(shell).toMatch(/\.archive-selection-bar \{/);
     expect(shell).toMatch(/\.archive-card-check \{/);

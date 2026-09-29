@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 
@@ -8,9 +8,11 @@ import { ReaderScreen } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
-import { getNativeImageCache } from '../lib/nativeImageCache';
+import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
+import { parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
+import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 
@@ -43,6 +45,22 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const goBack = useReturnNavigation();
   const { showToast } = useToast();
   const { preferences } = usePreferences();
+  /** DLSS5 与远端算力都是「设置里开了就用」：它们的门控（N 卡 + DLL + 检测通过 /
+   * 地址与令牌齐全）在设置页那边，不像超分那样还需要一个会话开关。 */
+  const dlssnrConfigured = preferences.dlssnrEnabled;
+  const remoteOps = useMemo(
+    () => parseRemoteOps(preferences.remoteComputeOps),
+    [preferences.remoteComputeOps],
+  );
+  const remoteConfigured = remoteOps.enabled
+    && preferences.remoteComputeUrl.trim() !== ''
+    && preferences.remoteComputeToken.trim() !== '';
+  // 队列回调只依赖稳定值，设置改了就靠这两个 ref 取最新的一份（改设置本身会让
+  // derived 重新排队，见下面的 enhancementToken）。
+  const dlssnrPassesRef = useRef(preferences.dlssnrPasses);
+  dlssnrPassesRef.current = preferences.dlssnrPasses;
+  const remoteOpsRef = useRef(remoteOps);
+  remoteOpsRef.current = remoteOps;
   const prefetchDistance = preferences.prefetchPages;
   // A backend with no model runs the nearest-neighbour fallback, which returns
   // the same pixels at four times the bytes — strictly worse than the plain
@@ -69,6 +87,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   useEffect(() => { if (!decensorConfigured) setDecensorWanted(false); }, [decensorConfigured]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
   const decensorEnabled = decensorConfigured && decensorWanted;
+  /** 处理中那枚小胶囊写什么：正在跑哪一档就说哪一档。远端/DLSS5 在链路上另算一步，
+   * 它失败时本机那一版会顶上（见下面的降级），所以这里说的是「正在算」而不是
+   * 「一定会变」。 */
+  const derivingLabel = remoteConfigured
+    ? '远端算力处理中…'
+    : dlssnrConfigured
+      ? 'DLSS5 处理中…'
+      : decensorEnabled && upscaleEnabled
+        ? '去码 + 超分处理中…'
+        : decensorEnabled
+          ? '去码处理中…'
+          : upscaleEnabled
+            ? '超分处理中…'
+            : '处理中…';
   /** Bumped whenever a switch flips, so the reader drops the renditions it is
    * holding instead of showing the previous answer until the next page turn. */
   const [enhancementToken, setEnhancementToken] = useState(0);
@@ -116,7 +148,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
   const derivedHandlesRef = useRef(new Map<number, ImageHandle>());
   const derivedAttemptedRef = useRef(new Set<number>());
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string }>>([]);
+  /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSS5 > 本机超分/去码。三者是同一
+   * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
+   * 结果）；本地超分/去码是前两者的输入。 */
+  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local' }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
   const generationRef = useRef(0);
@@ -265,6 +300,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * are not worth an ONNX run each, and running several at once only made every
    * one of them slower. */
   const [derivedPages, setDerivedPages] = useState<ReadonlyMap<number, string>>(() => new Map());
+  /** 正在处理（去码 / 超分）的页。一页在 CPU 上要好几秒，两样一起开近二十秒——
+   * 手上没有别的信号，用户会以为按钮点了个寂寞。 */
+  const [derivingPages, setDerivingPages] = useState<ReadonlySet<number>>(() => new Set());
+  const markDeriving = useCallback((index: number, active: boolean) => {
+    setDerivingPages((current) => {
+      if (current.has(index) === active) return current;
+      const next = new Set(current);
+      if (active) next.add(index); else next.delete(index);
+      return next;
+    });
+  }, []);
 
   const releaseDerived = useCallback(() => {
     derivedGenerationRef.current += 1;
@@ -272,6 +318,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedHandlesRef.current.clear();
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
+    setDerivingPages((current) => current.size === 0 ? current : new Set());
     setDerivedPages((current) => current.size === 0 ? current : new Map());
   }, []);
 
@@ -287,64 +334,129 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (!context || !mountedRef.current) break;
         derivedAttemptedRef.current.add(pageIndex);
         if (!await loadPage(pageIndex) || job.generation !== derivedGenerationRef.current) continue;
-        const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
-        // Both on: de-censor first, then enlarge the finished page. The detector
-        // and the inpainter were trained at page scale, so upscaling first would
-        // hand the inpainter interpolated pixels and smeared mosaic blocks.
-        const censored = job.decensorModel && !job.upscaleModel
-          ? await imageCache.load({ ...identity, rendition: 'decensored', modelId: job.decensorModel }).catch(() => undefined)
-          : undefined;
-        const enhanced = job.generation === derivedGenerationRef.current && job.upscaleModel
-          ? await imageCache.load({
-            ...identity,
-            rendition: 'enhanced',
-            modelId: job.upscaleModel,
-            ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
-          }).catch(() => undefined)
-          : undefined;
-        // 两条互斥：超分开着时 `censored` 根本不取值（去码是在超分调用内部做的），
-        // 所以这里只可能有一个产物，不需要给另一个收尾。
-        const derived = enhanced ?? censored;
-        if (!derived) continue;
-        if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
-          imageCache.release(derived);
-          continue;
+        // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
+        markDeriving(pageIndex, true);
+        try {
+          const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
+          // Both on: de-censor first, then enlarge the finished page. The detector
+          // and the inpainter were trained at page scale, so upscaling first would
+          // hand the inpainter interpolated pixels and smeared mosaic blocks.
+          const censored = job.decensorModel && !job.upscaleModel
+            ? await imageCache.load({ ...identity, rendition: 'decensored', modelId: job.decensorModel }).catch(() => undefined)
+            : undefined;
+          const enhanced = job.generation === derivedGenerationRef.current && job.upscaleModel
+            ? await imageCache.load({
+              ...identity,
+              rendition: 'enhanced',
+              modelId: job.upscaleModel,
+              ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
+            }).catch(() => undefined)
+            : undefined;
+          // 两条互斥：超分开着时 `censored` 根本不取值（去码是在超分调用内部做的），
+          // 所以这里只可能有一个产物，不需要给另一个收尾。
+          const local = enhanced ?? censored;
+          /** 远端 / DLSS5 那一步的输入：本地做了什么就从那一步的产物接着做。 */
+          const baseRendition: DlssnrSource = job.upscaleModel
+            ? 'enhanced'
+            : job.decensorModel
+              ? 'decensored'
+              : 'reader-page';
+          let derived = local;
+          if (job.engine === 'dlssnr' || job.engine === 'remote') {
+            // 远端 / DLSS5 是「这一页最终由谁画」里更高的一档，产物替代本地产物
+            // （本地那一版只是它的输入，收掉）。
+            const processed = await imageCache.load(job.engine === 'dlssnr'
+              ? {
+                ...identity,
+                rendition: 'dlssnr',
+                transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
+                  parseDlssnrPasses(dlssnrPassesRef.current),
+                )),
+              }
+              : {
+                ...identity,
+                rendition: 'remote',
+                transform: remoteTransform({
+                  source: baseRendition,
+                  op: remoteOpsRef.current.op.op,
+                  modelId: remoteOpsRef.current.op.modelId,
+                  scale: remoteOpsRef.current.op.scale,
+                  passes: JSON.stringify(remoteOpsRef.current.op.dlssnrPasses),
+                }),
+              }).catch(() => undefined);
+            if (processed) {
+              if (local) imageCache.release(local);
+              derived = processed;
+            }
+            // 那一档失败（没装片段、对面连不上、远端模型缺失）就退到本机这一版：
+            // 从前这里把 `local` 一起丢掉，页面上还是原图——超分/去码看起来就是
+            // 「失效了」，而失败原因只在缓存层留过一笔。
+          }
+          if (!derived) continue;
+          if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
+            imageCache.release(derived);
+            continue;
+          }
+          const occupied = derivedHandlesRef.current.get(pageIndex);
+          if (occupied) {
+            imageCache.release(derived);
+            continue;
+          }
+          retainDerived(pageIndex, derived);
+          // Yield between pages so navigation/input can be serviced promptly on
+          // slower devices while the native inference worker continues.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        } finally {
+          markDeriving(pageIndex, false);
         }
-        const occupied = derivedHandlesRef.current.get(pageIndex);
-        if (occupied) {
-          imageCache.release(derived);
-          continue;
-        }
-        retainDerived(pageIndex, derived);
-        // Yield between pages so navigation/input can be serviced promptly on
-        // slower devices while the native inference worker continues.
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     } finally {
       derivedBusyRef.current = false;
     }
-  }, [loadPage, retainDerived]);
+  }, [loadPage, retainDerived, markDeriving]);
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
   /** Called by the reader with the pages actually on screen. */
   const requestDerived = useCallback((indexes: readonly number[]) => {
-    if (!decensorEnabled && !upscaleEnabled) return;
+    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured && !remoteConfigured) return;
+    const engine: 'remote' | 'dlssnr' | 'local' = remoteConfigured
+      ? 'remote'
+      : dlssnrConfigured
+        ? 'dlssnr'
+        : 'local';
     let queued = false;
     const context = contextRef.current;
     const expanded = [...indexes, ...indexes.flatMap((index) => context ? getPrefetchPages(index, context.paths.length, prefetchDistance) : [])];
     for (const index of expanded) {
       if (derivedAttemptedRef.current.has(index) || derivedQueueRef.current.some((job) => job.pageIndex === index)) continue;
-      derivedQueueRef.current.push({ pageIndex: index, generation: derivedGenerationRef.current, decensorModel: decensorEnabled ? preferences.decensorModel : '', upscaleModel: upscaleEnabled ? preferences.upscaleModel : '' });
+      derivedQueueRef.current.push({
+        pageIndex: index,
+        generation: derivedGenerationRef.current,
+        decensorModel: decensorEnabled ? preferences.decensorModel : '',
+        upscaleModel: upscaleEnabled ? preferences.upscaleModel : '',
+        engine,
+      });
       queued = true;
     }
     if (queued) void runDerivedQueue();
-  }, [decensorEnabled, preferences.decensorModel, preferences.upscaleModel, runDerivedQueue, upscaleEnabled, prefetchDistance]);
+  }, [decensorEnabled, dlssnrConfigured, preferences.decensorModel, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled, prefetchDistance]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
   useLayoutEffect(() => {
     releaseDerived();
-  }, [decensorEnabled, enhancementToken, preferences.decensorModel, preferences.upscaleModel, releaseDerived, upscaleEnabled]);
+  }, [
+    decensorEnabled,
+    dlssnrConfigured,
+    enhancementToken,
+    preferences.decensorModel,
+    preferences.dlssnrPasses,
+    preferences.upscaleModel,
+    releaseDerived,
+    remoteConfigured,
+    remoteOps,
+    upscaleEnabled,
+  ]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -493,6 +605,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         toggle: () => { setDecensorWanted((value) => !value); setEnhancementToken((value) => value + 1); },
       }}
       derivedPages={derivedPages}
+      derivingPages={derivingPages}
+      derivingLabel={derivingLabel}
       onVisiblePages={requestDerived}
       onProgress={(pageIndex, reading) => {
         if (!scopeId || incognito) return;

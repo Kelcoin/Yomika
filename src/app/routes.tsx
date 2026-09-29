@@ -12,18 +12,41 @@ import { pickServer } from '../domain/server';
 import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
 import { MorePagesRoute } from '../components/MorePagesRoute';
 
+/** 每个懒加载页面一个加载器：`lazy()` 用它，启动后的空闲预热也用它。
+ *
+ * 切页时那一闪是 Suspense 的兜底：chunk 还没到，整页被换成加载动画，到了再换回来。
+ * chunk 只在第一次进入某个页面时缺，所以那一闪是偶发的（一次会话里每个页面各一次）。
+ * 启动稳定之后空闲时把它们一次性取回来，之后切页不再挂起，动画自然不闪。 */
+export const lazyPages = {
+  reader: () => import('../components/ReaderRoute'),
+  settings: () => import('../components/SettingsWorkspace'),
+  localArchives: () => import('../components/LocalArchivesWorkspace'),
+  upload: () => import('../components/UploadPanel'),
+  eh: () => import('../components/EhRouteWorkspace'),
+  metadataEdit: () => import('../components/MetadataEditRoute'),
+  deduplication: () => import('../components/DeduplicationWorkspace'),
+} as const;
+
 /** The standalone pages load on first entry. Everything else — home, library
  * and the three shelves — stays in the main chunk: those five panels are the
  * app's shell, are kept mounted across visits, and would pay a Suspense flash
  * on every return for no further savings. The leaves were the bulk of the
  * parsed bytes on boot even though they are one route deep. */
-const ReaderRouteScreen = lazy(() => import('../components/ReaderRoute').then((module) => ({ default: module.ReaderRoute })));
-const SettingsWorkspace = lazy(() => import('../components/SettingsWorkspace').then((module) => ({ default: module.SettingsWorkspace })));
-const LocalArchivesWorkspace = lazy(() => import('../components/LocalArchivesWorkspace').then((module) => ({ default: module.LocalArchivesWorkspace })));
-const UploadPanel = lazy(() => import('../components/UploadPanel').then((module) => ({ default: module.UploadPanel })));
-const EhRouteWorkspace = lazy(() => import('../components/EhRouteWorkspace').then((module) => ({ default: module.EhRouteWorkspace })));
-const MetadataEditRoute = lazy(() => import('../components/MetadataEditRoute').then((module) => ({ default: module.MetadataEditRoute })));
-const DeduplicationWorkspace = lazy(() => import('../components/DeduplicationWorkspace').then((module) => ({ default: module.DeduplicationWorkspace })));
+const ReaderRouteScreen = lazy(() => lazyPages.reader().then((module) => ({ default: module.ReaderRoute })));
+const SettingsWorkspace = lazy(() => lazyPages.settings().then((module) => ({ default: module.SettingsWorkspace })));
+const LocalArchivesWorkspace = lazy(() => lazyPages.localArchives().then((module) => ({ default: module.LocalArchivesWorkspace })));
+const UploadPanel = lazy(() => lazyPages.upload().then((module) => ({ default: module.UploadPanel })));
+const EhRouteWorkspace = lazy(() => lazyPages.eh().then((module) => ({ default: module.EhRouteWorkspace })));
+const MetadataEditRoute = lazy(() => lazyPages.metadataEdit().then((module) => ({ default: module.MetadataEditRoute })));
+const DeduplicationWorkspace = lazy(() => lazyPages.deduplication().then((module) => ({ default: module.DeduplicationWorkspace })));
+
+/** 空闲时把上面这些页面取回来。失败不管：真的进那个页面时 Suspense 照旧兜底。 */
+export function preloadLazyPages(): void {
+  if (typeof window === 'undefined') return;
+  const load = () => { for (const page of Object.values(lazyPages)) void page().catch(() => {}); };
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(load, { timeout: 2000 });
+  else window.setTimeout(load, 1200);
+}
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
@@ -570,25 +593,22 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           above an empty state was most of what the page showed. No control bar
           either — the order is fixed and the card style follows the library. */}
       {loading && (
-        /* Same shell as the library route: the `.library-shell-list` panel is
-           what carries the 16px side padding, so without it the shelf's cards
-           sat nearly flush against the sidebar. */
-        <div className="library-shell">
-          <section className="library-shell-list">
-            <LibraryWorkspace
-              archives={[]}
-              listLoading
-              showDetail={false}
-              detailBasePath={detailBasePath}
-              heading={null}
-              showToolbar={false}
-              cardStyle={shelfCardStyle}
-              searchQuery={query}
-              onSearchQueryChange={setQuery}
-              searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
-            />
-          </section>
-        </div>
+        /* 这一页已经是 ShelfShell 的列表栏（`.library-shell-list`，16px 侧内边距就在
+           那儿）。从前书架是独立页面，页面里自己套了一层 `.library-shell` +
+           `.library-shell-list` 来供那 16px——现在两侧都供，卡片会被推进去 32px，
+           列表也比那一栏窄一圈。 */
+        <LibraryWorkspace
+          archives={[]}
+          listLoading
+          showDetail={false}
+          detailBasePath={detailBasePath}
+          heading={null}
+          showToolbar={false}
+          cardStyle={shelfCardStyle}
+          searchQuery={query}
+          onSearchQueryChange={setQuery}
+          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+        />
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
       {!loading && !error && !hasServer && <ServerRequiredPrompt />}
@@ -597,55 +617,51 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       )}
       {!loading && !error && hasServer && shelfArchives.length > 0 && (
         // Same list and card system as the library, and the same search bar, so
-        // the only difference is what it searches — including the same
-        // `.library-shell-list` panel that sets the cards' side padding.
-        <div className="library-shell">
-          <section className="library-shell-list">
-            <LibraryWorkspace
-              archives={visibleArchives}
-              heading={null}
-              showToolbar={false}
-              showDetail={false}
-              detailBasePath={detailBasePath}
-              cardStyle={shelfCardStyle}
-              {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
-              searchQuery={query}
-              onSearchQueryChange={setQuery}
-              searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
-              readingProgressByArchiveId={progressByArchiveId}
-              onArchiveContextMenu={openContextMenu}
-              presets={presets}
-              onApplyPreset={(preset) => setQuery(preset.query)}
-              onSavePreset={() => { setPresetEditTarget(undefined); setPresetDialogOpen(true); }}
-              onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
-              onDeletePreset={(preset) => {
-                if (!scopeId) return;
-                void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
-                  if (result.ok) setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
-                });
-              }}
-              {...(timelineByArchiveId ? { timelineByArchiveId } : {})}
-              {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
-              /* Pulling a shelf re-reads the shelf, in place — same gesture, same
-                 disc, as the library. */
-              refreshing={pulling}
-              onRefresh={() => { setPulling(true); setReloadToken((value) => value + 1); }}
-              {...selection.props}
-              selectionActions={<>
-                {selection.actions}
-                {/* 历史的清理入口在这里：多选之后清掉的是**记录**（会同步到别的
-                    设备），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
-                    要清哪几条，只有看着列表的人知道。 */}
-                {name === 'history' && (
-                  <button className="secondary-action is-icon" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
-                    <Eraser aria-hidden="true" />
-                  </button>
-                )}
-              </>}
-              {...(finishedArchiveIds ? { finishedArchiveIds } : {})}
-            />
-          </section>
-        </div>
+        // the only difference is what it searches. The 16px side padding comes
+        // from the ShelfShell panel; this page adds none of its own.
+        <LibraryWorkspace
+          archives={visibleArchives}
+          heading={null}
+          showToolbar={false}
+          showDetail={false}
+          detailBasePath={detailBasePath}
+          cardStyle={shelfCardStyle}
+          {...(name === 'history' ? {} : { onCardStyleChange: setCardStyle })}
+          searchQuery={query}
+          onSearchQueryChange={setQuery}
+          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+          readingProgressByArchiveId={progressByArchiveId}
+          onArchiveContextMenu={openContextMenu}
+          presets={presets}
+          onApplyPreset={(preset) => setQuery(preset.query)}
+          onSavePreset={() => { setPresetEditTarget(undefined); setPresetDialogOpen(true); }}
+          onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
+          onDeletePreset={(preset) => {
+            if (!scopeId) return;
+            void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
+              if (result.ok) setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
+            });
+          }}
+          {...(timelineByArchiveId ? { timelineByArchiveId } : {})}
+          {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
+          /* Pulling a shelf re-reads the shelf, in place — same gesture, same
+             disc, as the library. */
+          refreshing={pulling}
+          onRefresh={() => { setPulling(true); setReloadToken((value) => value + 1); }}
+          {...selection.props}
+          selectionActions={<>
+            {selection.actions}
+            {/* 历史的清理入口在这里：多选之后清掉的是**记录**（会同步到别的
+                设备），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
+                要清哪几条，只有看着列表的人知道。 */}
+            {name === 'history' && (
+              <button className="secondary-action is-icon" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
+                <Eraser aria-hidden="true" />
+              </button>
+            )}
+          </>}
+          {...(finishedArchiveIds ? { finishedArchiveIds } : {})}
+        />
       )}
       {contextMenu}
       {selection.dialogs}

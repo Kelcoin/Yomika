@@ -530,9 +530,14 @@ mod tests {
         );
         // An absolute bound rather than a ratio: ORT memory-maps the initialisers,
         // so a cold open can itself be quick, and a ratio would then be measuring
-        // noise. A lookup that does not open anything cannot take milliseconds.
+        // noise. A lookup that does not open anything is a hash lookup and an Arc
+        // clone — microseconds. The bound is generous against the scheduler on
+        // purpose: under load this box deschedules the test thread for tens of
+        // milliseconds (27 ms measured once), while the open this is meant to rule
+        // out takes ~660 ms here. Five milliseconds was tight enough to fail about
+        // one run in six without anything being wrong.
         assert!(
-            warm < std::time::Duration::from_millis(5),
+            warm < std::time::Duration::from_millis(50),
             "a cached lookup took {warm:?}, so it is opening something (cold open was {cold:?}, first cached call {warm_first:?})",
         );
         drop(engines);

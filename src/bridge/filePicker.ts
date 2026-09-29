@@ -87,6 +87,21 @@ export async function pickModelFile(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
+const DLL_EXTENSIONS = ['dll'];
+
+/** DLSS5 的 `nvngx_dlssnr.dll`：从用户手上的那份变体里选一个。 */
+export async function pickDllFile(): Promise<string | null> {
+  if (testModelPicker) return testModelPicker();
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'DLSS 特性 DLL', extensions: DLL_EXTENSIONS }],
+  });
+  return typeof selected === 'string' ? selected : null;
+}
+
 export async function pickArchiveFile(): Promise<string | null> {
   if (testPicker) return testPicker();
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;

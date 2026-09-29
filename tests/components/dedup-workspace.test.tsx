@@ -128,7 +128,11 @@ describe('duplicate deletion confirmation', () => {
     // loadResult 与真实后端一样回放持久化的选择：scanChunk 写什么就回什么。
     let selectedArchiveIds: string[] = [];
     const adapter = vi.fn(async (command: string, payload?: { input?: { selectedArchiveIds?: string[] }; selectedArchiveIds?: string[] }) => {
-      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false } };
+      // 这个夹子里测的是卡片上的判定胶囊与标签行，不是翻译：把翻译关掉，标签行上就
+      // 一定是档案自己的标签。开着的话标签文本取决于翻译词典有没有下下来（词典走
+      // 网络），同一套断言会时对时错。判定胶囊（无修正/有码/无汉语）不受影响——
+      // 它们是本地按标签判定出来的。
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false, tagTranslationEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
       if (command === 'list_archive_identities') return { ok: true, value: records };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs } };

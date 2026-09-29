@@ -74,6 +74,13 @@ interface ReaderScreenProps {
    * its place in the same slot, so nothing about the view changes but the `src` —
    * which is what keeps the zoom from being thrown away mid-read. */
   derivedPages?: ReadonlyMap<number, string> | undefined;
+  /** Pages the caller is deriving right now (de-censor / upscale). On CPU a page
+   * takes seconds — a 1248×1416 with both models runs ~20 — and until now nothing
+   * on screen said so: press 「去码」, see nothing, and the feature reads as broken
+   * even though it is working. The pill is that missing sentence. */
+  derivingPages?: ReadonlySet<number> | undefined;
+  /** What to call the wait: `去码处理中…`, `超分处理中…`, both when both are on. */
+  derivingLabel?: string | undefined;
   /** The pages actually on screen, so the caller can enhance those and not the
    * whole prefetch window. */
   onVisiblePages?: ((indexes: readonly number[]) => void) | undefined;
@@ -135,7 +142,7 @@ function readViewport() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, onVisiblePages }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages }: ReaderScreenProps) {
   const pageActive = usePageActive();
   const reduceMotion = useReducedMotion();
   const goBack = useReturnNavigation();
@@ -1002,6 +1009,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         {source
           ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
+        {/* 处理中的那一页压一枚安静的小胶囊：本机跑一页要好几秒（两个模型一起
+            ~20 秒），没有它，用户按下「去码」后看到的就是「什么都没发生」。 */}
+        {derivingPages?.has(index) && (
+          <p className="reader-deriving" role="status"><LoadingIndicator label={derivingLabel} size="sm" inline />{derivingLabel}</p>
+        )}
       </div>
     );
   };

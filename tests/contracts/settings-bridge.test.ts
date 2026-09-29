@@ -33,6 +33,14 @@ const preferences = {
   autoSync: true,
   tagTranslationEnabled: true,
   tagCountOrderEnabled: true,
+  dlssnrEnabled: false,
+  dlssnrPasses: '',
+  computeCenterEnabled: false,
+  computeCenterPort: 47_653,
+  computeCenterToken: '',
+  remoteComputeUrl: '',
+  remoteComputeToken: '',
+  remoteComputeOps: '',
 };
 
 describe('native settings bridge', () => {

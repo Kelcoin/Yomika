@@ -33,6 +33,14 @@ const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
 const TAG_TRANSLATION_ENABLED_KEY: &str = "preferences.tag_translation_enabled";
 const TAG_COUNT_ORDER_ENABLED_KEY: &str = "preferences.tag_count_order_enabled";
+const DLSSNR_ENABLED_KEY: &str = "preferences.dlssnr_enabled";
+const DLSSNR_PASSES_KEY: &str = "preferences.dlssnr_passes";
+const COMPUTE_CENTER_ENABLED_KEY: &str = "preferences.compute_center_enabled";
+const COMPUTE_CENTER_PORT_KEY: &str = "preferences.compute_center_port";
+const COMPUTE_CENTER_TOKEN_KEY: &str = "preferences.compute_center_token";
+const REMOTE_COMPUTE_URL_KEY: &str = "preferences.remote_compute_url";
+const REMOTE_COMPUTE_TOKEN_KEY: &str = "preferences.remote_compute_token";
+const REMOTE_COMPUTE_OPS_KEY: &str = "preferences.remote_compute_ops";
 pub const GIB_BYTES: u64 = 1_073_741_824;
 pub const MIN_CACHE_BYTES: u64 = GIB_BYTES;
 pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
@@ -158,6 +166,32 @@ pub struct PreferenceSnapshot {
     pub tag_translation_enabled: bool,
     #[serde(default = "default_true")]
     pub tag_count_order_enabled: bool,
+    /// DLSS5：在阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染（仅 Windows 桌面、
+    /// 且装了 DLL、检测通过时设置页才显示这一组）。
+    #[serde(default)]
+    pub dlssnr_enabled: bool,
+    /// 每层参数，JSON 数组（形状见 `dlssnr::PassSettings`）。存字符串而不是结构体：
+    /// 这份偏好要跨端同步与解析，保持后端平台无关。
+    #[serde(default)]
+    pub dlssnr_passes: String,
+    /// 本机作为算力中心对外提供服务（局域网内让移动端借这台机器的算力）。
+    #[serde(default)]
+    pub compute_center_enabled: bool,
+    #[serde(default = "default_compute_center_port")]
+    pub compute_center_port: u16,
+    /// 算力中心的令牌：明文存在本机设置里（凭据存储另有一套，这一项要能显示给
+    /// 用户抄到移动端上）。
+    #[serde(default)]
+    pub compute_center_token: String,
+    /// 远端算力：本机把一页发给哪台桌面端处理（空 = 不用远端）。
+    #[serde(default)]
+    pub remote_compute_url: String,
+    #[serde(default)]
+    pub remote_compute_token: String,
+    /// 远端处理用的参数，JSON 对象。**只作用于远端**：不改本机自己的超分/去码/
+    /// DLSS5 设置，也不去动远端那台机器上的设置。
+    #[serde(default)]
+    pub remote_compute_ops: String,
 }
 
 
@@ -190,6 +224,9 @@ fn default_upscale_backend() -> String {
 fn default_upscale_auto_threshold() -> u64 {
     500 * 1024
 }
+fn default_compute_center_port() -> u16 {
+    47653
+}
 /// The historical five mobile entries.
 fn default_bottom_nav_items() -> Vec<String> {
     ["home", "library", "history", "watchlist", "settings"]
@@ -204,8 +241,18 @@ fn default_bottom_nav_items() -> Vec<String> {
 ///
 /// 名字是快照序列化后的键（camelCase），因为判断发生在 JSON 上：日志里存的是那份
 /// JSON，远端来的也是 JSON。
-pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 2] =
-    ["downloadDirectory", "cacheMaxBytes"];
+pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 8] = [
+    "downloadDirectory",
+    "cacheMaxBytes",
+    // 算力中心这一组全是「这台机器」的事：端口可能撞别的设备、令牌是这台机器的
+    // 凭据、远端地址指的是具体一台机器。同步出去只会把别的设备设置改坏。
+    "computeCenterEnabled",
+    "computeCenterPort",
+    "computeCenterToken",
+    "remoteComputeUrl",
+    "remoteComputeToken",
+    "remoteComputeOps",
+];
 
 impl Default for PreferenceSnapshot {
     fn default() -> Self {
@@ -238,6 +285,14 @@ impl Default for PreferenceSnapshot {
             auto_sync: true,
             tag_translation_enabled: true,
             tag_count_order_enabled: true,
+            dlssnr_enabled: false,
+            dlssnr_passes: String::new(),
+            compute_center_enabled: false,
+            compute_center_port: default_compute_center_port(),
+            compute_center_token: String::new(),
+            remote_compute_url: String::new(),
+            remote_compute_token: String::new(),
+            remote_compute_ops: String::new(),
         }
     }
 }
@@ -258,6 +313,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || !(MIN_CACHE_BYTES..=MAX_CACHE_BYTES).contains(&value.cache_max_bytes)
         || value.cache_max_bytes % GIB_BYTES != 0
         || value.prefetch_pages > MAX_PREFETCH_PAGES
+        || !(1024..=65535).contains(&value.compute_center_port)
         || !(1..=8).contains(&value.cover_concurrency)
         || !matches!(value.startup_route.as_str(), "home" | "library")
         || !matches!(value.card_style.as_str(), "wide" | "thumbnail")
@@ -411,6 +467,30 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         auto_sync: map_value(&stored, AUTO_SYNC_KEY, defaults.auto_sync)?,
         tag_translation_enabled: map_value(&stored, TAG_TRANSLATION_ENABLED_KEY, defaults.tag_translation_enabled)?,
         tag_count_order_enabled: map_value(&stored, TAG_COUNT_ORDER_ENABLED_KEY, defaults.tag_count_order_enabled)?,
+        dlssnr_enabled: map_value(&stored, DLSSNR_ENABLED_KEY, defaults.dlssnr_enabled)?,
+        dlssnr_passes: map_value(&stored, DLSSNR_PASSES_KEY, defaults.dlssnr_passes)?,
+        compute_center_enabled: map_value(
+            &stored,
+            COMPUTE_CENTER_ENABLED_KEY,
+            defaults.compute_center_enabled,
+        )?,
+        compute_center_port: map_value(
+            &stored,
+            COMPUTE_CENTER_PORT_KEY,
+            defaults.compute_center_port,
+        )?,
+        compute_center_token: map_value(
+            &stored,
+            COMPUTE_CENTER_TOKEN_KEY,
+            defaults.compute_center_token,
+        )?,
+        remote_compute_url: map_value(&stored, REMOTE_COMPUTE_URL_KEY, defaults.remote_compute_url)?,
+        remote_compute_token: map_value(
+            &stored,
+            REMOTE_COMPUTE_TOKEN_KEY,
+            defaults.remote_compute_token,
+        )?,
+        remote_compute_ops: map_value(&stored, REMOTE_COMPUTE_OPS_KEY, defaults.remote_compute_ops)?,
     };
     validate_preferences(&value)
 }
@@ -503,6 +583,32 @@ pub fn save_preferences_to(
         (AUTO_SYNC_KEY, serde_json::to_string(&value.auto_sync)),
         (TAG_TRANSLATION_ENABLED_KEY, serde_json::to_string(&value.tag_translation_enabled)),
         (TAG_COUNT_ORDER_ENABLED_KEY, serde_json::to_string(&value.tag_count_order_enabled)),
+        (DLSSNR_ENABLED_KEY, serde_json::to_string(&value.dlssnr_enabled)),
+        (DLSSNR_PASSES_KEY, serde_json::to_string(&value.dlssnr_passes)),
+        (
+            COMPUTE_CENTER_ENABLED_KEY,
+            serde_json::to_string(&value.compute_center_enabled),
+        ),
+        (
+            COMPUTE_CENTER_PORT_KEY,
+            serde_json::to_string(&value.compute_center_port),
+        ),
+        (
+            COMPUTE_CENTER_TOKEN_KEY,
+            serde_json::to_string(&value.compute_center_token),
+        ),
+        (
+            REMOTE_COMPUTE_URL_KEY,
+            serde_json::to_string(&value.remote_compute_url),
+        ),
+        (
+            REMOTE_COMPUTE_TOKEN_KEY,
+            serde_json::to_string(&value.remote_compute_token),
+        ),
+        (
+            REMOTE_COMPUTE_OPS_KEY,
+            serde_json::to_string(&value.remote_compute_ops),
+        ),
     ] {
         transaction
             .execute(
@@ -701,6 +807,16 @@ mod tests {
             ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
             auto_sync: false,
+            tag_translation_enabled: false,
+            tag_count_order_enabled: true,
+            dlssnr_enabled: true,
+            dlssnr_passes: "[{\"style\":1,\"intensity\":1.25}]".into(),
+            compute_center_enabled: true,
+            compute_center_port: 47_800,
+            compute_center_token: "token-123".into(),
+            remote_compute_url: "192.168.1.9:47653".into(),
+            remote_compute_token: "remote-token".into(),
+            remote_compute_ops: "{\"upscale\":{\"modelId\":\"x\"}}".into(),
             // 导入导出范围要能存住「只带一部分」这件事：记录 + 一类凭据。
         };
         save_preferences_to(&mut connection, wanted.clone()).expect("save preferences");

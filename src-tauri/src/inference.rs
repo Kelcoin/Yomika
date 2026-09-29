@@ -1353,6 +1353,14 @@ pub struct UpscalePageInput {
 // asynchronously; never queue behind inference on the window or database thread.
 static READER_INFERENCE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+/// 全局只允许一件重活：阅读器的超分/去码、DLSS5、算力中心收到的请求都走这里。
+/// 不这么收，两张图同时进来就会各开一份模型，内存直接翻倍。
+pub(crate) async fn run_heavy<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    run_reader_inference(work).await
+}
+
 async fn run_reader_inference<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
@@ -1619,7 +1627,117 @@ fn resolve_installed_bundle(
         })
 }
 
-fn run_decensor_bytes(
+/// 算力中心的能力清单用：本机上「模型包齐全、能直接跑」的模型。
+///
+/// 只列齐全的——半份模型跑一半会留半张处理过的图，比直接说「没有」更糟。
+pub(crate) fn runnable_models(models_data: &std::path::Path) -> Vec<RunnableModel> {
+    let mut runnable = Vec::new();
+    for model in installed_models_in(models_data) {
+        if model.kind == MODEL_KIND_DECENSOR {
+            if resolve_installed_bundle(models_data, &model.id).is_some() {
+                runnable.push(RunnableModel {
+                    id: model.id.clone(),
+                    kind: "decensor".to_string(),
+                    label: format!("去码：{}", model.id),
+                    scale: None,
+                });
+            }
+            continue;
+        }
+        match resolve_upscaler(models_data, &model.id) {
+            Some(ResolvedUpscaler::Onnx(_, manifest)) => runnable.push(RunnableModel {
+                id: model.id.clone(),
+                kind: "upscale".to_string(),
+                label: format!("超分：{}（{}x）", model.id, manifest.scale),
+                scale: Some(manifest.scale),
+            }),
+            Some(ResolvedUpscaler::Anime4k(preset)) => runnable.push(RunnableModel {
+                id: model.id.clone(),
+                kind: "upscale".to_string(),
+                label: format!("超分：{}（{}x）", model.id, preset.scale),
+                scale: Some(preset.scale),
+            }),
+            None => {}
+        }
+    }
+    runnable
+}
+
+/// 一台机器上「能直接用的模型」：算力中心把它报给移动端。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnableModel {
+    pub id: String,
+    /// `upscale` 或 `decensor`。
+    pub kind: String,
+    pub label: String,
+    pub scale: Option<u32>,
+}
+
+/// 一段图片字节跑一遍超分，回 PNG 字节（不碰本地缓存页面）。
+///
+/// 算力中心收到移动端发来的图就走这里：那边没有本机的归档与页码，只有字节。
+/// `model_id` 为空时用最近邻放大——「诚实但没模型」的那条路，与阅读器一致。
+pub(crate) fn run_upscale_bytes(
+    models_data: &std::path::Path,
+    model_id: &str,
+    source: &[u8],
+    requested_scale: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    let resolved = (!model_id.is_empty())
+        .then(|| resolve_upscaler(models_data, model_id))
+        .flatten();
+    // 点了名却找不到，说明调用方以为在跑模型——这时候悄悄换成最近邻会让人以为
+    // 「模型效果就这样」。与阅读器那条路一样：报错。
+    if !model_id.is_empty() && resolved.is_none() {
+        return Err(format!("没有装这个超分模型：{model_id}"));
+    }
+    let scale = match &resolved {
+        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.scale.clamp(1, 4),
+        Some(ResolvedUpscaler::Anime4k(preset)) => preset.scale,
+        None => requested_scale.unwrap_or(2).clamp(1, 4),
+    };
+    let decoded = image::load_from_memory(source)
+        .map_err(|error| error.to_string())?
+        .to_rgba8();
+    let (width, height) = (decoded.width(), decoded.height());
+    let max_pixels = match &resolved {
+        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.max_pixels,
+        Some(ResolvedUpscaler::Anime4k(_)) => anime4k::ANIME4K_MAX_PIXELS,
+        None => 64_000_000,
+    };
+    let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match &resolved {
+        Some(ResolvedUpscaler::Onnx(path, manifest)) => Some(Box::new(
+            onnx::OnnxEngine::open(path, manifest.scale, max_pixels, manifest.min_input_edge)
+                .map_err(|error| format!("{error:?}"))?,
+        )),
+        Some(ResolvedUpscaler::Anime4k(preset)) => Some(Box::new(
+            anime4k::Anime4kEngine::open(preset).map_err(|error| format!("{error:?}"))?,
+        )),
+        None => None,
+    };
+    let fallback = upscale::NearestNeighbourEngine { scale, max_pixels };
+    let engine: &dyn upscale::UpscaleEngine = match &chosen {
+        Some(engine) => engine.as_ref(),
+        None => &fallback,
+    };
+    let options = upscale::UpscaleOptions {
+        max_pixels,
+        ..upscale::UpscaleOptions::default()
+    };
+    let upscaled = upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options)
+        .map_err(|error| format!("{error:?}"))?;
+    let (final_rgba, final_width, final_height) =
+        fit_enhanced_output(&upscaled.rgba, upscaled.width, upscaled.height, width, height);
+    let mut encoded = Vec::new();
+    use image::ImageEncoder;
+    image::codecs::png::PngEncoder::new(&mut encoded)
+        .write_image(&final_rgba, final_width, final_height, image::ExtendedColorType::Rgba8)
+        .map_err(|error| error.to_string())?;
+    Ok(encoded)
+}
+
+pub(crate) fn run_decensor_bytes(
     models_data: &std::path::Path,
     model_id: &str,
     source: &[u8],

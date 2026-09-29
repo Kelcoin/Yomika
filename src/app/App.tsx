@@ -2,7 +2,7 @@ import { RetainedPage } from './RetainedPage';
 import { AppShell } from '../components/AppShell';
 import { useEffect, useRef } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { ReaderRoutes, WorkspaceRoutes } from './routes';
+import { preloadLazyPages, ReaderRoutes, WorkspaceRoutes } from './routes';
 import { PreferencesProvider, usePreferences } from './preferences';
 import { startTagTranslationUpdates, stopTagTranslationUpdates } from '../lib/tagTranslationService';
 import { installErrorLogging } from '../lib/errorLog';
@@ -49,6 +49,9 @@ export function App() {
     };
     updateLifecycle();
     document.addEventListener('visibilitychange', updateLifecycle);
+    // 启动稳定后把懒加载的页面取回来：不然切到那些页面时 Suspense 会把整页换成
+    // 加载动画，闪一下（chunk 只在第一次进入时缺）。
+    preloadLazyPages();
     return () => {
       stopErrorLogging();
       stopPressFeedback();

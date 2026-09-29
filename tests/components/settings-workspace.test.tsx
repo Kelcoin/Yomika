@@ -95,7 +95,9 @@ describe('settings workspace', () => {
     // 顶上那两句说明文字已经去掉：留着的都是眼下的事实。
     expect(menu.textContent).not.toContain('每次启动重新记录');
 
-    await user.click(within(menu).getByRole('button', { name: '导出' }));
+    // 动作都在 ⋮ 菜单里：复制、导出、错误反馈、清空。
+    await user.click(within(menu).getByRole('button', { name: '日志操作' }));
+    await user.click(await screen.findByRole('menuitem', { name: '导出日志' }));
     // 导出的是界面这一份（同一次拼装）：内容由前端给，原生侧只管写。
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_export', {
       path: 'C:/tmp/yomika-error.log',

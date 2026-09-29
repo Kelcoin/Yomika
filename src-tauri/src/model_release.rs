@@ -196,7 +196,7 @@ pub fn validate_upscale_catalog(catalog: &UpscaleCatalog) -> Result<(), String> 
 }
 
 /// A single path segment that can be used as a directory or file name.
-fn safe_segment(value: &str) -> bool {
+pub(crate) fn safe_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."

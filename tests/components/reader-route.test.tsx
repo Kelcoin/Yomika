@@ -381,4 +381,93 @@ describe('reader route', () => {
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     expect(commands).not.toContain('inference_upscale_page');
   });
+
+  it('runs the de-censoring bundle for the page on screen', async () => {
+    const commands: string[] = [];
+    setInvokeAdapterForTests(async (command: string) => {
+      commands.push(command);
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'inference_decensor_page') return { ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(commands).not.toContain('inference_decensor_page');
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    await waitFor(() => expect(commands).toContain('inference_decensor_page'));
+  });
+
+  it('says the page is being de-censored while the bundle runs', async () => {
+    // 一页在 CPU 上要好几秒；这段时间页面上压着一枚「去码处理中」的胶囊，
+    // 让等待有交代——不然按下「去码」看上去就是没反应。
+    let releaseDecensor: ((value: { ok: true; value: number[] }) => void) | undefined;
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'inference_decensor_page') {
+        return new Promise<{ ok: true; value: number[] }>((resolve) => { releaseDecensor = resolve; });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+
+    expect(await screen.findByText('去码处理中…')).toBeInTheDocument();
+    await act(async () => { releaseDecensor?.({ ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] }); });
+    await waitFor(() => expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument());
+  });
+
+  it('keeps the local de-censored page when the DLSS5 step fails', async () => {
+    // DLSS5 开着（设置里检测通过），但这一步在运行期失败（片段换了、驱动不对）。
+    // 从前这一失败会把**本地那一版也丢掉**，页面上还是原图——看起来就是「去码失效」。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition === 'dlssnr') throw new Error('DLSS5 跑不通');
+      return {
+        key: `${identity.rendition}-${identity.pageIndex}`,
+        url: `blob:${identity.rendition}-${identity.pageIndex}`,
+        bytes: 1,
+      };
+    });
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const commands: string[] = [];
+    setInvokeAdapterForTests(async (command: string) => {
+      commands.push(command);
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:reader-page-0');
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+
+    const image = screen.getByRole('img', { name: '第 1 页' });
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
+  });
 });
