@@ -112,3 +112,10 @@ export function readableInkOnHex(hex: string): string {
   });
   return INK_CANDIDATE_HEX[bestIndex]!;
 }
+
+export function myTagChipStyle(hex: string): { background: string; color: string } {
+  return {
+    background: `color-mix(in srgb, ${hex} 26%, var(--surface-container-highest))`,
+    color: 'var(--on-surface)',
+  };
+}

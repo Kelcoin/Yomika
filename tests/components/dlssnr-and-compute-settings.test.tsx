@@ -175,16 +175,16 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const snippets = await screen.findByRole('group', { name: 'DLSSNR 片段' });
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     // 三条都在：官方版与社区版各占一行，装的是哪一条由后端认哈希回答。
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
     expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
     expect(within(snippets).getByText('FP16 兼容版（RTX 20 / 30 系，性能较低）')).toBeTruthy();
-    expect(within(snippets).getByText('当前这一份')).toBeTruthy();
+    expect(within(snippets).getByText('已选择')).toBeTruthy();
     expect(within(snippets).queryByText(/NVIDIA DLSS SDK License/)).toBeNull();
 
     // 只有没装上的那两条可以点（下载完的替换由后端负责）。
-    const buttons = within(snippets).getAllByRole('button', { name: '下载并使用' });
+    const buttons = within(snippets).getAllByRole('button').filter((button) => !button.hasAttribute('disabled'));
     expect(buttons).toHaveLength(2);
     await user.click(buttons[0]!);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
@@ -201,11 +201,10 @@ describe('DLSS5 settings group', () => {
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     expect(within(group).getByRole('switch', { name: '启用 DLSSNR' })).toBeDisabled();
     await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const snippets = await screen.findByRole('group', { name: 'DLSSNR 片段' });
-    expect(within(snippets).getAllByRole('button', { name: '下载并使用' })).toHaveLength(3);
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    expect(within(snippets).getAllByRole('button')).toHaveLength(3);
     // 还没有片段就没有「当前这一份」，导入那一行改说「按显卡系列选一种变体」。
-    expect(within(snippets).queryByText('当前这一份')).toBeNull();
-    expect(within(snippets).getByText(/也可以自己找一份来导入/)).toBeTruthy();
+    expect(within(snippets).queryByText('已选择')).toBeNull();
   });
 
   it('adds a second layer as a full set of pass parameters', async () => {
@@ -284,7 +283,7 @@ describe('compute center settings group', () => {
     }));
     renderAdvanced();
     const group = await screen.findByRole('region', { name: '算力中心' });
-    expect(within(group).getByRole('switch', { name: '开启本机服务' })).toBeEnabled();
+    await waitFor(() => expect(within(group).getByRole('switch', { name: '开启本机远程后处理服务' })).toBeEnabled());
   });
 
   it('starts the server with the configured port and shows the LAN address', async () => {
@@ -299,7 +298,7 @@ describe('compute center settings group', () => {
 
     const group = await screen.findByRole('region', { name: '算力中心' });
     expect(within(group).queryByText(/192\.168\.1\.5:47653/)).toBeNull();
-    await user.click(within(group).getByRole('switch', { name: '开启本机服务' }));
+    await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
     await waitFor(() => expect(within(group).getByText(/192\.168\.1\.5:47653/)).toBeTruthy());
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', expect.objectContaining({ enabled: true, port: 47_653 })));
     await waitFor(() => expect(screen.queryByRole('region', { name: '远端算力' })).toBeNull());
@@ -318,7 +317,7 @@ describe('compute center settings group', () => {
     const group = await screen.findByRole('region', { name: '算力中心' });
     await user.click(within(group).getByRole('button', { name: '端口' }));
     const menu = screen.getByRole('dialog', { name: '端口' });
-    const input = within(menu).getByRole('spinbutton', { name: '算力中心端口' });
+    const input = within(menu).getByRole('spinbutton', { name: '远程后处理服务端口' });
     await user.clear(input);
     await user.type(input, '47655');
     await user.click(within(menu).getByRole('button', { name: '保存' }));
@@ -337,12 +336,12 @@ describe('compute center settings group', () => {
     const user = userEvent.setup();
     const group = await screen.findByRole('region', { name: '算力中心' });
     expect(within(group).queryByText('端口')).toBeNull();
-    await user.click(within(group).getByRole('switch', { name: '开启本机服务' }));
-    await user.click(within(group).getByRole('button', { name: '配对管理' }));
-    await user.click(within(screen.getByRole('dialog', { name: '配对管理' })).getByRole('button', { name: /Phone/ }));
+    await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
+    await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
+    await user.click(within(screen.getByRole('dialog', { name: '管理已有配对' })).getByRole('button', { name: /Phone/ }));
     await user.click(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_revoke_pairing', { id: 'client-1' }));
-    expect(screen.getByRole('dialog', { name: '配对管理' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: '管理已有配对' })).toBeInTheDocument();
   });
 
   it('keeps remote processing locked until pairing succeeds', async () => {
@@ -368,11 +367,11 @@ describe('compute center settings group', () => {
     renderAdvanced();
 
     const group = await screen.findByRole('region', { name: '远端算力' });
-    const toggle = within(group).getByRole('switch', { name: '使用其他设备处理' });
+    const toggle = within(group).getByRole('switch', { name: '使用远程后处理服务' });
     expect(toggle).toBeDisabled();
 
     await user.click(within(group).getByRole('button', { name: '添加设备' }));
-    const pairDialog = await screen.findByRole('dialog', { name: '添加远端设备' });
+    const pairDialog = await screen.findByRole('dialog', { name: '添加设备' });
     await user.type(within(pairDialog).getByLabelText('设备 IP'), '192.168.1.9:47653');
     await user.click(within(pairDialog).getByRole('button', { name: /^配对$/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_request', { url: '192.168.1.9:47653' }));

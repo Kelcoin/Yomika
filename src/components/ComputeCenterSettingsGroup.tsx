@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, RefreshCw, Server, Wand2 } from 'lucide-react';
+import { Link2, Plus, RefreshCw, Server, Unlink, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsMenu } from './SettingsValueControls';
@@ -205,7 +205,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       <div className="settings-group" role="region" aria-label="算力中心">
         <SettingsSwitch
           icon={<Server />}
-          label="开启本机服务"
+          label="开启本机远程后处理服务"
           hint={
             status?.running ? '这台设备正在为局域网内的其他设备处理图片' : '允许其他设备连接这台设备处理图片'
           }
@@ -224,21 +224,21 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
           value={String(status.port)}
           onClick={verified ? () => { setPortDraft(status.port); setPortMenu(true); } : undefined}
         />}
-        {portMenu && <SettingsMenu title="端口" onClose={() => setPortMenu(false)}>
-          <input className="settings-number" type="number" min={1024} max={65535} value={portDraft} aria-label="算力中心端口" onChange={(event) => setPortDraft(Number(event.target.value))} />
+        {portMenu && <SettingsMenu title="端口" icon={<Server />} onClose={() => setPortMenu(false)}>
+          <input className="settings-number settings-port-input" type="number" min={1024} max={65535} value={portDraft} aria-label="远程后处理服务端口" onChange={(event) => setPortDraft(Number(event.target.value))} />
           <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}>保存</button>
         </SettingsMenu>}
-        {status?.running && <SettingsRow icon={<Server />} label="配对管理" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => setLocalPairMenu(true) : undefined} />}
-        {localPairMenu && <SettingsMenu title={selectedClient ? status?.pairedClients?.find((client) => client.id === selectedClient)?.name ?? '设备' : '配对管理'} onClose={() => { if (selectedClient) setSelectedClient(undefined); else setLocalPairMenu(false); }}>
+        {status?.running && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => setLocalPairMenu(true) : undefined} />}
+        {localPairMenu && <SettingsMenu title={selectedClient ? status?.pairedClients?.find((client) => client.id === selectedClient)?.name ?? '设备' : '管理已有配对'} icon={<Link2 />} onClose={() => { if (selectedClient) setSelectedClient(undefined); else setLocalPairMenu(false); }}>
           {selectedClient ? <>
             <p className="settings-menu-desc">{status?.pairedClients?.find((client) => client.id === selectedClient)?.address}</p>
-            <button className="secondary-action" type="button" onClick={() => void revokeClient(selectedClient)}>撤销配对</button>
+            <button className="secondary-action" type="button" onClick={() => void revokeClient(selectedClient)}><Unlink aria-hidden="true" />撤销配对</button>
           </> : <>
             <div className="settings-choice-list">
               {status?.pairedClients?.map((client) => <button className="settings-choice-option-main" key={client.id} type="button" onClick={() => setSelectedClient(client.id)}>{client.name} · {client.address}</button>)}
               {status?.pairedClients?.length === 0 && <p className="settings-choice-empty">暂无已配对设备</p>}
             </div>
-            <button className="secondary-action" type="button" disabled={rotating || !status?.pairedClients?.length} onClick={() => void rotateToken()}>撤销全部配对</button>
+            <button className="secondary-action" type="button" disabled={rotating || !status?.pairedClients?.length} onClick={() => void rotateToken()}><Unlink aria-hidden="true" />撤销全部配对</button>
           </>}
         </SettingsMenu>}
       </div>
@@ -247,7 +247,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       {status && !status.running && <div className="settings-group" role="region" aria-label="远端算力">
         <SettingsSwitch
           icon={<Wand2 />}
-          label="使用其他设备处理"
+          label="使用远程后处理服务"
           hint="由已配对设备处理图片，结果在这台设备显示"
           disabled={!remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)}
           checked={remoteOps.enabled}
@@ -255,7 +255,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
         />
         <SettingsRow icon={<Server />} label="已配对设备" value={remoteOps.pairedDevices.find((device) => device.address === preferences.remoteComputeUrl)?.name ?? '未选择'} onClick={() => { setDeviceMenu(true); if (preferences.remoteComputeUrl && preferences.remoteComputeToken) void connectRemote(); }} />
         <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />
-        {deviceMenu && <SettingsMenu title="已配对设备" onClose={() => setDeviceMenu(false)}>
+        {deviceMenu && <SettingsMenu title="已配对设备" icon={<Server />} onClose={() => setDeviceMenu(false)}>
           <div className="settings-choice-list">
             {remoteOps.pairedDevices.map((device) => <button className="settings-choice-option-main" key={device.address} type="button" onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}>{device.name} · {device.address}</button>)}
           </div>
@@ -268,18 +268,22 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             {remoteOps.op.op === 'upscale' && <button className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === ''} onClick={() => updateRemoteOp({ modelId: '' })}>默认放大</button>}
             {remote.models.filter((model) => model.kind === remoteOps.op.op).map((model) => <button key={model.id} className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === model.id} onClick={() => updateRemoteOp({ modelId: model.id })}>{model.label}</button>)}
           </div>}
-          {remoteOps.op.op === 'upscale' && remoteOps.op.modelId === '' && <input className="settings-number" type="number" min={1} max={4} aria-label="远端放大倍数" value={remoteOps.op.scale} onChange={(event) => updateRemoteOp({ scale: Math.min(4, Math.max(1, Number(event.target.value) || 1)) })} />}
+          {remote && remoteOps.op.op === 'upscale' && remoteOps.op.modelId === '' && <label className="settings-menu-field">放大倍数<input className="settings-number settings-port-input" type="number" min={1} max={4} aria-label="远端放大倍数" value={remoteOps.op.scale} onChange={(event) => updateRemoteOp({ scale: Math.min(4, Math.max(1, Number(event.target.value) || 1)) })} /></label>}
         </SettingsMenu>}
-        {pairMenu && <SettingsMenu title="添加远端设备" onClose={() => { setPairMenu(false); setRequestId(''); }}>
+        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { setPairMenu(false); setRequestId(''); }}>
           <div className="settings-choice-list">
             {devices.map((device) => <button className="settings-choice-option-main" key={device.address} type="button" onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}>{device.name} · {device.address}</button>)}
           </div>
-          <button className="secondary-action" type="button" disabled={pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
-          <input className="settings-text-input" aria-label="设备 IP" placeholder="192.168.1.5:47653" value={address} onChange={(event) => { setAddress(event.target.value); setRequestId(''); setCode(''); }} />
+          <input className="settings-text-input settings-pair-address" aria-label="设备 IP" placeholder="192.168.1.5:47653" value={address} onChange={(event) => { setAddress(event.target.value); setRequestId(''); setCode(''); }} />
           {requestId ? <>
             <input className="settings-text-input" aria-label="配对码" inputMode="numeric" maxLength={6} placeholder="输入远端显示的六位配对码" value={code} onChange={(event) => setCode(event.target.value)} />
-            <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}>完成配对</button>
-          </> : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}>配对</button>}
+          </> : null}
+          <div className="settings-pair-actions">
+            <button className="secondary-action" type="button" disabled={pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
+            {requestId
+              ? <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}><Link2 aria-hidden="true" />完成配对</button>
+              : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}><Link2 aria-hidden="true" />配对</button>}
+          </div>
         </SettingsMenu>}
       </div>}
     </>

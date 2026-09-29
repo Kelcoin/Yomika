@@ -1264,8 +1264,15 @@ body::-webkit-scrollbar,
 }
 
 @media (hover: hover) {
-  .settings-choice-option.is-active .settings-choice-option-main:hover { background: color-mix(in srgb, var(--on-primary-container) 8%, transparent); }
+  .settings-choice-option:hover { background: var(--surface-container-high); }
+  .settings-choice-option.is-active:hover { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
+  .settings-choice-option > .settings-choice-option-main:hover { background: transparent; }
 }
+.settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-high); }
+.settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
+.dlssnr-variant-copy { display: grid; gap: 3px; min-width: 0; padding-block: var(--space-2); }
+.dlssnr-variant-copy strong { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.dlssnr-variant-copy small { color: var(--on-surface-variant); font-size: var(--text-xs); white-space: normal; }
 
 .settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
 
@@ -1824,6 +1831,8 @@ body::-webkit-scrollbar,
    shrink; the labels drop out below the width where six of them fit, and the
    icon plus its title still names the action. */.archive-detail-route-actions {
   display: flex;
+  container-type: inline-size;
+  container-name: detail-actions;
   align-items: stretch;
   /* A 400px pane splits six ways; the pill's own padding and this gap are the
      slack a two-character label lives on, so both stay at the floor. */
@@ -1839,6 +1848,9 @@ body::-webkit-scrollbar,
 
 .archive-detail-route-actions::-webkit-scrollbar {
   display: none;
+}
+@container detail-actions (max-width: 510px) {
+  .archive-detail-route-actions .archive-action-label { display: none; }
 }
 
 /* The detail toolbar's labels: six actions in one row. Below the container
@@ -1972,6 +1984,7 @@ body::-webkit-scrollbar,
   margin-bottom: var(--space-5);
 }
 .metadata-edit-header h1 { margin: 0; font-size: var(--text-title); }
+.metadata-edit-header h1 { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; white-space: normal; }
 .metadata-edit-form,
 .metadata-edit-form label { display: grid; gap: var(--space-2); color: var(--ink-secondary); font-weight: var(--weight-semibold); }
 .metadata-edit-form input,
@@ -2278,6 +2291,19 @@ body::-webkit-scrollbar,
 .archive-row-skeleton-copy { display: grid; align-content: center; gap: var(--space-3); }
 .archive-row-skeleton-copy .skeleton-line:nth-child(2) { width: 72%; }
 .archive-row-skeleton-copy .skeleton-line:nth-child(3) { width: 46%; }
+.archive-list-skeleton.has-timeline { padding-right: 104px; }
+.archive-row-skeleton { position: relative; }
+.archive-timeline-skeleton { position: absolute; top: 0; right: -76px; bottom: -12px; width: 56px; border-left: 2px solid var(--outline-variant); }
+.archive-timeline-skeleton::before { position: absolute; top: 22px; left: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--outline-variant); content: ''; }
+.archive-timeline-skeleton .skeleton-line { position: absolute; top: 22px; left: 10px; width: 45px; height: 10px; }
+.history-quick-jump { position: sticky; top: var(--space-2); z-index: 5; float: right; width: var(--control-height); height: 0; margin-right: var(--space-2); }
+.history-quick-jump > .icon-action { background: var(--surface-container-high); box-shadow: var(--shadow-overlay); }
+.history-quick-jump-menu { position: absolute; top: calc(var(--control-height) + var(--space-2)); right: 0; display: grid; max-height: min(50vh, 360px); min-width: 132px; overflow-y: auto; padding: var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-overlay); background: var(--surface-container-high); box-shadow: var(--shadow-overlay); }
+.history-quick-jump-menu button { min-height: 40px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: transparent; color: var(--on-surface); text-align: left; cursor: pointer; }
+@media (hover: hover) {
+  .history-quick-jump-menu button:hover { background: var(--primary-container); color: var(--on-primary-container); }
+}
+.history-quick-jump-menu button:is(.is-pressed, :active) { background: var(--primary-container); color: var(--on-primary-container); }
 .archive-load-more-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); padding: var(--space-3); }
 
 /* Overscroll: past either end of the list the content is dragged by hand and
@@ -3789,6 +3815,11 @@ body::-webkit-scrollbar,
 .archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
 .archive-thumb-card-body { position: relative; display: grid; align-content: start; justify-items: start; grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
+.archive-card-progress { position: absolute; inset: -4px 0 auto; display: block; height: 4px; overflow: hidden; background: var(--surface-container-highest); pointer-events: none; }
+.archive-card-progress-fill { display: block; height: 100%; background: var(--primary); transition: width var(--motion-medium); }
+.archive-row-copy { position: relative; }
+.archive-row-copy > .archive-card-progress { inset: auto 0 -1px; height: 3px; }
+.settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: vertical; font: inherit; }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .archive-thumb-card-title svg { flex: 0 0 auto; width: 15px; height: 15px; color: var(--brand-vermilion); }
@@ -5462,6 +5493,10 @@ body::-webkit-scrollbar,
 
    整块放在文件末尾是有意的：与静止态同特异性时后写的赢，不必靠 !important 抢。 */
 @media (hover: none) {
+  .settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-high); }
+  .settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
+  .settings-choice-option > .settings-choice-option-main:is(.is-pressed, :active) { background: transparent; }
+  .history-quick-jump-menu button:is(.is-pressed, :active) { background: var(--primary-container); color: var(--on-primary-container); }
   /* 日志记录的标题行按下态（与悬停那条成对：触屏没有 hover，按下就是唯一的反馈）。 */
   .error-log-entry-toggle:is(.is-pressed, :active) { background: var(--surface-muted); }
   .error-log-icon:is(.is-pressed, :active) { background: var(--secondary-container); color: var(--on-secondary-container); }
@@ -5574,7 +5609,7 @@ body::-webkit-scrollbar,
 
   /* 选中的选项已经高亮过一层，按下去要再深一点才看得出来。 */
   .settings-choice-option.is-active .settings-choice-option-main:is(.is-pressed, :active) {
-    background: color-mix(in srgb, var(--on-primary-container) 8%, transparent);
+    background: transparent;
   }
 
   .css-preset-card:is(.is-pressed, :active) {
@@ -5768,6 +5803,13 @@ body::-webkit-scrollbar,
   outline: 2px solid var(--brand-vermilion, currentColor);
   outline-offset: 1px;
 }
+.settings-pair-address { box-sizing: border-box; width: 100%; max-width: none; min-width: 0; min-height: 44px; }
+.settings-pair-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.settings-pair-actions > button { min-width: 0; }
+.settings-port-input { display: block; box-sizing: border-box; width: min(100%, 180px); margin-inline: auto; text-align: center; appearance: textfield; }
+.settings-port-input::-webkit-inner-spin-button,
+.settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
+.settings-menu-field { display: grid; justify-items: center; gap: var(--space-2); color: var(--on-surface-variant); }
 
 /* 一层 DLSSNR 是一小组：给个标题，参数才有「这是第几层」的归属感。 */
 .settings-subgroup {

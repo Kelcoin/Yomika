@@ -2,7 +2,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { pickCardTags } from '../lib/archiveCardPresentation';
 import { normalizeMyTagKey } from '../lib/ehMyTags';
 import { translateRawTag } from '../lib/tags';
-import { readableInkOnHex } from '../lib/ehMyTags';
+import { myTagChipStyle } from '../lib/ehMyTags';
 import { distributeTagRows } from '../lib/tagWaterfall';
 import { useEhMyTags } from './useEhMyTags';
 
@@ -57,7 +57,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     const element = root.current;
     if (!element) return;
     let active = true;
-    const measure = () => {
+    const measureTags = () => {
       if (!active) return;
       const widths = [...element.querySelectorAll<HTMLElement>('.card-tag-measure')]
         .map((chip) => chip.getBoundingClientRect().width);
@@ -71,10 +71,16 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
         && previous.containerWidth === containerWidth
         ? previous : { tags, widths, containerWidth });
     };
-    measure();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    measureTags();
+    const observer = fill && typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => {
+        if (!active) return;
+        const containerWidth = element.clientWidth;
+        setMeasured((previous) => previous && previous.containerWidth !== containerWidth
+          ? { ...previous, containerWidth } : previous);
+      }) : undefined;
     observer?.observe(element);
-    void document.fonts?.ready.then(measure);
+    void document.fonts?.ready.then(measureTags);
     return () => { active = false; observer?.disconnect(); };
   }, [tags, labelKey, fill]);
   // 测量层的顺序与 labels 一致（判定胶囊在前），所以宽度表也按 labels 兜底。
@@ -91,7 +97,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
       {row.map((tagIndex) => {
         const tag = tags[tagIndex - leading.length];
         const color = tag === undefined ? undefined : colorFor?.(tag);
-        return <span className={chipClass(tagIndex)} key={tagIndex} style={color ? { background: color, color: readableInkOnHex(color) } : undefined}>{labels[tagIndex]}</span>;
+        return <span className={chipClass(tagIndex)} key={tagIndex} style={color ? myTagChipStyle(color) : undefined}>{labels[tagIndex]}</span>;
       })}
     </span>)}
   </span>;

@@ -195,11 +195,15 @@ pub struct ReadingProgressInput {
     page_count: i64,
     layout: String,
     direction: String,
+    #[serde(default = "default_allow_progress_regression")]
+    allow_progress_regression: bool,
     /// Whether page 0 opens alone in double-page mode. `None` leaves whatever was
     /// stored alone, so a caller that does not care cannot erase the setting.
     #[serde(default)]
     cover_alone: Option<bool>,
 }
+
+fn default_allow_progress_regression() -> bool { true }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5986,7 +5990,8 @@ fn persist_reading_progress(
     const UPSERT: &str = "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, device_id, revision)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
         ON CONFLICT(scope_id, archive_id) DO UPDATE SET
-          page_index = excluded.page_index, page_count = excluded.page_count, layout = excluded.layout,
+          page_index = CASE WHEN ?9 THEN excluded.page_index ELSE MAX(reading_progress.page_index, excluded.page_index) END,
+          page_count = excluded.page_count, layout = excluded.layout,
           direction = excluded.direction, device_id = excluded.device_id,
           cover_alone = COALESCE(excluded.cover_alone, reading_progress.cover_alone),
           updated_at = CURRENT_TIMESTAMP, revision = reading_progress.revision + 1";
@@ -6000,7 +6005,8 @@ fn persist_reading_progress(
             progress.layout,
             progress.direction,
             progress.cover_alone,
-            device_id
+            device_id,
+            progress.allow_progress_regression,
         ],
     ) {
         return Err(error.to_string());
@@ -6053,7 +6059,7 @@ fn persist_reading_progress(
             "INSERT INTO reading_history (scope_id, archive_id, page_index, device_id, revision)
          VALUES (?1, ?2, ?3, ?4, 1)
          ON CONFLICT(scope_id, archive_id) DO UPDATE SET
-           page_index = MAX(reading_history.page_index, excluded.page_index),
+           page_index = excluded.page_index,
            visited_at = CURRENT_TIMESTAMP,
            device_id = excluded.device_id,
            revision = reading_history.revision + 1",
@@ -6920,8 +6926,11 @@ pub fn list_reading_history(
     let result = (|| -> Result<Vec<ReadingHistoryRecord>, String> {
         let mut statement = connection
             .prepare(
-                "SELECT scope_id, archive_id, page_index, visited_at, device_id, revision
-             FROM reading_history WHERE scope_id = ?1 ORDER BY visited_at DESC",
+                "SELECT h.scope_id, h.archive_id, COALESCE(p.page_index, h.page_index),
+                        h.visited_at, h.device_id, h.revision
+                 FROM reading_history h
+                 LEFT JOIN reading_progress p ON p.scope_id = h.scope_id AND p.archive_id = h.archive_id
+                 WHERE h.scope_id = ?1 ORDER BY h.visited_at DESC",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
@@ -7634,6 +7643,7 @@ mod tests {
                     page_count: 100,
                     layout: "paged".into(),
                     direction: "ltr".into(),
+                    allow_progress_regression: true,
                     cover_alone: None,
                 },
             )
@@ -7800,6 +7810,7 @@ mod tests {
                 page_count: 10,
                 layout: "paged".to_string(),
                 direction: "ltr".to_string(),
+                allow_progress_regression: true,
                 cover_alone: None,
             },
         )
@@ -7855,6 +7866,44 @@ mod tests {
             )
             .expect("history journal");
         assert_eq!(history_journal_count, 1);
+    }
+
+    #[test]
+    fn reading_history_follows_the_page_last_saved_for_resume() {
+        let mut connection = migrated_connection();
+        for page_index in [8, 2] {
+            persist_reading_progress(&mut connection, ReadingProgressInput {
+                scope_id: "scope-a".into(), archive_id: "archive-a".into(),
+                page_index, page_count: 10, layout: "paged".into(),
+                direction: "ltr".into(), allow_progress_regression: true, cover_alone: None,
+            }).expect("save page");
+        }
+        let (resume, history): (i64, i64) = connection.query_row(
+            "SELECT p.page_index, h.page_index FROM reading_progress p JOIN reading_history h
+             ON h.scope_id = p.scope_id AND h.archive_id = p.archive_id
+             WHERE p.scope_id = 'scope-a' AND p.archive_id = 'archive-a'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).expect("matching progress");
+        assert_eq!((resume, history), (2, 2));
+    }
+
+    #[test]
+    fn progress_without_regression_keeps_resume_and_history_at_highest_page() {
+        let mut connection = migrated_connection();
+        for page_index in [8, 2] {
+            persist_reading_progress(&mut connection, ReadingProgressInput {
+                scope_id: "scope-a".into(), archive_id: "archive-a".into(),
+                page_index, page_count: 10, layout: "paged".into(),
+                direction: "ltr".into(), allow_progress_regression: false, cover_alone: None,
+            }).expect("save page");
+        }
+        let (resume, history): (i64, i64) = connection.query_row(
+            "SELECT p.page_index, h.page_index FROM reading_progress p JOIN reading_history h
+             ON h.scope_id = p.scope_id AND h.archive_id = p.archive_id
+             WHERE p.scope_id = 'scope-a' AND p.archive_id = 'archive-a'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).expect("matching progress");
+        assert_eq!((resume, history), (8, 8));
     }
 
     #[test]

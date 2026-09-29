@@ -308,7 +308,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
             阅读, which spent a permanent toolbar slot on a rare choice and put a
             second reading entry point next to the real one. */}
         {detailActions.includes('read') && <Link
-          className="primary-action"
+          className="secondary-action"
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
           aria-label="阅读"
           title="阅读（长按进入无痕阅读）"

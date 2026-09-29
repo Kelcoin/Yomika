@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WindowApi = {
+  startDragging: () => Promise<void>;
   minimize: () => Promise<void>;
   toggleMaximize: () => Promise<void>;
   close: () => Promise<void>;
@@ -21,6 +22,7 @@ export function useWindowControls(): WindowApi | undefined {
   const [api] = useState<WindowApi | undefined>(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return undefined;
     return {
+      startDragging: () => tauriInvoke('plugin:window|start_dragging', { label: WINDOW_LABEL }),
       minimize: () => tauriInvoke('plugin:window|minimize', { label: WINDOW_LABEL }),
       toggleMaximize: () => tauriInvoke('plugin:window|toggle_maximize', { label: WINDOW_LABEL }),
       close: () => tauriInvoke('plugin:window|close', { label: WINDOW_LABEL }),

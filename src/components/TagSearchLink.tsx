@@ -1,6 +1,6 @@
 import { Link, useSearchParams } from 'react-router-dom';
 
-import { readableInkOnHex } from '../lib/ehMyTags';
+import { myTagChipStyle } from '../lib/ehMyTags';
 
 export function TagSearchLink({ label, query, color }: { label: string; query: string; color?: string | undefined }) {
   const [searchParams] = useSearchParams();
@@ -20,7 +20,7 @@ export function TagSearchLink({ label, query, color }: { label: string; query: s
       /* A colour here is the E-Hentai account's own preset for this tag
          ("My Tags"); the ink follows the fill's luminance because the theme's
          chip ink knows nothing about an arbitrary user colour. */
-      style={color ? { background: color, color: readableInkOnHex(color) } : undefined}
+      style={color ? myTagChipStyle(color) : undefined}
     >
       {label}
     </Link>

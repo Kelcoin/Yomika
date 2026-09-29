@@ -16,6 +16,7 @@ import { parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
+import { shouldAutoEnableUpscale } from '../lib/autoUpscale';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
@@ -176,10 +177,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // facts, so this runs whenever that lands, and only before a manual choice.
   useEffect(() => {
     if (!upscaleConfigured || !preferences.upscaleAutoEnable || upscaleChosenRef.current) return;
-    const sizeBytes = info?.sizeBytes ?? 0;
-    if (!sizeBytes || pages.length === 0) return;
-    if (sizeBytes / pages.length >= preferences.upscaleAutoThresholdBytes) setUpscaleWanted(true);
-  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoThresholdBytes, info?.sizeBytes, pages.length]);
+    if (!info?.sizeBytes || !info.tags || pages.length === 0) return;
+    if (shouldAutoEnableUpscale(info.tags, {
+      enabled: true, pageCount: pages.length, sizeBytes: info.sizeBytes,
+      thresholdBytes: preferences.upscaleAutoThresholdBytes,
+      whitelist: preferences.upscaleAutoWhitelist,
+      blacklist: preferences.upscaleAutoBlacklist,
+    })) setUpscaleWanted(true);
+  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoThresholdBytes, preferences.upscaleAutoWhitelist, preferences.upscaleAutoBlacklist, info?.sizeBytes, info?.tags, pages.length]);
   const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
@@ -195,6 +200,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; prefetch: boolean }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
+  const activeDerivedRef = useRef<{ pageIndex: number; prefetch: boolean; controller: AbortController }>();
   /** 每页一次任务的取消牌（正在跑或正在排队的那一个）。切页、换开关、离开阅读器时
    * 全部 abort——前端 abort 会顺着 `taskId` 叫停原生那侧的循环（见 nativeImageCache）。 */
   const derivedAbortsRef = useRef(new Map<number, AbortController>());
@@ -469,6 +475,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const taskBase = `${context.generation}:${job.generation}:${pageIndex}:${derivedTaskSeqRef.current += 1}`;
         const controller = new AbortController();
         derivedAbortsRef.current.set(pageIndex, controller);
+        activeDerivedRef.current = { pageIndex, prefetch: job.prefetch, controller };
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
           /** 第一步：去码（双开时也单独跑，不再塞进超分那一次调用里）。
@@ -589,6 +596,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           // slower devices while the native inference worker continues.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         } finally {
+          if (activeDerivedRef.current?.controller === controller) activeDerivedRef.current = undefined;
           if (controller.signal.aborted) derivedAttemptedRef.current.delete(pageIndex);
           derivedAbortsRef.current.delete(pageIndex);
           markDeriving(pageIndex, false);
@@ -613,12 +621,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         : 'local';
     let queued = false;
     const context = contextRef.current;
-    // DLSSNR gets one look-ahead page after the visible work. Never fill the
-    // entire image prefetch window with GPU jobs.
-    const lookahead = dlssnrConfigured && !remoteConfigured && context
-      ? Math.max(...indexes, -1) + 1
-      : -1;
-    const wanted = [...indexes, ...(lookahead >= 0 && context && lookahead < context.paths.length ? [lookahead] : [])];
+    // Only pages already inside the reader's configured preload window enter
+    // inference. Visible pages keep priority; the same policy applies to all
+    // local stages so turning to a preloaded page shows its finished rendition.
+    const neighbours = context && indexes.length > 0
+      ? getPrefetchPages(indexes[0]!, context.paths.length, prefetchDistance)
+      : [];
+    const wanted = [...new Set([...indexes, ...neighbours])];
+    const active = activeDerivedRef.current;
+    if (active?.prefetch && !indexes.includes(active.pageIndex) && indexes.some((index) => !derivedAttemptedRef.current.has(index))) {
+      active.controller.abort();
+    }
     derivedQueueRef.current = derivedQueueRef.current.filter((job) => wanted.includes(job.pageIndex));
     for (const [index, controller] of derivedAbortsRef.current) {
       if (!wanted.includes(index)) controller.abort();
@@ -637,7 +650,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
     derivedQueueRef.current.sort((a, b) => Number(a.prefetch) - Number(b.prefetch));
     if (queued) void runDerivedQueue();
-  }, [decensorEnabled, dlssnrConfigured, preferences.decensorModel, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
+  }, [decensorEnabled, dlssnrConfigured, prefetchDistance, preferences.decensorModel, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
@@ -814,13 +827,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       onDerivedDisplayed={releaseDisplayedPredecessors}
       onProgress={(pageIndex, reading) => {
         if (!scopeId || incognito) return;
-        void repository.saveProgress({
+        const progress = {
           scopeId,
           archiveId,
           pageIndex,
           pageCount: pages.length,
-          layout: reading.layout === 'webtoon' ? 'continuous' : 'paged',
+          layout: reading.layout === 'webtoon' ? 'continuous' as const : 'paged' as const,
           direction: reading.direction,
+          allowProgressRegression: preferencesRef.current.allowProgressRegression,
+        };
+        void repository.saveProgress(progress).then((result) => {
+          if (!result.ok) showToast(`阅读进度保存失败：${result.error.message}`, 'error');
+        }).catch((error: unknown) => {
+          showToast(`阅读进度保存失败：${String(error)}`, 'error');
         });
       }}
       incognito={incognito}

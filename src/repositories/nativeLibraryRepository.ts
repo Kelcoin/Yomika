@@ -42,7 +42,16 @@ function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
 }
 import type { ServerIdentity } from '../domain/server';
 
-type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'>;
+type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'> & { allowProgressRegression?: boolean };
+const pendingProgressWrites = new Map<string, Promise<unknown>>();
+const progressKey = (scopeId: string, archiveId: string) => `${scopeId}\0${archiveId}`;
+
+async function waitForProgress(scopeId: string, archiveId?: string) {
+  const writes = [...pendingProgressWrites].filter(([key]) => archiveId === undefined
+    ? key.startsWith(`${scopeId}\0`)
+    : key === progressKey(scopeId, archiveId)).map(([, write]) => write);
+  await Promise.all(writes);
+}
 const ReaderManifestSchema = z.object({
   archiveId: z.string().min(1),
   title: z.string(),
@@ -145,7 +154,8 @@ export class NativeLibraryRepository {
   deleteSearchPreset(scopeId: string, presetId: string): Promise<CommandResult<SearchPreset>> {
     return invokeCommand('delete_search_preset', { scopeId, presetId }, SearchPresetSchema);
   }
-  listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
+  async listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
+    await waitForProgress(scopeId);
     return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
   }
   appendSyncJournal(entry: SyncJournalInput): Promise<CommandResult<SyncJournalRecord>> {
@@ -422,10 +432,16 @@ export class NativeLibraryRepository {
   }
 
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {
-    return invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves);
+    const key = progressKey(progress.scopeId, progress.archiveId);
+    const prior = pendingProgressWrites.get(key);
+    const write = (prior ?? Promise.resolve()).then(() => invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves));
+    pendingProgressWrites.set(key, write);
+    void write.finally(() => { if (pendingProgressWrites.get(key) === write) pendingProgressWrites.delete(key); }).catch(() => undefined);
+    return write;
   }
 
-  loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {
+  async loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {
+    await waitForProgress(scopeId, archiveId);
     return invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
   }
 }

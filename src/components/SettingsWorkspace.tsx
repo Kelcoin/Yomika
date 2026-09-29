@@ -52,6 +52,7 @@ import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCa
 import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
+import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { openExternalUrl } from '../bridge/externalUrl';
@@ -552,6 +553,13 @@ export function SettingsWorkspace() {
   async function importModelFromPath(path: string) {
     setModelPending(true);
     try {
+      if (path.toLowerCase().endsWith('.dll')) {
+        const result = await new NativeDlssnrRepository().importDll(path);
+        if (!result.ok) { showToast(result.error.message, 'error'); return; }
+        window.dispatchEvent(new Event('yomika:dlssnr-imported'));
+        showToast(`DLSSNR 组件已导入：${result.value.variantLabel ?? '自定义 DLL'}`, 'success');
+        return;
+      }
       const result = await inferenceRepository.importModelPath(path);
       if (!result.ok) { showToast(result.error.message, 'error'); return; }
       showToast(`模型已导入：${modelOption(result.value).label}`, 'success');
@@ -963,6 +971,12 @@ export function SettingsWorkspace() {
             A failed save still interrupts, through the toast. */}
         {preferenceState.loading ? <StatusLine busy>正在读取偏好…</StatusLine> : (
           <div className="preferences-form">
+            {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
+              <div className="settings-group">
+                <SettingsSwitch icon={<Rocket />} label="开机自启" checked={preferenceDraft.startWithWindows} onToggle={() => editPreferences({ startWithWindows: !preferenceDraft.startWithWindows })} />
+                <SettingsSwitch icon={<PanelBottom />} label="关闭到托盘" checked={preferenceDraft.closeToTray} onToggle={() => editPreferences({ closeToTray: !preferenceDraft.closeToTray })} />
+              </div>
+            )}
             <div className="settings-group">
             {selectedSettingsSection === 'settings-general' && (
               <SettingsChoice
@@ -993,12 +1007,6 @@ export function SettingsWorkspace() {
                 checked={preferenceDraft.randomRoamShowFinished}
                 onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
               />
-            )}
-            {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
-              <SettingsSwitch icon={<Rocket />} label="开机自启" checked={preferenceDraft.startWithWindows} onToggle={() => editPreferences({ startWithWindows: !preferenceDraft.startWithWindows })} />
-            )}
-            {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
-              <SettingsSwitch icon={<PanelBottom />} label="关闭到托盘" checked={preferenceDraft.closeToTray} onToggle={() => editPreferences({ closeToTray: !preferenceDraft.closeToTray })} />
             )}
             {selectedSettingsSection === 'settings-general' && (
               <SettingsPanel
@@ -1116,6 +1124,24 @@ export function SettingsWorkspace() {
               >
                 <PreferenceRadioFallback name="direction" value={preferenceDraft.defaultDirection} options={[['ltr', '从左到右'], ['rtl', '从右到左']]} onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })} />
               </SettingsChoice>
+            )}
+            {selectedSettingsSection === 'settings-reading' && (
+              <SettingsSwitch
+                icon={<RotateCcw />}
+                label="允许阅读进度回溯"
+                hint="回看前面的页时，将续读位置更新为当前页"
+                checked={preferenceDraft.allowProgressRegression}
+                onToggle={() => editPreferences({ allowProgressRegression: !preferenceDraft.allowProgressRegression })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-reading' && (
+              <SettingsChoice
+                icon={<Gauge />}
+                label="卡片进度条"
+                value={preferenceDraft.progressBarVisibility}
+                options={[{ value: 'none', label: '不显示' }, { value: 'history', label: '仅历史记录' }, { value: 'all', label: '全部档案' }]}
+                onChange={(value) => editPreferences({ progressBarVisibility: value as PreferenceSnapshot['progressBarVisibility'] })}
+              />
             )}
             {selectedSettingsSection === 'settings-reading' && (
               <SettingsNumber
@@ -1556,6 +1582,12 @@ export function SettingsWorkspace() {
                   disabled={!preferenceDraft.upscaleAutoEnable}
                   onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
                 />
+                <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '不限'}>
+                  <textarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
+                </SettingsPanel>
+                <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；优先于白名单" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
+                  <textarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
+                </SettingsPanel>
               </div>
             )}
             {selectedSettingsSection === 'settings-advanced' && (
@@ -1611,7 +1643,7 @@ export function SettingsWorkspace() {
                 <SettingsRow
                   icon={<Upload />}
                   label="模型导入"
-                  hint="导入超分或去码的模型文件与压缩包"
+                  hint="导入超分、去码模型或 DLSSNR DLL"
                   control={
                     <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

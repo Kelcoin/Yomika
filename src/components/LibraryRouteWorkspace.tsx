@@ -486,7 +486,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     wasActiveRef.current = pageActive;
     if (!pageActive || wasActive || !serverIdRef.current) return;
     void loadFirstPageRef.current(serverIdRef.current, { background: true });
-  }, [pageActive]);
+    if (scopeId) void repository.listHistory(scopeId).then((result) => {
+      if (result.ok) setReadingHistory(result.value);
+    });
+  }, [pageActive, scopeId]);
 
   useEffect(() => {
     if (!serverId) return;

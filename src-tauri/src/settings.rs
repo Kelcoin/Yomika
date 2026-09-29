@@ -8,6 +8,8 @@ use crate::{db::Database, domain::result::CommandResult};
 const THEME_KEY: &str = "preferences.theme";
 const LAYOUT_KEY: &str = "preferences.default_layout";
 const DIRECTION_KEY: &str = "preferences.default_direction";
+const ALLOW_PROGRESS_REGRESSION_KEY: &str = "preferences.allow_progress_regression";
+const PROGRESS_BAR_VISIBILITY_KEY: &str = "preferences.progress_bar_visibility";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
 const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
@@ -17,6 +19,8 @@ const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
 const UPSCALE_AUTO_ENABLE_KEY: &str = "preferences.upscale_auto_enable";
+const UPSCALE_AUTO_WHITELIST_KEY: &str = "preferences.upscale_auto_whitelist";
+const UPSCALE_AUTO_BLACKLIST_KEY: &str = "preferences.upscale_auto_blacklist";
 const UPSCALE_AUTO_THRESHOLD_KEY: &str = "preferences.upscale_auto_threshold_bytes";
 const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
 const DOWNLOAD_DIRECTORY_KEY: &str = "preferences.download_directory";
@@ -85,6 +89,10 @@ pub struct PreferenceSnapshot {
     pub theme: String,
     pub default_layout: String,
     pub default_direction: String,
+    #[serde(default = "default_true")]
+    pub allow_progress_regression: bool,
+    #[serde(default = "default_progress_bar_visibility")]
+    pub progress_bar_visibility: String,
     pub cache_max_bytes: u64,
     /// How many pages either side of the current one the reader preloads.
     #[serde(default = "default_prefetch_pages")]
@@ -109,6 +117,10 @@ pub struct PreferenceSnapshot {
     /// 选择；关闭超分时该开关一并锁定。
     #[serde(default)]
     pub upscale_auto_enable: bool,
+    #[serde(default = "default_upscale_auto_whitelist")]
+    pub upscale_auto_whitelist: String,
+    #[serde(default = "default_upscale_auto_blacklist")]
+    pub upscale_auto_blacklist: String,
     /// 自动开启的阈值：每页平均字节数（体积/页数），默认 500 KB。
     #[serde(default = "default_upscale_auto_threshold")]
     pub upscale_auto_threshold_bytes: u64,
@@ -224,12 +236,15 @@ fn default_startup_route() -> String {
 fn default_card_style() -> String {
     "wide".to_string()
 }
+fn default_progress_bar_visibility() -> String { "history".into() }
 fn default_upscale_backend() -> String {
     "off".to_string()
 }
 fn default_upscale_auto_threshold() -> u64 {
     500 * 1024
 }
+fn default_upscale_auto_whitelist() -> String { "category:doujinshi\ncategory:manga".into() }
+fn default_upscale_auto_blacklist() -> String { "other:3d\ncategory:cosplay\ncategory:asian porn".into() }
 fn default_compute_center_port() -> u16 {
     47653
 }
@@ -268,6 +283,8 @@ impl Default for PreferenceSnapshot {
             theme: "system".into(),
             default_layout: "auto".into(),
             default_direction: "ltr".into(),
+            allow_progress_regression: true,
+            progress_bar_visibility: default_progress_bar_visibility(),
             cache_max_bytes: 2_147_483_648,
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
@@ -276,6 +293,8 @@ impl Default for PreferenceSnapshot {
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
             upscale_auto_enable: false,
+            upscale_auto_whitelist: default_upscale_auto_whitelist(),
+            upscale_auto_blacklist: default_upscale_auto_blacklist(),
             upscale_auto_threshold_bytes: default_upscale_auto_threshold(),
             decensor_model: String::new(),
             download_directory: String::new(),
@@ -320,6 +339,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     if !matches!(value.theme.as_str(), "system" | "light" | "dark")
         || !matches!(value.default_layout.as_str(), "auto" | "single" | "double" | "webtoon")
         || !matches!(value.default_direction.as_str(), "ltr" | "rtl")
+        || !matches!(value.progress_bar_visibility.as_str(), "none" | "history" | "all")
         || !(MIN_CACHE_BYTES..=MAX_CACHE_BYTES).contains(&value.cache_max_bytes)
         || value.cache_max_bytes % GIB_BYTES != 0
         || value.prefetch_pages > MAX_PREFETCH_PAGES
@@ -329,6 +349,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || !matches!(value.card_style.as_str(), "wide" | "thumbnail")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
+        || value.upscale_auto_whitelist.len() > 2000
+        || value.upscale_auto_blacklist.len() > 2000
         // 每页平均体积阈值：低于 64 KB 的封面图不值得判据，8 MB 以上整页
         // 都会超分失去意义。与设置页步进器的范围一致。
         || !(64 * 1024..=8 * 1024 * 1024).contains(&value.upscale_auto_threshold_bytes)
@@ -416,6 +438,8 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         theme: map_value(&stored, THEME_KEY, defaults.theme)?,
         default_layout: map_value(&stored, LAYOUT_KEY, defaults.default_layout)?,
         default_direction: map_value(&stored, DIRECTION_KEY, defaults.default_direction)?,
+        allow_progress_regression: map_value(&stored, ALLOW_PROGRESS_REGRESSION_KEY, defaults.allow_progress_regression)?,
+        progress_bar_visibility: map_value(&stored, PROGRESS_BAR_VISIBILITY_KEY, defaults.progress_bar_visibility)?,
         cache_max_bytes: map_value(&stored, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
         prefetch_pages: map_value(&stored, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: map_value(
@@ -432,6 +456,8 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             UPSCALE_AUTO_ENABLE_KEY,
             defaults.upscale_auto_enable,
         )?,
+        upscale_auto_whitelist: map_value(&stored, UPSCALE_AUTO_WHITELIST_KEY, defaults.upscale_auto_whitelist)?,
+        upscale_auto_blacklist: map_value(&stored, UPSCALE_AUTO_BLACKLIST_KEY, defaults.upscale_auto_blacklist)?,
         upscale_auto_threshold_bytes: map_value(
             &stored,
             UPSCALE_AUTO_THRESHOLD_KEY,
@@ -522,6 +548,8 @@ pub fn save_preferences_to(
             DIRECTION_KEY,
             serde_json::to_string(&value.default_direction),
         ),
+        (ALLOW_PROGRESS_REGRESSION_KEY, serde_json::to_string(&value.allow_progress_regression)),
+        (PROGRESS_BAR_VISIBILITY_KEY, serde_json::to_string(&value.progress_bar_visibility)),
         (
             CACHE_MAX_BYTES_KEY,
             serde_json::to_string(&value.cache_max_bytes),
@@ -551,6 +579,8 @@ pub fn save_preferences_to(
             UPSCALE_AUTO_ENABLE_KEY,
             serde_json::to_string(&value.upscale_auto_enable),
         ),
+        (UPSCALE_AUTO_WHITELIST_KEY, serde_json::to_string(&value.upscale_auto_whitelist)),
+        (UPSCALE_AUTO_BLACKLIST_KEY, serde_json::to_string(&value.upscale_auto_blacklist)),
         (
             UPSCALE_AUTO_THRESHOLD_KEY,
             serde_json::to_string(&value.upscale_auto_threshold_bytes),
@@ -825,6 +855,8 @@ mod tests {
             detail_date_kind: "added".into(),
             cache_max_bytes: 4_294_967_296,
             prefetch_pages: 3,
+            allow_progress_regression: false,
+            progress_bar_visibility: "all".into(),
             cover_concurrency: 6,
             startup_route: "library".into(),
             card_style: "thumbnail".into(),
@@ -832,6 +864,8 @@ mod tests {
             upscale_model: "real-esrgan-anime-x2".into(),
             upscale_auto_enable: true,
             upscale_auto_threshold_bytes: 1024 * 1024,
+            upscale_auto_whitelist: "category:manga".into(),
+            upscale_auto_blacklist: "other:3d".into(),
             decensor_model: "aletheia-lens".into(),
             download_directory: std::env::temp_dir().to_string_lossy().into_owned(),
             eh_favorite_delete_sync: true,

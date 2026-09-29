@@ -608,6 +608,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           searchQuery={query}
           onSearchQueryChange={setQuery}
           searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
+          {...(name === 'history' ? { timelineByArchiveId: new Map<string, ShelfTimelineEntry>() } : {})}
         />
       )}
       {error && <p className="form-error" role="alert">{error}</p>}

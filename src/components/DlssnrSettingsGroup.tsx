@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Download, ImageUpscale, Layers, Loader2, Plus, Scan, Sparkles, Upload } from 'lucide-react';
+import { Download, ImageUpscale, Layers, Loader2, Plus, Scan, Sparkles } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
-import { pickDllFile } from '../bridge/filePicker';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import {
   DEFAULT_DLSSNR_PASS,
@@ -54,8 +53,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       return cached ? (JSON.parse(cached) as DlssnrStatus) : undefined;
     } catch { return undefined; }
   });
-  const [verified, setVerified] = useState(false);
-  const [importing, setImporting] = useState(false);
+  const [verified, setVerified] = useState(() => {
+    try { return localStorage.getItem('yomika.dlssnr-status') !== null; } catch { return false; }
+  });
   const [catalog, setCatalog] = useState<DlssnrCatalog | undefined>(() => {
     try {
       const cached = localStorage.getItem('yomika.dlssnr-catalog');
@@ -98,6 +98,10 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     void refresh();
     void loadCatalog();
   }, [loadCatalog, refresh, visible]);
+  useEffect(() => {
+    window.addEventListener('yomika:dlssnr-imported', refresh);
+    return () => window.removeEventListener('yomika:dlssnr-imported', refresh);
+  }, [refresh]);
 
   // 进度走事件而不是那条命令的返回值（命令要等整个文件下完才回）。监听器**挂一次**：
   // 按「正在下载哪一条」去挂的话，命令开始到副作用跑起来之间的那几帧事件就丢掉了，
@@ -131,20 +135,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     setSelectedLayer(undefined);
     setDraftPass(undefined);
   };
-
-  async function importDll() {
-    const selected = await pickDllFile();
-    if (!selected) return;
-    setImporting(true);
-    const result = await repository.importDll(selected);
-    setImporting(false);
-    if (!result.ok) {
-      showToast(result.error.message, 'error');
-      return;
-    }
-    await refresh();
-    showToast(result.value.variantLabel ? `已导入：${result.value.variantLabel}${RESTART_NOTE}` : `已导入 DLL（认不出是哪种变体）${RESTART_NOTE}`, 'success');
-  }
 
   async function downloadVariant(variantId: string) {
     setDownloading(variantId);
@@ -206,8 +196,8 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           装的是哪一条由后端认哈希回答（`status.variant`）。子组标题只写中文：这一行的
           样式会把拉丁字母转成大写，文件名的大小写就丢了（导入那一行里写着原名）。 */}
       <SettingsRow icon={<Download />} label="DLSSNR 组件" value={status.variantLabel ?? '未安装'} onClick={() => setVariantMenu(true)} />
-      {variantMenu && <SettingsMenu title="DLSSNR 组件" onClose={() => setVariantMenu(false)}>
-      <div className="settings-subgroup" role="group" aria-label="DLSSNR 片段">
+      {variantMenu && <SettingsMenu title="DLSSNR 组件" icon={<DlssnrIcon />} onClose={() => setVariantMenu(false)}>
+      <div className="settings-choice-list" role="group" aria-label="DLSSNR 组件">
         {catalog === undefined && (
           <SettingsRow
             icon={<Download />}
@@ -223,48 +213,23 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           const recommended = status.recommendedVariant === variant.id;
           const busy = downloading === variant.id;
           const percent = download?.total ? Math.round((download.completed / download.total) * 100) : undefined;
-          return (
-            <SettingsRow
-              key={variant.id}
-              icon={<Download />}
-              label={`${variant.label}${recommended ? '（推荐）' : ''}`}
-              hint={installed
+          return <div className={`settings-choice-option${installed ? ' is-active' : ''}`} key={variant.id}>
+            <button className="settings-choice-option-main" type="button" disabled={installed || downloading !== undefined} aria-pressed={installed} onClick={() => void downloadVariant(variant.id)}>
+              <span className="dlssnr-variant-copy"><strong>{variant.label}{recommended ? '（推荐）' : ''}</strong><small>{installed
                 ? `使用中${status.dllBytes ? ` · ${megabytes(status.dllBytes)}` : ''}`
                 : busy
                   ? `下载中 ${megabytes(download?.completed ?? 0)}${download?.total ? ` / ${megabytes(download.total)} · ${percent}%` : ''}`
-                  : variant.note || `${megabytes(variant.size)} · 下载后会被校验再装上`}
-              control={installed
-                ? <span className="settings-row-note">当前这一份</span>
-                : <button
-                    className="secondary-action"
-                    type="button"
-                    disabled={downloading !== undefined}
-                    aria-busy={busy}
-                    onClick={() => void downloadVariant(variant.id)}
-                  >
-                    {busy ? '下载中…' : '下载并使用'}
-                  </button>}
-            />
-          );
-        })}
-        <SettingsRow
-          icon={<Upload />}
-          label="导入本地的 nvngx_dlssnr.dll"
-          hint={status.dllPresent
-            ? `已装：${status.variantLabel ?? '认不出是哪一种变体'}${status.dllBytes ? ` · ${megabytes(status.dllBytes)}` : ''}`
-            : `也可以自己找一份来导入；建议：${status.recommendedLabel ?? '按显卡系列选一种变体'}`}
-          control={
-            <button className="secondary-action" type="button" disabled={importing} aria-busy={importing} onClick={() => void importDll()}>
-              {importing ? '导入中…' : '选择 DLL…'}
+                  : variant.note || `${megabytes(variant.size)} · 下载后会被校验再装上`}</small></span>
             </button>
-          }
-        />
+            {installed && <span className="settings-row-note">已选择</span>}
+          </div>;
+        })}
       </div>
       </SettingsMenu>}
 
       {/* 层数：同一张图串行跑几个 pass（1–3 层，往上收益很小）。 */}
       <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
-      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
+      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} icon={<Layers />} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
       {selectedLayer === undefined ? <>
         {passes.map((pass, index) => <SettingsRow key={index} icon={<Layers />} label={`第 ${index + 1} 层`} value={STYLE_OPTIONS[pass.style]?.label ?? '默认'} onClick={() => openLayer(index)} />)}
         <button className="secondary-action" type="button" disabled={layerCount >= MAX_DLSSNR_PASSES} onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}><Plus aria-hidden="true" />添加层</button>

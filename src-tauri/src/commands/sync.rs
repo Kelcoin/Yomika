@@ -996,12 +996,12 @@ fn remote_change_wins(
     }
 }
 
-/// Reading progress carries one stricter rule than the generic clock race:
-/// across devices the page never goes backwards, whichever clock is newer —
-/// the same rule the frontend merge applies. Within one device the clock
-/// decides, so that device going back a page is a real user action.
+/// Across devices, a user's regression preference decides whether the newest
+/// visit or the furthest page wins. Device clocks are independent, so a visit
+/// compares timestamps before logical clocks when regression is allowed.
 #[allow(clippy::too_many_arguments)]
 fn remote_progress_wins(
+    allow_regression: bool,
     local_clock: i64,
     local_updated: &str,
     local_device: &str,
@@ -1011,6 +1011,16 @@ fn remote_progress_wins(
     remote_device: &str,
     remote_page: i64,
 ) -> bool {
+    if allow_regression && local_device != remote_device {
+        return match compare_instants(remote_updated, local_updated) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => remote_change_wins(
+                local_clock, local_updated, local_device,
+                remote_clock, remote_updated, remote_device,
+            ),
+        };
+    }
     if local_device == remote_device {
         return remote_change_wins(
             local_clock,
@@ -1222,6 +1232,16 @@ fn apply_remote_progress(
     let layout = payload_text(payload, "layout")?;
     let direction = payload_text(payload, "direction")?;
     let cover_alone = payload.get("coverAlone").and_then(|value| value.as_bool());
+    let allow_regression = transaction
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = 'preferences.allow_progress_regression'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .and_then(|value| serde_json::from_str::<bool>(&value).ok())
+        .unwrap_or(true);
     let gate = transaction
         .query_row(
             "SELECT revision, updated_at, COALESCE(device_id, ''), page_index
@@ -1240,6 +1260,7 @@ fn apply_remote_progress(
         .map_err(|error| error.to_string())?
         .map(|(clock, updated, device, page)| {
             remote_progress_wins(
+                allow_regression,
                 clock,
                 &updated,
                 &device,
@@ -3418,6 +3439,10 @@ mod tests {
         // clock — otherwise a device that jumped back drags the other one with
         // it on the next pull.
         let mut connection = migrated_connection();
+        connection.execute(
+            "INSERT INTO settings (key, value_json) VALUES ('preferences.allow_progress_regression', 'false')",
+            [],
+        ).expect("disable regression");
         let first = remote_objects(
             "scope-a",
             vec![remote_object(
@@ -3447,6 +3472,27 @@ mod tests {
             )
             .expect("kept page");
         assert_eq!(page, 80, "a newer clock from another device dragged the page backwards");
+    }
+
+    #[test]
+    fn cross_device_progress_regresses_when_the_newer_visit_allows_it() {
+        let mut connection = migrated_connection();
+        let first = remote_objects("scope-a", vec![remote_object(
+            "reading_progress", "scope-a/archive-a", 5, "2026-09-14 10:00:00",
+            serde_json::json!({"archiveId":"archive-a","pageIndex":80,"pageCount":100,"layout":"paged","direction":"ltr"}),
+        )]);
+        let mut lower = remote_object(
+            "reading_progress", "scope-a/archive-a", 6, "2026-09-14 10:01:00",
+            serde_json::json!({"archiveId":"archive-a","pageIndex":10,"pageCount":100,"layout":"paged","direction":"ltr"}),
+        );
+        lower.device_id = "device-c".into();
+        assert_eq!(apply_remote_objects(&mut connection, &first).expect("first"), 1);
+        assert_eq!(apply_remote_objects(&mut connection, &remote_objects("scope-a", vec![lower])).expect("newer"), 1);
+        let page: i64 = connection.query_row(
+            "SELECT page_index FROM reading_progress WHERE scope_id='scope-a' AND archive_id='archive-a'",
+            [], |row| row.get(0),
+        ).expect("synced page");
+        assert_eq!(page, 10);
     }
 
     #[test]

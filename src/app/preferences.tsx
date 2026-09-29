@@ -257,6 +257,10 @@ export function usePreferences(): PreferencesContextValue {
   return value;
 }
 
+export function useProgressBarVisibility(): PreferenceSnapshot['progressBarVisibility'] | undefined {
+  return useContext(PreferencesContext)?.preferences.progressBarVisibility;
+}
+
 /** The archive card style, and a setter that persists it.
  *
  * The library and the three shelves render the same list and have to agree on

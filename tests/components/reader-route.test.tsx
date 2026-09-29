@@ -39,7 +39,7 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', processed.url));
     expect(release).not.toHaveBeenCalledWith(processed);
     expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
-    await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1]));
+    await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
   function enhancedReader(pageCount: number, enhanced: (index: number) => Promise<ImageHandle>) {
     const cache = getNativeImageCache();
@@ -166,7 +166,7 @@ describe('reader route', () => {
     ]));
     expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
     expect(calls.at(-1)).toBe('save_reading_progress');
-    expect(progressScopes).toEqual(['scope-real', 'scope-real']);
+    expect(progressScopes).toEqual(['scope-real', 'scope-real', 'scope-real']);
   });
 
   it('uses and releases persistent reader pages without requesting LANraragi', async () => {

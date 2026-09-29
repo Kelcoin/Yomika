@@ -8,6 +8,7 @@ import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isW
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { longPressHandlers } from '../lib/longPressMenu';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
+import { useProgressBarVisibility } from '../app/preferences';
 
 const imageCache = getNativeImageCache();
 
@@ -17,8 +18,19 @@ const imageCache = getNativeImageCache();
  * line, which carries different facts in each place. The tag slot picks and
  * colours its own tags from the raw list, so a caller cannot pass a differently
  * ordered or differently coloured set by accident. */
-export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number }) {
+export function ArchiveProgressBar({ page, pageCount, visibility }: { page?: number | null | undefined; pageCount: number; visibility?: 'none' | 'history' | 'all' | undefined }) {
+  const preferredVisibility = useProgressBarVisibility();
+  const mode = visibility ?? preferredVisibility ?? 'history';
+  if (mode === 'none' || (mode === 'history' && page == null)) return null;
+  const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round(((page ?? 0) / pageCount) * 100))) : 0;
+  return <span className="archive-card-progress" role="progressbar" aria-label="阅读进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+    <span className="archive-card-progress-fill" style={{ width: `${percent}%` }} />
+  </span>;
+}
+
+export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined }) {
   return <div className="archive-thumb-card-body">
+    <ArchiveProgressBar page={progressPage} pageCount={pageCount} visibility={progressVisibility} />
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
@@ -60,7 +72,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
   </div>;
 }
 
-export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined }) {
+export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage, progressVisibility }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined; progressVisibility?: 'none' | 'history' | 'all' | undefined }) {
   const [aspectRatio, setAspectRatio] = useState<number>();
   const isWide = isWideCoverRatio(aspectRatio);
   // The same menu the library list opens, by right click on a desktop and by
@@ -89,23 +101,26 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       title={archive.title}
       tags={archive.tags}
       favorite={favorite}
+      progressPage={progressPage}
+      progressVisibility={progressVisibility}
+      pageCount={archive.pageCount}
       meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
     />
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6 }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number }) {
   const scroller = useHorizontalScroller();
   const [railWidth, setRailWidth] = useState(0);
   useEffect(() => {
@@ -130,7 +145,7 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       {archives.length === 0 && loading
         ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
-        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} />)}
+        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} />)}
     </div>
   </section>;
 }

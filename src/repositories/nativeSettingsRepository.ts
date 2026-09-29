@@ -14,6 +14,8 @@ export const PreferenceSnapshotSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
   defaultLayout: z.enum(['auto', 'single', 'double', 'webtoon']),
   defaultDirection: z.enum(['ltr', 'rtl']),
+  allowProgressRegression: z.boolean().default(true),
+  progressBarVisibility: z.enum(['none', 'history', 'all']).default('history'),
   cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
   // Defaults keep an older native build (which does not send these yet) from
   // failing the whole snapshot.
@@ -32,6 +34,8 @@ export const PreferenceSnapshotSchema = z.object({
    * average page size (bytes/page) reaches the threshold. Needs a model; the
    * switch locks while upscale itself is off. */
   upscaleAutoEnable: z.boolean().default(false),
+  upscaleAutoWhitelist: z.string().max(2000).default('category:doujinshi\ncategory:manga'),
+  upscaleAutoBlacklist: z.string().max(2000).default('other:3d\ncategory:cosplay\ncategory:asian porn'),
   /** The auto-enable threshold in bytes per page. Default 500 KB. */
   upscaleAutoThresholdBytes: z.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512_000),
   /** Installed de-censoring bundle to run on reader pages. Empty means off:
@@ -113,6 +117,8 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   theme: 'system',
   defaultLayout: 'auto',
   defaultDirection: 'ltr',
+  allowProgressRegression: true,
+  progressBarVisibility: 'history',
   cacheMaxBytes: 2_147_483_648,
   prefetchPages: 2,
   coverConcurrency: 4,
@@ -121,6 +127,8 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   upscaleBackend: 'off',
   upscaleModel: '',
   upscaleAutoEnable: false,
+  upscaleAutoWhitelist: 'category:doujinshi\ncategory:manga',
+  upscaleAutoBlacklist: 'other:3d\ncategory:cosplay\ncategory:asian porn',
   upscaleAutoThresholdBytes: 512_000,
   decensorModel: '',
   downloadDirectory: '',

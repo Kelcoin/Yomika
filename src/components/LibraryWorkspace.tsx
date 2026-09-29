@@ -1,6 +1,6 @@
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, CalendarClock, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -22,7 +22,7 @@ import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
 import { TagSearchLink } from './TagSearchLink';
-import { ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
+import { ArchiveProgressBar, ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
 import { useEhMyTags } from './useEhMyTags';
 import '../styles/library-loading.css';
 
@@ -183,6 +183,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     return () => window.clearTimeout(timer);
   }, [archives.length, listLoading, skeletonVisible]);
   const [editingMetadata, setEditingMetadata] = useState(false);
+  const [historyJumpOpen, setHistoryJumpOpen] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
   const [localSortOrder, setLocalSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -292,7 +293,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
-    const resolve = () => setScrollHostElement(scrollHost(scrollRef.current, root));
+    const resolve = () => {
+      const next = scrollHost(scrollRef.current, root);
+      setScrollHostElement((current) => current === next ? current : next);
+    };
     resolve();
     window.addEventListener('resize', resolve);
     return () => window.removeEventListener('resize', resolve);
@@ -410,6 +414,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     });
     return starts;
   }, [filteredArchives, timelineByArchiveId]);
+  const historyMonths = useMemo(() => {
+    if (!timelineByArchiveId) return [];
+    const seen = new Set<string>();
+    return filteredArchives.flatMap((archive, index) => {
+      const month = timelineByArchiveId.get(archive.archiveId)?.date.slice(0, 7);
+      if (!month || seen.has(month)) return [];
+      seen.add(month);
+      return [{ month, index }];
+    });
+  }, [filteredArchives, timelineByArchiveId]);
   const updateSearchQuery = (value: string) => { setLocalSearchQuery(value); onSearchQueryChange?.(value); };
   // The draft is what the user sees; only committed values reach the server.
   useEffect(() => { setSearchDraft(searchQuery); }, [searchQuery]);
@@ -469,7 +483,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const observer = new ResizeObserver((entries) => {
       const measured = entries[0]?.contentRect.width ?? element.clientWidth;
       if (measured <= 0) return;
-      setGridWidth((current) => (Math.abs(current - measured) < 1 ? current : measured));
+      setGridWidth((current) => getArchiveGridColumns(current || 720) === getArchiveGridColumns(measured)
+        ? current : measured);
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -609,6 +624,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <ArchiveThumbCardBody
           title={archive.title}
           tags={archive.tags}
+          progressPage={readingProgressByArchiveId?.get(archive.archiveId)}
+          pageCount={archive.pageCount}
           meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
         />
       </button>
@@ -626,6 +643,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {cover}
         {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         <span className="archive-row-copy">
+          <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} />
           <strong>{archive.title}</strong>
           <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
           <span className="archive-row-footer">
@@ -789,6 +807,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                refresh button any more — so the wheel and the finger are the only
                way to ask for it. */
           >
+            {historyMonths.length > 1 && (
+              <div className="history-quick-jump">
+                <button className="icon-action" type="button" aria-label="跳转到历史时间" title="跳转到历史时间" aria-expanded={historyJumpOpen} onClick={() => setHistoryJumpOpen((open) => !open)}><CalendarClock aria-hidden="true" /></button>
+                {historyJumpOpen && <div className="history-quick-jump-menu" role="group" aria-label="选择历史时间">
+                  {historyMonths.map(({ month, index }) => <button key={month} type="button" onClick={() => { rows.scrollToIndex(index, { align: 'start', behavior: 'smooth' }); setHistoryJumpOpen(false); }}>{month}</button>)}
+                </div>}
+              </div>
+            )}
             {/* The refresh's feedback, pinned over the list rather than carried
                 by it: the list springs back on release and this stays on top,
                 spinning, until the request ends. Sticky inside the panel, so it
@@ -820,7 +846,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   branch, so arriving at the library flashed 暂无档案库 before the
                   first page landed. */}
               {filteredArchives.length === 0 && !listLoading && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
-              {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} exiting={!listLoading} /></div>}
+              {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} timeline={Boolean(timelineByArchiveId)} exiting={!listLoading} /></div>}
               {displayMode === 'thumbnail' ? (
                 <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
                   {thumbnailRows.getVirtualItems().map((virtualRow) => (
@@ -932,7 +958,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
 }
 
-function ArchiveListSkeleton({ mode, exiting = false }: { mode: 'thumbnail' | 'wide'; exiting?: boolean }) {
+function ArchiveListSkeleton({ mode, timeline = false, exiting = false }: { mode: 'thumbnail' | 'wide'; timeline?: boolean; exiting?: boolean }) {
   /* A fixed count left tall windows with a strip of bare canvas under the last
      card. Count from the viewport instead: row heights mirror the CSS (158px
      wide rows, 350px thumbnail cards, plus one gap), and the old counts stay
@@ -946,13 +972,14 @@ function ArchiveListSkeleton({ mode, exiting = false }: { mode: 'thumbnail' | 'w
     return Math.max(minimum, Math.ceil(available / rowHeight));
   })();
   return (
-    <div className={`archive-list-skeleton is-${mode}${exiting ? ' is-exiting' : ''}`} role={exiting ? undefined : 'status'} aria-label={exiting ? undefined : '正在读取档案'} aria-hidden={exiting || undefined}>
+    <div className={`archive-list-skeleton is-${mode}${timeline ? ' has-timeline' : ''}${exiting ? ' is-exiting' : ''}`} role={exiting ? undefined : 'status'} aria-label={exiting ? undefined : '正在读取档案'} aria-hidden={exiting || undefined}>
       {mode === 'thumbnail'
         ? Array.from({ length: count }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
         : Array.from({ length: count }, (_, index) => (
           <div className="archive-row-skeleton" key={index}>
             <span className="skeleton-block archive-row-skeleton-cover" />
             <span className="archive-row-skeleton-copy"><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line" /></span>
+            {timeline && <span className="archive-timeline-skeleton"><span className="skeleton-line" /></span>}
           </div>
         ))}
     </div>

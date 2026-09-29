@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Trash2, X } from 'lucide-react';
 import type { ArchiveRecord } from '../domain/library';
 import { NativeSettingsRepository, type PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
@@ -15,10 +15,12 @@ export function ArchiveDeleteDialog({ archive, onClose, onDeleted }: {
   onDeleted: () => void;
 }) {
   const { showToast } = useToast();
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   return <ArchiveDeletionConfirmation description={`将永久删除「${archive.title}」，此操作不可撤销。`} onClose={onClose} onConfirm={async (syncFavorite) => {
     await deleteArchiveWithFavoriteSync(archive, syncFavorite);
     showToast('档案已删除', 'success');
-    onDeleted();
+    if (mounted.current) onDeleted();
   }} />;
 }
 

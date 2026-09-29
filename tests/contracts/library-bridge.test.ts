@@ -422,6 +422,36 @@ describe('native library repository bridge', () => {
     expect(result).toEqual({ ok: true, value });
   });
 
+  it('waits for queued page writes before reading history or resume progress', async () => {
+    const completed: Array<() => void> = [];
+    const calls: string[] = [];
+    setInvokeAdapterForTests((command, payload) => {
+      calls.push(command);
+      if (command === 'save_reading_progress') return new Promise((resolve) => {
+        completed.push(() => resolve({ ok: true, value: {
+          ...(payload as { progress: object }).progress,
+          updatedAt: '2026-08-26T00:00:00Z', revision: 1,
+        } }));
+      });
+      if (command === 'list_reading_history') return Promise.resolve({ ok: true, value: [] });
+      return Promise.resolve({ ok: true, value: null });
+    });
+    const repo = new NativeLibraryRepository();
+    const base = { scopeId: 'scope-a', archiveId: 'a1', pageCount: 10, layout: 'paged' as const, direction: 'ltr' as const };
+    const first = repo.saveProgress({ ...base, pageIndex: 1 });
+    const second = repo.saveProgress({ ...base, pageIndex: 2 });
+    const history = repo.listHistory('scope-a');
+    const resume = repo.loadProgress('scope-a', 'a1');
+    await vi.waitFor(() => expect(completed).toHaveLength(1));
+    expect(calls).toEqual(['save_reading_progress']);
+    completed.shift()?.();
+    await vi.waitFor(() => expect(completed).toHaveLength(1));
+    expect(calls).toEqual(['save_reading_progress', 'save_reading_progress']);
+    completed.shift()?.();
+    await Promise.all([first, second, history, resume]);
+    expect(calls.slice(2)).toEqual(['list_reading_history', 'load_reading_progress']);
+  });
+
   it('appends, lists, and retries scoped sync journal entries', async () => {
     const value = {
       sequence: 7, scopeId: 'scope-a', objectId: 'scope-a/a1', objectType: 'reading_progress',

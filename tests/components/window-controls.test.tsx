@@ -10,10 +10,16 @@ afterEach(() => {
 });
 
 describe('Windows title bar', () => {
-  it('keeps the brand mark inside the draggable region', () => {
+  it('starts a native drag from the title surface without dragging controls', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
     render(<TitleBar />);
-    expect(screen.getByRole('banner')).toHaveAttribute('data-tauri-drag-region', 'deep');
-    expect(screen.getByRole('button', { name: '关闭' }).parentElement).toHaveAttribute('data-tauri-drag-region', 'false');
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.mouseDown(screen.getByRole('banner'), { button: 0, detail: 1 });
+    expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging', { label: 'main' });
+    invoke.mockClear();
+    fireEvent.mouseDown(screen.getByRole('button', { name: '关闭' }), { button: 0, detail: 1 });
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('coalesces resize checks while the window is being resized', async () => {

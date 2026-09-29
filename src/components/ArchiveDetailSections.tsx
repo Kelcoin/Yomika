@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
-import { normalizeMyTagKey, prioritizeByMyTags, readableInkOnHex } from '../lib/ehMyTags';
+import { myTagChipStyle, normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
@@ -184,7 +184,7 @@ export function ArchiveDetailTagSection({ groups, loading = false, colorFor, onS
                   const key = `${group.namespace}-${tag.query}-${index}`;
                   // 颜色是账户自己的预设（任意 hex），芯片文字得跟着底色亮度走。
                   return onSelect
-                    ? <button className="metadata-chip tag-search-link" type="button" key={key} aria-label={`筛选 ${tag.label}`} title={`筛选 ${tag.label}`} style={color ? { background: color, color: readableInkOnHex(color) } : undefined} onClick={() => onSelect(tag)}>{tag.label}</button>
+                    ? <button className="metadata-chip tag-search-link" type="button" key={key} aria-label={`筛选 ${tag.label}`} title={`筛选 ${tag.label}`} style={color ? myTagChipStyle(color) : undefined} onClick={() => onSelect(tag)}>{tag.label}</button>
                     : <TagSearchLink label={tag.label} query={tag.query} color={color} key={key} />;
                 })}
               </span>

@@ -210,7 +210,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * continuous mode at page 40 would immediately save page 1. */
   const webtoonScrolledRef = useRef(false);
   const webtoonEnteredRef = useRef(false);
-  const reportedPageRef = useRef(state.pageIndex);
+  const reportedPageRef = useRef(-1);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
   const dragPagedRef = useRef(false);

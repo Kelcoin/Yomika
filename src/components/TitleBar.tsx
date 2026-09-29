@@ -6,18 +6,18 @@ import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowCont
  * decorations are off on Windows (decorations(false) in lib.rs); macOS keeps
  * its own traffic lights and never mounts this bar.
  *
- * Dragging and double-click-to-maximize belong to Tauri's own drag-region
- * script. `deep` includes the mark's SVG descendants; the controls explicitly
- * opt out. A React onDoubleClick used to live here as well, and the two fought:
- * a double click that started on a control button bubbled to the header and
- * toggle-maximized after the button's own action, so 最小化 looked like it
- * needed two presses (down, restore, down again) and 最大化 flipped twice. */
+ * Dragging starts in the native window command on pointer down. The control
+ * cluster stops propagation so only the empty title surface can start it. */
 export function TitleBar() {
   const api = useWindowControls();
   const maximized = useWindowMaximized(api);
 
   return (
-    <header className="titlebar" data-tauri-drag-region="deep">
+    <header className="titlebar" onMouseDown={(event) => {
+      if (event.button === 0 && event.detail === 1) void api?.startDragging().catch(() => {});
+    }} onDoubleClick={(event) => {
+      if (event.button === 0) void api?.toggleMaximize().catch(() => {});
+    }}>
       <span className="titlebar-mark">
         <YomikaMark size={18} />
       </span>

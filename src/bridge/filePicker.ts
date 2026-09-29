@@ -73,7 +73,7 @@ export async function pickDirectory(): Promise<string | null> {
 
 const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'cbz', 'cbr', 'cb7', 'pdf'];
 
-const MODEL_EXTENSIONS = ['zip', 'onnx'];
+const MODEL_EXTENSIONS = ['zip', 'onnx', 'dll'];
 
 export async function pickModelFile(): Promise<string | null> {
   if (testModelPicker) return testModelPicker();
@@ -82,7 +82,7 @@ export async function pickModelFile(): Promise<string | null> {
   const selected = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: '模型（zip / onnx）', extensions: MODEL_EXTENSIONS }],
+    filters: [{ name: '模型（zip / onnx / dll）', extensions: MODEL_EXTENSIONS }],
   });
   return typeof selected === 'string' ? selected : null;
 }
