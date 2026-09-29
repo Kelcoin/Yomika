@@ -90,19 +90,21 @@ use dlssnr::commands::{
     dlssnr_status,
 };
 use compute_center::{
-    compute_center_configure, compute_center_status, remote_compute_capabilities,
-    remote_compute_process,
+    compute_center_configure, compute_center_status, compute_discover, compute_pair_request,
+    compute_pair_confirm, remote_compute_capabilities, remote_compute_process,
 };
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    let background_launch = std::env::args().any(|arg| arg == "--background");
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     // 原生宿主只有 Android 有（登录面板 + SAF 写文件），别的平台那两条路走别的实现。
     #[cfg(target_os = "android")]
     let builder = builder.plugin(mobile_host::plugin());
     builder
-        .setup(|app| {
+        .setup(move |app| {
             data_paths::prepare(app.handle()).map_err(std::io::Error::other)?;
             // 错误日志留两轮：先把「本轮」翻成「上一轮」（上一轮的现场是这次闪退唯一的
             // 线索），再挂上 panic 钩子。
@@ -117,6 +119,29 @@ pub fn run() {
             // `Arc<ComputeCenter>` 会按另一个 TypeId 登记，`state()` 找不到就 panic
             // ——命令里 panic 会直接跨 FFI 边界中止整个进程（用户看到的就是闪退）。
             app.manage(compute_center::ComputeCenter::new());
+            if let Err(error) = compute_center::restore_on_launch(app.handle()) {
+                eprintln!("无法恢复远端处理服务：{error}");
+            }
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::{menu::MenuBuilder, tray::TrayIconBuilder};
+                let menu = MenuBuilder::new(app)
+                    .text("show", "打开 Yomika")
+                    .text("quit", "退出 Yomika")
+                    .build()?;
+                let mut tray = TrayIconBuilder::new()
+                    .menu(&menu)
+                    .tooltip("Yomika")
+                    .on_menu_event(|app, event| {
+                        match event.id().as_ref() {
+                            "show" => { if let Some(main) = app.get_webview_window("main") { let _ = main.show(); let _ = main.set_focus(); } }
+                            "quit" => app.exit(0),
+                            _ => {}
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() { tray = tray.icon(icon.clone()); }
+                tray.build(app)?;
+            }
             let config = app
                 .config()
                 .app
@@ -141,6 +166,8 @@ pub fn run() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(10));
+                    #[cfg(target_os = "windows")]
+                    if background_launch { return; }
                     if let Some(main) = handle.get_webview_window("main") {
                         let _ = main.show();
                     }
@@ -161,6 +188,22 @@ pub fn run() {
             set_big_window_icon(&main_window);
             let _ = main_window;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let close_to_tray = app.try_state::<Database>()
+                    .and_then(|database| database.connection.lock().ok()
+                        .and_then(|connection| settings::load_preferences_from(&connection).ok()))
+                    .is_some_and(|snapshot| snapshot.close_to_tray);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = (window, event);
         })
         .invoke_handler(tauri::generate_handler![
             frontend_ready,
@@ -258,6 +301,9 @@ pub fn run() {
             dlssnr_apply_page,
             compute_center_status,
             compute_center_configure,
+            compute_discover,
+            compute_pair_request,
+            compute_pair_confirm,
             remote_compute_capabilities,
             remote_compute_process,
             inference_start,

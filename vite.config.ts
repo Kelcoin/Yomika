@@ -11,6 +11,7 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 
 export default defineConfig({
   plugins: [react()],
+  cacheDir: '.vite-cache',
   clearScreen: false,
   // The About page shows the shipped version; reading it from package.json keeps
   // a second copy from going stale.

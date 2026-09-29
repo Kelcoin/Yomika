@@ -94,6 +94,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     [preferences.remoteComputeOps],
   );
   const remoteConfigured = remoteOps.enabled
+    && !preferences.computeCenterEnabled
+    && remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)
     && preferences.remoteComputeUrl.trim() !== ''
     && preferences.remoteComputeToken.trim() !== '';
   // 队列回调只依赖稳定值，设置改了就靠这两个 ref 取最新的一份（改设置本身会让
@@ -512,6 +514,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 ...identity,
                 rendition: 'remote',
                 transform: remoteTransform({
+                  device: preferences.remoteComputeUrl,
                   source: baseRendition,
                   op: remoteOpsRef.current.op.op,
                   modelId: remoteOpsRef.current.op.modelId,

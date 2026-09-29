@@ -128,7 +128,7 @@ pub struct DlssnrStatus {
     pub installable: bool,
     /// 这台机器现在就能跑：在上面的基础上还装了片段。
     ///
-    /// 能显示不等于能跑：开关还要等 [`probe`] 真的跑通一遍才解锁。
+    /// 可用性由显卡、核心与组件决定；手动检测仅用于诊断。
     pub available: bool,
     /// 真机跑过一遍的结论（这一份报告里没有——`probe` 才给）。
     pub probe: Option<ProbeReport>,
@@ -519,10 +519,7 @@ pub fn forget_probe() {
 
 /// 阅读器／算力中心在**真跑图之前**的二次校验。
 ///
-/// 前端那个开关只是「用户想用」；能不能用是这台机器此刻的事实，而事实只有这一侧
-/// 说得准：偏好是持久化的，昨天在另一台机器上打开过、或者 DLL 被换掉、驱动更新过，
-/// 前端都看不到。所以每次跑图前都问一遍这里——便宜（枚举显卡、看文件、比对探针
-/// 的时间戳），挡住的是「反复调用一个跑不起来的东西」。
+/// 每次跑图前检查这台机器当前是否具备显卡、核心与组件。
 #[cfg(windows)]
 pub fn runtime_gate(data_dir: &std::path::Path) -> Result<(), String> {
     let report = status(data_dir);
@@ -541,13 +538,7 @@ pub fn runtime_gate(data_dir: &std::path::Path) -> Result<(), String> {
             .error
             .unwrap_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string()));
     }
-    match last_probe_for(data_dir) {
-        Some(probe) if probe.supported => Ok(()),
-        Some(probe) => Err(probe
-            .error
-            .unwrap_or_else(|| "上次检测没有通过，请在设置页重新检测".to_string())),
-        None => Err("这台机器还没有跑通 DLSS5 检测，请在设置页先检测一次".to_string()),
-    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -704,20 +695,44 @@ mod tests {
 
     /// 门控：这台机器上跑不起来时，命令层必须自己拒绝——偏好在另一台机器上打开过
     /// 也好、昨天打开过也好，都不是此刻的事实。
+    ///
+    /// 判据是**这台机器的事实**（有没有片段、有没有 NGX 核心、有没有那块卡），
+    /// 手动检测只用于诊断，不参与门控：探针结论只活在进程内存里，要是拿它当门，
+    /// 每次重开应用都得先去设置页点一遍「检测」，否则 DLSS5 静悄悄地不再生效。
+    /// 真跑失败由原生处理链报回来（一次失败 + 一条日志），比「什么都没发生」好。
     #[test]
     fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
         let dir = tempfile::tempdir().expect("临时目录");
         forget_probe();
-        // 什么都没有（没片段、没探针）：必须给一句人话，而且不是 Ok。
+        // 什么都没有（没片段）：必须给一句人话，而且不是 Ok。
         let error = runtime_gate(dir.path()).expect_err("没有片段时不该放行");
         assert!(!error.is_empty());
 
-        // 有片段但没跑通探针：也不放行。
+        // 有片段时，答案由这台机器决定（有没有卡、有没有核心）——重点是**记不记探针
+        // 结论都不变**：同一台机器上先记一份「跑不起来」的结论，门控的答案必须一样，
+        // 否则就是又把探针当门了。
         let dll = dll_path(dir.path());
         std::fs::create_dir_all(dll.parent().expect("dlssnr 目录")).expect("建目录");
         std::fs::write(&dll, vec![0_u8; 4096]).expect("写片段");
-        let error = runtime_gate(dir.path()).expect_err("没有检测过就不该放行");
-        assert!(!error.is_empty());
+        let before = runtime_gate(dir.path());
+        *LAST_PROBE.lock().expect("探针表") = Some((
+            probe_key(dir.path()),
+            ProbeReport {
+                supported: false,
+                width: 0,
+                height: 0,
+                elapsed_ms: 0,
+                difference: 0.0,
+                error: Some("驱动不支持".to_string()),
+            },
+        ));
+        let after = runtime_gate(dir.path());
+        assert_eq!(
+            before.is_ok(),
+            after.is_ok(),
+            "探针结论不该改变门控的答案：{before:?} / {after:?}"
+        );
+        forget_probe();
     }
 
     /// 真机跑一遍：没有 NVIDIA 卡、没有 DLL、没有核心就打印原因并跳过；能跑就断言

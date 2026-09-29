@@ -31,6 +31,8 @@ const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
+const START_WITH_WINDOWS_KEY: &str = "preferences.start_with_windows";
+const CLOSE_TO_TRAY_KEY: &str = "preferences.close_to_tray";
 const TAG_TRANSLATION_ENABLED_KEY: &str = "preferences.tag_translation_enabled";
 const TAG_COUNT_ORDER_ENABLED_KEY: &str = "preferences.tag_count_order_enabled";
 const DLSSNR_ENABLED_KEY: &str = "preferences.dlssnr_enabled";
@@ -162,6 +164,10 @@ pub struct PreferenceSnapshot {
     /// 关掉就只剩「立即同步」按钮。
     #[serde(default = "default_true")]
     pub auto_sync: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
+    #[serde(default)]
+    pub close_to_tray: bool,
     #[serde(default = "default_true")]
     pub tag_translation_enabled: bool,
     #[serde(default = "default_true")]
@@ -241,7 +247,7 @@ fn default_bottom_nav_items() -> Vec<String> {
 ///
 /// 名字是快照序列化后的键（camelCase），因为判断发生在 JSON 上：日志里存的是那份
 /// JSON，远端来的也是 JSON。
-pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 8] = [
+pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 10] = [
     "downloadDirectory",
     "cacheMaxBytes",
     // 算力中心这一组全是「这台机器」的事：端口可能撞别的设备、令牌是这台机器的
@@ -252,6 +258,8 @@ pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 8] = [
     "remoteComputeUrl",
     "remoteComputeToken",
     "remoteComputeOps",
+    "startWithWindows",
+    "closeToTray",
 ];
 
 impl Default for PreferenceSnapshot {
@@ -283,6 +291,8 @@ impl Default for PreferenceSnapshot {
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
             auto_sync: true,
+            start_with_windows: false,
+            close_to_tray: false,
             tag_translation_enabled: true,
             tag_count_order_enabled: true,
             dlssnr_enabled: false,
@@ -465,6 +475,8 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         floating_nav: map_value(&stored, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: map_value(&stored, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
         auto_sync: map_value(&stored, AUTO_SYNC_KEY, defaults.auto_sync)?,
+        start_with_windows: map_value(&stored, START_WITH_WINDOWS_KEY, defaults.start_with_windows)?,
+        close_to_tray: map_value(&stored, CLOSE_TO_TRAY_KEY, defaults.close_to_tray)?,
         tag_translation_enabled: map_value(&stored, TAG_TRANSLATION_ENABLED_KEY, defaults.tag_translation_enabled)?,
         tag_count_order_enabled: map_value(&stored, TAG_COUNT_ORDER_ENABLED_KEY, defaults.tag_count_order_enabled)?,
         dlssnr_enabled: map_value(&stored, DLSSNR_ENABLED_KEY, defaults.dlssnr_enabled)?,
@@ -581,6 +593,8 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.bottom_nav_items),
         ),
         (AUTO_SYNC_KEY, serde_json::to_string(&value.auto_sync)),
+        (START_WITH_WINDOWS_KEY, serde_json::to_string(&value.start_with_windows)),
+        (CLOSE_TO_TRAY_KEY, serde_json::to_string(&value.close_to_tray)),
         (TAG_TRANSLATION_ENABLED_KEY, serde_json::to_string(&value.tag_translation_enabled)),
         (TAG_COUNT_ORDER_ENABLED_KEY, serde_json::to_string(&value.tag_count_order_enabled)),
         (DLSSNR_ENABLED_KEY, serde_json::to_string(&value.dlssnr_enabled)),
@@ -710,17 +724,46 @@ pub fn load_preferences(database: tauri::State<'_, Database>) -> CommandResult<P
 pub fn save_preferences(
     input: PreferenceSnapshot,
     database: tauri::State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> CommandResult<PreferenceSnapshot> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
+    #[cfg(target_os = "windows")]
+    {
+        let previous = load_preferences_from(&connection).ok();
+        if previous.as_ref().is_none_or(|value| value.start_with_windows != input.start_with_windows) {
+            if let Err(error) = update_windows_autostart(&app, input.start_with_windows) {
+                return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
     match save_preferences_to(&mut connection, input) {
         Ok(value) => CommandResult::success(value),
         Err(_) => {
             CommandResult::failure("INVALID_RESPONSE", "Preference snapshot is invalid", false)
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn update_windows_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let _ = app;
+    let mut command = std::process::Command::new("reg.exe");
+    command.args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Yomika", "/t", "REG_SZ", "/d"]);
+    if enabled {
+        command.arg(format!("\"{}\" --background", executable.display()));
+        command.arg("/f");
+    } else {
+        command = std::process::Command::new("reg.exe");
+        command.args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Yomika", "/f"]);
+    }
+    let output = command.output().map_err(|error| format!("更新开机自启失败：{error}"))?;
+    if output.status.success() { Ok(()) } else { Err(format!("更新开机自启失败：{}", String::from_utf8_lossy(&output.stderr))) }
 }
 
 #[tauri::command]
@@ -807,6 +850,8 @@ mod tests {
             ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
             auto_sync: false,
+            start_with_windows: false,
+            close_to_tray: false,
             tag_translation_enabled: false,
             tag_count_order_enabled: true,
             dlssnr_enabled: true,

@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { AlertTriangle, Download, FileText, ImageUpscale, Layers, Loader2, Minus, Plus, RefreshCw, Scan, Sparkles, Upload } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
-import { SettingsChoice, SettingsNumber } from './SettingsValueControls';
+import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
 import { pickDllFile } from '../bridge/filePicker';
@@ -45,12 +45,7 @@ interface Props {
   visible: boolean;
 }
 
-/** DLSS5 设置组：检测 → 片段（下载或导入）→ 开关 → 1–3 层参数。
- *
- * 门控分三道：这一组只在「支持系列的 N 卡 + 这个构建有 NGX 核心」时出现
- * （`status.installable`）——还没装片段的机器正是来这一组里挑一种下载的；
- * **开关**要等装了片段且真机检测跑通一次（`status.probe`）才解锁：显卡型号只决定
- * 该装哪一种变体，驱动与 NGX 自己还有话说。 */
+/** DLSS5 设置组：组件、开关与 1–3 层参数。检测是可选的诊断操作。 */
 export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: Props) {
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeDlssnrRepository(), []);
@@ -62,6 +57,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   /** 正在下载的那一条变体 id（同一时刻只有一条：后端那条下载路径也只跑一件）。 */
   const [downloading, setDownloading] = useState<string>();
   const [download, setDownload] = useState<{ completed: number; total?: number | undefined }>();
+  const [selectedLayer, setSelectedLayer] = useState<number | undefined>();
+  const [layerMenu, setLayerMenu] = useState(false);
+  const [variantMenu, setVariantMenu] = useState(false);
 
   const refresh = useCallback(async () => {
     const result = await repository.status();
@@ -174,11 +172,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   // 拆成一个变量：直接对着 `status.probe?.supported` 做别名会让 TS 把另一个分支
   // 收窄成 null，`probe.error` 就读不出来了。
   const probe = status.probe ?? undefined;
-  /** 跑通过 **并且** 那份结论是现在这一份片段上测出来的：换过 DLL 之后旧结论作废
-   * （`probeValid`），开关要重新锁上——不然界面显示「检测通过」而进程里跑的是换之前
-   * 那一份。 */
-  const probed = probe?.supported === true && status.probeValid;
-  const probeStale = probe?.supported === true && !status.probeValid;
+  const probed = status.available;
   const layerCount = passes.length;
 
   return (
@@ -187,24 +181,16 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         icon={<Sparkles />}
         label="启用 DLSS5"
         hint={
-          probed
-            ? `${status.variantLabel ?? 'nvngx_dlssnr'} · ${status.gpuName}${probe ? ` · 检测 ${probe.elapsedMs}ms` : ''}`
-            : probeStale
-              ? `换过片段：先重启应用，再点一次「检测」（现在这份结论是换之前那一份测出来的）`
-              : status.dllPresent
-                ? '先检测一次：跑通了才允许打开（这台机器上的驱动与 NGX 说了算）'
-                : '还没有片段：先在下面挑一种下载'
+            probed
+             ? `${status.variantLabel ?? 'nvngx_dlssnr'} · ${status.gpuName}`
+             : '还没有片段：先在下面选择或导入组件'
         }
         disabled={!probed}
         checked={preferences.dlssnrEnabled}
         onToggle={() => {
           if (!probed) {
             showToast(
-              probeStale
-                ? '换过片段：重启应用后再检测一次'
-                : status.dllPresent
-                  ? '先点一次「检测 DLSS5」'
-                  : '先在下面下载一种片段',
+              '先在下面选择或导入一种组件',
               'error',
             );
             return;
@@ -231,8 +217,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       {/* 片段本身：官方原版与社区版在模型仓库里各一条资产，分开维护，用哪一条用户自己挑。
           装的是哪一条由后端认哈希回答（`status.variant`）。子组标题只写中文：这一行的
           样式会把拉丁字母转成大写，文件名的大小写就丢了（导入那一行里写着原名）。 */}
+      <SettingsRow icon={<Download />} label="DLSS5 组件" value={status.variantLabel ?? '未安装'} onClick={() => setVariantMenu(true)} />
+      {variantMenu && <SettingsMenu title="DLSS5 组件" onClose={() => setVariantMenu(false)}>
       <div className="settings-subgroup" role="group" aria-label="DLSS5 片段">
-        <p className="settings-subgroup-title">片段</p>
         {catalog === undefined && (
           <SettingsRow
             icon={<Download />}
@@ -293,6 +280,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           />
         )}
       </div>
+      </SettingsMenu>}
 
       {probe && !probe.supported && probe.error && (
         <SettingsRow
@@ -304,11 +292,8 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       )}
 
       {/* 层数：同一张图串行跑几个 pass（1–3 层，往上收益很小）。 */}
-      <SettingsRow
-        icon={<Layers />}
-        label="层数"
-        hint={`同一张图串行跑 ${layerCount} 层，逐层叠加`}
-        control={
+      <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
+      {layerMenu && <SettingsMenu title="DLSS5 层数" onClose={() => setLayerMenu(false)}>
           <div className="settings-menu-stepper">
             <button
               className="icon-action"
@@ -338,11 +323,21 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
               <Plus aria-hidden="true" />
             </button>
           </div>
-        }
-      />
 
-      {passes.map((pass, index) => (
-        <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`} key={index}>
+        <div className="settings-inline-actions">
+          {passes.map((_, index) => (
+            <button key={index} className="secondary-action" type="button" onClick={() => { setLayerMenu(false); setSelectedLayer(index); }}>
+              第 {index + 1} 层
+            </button>
+          ))}
+        </div>
+      </SettingsMenu>}
+
+      {selectedLayer !== undefined && passes[selectedLayer] && (() => {
+        const index = selectedLayer;
+        const pass = passes[index]!;
+        return <SettingsMenu title={`第 ${index + 1} 层`} onClose={() => setSelectedLayer(undefined)}>
+        <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`}>
           <p className="settings-subgroup-title">第 {index + 1} 层{index === 0 ? '（起点）' : ''}</p>
           <SettingsChoice
             icon={<ImageUpscale />}
@@ -407,8 +402,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             checked={pass.uiCorrection}
             onToggle={() => updatePass(index, { uiCorrection: !pass.uiCorrection })}
           />
-        </div>
-      ))}
+          <button className="secondary-action" type="button" onClick={() => setSelectedLayer(undefined)}>完成</button>
+        </div></SettingsMenu>;
+      })()}
       <SettingsRow
         icon={<Sparkles />}
         label="当前配方"

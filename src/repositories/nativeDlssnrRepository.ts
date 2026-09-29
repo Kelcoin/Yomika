@@ -25,7 +25,7 @@ export const DlssnrStatusSchema = z.object({
   installable: z.boolean(),
   /** 现在就跑得起来：在上面的基础上还装了片段。 */
   available: z.boolean(),
-  /** 上次检测的结论（没跑过就是 null）。开关看它解不解锁。 */
+  /** 上次可选诊断的结论（没跑过就是 null）。 */
   probe: z
     .object({
       supported: z.boolean(),

@@ -72,10 +72,11 @@ export const PreferenceSnapshotSchema = z.object({
   /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
    * 关掉就只剩设置里的「立即同步」。 */
   autoSync: z.boolean().default(true),
+  startWithWindows: z.boolean().default(false),
+  closeToTray: z.boolean().default(false),
   tagTranslationEnabled: z.boolean().default(true),
   tagCountOrderEnabled: z.boolean().default(true),
-  /** DLSS5：阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染。只有 Windows 桌面、
-   * 装了 DLL 且检测通过时才在设置页出现（后端 dlssnr_status 说了算）。 */
+  /** DLSS5：阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染。 */
   dlssnrEnabled: z.boolean().default(false),
   /** 每层参数的 JSON 数组（形状见 dlssnr 的 PassSettings）。存字符串是为了让后端
    * 保持平台无关：非 Windows 的构建也能原样存住这份偏好。 */
@@ -135,6 +136,8 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
   autoSync: true,
+  startWithWindows: false,
+  closeToTray: false,
   tagTranslationEnabled: true,
   tagCountOrderEnabled: true,
   dlssnrEnabled: false,

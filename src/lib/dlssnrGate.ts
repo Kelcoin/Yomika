@@ -18,15 +18,13 @@ export interface DlssnrAvailability {
 /** 这台机器此刻能不能跑 DLSS5。
  *
  * `preferences.dlssnrEnabled` 只说明「用户想用」，而它是**持久化**的：昨天在台式机上
- * 打开过、今天换到没有 N 卡的机器上照样是 true；换过 DLL 之后旧的那次检测结论也还留在
- * 设置里。阅读器据此排队会反复调用一个跑不起来的东西（每次都是一次原生失败 + 一条
+ * 打开过、今天换到没有 N 卡的机器上照样是 true。阅读器据此排队会反复调用一个跑不起来的东西（每次都是一次原生失败 + 一条
  * 日志），所以排队之前先问原生这一句。
  *
- * 这一句是**便宜**的：原生只枚举显卡、看文件在不在、比对上次检测的时间戳，不建 D3D12
+ * 这一句是**便宜**的：原生只读缓存的显卡信息、看文件在不在，不建 D3D12
  * 设备、不跑 NGX。
  *
- * 「没有结论」与「结论是跑不起来」是两件事：前者（重开一次应用之后探针本来就不在了）
- * 照样放行——开关只有在检测通过过之后才可能被打开；后者才拦。 */
+ * 可选检测不参与运行门控；真正推理失败由原生处理链返回。 */
 export async function checkDlssnrAvailability(preferenceEnabled: boolean): Promise<DlssnrAvailability> {
   if (!preferenceEnabled) return { ready: false, disable: false };
   const result = await repository.status();
@@ -34,21 +32,6 @@ export async function checkDlssnrAvailability(preferenceEnabled: boolean): Promi
   const status = result.value;
   if (!status.available) {
     return { ready: false, reason: status.error ?? '这台机器现在跑不了 DLSS5', disable: true };
-  }
-  // Native execution requires a successful probe for this exact DLL in the
-  // current process. A persisted preference must not bypass that requirement
-  // after restart, DLL replacement, or driver changes.
-  if (!status.probe || !status.probeValid) {
-    return {
-      ready: false,
-      reason: status.probe
-        ? (status.probe.error ?? '上次检测没有通过，请重新检测')
-        : '这台机器还没有检测过，请在设置页先检测一次',
-      disable: true,
-    };
-  }
-  if (!status.probe.supported) {
-    return { ready: false, reason: status.probe.error ?? '上次检测没有通过', disable: true };
   }
   return { ready: true, disable: false };
 }

@@ -2,15 +2,15 @@
 //!
 //! 两个方向都在这一个模块里：
 //!
-//! * **服务端**（桌面）：一条极简的 HTTP/1.1 服务，`GET /v1/capabilities` 报能力、
-//!   `POST /v1/process` 收字节回字节。协议自己写（tokio + `TcpListener`），不引框架：
+//! * **服务端**（桌面）：一条极简的 HTTP/1.1 服务，`GET /v2/capabilities` 报能力、
+//!   `POST /v2/process` 收字节回字节。协议自己写（tokio + `TcpListener`），不引框架：
 //!   只有两个端点、一个令牌头，`Content-Length` + `Connection: close` 就够了。
 //! * **客户端**（任意端）：`remote_*` 几条命令，把本机缓存里的一页发给远端、取回
 //!   处理好的图。移动端没法直接发 HTTP（webview 里没有网络权限这条路），所以由
 //!   Rust 代发。
 //!
 //! 安全上的取舍：
-//! * 默认**不开**，且至少有一个「模型包齐全」的能力才允许开（前端与后端都拦）。
+//! * 默认**不开**；可用模型由远端请求时动态读取。
 //! * 每个请求都要令牌（除了一条只报服务名的 `/v1/ping`），比较是按位累积的常数
 //!   时间比较，不给逐字节试探留时间差。
 //! * 明文 HTTP：这是局域网内的临时通道，令牌就是全部凭据；要更严就换 HTTPS 反代。
@@ -37,7 +37,9 @@ const MAX_HEADER: usize = 32 * 1024;
 
 /// 服务名与版本：`/v1/ping` 用它自报家门（移动端连上时先确认对面是同类应用）。
 const SERVICE_NAME: &str = "yomika-compute-center";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
+const DISCOVERY_PORT: u16 = 47654;
+const DISCOVERY_REQUEST: &[u8] = b"YOMIKA_DISCOVER_V2";
 
 /// 一项能力：移动端据此显示「对面有什么、能不能用」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +64,7 @@ pub struct ComputeCenterStatus {
     pub addresses: Vec<String>,
     pub token: String,
     pub capabilities: Vec<Capability>,
-    /// 至少有一项能力齐全——没有就不允许开。
+    /// 保留旧字段供前端状态解析；服务可以在尚未安装模型时启动。
     pub can_start: bool,
 }
 
@@ -74,6 +76,7 @@ pub struct RemoteCapabilities {
     pub version: u32,
     pub name: String,
     pub capabilities: Vec<Capability>,
+    pub models: Vec<crate::inference::RunnableModel>,
 }
 
 /// 服务端句柄。
@@ -82,6 +85,60 @@ pub struct ComputeCenter {
     inner: Mutex<Option<Running>>,
     /// 令牌随时可能被用户换：请求进来现读，不用重启服务。
     token: Arc<RwLock<String>>,
+    pairing: Arc<PairingState>,
+}
+
+#[derive(Default)]
+struct PairingState {
+    pending: Mutex<Option<PendingPair>>,
+}
+
+struct PendingPair {
+    request_id: String,
+    code: String,
+    peer: String,
+    expires: std::time::Instant,
+    attempts: u8,
+}
+
+impl PairingState {
+    fn begin(&self, peer: &str) -> Result<(String, String), String> {
+        let mut pending = self.pending.lock().map_err(|_| "配对状态不可用")?;
+        if pending.as_ref().is_some_and(|item| item.expires > std::time::Instant::now()) {
+            return Err("已有配对请求，请稍后重试".into());
+        }
+        let request_id = fresh_token();
+        let secret = fresh_token();
+        let code_value = u32::from_str_radix(&secret[..8], 16).map_err(|_| "无法生成配对码")? % 1_000_000;
+        let code = format!("{code_value:06}");
+        *pending = Some(PendingPair {
+            request_id: request_id.clone(),
+            code: code.clone(),
+            peer: peer.to_string(),
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(90),
+            attempts: 0,
+        });
+        Ok((request_id, code))
+    }
+
+    fn confirm(&self, peer: &str, request_id: &str, code: &str) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "配对状态不可用")?;
+        let item = pending.as_mut().ok_or("没有待确认的配对请求")?;
+        if item.expires <= std::time::Instant::now() {
+            *pending = None;
+            return Err("配对码已过期".into());
+        }
+        if item.peer != peer || item.request_id != request_id {
+            return Err("配对请求不匹配".into());
+        }
+        item.attempts += 1;
+        if !token_matches(&item.code, code) {
+            if item.attempts >= 5 { *pending = None; }
+            return Err("配对码错误".into());
+        }
+        *pending = None;
+        Ok(())
+    }
 }
 
 struct Running {
@@ -104,6 +161,10 @@ impl ComputeCenter {
         self.inner.lock().map(|guard| guard.is_some()).unwrap_or(false)
     }
 
+    pub fn running_port(&self) -> Option<u16> {
+        self.inner.lock().ok().and_then(|guard| guard.as_ref().map(|running| running.port))
+    }
+
     /// 开服务。`port` 为 0 或占着就报错——这里不替用户改端口，改端口是设置页的事。
     pub fn start(&self, context: ServerContext, port: u16) -> Result<u16, String> {
         let mut guard = self.inner.lock().map_err(|_| "算力中心锁失败".to_string())?;
@@ -122,6 +183,7 @@ impl ComputeCenter {
             .map_err(|error| format!("设置非阻塞失败：{error}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let token = Arc::clone(&self.token);
+        let pairing = Arc::clone(&self.pairing);
 
         let stop_for_task = Arc::clone(&stop);
         // `from_std` 必须在 tokio 的运行环境里调（普通测试线程里没有 reactor），
@@ -130,8 +192,12 @@ impl ComputeCenter {
             let Ok(listener) = TcpListener::from_std(listener) else {
                 return;
             };
-            serve(listener, token, stop_for_task, context).await;
+            serve(listener, token, Arc::clone(&pairing), stop_for_task, context).await;
         });
+        if port != 0 {
+            let discovery_stop = Arc::clone(&stop);
+            std::thread::spawn(move || serve_discovery(bound, discovery_stop));
+        }
         *guard = Some(Running { port: bound, stop });
         Ok(bound)
     }
@@ -161,6 +227,49 @@ pub fn local_addresses() -> Vec<String> {
         }
     }
     addresses
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredDevice {
+    pub address: String,
+    pub name: String,
+    pub port: u16,
+}
+
+fn serve_discovery(port: u16, stop: Arc<AtomicBool>) {
+    let Ok(socket) = std::net::UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) else { return };
+    let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let reply = serde_json::json!({ "service": SERVICE_NAME, "version": PROTOCOL_VERSION, "name": host_name(), "port": port }).to_string();
+    let mut buffer = [0u8; 128];
+    while !stop.load(Ordering::SeqCst) {
+        if let Ok((size, peer)) = socket.recv_from(&mut buffer) {
+            if &buffer[..size] == DISCOVERY_REQUEST {
+                let _ = socket.send_to(reply.as_bytes(), peer);
+            }
+        }
+    }
+}
+
+pub fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
+    socket.set_broadcast(true).map_err(|error| error.to_string())?;
+    socket.set_read_timeout(Some(std::time::Duration::from_millis(1200))).map_err(|error| error.to_string())?;
+    socket.send_to(DISCOVERY_REQUEST, ("255.255.255.255", DISCOVERY_PORT)).map_err(|error| error.to_string())?;
+    let mut devices = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while let Ok((size, peer)) = socket.recv_from(&mut buffer) {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buffer[..size]) else { continue };
+        if value.get("service").and_then(|value| value.as_str()) != Some(SERVICE_NAME)
+            || value.get("version").and_then(|value| value.as_u64()) != Some(PROTOCOL_VERSION as u64) { continue }
+        let Some(port) = value.get("port").and_then(|value| value.as_u64()).and_then(|value| u16::try_from(value).ok()) else { continue };
+        let name = value.get("name").and_then(|value| value.as_str()).unwrap_or("Yomika").chars().take(80).collect();
+        let address = format!("{}:{port}", peer.ip());
+        if !devices.iter().any(|device: &DiscoveredDevice| device.address == address) {
+            devices.push(DiscoveredDevice { address, name, port });
+        }
+    }
+    Ok(devices)
 }
 
 /// 能力清单：三类各自查一遍「齐不齐」。
@@ -215,37 +324,14 @@ pub fn capabilities(model_data: &Path, data: &Path) -> Vec<Capability> {
 #[cfg(windows)]
 fn dlssnr_capability(data: &Path) -> Capability {
     let status = crate::dlssnr::status(data);
-    // Probe results are process-global, but validity is tied to the exact data
-    // directory and DLL. A different profile (or test fixture) must not make
-    // this capability report DLSS5 as ready here.
-    match crate::dlssnr::last_probe_for(data) {
-        Some(probe) if probe.supported => Capability {
-            id: "dlssnr".to_string(),
-            label: "DLSS5".to_string(),
-            ready: true,
-            detail: format!("{}（检测 {:.1}ms）", status.variant_label.clone().unwrap_or_else(|| "已导入".into()), probe.elapsed_ms as f64),
-        },
-        Some(probe) => Capability {
-            id: "dlssnr".to_string(),
-            label: "DLSS5".to_string(),
-            ready: false,
-            detail: probe
-                .error
-                .clone()
-                .unwrap_or_else(|| "这台机器上 DLSS5 跑不起来".to_string()),
-        },
-        None => Capability {
-            id: "dlssnr".to_string(),
-            label: "DLSS5".to_string(),
-            ready: false,
-            detail: if status.available {
-                "还没有检测过（在设置页点一次检测）".to_string()
-            } else {
-                status
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "DLSS5 不可用".to_string())
-            },
+    Capability {
+        id: "dlssnr".to_string(),
+        label: "DLSS5".to_string(),
+        ready: status.available,
+        detail: if status.available {
+            status.variant_label.unwrap_or_else(|| "已导入".into())
+        } else {
+            status.error.unwrap_or_else(|| "DLSS5 不可用".into())
         },
     }
 }
@@ -531,11 +617,13 @@ async fn write_json(stream: &mut TcpStream, status: u16, reason: &str, body: &st
 pub struct ServerContext {
     pub model_data: std::path::PathBuf,
     pub data: std::path::PathBuf,
+    pub app: Option<tauri::AppHandle>,
 }
 
 async fn serve(
     listener: TcpListener,
     token: Arc<RwLock<String>>,
+    pairing: Arc<PairingState>,
     stop: Arc<AtomicBool>,
     context: ServerContext,
 ) {
@@ -549,9 +637,10 @@ async fn serve(
                     break;
                 }
                 let token = Arc::clone(&token);
+                let pairing = Arc::clone(&pairing);
                 let context = context.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = handle_connection(stream, token, context).await;
+                    let _ = handle_connection(stream, token, pairing, context).await;
                 });
             }
             // 单个连接出错不该让服务停：继续接下一个。
@@ -563,6 +652,7 @@ async fn serve(
 async fn handle_connection(
     mut stream: TcpStream,
     token: Arc<RwLock<String>>,
+    pairing: Arc<PairingState>,
     context: ServerContext,
 ) -> Result<(), String> {
     let request = match read_request(&mut stream).await {
@@ -574,8 +664,39 @@ async fn handle_connection(
         }
     };
 
-    // 不带头令牌的一律先挡在门外（`/v1/ping` 只报服务名，不碰数据）。
-    if request.path == "/v1/ping" && request.method == "GET" {
+    // 配对入口只给出临时请求号；凭据必须凭被配对端显示的六位码取得。
+    if request.path == "/v2/pair/request" && request.method == "POST" {
+        let peer = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_string();
+        return match pairing.begin(&peer) {
+            Ok((request_id, code)) => {
+                if let Some(app) = &context.app {
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog()
+                        .message(format!("配对码：{code}\n\n请在发起配对的设备输入。90 秒内有效。"))
+                        .title("Yomika 远端配对")
+                        .show(|_| {});
+                }
+                write_json(&mut stream, 200, "OK", &serde_json::json!({ "requestId": request_id }).to_string()).await
+            }
+            Err(error) => write_json(&mut stream, 429, "Too Many Requests", &error_body("REMOTE_UNAVAILABLE", &error)).await,
+        };
+    }
+    if request.path == "/v2/pair/confirm" && request.method == "POST" {
+        let peer = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_string();
+        let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let request_id = payload.get("requestId").and_then(|value| value.as_str()).unwrap_or_default();
+        let code = payload.get("code").and_then(|value| value.as_str()).unwrap_or_default();
+        return match pairing.confirm(&peer, request_id, code) {
+            Ok(()) => {
+                let current_token = token.read().map(|guard| guard.clone()).unwrap_or_default();
+                write_json(&mut stream, 200, "OK", &serde_json::json!({ "token": current_token, "name": host_name() }).to_string()).await
+            }
+            Err(error) => write_json(&mut stream, 403, "Forbidden", &error_body("UNAUTHORIZED", &error)).await,
+        };
+    }
+
+    // 数据端点仍要求凭配对码取得的令牌。
+    if request.path == "/v2/ping" && request.method == "GET" {
         let body = serde_json::json!({ "service": SERVICE_NAME, "version": PROTOCOL_VERSION });
         return write_json(&mut stream, 200, "OK", &body.to_string()).await;
     }
@@ -592,18 +713,19 @@ async fn handle_connection(
     }
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/v1/capabilities") => {
+        ("GET", "/v2/capabilities") => {
             let name = host_name();
             let payload = RemoteCapabilities {
                 service: SERVICE_NAME.to_string(),
                 version: PROTOCOL_VERSION,
                 name,
                 capabilities: capabilities(&context.model_data, &context.data),
+                models: crate::inference::runnable_models(&context.model_data),
             };
             let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
             write_json(&mut stream, 200, "OK", &body).await
         }
-        ("POST", "/v1/process") => {
+        ("POST", "/v2/process") => {
             let params = request
                 .headers
                 .get("x-yomika-params")
@@ -674,7 +796,7 @@ fn host_name() -> String {
 pub fn remote_capabilities(url: &str, token: &str) -> Result<RemoteCapabilities, String> {
     let base = normalize_base(url)?;
     let response = blocking_client()?
-        .get(format!("{base}/v1/capabilities"))
+        .get(format!("{base}/v2/capabilities"))
         .header("x-yomika-token", token)
         .timeout(std::time::Duration::from_secs(8))
         .send()
@@ -684,7 +806,52 @@ pub fn remote_capabilities(url: &str, token: &str) -> Result<RemoteCapabilities,
     if !status.is_success() {
         return Err(describe_error(status.as_u16(), &body));
     }
-    serde_json::from_str(&body).map_err(|error| format!("对面回的不是能力清单：{error}"))
+    let capabilities: RemoteCapabilities = serde_json::from_str(&body).map_err(|error| format!("对面回的不是能力清单：{error}"))?;
+    if capabilities.service != SERVICE_NAME || capabilities.version != PROTOCOL_VERSION {
+        return Err("远端配对协议版本不匹配".into());
+    }
+    Ok(capabilities)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequest {
+    pub request_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairResult {
+    pub token: String,
+    pub name: String,
+}
+
+pub fn request_pairing(url: &str) -> Result<PairRequest, String> {
+    let base = normalize_base(url)?;
+    let response = blocking_client()?
+        .post(format!("{base}/v2/pair/request"))
+        .timeout(std::time::Duration::from_secs(8))
+        .send().map_err(|error| format!("连不上 {base}：{error}"))?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() { return Err(describe_error(status.as_u16(), &body)); }
+    serde_json::from_str(&body).map_err(|error| format!("配对响应无效：{error}"))
+}
+
+pub fn confirm_pairing(url: &str, request_id: &str, code: &str) -> Result<PairResult, String> {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("请输入六位数字配对码".into());
+    }
+    let base = normalize_base(url)?;
+    let response = blocking_client()?
+        .post(format!("{base}/v2/pair/confirm"))
+        .json(&serde_json::json!({ "requestId": request_id, "code": code }))
+        .timeout(std::time::Duration::from_secs(8))
+        .send().map_err(|error| format!("连不上 {base}：{error}"))?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() { return Err(describe_error(status.as_u16(), &body)); }
+    serde_json::from_str(&body).map_err(|error| format!("配对响应无效：{error}"))
 }
 
 /// 把一段图片字节发给远端处理，取回 PNG 字节。
@@ -708,14 +875,22 @@ pub fn remote_process(
     };
     // 一页大图 + 一个模型的推理，给足时间；再长就该考虑把图切小。
     const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let normalized = image::load_from_memory(&bytes)
+        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法解码：{error}")))?
+        .to_rgba8();
+    let mut png = Vec::new();
+    use image::ImageEncoder;
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(normalized.as_raw(), normalized.width(), normalized.height(), image::ExtendedColorType::Rgba8)
+        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法转换为 PNG：{error}")))?;
     let response = blocking_client()
         .map_err(RemoteFailure::transport)?
-        .post(format!("{base}/v1/process"))
+        .post(format!("{base}/v2/process"))
         .header("x-yomika-token", token)
         .header("x-yomika-params", encoded)
         .header("content-type", "application/octet-stream")
         .timeout(PROCESS_TIMEOUT)
-        .body(bytes)
+        .body(png)
         .send()
         .map_err(|error| {
             if error.is_timeout() {
@@ -887,13 +1062,23 @@ fn current_port(app: &tauri::AppHandle) -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
-/// 算力中心的现状：开没开、端口、地址、令牌、能力清单。
+pub fn restore_on_launch(app: &tauri::AppHandle) -> Result<(), String> {
+    let mut snapshot = preferences(app)?;
+    if !snapshot.compute_center_enabled { return Ok(()); }
+    if snapshot.compute_center_token.is_empty() {
+        snapshot.compute_center_token = fresh_token();
+        snapshot = store_preferences(app, snapshot)?;
+    }
+    let (model_data, data) = paths(app)?;
+    let center = center_of(app)?;
+    center.set_token(&snapshot.compute_center_token);
+    center.start(ServerContext { model_data, data, app: Some(app.clone()) }, snapshot.compute_center_port)?;
+    Ok(())
+}
+
+/// 算力中心的现状：开没开、端口、地址、令牌。
 #[tauri::command]
 pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCenterStatus> {
-    let (model_data, data) = match paths(&app) {
-        Ok(paths) => paths,
-        Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
-    };
     let center = match center_of(&app) {
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
@@ -901,21 +1086,18 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
     let token = preferences(&app)
         .map(|snapshot| snapshot.compute_center_token)
         .unwrap_or_default();
-    let capabilities = capabilities(&model_data, &data);
-    let can_start = capabilities.iter().any(|capability| capability.ready);
     CommandResult::success(ComputeCenterStatus {
         running: center.is_running(),
-        port: current_port(&app),
+        port: center.running_port().unwrap_or_else(|| current_port(&app)),
         addresses: local_addresses(),
         token,
-        capabilities,
-        can_start,
+        capabilities: Vec::new(),
+        can_start: true,
     })
 }
 
 /// 打开 / 关掉算力中心，或者换端口、换令牌。
 ///
-/// 打开时至少一项能力要齐全——这也是用户的要求：模型包齐全才允许开。
 #[tauri::command]
 pub fn compute_center_configure(
     app: tauri::AppHandle,
@@ -951,19 +1133,18 @@ pub fn compute_center_configure(
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    center.set_token(&snapshot.compute_center_token);
+    if center.running_port().is_some_and(|running| port.is_some_and(|port| port != running)) {
+        return CommandResult::failure(
+            "INVALID_RESPONSE",
+            "请先关闭算力中心，再修改端口",
+            false,
+        );
+    }
     if enabled {
-        let capabilities = capabilities(&model_data, &data);
-        if !capabilities.iter().any(|capability| capability.ready) {
-            return CommandResult::failure(
-                "INFERENCE_UNAVAILABLE",
-                "还没有一项能在远端用的能力：超分模型、去码模型包、DLSS5 至少齐全一个",
-                false,
-            );
-        }
         let context = ServerContext {
             model_data: model_data.clone(),
             data: data.clone(),
+            app: Some(app.clone()),
         };
         if let Err(error) = center.start(context, snapshot.compute_center_port) {
             // 端口被占、绑不上：这是本机的一次网络动作失败（前端错误码表里是 `NETWORK`）。
@@ -973,20 +1154,19 @@ pub fn compute_center_configure(
     } else {
         center.stop();
     }
+    center.set_token(&snapshot.compute_center_token);
 
     let saved = match store_preferences(&app, snapshot) {
         Ok(snapshot) => snapshot,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    let capabilities = capabilities(&model_data, &data);
-    let can_start = capabilities.iter().any(|capability| capability.ready);
     CommandResult::success(ComputeCenterStatus {
         running: center.is_running(),
-        port: saved.compute_center_port,
+        port: center.running_port().unwrap_or(saved.compute_center_port),
         addresses: local_addresses(),
         token: saved.compute_center_token,
-        capabilities,
-        can_start,
+        capabilities: Vec::new(),
+        can_start: true,
     })
 }
 
@@ -1001,6 +1181,33 @@ pub async fn remote_compute_capabilities(
         // 连不上就是「这个地址这一刻没有服务」：`NETWORK_ERROR` 不在前端的错误码表里，
         // 发出去整条错误会被桥当成无效响应，真正的信息反而看不到。
         Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+#[tauri::command]
+pub async fn compute_discover() -> CommandResult<Vec<DiscoveredDevice>> {
+    match tauri::async_runtime::spawn_blocking(discover_devices).await {
+        Ok(Ok(devices)) => CommandResult::success(devices),
+        Ok(Err(error)) => CommandResult::failure("NETWORK", error, true),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+#[tauri::command]
+pub async fn compute_pair_request(url: String) -> CommandResult<PairRequest> {
+    match tauri::async_runtime::spawn_blocking(move || request_pairing(&url)).await {
+        Ok(Ok(result)) => CommandResult::success(result),
+        Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+#[tauri::command]
+pub async fn compute_pair_confirm(url: String, request_id: String, code: String) -> CommandResult<PairResult> {
+    match tauri::async_runtime::spawn_blocking(move || confirm_pairing(&url, &request_id, &code)).await {
+        Ok(Ok(result)) => CommandResult::success(result),
+        Ok(Err(error)) => CommandResult::failure("UNAUTHORIZED", error, false),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
 }
@@ -1108,6 +1315,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pairing_codes_expire_and_cannot_be_replayed() {
+        let pairing = PairingState::default();
+        let (request_id, code) = pairing.begin("127.0.0.1").expect("start pairing");
+        assert_ne!(request_id, code);
+        assert!(pairing.confirm("127.0.0.1", &request_id, "invalid").is_err());
+        assert!(pairing.confirm("127.0.0.2", &request_id, &code).is_err());
+        assert!(pairing.confirm("127.0.0.1", &request_id, &code).is_ok());
+        assert!(pairing.confirm("127.0.0.1", &request_id, &code).is_err());
+    }
+
+    #[test]
     fn tokens_must_match_exactly_and_never_match_an_empty_stored_token() {
         assert!(token_matches("abc123", "abc123"));
         assert!(!token_matches("abc123", "abc124"));
@@ -1164,6 +1382,7 @@ mod tests {
         let context = ServerContext {
             model_data: dir.path().to_path_buf(),
             data: dir.path().to_path_buf(),
+            app: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
@@ -1223,6 +1442,7 @@ mod tests {
         let context = ServerContext {
             model_data: dir.to_path_buf(),
             data: dir.to_path_buf(),
+            app: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
@@ -1236,7 +1456,7 @@ mod tests {
         let (center, port) = server_for(dir.path());
         let response = raw_request(
             port,
-            b"POST /v1/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\ncontent-length: 100\r\n\r\n0123456789",
+            b"POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\ncontent-length: 100\r\n\r\n0123456789",
         );
         assert!(response.starts_with("HTTP/1.1 400"), "{response}");
         assert!(response.contains("INCOMPLETE_BODY"), "{response}");
@@ -1249,7 +1469,7 @@ mod tests {
         let (center, port) = server_for(dir.path());
         let head = |extra: &str| {
             format!(
-                "POST /v1/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\n{extra}\r\n"
+                "POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\n{extra}\r\n"
             )
         };
         // 重复的长度头：读哪一个都可能错，所以不猜。

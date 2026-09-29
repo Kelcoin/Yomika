@@ -40,16 +40,12 @@ describe('DLSS5 availability gate', () => {
     expect(await checkDlssnrAvailability(false)).toEqual({ ready: false, disable: false });
   });
 
-  it('allows only a machine with a valid successful probe', async () => {
+  it('allows an available machine without a mandatory probe', async () => {
     adapterReturning(statusWith({ probe: PASSED_PROBE, probeValid: true }));
     expect(await checkDlssnrAvailability(true)).toEqual({ ready: true, disable: false });
 
     adapterReturning(statusWith({ probe: null, probeValid: false }));
-    expect(await checkDlssnrAvailability(true)).toMatchObject({
-      ready: false,
-      disable: true,
-      reason: '这台机器还没有检测过，请在设置页先检测一次',
-    });
+    expect(await checkDlssnrAvailability(true)).toEqual({ ready: true, disable: false });
   });
 
   it('refuses and writes the switch back when the machine cannot run it at all', async () => {
@@ -61,15 +57,13 @@ describe('DLSS5 availability gate', () => {
     });
   });
 
-  it('refuses a failed or stale probe, and says which one it is', async () => {
+  it('does not turn an optional probe result into a runtime gate', async () => {
     adapterReturning(statusWith({ probe: { ...PASSED_PROBE, supported: false, error: '驱动不支持' } }));
-    expect(await checkDlssnrAvailability(true)).toMatchObject({ ready: false, disable: true, reason: '驱动不支持' });
+    expect(await checkDlssnrAvailability(true)).toEqual({ ready: true, disable: false });
 
     adapterReturning(statusWith({ probe: PASSED_PROBE, probeValid: false }));
     const stale = await checkDlssnrAvailability(true);
-    expect(stale.ready).toBe(false);
-    expect(stale.disable).toBe(true);
-    expect(stale.reason).toContain('重新检测');
+    expect(stale).toEqual({ ready: true, disable: false });
   });
 
   it('stays out of the preference when the machine cannot be asked at all', async () => {

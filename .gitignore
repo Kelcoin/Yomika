@@ -44,6 +44,7 @@ CLAUDE.local.md
 /src-tauri/target/
 /src-tauri/target-fixed/
 /node_modules/
+/.vite-cache/
 /.npm-cache/
 src-tauri/.npm-cache/
 *.tsbuildinfo

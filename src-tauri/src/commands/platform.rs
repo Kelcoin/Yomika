@@ -127,6 +127,8 @@ pub fn frontend_ready(app: tauri::AppHandle) -> CommandResult<()> {
     #[cfg(desktop)]
     {
         use tauri::Manager;
+        #[cfg(target_os = "windows")]
+        if std::env::args().any(|arg| arg == "--background") { return CommandResult::success(()); }
         if let Some(main) = app.get_webview_window("main") {
             let _ = main.show();
             let _ = main.set_focus();

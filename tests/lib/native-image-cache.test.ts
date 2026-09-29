@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { NativeImageCacheAdapter } from '../../src/lib/nativeImageCache';
+import { NativeImageCacheAdapter, remoteTransform } from '../../src/lib/nativeImageCache';
+import { createImageCacheKey } from '../../src/domain/cache';
+import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -46,5 +48,20 @@ describe('NativeImageCacheAdapter', () => {
     await repository.fetch({ scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'reader-page', pageIndex: 2, sourcePath: 'chapter/02.gif' });
 
     expect(adapter).toHaveBeenCalledWith('load_reader_page', { serverId: 'server-a', archiveId: 'archive-a', pageIndex: 2, path: 'chapter/02.gif' });
+  });
+
+  it('passes the selected local rendition to remote processing and separates device cache keys', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, remoteComputeUrl: '192.168.1.9:47653', remoteComputeToken: 'paired-token' } };
+      if (command === 'remote_compute_process') return [0x89, 0x50, 0x4e, 0x47];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const transform = remoteTransform({ device: '192.168.1.9:47653', source: 'enhanced', op: 'dlssnr', modelId: '', scale: 2, passes: '' });
+    const identity = { scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'remote' as const, pageIndex: 2, modelId: 'local-upscale', transform };
+    await new NativeImageCacheAdapter().fetch(identity);
+    expect(adapter).toHaveBeenCalledWith('remote_compute_process', { input: expect.objectContaining({ source: 'enhanced', upscaleModel: 'local-upscale' }) });
+    const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', op: 'dlssnr', modelId: '', scale: 2, passes: '' });
+    expect(createImageCacheKey(identity)).not.toBe(createImageCacheKey({ ...identity, transform: otherDevice }));
   });
 });

@@ -215,6 +215,7 @@ export type DlssnrSource = 'reader-page' | 'decensored' | 'enhanced';
 
 /** `remote` 那一版的全部处理参数（同样进缓存键）。 */
 export function remoteTransform(input: {
+  device: string;
   source: DlssnrSource;
   op: string;
   modelId: string;
@@ -225,17 +226,19 @@ export function remoteTransform(input: {
 }
 
 function parseRemoteOpsTransform(transform: string | undefined): {
+  device: string;
   source: DlssnrSource;
   op: string;
   modelId: string;
   scale: number;
   passes: string;
 } {
-  const fallback = { source: 'reader-page' as DlssnrSource, op: 'upscale', modelId: '', scale: 2, passes: '' };
+  const fallback = { device: '', source: 'reader-page' as DlssnrSource, op: 'upscale', modelId: '', scale: 2, passes: '' };
   if (!transform) return fallback;
   try {
     const parsed = JSON.parse(transform) as Partial<typeof fallback>;
     return {
+      device: typeof parsed.device === 'string' ? parsed.device : '',
       source: parsed.source === 'enhanced' || parsed.source === 'decensored' ? parsed.source : 'reader-page',
       op: typeof parsed.op === 'string' ? parsed.op : 'upscale',
       modelId: typeof parsed.modelId === 'string' ? parsed.modelId : '',

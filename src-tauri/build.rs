@@ -63,6 +63,48 @@ fn build_ngx_shim() -> bool {
     }
 }
 
+/// 给链接器一份应用清单：`tauri` 的 `tray-icon` 特性（Windows 上的托盘图标）经 `muda`
+/// 从 comctl32 导入 `TaskDialogIndirect`，而它只存在于 **v6** 那一份——side-by-side
+/// 程序集里的 comctl32。只有进程带清单声明了这个依赖，加载器才会去解析它；没有清单时
+/// 绑定的是 system32 里的 v5，缺这个导出，进程在**加载阶段**就死掉
+/// （0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND）。
+///
+/// 这份清单本来由 tauri-build 作为**资源**塞进 `resource.lib`，而资源里的清单只跟着
+/// bin 走：`cargo test` 编出来的二进制拿不到，于是整个 Rust 套件一行都跑不出来。改由
+/// 链接器生成（`/MANIFESTINPUT`）就落在**每个**二进制上；代价是必须让 tauri-build 别
+/// 再塞那份资源，否则同一个进程里两份 `RT_MANIFEST`（资源一份、链接器一份）会让
+/// CVTRES 直接报 CVT1100（资源重复）——见 `main()` 里的 `try_build`。
+///
+/// 内容与 tauri-build 自己那份（`windows-app-manifest.xml`）逐字相同，所以应用的行为
+/// 一点没变：清单里的依赖仍然只有 Common-Controls v6。
+fn embed_windows_manifest() {
+    const MANIFEST: &str = r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let manifest = out.join("yomika-app.manifest");
+    if std::fs::write(&manifest, MANIFEST).is_err() {
+        return;
+    }
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+}
+
 /// 编译时间与提交号：错误日志的「相关信息」里写的就是它们（`app_build_info` 读）。
 ///
 /// 只在**重新编译**时更新，而那正是「这一份二进制是哪来的」的答案。取不到 git 就留空，
@@ -103,7 +145,16 @@ fn main() {
     }
     println!("cargo:rustc-check-cfg=cfg(ngx_core)");
 
+    embed_windows_manifest();
     stamp_build_info();
 
-    tauri_build::build();
+    // 清单已交给链接器（见 `embed_windows_manifest`），所以让 tauri-build 别再往资源里
+    // 塞一份：两份 `RT_MANIFEST` 会让 CVTRES 报 CVT1100（资源重复），应用直接链接失败。
+    // 图标与版本信息仍然由它写进 `resource.lib`，只有清单这一项换成链接器生成、且因此
+    // 也覆盖到测试二进制。
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+    if let Err(error) = tauri_build::try_build(attributes) {
+        panic!("tauri-build 失败：{error:#}");
+    }
 }

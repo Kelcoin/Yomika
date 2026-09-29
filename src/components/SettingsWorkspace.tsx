@@ -972,6 +972,12 @@ export function SettingsWorkspace() {
                 onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
               />
             )}
+            {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
+              <SettingsSwitch icon={<Rocket />} label="开机自启" checked={preferenceDraft.startWithWindows} onToggle={() => editPreferences({ startWithWindows: !preferenceDraft.startWithWindows })} />
+            )}
+            {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
+              <SettingsSwitch icon={<PanelBottom />} label="关闭到托盘" checked={preferenceDraft.closeToTray} onToggle={() => editPreferences({ closeToTray: !preferenceDraft.closeToTray })} />
+            )}
             {selectedSettingsSection === 'settings-general' && (
               <SettingsPanel
                 icon={<FolderOpen />}

@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import { useState } from 'react';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -119,7 +120,7 @@ describe('DLSS5 settings group', () => {
     expect(setInvokeAdapterForTests).toBeTruthy();
   });
 
-  it('locks the switch until a probe has actually run', async () => {
+  it('allows the switch when a DLL is present without a mandatory probe', async () => {
     const user = userEvent.setup();
     let probed = false;
     const adapter = adapterFor({
@@ -136,16 +137,11 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSS5' });
     const toggle = within(group).getByRole('switch', { name: '启用 DLSS5' });
-    expect(toggle).toBeDisabled();
-
-    await user.click(within(group).getByRole('button', { name: '检测' }));
-    await waitFor(() => expect(toggle).toBeEnabled());
-
     await user.click(toggle);
     await waitFor(() => expect(edits).toContainEqual({ dlssnrEnabled: true }));
   });
 
-  it('keeps the switch locked when the last probe belongs to a different snippet', async () => {
+  it('does not lock the switch on a stale probe result', async () => {
     // 换过片段之后旧结论作废：界面不能显示「检测通过、可以打开」，因为进程里跑的还是
     // 换之前那一份（NGX 一个进程只加载一份，换片段的那个进程要重启）。
     const user = userEvent.setup();
@@ -162,8 +158,6 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSS5' });
     const toggle = within(group).getByRole('switch', { name: '启用 DLSS5' });
-    expect(toggle).toBeDisabled();
-    expect(within(group).getByText(/换过片段：先重启应用，再点一次「检测」/)).toBeTruthy();
     await user.click(toggle);
   });
 
@@ -180,7 +174,8 @@ describe('DLSS5 settings group', () => {
     renderDlssnr();
 
     const group = await screen.findByRole('region', { name: 'DLSS5' });
-    const snippets = await within(group).findByRole('group', { name: 'DLSS5 片段' });
+    await user.click(within(group).getByRole('button', { name: 'DLSS5 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSS5 片段' });
     // 三条都在：官方版与社区版各占一行，装的是哪一条由后端认哈希回答。
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
     expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
@@ -206,7 +201,8 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSS5' });
     expect(within(group).getByRole('switch', { name: '启用 DLSS5' })).toBeDisabled();
-    const snippets = await within(group).findByRole('group', { name: 'DLSS5 片段' });
+    await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSS5 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSS5 片段' });
     expect(within(snippets).getAllByRole('button', { name: '下载并使用' })).toHaveLength(3);
     // 还没有片段就没有「当前这一份」，导入那一行改说「按显卡系列选一种变体」。
     expect(within(snippets).queryByText('当前这一份')).toBeNull();
@@ -224,7 +220,8 @@ describe('DLSS5 settings group', () => {
     renderDlssnr({ editPreferences: (patch) => edits.push(patch) });
 
     const group = await screen.findByRole('region', { name: 'DLSS5' });
-    await user.click(within(group).getByRole('button', { name: '增加一层' }));
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSS5 层数' })).getByRole('button', { name: '增加一层' }));
     await waitFor(() => expect(edits.some((patch) => typeof patch.dlssnrPasses === 'string')).toBe(true));
     const saved = edits.find((patch) => typeof patch.dlssnrPasses === 'string')?.dlssnrPasses ?? '';
     const passes = parseDlssnrPasses(saved);
@@ -236,10 +233,34 @@ describe('DLSS5 settings group', () => {
     expect(second).toBeDefined();
     expect(Object.keys(second!).sort()).toEqual(Object.keys(first!).sort());
   });
+
+  it('edits the selected layer without changing the other layer', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    const initial = serializeDlssnrPasses([
+      { style: 0, intensity: 1, localToneStrength: 1, localStructureStrength: 1, skinStructureStrength: 0, autoMask: false, uiCorrection: false },
+      { style: 1, intensity: 1.5, localToneStrength: 1, localStructureStrength: 1, skinStructureStrength: 0, autoMask: false, uiCorrection: false },
+    ]);
+    let latest = initial;
+    function Harness() {
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES, dlssnrPasses: initial });
+      return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => {
+        const next = { ...current, ...patch };
+        latest = next.dlssnrPasses;
+        return next;
+      })} visible /></ToastProvider>;
+    }
+    render(<Harness />);
+    const group = await screen.findByRole('region', { name: 'DLSS5' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSS5 层数' })).getByRole('button', { name: '第 2 层' }));
+    await user.click(within(await screen.findByRole('dialog', { name: '第 2 层' })).getByRole('switch', { name: '自动遮罩' }));
+    await waitFor(() => expect(parseDlssnrPasses(latest).map((pass) => pass.autoMask)).toEqual([false, true]));
+  });
 });
 
 describe('compute center settings group', () => {
-  it('refuses to start when no capability is complete', async () => {
+  it('allows starting without a capability list gate', async () => {
     setInvokeAdapterForTests(adapterFor({
       dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
       compute_center_status: () => ({
@@ -252,7 +273,7 @@ describe('compute center settings group', () => {
     }));
     renderAdvanced();
     const group = await screen.findByRole('region', { name: '算力中心' });
-    expect(within(group).getByRole('switch', { name: '作为算力中心' })).toBeDisabled();
+    expect(within(group).getByRole('switch', { name: '作为算力中心' })).toBeEnabled();
   });
 
   it('starts the server with the configured port and shows the LAN address', async () => {
@@ -270,20 +291,26 @@ describe('compute center settings group', () => {
     await waitFor(() => expect(within(group).getByText(/192\.168\.1\.5:47653/)).toBeTruthy());
     await user.click(within(group).getByRole('switch', { name: '作为算力中心' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', expect.objectContaining({ enabled: true, port: 47_653 })));
+    await waitFor(() => expect(screen.queryByRole('region', { name: '远端算力' })).toBeNull());
+    expect(within(group).getByRole('spinbutton', { name: '算力中心端口' })).toBeDisabled();
   });
 
-  it('keeps remote processing locked until an address and token are filled in', async () => {
+  it('keeps remote processing locked until pairing succeeds', async () => {
     const user = userEvent.setup();
     const adapter = adapterFor({
       dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
       compute_center_status: () => ({ ok: true, value: computeStatus() }),
+      compute_discover: () => ({ ok: true, value: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', port: 47653 }] }),
+      compute_pair_request: () => ({ ok: true, value: { requestId: 'request-1' } }),
+      compute_pair_confirm: () => ({ ok: true, value: { token: 'remote-token', name: 'DESKTOP-PC' } }),
       remote_compute_capabilities: () => ({
         ok: true,
         value: {
           service: 'yomika-compute-center',
-          version: 1,
+          version: 2,
           name: 'DESKTOP-PC',
           capabilities: [capability('upscale', true, '超分'), capability('dlssnr', true, 'DLSS5')],
+          models: [{ id: 'upscale-x4', kind: 'upscale', label: '超分 x4', scale: 4 }],
         },
       }),
     });
@@ -294,16 +321,23 @@ describe('compute center settings group', () => {
     const toggle = within(group).getByRole('switch', { name: '使用远端算力' });
     expect(toggle).toBeDisabled();
 
-    const address = within(group).getByLabelText('远端地址');
-    await user.type(address, '192.168.1.9:47653');
-    await user.type(within(group).getByLabelText('远端令牌'), 'remote-token');
+    await user.click(within(group).getByRole('button', { name: '添加设备' }));
+    const pairDialog = await screen.findByRole('dialog', { name: '添加远端设备' });
+    await user.type(within(pairDialog).getByLabelText('设备 IP'), '192.168.1.9:47653');
+    await user.click(within(pairDialog).getByRole('button', { name: /^配对$/ }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_request', { url: '192.168.1.9:47653' }));
+    await user.type(within(pairDialog).getByLabelText('配对码'), '123456');
+    await user.click(within(pairDialog).getByRole('button', { name: '完成配对' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_confirm', { url: '192.168.1.9:47653', requestId: 'request-1', code: '123456' }));
     await waitFor(() => expect(toggle).toBeEnabled());
 
-    await user.click(within(group).getByRole('button', { name: '连接' }));
-    // 对面的能力是动态显示出来的：连上之前这一组根本不知道它有什么。
+    await user.click(within(group).getByRole('button', { name: '已配对设备' }));
+    const deviceDialog = await screen.findByRole('dialog', { name: '已配对设备' });
+    await user.click(within(deviceDialog).getByRole('button', { name: '刷新模型' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('remote_compute_capabilities', { url: '192.168.1.9:47653', token: 'remote-token' }));
-    await waitFor(() => expect(within(group).getByText('DESKTOP-PC · 协议 v1')).toBeTruthy());
-    expect(within(group).getByText('2 项可用')).toBeTruthy();
+    await waitFor(() => expect(within(deviceDialog).getByText(/DESKTOP-PC · 超分、DLSS5/)).toBeTruthy());
+    await user.click(within(deviceDialog).getByRole('button', { name: '超分 x4' }));
+    await waitFor(() => expect(adapter.mock.calls.some(([command, args]) => command === 'save_preferences' && String((args?.input as PreferenceSnapshot | undefined)?.remoteComputeOps).includes('upscale-x4'))).toBe(true));
   });
 });
 
@@ -321,11 +355,10 @@ describe('derived settings storage', () => {
 
     const ops = parseRemoteOps(serializeRemoteOps({
       enabled: true,
-      source: 'decensored',
       op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: [{ style: 1 }] },
+      pairedDevices: [],
     }));
     expect(ops.enabled).toBe(true);
-    expect(ops.source).toBe('decensored');
     expect(ops.op.op).toBe('dlssnr');
     expect(parseRemoteOps('not json').op.op).toBe('upscale');
   });

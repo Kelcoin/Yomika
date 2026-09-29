@@ -15,6 +15,7 @@ import { emitTauriEvent } from '../tauriEvents';
 afterEach(() => {
   resetInvokeAdapterForTests();
   resetFilePickerForTests();
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
 /** Sections are grouped by topic, and `?section=` opens one directly, which is
@@ -44,6 +45,23 @@ const DATA_EXPORT_TEXT = JSON.stringify({
 });
 
 describe('settings workspace', () => {
+  it('shows and saves background startup controls only on Windows', async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => false } });
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      if (command === 'platform_capabilities') return { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('general');
+    await user.click(await screen.findByRole('switch', { name: '开机自启' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, startWithWindows: true } }));
+    await user.click(screen.getByRole('switch', { name: '关闭到托盘' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, startWithWindows: true, closeToTray: true } }));
+  });
   it('opens About links through the native external browser command', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {

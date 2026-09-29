@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Copy, Layers, Loader2, RefreshCw, Server, Sparkles, Wand2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, RefreshCw, Server, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
-import { SettingsChoice, SettingsNumber } from './SettingsValueControls';
+import { SettingsMenu } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
-import { writeClipboardText } from '../bridge/clipboard';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import {
   DEFAULT_REMOTE_OPS,
@@ -14,18 +13,13 @@ import {
   serializeRemoteOps,
   type ComputeCenterStatus,
   type RemoteCapabilities,
+  type DiscoveredDevice,
 } from '../repositories/nativeComputeCenterRepository';
 
 const OP_OPTIONS = [
   { value: 'upscale', label: '超分' },
   { value: 'decensor', label: '去码' },
   { value: 'dlssnr', label: 'DLSS5' },
-];
-
-const SOURCE_OPTIONS = [
-  { value: 'reader-page', label: '原图' },
-  { value: 'decensored', label: '已去码' },
-  { value: 'enhanced', label: '已超分' },
 ];
 
 interface Props {
@@ -45,7 +39,15 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
   const [busy, setBusy] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [remote, setRemote] = useState<RemoteCapabilities>();
+  const remoteRequest = useRef(0);
   const [probingRemote, setProbingRemote] = useState(false);
+  const [pairMenu, setPairMenu] = useState(false);
+  const [deviceMenu, setDeviceMenu] = useState(false);
+  const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
+  const [address, setAddress] = useState('');
+  const [requestId, setRequestId] = useState('');
+  const [code, setCode] = useState('');
+  const [pairBusy, setPairBusy] = useState(false);
 
   const remoteOps = useMemo(() => parseRemoteOps(preferences.remoteComputeOps), [preferences.remoteComputeOps]);
   const updateRemoteOps = (patch: Partial<typeof remoteOps>) =>
@@ -76,6 +78,11 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       return;
     }
     setStatus(result.value);
+    editPreferences({
+      computeCenterEnabled: next,
+      computeCenterToken: result.value.token,
+      ...(next ? { remoteComputeOps: serializeRemoteOps({ ...remoteOps, enabled: false }) } : {}),
+    });
     showToast(next ? '算力中心已开启' : '算力中心已关闭', 'success');
   }
 
@@ -92,15 +99,16 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       return;
     }
     setStatus(result.value);
+    editPreferences({ computeCenterToken: result.value.token });
     showToast('已换一份新令牌：移动端要重新填', 'success');
   }
 
-  async function connectRemote() {
+  async function connectRemote(url = preferences.remoteComputeUrl, token = preferences.remoteComputeToken) {
+    const request = ++remoteRequest.current;
+    setRemote(undefined);
     setProbingRemote(true);
-    const result = await repository.remoteCapabilities(
-      preferences.remoteComputeUrl,
-      preferences.remoteComputeToken,
-    );
+    const result = await repository.remoteCapabilities(url, token);
+    if (request !== remoteRequest.current) return;
     setProbingRemote(false);
     if (!result.ok) {
       setRemote(undefined);
@@ -111,23 +119,52 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
     showToast(`已连上 ${result.value.name}`, 'success');
   }
 
-  const readyCount = status?.capabilities.filter((capability) => capability.ready).length ?? 0;
+  async function scanDevices() {
+    setPairBusy(true);
+    const result = await repository.discover();
+    setPairBusy(false);
+    if (result.ok) setDevices(result.value);
+    else showToast(result.error.message, 'error');
+  }
+
+  async function startPairing() {
+    if (!address.trim()) return;
+    setPairBusy(true);
+    const result = await repository.requestPair(address.trim());
+    setPairBusy(false);
+    if (result.ok) setRequestId(result.value.requestId);
+    else showToast(result.error.message, 'error');
+  }
+
+  async function finishPairing() {
+    setPairBusy(true);
+    const result = await repository.confirmPair(address.trim(), requestId, code.trim());
+    setPairBusy(false);
+    if (!result.ok) { showToast(result.error.message, 'error'); return; }
+    const existing = remoteOps.pairedDevices.filter((device) => device.address !== address.trim());
+    editPreferences({
+      remoteComputeUrl: address.trim(),
+      remoteComputeToken: result.value.token,
+      remoteComputeOps: serializeRemoteOps({ ...remoteOps, pairedDevices: [...existing.slice(-7), { address: address.trim(), name: result.value.name, token: result.value.token }] }),
+    });
+    setPairMenu(false);
+    setRequestId('');
+    setCode('');
+    showToast(`已配对 ${result.value.name}`, 'success');
+    void connectRemote(address.trim(), result.value.token);
+  }
 
   return (
     <>
-      {/* 本机作为算力中心：模型包至少齐全一项才允许开。 */}
+      {/* 本机节点与远端客户端互斥，避免一台设备同时显示两套连接入口。 */}
       <div className="settings-group" role="region" aria-label="算力中心">
         <SettingsSwitch
           icon={<Server />}
           label="作为算力中心"
           hint={
-            !status
-              ? '正在读取能力清单…'
-              : readyCount === 0
-                ? '超分模型、去码模型包、DLSS5 至少要齐全一项才能开'
-                : `局域网内给移动端提供：${status.capabilities.filter((item) => item.ready).map((item) => item.label).join('、')}`
+            status?.running ? '局域网内提供远端处理服务' : '允许其他设备配对并使用本机处理服务'
           }
-          disabled={busy || !status?.canStart}
+          disabled={busy}
           checked={status?.running ?? false}
           onToggle={() => void toggleServing(!(status?.running ?? false))}
         />
@@ -136,7 +173,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
           label="端口"
           hint={
             status && status.addresses.length > 0
-              ? `移动端填：${status.addresses[0]}:${preferences.computeCenterPort}`
+              ? `移动端填：${status.addresses[0]}:${status.port}`
               : '没有找到局域网地址（先连上 Wi-Fi / 网线）'
           }
           control={
@@ -145,6 +182,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
               type="number"
               min={1024}
               max={65535}
+              disabled={status?.running}
               value={preferences.computeCenterPort}
               aria-label="算力中心端口"
               onChange={(event) => {
@@ -156,173 +194,48 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             />
           }
         />
-        <SettingsRow
-          icon={<Copy />}
-          label="令牌"
-          hint={preferences.computeCenterToken === '' ? '开启时会自动生成一份' : '移动端要用这一份；换一份就要在移动端上重填'}
-          control={
-            <div className="settings-inline-actions">
-              <code className="settings-token" title={preferences.computeCenterToken}>
-                {preferences.computeCenterToken === '' ? '—' : `${preferences.computeCenterToken.slice(0, 8)}…`}
-              </code>
-              <button
-                className="secondary-action"
-                type="button"
-                disabled={preferences.computeCenterToken === ''}
-                onClick={() => void writeClipboardText(preferences.computeCenterToken).then(() => showToast('令牌已复制', 'success'))}
-              >
-                复制
-              </button>
-              <button className="secondary-action" type="button" disabled={rotating} aria-busy={rotating} onClick={() => void rotateToken()}>
-                <RefreshCw aria-hidden="true" />
-                换一份
-              </button>
-            </div>
-          }
-        />
-        {status?.capabilities.map((capability) => (
-          <SettingsRow
-            key={capability.id}
-            icon={capability.ready ? <Sparkles /> : <AlertTriangle />}
-            label={capability.label}
-            hint={capability.detail}
-            control={<span className="settings-row-note">{capability.ready ? '可用' : '不可用'}</span>}
-          />
-        ))}
+        {status?.running && <SettingsRow icon={<RefreshCw />} label="撤销旧配对" hint="重新生成访问凭据，已配对设备需要重新配对" control={<button className="secondary-action" type="button" disabled={rotating} onClick={() => void rotateToken()}>重置</button>} />}
       </div>
 
       {/* 远端算力：把这一页交给另一台设备处理。 */}
-      <div className="settings-group" role="region" aria-label="远端算力">
+      {status && !status.running && <div className="settings-group" role="region" aria-label="远端算力">
         <SettingsSwitch
           icon={<Wand2 />}
           label="使用远端算力"
-          hint={
-            preferences.remoteComputeUrl.trim() === ''
-              ? '先填上桌面端的地址（那边设置里会显示）'
-              : '把这一页交给那台设备处理，结果回到本机显示'
-          }
-          disabled={preferences.remoteComputeUrl.trim() === '' || preferences.remoteComputeToken.trim() === ''}
+          hint="把这一页交给已配对设备处理，结果回到本机显示"
+          disabled={!remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)}
           checked={remoteOps.enabled}
           onToggle={() => updateRemoteOps({ enabled: !remoteOps.enabled })}
         />
-        <SettingsRow
-          icon={<Server />}
-          label="远端地址"
-          hint="IP 或 IP:端口（端口不填按 47653）"
-          control={
-            <input
-              className="settings-text-input"
-              type="url"
-              inputMode="url"
-              placeholder="192.168.1.5:47653"
-              value={preferences.remoteComputeUrl}
-              aria-label="远端地址"
-              onChange={(event) => editPreferences({ remoteComputeUrl: event.target.value })}
-            />
-          }
-        />
-        <SettingsRow
-          icon={<Copy />}
-          label="远端令牌"
-          hint="在桌面端的算力中心设置里复制"
-          control={
-            <div className="settings-inline-actions">
-              <input
-                className="settings-text-input"
-                type="password"
-                value={preferences.remoteComputeToken}
-                aria-label="远端令牌"
-                onChange={(event) => editPreferences({ remoteComputeToken: event.target.value })}
-              />
-              <button
-                className="secondary-action"
-                type="button"
-                disabled={probingRemote || preferences.remoteComputeUrl.trim() === ''}
-                aria-busy={probingRemote}
-                onClick={() => void connectRemote()}
-              >
-                {probingRemote ? <Loader2 className="spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
-                连接
-              </button>
-            </div>
-          }
-        />
-        {remote && (
-          <>
-            <SettingsRow
-              icon={<Server />}
-              label="对面的能力"
-              hint={`${remote.name} · 协议 v${remote.version}`}
-              control={<span className="settings-row-note">{remote.capabilities.filter((item) => item.ready).length} 项可用</span>}
-            />
-            {remote.capabilities.map((capability) => (
-              <SettingsRow
-                key={capability.id}
-                icon={capability.ready ? <Sparkles /> : <AlertTriangle />}
-                label={capability.label}
-                hint={capability.detail}
-                control={<span className="settings-row-note">{capability.ready ? '可用' : '不可用'}</span>}
-              />
-            ))}
-          </>
-        )}
-        <SettingsChoice
-          icon={<Wand2 />}
-          label="远端处理方式"
-          hint="只作用于远端这一次处理"
-          value={remoteOps.op.op}
-          options={OP_OPTIONS}
-          onChange={(value) => updateRemoteOp({ op: value as typeof remoteOps.op.op })}
-        />
-        <SettingsChoice
-          icon={<Layers />}
-          label="起点"
-          hint="从哪一版页面开始送过去"
-          value={remoteOps.source}
-          options={SOURCE_OPTIONS}
-          onChange={(value) => updateRemoteOps({ source: value as typeof remoteOps.source })}
-        />
-        <SettingsRow
-          icon={<Sparkles />}
-          label="远端模型 / 倍数"
-          hint={
-            remoteOps.op.op === 'dlssnr'
-              ? 'DLSS5 用远端设置页里那份层参数'
-              : remoteOps.op.modelId === ''
-                ? '留空 = 用对面的默认（超分按倍数）'
-                : `模型 ${remoteOps.op.modelId}`
-          }
-          control={
-            <input
-              className="settings-text-input"
-              type="text"
-              placeholder="模型 id（可留空）"
-              value={remoteOps.op.modelId}
-              aria-label="远端模型 id"
-              onChange={(event) => updateRemoteOp({ modelId: event.target.value })}
-            />
-          }
-        />
-        {remoteOps.op.op === 'upscale' && (
-          <SettingsNumber
-            icon={<Wand2 />}
-            label="倍数"
-            hint="只在对面没有点名模型时起作用"
-            value={remoteOps.op.scale}
-            min={1}
-            max={4}
-            step={1}
-            format={(value) => `${value}×`}
-            onChange={(value) => updateRemoteOp({ scale: Math.round(value) })}
-          />
-        )}
-        <SettingsRow
-          icon={<AlertTriangle />}
-          label="明文 HTTP"
-          hint="局域网内的临时通道：令牌就是全部凭据，别把它暴露到公网"
-          control={<span className="settings-row-note">{remoteOps.enabled ? '使用中' : '未使用'}</span>}
-        />
-      </div>
+        <SettingsRow icon={<Server />} label="已配对设备" value={remoteOps.pairedDevices.find((device) => device.address === preferences.remoteComputeUrl)?.name ?? '未选择'} onClick={() => { setDeviceMenu(true); if (preferences.remoteComputeUrl && preferences.remoteComputeToken) void connectRemote(); }} />
+        <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />
+        {deviceMenu && <SettingsMenu title="已配对设备" onClose={() => setDeviceMenu(false)}>
+          <div className="settings-choice-list">
+            {remoteOps.pairedDevices.map((device) => <button className="settings-choice-option-main" key={device.address} type="button" onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}>{device.name} · {device.address}</button>)}
+          </div>
+          <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新模型</button>
+          {remote && <p className="settings-menu-desc">{remote.name} · {remote.capabilities.filter((item) => item.ready).map((item) => item.label).join('、')}</p>}
+          {remote && <div className="settings-choice-list" role="group" aria-label="远端处理方式">
+            {OP_OPTIONS.filter((option) => remote.capabilities.some((item) => item.id === option.value && item.ready)).map((option) => <button key={option.value} className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.op === option.value} onClick={() => updateRemoteOp({ op: option.value as typeof remoteOps.op.op, modelId: '' })}>{option.label}</button>)}
+          </div>}
+          {remote && remoteOps.op.op !== 'dlssnr' && <div className="settings-choice-list" role="group" aria-label="远端模型">
+            {remoteOps.op.op === 'upscale' && <button className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === ''} onClick={() => updateRemoteOp({ modelId: '' })}>默认放大</button>}
+            {remote.models.filter((model) => model.kind === remoteOps.op.op).map((model) => <button key={model.id} className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === model.id} onClick={() => updateRemoteOp({ modelId: model.id })}>{model.label}</button>)}
+          </div>}
+          {remoteOps.op.op === 'upscale' && remoteOps.op.modelId === '' && <input className="settings-number" type="number" min={1} max={4} aria-label="远端放大倍数" value={remoteOps.op.scale} onChange={(event) => updateRemoteOp({ scale: Math.min(4, Math.max(1, Number(event.target.value) || 1)) })} />}
+        </SettingsMenu>}
+        {pairMenu && <SettingsMenu title="添加远端设备" onClose={() => { setPairMenu(false); setRequestId(''); }}>
+          <div className="settings-choice-list">
+            {devices.map((device) => <button className="settings-choice-option-main" key={device.address} type="button" onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}>{device.name} · {device.address}</button>)}
+          </div>
+          <button className="secondary-action" type="button" disabled={pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
+          <input className="settings-text-input" aria-label="设备 IP" placeholder="192.168.1.5:47653" value={address} onChange={(event) => { setAddress(event.target.value); setRequestId(''); setCode(''); }} />
+          {requestId ? <>
+            <input className="settings-text-input" aria-label="配对码" inputMode="numeric" maxLength={6} placeholder="输入远端显示的六位配对码" value={code} onChange={(event) => setCode(event.target.value)} />
+            <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}>完成配对</button>
+          </> : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}>配对</button>}
+        </SettingsMenu>}
+      </div>}
     </>
   );
 }

@@ -34,6 +34,14 @@ impl GpuInfo {
 
 /// 枚举适配器，挑一块 NVIDIA 的回来（多卡机器上第一块即可：NGX 自己也认这一块）。
 pub fn detect_gpu() -> Result<Option<GpuInfo>, String> {
+    static GPU: std::sync::OnceLock<Option<GpuInfo>> = std::sync::OnceLock::new();
+    if let Some(found) = GPU.get() { return Ok(found.clone()); }
+    let found = detect_gpu_uncached()?;
+    let _ = GPU.set(found.clone());
+    Ok(found)
+}
+
+fn detect_gpu_uncached() -> Result<Option<GpuInfo>, String> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 
     let factory: IDXGIFactory1 =

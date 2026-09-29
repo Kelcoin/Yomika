@@ -1870,7 +1870,7 @@ pub(crate) fn runnable_models(models_data: &std::path::Path) -> Vec<RunnableMode
 }
 
 /// 一台机器上「能直接用的模型」：算力中心把它报给移动端。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnableModel {
     pub id: String,
