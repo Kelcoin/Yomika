@@ -50,6 +50,12 @@ export const DomainErrorCodeSchema = z.enum([
   /** 模型仓库那份目录拿不到（离线、镜像挂了）。目录只在设置页用，拿不到就该显示
    * 「列不出来」，而不是把所有模型列表一起弄空。 */
   'MODEL_CATALOG_FETCH_FAILED',
+  /** 本体更新检查（`app_release_latest`）：请求本身没走通，或者答复不是能用的
+   * release 负载。调用方按「这次查不出来」处理，不打扰用户。 */
+  'APP_RELEASE_CHECK_FAILED',
+  /** GitHub 那边没回话/超时。分开记是因为这一个值得过一会儿再试，前者通常是
+   * 我们的解析或网络配置的问题。 */
+  'APP_RELEASE_UNREACHABLE',
 ]);
 
 export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;

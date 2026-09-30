@@ -59,6 +59,19 @@ try {
     if (Test-Path -LiteralPath $tauriConfig -PathType Leaf) {
         (Get-Item -LiteralPath $tauriConfig -Force).LastWriteTime = Get-Date
     }
+    # 构建戳的**显式**输入（审计 P2-3）：`build.rs` 登记了
+    # `rerun-if-env-changed=YOMIKA_BUILD_COMMIT`，提交号一变它就重跑，不再只靠上面那个
+    # 「把配置文件的时间戳碰一下」的副作用（那一下现在只为重新嵌入 dist 而留）。
+    # 收尾时 `verify-build-stamp.ps1` 还会把产物里的戳与实际 HEAD 对一次。
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        $head = & $git.Source -C $repoRoot rev-parse --short=12 HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $head) {
+            $env:YOMIKA_BUILD_COMMIT = "$head".Trim()
+            Write-Host "Build stamp: $($env:YOMIKA_BUILD_COMMIT)"
+        }
+    }
+    if (-not $env:YOMIKA_BUILD_COMMIT) { Write-Warning "拿不到 git 提交号：这一份产物不会带构建戳。" }
     $tauriArgs = @("run", "tauri", "build", "--", "--ci")
     if (-not $Release) {
         $tauriArgs += "--debug"
@@ -92,6 +105,9 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw "Built executable missing: $output" }
+    # 产物里的构建戳必须等于构建时的 HEAD（审计 P2-3）。对不上就在这里失败：脚本打印
+    # 「构建成功」与产物真的换了是两件事。
+    & (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $output
     # Ship the bundled model beside the portable executable so a fresh package
     # works immediately and uses the same fixed data/models path as the app.
     $bundledModel = Join-Path $repoRoot "src-tauri\resources\models\waifu2x-upconv7"

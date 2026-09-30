@@ -1093,6 +1093,23 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/\.archive-row-wrap:not\(\[data-first=/);
   });
 
+  it('pins the wide-row progress bar to the card’s own bottom edge', () => {
+    const shell = read('src/styles/shell.css');
+    const source = read('src/components/LibraryWorkspace.tsx');
+    // 横条是卡片（那个 button）的直接子元素：只有横跨整张卡，卡片自己的
+    // overflow: hidden + border-radius 才能把两端削成与下缘一致的圆角。
+    expect(source).toMatch(/<ArchiveProgressBar page=\{readingProgressByArchiveId\?\.get\(archive\.archiveId\)\} pageCount=\{archive\.pageCount\} \/>\s*<\/button>/);
+    expect(source).not.toMatch(/<span className="archive-row-copy">\s*<ArchiveProgressBar/);
+    expect(shell).not.toMatch(/\.archive-row-copy > \.archive-card-progress\s*\{/);
+    const bar = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
+    expect(bar).toMatch(/inset:\s*auto 0 0/);
+    expect(bar).toMatch(/height:\s*4px/);
+    // `.archive-row > span` 的 display: grid 特异性更高，横条必须显式声明 display。
+    expect(bar).toMatch(/display:\s*block/);
+    // 缩略图卡那条仍压在封面与正文的接缝上，两种卡不共用同一个贴边位置。
+    expect(ruleBody(shell, '.archive-card-progress')).toMatch(/inset:\s*-5px 0 auto/);
+  });
+
   it('renders the library grid thumbnail with the shared card component', () => {
     const source = read('src/components/LibraryWorkspace.tsx');
     const card = read('src/components/ArchiveThumbnailCard.tsx');
@@ -1146,10 +1163,12 @@ describe('design system contract', () => {
     // The rail is the scroller's own background: 82px timeline column minus the
     // 13px node centre, plus the scroller's 4px side padding, puts the 2px line
     // exactly under the node by construction. Desktop only — the compact layout
-    // resets it and groups by the dated section bars instead.
+    // resets it and groups by the dated section bars instead. The rail runs down
+    // the left of the list now, so every horizontal measure is mirrored.
     expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]*--timeline-rail-center:\s*13px/);
-    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[\s\S]*right 73px top \/ 2px 100%/);
-    expect(shell).toMatch(/\.archive-row-timeline::after\s*\{[\s\S]*left:\s*var\(--timeline-rail-center\)[\s\S]*width:\s*8px[\s\S]*transform:\s*translateX\(-50%\)/);
+    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[\s\S]*left 72px top \/ 2px 100%/);
+    expect(shell).toMatch(/\.archive-row-timeline::after\s*\{[\s\S]*right:\s*var\(--timeline-rail-center\)[\s\S]*width:\s*8px[\s\S]*transform:\s*translateX\(50%\)/);
+    expect(shell).not.toMatch(/\.archive-row-timeline::after\s*\{[\s\S]{0,400}?left:\s*var\(--timeline-rail-center\)/);
   });
 
   it('lets the flow routes grow their cached panel so the tail can scroll out', () => {
@@ -1186,9 +1205,37 @@ describe('design system contract', () => {
   it('keeps the history timeline in its own rail outside the clickable card', () => {
     const shell = read('src/styles/shell.css');
     const source = read('src/components/LibraryWorkspace.tsx');
-    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\)\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*82px/);
+    // The rail column is the first of the two; the card keeps its place in the
+    // DOM (it is the row's markup and its click target) and is placed into the
+    // second column explicitly.
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\)\s*\{[^}]*grid-template-columns:\s*82px\s+minmax\(0,\s*1fr\)/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\) > \.archive-row\s*\{[^}]*grid-area:\s*1 \/ 2/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\) > \.archive-row-timeline\s*\{[^}]*grid-area:\s*1 \/ 1/);
+    expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]{0,400}?justify-items:\s*end/);
+    expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]{0,700}?padding:\s*var\(--space-3\) 28px 0 0/);
     // The timeline is rendered as a sibling of the card button, never inside it.
     expect(source).toMatch(/<\/button>[\s\S]{0,400}archive-row-timeline/);
+  });
+
+  it('gives the history quick-jump rail a gutter of its own', () => {
+    const shell = read('src/styles/shell.css');
+    const source = read('src/components/LibraryWorkspace.tsx');
+    // Ticks live in the gutter reserved to the right of the cards: a zero-height
+    // float whose width is cancelled by the negative margin, so it never takes
+    // part in the list's layout and never sits on a card.
+    expect(shell).toMatch(/\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*24px/);
+    expect(shell).toMatch(/\.archive-quick-rail\s*\{[^}]*float:\s*right[^}]*width:\s*24px[^}]*height:\s*0[^}]*margin-right:\s*-24px/);
+    // The height lives in the absolutely positioned track, which is what spreads
+    // the ticks down the strip.
+    expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*position:\s*absolute[^}]*grid-auto-rows:\s*1fr[^}]*height:\s*48vh/);
+    expect(shell).toMatch(/\.archive-quick-rail-tick\.is-active\s*\{\s*width:\s*16px;\s*background:\s*var\(--primary\)/);
+    // The compact layout keeps the calendar dropdown instead: the rail is not
+    // rendered there, and the gutter it reserved is given back.
+    expect(source).toMatch(/!compact && displayMode === 'wide' && railSegments\.length > 1/);
+    expect(source).toMatch(/compact && historyMonths\.length > 1/);
+    expect(shell).toMatch(/@media \(max-width: 900px\)[\s\S]*\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*4px/);
+    // Thumbnail cards have no rail to hang the ticks on.
+    expect(source).toMatch(/displayMode !== 'wide' \|\| railSegments\.length < 2/);
   });
 
   it('keeps the list row stride in step with the card gap', () => {
@@ -1324,7 +1371,7 @@ describe('design system contract', () => {
     // rest, pinned to the edges mid-gesture, never scrollable — and explicitly
     // reset in the compact block so the phone groups by the day bars instead.
     expect(workspace).toMatch(/timelineByArchiveId \? 'has-timeline'/);
-    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[^}]*no-repeat right 73px top \/ 2px 100%/);
+    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[^}]*no-repeat left 72px top \/ 2px 100%/);
     expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{\s*background:\s*none/);
     expect(shell).not.toMatch(/archive-row-timeline::before/);
     expect(card).toMatch(/headingIcon/);

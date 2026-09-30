@@ -412,6 +412,35 @@ fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> Com
     }
 }
 
+/// 按**数据目录**记一条（不是 `AppHandle`）。
+///
+/// 存在的理由：重活跑在 `spawn_blocking` 里，那里没有 handle；而日志的位置、格式与轮转
+/// 必须和 `error_log_write` 完全同一套（`<data>/logs/error.log`、同一份制表符文本），
+/// 否则界面那个「错误日志」面板就看不到它。调用方自己保证不写图片内容与凭据。
+pub(crate) fn record_at_data_dir(
+    data_dir: &Path,
+    level: &str,
+    source: &str,
+    message: &str,
+    detail: Option<&str>,
+) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Ok(());
+    }
+    let directory = data_dir.join("logs");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let entry = ErrorLogEntry {
+        at: now_stamp(),
+        level: level.to_string(),
+        source: source.to_string(),
+        message: message.to_string(),
+        detail: detail
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.to_string()),
+    };
+    append_lines(&directory.join(ERROR_LOG), &[text_line(&entry)])
+}
+
 /// 清空两轮的全部记录。
 ///
 /// 删文件而不是截断成空：`rotate` 靠「文件在不在」判断哪一轮有没有东西（见它的注释），

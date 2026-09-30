@@ -109,18 +109,37 @@ fn embed_windows_manifest() {
 ///
 /// 只在**重新编译**时更新，而那正是「这一份二进制是哪来的」的答案。取不到 git 就留空，
 /// 界面按缺项处理，不编假值。
+///
+/// 构建脚本可以在编译前把这两项放进环境变量（`YOMIKA_BUILD_COMMIT` /
+/// `YOMIKA_BUILD_TIME`）——那是**显式**输入，配合下面的 `rerun-if-env-changed`：提交号
+/// 一变这一份 build script 就会重跑。只靠 `tauri.conf.json` 的时间戳是不够的（审计
+/// P2-3：只改源码、没碰配置时，产物会留着上一个提交号）。
 fn stamp_build_info() {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    println!("cargo:rustc-env=YOMIKA_BUILD_TIME={seconds}");
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
+    let seconds = std::env::var("YOMIKA_BUILD_TIME")
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0)
+                .to_string()
+        });
+    println!("cargo:rustc-env=YOMIKA_BUILD_TIME={seconds}");
+    let commit = std::env::var("YOMIKA_BUILD_COMMIT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short=12", "HEAD"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
         .unwrap_or_default();
     println!("cargo:rustc-env=YOMIKA_BUILD_COMMIT={commit}");
 }
@@ -144,6 +163,13 @@ fn main() {
         }
     }
     println!("cargo:rustc-check-cfg=cfg(ngx_core)");
+
+    // 构建戳的显式输入：构建脚本会先把当前 HEAD 放进这个变量（见 `stamp_build_info`）。
+    // 只改了源码、没碰 `tauri.conf.json` 与图标时，tauri-build 注册的
+    // `rerun-if-changed` 不会让这一份 build script 重跑，产物就会带着**上一个**提交号；
+    // 登记这两个变量之后，提交号一变这里必定重跑（审计 P2-3）。
+    println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_TIME");
 
     embed_windows_manifest();
     stamp_build_info();

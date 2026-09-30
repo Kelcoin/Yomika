@@ -36,6 +36,9 @@ afterEach(() => {
   for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
     const key = window.localStorage.key(index);
     if (key?.startsWith('yomika:library-categories:') || key === 'yomika.last-nav') window.localStorage.removeItem(key);
+    // 「跳过这个版本」是记在 localStorage 里的：一个用例跳过之后，下一个用例的启动
+    // 检查就会安静下来——而它要验的正是「弹窗出现了」。
+    else if (key?.startsWith('yomika.update.')) window.localStorage.removeItem(key);
   }
 });
 

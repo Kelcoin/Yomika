@@ -1357,6 +1357,10 @@ pub struct RemoteProcessInput {
     /// 前端给这次任务起的号：翻页之后就不必再发出去了。
     #[serde(default)]
     pub task_id: Option<String>,
+    /// `"foreground"` 才是当前页。远端有**自己**的一条队列（`inference::run_remote`），
+    /// 这里的档位决定的是「远端任务之间」谁先走：当前页插到整本预扫前面（审计 P2-2）。
+    #[serde(default)]
+    pub priority: Option<String>,
 }
 
 #[tauri::command]
@@ -1372,14 +1376,15 @@ pub async fn remote_compute_process(
             ))
         }
     };
-    let result = crate::inference::run_heavy(
-        crate::inference::HeavyPriority::Background,
-        None,
-        move || {
-            let database = app.state::<crate::db::Database>();
-            remote_process_cached_page(&database, &data, &input)
-        },
-    )
+    // 远端走**自己**那条队列，不占本机 GPU 那一件重活：阻塞式 HTTP 发出去之后这一侧
+    // 没法掐断，最长要等 180 秒，而它占的资源在对面那台机器上——让本机当前页的
+    // DLSSNR / 超分排在它后面是纯粹的浪费（审计 P2-2）。
+    let priority = crate::inference::HeavyPriority::parse(input.priority.as_deref());
+    let task_id = input.task_id.clone();
+    let result = crate::inference::run_remote(priority, task_id, move || {
+        let database = app.state::<crate::db::Database>();
+        remote_process_cached_page(&database, &data, &input)
+    })
     .await?;
     Ok(crate::domain::result::into_binary_response(result))
 }
@@ -1423,13 +1428,19 @@ fn remote_process_cached_page(
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
     drop(connection);
-    // 已经发出去的那一次没法从这一侧掐断（阻塞式 HTTP），所以只保证「取消之后不再
-    // 发出新的」。发出去之后的结果仍然按正常路径回来，只是前端已经不要了。
+    // 两道检查：发出**之前**取消就不再发（省掉对面一次推理），发出**之后**取消则按
+    // 取消处理结果（见下面的 match）。真正的中断要靠异步 HTTP，那是以后的事。
     if guard.cancelled() {
         return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
     }
 
     match remote_process(&input.url, &input.token, &input.params, page.bytes) {
+        // 已经发出去的那一次没法从这一侧掐断（阻塞式 HTTP），但结果回来时要是已经没人
+        // 要了，就把它按取消处理：不把一页已经翻过去的图当成「成功」交上去，也让它早
+        // 一点从那条队列上退下来（审计 P2-2 的「响应后丢弃」落到原生这一侧）。
+        Ok(_) if guard.cancelled() => {
+            CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
+        }
         Ok(bytes) => CommandResult::success(bytes),
         // 远端那一步的失败带着自己的码：超时是可重试的（本地可以退到本机那一版
         // 继续读），4xx 是我们发错了、不该原样重试。

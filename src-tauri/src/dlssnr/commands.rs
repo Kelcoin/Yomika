@@ -283,8 +283,16 @@ fn apply_cached_page(
         }
     }
     // 产物落盘：这一页下次翻回来（或者重启应用之后）就是上面那条命中路径，整段
-    // GPU 与编码都不再走。取消掉的任务在上面就返回了，不会写。
-    crate::inference::store_derived(database, data_dir, &output, DLSSNR_MIME, &encoded);
+    // GPU 与编码都不再走。取消掉的任务在上面就返回了，不会写。写不进去也照样把这一页
+    // 交出去，只是记一条 `CACHE_WRITE_FAILED`（见 `inference::finish_derived`）。
+    let encoded = crate::inference::finish_derived(
+        database,
+        data_dir,
+        DLSSNR_CACHE_SOURCE,
+        &output,
+        DLSSNR_MIME,
+        encoded,
+    );
     CommandResult::success(encoded)
 }
 
@@ -298,6 +306,9 @@ const DLSSNR_RENDITION: &str = "dlssnr";
 /// magic bytes，所以这里必须与上面编出来的容器一致，否则取回来的一页会带着错的
 /// content-type 发给前端。
 const DLSSNR_MIME: &str = "image/png";
+
+/// 统一错误日志里 `source` 那一栏（产物没落盘时那条 `CACHE_WRITE_FAILED`）。
+const DLSSNR_CACHE_SOURCE: &str = "dlssnr.cache";
 
 #[cfg(test)]
 mod tests {
@@ -321,11 +332,19 @@ mod tests {
         bytes
     }
 
-    /// 摆一份「DLL 在这儿」的占位文件：产物 revision 只看它的字节数与修改时间。
+    /// 摆一份「DLL 在这儿」的占位文件：产物 revision 按它的内容（SHA-256 + 字节数）认。
     fn fake_dll(dir: &std::path::Path, bytes: usize) {
         let dll = crate::dlssnr::dll_path(dir);
         std::fs::create_dir_all(dll.parent().expect("目录")).expect("建目录");
         std::fs::write(&dll, vec![0u8; bytes]).expect("写 DLL 占位");
+    }
+
+    /// 一份能过 `install_dll` 那几道检查的假片段：`MZ` 头 + 足够长。
+    fn pe_stub(bytes: usize) -> Vec<u8> {
+        let mut stub = vec![0u8; bytes];
+        stub[0] = b'M';
+        stub[1] = b'Z';
+        stub
     }
 
     fn input_with(settings: Option<crate::dlssnr::DlssnrSettings>) -> DlssnrPageInput {
@@ -414,6 +433,84 @@ mod tests {
             base,
             crate::dlssnr::output_revision(dir.path(), None, &settings),
             "换了一份 DLL 就是另一版"
+        );
+    }
+
+    /// 审计报告 P1-2：同样字节数、**同样修改时间**、内容不同的 DLL 也是另一版。
+    ///
+    /// 复制一份片段过来、从压缩包解出来、从云端同步下来、还原一份旧备份——这些都不保证
+    /// 改动「字节数 + 修改时间」，而旧实现只认这两项，于是换汤不换药的产物会被端上来。
+    /// 这里两份片段的大小与修改时间都对齐，身份只能从内容上看出来。
+    #[test]
+    fn two_dlls_of_the_same_size_and_timestamp_are_still_different_versions() {
+        let first = tempfile::tempdir().expect("临时目录");
+        let second = tempfile::tempdir().expect("临时目录");
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        fake_dll(first.path(), 1024);
+        fake_dll(second.path(), 1024);
+        let second_dll = crate::dlssnr::dll_path(second.path());
+        std::fs::write(&second_dll, vec![7u8; 1024]).expect("换片段");
+        let timestamp = std::fs::metadata(crate::dlssnr::dll_path(first.path()))
+            .expect("第一份片段")
+            .modified()
+            .expect("修改时间");
+        std::fs::File::options()
+            .write(true)
+            .open(&second_dll)
+            .expect("打开第二份片段")
+            .set_modified(timestamp)
+            .expect("对齐修改时间");
+
+        assert_eq!(
+            std::fs::metadata(crate::dlssnr::dll_path(first.path()))
+                .expect("第一份片段")
+                .len(),
+            std::fs::metadata(&second_dll).expect("第二份片段").len(),
+            "这两份片段的字节数要一样（不然这条测试就测不到内容了）"
+        );
+        assert_eq!(
+            std::fs::metadata(crate::dlssnr::dll_path(first.path()))
+                .expect("第一份片段")
+                .modified()
+                .expect("修改时间"),
+            std::fs::metadata(&second_dll)
+                .expect("第二份片段")
+                .modified()
+                .expect("修改时间"),
+            "这两份片段的修改时间要一样"
+        );
+        assert_ne!(
+            crate::dlssnr::output_revision(first.path(), None, &settings),
+            crate::dlssnr::output_revision(second.path(), None, &settings),
+            "内容不同就是另一版，哪怕字节数与修改时间一模一样"
+        );
+    }
+
+    /// 导入边界：刚装进去的那一份立刻就是「当前这一份」（身份不许还记着上一份的内容）。
+    #[test]
+    fn installing_a_dll_makes_the_identity_follow_the_new_bytes() {
+        const BYTES: usize = 1_048_576;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        // 先有一份在用的，把它的指纹读进进程内缓存。
+        fake_dll(dir.path(), BYTES);
+        let before = crate::dlssnr::output_revision(dir.path(), None, &settings);
+
+        let source = dir.path().join("imported.dll");
+        std::fs::write(&source, pe_stub(BYTES)).expect("写待导入的片段");
+        crate::dlssnr::install_dll(&source, dir.path()).expect("导入");
+
+        assert_ne!(
+            before,
+            crate::dlssnr::output_revision(dir.path(), None, &settings),
+            "导入之后当前这一份就是刚装的那一份"
+        );
+        // 认得出的变体才会由 `installed_variant` 报字节数，所以这里直接核对身份串：
+        // 它要跟着刚装进去的那份内容走。
+        let digest = crate::dlssnr::file_sha256(&crate::dlssnr::dll_path(dir.path())).expect("哈希");
+        assert!(
+            crate::dlssnr::dll_identity(dir.path()).contains(&digest),
+            "身份里要带上新内容的哈希"
         );
     }
 

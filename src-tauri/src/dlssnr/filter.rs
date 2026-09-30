@@ -62,6 +62,18 @@ const MIN_EDGE: u32 = 32;
 /// 由调用方翻译成 `INFERENCE_CANCELLED`。
 pub const CANCELLED: &str = "dlssnr: cancelled";
 
+/// 测试用：让下一次 `record_page` 在记完上传之后报一次取消。
+///
+/// 真实的「层间取消」要另一个线程掐着时间置 flag（`apply_with_dll_bucket` 开头就有
+/// 一次早退，赛跑要么早退要么跑完，不可复现），所以这里注入同一条错误路径。
+#[cfg(test)]
+static FAIL_RECORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub fn fail_next_record(fail: bool) {
+    FAIL_RECORD.store(fail, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// 把一张图跑一遍 DLSSNR。
 pub fn apply(
     data_dir: &Path,
@@ -181,17 +193,32 @@ fn run(
     let (_upload, readback) = match recorded {
         Ok(buffers) => buffers,
         Err(error) => {
-            // 出错了：一条命令都还没提交，丢掉就是（纹理的实际状态也就没变过），
-            // 但 feature 句柄要还给 NGX。
-            let _ = context.discard_recorded();
-            workspace.release(&context.core);
+            // 出错了：一条命令都还没提交，丢掉就是（已记录的 barrier 一条都没执行，
+            // 纹理在 GPU 上的实际状态还是上一页收尾时的样子，而 `workspace` 模块保证
+            // 每页收尾都摆回开场状态，所以这份工作区下回照样能用）。
+            // 收不回去（reset 失败）时上下文已经中毒，那就整份丢掉——还给一个已经
+            // 作废的上下文没有意义；否则把**工作区**交回缓存：取消在后台预扫被前台
+            // 抢断时是常态，`Workspace::release` 会把 feature 还掉、工作区跟着销毁，
+            // 于是每次取消都要重建一遍（120ms 级）。
+            if let Err(reset) = context.discard_recorded() {
+                drop(workspace);
+                return Err(reset);
+            }
+            context.release_workspace(workspace);
             return Err(error);
         }
     };
     phase("记录（上传 + 各层 + 回读）", &mut mark);
 
     if let Err(error) = context.execute_and_wait() {
-        workspace.release(&context.core);
+        // 提交期失败：GPU 有没有停下不知道（`execute_and_wait` 已经把上下文标中毒，
+        // `with_context_at` 会把它从缓存里摘掉）。这时候**不能**把工作区还回缓存，
+        // 也不该去调 NGX 释放 feature——整份工作区跟着上下文一起丢掉。
+        if context.poisoned.is_some() {
+            drop(workspace);
+        } else {
+            workspace.release(&context.core);
+        }
         return Err(error);
     }
     phase("提交 + 等 GPU（含全部推理）", &mut mark);
@@ -199,9 +226,10 @@ fn run(
     let rgba = match context.map_read_back(&readback, width, height) {
         Ok(rgba) => rgba,
         Err(error) => {
-            // 命令已经提交过了，工作区本身还是好的（状态机每页收尾都摆回去了），
-            // 只是这一页失败：feature 句柄得还给 NGX，否则下一个工作区会重头再建。
-            workspace.release(&context.core);
+            // 命令已经提交并跑完了：整套 barrier 都执行过，收尾已经把纹理摆回开场
+            // 状态（见 `workspace` 模块头），所以工作区是真好的，交回缓存就行——
+            // 以前这里 `Workspace::release` 会连 feature 一起还掉，下一页白重建一遍。
+            context.release_workspace(workspace);
             return Err(error);
         }
     };
@@ -239,6 +267,12 @@ fn record_page(
         &image.rgba,
     )?;
 
+    // 层与层之间仍是取消点。（整页只有一次提交，所以这里的取消等于整页作废：
+    // 一条命令都还没发出去，已经花掉的只有记录的时间和一次上传的行拷贝。）
+    #[cfg(test)]
+    if FAIL_RECORD.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(CANCELLED.to_string());
+    }
     for index in 0..pass_count {
         // 层与层之间仍是取消点。（整页只有一次提交，所以这里的取消等于整页作废：
         // 一条命令都还没发出去，已经花掉的只有记录的时间和一次上传的行拷贝。）

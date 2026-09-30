@@ -9,6 +9,7 @@ import { installErrorLogging } from '../lib/errorLog';
 import { installPressFeedback } from '../lib/pressFeedback';
 import { SplashFrame } from '../components/SplashFrame';
 import { ToastProvider } from '../components/Toast';
+import { UpdateNotice } from '../components/UpdateNotice';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -71,6 +72,8 @@ export function App() {
         {[...readers.current].map(([key, saved]) => <RetainedPage key={key} active={reading && readerKey === key}>
           <Routes location={saved}><Route path="*" element={<ReaderRoutes />} /></Routes>
         </RetainedPage>)}
+        {/* 版本提醒挂在所有页面之外：在阅读器里也该收到，而它自己不做任何渲染。 */}
+        <UpdateNotice />
       </ToastProvider>
     </PreferencesProvider>
   );

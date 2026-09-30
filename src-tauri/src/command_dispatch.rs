@@ -26,6 +26,7 @@
 mod tests {
     /// 每个含 `#[tauri::command]` 的源文件，路径相对 `src/`。
     const SOURCES: &[(&str, &str)] = &[
+        ("app_release.rs", include_str!("app_release.rs")),
         ("cache.rs", include_str!("cache.rs")),
         ("commands/eh.rs", include_str!("commands/eh.rs")),
         ("commands/legacy.rs", include_str!("commands/legacy.rs")),

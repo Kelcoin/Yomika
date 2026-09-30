@@ -222,11 +222,15 @@ describe('reader route', () => {
     expect(await screen.findByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     // The overview panel's facts (metadata + cover) load in the background, so
     // their exact interleaving is not fixed; what matters is which commands run
-    // and that progress is written after the page turn.
+    // and that progress is written after the page turn. The app shell's startup
+    // update check runs here too: it asks once for the release and the model
+    // catalog, and a failure (offline, or a test adapter that does not know the
+    // command) just goes quiet.
     expect(new Set(calls)).toEqual(new Set([
       'list_servers', 'load_preferences', 'load_reader_manifest', 'load_archive_metadata',
       'load_reading_progress', 'load_archive_thumbnail', 'cache_read_image', 'load_reader_page',
       'save_reading_progress',
+      'app_release_latest', 'inference_list_models', 'model_release_list_upscalers',
     ]));
     expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
     expect(calls.at(-1)).toBe('save_reading_progress');

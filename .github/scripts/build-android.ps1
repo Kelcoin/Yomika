@@ -67,7 +67,19 @@ try {
     # `tauri_build::try_build` 注册的 `rerun-if-changed=tauri.conf.json`（与图标）决定。
     # 只改源码、没碰这些文件时，这条链会复用上一次的 build script 输出，`.so` 里带的
     # 就是**上一个** commit 号（实测：HEAD 已是 b842e5f，APK 里却是 bc204cc）。
-    # 把配置的时间戳改一下，迫使 build.rs 重跑、stamp 重算。
+    # 改成两条腿走路：① 提交号当**显式输入**放进环境变量（`build.rs` 里登记了
+    # `rerun-if-env-changed`，它一变那边必定重跑）；② 时间戳照旧碰一下（那一下同时管着
+    # 前端 dist 的重新嵌入）。收尾时再用 `verify-build-stamp.ps1` 把 APK 里的 `.so` 与
+    # 实际 HEAD 对一次（审计 P2-3）。
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        $head = & $git.Source -C $repoRoot rev-parse --short=12 HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $head) {
+            $env:YOMIKA_BUILD_COMMIT = "$head".Trim()
+            Write-Host "Build stamp: $($env:YOMIKA_BUILD_COMMIT)"
+        }
+    }
+    if (-not $env:YOMIKA_BUILD_COMMIT) { Write-Warning "拿不到 git 提交号：这一份产物不会带构建戳。" }
     $tauriConfig = Join-Path $repoRoot "src-tauri\tauri.conf.json"
     if (Test-Path -LiteralPath $tauriConfig -PathType Leaf) {
         (Get-Item -LiteralPath $tauriConfig -Force).LastWriteTime = Get-Date
@@ -81,6 +93,9 @@ try {
         Where-Object { $_.FullName -match $configuration } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $apk) { throw "No $configuration APK under src-tauri\gen\android\app\build\outputs\apk." }
+    # APK 里那个 `.so` 的构建戳必须等于构建时的 HEAD（审计 P2-3）；对不上就失败，别让
+    # 一份带旧戳的包发出去。
+    & (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $apk.FullName -InsideApk
     Write-Host "Android package: $($apk.FullName)"
     Write-Host "Install on a connected device: adb install -r `"$($apk.FullName)`""
     Write-Host "Live-reload instead: npm run tauri android dev   (then chrome://inspect for the WebView devtools)"

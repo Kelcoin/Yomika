@@ -1,3 +1,4 @@
+mod app_release;
 mod bundled_models;
 mod cache;
 // 命令调度的不变量（同步命令不许 `block_on`、不许锁那把全局库锁、不许等子进程）。
@@ -83,6 +84,7 @@ use inference::{
     inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page,
     inference_validate_model,
 };
+use app_release::app_release_latest;
 use model_release::{
     model_release_activate, model_release_cancel, model_release_download,
     model_release_download_bundle, model_release_download_default, model_release_fetch_manifest,
@@ -427,6 +429,7 @@ pub fn run() {
             inference_install_decensor_bundle,
             inference_list_models,
             inference_clear_cache,
+            app_release_latest,
             model_release_url,
             model_release_fetch_manifest,
             model_release_list_upscalers,

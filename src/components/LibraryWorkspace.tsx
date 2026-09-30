@@ -43,6 +43,11 @@ const PULL_DAMPING = 0.5;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
 
+/** Ticks the right-hand quick-jump rail can show before they stop being
+ * clickable: a 48vh strip gives each one about 5px at this count. A longer
+ * history falls back to one tick per month rather than an unclickable comb. */
+const RAIL_MAX_SEGMENTS = 60;
+
 const scrollsVertically = (element: HTMLElement) => {
   const { overflowY } = getComputedStyle(element);
   return overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
@@ -184,6 +189,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   }, [archives.length, listLoading, skeletonVisible]);
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [historyJumpOpen, setHistoryJumpOpen] = useState(false);
+  /** Which tick of the quick-jump rail the reader is looking at, as an index
+   * into `railSegments`. Only written when the day (or month) changes. */
+  const [railActive, setRailActive] = useState(0);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
   const [localSortOrder, setLocalSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -424,6 +432,23 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       return [{ month, index }];
     });
   }, [filteredArchives, timelineByArchiveId]);
+  /** The rail's ticks: one per day, or one per month once the history has more
+   * days than the strip can hold as separate targets. */
+  const railSegments = useMemo(() => {
+    if (!timelineByArchiveId) return [];
+    const days = [...dayStarts.entries()].map(([index, label]) => ({ index, label }));
+    if (days.length <= RAIL_MAX_SEGMENTS) return days;
+    return historyMonths.slice(-RAIL_MAX_SEGMENTS).map(({ month, index }) => ({ index, label: month }));
+  }, [dayStarts, historyMonths, timelineByArchiveId]);
+  /** The tick for the row the reader is looking at: the last segment that starts
+   * at or above it. */
+  const railSegmentFor = useCallback((rowIndex: number) => {
+    let active = 0;
+    railSegments.forEach((segment, position) => {
+      if (segment.index <= rowIndex) active = position;
+    });
+    return active;
+  }, [railSegments]);
   const updateSearchQuery = (value: string) => { setLocalSearchQuery(value); onSearchQueryChange?.(value); };
   // The draft is what the user sees; only committed values reach the server.
   useEffect(() => { setSearchDraft(searchQuery); }, [searchQuery]);
@@ -643,7 +668,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {cover}
         {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         <span className="archive-row-copy">
-          <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} />
           <strong>{archive.title}</strong>
           <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
           <span className="archive-row-footer">
@@ -651,6 +675,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
           </span>
         </span>
+        {/* 进度条贴的是卡片自己的底边，所以它是卡片的直接子元素、排在文案之后：
+            卡片自己的 overflow: hidden + border-radius 把横条两端削成与卡片下缘
+            一致的圆角，而这只有横条横跨整张卡时才成立（放在 .archive-row-copy 里
+            它只能贴到文案栏的底边，两端是直角，右侧还差一个卡片内边距）。 */}
+        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} />
       </button>
     )}
     {/* The timeline belongs to the list rail, so it sits outside the clickable
@@ -801,13 +830,41 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             onScroll={(event) => {
               const target = event.currentTarget;
               if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
+              // The rail's filled tick follows the row at the top of the viewport.
+              // Written only when the day changes: this list is virtualized, and a
+              // state write per row would re-render every card on every scroll.
+              if (displayMode !== 'wide' || railSegments.length < 2) return;
+              const items = rows.getVirtualItems();
+              const visible = items.find((item) => item.end > target.scrollTop) ?? items[0];
+              if (!visible) return;
+              const active = railSegmentFor(visible.index);
+              setRailActive((current) => (current === active ? current : active));
             }}
             /* Overscroll: past either end the list is dragged by hand and
                springs back. Past the top it can also refresh — there is no
                refresh button any more — so the wheel and the finger are the only
                way to ask for it. */
           >
-            {historyMonths.length > 1 && (
+            {/* 桌面用右侧的刻度条跳转；手机那一档轨线整列都不画，刻度条没有落点，
+                所以保留原来的日历下拉（两种入口不会同时出现）。 */}
+            {!compact && displayMode === 'wide' && railSegments.length > 1 && (
+              <div className="archive-quick-rail" role="group" aria-label="历史快速跳转">
+                <div className="archive-quick-rail-track">
+                  {railSegments.map((segment, position) => (
+                    <button
+                      key={`${segment.index}-${segment.label}`}
+                      className={`archive-quick-rail-tick${position === railActive ? ' is-active' : ''}`}
+                      type="button"
+                      title={segment.label}
+                      aria-label={`跳转到 ${segment.label}`}
+                      aria-current={position === railActive ? 'true' : undefined}
+                      onClick={() => { rows.scrollToIndex(segment.index, { align: 'start', behavior: 'smooth' }); setRailActive(position); }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {compact && historyMonths.length > 1 && (
               <div className="history-quick-jump">
                 <button className="icon-action" type="button" aria-label="跳转到历史时间" title="跳转到历史时间" aria-expanded={historyJumpOpen} onClick={() => setHistoryJumpOpen((open) => !open)}><CalendarClock aria-hidden="true" /></button>
                 {historyJumpOpen && <div className="history-quick-jump-menu" role="group" aria-label="选择历史时间">

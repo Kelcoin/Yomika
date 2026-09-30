@@ -20,6 +20,7 @@ import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { SYNC_COMPLETED_EVENT, autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
 import { formatSyncAge } from '../lib/syncTime';
+import { availableModelUpdates } from '../lib/modelUpdates';
 import { OverlayLayer } from './OverlayLayer';
 import { ComputeCenterSettingsGroup } from './ComputeCenterSettingsGroup';
 import { DlssnrSettingsGroup } from './DlssnrSettingsGroup';
@@ -242,31 +243,33 @@ function ModelDownloadSlot({ open, label, progress }: { open: boolean; label: st
   );
 }
 
-/** 下载一颗尚未安装的模型。
+/** 下载一颗尚未安装的模型，或者更新一颗已经过时的。
  *
  * 同一个动作有两个入口：菜单里挂在它自己那一项上，行上挂在行右侧。以前只有菜单里
  * 那一个，于是「下载」这件事必须先打开二级菜单才做得到；而进度条画在设置项上、
  * 也就是菜单那层遮罩的后面，点完下载根本看不到。 */
-function ModelDownloadButton({ option, installed, pending, className, onDownload }: {
+function ModelDownloadButton({ option, installed, outdated, pending, className, onDownload }: {
   option: { value: string; label: string };
   installed: boolean;
+  /** 已装，但盘上那份比目录里的版本旧：同一个动作，按钮改叫更新。 */
+  outdated?: boolean | undefined;
   pending: boolean;
   className: string;
   onDownload: () => void;
 }) {
-  // Nothing to offer when the model is already installed, and nothing to offer for
+  // Nothing to offer when the model is already installed and current, and nothing to offer for
   // an empty id either: the upscale row exists before any catalog has answered.
-  if (installed || !option.value) return null;
+  if ((installed && !outdated) || !option.value) return null;
   return (
     <button
       className={className}
       type="button"
-      aria-label={`下载${option.label}`}
-      title="下载模型"
+      aria-label={`${outdated ? '更新' : '下载'}${option.label}`}
+      title={outdated ? '更新模型' : '下载模型'}
       disabled={pending}
       // 它只在二级菜单里出现：不冒泡，否则点下载会顺手把菜单关掉，进度条刚出现就没了。
       onClick={(event) => { event.stopPropagation(); onDownload(); }}
-    ><Download aria-hidden="true" /></button>
+    >{outdated ? <RefreshCw aria-hidden="true" /> : <Download aria-hidden="true" />}</button>
   );
 }
 
@@ -412,6 +415,10 @@ export function SettingsWorkspace() {
       .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
       .map((hosted) => ({ value: hosted.id, label: hosted.label })),
   ];
+  /** 已装、但目录里报了新版本的那些。更新就是同一个下载动作，只是按钮换个说法：
+   * 后端把版本编进安装路径（`models/<id>/<version>`），新版本落一个新目录，取用时
+   * 认的是最新的那一版，所以不需要先卸载旧的。 */
+  const outdatedUpscaleIds = new Set(availableModelUpdates(installedModels, upscaleCatalog).map((update) => update.id));
   /** 这一行显示哪个模型。下载在二级菜单里按选项走，所以这里不需要配一份「当前选项」。 */
   const upscaleSelectedModel = preferenceDraft.upscaleModel || upscaleModelOptions[0]?.value || '';
   // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
@@ -1552,6 +1559,7 @@ export function SettingsWorkspace() {
                   optionAction={(option) => <ModelDownloadButton
                     option={option}
                     installed={Boolean(runnableModels?.some((model) => model.id === option.value))}
+                    outdated={outdatedUpscaleIds.has(option.value)}
                     pending={modelPending}
                     className="select-option-download"
                     onDownload={() => void downloadModel(option.value, option.label)}

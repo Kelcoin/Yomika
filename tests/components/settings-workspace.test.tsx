@@ -314,6 +314,9 @@ describe('settings workspace', () => {
     // away in that row's floating menu, which is what keeps the section one list
     // instead of a column of filled-in forms.
     await screen.findByRole('button', { name: '遮挡区域检测模型' });
+    // 读一次模型列表的调用数：启动时的更新检查也会读一次（它是另一个组件），
+    // 所以这里盯的不是「恰好一次」，而是「后面翻开关不会再去读」。
+    const modelListReads = adapter.mock.calls.filter(([command]) => command === 'inference_list_models').length;
     for (const role of ['遮挡区域检测', '条状遮挡修补', '马赛克修补', '修复结果增强']) {
       expect(screen.getByText(role)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: `${role}模型` })).toBeInTheDocument();
@@ -340,7 +343,7 @@ describe('settings workspace', () => {
     expect(screen.getByRole('button', { name: '选择模型文件…' })).toBeInTheDocument();
     expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(screen.queryByRole('dialog', { name: '模型导入' })).toBeNull();
-    expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(1);
+    expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(modelListReads);
   });
 
   it('says the model list is still loading instead of claiming nothing is installed', async () => {
@@ -862,6 +865,47 @@ describe('settings workspace', () => {
     // 按钮。行名取目录那份——装之前装之后是同一个名字。
     expect(within(menu).getAllByRole('button', { name: 'Anime4K 重复项' })).toHaveLength(1);
     expect(within(menu).queryByRole('button', { name: '下载Anime4K 重复项' })).toBeNull();
+  });
+
+  it('offers the update on a model whose catalog version moved on', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      // 盘上那份还是老版本；目录里已经是新的了（后端把版本编进安装路径，
+      // 所以下载新版本不需要先删旧的）。
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [{ id: 'realcugan-2x-denoise3x', version: '2022.02.27', scale: 2, kind: 'upscale', components: [] }],
+      };
+      if (command === 'model_release_list_upscalers') return {
+        ok: true,
+        value: {
+          tag: 'models-v1',
+          models: [{
+            id: 'realcugan-2x-denoise3x',
+            label: 'Real-CUGAN 2x 漫画（强降噪）',
+            scale: 2,
+            version: '2024.01.01',
+            files: [{ name: 'realcugan-2x-denoise3x.onnx', size: 5272599, sha256: 'b'.repeat(64) }],
+          }],
+        },
+      };
+      if (command === 'model_release_download_default') return { ok: true, value: null };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    // 这一份 fixture 正好也是「有模型可以更新」：启动检查会盖一层弹窗上来，先把那层
+    // 收掉再操作页面（弹窗自己的行为在 update-notice.test.tsx 里验）。
+    await user.click(await screen.findByRole('button', { name: '跳过该版本' }));
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
+    // 同一个下载动作，只是说法变了：装着的那个不是最新版，就该能再点一次。
+    const update = await screen.findByRole('button', { name: '更新Real-CUGAN 2x 漫画（强降噪）' });
+    expect(screen.queryByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' })).toBeNull();
+    await user.click(update);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
   });
 
   it('shows the download progress where the download was started', async () => {

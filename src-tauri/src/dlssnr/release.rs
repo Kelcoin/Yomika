@@ -194,6 +194,8 @@ fn put_in_place(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<
 /// 把已经校验过的暂存文件装进数据目录，并报出装的是哪一种。
 fn install_staged(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<InstalledDll, String> {
     put_in_place(staged, data_dir)?;
+    // 文件名没变、内容变了：进程内记住的那份指纹（产物身份与探针结论都看它）要作废。
+    super::forget_fingerprint();
     let target = dll_path(data_dir);
     let bytes = std::fs::metadata(&target).map(|value| value.len()).unwrap_or(0);
     let variant = installed_variant(data_dir).map(|(variant, _)| variant);

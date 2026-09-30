@@ -1493,8 +1493,30 @@ pub(crate) fn cached_derived(
         .map(|image| image.bytes)
 }
 
-/// 把派生结果写回缓存。失败只记一笔：缓存写不进去不该让这一页白跑（用户手上已
-/// 经有图了），而磁盘配额、权限之类的原因不是这一页的错。
+/// 派生结果没能落盘的原因。
+///
+/// 「这一页算出来了」与「这一页存下来了」是两件事：缓存写不进去不是这一页的错（GPU 与
+/// 编码都已经成功，用户手上已经有图），但下次翻回这一页还得再算一遍，所以要能把它和
+/// 「成功且已缓存」分开，让上层说得出发生了什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheWriteError {
+    /// 统一错误日志里的稳定分类（见 `CACHE_WRITE_FAILED`）。界面按它归档，不用猜措辞。
+    pub(crate) code: &'static str,
+    /// 给人看的一句话（中文），含底层原因。
+    pub(crate) message: String,
+    /// 再试一次还有没有意义：数据库锁拿不到是「这一下拿不到」，磁盘满、权限不对不是
+    /// 重试能解决的。
+    pub(crate) retryable: bool,
+}
+
+/// 派生产物落盘失败的稳定分类：日志里那句警告以它开头，界面按它归档。
+pub(crate) const CACHE_WRITE_FAILED: &str = "CACHE_WRITE_FAILED";
+
+/// 统一错误日志里 `source` 那一栏：哪一条命令的产物没落盘。
+pub(crate) const UPSCALE_CACHE_SOURCE: &str = "inference.upscale.cache";
+pub(crate) const DECENSOR_CACHE_SOURCE: &str = "inference.decensor.cache";
+
+/// 把派生结果写回缓存。
 ///
 /// `mime` 必须说真话：`cache::sniff_image_mime` 见到 `image/*` 就原样收下，不核对
 /// magic bytes，所以这里报错了容器类型，取回来的一页就会带着错的 content-type 发给
@@ -1505,13 +1527,77 @@ pub(crate) fn store_derived(
     identity: &crate::cache::CacheImageIdentity,
     mime: &str,
     bytes: &[u8],
-) {
+) -> Result<(), CacheWriteError> {
     let Ok(connection) = database.connection.lock() else {
-        return;
+        return Err(CacheWriteError {
+            code: CACHE_WRITE_FAILED,
+            message: "数据库正被占用，这一页的产物没能落盘".to_string(),
+            retryable: true,
+        });
     };
-    if let Err(error) = crate::cache::store_image_cache(&connection, app_data, identity, mime, bytes) {
-        eprintln!("yomika: derived cache write failed: {error}");
+    crate::cache::store_image_cache(&connection, app_data, identity, mime, bytes).map_err(|error| {
+        CacheWriteError {
+            code: CACHE_WRITE_FAILED,
+            message: format!("这一页的产物没能落盘：{error}"),
+            retryable: false,
+        }
+    })
+}
+
+/// 落盘失败记一笔结构化警告。
+///
+/// **不记图片内容、不记凭据**：`detail` 里只有缓存键（scope / archive / page /
+/// rendition / revision），够下次翻回同一页时对照。写进统一错误日志
+/// `<data>/logs/error.log`，界面那个「错误日志」面板读的就是这一份文件。
+pub(crate) fn note_cache_write_failure(
+    app_data: &std::path::Path,
+    source: &str,
+    identity: &crate::cache::CacheImageIdentity,
+    error: &CacheWriteError,
+) {
+    let detail = format!(
+        "scope={} archive={} page={} rendition={} revision={}",
+        identity.scope_id,
+        identity.archive_id,
+        identity.page_index,
+        identity.rendition,
+        identity.revision.as_deref().unwrap_or("-"),
+    );
+    if let Err(log_error) = crate::error_log::record_at_data_dir(
+        app_data,
+        "warn",
+        source,
+        &format!("{}：{}", error.code, error.message),
+        Some(&detail),
+    ) {
+        eprintln!(
+            "yomika: derived cache write failed: {} (log: {log_error})",
+            error.message
+        );
     }
+}
+
+/// 派生结果的统一收尾：交给缓存，然后**无论成没成**都把这一页交出去。
+///
+/// 超分 / 去码 / DLSSNR 三条命令的结尾都是这一句。成功体是**裸字节**
+/// （`domain::result::into_binary_response` 直接把 PNG 当 IPC 体发出去，没有可以挂字段
+/// 的信封），所以「这一次没缓存上」的结构化出口就是统一错误日志里那条
+/// `CACHE_WRITE_FAILED`：带完整缓存键，用户能在界面里看到，下次翻回同一页也能对账。
+///
+/// 为什么不直接返回可重试错误：用户正看着的这张图**已经算出来了**，磁盘满不该把它从
+/// 眼前拿走——缓存是可再生的（重启后再算一遍），这一页不是。
+pub(crate) fn finish_derived(
+    database: &crate::db::Database,
+    app_data: &std::path::Path,
+    source: &str,
+    identity: &crate::cache::CacheImageIdentity,
+    mime: &str,
+    encoded: Vec<u8>,
+) -> Vec<u8> {
+    if let Err(error) = store_derived(database, app_data, identity, mime, &encoded) {
+        note_cache_write_failure(app_data, source, identity, &error);
+    }
+    encoded
 }
 
 
@@ -1622,6 +1708,9 @@ impl HeavyQueueState {
 /// 排在前台当前页前面，用户就得盯着正在看的那一页等预扫。所以这里自带一个两档优先
 /// 级队列——前台插到后台前面，并且把正在跑的后台那件掐掉（只置旗，它会在自己的检
 /// 查点退出来）。
+///
+/// 有两份实例：`HEAVY_QUEUE`（本机 GPU / 模型的重活）与 `REMOTE_QUEUE`（发给远端
+/// 那一步的重活）。分开的理由见 `run_remote`。
 struct HeavyQueue {
     state: std::sync::Mutex<HeavyQueueState>,
 }
@@ -1637,13 +1726,17 @@ impl HeavyQueue {
         }
     }
 
-    async fn acquire(&self, priority: HeavyPriority, task_id: Option<String>) -> HeavyPermit {
+    async fn acquire(
+        self: &'static Self,
+        priority: HeavyPriority,
+        task_id: Option<String>,
+    ) -> HeavyPermit {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let preempt = {
             let mut state = self.lock();
             if state.can_start(priority) {
                 state.start(priority, task_id);
-                return HeavyPermit;
+                return HeavyPermit { queue: self };
             }
             state.enqueue(priority, task_id, sender)
         };
@@ -1653,7 +1746,7 @@ impl HeavyQueue {
         // 叫醒的那一头没了（这个命令 future 已经被丢掉）不算错：许可会经 release
         // 的循环交给下一位，这里当作拿到再立刻还回去。
         let _ = receiver.await;
-        HeavyPermit
+        HeavyPermit { queue: self }
     }
 
     /// 还许可：交给下一位，没有等待者才算空。
@@ -1691,31 +1784,60 @@ impl HeavyQueue {
 
 static HEAVY_QUEUE: HeavyQueue = HeavyQueue::new();
 
+/// 发给远端那一步的重活自己的闸。远端请求在等的过程中**不占**本机 GPU 那一件，
+/// 理由见 `run_remote`。
+static REMOTE_QUEUE: HeavyQueue = HeavyQueue::new();
+
 /// 拿着一张代表「现在只有这一件重活在跑」的牌。丢掉就还回去。
-pub(crate) struct HeavyPermit;
+///
+/// 牌上记着是哪一条队列给的：本机那一件与远端那一件是两条独立的链子。
+pub(crate) struct HeavyPermit {
+    queue: &'static HeavyQueue,
+}
 
 impl Drop for HeavyPermit {
     fn drop(&mut self) {
-        HEAVY_QUEUE.release();
+        self.queue.release();
     }
 }
 
 /// 全局只允许一件重活：阅读器的超分/去码、DLSSNR、远端处理收到的请求都走这里。
 /// 不这么收，两张图同时进来就会各开一份模型，内存直接翻倍。
+///
+/// **本机**那一件。发给远端的请求走 `run_remote`（另一条队列）。
 pub(crate) async fn run_heavy<T: Send + 'static>(
     priority: HeavyPriority,
     task_id: Option<String>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
-    run_reader_inference(priority, task_id, work).await
+    run_on(&HEAVY_QUEUE, priority, task_id, work).await
 }
 
-async fn run_reader_inference<T: Send + 'static>(
+/// 远端任务的闸：**不占本机那一件重活**。
+///
+/// 远端那一步的等待时间由局域网决定（最长 180 秒），而阻塞式 HTTP 发出之后本机这一侧
+/// 没法掐断它。以前它占的就是本机 GPU 的独占闸，于是一份卡住或慢的远端请求会让用户
+/// 当前页的 DLSSNR / 超分一直排队——而这两件事根本不抢同一份资源：远端重活占的是**对面**
+/// 机器的算力，本机只做解码与编码（审计 P2-2）。所以给它自己的一条队列，两档优先级在
+/// 这里同样有用：前台那一页的远端请求插到整本预扫的前面。
+///
+/// 本机这一侧仍然一次一件（`HEAVY_QUEUE`），所以「两张图同时进来把内存顶爆」那条
+/// 保护没有松开。
+pub(crate) async fn run_remote<T: Send + 'static>(
     priority: HeavyPriority,
     task_id: Option<String>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
-    let permit = HEAVY_QUEUE.acquire(priority, task_id).await;
+    run_on(&REMOTE_QUEUE, priority, task_id, work).await
+}
+
+async fn run_on<T: Send + 'static>(
+    queue: &'static HeavyQueue,
+    priority: HeavyPriority,
+    task_id: Option<String>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let permit = queue.acquire(priority, task_id).await;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -1744,7 +1866,7 @@ pub async fn inference_upscale_page(
     let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
     let priority = HeavyPriority::parse(input.priority.as_deref());
     let task_id = input.task_id.clone();
-    let result = run_reader_inference(priority, task_id, move || {
+    let result = run_heavy(priority, task_id, move || {
         let database = app.state::<crate::db::Database>();
         upscale_cached_page_with_models(&database, &cache_data, &app_data, &input)
     })
@@ -1949,8 +2071,16 @@ fn upscale_cached_page_with_models(
         }
     }
     // 产物落盘：DLSSNR / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
-    // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。
-    store_derived(database, app_data, &enhanced_identity, "image/png", &encoded);
+    // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。写不进去也照样把
+    // 这一页交出去，只是记一条 `CACHE_WRITE_FAILED`（见 `finish_derived`）。
+    let encoded = finish_derived(
+        database,
+        app_data,
+        UPSCALE_CACHE_SOURCE,
+        &enhanced_identity,
+        "image/png",
+        encoded,
+    );
     CommandResult::success(encoded)
 }
 
@@ -1991,7 +2121,7 @@ pub async fn inference_decensor_page(
     let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
     let priority = HeavyPriority::parse(input.priority.as_deref());
     let task_id = input.task_id.clone();
-    let result = run_reader_inference(priority, task_id, move || {
+    let result = run_heavy(priority, task_id, move || {
         let database = app.state::<crate::db::Database>();
         decensor_cached_page(&database, &cache_data, &app_data, &input)
     })
@@ -2239,8 +2369,16 @@ fn decensor_cached_page(
     };
     drop(guard);
     // 去码产物是链路的**中间结果**：超分那一步读它，DLSSNR / 远端也以它为起点。
-    // 只在这里落盘，取消掉的任务不写。
-    store_derived(database, app_data, &identity, "image/png", &encoded);
+    // 只在这里落盘，取消掉的任务不写。写不进去也照样把这一页交出去，只是记一条
+    // `CACHE_WRITE_FAILED`（见 `finish_derived`）。
+    let encoded = finish_derived(
+        database,
+        app_data,
+        DECENSOR_CACHE_SOURCE,
+        &identity,
+        "image/png",
+        encoded,
+    );
     CommandResult::success(encoded)
 }
 
@@ -2657,10 +2795,13 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn reader_inference_does_not_block_the_async_executor() {
+        // 这条会真的走一遍全局 `HEAVY_QUEUE`（`run_heavy`）：与那几条直接摆弄队列的
+        // 测试互相排队，不然并行跑时它们会看到对方的许可。
+        let _serial = heavy_queue_test_lock();
         let caller = std::thread::current().id();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker = tokio::spawn(run_reader_inference(
+        let worker = tokio::spawn(run_heavy(
             HeavyPriority::Background,
             None,
             move || {
@@ -3892,5 +4033,191 @@ mod tests {
 
         drop(running);
         waiter.await.unwrap();
+    }
+
+    /// 审计 P2-2：远端那一步等的是**对面**那台机器，不该占住本机的重活槽。
+    ///
+    /// 以前两条路共用一个闸，一份卡住或慢的远端请求（阻塞式 HTTP，最长 180 秒）会让
+    /// 用户当前页的 DLSSNR / 超分一直排队。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_remote_task_does_not_hold_the_local_heavy_slot() {
+        let _serial = heavy_queue_test_lock();
+
+        // 远端占着自己的那条 → 本机那一件仍然要立刻拿得到。
+        let remote = REMOTE_QUEUE.acquire(HeavyPriority::Background, None).await;
+        let local = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            HEAVY_QUEUE.acquire(HeavyPriority::Foreground, None),
+        )
+        .await
+        .expect("远端占着的时候，本机那一件重活仍然要立刻能跑");
+        drop(local);
+        drop(remote);
+        assert!(HEAVY_QUEUE.lock().running.is_none());
+        assert!(REMOTE_QUEUE.lock().running.is_none());
+
+        // 反过来：本机占着 → 远端也立刻能发出去。
+        let local = HEAVY_QUEUE.acquire(HeavyPriority::Foreground, None).await;
+        let remote = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            REMOTE_QUEUE.acquire(HeavyPriority::Background, None),
+        )
+        .await
+        .expect("本机占着的时候，远端那一步仍然要立刻能发出去");
+        drop(remote);
+        drop(local);
+        assert!(HEAVY_QUEUE.lock().running.is_none());
+        assert!(REMOTE_QUEUE.lock().running.is_none());
+    }
+
+    /// 负控：分两条队列不是把闸拆了——各自仍然一次一件。
+    #[tokio::test(flavor = "current_thread")]
+    async fn each_heavy_queue_still_runs_one_thing_at_a_time() {
+        let _serial = heavy_queue_test_lock();
+
+        let local = HEAVY_QUEUE.acquire(HeavyPriority::Background, None).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(120),
+                HEAVY_QUEUE.acquire(HeavyPriority::Background, None)
+            )
+            .await
+            .is_err(),
+            "本机那一条仍然一次一件"
+        );
+
+        let remote = REMOTE_QUEUE.acquire(HeavyPriority::Background, None).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(120),
+                REMOTE_QUEUE.acquire(HeavyPriority::Foreground, None)
+            )
+            .await
+            .is_err(),
+            "远端那一条仍然一次一件"
+        );
+
+        drop(remote);
+        drop(local);
+        assert!(HEAVY_QUEUE.lock().running.is_none());
+        assert!(REMOTE_QUEUE.lock().running.is_none());
+    }
+
+    /// 一张真的小 PNG（缓存层的 `sniff_image_mime` 与 blake3 校验都走真字节）。
+    fn tiny_page_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let (width, height) = (8u32, 8u32);
+        let rgba = vec![7u8; (width * height * 4) as usize];
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+            .expect("编码 PNG");
+        bytes
+    }
+
+    /// 让缓存写必然失败：把 `cache` 这个位置先占成**文件**，`create_dir_all(<data>/cache/
+    /// images/xx)` 就建不起来。（不靠权限位：Windows 上目录的只读位本来就不挡写入。）
+    fn block_cache_writes(data_dir: &std::path::Path) {
+        std::fs::write(data_dir.join("cache"), b"").expect("占位");
+    }
+
+    fn derived_identity() -> crate::cache::CacheImageIdentity {
+        let mut identity =
+            crate::cache::CacheImageIdentity::new("scope-a", "archive-7", "dlssnr", 42);
+        identity.revision = Some("dlssnr:v2:0f1e".to_string());
+        identity
+    }
+
+    /// P2-1：写不进去要能被调用方看见（不是一个被吞掉的 `()`），而且原因分得清「再试
+    /// 一次有用」和「没用」。
+    #[test]
+    fn a_derived_result_that_cannot_be_written_reports_a_structured_error() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        let identity = derived_identity();
+        block_cache_writes(dir.path());
+
+        let error = store_derived(&database, dir.path(), &identity, "image/png", &tiny_page_png())
+            .expect_err("写不进去必须是 Err");
+        assert_eq!(error.code, CACHE_WRITE_FAILED);
+        assert!(!error.message.trim().is_empty(), "要有一句人话");
+        assert!(!error.retryable, "目录建不起来不是重试能解决的");
+    }
+
+    /// P2-1 的契约：缓存没写进去，这一页照样交出去——图已经算出来了，磁盘满不该把它从
+    /// 用户眼前拿走；代价是统一错误日志里多一条带完整缓存键的警告。
+    #[test]
+    fn a_failed_cache_write_still_returns_the_page_and_says_so_in_the_log() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        let identity = derived_identity();
+        let png = tiny_page_png();
+        block_cache_writes(dir.path());
+
+        let returned = finish_derived(
+            &database,
+            dir.path(),
+            DECENSOR_CACHE_SOURCE,
+            &identity,
+            "image/png",
+            png.clone(),
+        );
+        assert_eq!(returned, png, "写不进去也要把这一页原样交出去");
+
+        let log = std::fs::read_to_string(dir.path().join("logs/error.log")).expect("错误日志");
+        let line = log.lines().next().expect("一条记录");
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 5, "统一错误日志是制表符分隔的五栏：{line}");
+        assert_eq!(fields[1], "warn");
+        assert_eq!(fields[2], DECENSOR_CACHE_SOURCE);
+        assert!(
+            fields[3].starts_with(CACHE_WRITE_FAILED),
+            "分类要在最前面：{line}"
+        );
+        for key in [
+            "scope=scope-a",
+            "archive=archive-7",
+            "page=42",
+            "rendition=dlssnr",
+            "revision=dlssnr:v2:0f1e",
+        ] {
+            assert!(
+                fields[4].contains(key),
+                "detail 里要能对账：{key} / {}",
+                fields[4]
+            );
+        }
+        // 一次失败一条：不要把同一件事写成两行（日志面板按 (时间,级别,来源,消息) 去重，
+        // 但重复写本身就说明有人调了两遍）。
+        assert_eq!(log.lines().count(), 1, "一次失败一条");
+    }
+
+    /// 成功落盘时不写日志：警告只在真出问题时出现，不然日志面板就全是噪音。
+    #[test]
+    fn a_derived_result_that_lands_returns_the_page_and_leaves_no_warning() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        let identity = derived_identity();
+        let png = tiny_page_png();
+
+        let returned = finish_derived(
+            &database,
+            dir.path(),
+            UPSCALE_CACHE_SOURCE,
+            &identity,
+            "image/png",
+            png.clone(),
+        );
+
+        assert_eq!(returned, png);
+        assert_eq!(
+            cached_derived(&database, dir.path(), &identity),
+            Some(png),
+            "落盘了就该能原样取回来"
+        );
+        assert!(
+            !dir.path().join("logs/error.log").exists(),
+            "成功不该留警告"
+        );
     }
 }

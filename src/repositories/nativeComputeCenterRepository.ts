@@ -139,6 +139,8 @@ export class NativeComputeCenterRepository {
     decensorModel?: string;
     upscaleModel?: string;
     taskId?: string;
+    /** 远端有自己的队列（不占本机 GPU 那一件）：档位管的是远端任务之间谁先走。 */
+    priority?: 'foreground' | 'background';
   }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('remote_compute_process', { input });
   }

@@ -293,14 +293,16 @@ pub fn dll_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("dlssnr").join("nvngx_dlssnr.dll")
 }
 
-/// DLSSNR 产物该记在哪一版：这一份 DLL（按字节数与修改时间认）+ 这一套参数 + 起点
-/// 那一版的 revision。
+/// DLSSNR 产物该记在哪一版：这一份 DLL（按**内容**认）+ 这一套参数 + 起点那一版的
+/// revision。
 ///
 /// 前端说不出这件事——`nativeImageCache.read()` 对派生版本一律当作「本次会话的产物」，
 /// 所以「磁盘上这一页是哪一份 DLL 用哪一套参数跑出来的」只能由知道这两件事的这里回答。
-/// 任何一项变了就是另一版，旧产物不许顶上来。165 MB 的 DLL 不算哈希（`file_sha256`
-/// 太慢，不能放在热路径上），用字节数 + 修改时间：换 DLL 是「导入/下载」这条路径干的，
-/// 它必然重写文件，两者至少有一个变。
+/// 任何一项变了就是另一版，旧产物不许顶上来。
+///
+/// 版本前缀是 `v2`：v1 认的是「字节数 + 修改时间」，复制、解包、同步、恢复备份都能让
+/// 一份完全不同的 DLL 在这两项上与原来那份一样（审计报告 P1-2），所以 v1 的产物一律
+/// 不再认。内容哈希不放在热路径上，见 [`cached_fingerprint`]。
 #[cfg(windows)]
 pub fn output_revision(
     data_dir: &std::path::Path,
@@ -308,7 +310,7 @@ pub fn output_revision(
     settings: &DlssnrSettings,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dlssnr-out:v1\0");
+    hasher.update(b"dlssnr-out:v2\0");
     hasher.update(dll_identity(data_dir).as_bytes());
     hasher.update(b"\0");
     hasher.update(source_revision.unwrap_or("reader-page").as_bytes());
@@ -316,24 +318,21 @@ pub fn output_revision(
     // `settings` 传进来之前已经 `normalized()` 过（层数与数值都收过范围），所以
     // 「默认」与「显式写出默认值」在这里是同一串。
     hasher.update(serde_json::to_string(settings).unwrap_or_default().as_bytes());
-    format!("dlssnr:v1:{}", hasher.finalize().to_hex())
+    format!("dlssnr:v2:{}", hasher.finalize().to_hex())
 }
 
-/// 「这一份 DLL 是哪一份」的便宜说法。没装就是 `missing`——没装时产物缓存自然全部
-/// 失效（换回同一份 DLL 时也会对不上，所以宁可多算一次）。
+/// 「这一份 DLL 是哪一份」——按**内容**认（SHA-256 + 字节数）。
+///
+/// 只认字节数与修改时间是不够的：把另一份 DLL 复制过来、解包出来、从云端同步下来、
+/// 或还原一份旧备份，这两项都可能与原来那份分毫不差，于是换汤不换药的产物缓存把旧图
+/// 端上来（审计报告 P1-2）。哈希本身在 [`cached_fingerprint`] 里进程内只算一遍，
+/// 所以这不是热路径上的 165 MB。没装就是 `missing`——没装时产物缓存自然全部失效
+/// （换回同一份 DLL 时也会重建，所以宁可多算一次）。
 #[cfg(windows)]
 fn dll_identity(data_dir: &std::path::Path) -> String {
-    match std::fs::metadata(dll_path(data_dir)) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|value| value.as_nanos())
-                .unwrap_or(0);
-            format!("{}:{}", metadata.len(), modified)
-        }
-        Err(_) => "missing".into(),
+    match cached_fingerprint(&dll_path(data_dir)) {
+        Some((bytes, digest)) => format!("sha256:{digest}:{bytes}"),
+        None => "missing".into(),
     }
 }
 
@@ -386,6 +385,60 @@ pub fn variant_of(bytes: usize, sha256_hex: &str) -> Option<Variant> {
     }
 }
 
+/// 进程内记住「这个路径上那份 DLL 的内容」：`(路径, 字节数, 修改时间, 指纹)`。
+///
+/// 只留最近问过的那一条路径——应用只有一个数据目录，测试里那些临时目录里的片段都是
+/// 几百字节，重算也不心疼。
+#[cfg(windows)]
+type FingerprintCache = std::sync::Mutex<
+    Option<(
+        std::path::PathBuf,
+        u64,
+        Option<std::time::SystemTime>,
+        Option<(u64, String)>,
+    )>,
+>;
+
+#[cfg(windows)]
+static DLL_FINGERPRINT: std::sync::OnceLock<FingerprintCache> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn fingerprint_cache() -> &'static FingerprintCache {
+    DLL_FINGERPRINT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 这一份 DLL 的**内容**指纹：`(字节数, SHA-256)`，进程内只读一遍。
+///
+/// 165 MB 读一遍只在**第一次**要身份时付——真机上设置页认变体本来就要读一遍，产物
+/// 身份（[`dll_identity`]）与探针结论（[`probe_key`]）复用同一份结果，所以一次运行里
+/// 最多一次。之后按 `(路径, 字节数, 修改时间)` 命中；真的往这个路径写过新文件的
+/// 地方（导入 / 下载）会显式作废，见 [`forget_fingerprint`]。
+#[cfg(windows)]
+fn cached_fingerprint(path: &std::path::Path) -> Option<(u64, String)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok();
+    if let Ok(guard) = fingerprint_cache().lock() {
+        if let Some((cached_path, bytes, cached_modified, value)) = guard.as_ref() {
+            if cached_path == path && *bytes == metadata.len() && *cached_modified == modified {
+                return value.clone();
+            }
+        }
+    }
+    let value = file_sha256(path).map(|digest| (metadata.len(), digest));
+    if let Ok(mut guard) = fingerprint_cache().lock() {
+        *guard = Some((path.to_path_buf(), metadata.len(), modified, value.clone()));
+    }
+    value
+}
+
+/// 刚往这个路径写过一份 DLL（导入 / 下载）之后作废进程内的指纹：文件名没变、内容变了。
+#[cfg(windows)]
+pub(super) fn forget_fingerprint() {
+    if let Ok(mut guard) = fingerprint_cache().lock() {
+        *guard = None;
+    }
+}
+
 /// 装进数据目录的那份 DLL 是三种里的哪一种（顺带把字节数与哈希记下来给设置页）。
 #[cfg(windows)]
 pub fn installed_variant(data_dir: &std::path::Path) -> Option<(Variant, u64)> {
@@ -397,24 +450,8 @@ pub fn installed_variant(data_dir: &std::path::Path) -> Option<(Variant, u64)> {
 
 #[cfg(windows)]
 fn cached_variant(path: &std::path::Path) -> Option<Variant> {
-    use std::sync::{Mutex, OnceLock};
-    type CacheEntry = (std::path::PathBuf, u64, Option<std::time::SystemTime>, Option<Variant>);
-    static CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((cached_path, bytes, cached_modified, variant)) = guard.as_ref() {
-            if cached_path == path && *bytes == metadata.len() && *cached_modified == modified {
-                return *variant;
-            }
-        }
-    }
-    let variant = file_sha256(path).and_then(|digest| variant_of(metadata.len() as usize, &digest));
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((path.to_path_buf(), metadata.len(), modified, variant));
-    }
-    variant
+    let (bytes, digest) = cached_fingerprint(path)?;
+    variant_of(bytes as usize, &digest)
 }
 
 /// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、拷到数据目录、认清是哪一种变体。
@@ -459,8 +496,10 @@ pub fn install_dll(source: &std::path::Path, data_dir: &std::path::Path) -> Resu
         format!("落盘失败：{error}")
     })?;
 
+    // 刚写过这个路径：进程里记住的那份指纹不作数了，重新读一遍（也顺手把变体认出来）。
+    forget_fingerprint();
     let bytes = std::fs::metadata(&target).map(|value| value.len()).unwrap_or(0);
-    let variant = file_sha256(&target).and_then(|digest| variant_of(bytes as usize, &digest));
+    let variant = cached_variant(&target);
     Ok(InstalledDll {
         bytes,
         variant: variant.map(|value| value.id().to_string()),
@@ -501,24 +540,25 @@ pub fn apply_rgba(
 #[cfg(windows)]
 static LAST_PROBE: std::sync::Mutex<Option<(ProbeKey, ProbeReport)>> = std::sync::Mutex::new(None);
 
-/// 认一份 DLL：数据目录 + 字节数 + 修改时间。165MB 的内容哈希（`status` 认变体时
-/// 算的那一份）在每次跑图前算一遍太贵，而换文件必然把后两个都变掉；带上目录是因为
-/// 表是进程级的，而测试与应用会指向不同的数据目录。
+/// 认一份 DLL：数据目录 + **内容**指纹（字节数 + SHA-256）。
+///
+/// 只认「字节数 + 修改时间」时，一份复制/解包/同步过来的 DLL 可以在这两项上与原来那份
+/// 一模一样，于是这里显示的还是换之前那份的结论（审计报告 P1-2）。指纹在
+/// [`cached_fingerprint`] 里进程内只算一遍，所以不算热路径；带上目录是因为这张表是
+/// 进程级的，而测试与应用会指向不同的数据目录。
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeKey {
     data_dir: std::path::PathBuf,
-    bytes: u64,
-    modified: Option<std::time::SystemTime>,
+    /// 没装（或读不出来）就是 `None`。
+    fingerprint: Option<(u64, String)>,
 }
 
 #[cfg(windows)]
 fn probe_key(data_dir: &std::path::Path) -> ProbeKey {
-    let metadata = std::fs::metadata(dll_path(data_dir)).ok();
     ProbeKey {
         data_dir: data_dir.to_path_buf(),
-        bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
-        modified: metadata.and_then(|value| value.modified().ok()),
+        fingerprint: cached_fingerprint(&dll_path(data_dir)),
     }
 }
 
@@ -1092,5 +1132,127 @@ mod tests {
         let gap = mean_absolute_difference(&first.rgba, &second.rgba);
         println!("一层 vs 两层：平均逐通道差 {gap:.3}");
         assert!(gap > 0.5, "两层输出和一层一样（{gap:.3}），第二层没真跑");
+    }
+
+    /// 提交期失败（`Signal` 失败、栅栏超时…）之后，那份上下文**不能**留在缓存里：
+    /// 报错的那一次就要把坏上下文摘掉，下一次请求重建一份，再往后回到复用。
+    ///
+    /// 这是审计报告 P1-1 的场景：`GpuContext` 是进程级缓存，一次 GPU/驱动错误在改之前
+    /// 会被后续每个请求反复用到，故障就放大成「连着一串页都失败」。
+    #[test]
+    fn a_failed_submit_drops_the_context_instead_of_poisoning_every_page() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let none = crate::inference::cancel::CancelToken::none();
+        let settings = DlssnrSettings::default();
+        let page = synthetic_image(240, 320);
+
+        // 先把上下文建起来；这台机器跑不起来就跳过（与别的 GPU 测试同一条规矩）。
+        if let Err(error) = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None) {
+            println!("跳过：DLSSNR 没跑起来 —— {error}");
+            return;
+        }
+        let builds = super::device::context_builds();
+
+        // 注入一次提交失败：报错必须带稳定错误码，说清是提交期失败。
+        super::device::fail_next_submit(true);
+        let error = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect_err("注入的提交失败必须报错");
+        assert!(
+            error.contains(super::device::DEVICE_RESET_REQUIRED),
+            "提交期失败要给稳定错误码：{error}"
+        );
+        assert!(error.contains("注入的提交失败"), "要说清是哪一步失败：{error}");
+        assert_eq!(
+            super::device::context_builds(),
+            builds,
+            "报错的那一刻还不该重建：坏上下文先摘掉，等下一次请求再建"
+        );
+
+        // 下一次请求必须**重建**一份上下文（坏的那份已经不在缓存里了）。
+        filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect("作废之后要能自己恢复");
+        assert_eq!(
+            super::device::context_builds(),
+            builds + 1,
+            "作废的上下文之后必须重建，而且只重建一份"
+        );
+        // 新上下文里的计数是它自己的：这一页的工作区与 feature 都得是新建的（旧上下文
+        // 那份计数随它一起作废，跨上下文比大小没有意义）。
+        let (workspaces_after, features_after) = filter::context_counts(&dir, &dll).expect("读计数");
+        assert_eq!(workspaces_after, 1, "新上下文里要重新建一个工作区");
+        assert!(features_after > 0, "新上下文里要重新建 feature");
+
+        // 恢复之后回到复用：再跑一页不该再建上下文，也不该再建工作区与 feature。
+        filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect("重建之后继续复用");
+        assert_eq!(
+            super::device::context_builds(),
+            builds + 1,
+            "恢复之后不该再建上下文"
+        );
+        let (workspaces_reused, features_reused) =
+            filter::context_counts(&dir, &dll).expect("读计数");
+        assert_eq!(
+            (workspaces_reused, features_reused),
+            (workspaces_after, features_after),
+            "恢复之后同样的页要接着用那个工作区"
+        );
+    }
+
+    /// 取消（记录期出错）**不该**动上下文，也不该把工作区销毁掉。
+    ///
+    /// 取消是常态：后台整本预扫被前台当前页抢断时就掐掉正在跑的那一页，所以每取消一次
+    /// 就重建一遍 feature（120ms 级）是纯浪费。这里注入一次记录期失败，判据是紧接着的
+    /// 一次正常请求**不新建工作区、不重建 feature**。
+    #[test]
+    fn a_cancelled_page_keeps_the_context_and_its_workspace() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let none = crate::inference::cancel::CancelToken::none();
+        let settings = DlssnrSettings::default();
+        let page = synthetic_image(700, 900);
+
+        // 先正常跑一次，把工作区与 feature 都建出来。
+        let first = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect("先跑一页都跑不动");
+        let builds = super::device::context_builds();
+        let (workspaces_before, features_before) = filter::context_counts(&dir, &dll).expect("读计数");
+
+        // 注入一次「记到一半被取消」：错误串就是取消那份，上下文不该作废。
+        filter::fail_next_record(true);
+        let error = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect_err("注入的记录期失败要报错");
+        assert_eq!(error, filter::CANCELLED, "层间取消失败要报成取消：{error}");
+
+        // 同一个工作区接着用：不重建上下文、不新建工作区、不重建 feature。
+        let second = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, None)
+            .expect("取消之后要能继续跑");
+        assert_eq!(
+            super::device::context_builds(),
+            builds,
+            "取消不该把上下文也作废掉"
+        );
+        let (workspaces_after, features_after) = filter::context_counts(&dir, &dll).expect("读计数");
+        assert_eq!(
+            (workspaces_after, features_after),
+            (workspaces_before, features_before),
+            "取消不该把工作区丢掉：被取消的那一页没有提交过任何命令，纹理还在开场状态"
+        );
+        assert_eq!(
+            mean_absolute_difference(&first.rgba, &second.rgba),
+            0.0,
+            "取消之后再跑同一页，结果该一模一样"
+        );
     }
 }

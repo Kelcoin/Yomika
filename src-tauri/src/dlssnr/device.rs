@@ -6,8 +6,15 @@
 //! 单项开销），一页的整套命令（上传 → 各层 → 回读）合成一次提交。
 //!
 //! 全局一把锁：GPU 侧一次只跑一个请求（阅读器本来也有单并发闸，算力中心同理）。
+//!
+//! 这里把失败分两类。**记录期**出错（还没提交，比如上传失败、层间取消）丢掉重记就是，
+//! 上下文留着；**提交期**出错（关闭命令表、`Signal`、栅栏超时、重置分配器/命令表）
+//! 说明 GPU 状态未知、命令表也未必能再记，于是整份上下文作废并从缓存里摘掉，下一次
+//! 请求重建——返回的稳定错误码是 [`DEVICE_RESET_REQUIRED`]。上下文建不起来时失败会按
+//! DLL 指纹记住，不会每个请求都去重新初始化一次 NGX。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::Interface;
@@ -37,12 +44,66 @@ pub struct GpuContext {
     /// 诊断用计数：建过几个工作区、建过几次 feature。测试拿它证明「换页不重建」。
     pub workspace_builds: u64,
     pub feature_builds: u64,
+    /// `Some(原因)` ＝ 这一份上下文已经作废，不能再记录、不能再复用。
+    ///
+    /// 提交失败/栅栏超时/命令表重置失败都走这里：GPU 有没有停下不知道，命令表也未必
+    /// 还能 Reset，于是整份上下文交给 `with_context_at` 从缓存里摘掉（报告 P1-1）。
+    pub poisoned: Option<String>,
 }
 
 // D3D12 的对象是 agile 的（windows crate 已经给它们 Send/Sync），指针都由这把锁串起来。
 unsafe impl Send for GpuContext {}
 
-static CONTEXT: OnceLock<Mutex<Option<(ContextKey, GpuContext)>>> = OnceLock::new();
+/// GPU 侧出错之后这一份上下文已经作废时给出的稳定错误码。
+///
+/// 看到它就说明：这一次的结果不可用，而且设备/队列/命令表/工作区整份已经报废，
+/// 下一次请求会重新建。调用方不该把它当成参数错误（报告 P1-1）。
+pub const DEVICE_RESET_REQUIRED: &str = "DLSSNR_DEVICE_RESET_REQUIRED";
+
+/// 把原因包成带稳定错误码的一行。
+fn reset_required(reason: &str) -> String {
+    format!("{DEVICE_RESET_REQUIRED}：{reason}")
+}
+
+/// 进程级上下文槽的三态。
+///
+/// `Failed` 是「试过一次、没建起来」：不记住它，每个请求都会重新去初始化 NGX——
+/// 而 NGX 一旦失败，进程内就不该再反复试（且报告要求这种错误「一次性、不会无限
+/// 重试」）。记住的是**按 DLL 指纹**失败的：换一份片段（大小/修改时间变了）会重新试。
+enum ContextState {
+    Empty,
+    Ready {
+        key: ContextKey,
+        context: GpuContext,
+    },
+    Failed {
+        key: ContextKey,
+        message: String,
+    },
+}
+
+static CONTEXT: OnceLock<Mutex<ContextState>> = OnceLock::new();
+
+/// 建过几份上下文（每次重建 +1）。测试拿它断言「作废之后确实重新建了一份」。
+static CONTEXT_BUILDS: AtomicU64 = AtomicU64::new(0);
+
+/// 测试用：建过几份上下文。
+#[cfg(test)]
+pub fn context_builds() -> u64 {
+    CONTEXT_BUILDS.load(Ordering::Relaxed)
+}
+
+/// 测试用：下一次提交直接按「栅栏信号失败」处理。
+///
+/// 真的等一次 30 秒的栅栏超时没法进测试，但它与 `Signal` 失败、命令表重置失败走的
+/// 是**同一条**中毒路径，所以在这里注入就够（报告 P1-1 的故障注入）。
+#[cfg(test)]
+static FAIL_SUBMIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub fn fail_next_submit(fail: bool) {
+    FAIL_SUBMIT.store(fail, Ordering::SeqCst);
+}
 
 /// 这份上下文是按哪一份 DLL / 哪个数据目录建出来的。
 ///
@@ -80,30 +141,144 @@ pub fn with_context<T>(
     with_context_at(data_dir, &dll, use_context)
 }
 
+/// 缓存槽里那份状态，对这一次 `(data_dir, dll)` 意味着什么。
+///
+/// 抽成纯决策是为了能单测这张表：真去走 `Rebuild` 那一格就要真的初始化一遍 NGX，
+/// 而「初始化失败」正是进程内不该再试的那件事（`Failed` 状态存在的理由），测试里
+/// 不能去踩；反过来 `AlreadyInitialized` 那一格也不能靠真建两份上下文来制造。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotStep {
+    /// 就是它：直接跑。
+    Run,
+    /// 缓存里是另一份 DLL（或另一个数据目录）的上下文：NGX 换不掉，明确报错。
+    AlreadyInitialized,
+    /// 这一份已经失败过：报同一个错，不再初始化一遍。
+    Remembered,
+    /// 空槽，或只是另一份 DLL 的失败记录：去建一份。
+    Rebuild,
+}
+
+fn slot_step(cached: Option<&ContextKey>, failed: Option<&ContextKey>, key: &ContextKey) -> SlotStep {
+    if cached.is_some_and(|existing| existing == key) {
+        return SlotStep::Run;
+    }
+    if cached.is_some() {
+        return SlotStep::AlreadyInitialized;
+    }
+    if failed.is_some_and(|remembered| remembered == key) {
+        return SlotStep::Remembered;
+    }
+    SlotStep::Rebuild
+}
+
 /// 同上，但 DLL 由调用方点名（测试指着 docs 里的那一份；应用指着用户导入的那一份）。
+///
+/// 上下文的三种去向都在这里决定：跑完没出事就放回缓存；**中毒**（GPU 提交/栅栏/重置
+/// 失败）就整份丢掉，下一次请求重建；建不起来就按 DLL 指纹把失败记住，不再反复初始化
+/// 那个进程内注定失败的 NGX。
 pub fn with_context_at<T>(
     data_dir: &std::path::Path,
     dll: &std::path::Path,
     use_context: impl FnOnce(&mut GpuContext) -> Result<T, String>,
 ) -> Result<T, String> {
     let key = ContextKey::of(data_dir, dll);
-    let cell = CONTEXT.get_or_init(|| Mutex::new(None));
+    let cell = CONTEXT.get_or_init(|| Mutex::new(ContextState::Empty));
     let mut guard = cell.lock().map_err(|_| "DLSSNR 上下文锁失败".to_string())?;
-    if let Some((existing, context)) = guard.as_mut() {
-        if *existing != key {
+    // 把上下文暂时取出来跑（锁还在手上）：跑完按它有没有中毒决定放回去还是丢掉。
+    let state = std::mem::replace(&mut *guard, ContextState::Empty);
+    let (cached, failed) = match &state {
+        ContextState::Ready { key, .. } => (Some(key), None),
+        ContextState::Failed { key, .. } => (None, Some(key)),
+        ContextState::Empty => (None, None),
+    };
+    match slot_step(cached, failed, &key) {
+        SlotStep::Run => {
+            let ContextState::Ready {
+                key: existing,
+                mut context,
+            } = state
+            else {
+                unreachable!("Run 只可能来自 Ready")
+            };
+            let result = use_context(&mut context);
+            match context.poisoned.take() {
+                // 提交/信号/栅栏/重置失败过：整份丢弃（`Drop` 里也不会再去碰 NGX），
+                // 下一次请求重建。**这就是「一次 GPU 错误不能放大成后续请求连续失败」**。
+                Some(reason) => Err(reset_required(&reason)),
+                None => {
+                    *guard = ContextState::Ready { key: existing, context };
+                    result
+                }
+            }
+        }
+        SlotStep::AlreadyInitialized => {
+            let ContextState::Ready {
+                key: existing,
+                context,
+            } = state
+            else {
+                unreachable!("AlreadyInitialized 只可能来自 Ready")
+            };
             // 旧上下文还活着，NGX 也已经在进程里初始化过了：这时候换一份 DLL 是
             // 换不掉的。宁可明确报错，也不要让用户以为自己在跑新导入的那一份。
-            return Err(format!(
+            let message = format!(
                 "DLSSNR 已经为另一份片段初始化过（{} 字节，数据目录 {}）：换过 DLL 之后要重启应用才会用新的那一份",
                 existing.dll_bytes,
                 existing.data_dir.display()
-            ));
+            );
+            *guard = ContextState::Ready { key: existing, context };
+            Err(message)
         }
-        return use_context(context);
+        SlotStep::Remembered => {
+            let ContextState::Failed {
+                key: failed_key,
+                message,
+            } = state
+            else {
+                unreachable!("Remembered 只可能来自 Failed")
+            };
+            // 同一份 DLL 已经失败过：给同一个错，不再去初始化一遍 NGX。
+            *guard = ContextState::Failed {
+                key: failed_key,
+                message: message.clone(),
+            };
+            Err(message)
+        }
+        SlotStep::Rebuild => create_and_run(&mut guard, key, data_dir, dll, use_context),
     }
-    let context = GpuContext::create(data_dir, dll)?;
-    let context = &mut guard.insert((key, context)).1;
-    use_context(context)
+}
+
+/// 建一份新上下文并立刻跑这次请求（失败记住、中毒丢掉）。
+fn create_and_run<T>(
+    guard: &mut ContextState,
+    key: ContextKey,
+    data_dir: &std::path::Path,
+    dll: &std::path::Path,
+    use_context: impl FnOnce(&mut GpuContext) -> Result<T, String>,
+) -> Result<T, String> {
+    match GpuContext::create(data_dir, dll) {
+        Ok(mut context) => {
+            CONTEXT_BUILDS.fetch_add(1, Ordering::Relaxed);
+            let result = use_context(&mut context);
+            match context.poisoned.take() {
+                Some(reason) => Err(reset_required(&reason)),
+                None => {
+                    *guard = ContextState::Ready { key, context };
+                    result
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!(
+                "{error}（这一份片段没能建起 GPU 上下文：换一份 DLL 或重启应用会重新尝试）"
+            );
+            *guard = ContextState::Failed {
+                key,
+                message: message.clone(),
+            };
+            Err(message)
+        }
+    }
 }
 
 impl GpuContext {
@@ -152,7 +327,17 @@ impl GpuContext {
             workspaces: Vec::new(),
             workspace_builds: 0,
             feature_builds: 0,
+            poisoned: None,
         })
+    }
+
+    /// 标记这一份上下文已经作废，并给出带稳定错误码的错误。
+    ///
+    /// 拿不准 GPU 有没有停下时用它——它意味着整份设备上下文作废：`with_context_at`
+    /// 会把这一份丢掉，下一次请求重新建 device/queue/allocator/list/workspace。
+    fn poison(&mut self, reason: String) -> String {
+        self.poisoned = Some(reason.clone());
+        reset_required(&reason)
     }
 
     /// 分配一个参数对象（NGX 核心分配，析构也还给它）。
@@ -161,29 +346,48 @@ impl GpuContext {
     }
 
     /// 把当前记录好的命令提交掉，并等 GPU 跑完。
+    ///
+    /// 这里的**每一条失败路径都会让整份上下文作废**（`poison`）：关闭失败时命令表处在
+    /// 未知状态；`Signal` 失败或栅栏超时时命令已经发出去了、GPU 有没有停下不知道；
+    /// 重置失败则这张命令表再也记不了下一页。作废之后调用方不能再拿工作区去 `release`
+    /// （见 `filter::run`），`with_context_at` 会把上下文从缓存里摘掉。
     pub fn execute_and_wait(&mut self) -> Result<(), String> {
+        // 测试注入：按「提交/栅栏信号失败」处理。真的等一次 30 秒超时没法进测试，
+        // 但它走的是同一条中毒路径。
+        #[cfg(test)]
+        if FAIL_SUBMIT.swap(false, Ordering::SeqCst) {
+            return Err(self.poison("注入的提交失败（测试）".to_string()));
+        }
         if let Err(error) = unsafe { self.list.Close() } {
             for message in info_queue_messages(&self.device) {
                 eprintln!("[dlssnr] 调试层：{message}");
             }
-            return Err(format!("关闭命令表失败：{error}"));
+            // 命令还没提交过，理论上 reset 一下就能重来；但连关闭都失败，说明命令表
+            // 已经不是记录时的样子了——试着收回去，然后整份作废。
+            let _ = self.discard_recorded();
+            return Err(self.poison(format!("关闭命令表失败：{error}")));
         }
         let lists = [Some(self.list.cast::<ID3D12CommandList>().map_err(|error| error.to_string())?)];
         unsafe { self.queue.ExecuteCommandLists(&lists) };
 
         self.fence_value += 1;
-        unsafe { self.queue.Signal(&self.fence, self.fence_value) }
-            .map_err(|error| format!("信号栅栏失败：{error}"))?;
+        if let Err(error) = unsafe { self.queue.Signal(&self.fence, self.fence_value) } {
+            return Err(self.poison(format!("信号栅栏失败：{error}")));
+        }
         // 轮询而不是等事件：这里一次只有一张图，1ms 的粒度足够，也少一个内核对象。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while unsafe { self.fence.GetCompletedValue() } < self.fence_value {
             if std::time::Instant::now() > deadline {
-                return Err("等待 GPU 超过 30 秒".to_string());
+                return Err(self.poison("等待 GPU 超过 30 秒".to_string()));
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        unsafe { self.allocator.Reset() }.map_err(|error| format!("重置分配器失败：{error}"))?;
-        unsafe { self.list.Reset(&self.allocator, None) }.map_err(|error| format!("重置命令表失败：{error}"))?;
+        if let Err(error) = unsafe { self.allocator.Reset() } {
+            return Err(self.poison(format!("重置分配器失败：{error}")));
+        }
+        if let Err(error) = unsafe { self.list.Reset(&self.allocator, None) } {
+            return Err(self.poison(format!("重置命令表失败：{error}")));
+        }
         Ok(())
     }
 
@@ -191,10 +395,16 @@ impl GpuContext {
     ///
     /// **不执行**：命令没提交过，纹理的实际状态也就没变过——下次重新记录时那些
     /// 「开场状态」的假设依然成立（见 `workspace` 模块头的状态机）。
+    ///
+    /// 收不回去就说明这份上下文也不能再用了（命令表停在不可记录的状态）：标中毒。
     pub fn discard_recorded(&mut self) -> Result<(), String> {
         let _ = unsafe { self.list.Close() };
-        unsafe { self.allocator.Reset() }.map_err(|error| format!("重置分配器失败：{error}"))?;
-        unsafe { self.list.Reset(&self.allocator, None) }.map_err(|error| format!("重置命令表失败：{error}"))?;
+        if let Err(error) = unsafe { self.allocator.Reset() } {
+            return Err(self.poison(format!("重置分配器失败：{error}")));
+        }
+        if let Err(error) = unsafe { self.list.Reset(&self.allocator, None) } {
+            return Err(self.poison(format!("重置命令表失败：{error}")));
+        }
         Ok(())
     }
 
@@ -545,6 +755,12 @@ impl GpuContext {
 
 impl Drop for GpuContext {
     fn drop(&mut self) {
+        if self.poisoned.is_some() {
+            // 已经作废的上下文（提交失败 / 栅栏超时 / 设备丢了）：GPU 是否停下未知，
+            // 这时候再去调 NGX 释放 feature 只是拿一个状态未知的设备开玩笑——整份
+            // 交给进程/驱动回收（报告 P1-1：不要在没有确认 GPU 停下时去动资源）。
+            return;
+        }
         // feature 句柄要还给 NGX；纹理靠 D3D12 自己的引用计数。
         for workspace in self.workspaces.iter_mut() {
             workspace.release(&self.core);
@@ -647,4 +863,62 @@ fn info_queue_messages(device: &ID3D12Device) -> Vec<String> {
         messages.push(String::from_utf8_lossy(&text[..text.len().saturating_sub(1)]).to_string());
     }
     messages
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// 一个上下文、一份失败记录各自的去向（审计报告 P1-1 的第三、四条）。
+    ///
+    /// 只测决策表，不碰全局槽，也不去真的初始化 NGX：走 `Rebuild` 那一格就要真的建一份
+    /// 上下文，而「初始化失败」是进程内不该再试的那件事（`Failed` 状态存在的理由），
+    /// 测试里踩一次会把整组 GPU 测试弄坏；`AlreadyInitialized` 那一格也不能靠真建两份
+    /// 上下文来制造（NGX 只认一块设备）。
+    #[test]
+    fn the_slot_keeps_one_context_and_remembers_a_failure_per_dll() {
+        let dir = std::env::temp_dir().join("yomika-dlssnr-slot-step");
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let first = dir.join("first.dll");
+        let second = dir.join("second.dll");
+        std::fs::write(&first, vec![0u8; 8]).expect("写第一份片段");
+        std::fs::write(&second, vec![0u8; 16]).expect("写第二份片段");
+        let other_dir = dir.join("other-data");
+        std::fs::create_dir_all(&other_dir).expect("另一个数据目录");
+
+        let first_key = ContextKey::of(&dir, &first);
+        let second_key = ContextKey::of(&dir, &second);
+        let other_key = ContextKey::of(&other_dir, &first);
+
+        // 空槽：去建。
+        assert_eq!(slot_step(None, None, &first_key), SlotStep::Rebuild);
+        // 缓存里是第一份：同一份直接跑。
+        assert_eq!(
+            slot_step(Some(&first_key), None, &first_key),
+            SlotStep::Run
+        );
+        // 换一份 DLL、或换一个数据目录：都换不掉（NGX 只认一块设备，只能报错让用户重启）。
+        assert_eq!(
+            slot_step(Some(&first_key), None, &second_key),
+            SlotStep::AlreadyInitialized
+        );
+        assert_eq!(
+            slot_step(Some(&first_key), None, &other_key),
+            SlotStep::AlreadyInitialized
+        );
+        // 第一份失败过之后：同一份报回记住的那个错，不再初始化一遍。
+        assert_eq!(
+            slot_step(None, Some(&first_key), &first_key),
+            SlotStep::Remembered
+        );
+        // 而另一份（或另一个数据目录）不该被那份记录挡着：重新试。
+        assert_eq!(
+            slot_step(None, Some(&first_key), &second_key),
+            SlotStep::Rebuild
+        );
+        assert_eq!(
+            slot_step(None, Some(&first_key), &other_key),
+            SlotStep::Rebuild
+        );
+    }
 }

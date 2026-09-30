@@ -226,6 +226,63 @@ describe('library workspace', () => {
     expect(secondTimeline).toHaveTextContent('09:30');
   });
 
+  it('offers one quick-jump tick per day on the history rail', () => {
+    renderWorkspace({
+      archives: archives.slice(0, 3),
+      timelineByArchiveId: new Map([
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15' }],
+        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '09:30' }],
+        ['archive-2', { date: '2026-09-10', dayLabel: '昨天', time: '22:40' }],
+      ]),
+    });
+
+    const rail = screen.getByRole('group', { name: '历史快速跳转' });
+    const ticks = [...rail.querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    // 一天一个刻度，不是一行一个：同一天的第二行共用当天那条。
+    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天', '昨天']);
+    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天', '跳转到 昨天']);
+    // 第一条就是「正在看的那天」；桌面端不再同时挂着日历下拉（两个入口挤在
+    // 同一角会互相重叠）。
+    expect(ticks[0]).toHaveClass('is-active');
+    expect(ticks[0]).toHaveAttribute('aria-current', 'true');
+    expect(ticks[1]).not.toHaveClass('is-active');
+    expect(document.querySelector('.history-quick-jump')).toBeNull();
+  });
+
+  it('moves the rail’s filled tick when a day is picked', async () => {
+    const user = userEvent.setup();
+    renderWorkspace({
+      archives: archives.slice(0, 3),
+      timelineByArchiveId: new Map([
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15' }],
+        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '09:30' }],
+        ['archive-2', { date: '2026-09-10', dayLabel: '昨天', time: '22:40' }],
+      ]),
+    });
+
+    const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    await user.click(ticks[1]!);
+    expect(ticks[1]).toHaveClass('is-active');
+    expect(ticks[0]).not.toHaveClass('is-active');
+  });
+
+  it('pins the reading progress to the card’s own bottom edge', () => {    renderWorkspace({
+      archives: archives.slice(0, 1),
+      cardStyle: 'wide',
+      readingProgressByArchiveId: new Map([['archive-0', 40]]),
+    });
+
+    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    const bar = card.querySelector<HTMLElement>('.archive-card-progress');
+    // 贴卡片自己的底边：横条是卡片的直接子元素，卡片自己的 overflow: hidden +
+    // border-radius 才能把两端削成与下缘一致的圆角（在文案栏里只能贴到文案栏
+    // 的底边，两端是直角，右侧还差一个内边距）。
+    expect(bar).not.toBeNull();
+    expect(bar?.parentElement).toBe(card);
+    expect(bar?.closest('.archive-row-copy')).toBeNull();
+    expect(card.lastElementChild).toBe(bar);
+  });
+
   it('refreshes only when a pull past the top of the list is released', async () => {
     const onRefresh = vi.fn();
     renderWorkspace({ archives, onRefresh });

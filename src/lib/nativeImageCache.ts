@@ -143,6 +143,9 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
+        // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
+        // 当前页插到整本预扫前面。
+        ...(identity.priority ? { priority: identity.priority } : {}),
       });
       if (!processed.ok) throw new Error(processed.error.message);
       const bytes = new Uint8Array(processed.value);
