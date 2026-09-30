@@ -226,7 +226,7 @@ describe('library workspace', () => {
     expect(secondTimeline).toHaveTextContent('09:30');
   });
 
-  it('offers one quick-jump tick per day on the history rail', () => {
+  it('offers a quick-jump tick for every row while the history fits the rail', () => {
     renderWorkspace({
       archives: archives.slice(0, 3),
       timelineByArchiveId: new Map([
@@ -238,10 +238,11 @@ describe('library workspace', () => {
 
     const rail = screen.getByRole('group', { name: '历史快速跳转' });
     const ticks = [...rail.querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
-    // 一天一个刻度，不是一行一个：同一天的第二行共用当天那条。
-    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天', '昨天']);
-    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天', '跳转到 昨天']);
-    // 第一条就是「正在看的那天」；桌面端不再同时挂着日历下拉（两个入口挤在
+    // 一行一个刻度，不是一天一个：同一天的两条记录要能各自跳到（长历史里一天几十条，
+    // 共用一个刻度等于那一整天只能跳到开头）。
+    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天 08:15', '今天 09:30', '昨天 22:40']);
+    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天 08:15', '跳转到 今天 09:30', '跳转到 昨天 22:40']);
+    // 第一条就是「正在看的那一行」；桌面端不再同时挂着日历下拉（两个入口挤在
     // 同一角会互相重叠）。
     expect(ticks[0]).toHaveClass('is-active');
     expect(ticks[0]).toHaveAttribute('aria-current', 'true');
@@ -249,7 +250,24 @@ describe('library workspace', () => {
     expect(document.querySelector('.history-quick-jump')).toBeNull();
   });
 
-  it('moves the rail’s filled tick when a day is picked', async () => {
+  it('samples rows instead of collapsing to one tick per month on a long history', () => {
+    const entryFor = (index: number) => ({
+      date: `2026-0${(index % 9) + 1}-0${(index % 9) + 1}`,
+      dayLabel: `${(index % 9) + 1}月${(index % 9) + 1}日`,
+      time: `0${index % 10}:${10 + (index % 50)}`,
+    });
+    const timelineByArchiveId = new Map(archives.map((archive, index) => [archive.archiveId, entryFor(index)]));
+    renderWorkspace({ archives, timelineByArchiveId });
+
+    const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    // 100 行、上限 60 个刻度 → 每 2 行一个，50 个；不再是「超过 60 天就退化成一个月
+    // 一个刻度」（那本历史只剩四个目标）。
+    expect(ticks).toHaveLength(50);
+    expect(ticks[0]).toHaveAttribute('title', '1月1日 00:10');
+    expect(ticks.at(-1)).toHaveAttribute('title', `${entryFor(98).dayLabel} ${entryFor(98).time}`);
+  });
+
+  it('moves the rail’s filled tick when a tick is picked', async () => {
     const user = userEvent.setup();
     renderWorkspace({
       archives: archives.slice(0, 3),

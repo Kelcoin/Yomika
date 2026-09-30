@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Maximize2, Minimize2, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -266,7 +266,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   /** Set on release when the pointer travelled far enough to be a drag, so the
    * click that follows can be ignored. */
   const gestureMovedRef = useRef(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
@@ -659,16 +658,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     return () => window.clearInterval(timer);
   }, [autoPlay, effectiveLayout, state.direction, state.layout, pageActive]);
 
-  function toggleFullscreen() {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
-    } else {
-      document.documentElement.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    }
-  }
-
   /** Past this much travel a gesture is a drag rather than a tap. */
   const TAP_SLOP = 5;
 
@@ -1007,6 +996,21 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       onClick={(event) => { event.stopPropagation(); void windowApi.toggleMaximize().catch(() => {}); }}
     ><WindowGlyph kind={windowMaximized ? 'restore' : 'maximize'} /></button>
   ) : null;
+  /** The bottom bar is three slots: how the pages are arranged, where the reader
+   * is, and what is done to the page. 自动翻页 belongs with neither side of that
+   * split, so it rides on whichever side has *less* in it: the left slot always
+   * holds two (布局、方向), the right slot holds as many as the configured
+   * enhancement toggles — so with none or one of them the right side is the empty
+   * one, and with two or three the left side is. Counting instead of asking
+   * 「有没有超分」 matters: one configured toggle would still leave the left side
+   * heavier by a button (user report:「如果用户没有开启超分相关功能，则重新排布
+   * 尽量让左右两侧视觉重心一致」). */
+  const enhancementCount =
+    Number(Boolean(upscale?.configured)) + Number(Boolean(decensor?.configured)) + Number(Boolean(dlssnr?.configured));
+  const autoPlayJoinsProcessing = enhancementCount < 2;
+  const autoPlayControl = (
+    <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
+  );
   /** The Readoshi page pill: what is on screen and out of how many, spread
    * ranges joined with an en dash. It sits outside the auto-hiding chrome so
    * the number survives immersive reading, and ignores the pointer entirely
@@ -1248,6 +1252,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             <strong>{title}</strong>
             {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
             {renderWindowMaximize()}
+            {/* 缩略面板从底栏挪上来：它是「这块档案」的一件事，和返回、标题、阅读
+                设置同一层；底栏留给翻页与画面处理。 */}
+            <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
             <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
           </header>
         )}
@@ -1258,23 +1265,33 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             aria-label="阅读控制"
             onClick={stopChromeToggle}
           >
+              {/* Three slots, left to right: how the pages are arranged, where the
+                  reader is, what is done to the page. The counter is the middle
+                  slot by grid position, not by luck — the sides are equal `1fr`
+                  tracks, so it stays centred whatever the two sides hold. */}
+              <div className="reader-toolbar-group reader-toolbar-layout"><button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
+                {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
+              </button>
+              {/* One control, cycling 自动 → 单页 → 双页 → webtoon. Three separate
+                  buttons spent three toolbar slots to express one choice, and
+                  none of them could select 自动 once you left it.
+                  No `aria-pressed` on direction either: it is a choice between
+                  two, not a switch that is on, and the pressed styling made the
+                  button look permanently hovered whenever the answer was
+                  right-to-left. */}
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
+              {!autoPlayJoinsProcessing && autoPlayControl}</div>
               <div className="reader-toolbar-group reader-toolbar-pages">
                 <button type="button" aria-label="上一页" onClick={() => move('previous')}><ChevronLeft aria-hidden="true" /></button>
                 <span>{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
                 <button type="button" aria-label="下一页" onClick={() => move('next')}><ChevronRight aria-hidden="true" /></button>
               </div>
-              {/* One control, cycling 自动 → 单页 → 双页 → webtoon. Three separate
-                  buttons spent three toolbar slots to express one choice, and
-                  none of them could select 自动 once you left it. */}
-              <div className="reader-toolbar-group reader-toolbar-layout"><button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
-                {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
-              </button>
-              <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
-              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button></div>
               <div className="reader-toolbar-group reader-toolbar-processing">
               {/* The two derived renditions, switchable from here. Both were
                   settings-only, so there was no way to see what either one did to
-                  the page you were looking at. */}
+                  the page you were looking at. 全屏/退出全屏 去过这里：它和顶栏的
+                  最大化窗口长着同一枚方形图标，被当成重复的那一颗，而顶栏那颗
+                  本来就在（见 reader.css 那两条栏的注释）。 */}
               {upscale?.configured && (
                 <button
                   type="button"
@@ -1298,15 +1315,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               {dlssnr?.configured && (
                 <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon /></button>
               )}
-              </div>
-              <div className="reader-toolbar-group reader-toolbar-view">
-              <button type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
-              {/* No `aria-pressed`: direction is a choice between two, not a
-                  switch that is on, and the pressed styling made the button look
-                  permanently hovered whenever the answer was right-to-left. */}
-              <button type="button" aria-label={isFullscreen ? '退出全屏' : '全屏'} onClick={toggleFullscreen}>
-                {isFullscreen ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
-              </button>
+              {autoPlayJoinsProcessing && autoPlayControl}
               </div>
           </div>
         )}

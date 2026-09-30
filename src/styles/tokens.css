@@ -168,42 +168,42 @@
     --selection-background: color-mix(in srgb, #a83b32 24%, transparent);
     --selection-ink: #1a1c1a;
 
-    /* ---- Reader chrome: its own dark M3 scheme --------------------------
-       The reader canvas is black in both themes, so this chrome cannot reuse
-       the theme's roles: in the light theme --primary is a deep vermilion,
-       which is unreadable on black. These values are the dark scheme, fixed.
+    /* ---- Reader canvas: its own dark scheme -----------------------------
+       The reader canvas is black in both themes — a page is artwork, and artwork
+       wants a neutral void around it — so everything that sits *on the canvas*
+       cannot reuse the theme's roles: in the light theme --primary is a deep
+       vermilion barely 2.5:1 against this canvas.
 
-       **不透明**，而且层级只用**色调**表达——这是 M3 的那条规矩（container
-       color 分档，内容从 app bar 底下滚过去），也把上一轮那套「半透明 + 背景
-       模糊」整个去掉了：底栏与顶栏靠**各自那一档**分开，而不是靠模糊。另外
-       `backdrop-filter` 每一帧都要重采样背后的画面，是合成里最贵的一类效果，
-       而这个阅读器刚刚才为流畅度做过一轮（docs/34）。
+       两条栏**不在**这一组。顶栏、底栏与出错横幅改用主题的
+       surface-container / hairline / on-surface 三个角色（见 reader.css）：
+       它们是应用自己的家具，不是画面的一部分。浅色主题下这两条栏于是变浅，
+       中间仍是黑画布——M3 的 container 分档本来就是这么工作的。
+
+       What is left here is the canvas plus the marks that touch the artwork:
+       the page pill and the 「处理中」 pill (both float over a picture of any
+       brightness, so each carries its own **opaque** table — 上一轮那套「半透明 +
+       背景模糊」整个去掉了：底栏与顶栏靠各自那一档色调分开，而不是靠模糊，而且
+       `backdrop-filter` 每一帧都要重采样背后的画面，是合成里最贵的一类效果，而这个
+       阅读器刚刚才为流畅度做过一轮（docs/34）), the failure view's text and its
+       outlined button, and the canvas focus ring.
 
        Role map (M3 → token):
-         surface                --reader-surface            顶栏（small top app
-                                                             bar，64dp）
-         surface-container      --reader-surface-container  底栏（bottom app bar，
-                                                             80dp）
          surface-container-high --reader-surface-raised     浮在画面上的小胶囊
-                                                             （页码、处理中）
-         on-surface             --reader-ink                标题、页码
-         on-surface-variant     --reader-muted              app bar 上的图标
-         outline-variant        --reader-border-muted       两条栏朝向内容那一侧
-                                                             的 1px 分隔线
-         primary                --reader-primary            选中的开关
+         on-surface             --reader-ink                画布上的字、胶囊上的亮墨
+         on-surface-variant     --reader-muted              画布上的次要文字
+         primary                --reader-primary            选中的开关、画布焦点环
+         outline-variant        --reader-border             画布上的描边控件
+         outline-variant(淡)    --reader-border-muted       胶囊的 1px 描边
 
-       三档是照着 M3 深色方案的间距取的：画布最黑，surface 比它亮一档，底栏再
-       亮一档，浮起来的小胶囊最亮。图标与页码在三档上都过 WCAG AA（最差的一对
-       是 --reader-muted 落在 --reader-surface-raised 上，6.2:1）。
+       三档是照着 M3 深色方案的间距取的：画布最黑，胶囊最亮。胶囊上的字在最亮那一档
+       也过 WCAG AA（最差的一对是 --reader-muted 落在 --reader-surface-raised 上，
+       6.2:1）。
 
        The overview panel is deliberately NOT in this group: it is a dialog body
        that also appears inside the dedup workspace's themed dialog, so it
        follows the theme (see .reader-overview in reader.css).
-       Custom colour schemes recolor the app, not this chrome — as with every
-       other --reader-* token here. ---------------------------------------- */
+       Custom colour schemes recolor the app, not this canvas. --------------- */
     --reader-canvas: #050506;
-    --reader-surface: #0f1014;
-    --reader-surface-container: #1b1c20;
     --reader-surface-raised: #26272c;
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;

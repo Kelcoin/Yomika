@@ -869,12 +869,12 @@ describe('design system contract', () => {
     // BottomAppBarHorizontalPadding —— M3 把「距图标 16dp」的内容边距交给按钮自己
     // 的内边距，容器只留 4dp）、24dp 图标、标题 title-large（22/28）。
     //
-    // **两条栏是两个角色**：顶栏 surface、底栏 surface-container（M3 就是这么分的，
-    // 见 skill 的 component-catalog：「scrolled app bar → surface-container」）。
-    // 它们靠这一档色调分开，而不是靠模糊——所以两条都是**不透明**的，整块 chrome
-    // 里没有一处 `backdrop-filter`，也没有带 alpha 的容器色。
-    // （2026-09-30 上一轮曾把它们合并成同一种半透明 chrome；这一轮按规范还原成
-    // 两个角色 + 不透明。）
+    // **两条栏跟随应用主题**：容器、分隔线、墨色都取 --surface-container / --hairline /
+    // --on-surface(-variant)，和 shell 的标题栏同一档家具——阅读模式不再像「另一个
+    // 应用」。画布本身仍是固定深色（--reader-canvas），压在画面上那些东西也仍是
+    // --reader-*（见下面那条 on-canvas chrome 的测试）。
+    // 两条栏依然都是**不透明**的：整块 chrome 里没有一处 `backdrop-filter`，也没有带
+    // alpha 的容器色（2026-09-30 上一轮曾把它们做成同一种半透明 chrome）。
     const reader = read('src/styles/reader.css');
     const tokens = read('src/styles/tokens.css');
 
@@ -882,10 +882,12 @@ describe('design system contract', () => {
     expect(tokens).toMatch(/--reader-title-leading:\s*28px/);
     expect(tokens).toMatch(/--reader-toolbar-height:\s*80px/);
     expect(tokens).toMatch(/--reader-primary:\s*#ffb4a9/);
-    // 三档 surface 与 on-* 各就各位；上一轮那两个「两条栏一个材质」的令牌已经不在。
-    expect(tokens).toMatch(/--reader-surface:\s*#[0-9a-f]{6};/);
-    expect(tokens).toMatch(/--reader-surface-container:\s*#[0-9a-f]{6};/);
+    // 阅读器只剩「画布 + 压在画面上的东西」这一组固定深色令牌；两条栏专用的
+    // --reader-surface / --reader-surface-container 已随这一轮删掉——它们现在读主题。
+    expect(tokens).toMatch(/--reader-canvas:\s*#[0-9a-f]{6};/);
     expect(tokens).toMatch(/--reader-surface-raised:\s*#[0-9a-f]{6};/);
+    expect(tokens).not.toMatch(/--reader-surface:/);
+    expect(tokens).not.toMatch(/--reader-surface-container/);
     expect(tokens).not.toMatch(/--reader-chrome:/);
     expect(tokens).not.toMatch(/--reader-bar-container/);
 
@@ -894,9 +896,11 @@ describe('design system contract', () => {
     expect(top).toMatch(/padding:\s*var\(--safe-top\)\s+var\(--space-1\)\s+0/);
     // 容器高度是定的，不是 min-height：内容在 64dp 里居中，多一行也不会长高。
     expect(top).not.toMatch(/min-height/);
-    // 顶栏 = surface，不透明；朝内容那一侧一条 outline-variant 分隔线。
-    expect(top).toMatch(/background:\s*var\(--reader-surface\)/);
-    expect(top).toMatch(/border-bottom:\s*1px solid var\(--reader-border-muted\)/);
+    // 顶栏 = 主题的 surface-container（和 shell 的标题栏同一档），不透明；朝内容那一侧
+    // 一条 hairline 分隔线；墨色取 on-surface。
+    expect(top).toMatch(/background:\s*var\(--surface-container\)/);
+    expect(top).toMatch(/color:\s*var\(--on-surface\)/);
+    expect(top).toMatch(/border-bottom:\s*1px solid var\(--hairline\)/);
     expect(top).not.toMatch(/backdrop-filter/);
     expect(top).not.toMatch(/color-mix|transparent/);
 
@@ -916,26 +920,56 @@ describe('design system contract', () => {
     // 功能组之间留 8dp；组内图标仍由各自的触控面提供间距。
     expect(toolbar).toMatch(/gap:\s*var\(--space-2\)/);
     expect(ruleBody(reader, '.reader-toolbar-group')).toMatch(/display:\s*flex/);
-    // 底栏 = surface-container，比顶栏高一档 —— 这一条就是「两条栏不是同一个材质」。
-    expect(toolbar).toMatch(/background:\s*var\(--reader-surface-container\)/);
-    expect(toolbar).toMatch(/border-top:\s*1px solid var\(--reader-border-muted\)/);
+    // 底栏 = 主题的 surface-container——和顶栏同一档（一条在上、一条在下，中间隔着
+    // 画面），分隔线同样取 hairline。「两条栏不是同一个材质」这条设计仍然成立，只是
+    // 两档现在都由主题给。
+    expect(toolbar).toMatch(/background:\s*var\(--surface-container\)/);
+    expect(toolbar).toMatch(/color:\s*var\(--on-surface\)/);
+    expect(toolbar).toMatch(/border-top:\s*1px solid var\(--hairline\)/);
     expect(toolbar).not.toMatch(/backdrop-filter/);
     expect(toolbar).not.toMatch(/color-mix|transparent/);
     expect(toolbar).not.toMatch(/var\(--reader-surface\)/);
+
+    // 三段式网格：中列 `auto`、两侧等宽 `1fr`，页码因此**按网格**落在栏的中间，而不是
+    // 靠「两组恰好一样宽」。`justify-content` 在这一条里一律不许出现——上一轮 ≤900px 的
+    // 那条查询把它压成 `flex-start`，窗口一窄，页码就从中间滑到左边。
+    expect(toolbar).toMatch(/display:\s*grid/);
+    expect(toolbar).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\)/);
+    expect(toolbar).not.toMatch(/justify-content/);
+    expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/grid-column:\s*1/);
+    expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/justify-self:\s*start/);
+    expect(ruleBody(reader, '.reader-toolbar-pages')).toMatch(/grid-column:\s*2/);
+    expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/grid-column:\s*3/);
+    expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/justify-self:\s*end/);
+
+    // 手机档（≤610px）换成可以换行的 flex：页码整行占满、行内居中，剩下两组跟在后面，
+    // 整行同样居中。这是「移动模式下底栏组件没有居中」那条 user report 的钉子。
+    const phone = ruleBody(reader, '@media (max-width: 610px)');
+    expect(phone).toMatch(/flex-wrap:\s*wrap/);
+    expect(phone).toMatch(/justify-content:\s*center/);
+    expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*width:\s*100%/);
+    expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*justify-content:\s*center/);
+    // 900px 那一档只收组内间距，不再动对齐。
+    expect(ruleBody(reader, '@media (max-width: 900px)')).not.toMatch(/justify-content/);
 
     // M3 的 top app bar 一明一暗两颗图标：前导（返回）是 on-surface，尾随动作是
     // on-surface-variant。底栏那一排动作全走 on-surface-variant，页码是 on-surface。
     // 底栏那条要按规则本体匹配：`.reader-toolbar button` 先出现在上面那条共享几何规则
     // 的选择器列表里，`ruleBody` 取的是第一个。
     expect(reader).not.toMatch(/\.reader-chrome-top \.reader-icon-button\s*\{/);
-    expect(ruleBody(reader, '.reader-chrome-top .reader-chrome-settings,\n.reader-chrome-top .reader-chrome-window'))
-      .toMatch(/color:\s*var\(--reader-muted\)/);
-    expect(reader).toMatch(/\.reader-toolbar button \{\s*color:\s*var\(--reader-muted\);\s*\}/);
+    expect(ruleBody(reader, '.reader-chrome-top .reader-chrome-settings,\n.reader-chrome-top .reader-chrome-window,\n.reader-chrome-top .reader-chrome-thumbnails'))
+      .toMatch(/color:\s*var\(--on-surface-variant\)/);
+    expect(reader).toMatch(/\.reader-toolbar button \{\s*color:\s*var\(--on-surface-variant\);\s*\}/);
+    // 缩略面板按钮搬到顶栏之后，它是这条栏上唯一有开/关状态的一颗，和底栏那些开关同一条
+    // 读法（只有图标换 primary，容器保持透明）。
+    expect(ruleBody(reader, ".reader-chrome-top .reader-chrome-thumbnails[aria-pressed='true']"))
+      .toMatch(/color:\s*var\(--primary\)/);
     // 组不带填充（M3 的 bottom app bar 是一排 standard icon button）。
     expect(ruleBody(reader, '.reader-toolbar-group')).not.toMatch(/background/);
     expect(reader).not.toMatch(/\.reader-toolbar-pages[^{]*\{[^}]*background/);
 
-    // 浮在画面上的两枚胶囊也是不透明的，取 surface-container-high（比两条栏都亮）。
+    // 浮在画面上的两枚胶囊仍是阅读器自己那套固定深色（不进主题）：它们压在亮度不可控
+    // 的画面上，跟着主题翻转只会在浅色主题下变成深色压黑底。
     expect(ruleBody(reader, '.reader-deriving')).toMatch(/background:\s*var\(--reader-surface-raised\)/);
     expect(ruleBody(reader, '.reader-page-indicator')).toMatch(/background:\s*var\(--reader-surface-raised\)/);
     // 整个 chrome 里只剩概览那层蒙版带模糊——它是一枚对话框的 scrim，不是 app bar。
@@ -951,7 +985,7 @@ describe('design system contract', () => {
     // 选中的开关走 M3 standard icon button 的选中态：只有图标换 primary，容器保持
     // 透明。填充式（整块实色）会把一枚控件变成压在画面上的色块。
     const selected = ruleBody(reader, '.reader-toolbar button[aria-pressed="true"]');
-    expect(selected).toMatch(/color:\s*var\(--reader-primary\)/);
+    expect(selected).toMatch(/color:\s*var\(--primary\)/);
     expect(selected).not.toMatch(/background/);
 
     // 概览面板是一枚 M3 对话框：extra-large 圆角 + 24dp 内边距。
@@ -963,18 +997,23 @@ describe('design system contract', () => {
     expect(ruleBody(reader, '.reader-page-indicator.is-raised')).toMatch(/bottom:\s*calc\(var\(--reader-toolbar-height\)/);
   });
 
-  it('keeps the reader chrome on its own fixed dark scheme', () => {
-    // 阅读画布两个主题下都是黑的，所以这一层 chrome 只能用 --reader-* 那套固定的
+  it('keeps the on-canvas reader chrome on its own fixed dark scheme', () => {
+    // 阅读画布两个主题下都是黑的，压在**画面**上的东西只能用 --reader-* 那套固定的
     // 深色方案。引用会随主题翻转的颜色令牌，在浅色主题下就会变成深色落在黑底上：
     // 选中页缩略图的描边（--brand-cyan）、画布焦点环（--focus-ring）都曾如此。
     //
-    // 唯一的例外是概览面板（.reader-overview*）：它是一枚对话框，同一个面板还出现
-    // 在去重工作区那个跟随主题的对话框里，里面的标签芯片本来就是主题色——所以它跟随
-    // 主题，反而必须引用主题角色。把面板的规则剔掉再查。
+    // 两组例外，它们**必须**引用主题角色：两条栏（顶栏 / 底栏 / 出错横幅 / 顶栏里的无痕
+    // 徽章）从 2026-09-30 起跟随应用主题（见上一条测试）；概览面板是一枚对话框，同一个
+    // 面板还出现在去重工作区那个跟随主题的对话框里，里面的标签芯片本来就是主题色。按
+    // 选择器把这两组规则**整条**剔掉，再看剩下的（画布、页码胶囊、重试按钮……）。
     const reader = read('src/styles/reader.css');
-    const rules = [...reader.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*)\{([^{}]*)\}/g)];
-    const chrome = rules.filter(([, selector]) => !(selector ?? '').includes('.reader-overview')).map(([whole]) => whole).join('\n');
-    expect(chrome).toMatch(/--reader-surface/);
+    const themed = /[^{}]*\.(?:reader-chrome-top|reader-toolbar|reader-error-bar|reader-overview|reader-incognito-badge)[\w-]*[^{}]*\{[^{}]*\}/g;
+    const rest = reader.replace(/\/\*[\s\S]*?\*\//g, '').replace(themed, '');
+    const rules = [...rest.matchAll(/([^{}]*)\{([^{}]*)\}/g)];
+    const chrome = rules.map(([whole]) => whole).join('\n');
+    // 剔完还得剩下东西，否则「剩下的里面没有违规令牌」是句空话。
+    expect(chrome).toMatch(/--reader-canvas/);
+    expect(chrome).toMatch(/--reader-surface-raised/);
     const flipping = /var\(--(?:primary|on-primary|primary-container|on-primary-container|secondary|tertiary|error|success|warning|surface[\w-]*|on-surface[\w-]*|ink-[\w-]+|brand-[\w-]+|outline[\w-]*|hairline[\w-]*|control-[\w-]+|chip-[\w-]+|backdrop-overlay|selection-[\w-]+|focus-[\w-]+|inverse-[\w-]+|state-[\w-]+|category-[\w-]+|tag-ns-[\w-]+|eh-mark-[\w-]+|shadow-[\w-]+)\)/;
     expect(chrome).not.toMatch(flipping);
   });

@@ -208,6 +208,40 @@ describe('application shell', () => {
     expect(within(rail).getByRole('link', { name: /档案g/ })).toBeInTheDocument();
   });
 
+  it('lists every unfinished history record on the continue-reading rail', async () => {
+    // 用户报的「历史记录里有很多没读完的，继续阅读里却只显示了六本」：那一排从前写死
+    // 只取前六条（`CONTINUE_READING_RAIL`），历史页面却能滚出整条历史。同一份口径、同
+    // 一份数据，不该有一边少。
+    const history = Array.from({ length: 12 }, (_, index) => ({
+      scopeId: 'scope-a', archiveId: `h${index}`, pageIndex: 1, visitedAt: `2026-09-${String(12 - index).padStart(2, '0')}T00:00:00Z`, deviceId: 'device-a', revision: 1,
+    }));
+    const archives = history.map((item) => ({
+      serverId: 'scope-a', archiveId: item.archiveId, title: `档案${item.archiveId}`,
+      pageCount: 12, updatedAt: '2026-09-01T00:00:00Z',
+    }));
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: history };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_archives_by_ids') {
+        const ids = (args as { archiveIds?: string[] } | undefined)?.archiveIds ?? [];
+        return { ok: true, value: archives.filter((item) => ids.includes(item.archiveId)) };
+      }
+      if (command === 'search_random_archives') return { ok: true, value: [] };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderAt();
+
+    const rail = await screen.findByRole('region', { name: '继续阅读' });
+    await waitFor(() => expect(within(rail).getAllByRole('link')).toHaveLength(12));
+    // 最旧的那一条也在：只留前几条就会漏掉它。
+    expect(within(rail).getByRole('link', { name: /档案h11/ })).toBeInTheDocument();
+  });
+
   it('answers a right click on a home rail card', async () => {
     // The library list was the only surface wired to the menu, which read as the
     // app not having one at all: the rails, the recommendation rail and the

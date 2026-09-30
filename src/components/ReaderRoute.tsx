@@ -6,7 +6,7 @@ import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ReaderScreen } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
-import { getPrefetchPages, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
+import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
 import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
@@ -253,8 +253,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (handle) imageCache.release(handle);
   }, []);
 
-  /** Hold a finished derived rendition for the session, dropping the oldest once
-   * the session is over its budget.
+  /** Hold a finished derived rendition for the session, dropping the one the reader
+   * is least likely to need next once the session is over its budget (`pickDerivedEvictionVictim`).
    *
    * The same page can gain a *better* rendition while the session runs — with both
    * enhancements on, the de-censored page arrives first and the enlarged one
@@ -283,24 +283,29 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedBytesRef.current += handle.bytes;
     const dropped: number[] = [];
     while (derivedBytesRef.current > DERIVED_SESSION_BUDGET_BYTES && held.size > 1) {
-      const oldest = [...held.keys()].find((index) => !visiblePagesRef.current.has(index));
-      if (oldest === undefined) break;
-      const evicted = held.get(oldest);
-      held.delete(oldest);
+      // 丢「离正在读的那一页最远」的那一页，不是「最早算出来的」那一页：预扫是从
+      // 当前页往后由近到远灌进来的，最早进来的正好是马上要翻到的（见
+      // `pickDerivedEvictionVictim`）。
+      const visible = visiblePagesRef.current;
+      const anchor = visible.size > 0 ? Math.min(...visible) : pageIndex;
+      const victim = pickDerivedEvictionVictim([...held.keys()], visible, anchor);
+      if (victim === undefined) break;
+      const evicted = held.get(victim);
+      held.delete(victim);
       if (!evicted) break;
       derivedBytesRef.current -= evicted.bytes;
       imageCache.release(evicted);
-      const retired = retiredDerivedRef.current.get(oldest);
+      const retired = retiredDerivedRef.current.get(victim);
       if (retired) {
-        retiredDerivedRef.current.delete(oldest);
+        retiredDerivedRef.current.delete(victim);
         for (const handle of retired) imageCache.release(handle);
       }
       // Its attempt is un-spent again, or a page whose result was dropped for
       // room would never be enhanced a second time. 后台预处理过的页也一样：它只是
       // 不再被预处理重复捡起来（见 `derivedWarmedRef`），用户真的翻回去时仍然要
       // 重新算给他看。
-      derivedAttemptedRef.current.delete(oldest);
-      dropped.push(oldest);
+      derivedAttemptedRef.current.delete(victim);
+      dropped.push(victim);
     }
     setDerivedPages((current) => {
       const next = new Map(current).set(pageIndex, handle.url);

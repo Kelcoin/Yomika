@@ -73,6 +73,45 @@ describe('reader route', () => {
     // 可见的那一页排在后台那些页前面——预处理不该让正在读的这页等。
     expect(dlssnrPages()[0]).toBe(0);
   });
+  it('keeps the pages the reader is about to reach when the session budget overflows', async () => {
+    // 用户报的问题：DLSSNR 明明预扫过了，翻到那一页却还要现算。会话预算 64MB、一页
+    // 成品 3–6MB，装得下十来页；预扫是从当前页往后由近到远灌进来的，所以「最早算出来
+    // 的那一页」正好是马上要翻到的那一页——按插入顺序淘汰，等于每翻一页都先把下一批
+    // 要读的丢掉。这一条盯的是淘汰顺序：丢远的，留近的。
+    const cache = getNativeImageCache();
+    const pageCount = 24;
+    const bytes = 6 * 1024 * 1024;
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes }
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'budget', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/budget']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    const dlssnrPages = () => load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex);
+    await waitFor(() => {
+      expect(new Set(dlssnrPages())).toEqual(new Set(Array.from({ length: pageCount }, (_, index) => index)));
+    }, { timeout: 10_000 });
+
+    const dropped = release.mock.calls
+      .map(([handle]) => Number(handle.key.replace('dlssnr-', '')))
+      .filter((index) => Number.isInteger(index));
+    // 预扫把整本都做完了，但只留得住离第 1 页最近的那十来页：丢掉的必须是远端那些，
+    // 第 1 页往后紧挨着的几页一页都不能丢（丢了就意味着翻过去要现算）。
+    expect(dropped.length).toBeGreaterThan(0);
+    expect(dropped.every((index) => index >= 10)).toBe(true);
+  });
+
   it('marks the page in the viewport as foreground and the rest of the sweep as background', async () => {
     // 用户要的「超分、去码、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
     // 字段：队列按档位给每件活打上前台/后台，原生那侧据此插队并掐掉正在跑的后台。

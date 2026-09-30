@@ -124,9 +124,10 @@
   padding: 4px 12px;
   border: 1px solid var(--reader-border-muted);
   border-radius: var(--radius-pill);
-  /* 浮在画面上的一枚不透明胶囊：取 M3 的 surface-container-high——比两条栏都亮
-     一档，所以它压在画面上时自己就是一块可读的台面（原来是从半透明底色里 mix
-     出来的，底色一透明就得再补一层模糊）。 */
+  /* 浮在画面上的一枚不透明胶囊：取阅读器自己那套深色方案的
+     surface-container-high——它在黑画布上就是一块可读的台面（原来是从半透明底色里
+     mix 出来的，底色一透明就得再补一层模糊）。两条栏改用主题色之后它仍留在这一组：
+     它压在**画面**上，底下的亮度不可控，只有不透明的固定深色才两边都站得住。 */
   background: var(--reader-surface-raised);
   color: var(--reader-muted);
   font-family: var(--font-body);
@@ -217,8 +218,9 @@
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
-  border-bottom: 1px solid var(--reader-border-muted);
-  background: var(--reader-surface);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-container);
+  color: var(--on-surface);
 }
 
 /* M3 title-large 是 22sp/28sp、字重 400，但 M3 的 app bar 标题在一个**自带加粗标题**的
@@ -291,10 +293,10 @@
    padding (TopAppBarHorizontalPadding), a 4dp inset before the title, and 24dp
    icons. Deliberately taller than the shell's 44px window title bar: the reader
    is its own full-bleed mode, and its chrome is the only chrome on screen.
-   容器是**不透明**的 `surface`——M3 的 app bar 就靠这一档色调与画布分开，不用
-   模糊也不用 alpha（见 tokens.css 里那组 surface 令牌）。朝向内容那一侧留一条
-   1px 分隔线（M3 的 scrolled app bar 就是这个做法，用的是 outline-variant 的
-   角色）。 */
+   容器是**不透明**的，取主题的 `surface-container`——和 shell 的标题栏、状态栏
+   同一档（见 tokens.css：阅读画布仍是固定的黑，但两条栏是应用自己的家具）。
+   朝向内容那一侧留一条 1px 分隔线（M3 的 scrolled app bar 就是这个做法，用的是
+   outline-variant 的角色）。 */
 .reader-chrome-top {
   position: absolute;
   top: 0;
@@ -305,8 +307,9 @@
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
-  border-bottom: 1px solid var(--reader-border-muted);
-  background: var(--reader-surface);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-container);
+  color: var(--on-surface);
   animation: reader-chrome-top-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
@@ -332,7 +335,12 @@
    （返回）和右端的设置同权。M3 的 top app bar 本来就是一明一暗两颗，这里跟它走。
    `.reader-icon-button { color: inherit }` 与这条同特异性，所以要指名。 */
 .reader-chrome-top .reader-chrome-settings,
-.reader-chrome-top .reader-chrome-window { flex: none; color: var(--reader-muted); }
+.reader-chrome-top .reader-chrome-window,
+.reader-chrome-top .reader-chrome-thumbnails { flex: none; color: var(--on-surface-variant); }
+
+/* 顶栏里唯一有开/关状态的一颗：和底栏那些开关同一条读法（只有图标换 primary，
+   容器保持透明）。 */
+.reader-chrome-top .reader-chrome-thumbnails[aria-pressed='true'] { color: var(--primary); }
 
 /* The reader's own window control lives in the chrome header row and inherits
    the shared icon-button geometry, so its hover shape matches the rest of the
@@ -377,8 +385,8 @@
 /* M3 subtitle role in an app bar: on-surface-variant. */
 .reader-incognito-badge {
   flex: none;
-  border: 1px solid var(--reader-border);
-  color: var(--reader-muted);
+  border: 1px solid var(--outline-variant);
+  color: var(--on-surface-variant);
 }
 
 .reader-incognito-badge svg { width: 14px; height: 14px; }
@@ -408,14 +416,17 @@
    (on-surface) more emphasis than its icons. This has to come after the shared
    geometry rule above, whose `color: inherit` is the same specificity. */
 .reader-toolbar button {
-  color: var(--reader-muted);
+  color: var(--on-surface-variant);
 }
 
-/* M3 state layer: an on-surface wash over whatever the control rests on. */
+/* M3 state layer: an on-surface wash over whatever the control rests on. 取 shell
+   自己的悬停那一档（`--surface-container-high`），两条栏的底色是
+   `--surface-container`，正好高一档；阅读器自己的 `--reader-control-hover` 是给
+   黑画布上的控件用的（只剩重试那颗），在这两条主题色的栏上会淡得看不见。 */
 @media (hover: hover) {
   .reader-icon-button:hover,
   .reader-toolbar button:hover {
-    background: var(--reader-control-hover);
+    background: var(--surface-container-high);
   }
 }
 
@@ -423,7 +434,11 @@
    抬手就没。 */
 @media (hover: none) {
   .reader-icon-button:is(.is-pressed, :active),
-  .reader-toolbar button:is(.is-pressed, :active),
+  .reader-toolbar button:is(.is-pressed, :active) {
+    background: var(--surface-container-high);
+  }
+
+  /* 重试那颗落在黑画布上（出错视图），用阅读器自己那层。 */
   .reader-retry-button:is(.is-pressed, :active) {
     background: var(--reader-control-hover);
   }
@@ -435,31 +450,34 @@
    it is what this used to be in ink; it turns one control into a block of
    colour sitting on the artwork, which the reader cannot afford. */
 .reader-toolbar button[aria-pressed="true"] {
-  color: var(--reader-primary);
+  color: var(--primary);
 }
 
 /* M3 bottom app bar: an 80dp container (plus the safe area), 4dp of inline
    padding, actions as standard icon buttons with no gap between their boxes
-   (IconButtonSpace = 0 — each box carries its own padding). The container is
-   surface-container, one tonal step above the top bar, so the two ends of the
-   screen are not the same flat black. 模糊的理由与顶栏同一条。 */
+   (IconButtonSpace = 0 — each box carries its own padding).
+
+   三段式，不是一排：中列是 `auto`，两侧是等宽的 `1fr`——页码因此**按网格**落在
+   栏的中间，而不是靠「两组恰好一样宽」。左右两列各自贴边（`justify-self`），
+   除了最窄的那一档（见 610px 那条查询）以外不换行。容器和顶栏同一档
+   `surface-container`：一条在上、一条在下，中间隔着画面，不再靠色调差互相区分。
+   朝向内容那一侧同样留一条 1px 分隔线。 */
 .reader-toolbar {
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
   gap: var(--space-2);
   height: calc(var(--reader-toolbar-height) + var(--safe-bottom));
   padding: 0 var(--space-1) var(--safe-bottom);
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  /* M3 bottom app bar：容器是 surface-container，比顶栏的 surface 高一档——两条栏
-     靠这一档色调分开，不是靠模糊。朝向内容那一侧同样留一条 1px 分隔线。 */
-  border-top: 1px solid var(--reader-border-muted);
-  background: var(--reader-surface-container);
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-container);
+  color: var(--on-surface);
   animation: reader-chrome-bottom-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
@@ -478,7 +496,11 @@
   min-height: 48px;
   padding: 2px 4px;
 }
-.reader-toolbar-processing:empty { display: none; }
+
+/* 三列各就各位：左=布局，中=页码，右=画面处理。DOM 顺序就是这三段。 */
+.reader-toolbar-layout { grid-column: 1; justify-self: start; }
+.reader-toolbar-pages { grid-column: 2; justify-self: center; }
+.reader-toolbar-processing { grid-column: 3; justify-self: end; }
 
 /* M3 disabled: the icon drops to on-surface at 38%. */
 .reader-toolbar button:disabled {
@@ -495,7 +517,7 @@
 .reader-toolbar span {
   flex: 0 0 auto;
   min-width: 64px;
-  color: var(--reader-ink);
+  color: var(--on-surface);
   font-family: var(--font-utility);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
@@ -722,28 +744,34 @@
 }
 
 /* Compact layout, matching COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and the
-   shell's own media query. */@media (max-width: 900px) {
+   shell's own media query. 底栏**不在这条查询里改对齐**：上一轮把 ≤900px 的
+   `justify-content` 压成 `flex-start`，于是窗口一窄，页码就从栏中间滑到左边
+   （user report: 「修复移动模式下底栏组件没有居中的问题」）。三段式的网格在
+   900px 下仍然放得开，只有组内间距收一档。 */@media (max-width: 900px) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {
-    justify-content: flex-start;
     gap: var(--space-1);
   }
 }
 
+/* 手机档：三列并排放不下，改成两行——第一行整行给页码（`width: 100%` 让它自己
+   占一行，行内居中），第二行放剩下的控件，整行居中。`order` 把页码提到最前，
+   DOM 顺序（布局/页码/处理）不变，读屏顺序也就没变。 */
 @media (max-width: 610px) {
   .reader-toolbar {
     --reader-toolbar-height: 112px;
+    display: flex;
     flex-wrap: wrap;
     align-content: center;
-    justify-content: space-evenly;
+    justify-content: center;
+    gap: var(--space-1);
     overflow: hidden;
   }
   .reader-toolbar-group { min-height: 44px; }
-  .reader-toolbar-pages { order: 0; }
+  .reader-toolbar-pages { order: 0; justify-content: center; width: 100%; }
   .reader-toolbar-layout { order: 1; }
   .reader-toolbar-processing { order: 2; }
-  .reader-toolbar-view { order: 3; }
 }
 
 @media (max-width: 420px) {
@@ -762,9 +790,10 @@
   overscroll-behavior: contain;
 }
 
-/* 两条栏**不在这条查询里**：它们本来就是不透明的，没有模糊可摘（见 tokens.css 那组
-   surface 令牌）。只有概览那层蒙版还带 `blur` —— 半透明模糊是合成最贵的一类效果
-   （每一帧都要重新采样背后的内容），而它的观感在系统要求减少透明度时反而更差。 */
+/* 两条栏**不在这条查询里**：它们本来就是不透明的主题色，没有模糊可摘（见 tokens.css
+   那组 surface 令牌与 reader.css 里两条栏的 background）。只有概览那层蒙版还带
+   `blur` —— 半透明模糊是合成最贵的一类效果（每一帧都要重新采样背后的内容），而它的
+   观感在系统要求减少透明度时反而更差。 */
 @media (prefers-reduced-transparency: reduce) {
   .reader-overview-backdrop {
     backdrop-filter: none;

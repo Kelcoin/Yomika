@@ -12,6 +12,7 @@ import {
   getPrefetchPages,
   getVisiblePageIndexes,
   planPageSpreads,
+  pickDerivedEvictionVictim,
   resolveReaderLayout,
   settleZoom,
   shouldCommitPageTurn,
@@ -275,6 +276,22 @@ describe('reader domain', () => {
     expect(sweepOrder(9, 0)).toEqual([]);
     expect(sweepOrder(99, 3)).toEqual([2, 1, 0]);
     expect(sweepOrder(-5, 3)).toEqual([0, 1, 2]);
+  });
+
+  it('drops the derived page the reader is least likely to need next', () => {
+    // 会话预算不够时先放掉哪一页。预扫从当前页往后由近到远灌进来，所以「最早算出来
+    // 的」正好是马上要翻到的那一页——挑它出来丢，用户每翻一页都得重新等模型。
+    const visible = new Set([4]);
+    // 最远的先丢：这里 11 离第 4 页有 7 页。
+    expect(pickDerivedEvictionVictim([3, 4, 5, 6, 11], visible, 4)).toBe(11);
+    // 可见页永远不动，哪怕它是离锚点最远的。
+    expect(pickDerivedEvictionVictim([0, 4], new Set([0, 4]), 4)).toBeUndefined();
+    // 距离相同时先丢身后的：读漫画是一条直线，翻回去是例外。
+    expect(pickDerivedEvictionVictim([1, 7], visible, 4)).toBe(1);
+    expect(pickDerivedEvictionVictim([7, 1], visible, 4)).toBe(1);
+    // 全都可见就没有可丢的。
+    expect(pickDerivedEvictionVictim([3, 4, 5], new Set([3, 4, 5]), 4)).toBeUndefined();
+    expect(pickDerivedEvictionVictim([], visible, 4)).toBeUndefined();
   });
 
   it('keeps the cover standalone and pairs all subsequent pages', () => {

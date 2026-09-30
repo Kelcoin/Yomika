@@ -190,7 +190,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [historyJumpOpen, setHistoryJumpOpen] = useState(false);
   /** Which tick of the quick-jump rail the reader is looking at, as an index
-   * into `railSegments`. Only written when the day (or month) changes. */
+   * into `railSegments`. Only written when the tick changes. */
   const [railActive, setRailActive] = useState(0);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [localSearchQuery, setLocalSearchQuery] = useState('');
@@ -432,14 +432,27 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       return [{ month, index }];
     });
   }, [filteredArchives, timelineByArchiveId]);
-  /** The rail's ticks: one per day, or one per month once the history has more
-   * days than the strip can hold as separate targets. */
+  /** The rail's ticks: evenly sampled rows, not one per day.
+   *
+   * 一天一个刻度在长历史里太稀：240 条记录压在 61 天里，轨道上只有 61 个目标，而且
+   * 一旦超过 `RAIL_MAX_SEGMENTS` 就整体退化成「一个月一个刻度」（这本历史只剩四个），
+   * 想跳到「今天下午」是做不到的。现在按行等分采样——册数比上限多就每 `step` 行放
+   * 一个，最多 `RAIL_MAX_SEGMENTS` 个刻度，每个刻度带自己那一行的日期与时间。 */
   const railSegments = useMemo(() => {
     if (!timelineByArchiveId) return [];
-    const days = [...dayStarts.entries()].map(([index, label]) => ({ index, label }));
-    if (days.length <= RAIL_MAX_SEGMENTS) return days;
-    return historyMonths.slice(-RAIL_MAX_SEGMENTS).map(({ month, index }) => ({ index, label: month }));
-  }, [dayStarts, historyMonths, timelineByArchiveId]);
+    const rowCount = filteredArchives.length;
+    if (rowCount === 0) return [];
+    const step = Math.max(1, Math.ceil(rowCount / RAIL_MAX_SEGMENTS));
+    const segments: Array<{ index: number; label: string }> = [];
+    for (let index = 0; index < rowCount; index += step) {
+      const archive = filteredArchives[index];
+      const entry = archive ? timelineByArchiveId.get(archive.archiveId) : undefined;
+      const day = entry?.dayLabel || entry?.date || '';
+      const label = [day, entry?.time].filter(Boolean).join(' ').trim();
+      segments.push({ index, label: label || `第 ${index + 1} 行` });
+    }
+    return segments;
+  }, [filteredArchives, timelineByArchiveId]);
   /** The tick for the row the reader is looking at: the last segment that starts
    * at or above it. */
   const railSegmentFor = useCallback((rowIndex: number) => {
@@ -831,7 +844,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               const target = event.currentTarget;
               if (target.scrollTop + target.clientHeight >= target.scrollHeight - 320) onLoadMore?.();
               // The rail's filled tick follows the row at the top of the viewport.
-              // Written only when the day changes: this list is virtualized, and a
+              // Written only when the tick changes: this list is virtualized, and a
               // state write per row would re-render every card on every scroll.
               if (displayMode !== 'wide' || railSegments.length < 2) return;
               const items = rows.getVirtualItems();

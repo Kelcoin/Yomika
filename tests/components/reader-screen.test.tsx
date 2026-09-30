@@ -159,7 +159,7 @@ describe('reader screen', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     fireEvent.click(reader);
-    const button = screen.getByRole('button', { name: '全屏' });
+    const button = screen.getByRole('button', { name: '上一页' });
     fireEvent.mouseDown(button, { button: 0, clientX: 500, clientY: 700 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
     fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 700 });
@@ -839,27 +839,71 @@ describe('reader screen', () => {
     expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument();
   });
 
-  it('enters and exits fullscreen via toolbar button', async () => {
-    let fullscreenElement: Element | null = null;
-    const requestFullscreen = vi.fn(() => { fullscreenElement = document.documentElement; return Promise.resolve(); });
-    const exitFullscreen = vi.fn(() => { fullscreenElement = null; return Promise.resolve(); });
-    Object.defineProperty(document, 'fullscreenElement', { get: () => fullscreenElement, configurable: true });
-    document.documentElement.requestFullscreen = requestFullscreen;
-    document.exitFullscreen = exitFullscreen;
-
+  it('drops the fullscreen control and keeps the counter in the middle slot', async () => {
     const user = userEvent.setup();
     renderReader();
 
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    expect(screen.getByRole('button', { name: '全屏' })).toBeInTheDocument();
+    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
+    // 三段式网格：左=布局/方向，中=页码，右=画面处理。底栏那颗「全屏」去掉了——它和
+    // 顶栏的「最大化窗口」是同一枚方形图标，被当成重复的那一颗（其实一个是 HTML
+    // Fullscreen API、一个是 Tauri 的 toggle_maximize，但重复的观感是真的）。
+    expect([...toolbar.children].map((group) => group.className)).toEqual([
+      'reader-toolbar-group reader-toolbar-layout',
+      'reader-toolbar-group reader-toolbar-pages',
+      'reader-toolbar-group reader-toolbar-processing',
+    ]);
+    expect(within(toolbar).queryByRole('button', { name: '全屏' })).not.toBeInTheDocument();
+    expect(within(toolbar).queryByRole('button', { name: '退出全屏' })).not.toBeInTheDocument();
+    expect(within(toolbar).getByText('1 / 3')).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole('button', { name: '全屏' }));
-    expect(requestFullscreen).toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: '全屏' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '退出全屏' })).toBeInTheDocument();
+  it('moves the thumbnail panel from the toolbar up to the top bar', async () => {
+    const user = userEvent.setup();
+    renderReader();
 
-    fullscreenElement = document.documentElement;
-    await user.click(screen.getByRole('button', { name: '退出全屏' }));
-    expect(exitFullscreen).toHaveBeenCalled();
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const top = document.querySelector('.reader-chrome-top') as HTMLElement;
+    const thumbnailButton = within(top).getByRole('button', { name: '缩略面板' });
+    // 它是顶栏里唯一有开/关状态的一颗（按下换 primary，见 design-system 契约测试）。
+    expect(thumbnailButton).toHaveAttribute('aria-pressed', 'false');
+    expect(within(screen.getByRole('toolbar', { name: '阅读控制' })).queryByRole('button', { name: '缩略面板' }))
+      .not.toBeInTheDocument();
+
+    await user.click(thumbnailButton);
+    expect(await screen.findByRole('button', { name: '跳转到第 3 页' })).toBeInTheDocument();
+    expect(thumbnailButton).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('moves auto-play onto whichever side of the toolbar is lighter', async () => {
+    const user = userEvent.setup();
+    const on = { configured: true, active: false, toggle: () => undefined };
+    const autoPlay = () => screen.getByRole('button', { name: /自动翻页/ });
+    // 左格固定两枚（布局、方向），右格是开着的增强开关（超分/去码/DLSSNR）。自动翻页要补到
+    // **更空**的那一格——判据是数量，不是「有没有开超分」：只开一个开关时右边仍比左边轻，
+    // 只按布尔判断会把自动翻页丢到已经更重的一侧去（曾经就是这么写反的）。
+    const placement = async (props: { upscale?: typeof on; decensor?: typeof on; dlssnr?: typeof on }) => {
+      const view = render(
+        <MemoryRouter>
+          <ReaderScreen archiveId="a1" title="Test archive" pages={pages} {...props} />
+        </MemoryRouter>,
+      );
+      await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      const placed = {
+        layout: document.querySelector('.reader-toolbar-layout')?.contains(autoPlay()) === true,
+        processing: document.querySelector('.reader-toolbar-processing')?.contains(autoPlay()) === true,
+      };
+      view.unmount();
+      return placed;
+    };
+
+    // 一个都没开：右格是空的 → 自动翻页去右边（2 对 1）。
+    expect(await placement({})).toEqual({ layout: false, processing: true });
+    // 开一个：右格 1 枚，仍比左格轻 → 继续留在右边（2 对 2）。
+    expect(await placement({ upscale: on })).toEqual({ layout: false, processing: true });
+    // 开两个：右格 2 枚，轮到左格轻 → 自动翻页回到左边（3 对 2）。
+    expect(await placement({ upscale: on, decensor: on })).toEqual({ layout: true, processing: false });
+    // 开三个：右格 3 枚（3 对 3，左格仍不更重）。
+    expect(await placement({ upscale: on, decensor: on, dlssnr: on })).toEqual({ layout: true, processing: false });
   });
 });

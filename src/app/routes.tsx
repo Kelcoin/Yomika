@@ -96,9 +96,6 @@ const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list:
  * re-resolve the shelves and draw a new random set. */
 const HOME_SNAPSHOT_FRESH_MS = 90_000;
 
-/** 「继续阅读」这一排显示几张。历史页面能滚出整条历史，首页只有一排的位置。 */
-const CONTINUE_READING_RAIL = 6;
-
 interface HomeSnapshot {
   servers: Awaited<ReturnType<NativeLibraryRepository['listServers']>>;
   history: ReadingHistoryRecord[];
@@ -261,12 +258,13 @@ function HomeWorkspace() {
   });
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   /** 「继续阅读」的已读完开关：关闭时不把进度超过 95% 的记录放进这一排，其余照旧。
-   * 口径与历史页面共用（`historyShelfArchives`），所以这一排就是历史列表过滤之后的前
-   * 六条——被隐藏的记录不会在这一排里留下空格。历史页面固定显示已读完，不受开关影响。 */
+   * 口径与历史页面共用（`historyShelfArchives`），而且**不截断**——这一排从前只取前六
+   * 条，用户看到的就是「历史页里明明有几十本没读完，首页只摆六本」。横向滚动本来就不
+   * 需要截断：封面是懒加载的（`ArchiveThumbMedia` 用共享 IntersectionObserver，480px
+   * rootMargin 之内才去取图），挂上去的只是一层轻量卡片。 */
   const continueReading = useMemo(
     () => historyShelfArchives(history, archiveById, {
       hideFinished: !preferences.continueReadingShowFinished,
-      limit: CONTINUE_READING_RAIL,
     }),
     [archiveById, history, preferences.continueReadingShowFinished],
   );

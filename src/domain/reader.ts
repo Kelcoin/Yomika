@@ -437,6 +437,40 @@ export function sweepOrder(anchor: number, pageCount: number): number[] {
   return order;
 }
 
+/** 会话预算不够时，先从内存里放掉哪一页派生结果。
+ *
+ * 这一条按「离正在读的那一页多远」挑，不按「谁先算出来」挑。预扫是按
+ * `sweepOrder` 灌进来的，也就是**从当前页往后由近到远**，所以「最早进来的那一页」
+ * 恰恰是用户马上要翻到的那一页：DLSSNR 一页成品 3–6MB，64MB 的会话预算只装得下十
+ * 来页，于是旧规则每翻一页都先丢掉下一批要读的，用户翻过去的时候只能现算——表现
+ * 出来就是「必须翻到那一页才开始处理」。
+ *
+ * 距离相同时丢身后的那一页：读漫画是一条直线，翻回去是例外。（整本预扫本身不动，
+ * 它仍在把结果写进盘上的缓存，见 `docs/39`。）
+ *
+ * 可见页永远不参与；调用方还要保证持有表里至少留一页。 */
+export function pickDerivedEvictionVictim(
+  held: readonly number[],
+  visible: ReadonlySet<number>,
+  anchor: number,
+): number | undefined {
+  let victim: number | undefined;
+  let victimDistance = -1;
+  let victimBehind = false;
+  for (const index of held) {
+    if (visible.has(index)) continue;
+    const distance = Math.abs(index - anchor);
+    const behind = index < anchor;
+    const further = distance > victimDistance || (distance === victimDistance && behind && !victimBehind);
+    if (victim === undefined || further) {
+      victim = index;
+      victimDistance = distance;
+      victimBehind = behind;
+    }
+  }
+  return victim;
+}
+
 function clampPage(pageIndex: number, pageCount: number): number {
   if (pageCount <= 0) return 0;
   return Math.min(pageCount - 1, Math.max(0, Math.floor(pageIndex)));
