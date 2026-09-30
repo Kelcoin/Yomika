@@ -62,6 +62,16 @@ Push-Location $repoRoot
 try {
     $configuration = if ($Release) { "release" } else { "debug" }
     Write-Host "Building the $configuration APK for aarch64 (frontend first: tauri runs npm run build)."
+    # 与 build-windows.ps1 同一个理由：`build.rs` 把编译时刻与
+    # `git rev-parse --short=12 HEAD` 写进 `YOMIKA_BUILD_COMMIT`，而它的重跑由
+    # `tauri_build::try_build` 注册的 `rerun-if-changed=tauri.conf.json`（与图标）决定。
+    # 只改源码、没碰这些文件时，这条链会复用上一次的 build script 输出，`.so` 里带的
+    # 就是**上一个** commit 号（实测：HEAD 已是 b842e5f，APK 里却是 bc204cc）。
+    # 把配置的时间戳改一下，迫使 build.rs 重跑、stamp 重算。
+    $tauriConfig = Join-Path $repoRoot "src-tauri\tauri.conf.json"
+    if (Test-Path -LiteralPath $tauriConfig -PathType Leaf) {
+        (Get-Item -LiteralPath $tauriConfig -Force).LastWriteTime = Get-Date
+    }
     $tauriArgs = @("run", "tauri", "android", "build", "--", "--ci", "--apk", "--target", "aarch64")
     if (-not $Release) { $tauriArgs = @("run", "tauri", "android", "build", "--", "--ci", "--debug", "--apk", "--target", "aarch64") }
     & npm @tauriArgs
