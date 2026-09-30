@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     # 要验的产物：Windows 的 `yomika.exe`，或 Android 的 `.so`。
     [Parameter(Mandatory = $true)][string]$Path,
