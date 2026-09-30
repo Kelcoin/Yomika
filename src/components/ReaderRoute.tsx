@@ -541,6 +541,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         derivedAbortsRef.current.set(pageIndex, controller);
         derivedTierRef.current.set(pageIndex, job.tier);
         activeDerivedRef.current = { pageIndex, tier: job.tier, controller };
+        // 用户正看着的这几页是前台：原生那侧让它们插到后台整本预扫前面，并且会掐掉
+        // 正在跑的后台那一件。判据是 tier——`visible` 是当前窗口里的页，其它（预扫
+        // 的 `background`、邻页的 `neighbour`）都往后站。
+        const priority = job.tier === 'visible' ? ('foreground' as const) : ('background' as const);
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
           /** 第一步：去码（双开时也单独跑，不再塞进超分那一次调用里）。
@@ -550,7 +554,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
            * 超分失败」时前端手上什么都没有——页面上还是原图。 */
           const censored = job.decensorModel
             ? await imageCache.load(
-              { ...identity, rendition: 'decensored', modelId: job.decensorModel, taskId: `${taskBase}:decensor` },
+              { ...identity, rendition: 'decensored', modelId: job.decensorModel, priority, taskId: `${taskBase}:decensor` },
               { signal: controller.signal },
             ).catch(() => undefined)
             : undefined;
@@ -576,6 +580,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               ...(censored && job.decensorModel
                 ? { decensorModelId: job.decensorModel, source: 'decensored' as const }
                 : { source: 'reader-page' as const }),
+              priority,
               taskId: `${taskBase}:enhanced`,
             }, { signal: controller.signal }).catch(() => undefined)
             : undefined;
@@ -617,6 +622,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 // 同一个 revision。
                 ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
+                priority,
                 taskId: `${taskBase}:${job.engine}`,
               }
               : {

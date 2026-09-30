@@ -1,7 +1,10 @@
 //! D3D12 侧的一次性上下文：设备、队列、命令表、栅栏，以及 NGX 的初始化。
 //!
 //! 一页图只跑一次，所以这里不追帧率：设备与命令对象进程内建一次（NGX 的
-//! `Init_Ext` 只认一块设备），纹理每次按尺寸建、用完就放。
+//! `Init_Ext` 只认一块设备）。纹理与 feature 按**量化尺寸**缓存成
+//! [`Workspace`]（见 `workspace` 模块：换尺寸重建 feature 是这条链路上最大的
+//! 单项开销），一页的整套命令（上传 → 各层 → 回读）合成一次提交。
+//!
 //! 全局一把锁：GPU 侧一次只跑一个请求（阅读器本来也有单并发闸，算力中心同理）。
 
 use std::path::PathBuf;
@@ -14,6 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::IDXGIAdapter1;
 
 use super::ngx::{NgxCore, Parameters};
+use super::workspace::{self, Workspace};
 
 /// 进程内的一块设备 + 一个 NGX 会话（核心 + 片段）。
 pub struct GpuContext {
@@ -28,19 +32,11 @@ pub struct GpuContext {
     pub fence_value: u64,
     /// NGX 的应用数据目录（它在那里写日志）。
     pub data_dir: PathBuf,
-    /// 当前尺寸下每个 pass 的 feature；换尺寸就整批重建（feature 与宽高绑定）。
-    ///
-    /// 句柄与它的**参数表绑在一起**：创建与评估共用同一个参数对象——创建那一步
-    /// NGX 会往表里放内部句柄，评估时还要用。
-    pub features: Vec<FeatureSlot>,
-    /// 上面那批句柄是按哪个尺寸建的。
-    pub feature_size: Option<(u32, u32)>,
-}
-
-/// 一个 pass：特性句柄 + 它的参数表。
-pub struct FeatureSlot {
-    pub handle: *mut std::ffi::c_void,
-    pub parameters: Parameters,
+    /// 按量化尺寸缓存的工作区（近期用过的排在前面）。
+    pub workspaces: Vec<Workspace>,
+    /// 诊断用计数：建过几个工作区、建过几次 feature。测试拿它证明「换页不重建」。
+    pub workspace_builds: u64,
+    pub feature_builds: u64,
 }
 
 // D3D12 的对象是 agile 的（windows crate 已经给它们 Send/Sync），指针都由这把锁串起来。
@@ -153,8 +149,9 @@ impl GpuContext {
             fence,
             fence_value: 0,
             data_dir: data_dir.to_path_buf(),
-            features: Vec::new(),
-            feature_size: None,
+            workspaces: Vec::new(),
+            workspace_builds: 0,
+            feature_builds: 0,
         })
     }
 
@@ -190,6 +187,81 @@ impl GpuContext {
         Ok(())
     }
 
+    /// 丢掉这张命令表上已记录、但决定不提交的命令（取消时用）。
+    ///
+    /// **不执行**：命令没提交过，纹理的实际状态也就没变过——下次重新记录时那些
+    /// 「开场状态」的假设依然成立（见 `workspace` 模块头的状态机）。
+    pub fn discard_recorded(&mut self) -> Result<(), String> {
+        let _ = unsafe { self.list.Close() };
+        unsafe { self.allocator.Reset() }.map_err(|error| format!("重置分配器失败：{error}"))?;
+        unsafe { self.list.Reset(&self.allocator, None) }.map_err(|error| format!("重置命令表失败：{error}"))?;
+        Ok(())
+    }
+
+    /// 取一个装得下这一页的工作区：装得下就复用（同一 bucket 不会重建 feature），
+    /// 否则按量化尺寸新建一个。用完交回 [`GpuContext::release_workspace`]。
+    ///
+    /// `forced` 是试验用的：点名一个创建尺寸（要装得下这一页），好让「按页尺寸建
+    /// feature」那条老路还能跑，与 bucket 那一路对比输出。
+    pub fn acquire_workspace(
+        &mut self,
+        width: u32,
+        height: u32,
+        passes: usize,
+        forced: Option<(u32, u32)>,
+    ) -> Result<Workspace, String> {
+        let choice = match forced {
+            Some(size) => {
+                if size.0 < width || size.1 < height {
+                    return Err(format!(
+                        "bucket {}×{} 装不下这一页 {width}×{height}",
+                        size.0, size.1
+                    ));
+                }
+                match self.workspaces.iter().position(|item| item.size == size) {
+                    Some(index) => workspace::Choice::Reuse(index),
+                    None => workspace::Choice::Create(size),
+                }
+            }
+            None => workspace::choose(&self.workspace_sizes(), (width, height)),
+        };
+        match choice {
+            workspace::Choice::Reuse(index) => {
+                let mut existing = self.workspaces.remove(index);
+                existing.ensure_features(self, passes)?;
+                Ok(existing)
+            }
+            workspace::Choice::Create(size) => Workspace::create(self, size, passes),
+        }
+    }
+
+    /// 把工作区交回缓存：最近用过的排前面，超出条数或显存预算就从最久没用的开始扔。
+    ///
+    /// 至少留一个（刚用过的这个）——否则一张长条页会把普通页那一档挤掉，紧接着的
+    /// 下一页又要重建 feature，正好抵消这层想省的东西。
+    pub fn release_workspace(&mut self, workspace: Workspace) {
+        if let Some(index) = self.workspaces.iter().position(|item| item.size == workspace.size) {
+            // 同尺寸不该有两份（取的时候是移出去的，这条只是兜底）。
+            let mut stale = self.workspaces.remove(index);
+            stale.release(&self.core);
+        }
+        self.workspaces.insert(0, workspace);
+        let mut total: u64 = self.workspaces.iter().map(Workspace::bytes).sum();
+        while self.workspaces.len() > 1
+            && (self.workspaces.len() > workspace::MAX_WORKSPACES || total > workspace::WORKSPACE_BUDGET_BYTES)
+        {
+            if let Some(mut dropped) = self.workspaces.pop() {
+                total = total.saturating_sub(dropped.bytes());
+                dropped.release(&self.core);
+            }
+        }
+    }
+
+    /// 现有工作区的尺寸，按「最近用过」排（给 `workspace::choose` 挑）。
+    fn workspace_sizes(&self) -> Vec<(u32, u32)> {
+        self.workspaces.iter().map(|item| item.size).collect()
+    }
+
     /// 建一张默认堆纹理。
     pub fn create_texture(
         &self,
@@ -218,81 +290,37 @@ impl GpuContext {
             .map_err(|error| format!("创建纹理失败（{width}x{height}）：{error}"))
     }
 
-    /// 把 `rgba`（RGBA8，行紧凑）传到一张默认堆纹理里。
-    pub fn upload_rgba(
-        &mut self,
+    /// 记录一次 RGBA8 上传（**不提交**）：`from` 是这张纹理当前的状态。
+    ///
+    /// 返回上传缓冲：它还被这一批命令引用，**要活到提交之后**——提前 drop 就是让
+    /// GPU 去拷一个已经析构的资源。
+    pub fn record_upload_rgba(
+        &self,
         texture: &ID3D12Resource,
+        from: D3D12_RESOURCE_STATES,
         width: u32,
         height: u32,
         bytes: &[u8],
-    ) -> Result<(), String> {
-        let row_pitch = width * 4;
-        let aligned_pitch = (row_pitch + 255) & !255;
-        let buffer_size = aligned_pitch as u64 * height as u64;
-        let buffer = self.create_buffer(D3D12_HEAP_TYPE_UPLOAD, buffer_size)?;
-
-        unsafe {
-            let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-            buffer
-                .Map(0, None, Some(&mut mapped))
-                .map_err(|error| format!("映射上传缓冲失败：{error}"))?;
-            for row in 0..height as usize {
-                let source = &bytes[row * row_pitch as usize..(row + 1) * row_pitch as usize];
-                std::ptr::copy_nonoverlapping(
-                    source.as_ptr(),
-                    (mapped as *mut u8).add(row * aligned_pitch as usize),
-                    row_pitch as usize,
-                );
-            }
-            buffer.Unmap(0, None);
-        }
-
-        self.transition(texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-            Offset: 0,
-            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                Width: width,
-                Height: height,
-                Depth: 1,
-                RowPitch: aligned_pitch,
-            },
-        };
-        self.copy_buffer_to_texture(texture, &buffer, footprint);
-        // 缓冲要活到 GPU 跑完：先提交再释放。
-        let _ = self.execute_and_wait()?;
-        self.transition(texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        Ok(())
+    ) -> Result<ID3D12Resource, String> {
+        self.record_upload_like(texture, from, DXGI_FORMAT_R8G8B8A8_UNORM, width, height, bytes, 4)
     }
 
-    /// 建一张全零的引导图（运动/深度都按零给：静态图片没有运动，深度也按契约给零）。
-    pub fn create_zero_guide(
-        &mut self,
+    /// `record_upload_rgba` 的通用版：任意像素宽度与格式（引导图用得上）。
+    ///
+    /// 拷贝按 `width`×`height` **有界**：纹理是 bucket（可能比这一页大），无界拷贝会
+    /// 连纹理上多出来的那片一起算，而缓冲没有那么大。footprint 那一侧的格式必须写
+    /// 纹理的格式——调试层对缓冲那侧的 footprint 会按「Height/Depth 推出的纹理维度」
+    /// 检查格式，写 UNKNOWN 会被挡下来（这里踩过一次）。
+    pub fn record_upload_like(
+        &self,
+        texture: &ID3D12Resource,
+        from: D3D12_RESOURCE_STATES,
+        format: DXGI_FORMAT,
         width: u32,
         height: u32,
-        format: DXGI_FORMAT,
+        bytes: &[u8],
         bytes_per_pixel: u32,
     ) -> Result<ID3D12Resource, String> {
-        let texture = self.create_texture(width, height, format, D3D12_RESOURCE_FLAGS(0))?;
-        let zeros = vec![0u8; width as usize * height as usize * bytes_per_pixel as usize];
-        self.upload_rgba_like(&texture, format, width, height, &zeros, bytes_per_pixel)?;
-        Ok(texture)
-    }
-
-    /// `upload_rgba` 的通用版：任意像素宽度与格式（引导图用得上）。
-    ///
-    /// `format` 是**纹理的格式**，也是缓冲 footprint 的格式：调试层对缓冲那一侧
-    /// 的 footprint 会按「Height/Depth 推出的纹理维度」检查格式，写 UNKNOWN 会被
-    /// 挡下来（这里踩过一次）。
-    fn upload_rgba_like(
-        &mut self,
-        texture: &ID3D12Resource,
-        format: DXGI_FORMAT,
-        width: u32,
-        height: u32,
-        bytes: &[u8],
-        bytes_per_pixel: u32,
-    ) -> Result<(), String> {
         let row_pitch = width * bytes_per_pixel;
         let aligned_pitch = (row_pitch + 255) & !255;
         let buffer = self.create_buffer(D3D12_HEAP_TYPE_UPLOAD, aligned_pitch as u64 * height as u64)?;
@@ -311,7 +339,8 @@ impl GpuContext {
             }
             buffer.Unmap(0, None);
         }
-        self.transition(texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+
+        self.transition(texture, from, D3D12_RESOURCE_STATE_COPY_DEST);
         let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
             Offset: 0,
             Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
@@ -322,19 +351,48 @@ impl GpuContext {
                 RowPitch: aligned_pitch,
             },
         };
-        self.copy_buffer_to_texture(texture, &buffer, footprint);
-        let _ = self.execute_and_wait()?;
+        self.copy_buffer_to_texture(texture, &buffer, footprint, width, height);
         self.transition(texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        Ok(())
+        Ok(buffer)
     }
 
-    /// 把一张纹理读回紧凑的 RGBA8。
-    pub fn read_back_rgba(
-        &mut self,
+    /// 记录一张全零的引导图（建纹理 + 上传零，**不提交**）。
+    ///
+    /// 运动与深度都按零给：静态图片没有运动，深度也按契约给零。返回（纹理, 上传
+    /// 缓冲）：缓冲要活到提交之后。
+    pub fn record_zero_guide(
+        &self,
+        width: u32,
+        height: u32,
+        format: DXGI_FORMAT,
+        bytes_per_pixel: u32,
+    ) -> Result<(ID3D12Resource, ID3D12Resource), String> {
+        let texture = self.create_texture(width, height, format, D3D12_RESOURCE_FLAGS(0))?;
+        let zeros = vec![0u8; width as usize * height as usize * bytes_per_pixel as usize];
+        let buffer = self.record_upload_like(
+            &texture,
+            D3D12_RESOURCE_STATE_COMMON,
+            format,
+            width,
+            height,
+            &zeros,
+            bytes_per_pixel,
+        )?;
+        Ok((texture, buffer))
+    }
+
+    /// 记录一次回读（**不提交**）：把纹理左上角 `width`×`height` 那一块拷进回读缓冲。
+    ///
+    /// 大纹理里跑小页（bucket）全靠这一圈源 box：不给 box，`CopyTextureRegion` 会把
+    /// 整个 subresource 拷进按小页开的缓冲里（这里踩过一次）。
+    pub fn record_read_back(
+        &self,
         texture: &ID3D12Resource,
         width: u32,
         height: u32,
-    ) -> Result<Vec<u8>, String> {
+        texture_width: u32,
+        texture_height: u32,
+    ) -> Result<ID3D12Resource, String> {
         let row_pitch = width * 4;
         let aligned_pitch = (row_pitch + 255) & !255;
         let buffer = self.create_buffer(D3D12_HEAP_TYPE_READBACK, aligned_pitch as u64 * height as u64)?;
@@ -359,13 +417,29 @@ impl GpuContext {
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
         };
-        unsafe { self.list.CopyTextureRegion(&destination, 0, 0, 0, &source, None) };
-        self.execute_and_wait()?;
+        let region = D3D12_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: width.min(texture_width),
+            bottom: height.min(texture_height),
+            back: 1,
+        };
+        unsafe { self.list.CopyTextureRegion(&destination, 0, 0, 0, &source, Some(&region)) };
+        Ok(buffer)
+    }
 
+    /// 提交并等 GPU 跑完之后，把回读缓冲映成紧凑的 RGBA8。
+    pub fn map_read_back(&self, buffer: &ID3D12Resource, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        let row_pitch = width * 4;
+        let aligned_pitch = (row_pitch + 255) & !255;
         let mut rgba = vec![0u8; row_pitch as usize * height as usize];
         unsafe {
             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-            let range = D3D12_RANGE { Begin: 0, End: rgba.len() };
+            let range = D3D12_RANGE {
+                Begin: 0,
+                End: rgba.len(),
+            };
             buffer
                 .Map(0, Some(&range), Some(&mut mapped))
                 .map_err(|error| format!("映射回读缓冲失败：{error}"))?;
@@ -382,14 +456,17 @@ impl GpuContext {
         Ok(rgba)
     }
 
-    /// 缓冲 → 纹理的一次拷贝。两侧的 `Type` 不能搞反：**纹理那侧是
-    /// `SUBRESOURCE_INDEX`，缓冲那侧才是 `PLACED_FOOTPRINT`**——反了调试层会直接
-    /// 说「PLACED_FOOTPRINT 只能配 DIMENSION_BUFFER 的资源」（这里踩过一次）。
+    /// 缓冲 → 纹理的一次拷贝，按 `width`×`height` 有界（纹理可能比这一块大）。
+    /// 两侧的 `Type` 不能搞反：**纹理那侧是 `SUBRESOURCE_INDEX`，缓冲那侧才是
+    /// `PLACED_FOOTPRINT`**——反了调试层会直接说「PLACED_FOOTPRINT 只能配
+    /// DIMENSION_BUFFER 的资源」（这里踩过一次）。
     fn copy_buffer_to_texture(
         &self,
         texture: &ID3D12Resource,
         buffer: &ID3D12Resource,
         footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+        width: u32,
+        height: u32,
     ) {
         let texture_location = D3D12_TEXTURE_COPY_LOCATION {
             pResource: std::mem::ManuallyDrop::new(Some(texture.clone())),
@@ -401,9 +478,17 @@ impl GpuContext {
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprint },
         };
+        let region = D3D12_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: width,
+            bottom: height,
+            back: 1,
+        };
         unsafe {
             self.list
-                .CopyTextureRegion(&texture_location, 0, 0, 0, &buffer_location, None)
+                .CopyTextureRegion(&texture_location, 0, 0, 0, &buffer_location, Some(&region))
         };
     }
 
@@ -460,8 +545,9 @@ impl GpuContext {
 
 impl Drop for GpuContext {
     fn drop(&mut self) {
-        for slot in self.features.drain(..) {
-            self.core.release_feature(slot.handle);
+        // feature 句柄要还给 NGX；纹理靠 D3D12 自己的引用计数。
+        for workspace in self.workspaces.iter_mut() {
+            workspace.release(&self.core);
         }
     }
 }

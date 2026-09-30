@@ -33,6 +33,9 @@ export interface ImageCacheIdentity {
   /** 原生那侧这次任务号：前端给它起名，切页 / 关开关时拿它取消正在跑的推理。
    * **不进缓存键**——它只说明「这一次请求」，同一张图的两次请求是两个任务号。 */
   taskId?: string;
+  /** 用户正看着的那一页（`foreground`）排到后台整本预扫（`background`）前面，
+   * 后者正在跑时会被让位。**不进缓存键**——同一张图前台后台拿到的是同一份产物。 */
+  priority?: 'foreground' | 'background';
   transform?: string;
 }
 

@@ -73,6 +73,37 @@ describe('reader route', () => {
     // 可见的那一页排在后台那些页前面——预处理不该让正在读的这页等。
     expect(dlssnrPages()[0]).toBe(0);
   });
+  it('marks the page in the viewport as foreground and the rest of the sweep as background', async () => {
+    // 用户要的「超分、去码、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
+    // 字段：队列按档位给每件活打上前台/后台，原生那侧据此插队并掐掉正在跑的后台。
+    const cache = getNativeImageCache();
+    const pageCount = 6;
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'priority', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/priority']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    const derived = () => load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr');
+    const pagesWith = (priority: string) => derived()
+      .filter(([identity]) => identity.priority === priority)
+      .map(([identity]) => identity.pageIndex);
+    await waitFor(() => {
+      expect(new Set(pagesWith('background'))).toEqual(new Set(Array.from({ length: pageCount - 1 }, (_, index) => index + 1)));
+    }, { timeout: 10_000 });
+    expect(new Set(pagesWith('foreground'))).toEqual(new Set([0]));
+  });
 
   function enhancedReader(pageCount: number, enhanced: (index: number) => Promise<ImageHandle>) {
     const cache = getNativeImageCache();

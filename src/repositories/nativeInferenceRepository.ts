@@ -109,13 +109,13 @@ export class NativeInferenceRepository {
    * `decensored`, the previous step's output. With `decensored` the native side
    * also needs `decensorModel` — the rendition is keyed by the bundle that made
    * it, so it can only be found by the same id. */
-  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; decensorModel?: string; source?: 'reader-page' | 'decensored'; tileSize?: number; tileSleepMs?: number; taskId?: string }): Promise<CommandResult<ArrayBuffer>> {
+  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; decensorModel?: string; source?: 'reader-page' | 'decensored'; tileSize?: number; tileSleepMs?: number; taskId?: string; priority?: 'foreground' | 'background' }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('inference_upscale_page', { input });
   }
 
   /** Runs the de-censoring bundle over one cached reader page; the result is
    * stored as the `decensored` rendition, keyed by bundle version. */
-  decensorPage(input: { scopeId: string; archiveId: string; pageIndex: number; modelId: string; taskId?: string }): Promise<CommandResult<ArrayBuffer>> {
+  decensorPage(input: { scopeId: string; archiveId: string; pageIndex: number; modelId: string; taskId?: string; priority?: 'foreground' | 'background' }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('inference_decensor_page', { input });
   }
 

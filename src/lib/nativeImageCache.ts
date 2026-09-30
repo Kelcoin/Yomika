@@ -92,6 +92,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
           ? { source, decensorModel: identity.decensorModelId }
           : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
+        ...(identity.priority ? { priority: identity.priority } : {}),
       });
       if (!upscaled.ok) throw new Error(upscaled.error.message);
       const bytes = new Uint8Array(upscaled.value);
@@ -110,6 +111,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
+        ...(identity.priority ? { priority: identity.priority } : {}),
         settings: { passes: parseDlssnrPasses(passes) },
       });
       if (!processed.ok) throw new Error(processed.error.message);
@@ -156,6 +158,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         pageIndex: identity.pageIndex,
         modelId: identity.modelId ?? '',
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
+        ...(identity.priority ? { priority: identity.priority } : {}),
       });
       if (!filled.ok) throw new Error(filled.error.message);
       const bytes = new Uint8Array(filled.value);

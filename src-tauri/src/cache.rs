@@ -1,15 +1,16 @@
 use crate::{db::Database, domain::result::CommandResult};
 use rusqlite::OptionalExtension;
 
-/// `enhanced` is the upscaler output and `decensored` the de-censoring pipeline's,
-/// both keyed by model version in the identity revision so a model change cannot
-/// serve a stale image.
-const IMAGE_RENDITIONS: [&str; 5] = [
+/// `enhanced` is the upscaler output, `decensored` the de-censoring pipeline's and
+/// `dlssnr` the neural filter's, all keyed by what produced them in the identity
+/// revision so a model or DLL change cannot serve a stale image.
+const IMAGE_RENDITIONS: [&str; 6] = [
     "cover",
     "page-thumbnail",
     "reader-page",
     "enhanced",
     "decensored",
+    "dlssnr",
 ];
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;

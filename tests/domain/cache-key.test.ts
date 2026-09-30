@@ -23,4 +23,13 @@ describe('image cache key', () => {
     expect(createImageCacheKey({ scopeId: 's', archiveId: 'a', pageIndex: 3, rendition: 'enhanced', modelId: 'realesr-general', transform: 'none' }))
       .toBe(createImageCacheKey({ transform: 'none', modelId: 'realesr-general', rendition: 'enhanced', pageIndex: 3, archiveId: 'a', scopeId: 's' }));
   });
+
+  it('ignores the scheduling priority, so one page keeps one entry', () => {
+    // 优先级是「这一件活现在排第几」的提示，不是产物的一部分：同一页以前台跑过、
+    // 后台又跑一遍时，必须命中同一条缓存，而不是留下两份同样的图。
+    const base = { scopeId: 's', archiveId: 'a', pageIndex: 3, rendition: 'enhanced' as const, modelId: 'realesr-general' };
+    expect(createImageCacheKey({ ...base, priority: 'foreground' }))
+      .toBe(createImageCacheKey({ ...base, priority: 'background' }));
+    expect(createImageCacheKey({ ...base, priority: 'foreground' })).toBe(createImageCacheKey(base));
+  });
 });

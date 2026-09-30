@@ -1377,6 +1377,10 @@ pub struct UpscalePageInput {
     /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
     #[serde(default)]
     pub task_id: Option<String>,
+    /// 这次请求是前台（用户正看着的那一页）还是后台（提前预扫）。前端不给就是
+    /// 后台——见 `HeavyPriority::parse`。
+    #[serde(default)]
+    pub priority: Option<String>,
 }
 
 /// 派生版本（去码 / 超分产物）的缓存 revision。
@@ -1477,7 +1481,7 @@ pub(crate) fn source_revision(
 }
 
 /// 从缓存里取一版派生结果；没有就是 `None`（不是错误——第一次跑本来就没有）。
-fn cached_derived(
+pub(crate) fn cached_derived(
     database: &crate::db::Database,
     app_data: &std::path::Path,
     identity: &crate::cache::CacheImageIdentity,
@@ -1491,40 +1495,227 @@ fn cached_derived(
 
 /// 把派生结果写回缓存。失败只记一笔：缓存写不进去不该让这一页白跑（用户手上已
 /// 经有图了），而磁盘配额、权限之类的原因不是这一页的错。
-fn store_derived(
+///
+/// `mime` 必须说真话：`cache::sniff_image_mime` 见到 `image/*` 就原样收下，不核对
+/// magic bytes，所以这里报错了容器类型，取回来的一页就会带着错的 content-type 发给
+/// 前端。
+pub(crate) fn store_derived(
     database: &crate::db::Database,
     app_data: &std::path::Path,
     identity: &crate::cache::CacheImageIdentity,
+    mime: &str,
     bytes: &[u8],
 ) {
     let Ok(connection) = database.connection.lock() else {
         return;
     };
-    if let Err(error) = crate::cache::store_image_cache(&connection, app_data, identity, "image/png", bytes) {
+    if let Err(error) = crate::cache::store_image_cache(&connection, app_data, identity, mime, bytes) {
         eprintln!("yomika: derived cache write failed: {error}");
     }
 }
 
 
-// A single heavy job at a time bounds memory across reader remounts. Acquire
-// asynchronously; never queue behind inference on the window or database thread.
-static READER_INFERENCE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+/// 重活的优先级。前台＝用户正在看的那一页（超分/去码/DLSSNR 都算重活），后台＝
+/// 阅读器为了「翻到就能看」而提前预扫的那一批。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeavyPriority {
+    Foreground,
+    Background,
+}
+
+impl HeavyPriority {
+    /// 只有前端明说 `"foreground"` 才是前台。**默认是后台**：将来哪个调用点忘了
+    /// 带这一栏，它排在整本预扫后面，而不是把正在跑的那件活掐掉。
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("foreground") => Self::Foreground,
+            _ => Self::Background,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Foreground => 1,
+            Self::Background => 0,
+        }
+    }
+}
+
+/// 现在拿着许可的那一件。
+struct HeavyRunning {
+    priority: HeavyPriority,
+    task_id: Option<String>,
+}
+
+/// 在等许可的队伍里的一个。`sender` 是叫醒它的那一头；`sequence` 只用来在同一
+/// 档里排先来后到。
+struct HeavyWaiter {
+    priority: HeavyPriority,
+    sequence: u64,
+    task_id: Option<String>,
+    sender: tokio::sync::oneshot::Sender<()>,
+}
+
+/// 排队与抢占的**纯决策**部分：不放 tokio、不发信号，为的是能用同步单测把
+/// 「谁先跑」「该掐谁」这两件事钉住。
+struct HeavyQueueState {
+    running: Option<HeavyRunning>,
+    waiters: Vec<HeavyWaiter>,
+    sequence: u64,
+}
+
+impl HeavyQueueState {
+    /// 轮到自己了没有。有更高级别的人排着就不算——新来的后台不许插到已经排队的
+    /// 前台前面。
+    fn can_start(&self, priority: HeavyPriority) -> bool {
+        self.running.is_none()
+            && !self
+                .waiters
+                .iter()
+                .any(|waiter| waiter.priority.rank() > priority.rank())
+    }
+
+    fn start(&mut self, priority: HeavyPriority, task_id: Option<String>) {
+        self.running = Some(HeavyRunning { priority, task_id });
+    }
+
+    /// 排队，回**要掐的任务号**（如果有）：只有「自己前台、正在跑的是后台、而且
+    /// 它报了号」才给。前台不抢前台——同一页的去码与超分是两步，后一步要等前一步
+    /// 的产物，掐掉就是自己把自己饿死。
+    fn enqueue(
+        &mut self,
+        priority: HeavyPriority,
+        task_id: Option<String>,
+        sender: tokio::sync::oneshot::Sender<()>,
+    ) -> Option<String> {
+        self.sequence += 1;
+        let preempt = match (&self.running, priority) {
+            (Some(running), HeavyPriority::Foreground)
+                if running.priority == HeavyPriority::Background =>
+            {
+                running.task_id.clone()
+            }
+            _ => None,
+        };
+        self.waiters.push(HeavyWaiter {
+            priority,
+            sequence: self.sequence,
+            task_id,
+            sender,
+        });
+        preempt
+    }
+
+    /// 下一个该跑的：前台优先，同档先来先到。
+    fn next(&mut self) -> Option<HeavyWaiter> {
+        let index = self
+            .waiters
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, waiter)| (waiter.priority.rank(), std::cmp::Reverse(waiter.sequence)))
+            .map(|(index, _)| index)?;
+        Some(self.waiters.swap_remove(index))
+    }
+}
+
+/// 一件重活一次，是为了跨阅读器重挂载收住内存。但**谁先来**不该是 FIFO：整本预扫
+/// 排在前台当前页前面，用户就得盯着正在看的那一页等预扫。所以这里自带一个两档优先
+/// 级队列——前台插到后台前面，并且把正在跑的后台那件掐掉（只置旗，它会在自己的检
+/// 查点退出来）。
+struct HeavyQueue {
+    state: std::sync::Mutex<HeavyQueueState>,
+}
+
+impl HeavyQueue {
+    const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(HeavyQueueState {
+                running: None,
+                waiters: Vec::new(),
+                sequence: 0,
+            }),
+        }
+    }
+
+    async fn acquire(&self, priority: HeavyPriority, task_id: Option<String>) -> HeavyPermit {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let preempt = {
+            let mut state = self.lock();
+            if state.can_start(priority) {
+                state.start(priority, task_id);
+                return HeavyPermit;
+            }
+            state.enqueue(priority, task_id, sender)
+        };
+        if let Some(target) = preempt {
+            cancel::cancel(&target);
+        }
+        // 叫醒的那一头没了（这个命令 future 已经被丢掉）不算错：许可会经 release
+        // 的循环交给下一位，这里当作拿到再立刻还回去。
+        let _ = receiver.await;
+        HeavyPermit
+    }
+
+    /// 还许可：交给下一位，没有等待者才算空。
+    ///
+    /// 循环是必须的：`send` 失败说明那一位的 future 已经没了（用户翻页 / 关了开
+    /// 关），许可不能就这么丢在地板上，否则整条链子从此卡死。
+    fn release(&self) {
+        loop {
+            let mut state = self.lock();
+            let Some(waiter) = state.next() else {
+                state.running = None;
+                return;
+            };
+            let HeavyWaiter {
+                priority,
+                task_id,
+                sender,
+                ..
+            } = waiter;
+            if sender.send(()).is_ok() {
+                state.start(priority, task_id);
+                return;
+            }
+            // 这一位已经不在了：继续找下一位。running 仍然算占着——不能让新来的
+            // 在 next() 走到之前抢跑进来。
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HeavyQueueState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+static HEAVY_QUEUE: HeavyQueue = HeavyQueue::new();
+
+/// 拿着一张代表「现在只有这一件重活在跑」的牌。丢掉就还回去。
+pub(crate) struct HeavyPermit;
+
+impl Drop for HeavyPermit {
+    fn drop(&mut self) {
+        HEAVY_QUEUE.release();
+    }
+}
 
 /// 全局只允许一件重活：阅读器的超分/去码、DLSSNR、远端处理收到的请求都走这里。
 /// 不这么收，两张图同时进来就会各开一份模型，内存直接翻倍。
 pub(crate) async fn run_heavy<T: Send + 'static>(
+    priority: HeavyPriority,
+    task_id: Option<String>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
-    run_reader_inference(work).await
+    run_reader_inference(priority, task_id, work).await
 }
 
 async fn run_reader_inference<T: Send + 'static>(
+    priority: HeavyPriority,
+    task_id: Option<String>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
-    let permit = READER_INFERENCE_GATE
-        .acquire()
-        .await
-        .map_err(|e| e.to_string())?;
+    let permit = HEAVY_QUEUE.acquire(priority, task_id).await;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -1551,7 +1742,9 @@ pub async fn inference_upscale_page(
         }
     };
     let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
-    let result = run_reader_inference(move || {
+    let priority = HeavyPriority::parse(input.priority.as_deref());
+    let task_id = input.task_id.clone();
+    let result = run_reader_inference(priority, task_id, move || {
         let database = app.state::<crate::db::Database>();
         upscale_cached_page_with_models(&database, &cache_data, &app_data, &input)
     })
@@ -1757,7 +1950,7 @@ fn upscale_cached_page_with_models(
     }
     // 产物落盘：DLSSNR / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
     // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。
-    store_derived(database, app_data, &enhanced_identity, &encoded);
+    store_derived(database, app_data, &enhanced_identity, "image/png", &encoded);
     CommandResult::success(encoded)
 }
 
@@ -1772,6 +1965,10 @@ pub struct DecensorPageInput {
     /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
     #[serde(default)]
     pub task_id: Option<String>,
+    /// 这次请求是前台（用户正看着的那一页）还是后台（提前预扫）。前端不给就是
+    /// 后台——见 `HeavyPriority::parse`。
+    #[serde(default)]
+    pub priority: Option<String>,
 }
 
 #[tauri::command]
@@ -1792,7 +1989,9 @@ pub async fn inference_decensor_page(
         }
     };
     let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
-    let result = run_reader_inference(move || {
+    let priority = HeavyPriority::parse(input.priority.as_deref());
+    let task_id = input.task_id.clone();
+    let result = run_reader_inference(priority, task_id, move || {
         let database = app.state::<crate::db::Database>();
         decensor_cached_page(&database, &cache_data, &app_data, &input)
     })
@@ -2041,7 +2240,7 @@ fn decensor_cached_page(
     drop(guard);
     // 去码产物是链路的**中间结果**：超分那一步读它，DLSSNR / 远端也以它为起点。
     // 只在这里落盘，取消掉的任务不写。
-    store_derived(database, app_data, &identity, &encoded);
+    store_derived(database, app_data, &identity, "image/png", &encoded);
     CommandResult::success(encoded)
 }
 
@@ -2433,6 +2632,7 @@ mod tests {
             decensor_model: None,
             source: None,
             task_id: None,
+            priority: None,
         };
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| upscale_cached_page(&database, &root, &input));
@@ -2460,13 +2660,17 @@ mod tests {
         let caller = std::thread::current().id();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker = tokio::spawn(run_reader_inference(move || {
-            started_tx.send(std::thread::current().id()).unwrap();
-            release_rx
-                .recv_timeout(std::time::Duration::from_secs(3))
-                .unwrap();
-            42
-        }));
+        let worker = tokio::spawn(run_reader_inference(
+            HeavyPriority::Background,
+            None,
+            move || {
+                started_tx.send(std::thread::current().id()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+                42
+            },
+        ));
         let worker_thread = started_rx.await.unwrap();
         assert_ne!(caller, worker_thread);
         // On a single-thread executor this can run only if inference yielded.
@@ -2707,6 +2911,7 @@ mod tests {
                 decensor_model: Some("aletheia".into()),
                 source: Some("decensored".into()),
                 task_id: None,
+                priority: None,
             },
         );
         match not_yet {
@@ -2734,6 +2939,7 @@ mod tests {
                 decensor_model: Some("aletheia".into()),
                 source: Some("decensored".into()),
                 task_id: None,
+                priority: None,
             },
         );
         let bytes = match chained {
@@ -2797,6 +3003,7 @@ mod tests {
             decensor_model: None,
             source: None,
             task_id: None,
+            priority: None,
         };
 
         let first = match upscale_cached_page(&database, &app_data, &input) {
@@ -3540,5 +3747,150 @@ mod tests {
             .unwrap();
         assert_eq!(statuses, vec!["completed", "pending"]);
         assert!(transition_job(&connection, "job-c", "completed").is_err());
+    }
+
+    /// 空状态。测试自己造，不去碰那个进程级的全局队列。
+    fn empty_heavy_queue() -> HeavyQueueState {
+        HeavyQueueState {
+            running: None,
+            waiters: Vec::new(),
+            sequence: 0,
+        }
+    }
+
+    /// 前台（用户正看着的那一页）排到后台（整本预扫）前面，并且点名要掐正在跑的那
+    /// 一件；同一档里仍然先来先到。
+    #[test]
+    fn the_heavy_queue_runs_the_current_page_first() {
+        let mut state = empty_heavy_queue();
+        assert!(state.can_start(HeavyPriority::Background));
+        // 整本预扫先跑起来。
+        state.start(HeavyPriority::Background, Some("sweep-1".into()));
+        assert!(!state.can_start(HeavyPriority::Background), "同时只能有一件");
+
+        let (sweep_2, _recv_2) = tokio::sync::oneshot::channel();
+        let (sweep_3, _recv_3) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            state.enqueue(
+                HeavyPriority::Background,
+                Some("sweep-2".into()),
+                sweep_2
+            ),
+            None,
+            "后台不抢后台"
+        );
+        assert_eq!(
+            state.enqueue(
+                HeavyPriority::Background,
+                Some("sweep-3".into()),
+                sweep_3
+            ),
+            None
+        );
+
+        let (page, _recv_page) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            state.enqueue(
+                HeavyPriority::Foreground,
+                Some("page-9".into()),
+                page
+            ),
+            Some("sweep-1".to_string()),
+            "前台进来要掐掉正在跑的后台那一件"
+        );
+        let next = state.next().expect("有人排队");
+        assert_eq!(next.priority, HeavyPriority::Foreground);
+        assert_eq!(next.task_id.as_deref(), Some("page-9"));
+        assert_eq!(state.next().unwrap().task_id.as_deref(), Some("sweep-2"));
+        assert_eq!(state.next().unwrap().task_id.as_deref(), Some("sweep-3"));
+        assert!(state.next().is_none());
+    }
+
+    /// 前台之间不互相抢：同一页的去码与超分是两步，后一步等前一步的产物。
+    #[test]
+    fn a_foreground_request_does_not_cancel_another_foreground_job() {
+        let mut state = empty_heavy_queue();
+        state.start(HeavyPriority::Foreground, Some("page-1:decensor".into()));
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            state.enqueue(HeavyPriority::Foreground, Some("page-1:enhanced".into()), sender),
+            None
+        );
+    }
+
+    /// 新来的后台不许插到已经排队的前台前面：否则用户翻到的那一页又要等预扫。
+    #[test]
+    fn a_queued_foreground_is_not_overtaken_by_a_later_background() {
+        let mut state = empty_heavy_queue();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        state.enqueue(HeavyPriority::Foreground, Some("page".into()), sender);
+        assert!(!state.can_start(HeavyPriority::Background));
+        assert!(state.can_start(HeavyPriority::Foreground));
+    }
+
+    /// 两个碰**全局** `HEAVY_QUEUE` 的测试要互相排队：它是进程级的，并行跑会看到
+    /// 对方的许可（和 GPU 测试同一个理由）。
+    fn heavy_queue_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 排上队了没有。`acquire` 是「先拿锁、再 await」，所以要等那个任务真的走到
+    /// await 上，不然测的就成了 release 时没人在等。
+    async fn wait_for_waiters(count: usize) {
+        for _ in 0..1000 {
+            if HEAVY_QUEUE.lock().waiters.len() == count {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "排队人数没到 {count}：现在是 {}",
+            HEAVY_QUEUE.lock().waiters.len()
+        );
+    }
+
+    /// 还回去的许可要交给下一位，不能丢在地上（丢了整条链子从此卡死）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_released_permit_reaches_the_next_one_in_line() {
+        let _serial = heavy_queue_test_lock();
+        let running = HEAVY_QUEUE.acquire(HeavyPriority::Background, None).await;
+        assert!(
+            HEAVY_QUEUE.lock().running.is_some(),
+            "第一件该在跑"
+        );
+
+        let waiter = tokio::spawn(async move {
+            let _permit = HEAVY_QUEUE.acquire(HeavyPriority::Foreground, None).await;
+        });
+        wait_for_waiters(1).await;
+        drop(running);
+        waiter.await.unwrap();
+        assert!(
+            HEAVY_QUEUE.lock().running.is_none(),
+            "走到最后一件时就该空出来"
+        );
+    }
+
+    /// 前台插队时，正在跑的那个后台任务会收到取消旗（它自己会在检查点退出来）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_foreground_request_cancels_the_running_background_job() {
+        let _serial = heavy_queue_test_lock();
+        let running = HEAVY_QUEUE
+            .acquire(HeavyPriority::Background, Some("sweep-1".into()))
+            .await;
+        let guard = cancel::begin(Some("sweep-1"));
+        assert!(!guard.cancelled());
+
+        let waiter = tokio::spawn(async {
+            let _permit = HEAVY_QUEUE
+                .acquire(HeavyPriority::Foreground, Some("page-1".into()))
+                .await;
+        });
+        wait_for_waiters(1).await;
+        assert!(guard.cancelled(), "正在跑的后台那件该被掐");
+
+        drop(running);
+        waiter.await.unwrap();
     }
 }

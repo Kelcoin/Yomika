@@ -46,7 +46,13 @@ pub async fn dlssnr_probe(app: tauri::AppHandle, force: Option<bool>) -> Command
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
     };
     let force = force.unwrap_or(false);
-    match crate::inference::run_heavy(move || super::probe_cached(&data, force)).await {
+    match crate::inference::run_heavy(
+        crate::inference::HeavyPriority::Background,
+        None,
+        move || super::probe_cached(&data, force),
+    )
+    .await
+    {
         Ok(report) => CommandResult::success(report),
         Err(error) => CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
     }
@@ -138,6 +144,9 @@ pub struct DlssnrPageInput {
     /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
     #[serde(default)]
     pub task_id: Option<String>,
+    /// 这次请求是前台（用户正看着的那一页）还是后台（提前预扫）。
+    #[serde(default)]
+    pub priority: Option<String>,
 }
 
 #[tauri::command]
@@ -153,7 +162,9 @@ pub async fn dlssnr_apply_page(
             ))
         }
     };
-    let result = crate::inference::run_heavy(move || {
+    let priority = crate::inference::HeavyPriority::parse(input.priority.as_deref());
+    let task_id = input.task_id.clone();
+    let result = crate::inference::run_heavy(priority, task_id, move || {
         let database = app.state::<crate::db::Database>();
         apply_cached_page(&database, &data, &input)
     })
@@ -191,6 +202,25 @@ fn apply_cached_page(
         input.page_index,
     );
     source.revision = revision;
+    let settings = input.settings.clone().unwrap_or_default().normalized();
+    // 产物缓存先问一遍：键是「起点那一版 + 这一份 DLL + 这一套参数」。命中就整段跳过
+    // ——不读页、不解码、不跑 GPU、不编码，重新挂载阅读器 / 重启应用之后也是这一条。
+    // 放在 `runtime_gate` 之前：能命中就说明这同一份 DLL 已经跑出过这一页，此刻机器
+    // 还说跑不起来（换驱动、拔显卡）也不该让人看不到手上已经有的图。
+    let mut output = CacheImageIdentity::new(
+        &input.scope_id,
+        &input.archive_id,
+        DLSSNR_RENDITION,
+        input.page_index,
+    );
+    output.revision = Some(super::output_revision(
+        data_dir,
+        source.revision.as_deref(),
+        &settings,
+    ));
+    if let Some(hit) = crate::inference::cached_derived(database, data_dir, &output) {
+        return CommandResult::success(hit);
+    }
     // 二次校验：前端那个布尔值只是「用户想用」，跑不跑得起来是这台机器此刻的
     // 事实。放在取页之前——跑不起来时连缓存都不该碰。
     if let Err(error) = super::runtime_gate(data_dir) {
@@ -252,11 +282,22 @@ fn apply_cached_page(
             return CommandResult::failure("UNKNOWN", error.to_string(), true);
         }
     }
+    // 产物落盘：这一页下次翻回来（或者重启应用之后）就是上面那条命中路径，整段
+    // GPU 与编码都不再走。取消掉的任务在上面就返回了，不会写。
+    crate::inference::store_derived(database, data_dir, &output, DLSSNR_MIME, &encoded);
     CommandResult::success(encoded)
 }
 
 /// `filter::MIN_EDGE` 的同一条下限（命令这一层用它给出人话）。
 const DLSSNR_MIN_EDGE: u32 = 32;
+
+/// 产物在缓存里记成哪一版（`cache::IMAGE_RENDITIONS` 里必须有它）。
+const DLSSNR_RENDITION: &str = "dlssnr";
+
+/// 产物容器的 content-type。`cache::sniff_image_mime` 见到 `image/*` 就照收、不核对
+/// magic bytes，所以这里必须与上面编出来的容器一致，否则取回来的一页会带着错的
+/// content-type 发给前端。
+const DLSSNR_MIME: &str = "image/png";
 
 #[cfg(test)]
 mod tests {
@@ -267,6 +308,149 @@ mod tests {
             CommandResult::Failure { error, .. } => error,
             CommandResult::Success { .. } => panic!("这一步该失败"),
         }
+    }
+
+    /// 一页的 PNG（测试里当「已经是这个尺寸的图」用）。
+    fn page_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let image = crate::dlssnr::synthetic_image(width, height);
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&image.rgba, width, height, image::ExtendedColorType::Rgba8)
+            .expect("编码 PNG");
+        bytes
+    }
+
+    /// 摆一份「DLL 在这儿」的占位文件：产物 revision 只看它的字节数与修改时间。
+    fn fake_dll(dir: &std::path::Path, bytes: usize) {
+        let dll = crate::dlssnr::dll_path(dir);
+        std::fs::create_dir_all(dll.parent().expect("目录")).expect("建目录");
+        std::fs::write(&dll, vec![0u8; bytes]).expect("写 DLL 占位");
+    }
+
+    fn input_with(settings: Option<crate::dlssnr::DlssnrSettings>) -> DlssnrPageInput {
+        DlssnrPageInput {
+            scope_id: "scope".into(),
+            archive_id: "archive".into(),
+            page_index: 0,
+            source: None,
+            settings,
+            task_id: Some("reader-task".into()),
+            decensor_model: None,
+            upscale_model: None,
+            priority: None,
+        }
+    }
+
+    /// R2：产物落盘之后，同一页再问一次不该再碰 GPU、不该再编码——直接给磁盘上那一份。
+    /// 这条路径在真机上决定「重启应用 / 重新翻回这一页」要不要再等一次。
+    #[test]
+    fn a_stored_output_is_served_without_touching_the_gpu() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        fake_dll(dir.path(), 1024);
+
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        let stored = page_png(96, 96);
+        let mut identity =
+            crate::cache::CacheImageIdentity::new("scope", "archive", DLSSNR_RENDITION, 0);
+        identity.revision = Some(crate::dlssnr::output_revision(dir.path(), None, &settings));
+        {
+            let connection = database.connection.lock().expect("库锁");
+            crate::cache::store_image_cache(
+                &connection,
+                dir.path(),
+                &identity,
+                "image/png",
+                &stored,
+            )
+            .expect("落盘");
+        }
+        // 起点那一页**故意不存在**：命中路径必须在读页之前就返回。
+        match apply_cached_page(&database, dir.path(), &input_with(Some(settings))) {
+            CommandResult::Success { value, .. } => {
+                assert_eq!(value, stored, "命中的应当就是落盘的那一份")
+            }
+            CommandResult::Failure { error, .. } => {
+                panic!("该命中缓存，却失败了：{} {}", error.code, error.message)
+            }
+        }
+    }
+
+    /// 参数、起点、DLL 任何一样变了就是另一版：旧产物顶上来比重新算一遍糟得多。
+    #[test]
+    fn changing_the_settings_or_the_source_invalidates_a_stored_output() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        fake_dll(dir.path(), 1024);
+
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        let base = crate::dlssnr::output_revision(dir.path(), None, &settings);
+        assert_eq!(
+            base,
+            crate::dlssnr::output_revision(dir.path(), None, &settings),
+            "同一份输入要给出同一个键"
+        );
+
+        let stronger = crate::dlssnr::DlssnrSettings {
+            passes: vec![crate::dlssnr::PassSettings {
+                intensity: 1.5,
+                ..Default::default()
+            }],
+        }
+        .normalized();
+        assert_ne!(
+            base,
+            crate::dlssnr::output_revision(dir.path(), None, &stronger),
+            "层参数变了就是另一版"
+        );
+        assert_ne!(
+            base,
+            crate::dlssnr::output_revision(dir.path(), Some("decensored:abc"), &settings),
+            "起点那一版变了就是另一版"
+        );
+
+        fake_dll(dir.path(), 2048);
+        assert_ne!(
+            base,
+            crate::dlssnr::output_revision(dir.path(), None, &settings),
+            "换了一份 DLL 就是另一版"
+        );
+    }
+
+    /// 没落盘过的那套参数不许命中：缓存是用来省一次计算的，不是用来给错图的。
+    #[test]
+    fn a_different_settings_combination_misses_the_stored_output() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        fake_dll(dir.path(), 1024);
+
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        let mut identity =
+            crate::cache::CacheImageIdentity::new("scope", "archive", DLSSNR_RENDITION, 0);
+        identity.revision = Some(crate::dlssnr::output_revision(dir.path(), None, &settings));
+        {
+            let connection = database.connection.lock().expect("库锁");
+            crate::cache::store_image_cache(
+                &connection,
+                dir.path(),
+                &identity,
+                "image/png",
+                &page_png(96, 96),
+            )
+            .expect("落盘");
+        }
+
+        let stronger = crate::dlssnr::DlssnrSettings {
+            passes: vec![crate::dlssnr::PassSettings {
+                intensity: 1.5,
+                ..Default::default()
+            }],
+        };
+        let result = apply_cached_page(&database, dir.path(), &input_with(Some(stronger)));
+        assert!(
+            matches!(result, CommandResult::Failure { .. }),
+            "另一种参数不该拿到那份图"
+        );
     }
 
     #[test]
@@ -282,6 +466,7 @@ mod tests {
             task_id: None,
             decensor_model: None,
             upscale_model: None,
+            priority: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         let error = expect_failure(result);
@@ -302,6 +487,7 @@ mod tests {
             task_id: None,
             decensor_model: None,
             upscale_model: None,
+            priority: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         assert_eq!(expect_failure(result).code, "INVALID_RESPONSE");
@@ -323,6 +509,7 @@ mod tests {
             task_id: Some("reader-task".into()),
             decensor_model: None,
             upscale_model: None,
+            priority: None,
         };
         let error = expect_failure(apply_cached_page(&database, dir.path(), &input));
         assert_eq!(error.code, "INFERENCE_UNAVAILABLE");
@@ -342,6 +529,7 @@ mod tests {
             task_id: None,
             decensor_model: None,
             upscale_model: None,
+            priority: None,
         };
         let result = apply_cached_page(&database, dir.path(), &input);
         let error = expect_failure(result);

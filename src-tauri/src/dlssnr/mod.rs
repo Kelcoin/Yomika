@@ -91,6 +91,8 @@ mod ngx;
 mod release;
 #[cfg(windows)]
 mod settings;
+#[cfg(windows)]
+mod workspace;
 
 #[cfg(windows)]
 pub use filter::{apply, DlssnrImage};
@@ -289,6 +291,50 @@ pub const fn is_supported_platform() -> bool {
 #[cfg(windows)]
 pub fn dll_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("dlssnr").join("nvngx_dlssnr.dll")
+}
+
+/// DLSSNR 产物该记在哪一版：这一份 DLL（按字节数与修改时间认）+ 这一套参数 + 起点
+/// 那一版的 revision。
+///
+/// 前端说不出这件事——`nativeImageCache.read()` 对派生版本一律当作「本次会话的产物」，
+/// 所以「磁盘上这一页是哪一份 DLL 用哪一套参数跑出来的」只能由知道这两件事的这里回答。
+/// 任何一项变了就是另一版，旧产物不许顶上来。165 MB 的 DLL 不算哈希（`file_sha256`
+/// 太慢，不能放在热路径上），用字节数 + 修改时间：换 DLL 是「导入/下载」这条路径干的，
+/// 它必然重写文件，两者至少有一个变。
+#[cfg(windows)]
+pub fn output_revision(
+    data_dir: &std::path::Path,
+    source_revision: Option<&str>,
+    settings: &DlssnrSettings,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dlssnr-out:v1\0");
+    hasher.update(dll_identity(data_dir).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_revision.unwrap_or("reader-page").as_bytes());
+    hasher.update(b"\0");
+    // `settings` 传进来之前已经 `normalized()` 过（层数与数值都收过范围），所以
+    // 「默认」与「显式写出默认值」在这里是同一串。
+    hasher.update(serde_json::to_string(settings).unwrap_or_default().as_bytes());
+    format!("dlssnr:v1:{}", hasher.finalize().to_hex())
+}
+
+/// 「这一份 DLL 是哪一份」的便宜说法。没装就是 `missing`——没装时产物缓存自然全部
+/// 失效（换回同一份 DLL 时也会对不上，所以宁可多算一次）。
+#[cfg(windows)]
+fn dll_identity(data_dir: &std::path::Path) -> String {
+    match std::fs::metadata(dll_path(data_dir)) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{}", metadata.len(), modified)
+        }
+        Err(_) => "missing".into(),
+    }
 }
 
 /// 社区包里的三种变体（docs/DLSSNR-DLL-Options-310.8.0.0/README.txt）。
@@ -616,6 +662,15 @@ mod tests {
         None
     }
 
+    /// 这一组测试共用**一台设备**和**一个进程级的工作区缓存**（见 `device.rs` 的
+    /// `OnceLock`），并行跑起来会互相挤掉对方的工作区：计时不可复现，工作区计数也
+    /// 不再等于「这个测试自己建了几个」。所以凡是碰 `with_context*` 的测试都在开头
+    /// 排队。锁中毒不是错（上一个测试 panic 过也要放行）。
+    pub(crate) fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn variant_hashes_match_the_shipped_readme() {
         // 三种变体的哈希来自 docs 里的 README；认变体靠它，错一个字符就等于把
@@ -754,6 +809,7 @@ mod tests {
     /// 它真的改了图。这条同时是「核心 → 片段 → 参数对象 → 评估 → 回读」的端到端。
     #[test]
     fn applies_dlssnr_on_this_machine_when_available() {
+        let _gpu = gpu_test_lock();
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll（设 YOMIKA_DLSSNR_DLL 或放好 docs 里的社区包）");
             return;
@@ -796,5 +852,245 @@ mod tests {
         let stacked_difference = mean_absolute_difference(&image.rgba, &stacked.rgba);
         println!("两层：平均逐通道差 {stacked_difference:.2}");
         assert!(stacked_difference > 0.05);
+    }
+
+    /// 临时探针：一页到底花在哪。`YOMIKA_DLSSNR_TIMING=1 cargo test --release --lib
+    /// dlssnr::tests::timing_probe -- --nocapture`。
+    #[test]
+    fn timing_probe() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else { return };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let one = DlssnrSettings::default();
+        // 库里 reader-page 的中位数是 3.1MP（1478x2100 那一档），p90 是 26MP。
+        let a = synthetic_image(1478, 2100);
+        let b = synthetic_image(1500, 2100); // 下一页：尺寸差 22 像素
+        let c = synthetic_image(2000, 3000);
+        let run = |label: &str, image: &DlssnrImage, settings: &DlssnrSettings| {
+            let started = std::time::Instant::now();
+            let output = filter::apply_with_dll(&dir, &dll, image, settings);
+            let elapsed = started.elapsed().as_millis();
+            match output {
+                Ok(_) => println!("{label:<28} {elapsed:>6} ms"),
+                Err(error) => println!("{label:<28} 失败：{error}"),
+            }
+        };
+        println!("--- 整条原生链路（A=1478x2100 3.1MP） ---");
+        run("A #1 冷启动", &a, &one);
+        run("A #2 同尺寸复用", &a, &one);
+        run("A #3 同尺寸复用", &a, &one);
+        let two = DlssnrSettings { passes: vec![PassSettings::default(), PassSettings::default()] };
+        let three = DlssnrSettings {
+            passes: vec![PassSettings::default(), PassSettings::default(), PassSettings::default()],
+        };
+        run("A 两层（重建+2 pass）", &a, &two);
+        run("A 两层 复用", &a, &two);
+        run("A 三层（重建+3 pass）", &a, &three);
+        run("A 三层 复用", &a, &three);
+        println!("--- 换尺寸（真实翻页：每页尺寸都不一样） ---");
+        run("B #1 换尺寸", &b, &one);
+        run("B #2 复用", &b, &one);
+        run("A #4 换回 A", &a, &one);
+        run("C #1 2000x3000 6MP", &c, &one);
+        run("C #2 复用", &c, &one);
+
+        // p90 的长条页（26MP 一档）：库里这类页不少，而它决定「翻一页要等多久」。
+        let d = synthetic_image(1800, 14000);
+        println!("--- 长条页 1800x14000 = 25.2MP（RGBA 100MB） ---");
+        run("D #1 冷（含重建）", &d, &one);
+        run("D #2 复用", &d, &one);
+        let started = std::time::Instant::now();
+        {
+            use image::ImageEncoder;
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(&d.rgba, d.width, d.height, image::ExtendedColorType::Rgba8)
+                .expect("编码 PNG");
+            println!("{:<28} {:>6} ms（{} KB）", "编码 25.2MP PNG", started.elapsed().as_millis(), out.len() / 1024);
+        }
+
+        println!("--- 纯 CPU 部分 ---");
+        // 输入解码：真实输入是 LANraragi 给的 JPEG。
+        let jpeg = {
+            let rgb: Vec<u8> = a.rgba.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+            let mut buffer = std::io::Cursor::new(Vec::new());
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 92)
+                .encode(&rgb, a.width, a.height, image::ExtendedColorType::Rgb8)
+                .expect("编码 JPEG");
+            buffer.into_inner()
+        };
+        println!("输入 JPEG 体积：{} KB", jpeg.len() / 1024);
+        let started = std::time::Instant::now();
+        let decoded = image::load_from_memory(&jpeg).expect("解码 JPEG").to_rgba8();
+        println!("{:<28} {:>6} ms（{}x{}）", "解码 JPEG → RGBA8", started.elapsed().as_millis(), decoded.width(), decoded.height());
+
+        // 输出编码：命令层回给前端的正是这份 PNG。
+        let started = std::time::Instant::now();
+        let mut encoded = Vec::new();
+        {
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut encoded)
+                .write_image(&a.rgba, a.width, a.height, image::ExtendedColorType::Rgba8)
+                .expect("编码 PNG");
+        }
+        println!("{:<28} {:>6} ms（{} KB）", "编码结果 PNG（默认压缩）", started.elapsed().as_millis(), encoded.len() / 1024);
+        let started = std::time::Instant::now();
+        let fast = {
+            use image::ImageEncoder;
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut out,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::NoFilter,
+            )
+            .write_image(&a.rgba, a.width, a.height, image::ExtendedColorType::Rgba8)
+            .expect("编码 PNG");
+            out
+        };
+        println!("{:<28} {:>6} ms（{} KB）", "编码结果 PNG（Fast/NoFilter）", started.elapsed().as_millis(), fast.len() / 1024);
+    }
+
+    /// 「一个 bucket 工作区吃同一本档案里各种尺寸的页」成不成立。
+    ///
+    /// 判据只有一条：**输出要和按页尺寸建 feature 时几乎一样**（同一张图、同一层
+    /// 参数）。不成立就不能用——跑出来是花屏等于把功能做坏。差值的参照是「同一模式
+    /// 再跑一遍」的噪声底。
+    #[test]
+    fn a_bucket_workspace_matches_a_per_page_feature() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let settings = DlssnrSettings::default();
+        let none = crate::inference::cancel::CancelToken::none();
+        let page = synthetic_image(1478, 2100);
+
+        let run = |label: &str, forced: Option<(u32, u32)>| {
+            let started = std::time::Instant::now();
+            let output = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &none, forced);
+            let elapsed = started.elapsed().as_millis();
+            match output {
+                Ok(output) => {
+                    println!("{label:<38} {elapsed:>6} ms");
+                    Some(output)
+                }
+                Err(error) => {
+                    println!("{label:<38} 失败：{error}");
+                    None
+                }
+            }
+        };
+
+        println!("--- bucket 工作区 vs 按页尺寸建 feature（页 1478x2100）---");
+        // 生产路径：量化成 1536×2112 的 bucket（1478、1500 这一类的页共用它）。
+        let bucket = run("bucket（生产路径）", None);
+        // 老路：feature 建在这一页的尺寸上。`forced` 点名的尺寸和上面那个不同，
+        // 两边各自量的都是要量的东西。
+        let per_page = run("按页尺寸（1478x2100）", Some((1478, 2100)));
+        // 噪声底：同一模式再跑一遍（NGX 同一张图本来就跑不出逐字节一致的结果）。
+        let per_page_again = run("按页尺寸（噪声底）", Some((1478, 2100)));
+
+        let (Some(bucket), Some(per_page), Some(per_page_again)) = (bucket, per_page, per_page_again) else {
+            println!("有的一版没跑出来（原因见上面那几行），不比较");
+            return;
+        };
+        let noise = mean_absolute_difference(&per_page.rgba, &per_page_again.rgba);
+        let gap = mean_absolute_difference(&per_page.rgba, &bucket.rgba);
+        println!("噪声底（按页 vs 按页）: {noise:.3}");
+        println!("bucket vs 按页: 平均逐通道差 {gap:.3}（{:.4}%）", gap / 255.0 * 100.0);
+        assert!(
+            gap <= noise.max(0.5),
+            "bucket 与按页尺寸的输出差太多：{gap:.3}（噪声底 {noise:.3}）"
+        );
+    }
+
+    /// 同一本档案里连着翻、页页尺寸都差十几像素时，它们应该落进**同一个工作区**：
+    /// 换页不重建 feature。这是这轮优化要证明的核心，用 `GpuContext` 上的计数器判
+    /// ——时间在 CI 上不稳，计数是确定的机制。
+    ///
+    /// 计数器是**进程级**的（同一个测试进程里所有 GPU 测试共用一个上下文），所以差值
+    /// 只能当上界：`<= 1`。按页重建那一支会是 3。
+    #[test]
+    fn similar_pages_share_one_workspace() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let settings = DlssnrSettings::default();
+        let none = crate::inference::cancel::CancelToken::none();
+        // 一本档案里最常见的差异就是十几像素（扫描/裁边）。
+        let pages = [
+            synthetic_image(1300, 1900),
+            synthetic_image(1310, 1900),
+            synthetic_image(1290, 1890),
+        ];
+
+        let before = filter::context_counts(&dir, &dll).expect("读计数");
+        for (index, page) in pages.iter().enumerate() {
+            let started = std::time::Instant::now();
+            filter::apply_with_dll_bucket(&dir, &dll, page, &settings, &none, None)
+                .unwrap_or_else(|error| panic!("第 {} 页失败：{error}", index + 1));
+            println!(
+                "第 {} 页（{}x{}）{:>6} ms",
+                index + 1,
+                page.width,
+                page.height,
+                started.elapsed().as_millis()
+            );
+        }
+        let after = filter::context_counts(&dir, &dll).expect("读计数");
+        let builds = after.0 - before.0;
+        let feature_builds = after.1 - before.1;
+        println!("三页之后：新建工作区 {builds} 次、重建 feature {feature_builds} 次");
+        assert!(builds <= 1, "三页尺寸只差十几像素，却建了 {builds} 个工作区");
+        assert!(
+            feature_builds <= 1,
+            "三页尺寸只差十几像素，却重建了 {feature_builds} 次 feature"
+        );
+    }
+
+    /// 层数从 1 涨到 2 时，同一个工作区要能**原地长大**（补一张中间图），而不是拿
+    /// 一张只有 0 张中间图的工作区去跑两层（那会越界）。
+    ///
+    /// 判据用输出：两层的输出必须和一层的不一样——不一样才说明第二层真的拿前一层
+    /// 的输出当输入跑了。计数不参与判断（进程级计数器会被并行的 GPU 测试搅浑）。
+    #[test]
+    fn growing_the_layer_count_reuses_the_same_workspace() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let none = crate::inference::cancel::CancelToken::none();
+        let page = synthetic_image(600, 800);
+        let one = DlssnrSettings::default();
+        let two = DlssnrSettings {
+            passes: vec![
+                PassSettings::default(),
+                PassSettings {
+                    intensity: 1.2,
+                    ..PassSettings::default()
+                },
+            ],
+        };
+
+        // 先用一层把工作区建出来（只有 0 张中间图），再用两层要它。
+        let first = filter::apply_with_dll_bucket(&dir, &dll, &page, &one, &none, None)
+            .expect("一层跑不动");
+        let second = filter::apply_with_dll_bucket(&dir, &dll, &page, &two, &none, None)
+            .expect("两层要在同一个工作区里原地长大");
+        assert_eq!(second.rgba.len(), 600 * 800 * 4, "输出尺寸得和这一页一致");
+        let gap = mean_absolute_difference(&first.rgba, &second.rgba);
+        println!("一层 vs 两层：平均逐通道差 {gap:.3}");
+        assert!(gap > 0.5, "两层输出和一层一样（{gap:.3}），第二层没真跑");
     }
 }

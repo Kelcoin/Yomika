@@ -841,9 +841,11 @@ async fn handle_connection(
             let context = context;
             // 重活串到全局那一件（见 `inference::run_heavy`）：两张图同时进来把内存
             // 顶爆比慢一点糟。
-            let processed = crate::inference::run_heavy(move || {
-                process(&context.model_data, &context.data, &params, &body)
-            })
+            let processed = crate::inference::run_heavy(
+                crate::inference::HeavyPriority::Background,
+                None,
+                move || process(&context.model_data, &context.data, &params, &body),
+            )
             .await
             .and_then(|inner| inner);
             match processed {
@@ -1370,10 +1372,14 @@ pub async fn remote_compute_process(
             ))
         }
     };
-    let result = crate::inference::run_heavy(move || {
-        let database = app.state::<crate::db::Database>();
-        remote_process_cached_page(&database, &data, &input)
-    })
+    let result = crate::inference::run_heavy(
+        crate::inference::HeavyPriority::Background,
+        None,
+        move || {
+            let database = app.state::<crate::db::Database>();
+            remote_process_cached_page(&database, &data, &input)
+        },
+    )
     .await?;
     Ok(crate::domain::result::into_binary_response(result))
 }

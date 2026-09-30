@@ -1,4 +1,4 @@
-//! 一张图的 DLSSNR 处理：上传 → 跑 1–3 个 NGX pass → 读回。
+//! 一张图的 DLSSNR 处理：上传 → 跑 1–3 个 NGX pass → 回读。
 //!
 //! 顺序（照 NGX 对这几个参数的读法来，反汇编复核过）：
 //! 输入颜色按 `NON_PIXEL_SHADER_RESOURCE`、输出按 `UNORDERED_ACCESS`，运动与深度
@@ -6,17 +6,23 @@
 //! ——没有上一帧的历史，NGX 的时间性从这一帧开始。
 //!
 //! 多层就是同一张图串行跑几个 feature：第 N 层的输入是第 N-1 层的输出。
+//!
+//! **纹理与 feature 不在这里建**：它们按量化尺寸缓存在 [`Workspace`] 里（换尺寸
+//! 重建 feature 是这条链路上最大的单项开销，同一 bucket 内换页不再重建）。这一层
+//! 只负责把一页的整套命令记进同一张命令表——上传 → 各层 → 回读——**一次提交、
+//! 一次等待**，以前那一页四次提交加四次轮询也在这里收掉了。
 
-use std::ffi::c_void;
 use std::path::Path;
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
-use windows::Win32::Graphics::Dxgi::Common::*;
 
-use super::device::with_context;
+use crate::inference::cancel::CancelToken;
+
+use super::device::{with_context, GpuContext};
 use super::ngx::Parameters;
 use super::settings::DlssnrSettings;
+use super::workspace::Workspace;
 
 /// 一张待处理的图：紧凑的 RGBA8。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +68,7 @@ pub fn apply(
     image: &DlssnrImage,
     settings: &DlssnrSettings,
 ) -> Result<DlssnrImage, String> {
-    apply_with_token(data_dir, image, settings, &super::super::inference::cancel::CancelToken::none())
+    apply_with_token(data_dir, image, settings, &CancelToken::none())
 }
 
 /// 同上，但带取消牌：层与层之间查一次。阅读器用它——一张 4K 图一层几百毫秒，
@@ -71,7 +77,7 @@ pub fn apply_with_token(
     data_dir: &Path,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
-    cancel: &super::super::inference::cancel::CancelToken,
+    cancel: &CancelToken,
 ) -> Result<DlssnrImage, String> {
     if image.width < MIN_EDGE || image.height < MIN_EDGE {
         return Err(format!(
@@ -80,7 +86,7 @@ pub fn apply_with_token(
         ));
     }
     let settings = settings.clone().normalized();
-    with_context(data_dir, |context| run(context, image, &settings, cancel))
+    with_context(data_dir, |context| run(context, image, &settings, cancel, None))
 }
 
 /// 与 [`apply`] 相同，但 DLL 由调用方点名。**只有测试用**：它指着
@@ -93,7 +99,7 @@ pub fn apply_with_dll(
     image: &DlssnrImage,
     settings: &DlssnrSettings,
 ) -> Result<DlssnrImage, String> {
-    apply_with_dll_token(data_dir, dll, image, settings, &super::super::inference::cancel::CancelToken::none())
+    apply_with_dll_token(data_dir, dll, image, settings, &CancelToken::none())
 }
 
 #[cfg(test)]
@@ -102,7 +108,24 @@ pub fn apply_with_dll_token(
     dll: &Path,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
-    cancel: &super::super::inference::cancel::CancelToken,
+    cancel: &CancelToken,
+) -> Result<DlssnrImage, String> {
+    apply_with_dll_bucket(data_dir, dll, image, settings, cancel, None)
+}
+
+/// 试验用：点名工作区的创建尺寸，绕开 bucket 策略。
+///
+/// `forced = Some((w, h))`（要装得下这一页）时按这个尺寸建/取工作区，于是还能跑
+/// 「按页尺寸建 feature」那条老路，与 bucket 那一路对比输出（见 `mod.rs` 里的
+/// `a_bucket_workspace_matches_a_per_page_feature`）。
+#[cfg(test)]
+pub fn apply_with_dll_bucket(
+    data_dir: &Path,
+    dll: &Path,
+    image: &DlssnrImage,
+    settings: &DlssnrSettings,
+    cancel: &CancelToken,
+    forced: Option<(u32, u32)>,
 ) -> Result<DlssnrImage, String> {
     if image.width < MIN_EDGE || image.height < MIN_EDGE {
         return Err(format!(
@@ -114,74 +137,76 @@ pub fn apply_with_dll_token(
         return Err(CANCELLED.to_string());
     }
     let settings = settings.clone().normalized();
-    super::device::with_context_at(data_dir, dll, |context| run(context, image, &settings, cancel))
+    super::device::with_context_at(data_dir, dll, |context| run(context, image, &settings, cancel, forced))
+}
+
+/// 测试用：读全局上下文上「建过几个工作区 / 建过几次 feature」的计数。
+///
+/// 同一进程里所有 GPU 测试共用这个上下文（GPU 侧本来就串行），所以差值是个上界。
+#[cfg(test)]
+pub fn context_counts(data_dir: &Path, dll: &Path) -> Result<(u64, u64), String> {
+    super::device::with_context_at(data_dir, dll, |context| {
+        Ok((context.workspace_builds, context.feature_builds))
+    })
 }
 
 fn run(
-    context: &mut super::device::GpuContext,
+    context: &mut GpuContext,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
-    cancel: &super::super::inference::cancel::CancelToken,
+    cancel: &CancelToken,
+    forced: Option<(u32, u32)>,
 ) -> Result<DlssnrImage, String> {
     let width = image.width;
     let height = image.height;
-    // 颜色：输入按 SRV 用，输出要能写（UAV）。两张都带
-    // `ALLOW_UNORDERED_ACCESS`：输入那张不需要，但多一个标志无害，而且换层数时
-    // 输入/输出会互换位置。
-    let color_flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    let input = context.create_texture(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, color_flags)?;
-    context.upload_rgba(&input, width, height, &image.rgba)?;
-
-    // 零引导：运动 R16G16_FLOAT、深度 R32_FLOAT，尺寸与颜色一致。
-    let motion = context.create_zero_guide(width, height, DXGI_FORMAT_R16G16_FLOAT, 4)?;
-    let depth = context.create_zero_guide(width, height, DXGI_FORMAT_R32_FLOAT, 4)?;
-
     let pass_count = settings.pass_count() as usize;
-    let mut intermediates = Vec::new();
-    for _ in 0..pass_count.saturating_sub(1) {
-        intermediates.push(context.create_texture(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, color_flags)?);
-    }
-    let output = context.create_texture(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, color_flags)?;
-
-    eprintln!("[dlssnr] 纹理就绪，开始建 feature");
-    ensure_features(context, width, height, pass_count)?;
-
-    for index in 0..pass_count {
-        // 层与层之间是取消点：切页之后剩下的层不再跑（每层都要上传、评估、回读）。
-        if cancel.cancelled() {
-            return Err(CANCELLED.to_string());
+    debug_assert!(pass_count <= settings.passes.len(), "层数比参数表还多");
+    let timing = std::env::var_os("YOMIKA_DLSSNR_TIMING").is_some();
+    let mut mark = std::time::Instant::now();
+    let phase = |label: &str, mark: &mut std::time::Instant| {
+        if timing {
+            eprintln!("[dlssnr 耗时] {label}: {}ms", mark.elapsed().as_millis());
         }
-        let pass = settings.passes[index];
-        // 这一层的输出：不是最后一层就写中间图。
-        let target = if index + 1 == pass_count {
-            &output
-        } else {
-            &intermediates[index]
-        };
-        let source = if index == 0 {
-            &input
-        } else {
-            &intermediates[index - 1]
-        };
+        *mark = std::time::Instant::now();
+    };
 
-        if index > 0 {
-            // 上一层的输出这一层当输入读。
-            context.transition(source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // 工作区：装得下就复用（同一 bucket **不重建 feature**），装不下或太浪费就新建。
+    let mut workspace = context.acquire_workspace(width, height, pass_count, forced)?;
+    phase("取/建工作区（含 feature）", &mut mark);
+
+    // 一页的整套命令走同一张命令表：上传 → 各层 → 回读，末尾一次提交一次等待。
+    let recorded = record_page(context, &mut workspace, image, settings, cancel);
+    // 上传缓冲要活到提交之后（提交的命令里还要从它拷进纹理）：下划线前缀的绑定照样
+    // 活到作用域结束，裸 `_` 会立刻析构。
+    let (_upload, readback) = match recorded {
+        Ok(buffers) => buffers,
+        Err(error) => {
+            // 出错了：一条命令都还没提交，丢掉就是（纹理的实际状态也就没变过），
+            // 但 feature 句柄要还给 NGX。
+            let _ = context.discard_recorded();
+            workspace.release(&context.core);
+            return Err(error);
         }
-        context.transition(target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+    phase("记录（上传 + 各层 + 回读）", &mut mark);
 
-        // 就用创建时那张参数表（NGX 在里面放了内部句柄）。
-        let handle = context.features[index].handle;
-        let parameters = &context.features[index].parameters;
-        fill_evaluate_parameters(parameters, source, target, &motion, &depth, width, height, pass);
-        context
-            .core
-            .evaluate_feature(context.list.as_raw(), handle, parameters)?;
+    if let Err(error) = context.execute_and_wait() {
+        workspace.release(&context.core);
+        return Err(error);
     }
+    phase("提交 + 等 GPU（含全部推理）", &mut mark);
 
-    eprintln!("[dlssnr] 提交（回读里会等 GPU）");
-    let rgba = context.read_back_rgba(&output, width, height)?;
-    eprintln!("[dlssnr] 回读完成");
+    let rgba = match context.map_read_back(&readback, width, height) {
+        Ok(rgba) => rgba,
+        Err(error) => {
+            // 命令已经提交过了，工作区本身还是好的（状态机每页收尾都摆回去了），
+            // 只是这一页失败：feature 句柄得还给 NGX，否则下一个工作区会重头再建。
+            workspace.release(&context.core);
+            return Err(error);
+        }
+    };
+    phase("映射回读", &mut mark);
+    context.release_workspace(workspace);
     Ok(DlssnrImage {
         width,
         height,
@@ -189,84 +214,92 @@ fn run(
     })
 }
 
-/// 取这一尺寸的 feature（每个 pass 一个）。尺寸变了就重建——NGX 的 feature 是跟
-/// 宽高绑定的。每个 feature 带着**它创建时的那张参数表**：评估要用同一张（创建那
-/// 一步 NGX 会往里放内部句柄）。
-fn ensure_features(
-    context: &mut super::device::GpuContext,
-    width: u32,
-    height: u32,
-    pass_count: usize,
-) -> Result<(), String> {
-    if context.feature_size != Some((width, height)) || context.features.len() < pass_count {
-        for slot in std::mem::take(&mut context.features) {
-            context.core.release_feature(slot.handle);
-        }
-        for _ in 0..pass_count {
-            // 创建参数一个都不能少（尺寸、缩放比、回调、质量档……），少一个片段就
-            // 回「参数缺失或类型不对」。
-            let parameters = create_parameters(context, width, height)?;
-            let handle = context
-                .core
-                .create_feature(context.list.as_raw(), &parameters)?;
-            context.features.push(super::device::FeatureSlot {
-                handle,
-                parameters,
-            });
-        }
-        context.feature_size = Some((width, height));
-    }
-    Ok(())
-}
-
-/// 创建 feature 时的参数：同分辨率、不放大、缩放比 1、预设 0、质量档 Balanced。
+/// 把一页的整套命令记进命令表：上传 → 各层 → 回读。**不提交**。
 ///
-/// 一个都不能少：少一个片段就回「参数缺失或类型不对」。`Set` 的重载也要按类型选
-/// （整数走 int、尺寸走 unsigned、比例走 float）——NGX 按重载记类型，混了它读不到。
-fn create_parameters(context: &super::device::GpuContext, width: u32, height: u32) -> Result<Parameters, String> {
-    let parameters = context.allocate_parameters()?;
-    parameters.set_u32("DLSSNR.Width", width);
-    parameters.set_u32("DLSSNR.Height", height);
-    parameters.set_u32("DLSSNR.InputWidth", width);
-    parameters.set_u32("DLSSNR.InputHeight", height);
-    parameters.set_u32("DLSSNR.OutputWidth", width);
-    parameters.set_u32("DLSSNR.OutputHeight", height);
-    parameters.set_u32("DLSSNR.Output.Width", width);
-    parameters.set_u32("DLSSNR.Output.Height", height);
-    parameters.set_u32("DLSSNR.Upscaling", 0);
-    parameters.set_f32("DLSSNR.Scale", 1.0);
-    parameters.set_f32("DLSSNR.ScalingRatio", 1.0);
-    // 缩放比回调：NGX 会拿它问一遍。
-    parameters.set_pointer(
-        "DLSSNRComputeScalingRatioCallback",
-        super::ngx::dlssnr_scaling_ratio_callback as *mut c_void,
-    );
-    parameters.set_i32("DLSSNR.Hint.Render.Preset", 0);
-    parameters.set_u32("Width", width);
-    parameters.set_u32("Height", height);
-    parameters.set_i32("PerfQualityValue", 1); // Balanced
-    parameters.set_u32("CreationNodeMask", 1);
-    parameters.set_u32("VisibilityNodeMask", 1);
-    #[cfg(any(test, debug_assertions))]
-    if std::env::var_os("YOMIKA_NGX_LOG").is_some() {
-        for name in [
-            "DLSSNR.Width",
-            "DLSSNR.Height",
-            "DLSSNR.Upscaling",
-            "DLSSNR.Scale",
-            "DLSSNR.ScalingRatio",
-            "DLSSNR.Hint.Render.Preset",
-            "Width",
-            "Height",
-            "PerfQualityValue",
-            "CreationNodeMask",
-            "VisibilityNodeMask",
-            "DLSSNRComputeScalingRatioCallback",
-        ] {
-            eprintln!("[参数] {}", parameters.read_back(name));
+/// 返回（上传缓冲, 回读缓冲）：两张都被这一批命令引用，要活到提交之后。
+fn record_page(
+    context: &mut GpuContext,
+    workspace: &mut Workspace,
+    image: &DlssnrImage,
+    settings: &DlssnrSettings,
+    cancel: &CancelToken,
+) -> Result<(ID3D12Resource, ID3D12Resource), String> {
+    let width = image.width;
+    let height = image.height;
+    let (bucket_width, bucket_height) = workspace.size;
+    let pass_count = settings.pass_count() as usize;
+
+    // 颜色：这一页贴在左上角，纹理可能比它大（bucket）。拷完回到 SRV，正好接着给
+    // 第一层当输入（`input` 每页开场就是 SRV，见 `workspace` 模块头的状态机）。
+    let upload = context.record_upload_rgba(
+        &workspace.input,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        width,
+        height,
+        &image.rgba,
+    )?;
+
+    for index in 0..pass_count {
+        // 层与层之间仍是取消点。（整页只有一次提交，所以这里的取消等于整页作废：
+        // 一条命令都还没发出去，已经花掉的只有记录的时间和一次上传的行拷贝。）
+        if cancel.cancelled() {
+            return Err(CANCELLED.to_string());
         }
+        let pass = settings.passes[index];
+        let last = index + 1 == pass_count;
+        let source = if index == 0 {
+            &workspace.input
+        } else {
+            &workspace.intermediates[index - 1]
+        };
+        let target = if last {
+            &workspace.output
+        } else {
+            &workspace.intermediates[index]
+        };
+
+        if index > 0 {
+            // 上一层的输出这一层当输入读。
+            context.transition(
+                source,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        }
+        // 目标图每页开场：输出是 COMMON（上一页收尾摆回来的），中间图是 SRV。
+        let from = if last {
+            D3D12_RESOURCE_STATE_COMMON
+        } else {
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+        };
+        context.transition(target, from, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // 就用创建时那张参数表（NGX 在里面放了内部句柄）。尺寸参数保持工作区的
+        // 尺寸，这一页多大只由 subrect 说明——实测两者输出一致（差 0.012/255）。
+        let parameters = &workspace.features[index].parameters;
+        fill_evaluate_parameters(
+            parameters,
+            source,
+            target,
+            &workspace.motion,
+            &workspace.depth,
+            width,
+            height,
+            pass,
+        );
+        context
+            .core
+            .evaluate_feature(context.list.as_raw(), workspace.features[index].handle, parameters)?;
     }
-    Ok(parameters)
+
+    let readback = context.record_read_back(&workspace.output, width, height, bucket_width, bucket_height)?;
+    // 输出收尾摆回 COMMON：下一页开场就还是「COMMON → UAV」。
+    context.transition(
+        &workspace.output,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_COMMON,
+    );
+    Ok((upload, readback))
 }
 
 /// 每次评估的参数（创建那张表继续用，另加每层的风格）。
