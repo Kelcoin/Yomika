@@ -1,0 +1,78 @@
+/*
+ * 托盘右键菜单。
+ *
+ * 这**不是**系统菜单：系统的宽度由「图标栏 + 内边距」算出来（两个双字条目也要一百二十来
+ * 像素），悬停高亮是矩形、和圆角边框对不上——两件都改不了（用户 2026-09-30 报的）。所以
+ * 菜单由 `tray_menu.rs` 那个 96×76 的无边框透明窗口自己画。
+ *
+ * 这里只引 tokens，不引 shell：这是一个独立文档，它要的是「和主窗同一套主题」而不是
+ * 整个应用外壳。主题由 `tray_menu_state` 命令给（主窗的 `data-theme` 传不过来）。
+ */
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  /* 菜单是被点开的一小块界面，整页拖选只会把文字选蓝。 */
+  user-select: none;
+}
+
+.tray-menu {
+  box-sizing: border-box;
+  /* 铺满窗口：`inset: 0` 而不是 `height: 100%`，少一层「百分比高度对着谁解析」的
+     不确定性——窗口尺寸就是菜单尺寸，差 1px 就是边框被切掉一条。 */
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-1);
+  border: 1px solid var(--outline-variant);
+  /* 12px 和卡片同一档；窗口是透明的，四角之外就是桌面。 */
+  border-radius: var(--radius-card);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  /* 没有投影，而且是**故意**的：窗口正好是菜单那么大，`box-shadow` 会被窗口裁掉，
+     留出一条硬边。要投影就得给窗口留一圈透明边距，那又要把边距写进定位里。菜单靠
+     自己的表面色 + 1px 描边和任务栏分开——M3 的层级本来就该用色调而不是阴影。 */
+}
+
+.tray-menu-item {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  flex: 0 0 32px;
+  padding: 0 var(--space-2);
+  border: 0;
+  /* 圆角跟着容器的内缩走：悬停高亮是一枚**内缩的胶囊**，不是顶到边框的矩形——
+   * 那正是系统菜单被诟病的地方（「hover 效果与边框不匹配」）。 */
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+/* 悬停与按下是同一层墨色，触屏上没有 hover 也看得见。 */
+.tray-menu-item:hover,
+.tray-menu-item:is(.is-pressed, :active),
+.tray-menu-item:focus-visible {
+  background: var(--surface-container-highest);
+  outline: none;
+}
+
+/* 退出是破坏性动作：悬停时用 error 的容器色，和别处的危险色调同源。 */
+.tray-menu-item.is-danger:hover,
+.tray-menu-item.is-danger:is(.is-pressed, :active),
+.tray-menu-item.is-danger:focus-visible {
+  background: var(--error-container);
+  color: var(--on-error-container);
+}

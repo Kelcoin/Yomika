@@ -345,6 +345,68 @@ describe('design system contract', () => {
     expect(css).toMatch(/\.reader-chrome-top\.is-leaving \{\s*animation:\s*reader-chrome-top-out/);
   });
 
+  it('draws the tray menu itself instead of handing it to Windows', () => {
+    // 系统托盘菜单有两处改不了，也是用户 2026-09-30 报的那两条：宽度由「图标栏 + 内边距」
+    // 算出来（两个双字条目实测约 121px，见 debug_outputs/refs/tray-menu.png），悬停高亮
+    // 是矩形、和圆角边框对不上。所以菜单改成应用自己画的一个无边框透明小窗口。
+    const rust = read('src-tauri/src/tray_menu.rs');
+    const css = read('src/styles/tray-menu.css');
+    const lib = read('src-tauri/src/lib.rs');
+
+    // 窗口尺寸在 Rust 与 CSS 两处写死同一件事：对不上就是菜单被裁一半或四周多一块透明边。
+    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 96\.0;/);
+    expect(rust).toMatch(/pub const MENU_HEIGHT: f64 = 74\.0;/);
+    expect(css).toMatch(/\.tray-menu \{[\s\S]*?inset:\s*0/);
+    // 96px 是**窄于**系统菜单的：参考图里两个双字条目的系统菜单约 121px。
+    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 96\.0;/);
+    // 创建时的尺寸会被系统夹到 SM_CXMINTRACK（实测 136），而 SetWindowPos 不受这个下限
+    // 约束——所以建好之后必须再显式设一次，否则菜单是 136 宽，比系统菜单还宽。
+    expect(rust).toMatch(/window\.set_size\(tauri::LogicalSize::new\(MENU_WIDTH, MENU_HEIGHT\)\)/);
+    // 透明 + 无边框：12px 圆角之外必须是桌面本身。
+    expect(rust).toMatch(/\.transparent\(true\)/);
+    expect(rust).toMatch(/\.decorations\(false\)/);
+    expect(rust).toMatch(/\.shadow\(false\)/);
+    // 托盘不再挂系统菜单；右键弹的是这个窗口。（注释里提到旧写法是允许的。）
+    expect(lib).not.toMatch(/MenuBuilder::new/);
+    expect(lib).not.toMatch(/\.menu\(&/);
+    expect(lib).toMatch(/show_menu_on_left_click\(false\)/);
+    expect(lib).toMatch(/TrayIconEvent::Click \{ button: MouseButton::Right/);
+    // 左键仍然能把主窗叫回来：菜单万一没弹出来，应用不能变成只有右键够得着的东西。
+    expect(lib).toMatch(/MouseButton::Left/);
+    // 第二个入口是独立文档（只为两条菜单项，不该拉整个应用 bundle）。
+    expect(read('vite.config.ts')).toMatch(/'tray-menu': entry\('\.\/tray-menu\.html'\)/);
+
+    // 悬停高亮是**内缩的胶囊**：容器留 4dp，条目自己再圆一档——不是顶到边框的矩形。
+    expect(ruleBody(css, '.tray-menu')).toMatch(/padding:\s*var\(--space-1\)/);
+    expect(ruleBody(css, '.tray-menu')).toMatch(/border-radius:\s*var\(--radius-card\)/);
+    const item = ruleBody(css, '.tray-menu-item');
+    expect(item).toMatch(/border-radius:\s*var\(--radius-control\)/);
+    expect(item).toMatch(/height:\s*32px/);
+    expect(css).toMatch(/\.tray-menu-item:hover,[\s\S]*?background:\s*var\(--surface-container-highest\)/);
+    // 退出用破坏性的容器色，和其它地方的危险色调同源。
+    expect(css).toMatch(/\.tray-menu-item\.is-danger:hover,[\s\S]*?background:\s*var\(--error-container\)/);
+  });
+
+  it('gives the tray its own mark, not the app icon', () => {
+    // 托盘给的 16px 上，print 那版标记的 18/512 笔画是 0.56px — 整块糊成一团灰
+    // （用户报的「小尺寸下很难看清」）。所以托盘用的是单独一份：`assets/yomika-tray.svg`
+    // 是源头，`icons/tray-32.png` 是 `npx tauri icon` 出来的、被 include_bytes! 编进 exe。
+    const lib = read('src-tauri/src/lib.rs');
+    const cargo = read('src-tauri/Cargo.toml');
+    expect(lib).toMatch(/include_bytes!\("\.\.\/icons\/tray-32\.png"\)/);
+    expect(lib).toMatch(/Image::from_bytes\(/);
+    // 解不出来要退回应用图标：托盘没有图标比图标糊一点糟得多。
+    expect(lib).toMatch(/app\.default_window_icon\(\)\.cloned\(\)/);
+    // 那条 `Image::from_bytes` 要能解码 PNG，靠的是这个特性。
+    expect(cargo).toMatch(/tauri\s*=\s*\{[^}]*"image-png"/);
+
+    // 源头、产物、以及「产物是从源头来的」都要在仓库里说得清。
+    expect(read('assets/yomika-tray.svg')).toContain('Yomika tray mark');
+    expect(read('src-tauri/icons/README.md')).toContain('tray-32.png');
+    const tray = read('src-tauri/src/tray_menu.rs');
+    expect(tray).toMatch(/fn the_embedded_tray_bitmap_decodes_to_a_non_empty_icon/);
+  });
+
   it('keeps the toast above menus, their backdrop and dialogs', () => {
     // toast 说的是刚刚发生的那件事：被二级菜单那道 fixed 遮罩盖住就等于没发生。
     const tokens = read('src/styles/tokens.css');
@@ -791,8 +853,14 @@ describe('design system contract', () => {
     // 阅读模式的顶栏/底栏按 M3 的 small top app bar 与 bottom app bar 规格：容器
     // 64dp / 80dp（各加自己的安全区）、左右 4dp（TopAppBarHorizontalPadding 与
     // BottomAppBarHorizontalPadding —— M3 把「距图标 16dp」的内容边距交给按钮自己
-    // 的内边距，容器只留 4dp）、24dp 图标、标题 title-large（22/28）、底栏容器是
-    // surface-container（比顶栏的 surface 高一档）。
+    // 的内边距，容器只留 4dp）、24dp 图标、标题 title-large（22/28）。
+    //
+    // **两条栏是两个角色**：顶栏 surface、底栏 surface-container（M3 就是这么分的，
+    // 见 skill 的 component-catalog：「scrolled app bar → surface-container」）。
+    // 它们靠这一档色调分开，而不是靠模糊——所以两条都是**不透明**的，整块 chrome
+    // 里没有一处 `backdrop-filter`，也没有带 alpha 的容器色。
+    // （2026-09-30 上一轮曾把它们合并成同一种半透明 chrome；这一轮按规范还原成
+    // 两个角色 + 不透明。）
     const reader = read('src/styles/reader.css');
     const tokens = read('src/styles/tokens.css');
 
@@ -800,13 +868,23 @@ describe('design system contract', () => {
     expect(tokens).toMatch(/--reader-title-leading:\s*28px/);
     expect(tokens).toMatch(/--reader-toolbar-height:\s*80px/);
     expect(tokens).toMatch(/--reader-primary:\s*#ffb4a9/);
-    expect(tokens).toMatch(/--reader-bar-container:/);
+    // 三档 surface 与 on-* 各就各位；上一轮那两个「两条栏一个材质」的令牌已经不在。
+    expect(tokens).toMatch(/--reader-surface:\s*#[0-9a-f]{6};/);
+    expect(tokens).toMatch(/--reader-surface-container:\s*#[0-9a-f]{6};/);
+    expect(tokens).toMatch(/--reader-surface-raised:\s*#[0-9a-f]{6};/);
+    expect(tokens).not.toMatch(/--reader-chrome:/);
+    expect(tokens).not.toMatch(/--reader-bar-container/);
 
     const top = ruleBody(reader, '.reader-chrome-top');
     expect(top).toMatch(/height:\s*calc\(64px \+ var\(--safe-top\)\)/);
     expect(top).toMatch(/padding:\s*var\(--safe-top\)\s+var\(--space-1\)\s+0/);
     // 容器高度是定的，不是 min-height：内容在 64dp 里居中，多一行也不会长高。
     expect(top).not.toMatch(/min-height/);
+    // 顶栏 = surface，不透明；朝内容那一侧一条 outline-variant 分隔线。
+    expect(top).toMatch(/background:\s*var\(--reader-surface\)/);
+    expect(top).toMatch(/border-bottom:\s*1px solid var\(--reader-border-muted\)/);
+    expect(top).not.toMatch(/backdrop-filter/);
+    expect(top).not.toMatch(/color-mix|transparent/);
 
     const title = ruleBody(reader, '.reader-chrome-top strong');
     expect(title).toMatch(/font-size:\s*var\(--reader-title-size\)/);
@@ -824,7 +902,33 @@ describe('design system contract', () => {
     // 功能组之间留 8dp；组内图标仍由各自的触控面提供间距。
     expect(toolbar).toMatch(/gap:\s*var\(--space-2\)/);
     expect(ruleBody(reader, '.reader-toolbar-group')).toMatch(/display:\s*flex/);
-    expect(toolbar).toMatch(/background:\s*var\(--reader-bar-container\)/);
+    // 底栏 = surface-container，比顶栏高一档 —— 这一条就是「两条栏不是同一个材质」。
+    expect(toolbar).toMatch(/background:\s*var\(--reader-surface-container\)/);
+    expect(toolbar).toMatch(/border-top:\s*1px solid var\(--reader-border-muted\)/);
+    expect(toolbar).not.toMatch(/backdrop-filter/);
+    expect(toolbar).not.toMatch(/color-mix|transparent/);
+    expect(toolbar).not.toMatch(/var\(--reader-surface\)/);
+
+    // M3 的 top app bar 一明一暗两颗图标：前导（返回）是 on-surface，尾随动作是
+    // on-surface-variant。底栏那一排动作全走 on-surface-variant，页码是 on-surface。
+    // 底栏那条要按规则本体匹配：`.reader-toolbar button` 先出现在上面那条共享几何规则
+    // 的选择器列表里，`ruleBody` 取的是第一个。
+    expect(reader).not.toMatch(/\.reader-chrome-top \.reader-icon-button\s*\{/);
+    expect(ruleBody(reader, '.reader-chrome-top .reader-chrome-settings,\n.reader-chrome-top .reader-chrome-window'))
+      .toMatch(/color:\s*var\(--reader-muted\)/);
+    expect(reader).toMatch(/\.reader-toolbar button \{\s*color:\s*var\(--reader-muted\);\s*\}/);
+    // 组不带填充（M3 的 bottom app bar 是一排 standard icon button）。
+    expect(ruleBody(reader, '.reader-toolbar-group')).not.toMatch(/background/);
+    expect(reader).not.toMatch(/\.reader-toolbar-pages[^{]*\{[^}]*background/);
+
+    // 浮在画面上的两枚胶囊也是不透明的，取 surface-container-high（比两条栏都亮）。
+    expect(ruleBody(reader, '.reader-deriving')).toMatch(/background:\s*var\(--reader-surface-raised\)/);
+    expect(ruleBody(reader, '.reader-page-indicator')).toMatch(/background:\s*var\(--reader-surface-raised\)/);
+    // 整个 chrome 里只剩概览那层蒙版带模糊——它是一枚对话框的 scrim，不是 app bar。
+    // 先去掉注释再抓选择器，否则上一条规则的注释会跟着一起被捕获。
+    const blurSelectors = [...reader.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(?:^|\})\s*([^{}]*?)\{[^{}]*backdrop-filter:\s*blur/g)]
+      .map((match) => (match[1] ?? '').trim());
+    expect(blurSelectors.join(' | ')).toBe('.reader-overview-backdrop');
 
     // 图标按钮是 M3 的 full shape，不是 8px 圆角；图标 24dp。
     expect(ruleBody(reader, '.reader-icon-button,\n.reader-toolbar button')).toMatch(/border-radius:\s*var\(--radius-pill\)/);
@@ -856,7 +960,7 @@ describe('design system contract', () => {
     const reader = read('src/styles/reader.css');
     const rules = [...reader.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*)\{([^{}]*)\}/g)];
     const chrome = rules.filter(([, selector]) => !(selector ?? '').includes('.reader-overview')).map(([whole]) => whole).join('\n');
-    expect(chrome).toMatch(/--reader-chrome/);
+    expect(chrome).toMatch(/--reader-surface/);
     const flipping = /var\(--(?:primary|on-primary|primary-container|on-primary-container|secondary|tertiary|error|success|warning|surface[\w-]*|on-surface[\w-]*|ink-[\w-]+|brand-[\w-]+|outline[\w-]*|hairline[\w-]*|control-[\w-]+|chip-[\w-]+|backdrop-overlay|selection-[\w-]+|focus-[\w-]+|inverse-[\w-]+|state-[\w-]+|category-[\w-]+|tag-ns-[\w-]+|eh-mark-[\w-]+|shadow-[\w-]+)\)/;
     expect(chrome).not.toMatch(flipping);
   });

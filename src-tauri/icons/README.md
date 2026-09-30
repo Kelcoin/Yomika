@@ -52,3 +52,32 @@ mask's safe area.
 A regeneration also rewrites the desktop set, `icon.ico` included. That one comes
 out with 32×32 still in front, so it keeps working — the warning above is about
 design-tool exports, not about this command.
+
+## The tray icon is a separate mark
+
+`tray-32.png` is **not** part of the set above and must not be regenerated from
+`icon-manifest.json`: the tray borrows nothing from the app icon.
+
+The notification area gives an icon 16px (32 at 200% DPI), and the print mark's
+strokes are 18 units of 512 — 0.56px there. Measured on the real bitmap: the app
+icon at 32×32 carries **1** pixel bright enough to read as ink, because every
+0.6px stroke anti-aliases away. That is the user report 「小尺寸下很难看清」.
+
+`assets/yomika-tray.svg` is the tray's own master: same rounded plate and same
+two-tier ink, but the glyph is filled rather than stroked, reduced from five
+elements to three, and every edge sits on a 32-unit boundary so the 512-unit
+master downsamples 1:2 to the tray bitmap and 1:32 to a 16px render on exact pixel
+boundaries. It carries 334 readable ink pixels at 32×32 where the app icon has 1.
+
+Regenerate the bitmap (the output directory is a scratch one — only `32x32.png`
+is kept, renamed to `tray-32.png`; the rest of the generated set would clobber the
+app icons):
+
+    npx tauri icon assets/yomika-tray.svg -o /tmp/yomika-tray
+    cp /tmp/yomika-tray/32x32.png src-tauri/icons/tray-32.png
+
+`lib.rs` embeds that PNG with `include_bytes!` and hands it to the tray
+(`Image::from_bytes`, which is why `tauri` carries the `image-png` feature). If the
+bitmap ever fails to decode the tray falls back to the app icon, because a blurry
+tray icon beats no tray icon.
+

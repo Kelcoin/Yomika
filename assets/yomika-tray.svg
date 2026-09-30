@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Yomika tray mark</title>
+  <desc id="desc">The brand mark re-derived for the Windows notification area. Same rounded plate and same two-tier ink as `yomika-mark-print.svg`, but the glyph is filled instead of stroked and reduced from five elements to three: at the 16px the tray actually gives it, the print mark's 18-unit strokes land on 0.56px and the whole thing dissolves into grey mush (user report: "在小尺寸下很难看清"). Every edge here sits on a 32-unit boundary, so a 512-unit master downsamples 1:2 to the 32px tray bitmap and 1:32 to a 16px render on exact pixel boundaries — the 128-unit stroke is a full 4px, the dot 5px across. The accent frame is dropped, not forgotten: at 16px it stole the width the glyph needs (candidate "C-framed" in the tray-icon study), and the plate already carries the identity.</desc>
+  <rect width="512" height="512" rx="112" fill="#0D0D0D"/>
+  <!-- Spine and top arm as one corner: the print mark's first two strokes, thickened. -->
+  <rect x="64" y="64" width="128" height="384" rx="64" fill="#F5F5F5"/>
+  <rect x="64" y="64" width="320" height="128" rx="64" fill="#F5F5F5"/>
+  <!-- The dot keeps the print mark's quieter ink, and its own 160-unit gap from the arm. -->
+  <circle cx="344" cy="344" r="80" fill="#E8E8E8"/>
+</svg>

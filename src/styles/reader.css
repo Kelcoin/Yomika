@@ -124,7 +124,10 @@
   padding: 4px 12px;
   border: 1px solid var(--reader-border-muted);
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--reader-bar-container) 88%, transparent);
+  /* 浮在画面上的一枚不透明胶囊：取 M3 的 surface-container-high——比两条栏都亮
+     一档，所以它压在画面上时自己就是一块可读的台面（原来是从半透明底色里 mix
+     出来的，底色一透明就得再补一层模糊）。 */
+  background: var(--reader-surface-raised);
   color: var(--reader-muted);
   font-family: var(--font-body);
   font-size: var(--text-xs);
@@ -214,7 +217,8 @@
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
-  background: var(--reader-chrome);
+  border-bottom: 1px solid var(--reader-border-muted);
+  background: var(--reader-surface);
 }
 
 /* M3 title-large 是 22sp/28sp、字重 400，但 M3 的 app bar 标题在一个**自带加粗标题**的
@@ -287,9 +291,10 @@
    padding (TopAppBarHorizontalPadding), a 4dp inset before the title, and 24dp
    icons. Deliberately taller than the shell's 44px window title bar: the reader
    is its own full-bleed mode, and its chrome is the only chrome on screen.
-   半透明的底色单独用是不够的：条下面压的是任意亮度的画面，透出来的边缘与笔触
-   会和标题、图标抢注意力。模糊抹掉那层纹理，底色保证对比度（见 tokens.css
-   `--reader-chrome` 那条注释）——两者是一件事的两半，只写一半就是「看不清」。 */
+   容器是**不透明**的 `surface`——M3 的 app bar 就靠这一档色调与画布分开，不用
+   模糊也不用 alpha（见 tokens.css 里那组 surface 令牌）。朝向内容那一侧留一条
+   1px 分隔线（M3 的 scrolled app bar 就是这个做法，用的是 outline-variant 的
+   角色）。 */
 .reader-chrome-top {
   position: absolute;
   top: 0;
@@ -300,8 +305,8 @@
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
-  background: var(--reader-chrome);
-  backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--reader-border-muted);
+  background: var(--reader-surface);
   animation: reader-chrome-top-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
@@ -321,11 +326,11 @@
   white-space: nowrap;
 }
 
-/* M3 gives the app bar two icon colours: the leading icon is on-surface and
-   the trailing ones are on-surface-variant. The leading button inherits the
-   bar's ink, so only the trailing pair is named here — scoped to the bar,
-   because `.reader-icon-button { color: inherit }` below is the same
-   specificity and would otherwise win on source order. */
+/* M3 gives the top app bar two icon colours: the leading navigation icon is
+   on-surface and the trailing actions are on-surface-variant. 复原这一档：上一轮
+   为了让两条栏「看起来是一套」把前导按钮也压成了 muted，结果顶端最重要的那颗
+   （返回）和右端的设置同权。M3 的 top app bar 本来就是一明一暗两颗，这里跟它走。
+   `.reader-icon-button { color: inherit }` 与这条同特异性，所以要指名。 */
 .reader-chrome-top .reader-chrome-settings,
 .reader-chrome-top .reader-chrome-window { flex: none; color: var(--reader-muted); }
 
@@ -337,8 +342,8 @@
    bottom-centre slot rests in the letterbox under a width-filling image, the
    corner slot rides the right gap of a height-filling one, and both fade out
    in continuous mode and while zoomed. It carries M3's label-medium: 12sp at
-   weight 500 with 0.5sp tracking, on the bar's own container colour so the two
-   bottom surfaces match. */.reader-page-indicator {
+   weight 500 with 0.5sp tracking. 底色与「处理中」胶囊同一档
+   （surface-container-high），两者都是浮在画面上的小台面。 */.reader-page-indicator {
   position: fixed;
   z-index: var(--z-reader-chrome);
   right: 16px;
@@ -346,7 +351,7 @@
   padding: 4px 12px;
   border: 1px solid var(--reader-border-muted);
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--reader-bar-container) 88%, transparent);
+  background: var(--reader-surface-raised);
   color: var(--reader-muted);
   font-family: var(--font-body);
   font-size: var(--text-xs);
@@ -451,14 +456,20 @@
   padding: 0 var(--space-1) var(--safe-bottom);
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  background: var(--reader-bar-container);
-  backdrop-filter: blur(18px);
+  /* M3 bottom app bar：容器是 surface-container，比顶栏的 surface 高一档——两条栏
+     靠这一档色调分开，不是靠模糊。朝向内容那一侧同样留一条 1px 分隔线。 */
+  border-top: 1px solid var(--reader-border-muted);
+  background: var(--reader-surface-container);
   animation: reader-chrome-bottom-in var(--motion-standard) backwards;
   pointer-events: auto;
 }
 
 .reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; }
 
+/* 组只管间距，不带底色。M3 的 bottom app bar 是一排 standard icon button，没有
+   分组容器这一层，所以这里只把相关的图标凑近、组与组之间留 8dp。图标颜色走
+   `.reader-toolbar button` 那条（on-surface-variant），页码那一组靠自己的亮墨
+   （on-surface）分出来——和顶栏「一明一暗」是同一套读法。 */
 .reader-toolbar-group {
   display: flex;
   align-items: center;
@@ -466,11 +477,6 @@
   gap: 2px;
   min-height: 48px;
   padding: 2px 4px;
-  border-radius: var(--radius-pill);
-  background: var(--reader-control-hover);
-}
-.reader-toolbar-pages {
-  background: color-mix(in srgb, var(--reader-primary) 12%, var(--reader-bar-container));
 }
 .reader-toolbar-processing:empty { display: none; }
 
@@ -756,13 +762,10 @@
   overscroll-behavior: contain;
 }
 
-/* 「减少透明度」下不需要模糊：半透明模糊是合成最贵的一类效果（每一帧都要重新采样
-   背后的内容），而它的观感在系统要求减少透明度时反而更差。这时候缺的那一半由令牌
-   补上——tokens.css 在这条查询里把 --reader-chrome / --reader-bar-container 收成
-   不透明，所以下面只需要摘掉模糊本身。 */
+/* 两条栏**不在这条查询里**：它们本来就是不透明的，没有模糊可摘（见 tokens.css 那组
+   surface 令牌）。只有概览那层蒙版还带 `blur` —— 半透明模糊是合成最贵的一类效果
+   （每一帧都要重新采样背后的内容），而它的观感在系统要求减少透明度时反而更差。 */
 @media (prefers-reduced-transparency: reduce) {
-  .reader-chrome-top,
-  .reader-toolbar,
   .reader-overview-backdrop {
     backdrop-filter: none;
   }

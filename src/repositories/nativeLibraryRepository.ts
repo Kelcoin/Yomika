@@ -43,12 +43,29 @@ function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
 import type { ServerIdentity } from '../domain/server';
 
 type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'> & { allowProgressRegression?: boolean };
-const pendingProgressWrites = new Map<string, Promise<unknown>>();
-const progressKey = (scopeId: string, archiveId: string) => `${scopeId}\0${archiveId}`;
+/** 同一个键上的写入串成一条链：**后一次派发**等前一次落定再发。
+ *
+ * 这几条命令体都改成了 `#[tauri::command(async)]`，也就是在 tokio 线程池上跑——「先发
+ * 的先落库」不再由 UI 线程保证。写入绝对值的那几个（收藏、待看、阅读进度）必须自己排
+ * 好序，否则同一张卡连点两次会倒着落库：界面上是取消收藏，库里还留着。
+ *
+ * 传 `run` 而不是已经发出去的 promise，是因为第二个参数接的是**拒绝**路径：前一次写入
+ * 失败（桥断了、响应读不出来）不该把后一次一起吞掉。
+ */
+const pendingWrites = new Map<string, Promise<unknown>>();
+function queuedWrite<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const prior = pendingWrites.get(key);
+  const write = (prior ?? Promise.resolve()).then(run, run);
+  pendingWrites.set(key, write);
+  void write.finally(() => { if (pendingWrites.get(key) === write) pendingWrites.delete(key); }).catch(() => undefined);
+  return write;
+}
+
+const progressKey = (scopeId: string, archiveId: string) => `progress\0${scopeId}\0${archiveId}`;
 
 async function waitForProgress(scopeId: string, archiveId?: string) {
-  const writes = [...pendingProgressWrites].filter(([key]) => archiveId === undefined
-    ? key.startsWith(`${scopeId}\0`)
+  const writes = [...pendingWrites].filter(([key]) => archiveId === undefined
+    ? key.startsWith(`progress\0${scopeId}\0`)
     : key === progressKey(scopeId, archiveId)).map(([, write]) => write);
   await Promise.all(writes);
 }
@@ -125,8 +142,11 @@ export interface SearchPresetInput {
 }
 
 export class NativeLibraryRepository {
+  /** 收藏/待看写的是**绝对值**（`added`），不是「切换」：连点两次就是先写 true 再写
+   * false，谁最后落库谁说了算。这两条命令也在 tokio 线程池上跑，所以要按同一个键排好
+   * ——不然界面上是「已取消」，库里还留着那一行（见 `queuedWrite`）。 */
   setWatchlist(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
+    return queuedWrite(`watchlist\0${scopeId}\0${archiveId}`, () => invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
   }
   listWatchlist(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_watchlist', { scopeId }, z.array(WatchlistRecordSchema));
@@ -134,7 +154,7 @@ export class NativeLibraryRepository {
   /** Reading list ("待看") is a second list beside the watchlist ("收藏夹"):
    * intent to read versus having liked something. */
   setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
+    return queuedWrite(`reading-list\0${scopeId}\0${archiveId}`, () => invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
   }
   listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
@@ -432,12 +452,10 @@ export class NativeLibraryRepository {
   }
 
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {
-    const key = progressKey(progress.scopeId, progress.archiveId);
-    const prior = pendingProgressWrites.get(key);
-    const write = (prior ?? Promise.resolve()).then(() => invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves));
-    pendingProgressWrites.set(key, write);
-    void write.finally(() => { if (pendingProgressWrites.get(key) === write) pendingProgressWrites.delete(key); }).catch(() => undefined);
-    return write;
+    return queuedWrite(
+      progressKey(progress.scopeId, progress.archiveId),
+      () => invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves),
+    );
   }
 
   async loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {

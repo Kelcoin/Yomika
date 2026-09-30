@@ -172,31 +172,42 @@
        The reader canvas is black in both themes, so this chrome cannot reuse
        the theme's roles: in the light theme --primary is a deep vermilion,
        which is unreadable on black. These values are the dark scheme, fixed.
+
+       **不透明**，而且层级只用**色调**表达——这是 M3 的那条规矩（container
+       color 分档，内容从 app bar 底下滚过去），也把上一轮那套「半透明 + 背景
+       模糊」整个去掉了：底栏与顶栏靠**各自那一档**分开，而不是靠模糊。另外
+       `backdrop-filter` 每一帧都要重采样背后的画面，是合成里最贵的一类效果，
+       而这个阅读器刚刚才为流畅度做过一轮（docs/34）。
+
        Role map (M3 → token):
-         surface              --reader-chrome        top app bar (64dp)
-         surface-container    --reader-bar-container bottom app bar (80dp), one
-                                                     tonal step above the top bar
-         on-surface           --reader-ink          app-bar title, page counter
-         on-surface-variant   --reader-muted        toolbar icons, subtitle badge
-         primary              --reader-primary      a selected toggle
+         surface                --reader-surface            顶栏（small top app
+                                                             bar，64dp）
+         surface-container      --reader-surface-container  底栏（bottom app bar，
+                                                             80dp）
+         surface-container-high --reader-surface-raised     浮在画面上的小胶囊
+                                                             （页码、处理中）
+         on-surface             --reader-ink                标题、页码
+         on-surface-variant     --reader-muted              app bar 上的图标
+         outline-variant        --reader-border-muted       两条栏朝向内容那一侧
+                                                             的 1px 分隔线
+         primary                --reader-primary            选中的开关
+
+       三档是照着 M3 深色方案的间距取的：画布最黑，surface 比它亮一档，底栏再
+       亮一档，浮起来的小胶囊最亮。图标与页码在三档上都过 WCAG AA（最差的一对
+       是 --reader-muted 落在 --reader-surface-raised 上，6.2:1）。
+
        The overview panel is deliberately NOT in this group: it is a dialog body
        that also appears inside the dedup workspace's themed dialog, so it
        follows the theme (see .reader-overview in reader.css).
        Custom colour schemes recolor the app, not this chrome — as with every
        other --reader-* token here. ---------------------------------------- */
     --reader-canvas: #050506;
+    --reader-surface: #0f1014;
+    --reader-surface-container: #1b1c20;
+    --reader-surface-raised: #26272c;
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
     --reader-primary: #ffb4a9;
-    --reader-chrome: rgb(5 5 7 / 0.9);
-    /* Translucency plus backdrop blur stands in for M3's tonal elevation (see
-       docs/03-visual-system.md §3.6): the container is surface-container, and
-       the blur keeps the artwork legible underneath it.
-       底色与模糊是一件事的两半，不能只留一半：条下面压的是任意亮度的画面，
-       单靠底色透出来的高频边缘会和标题、图标抢注意力（看着就是「看不清」）。
-       0.9/0.92 是模糊之外再补的一档——blur 抹掉画面的纹理，底色保证文字与图标
-       的对比度不随翻到哪一页而变。 */
-    --reader-bar-container: rgb(26 27 30 / 0.92);
     --reader-border: rgb(244 241 248 / 0.24);
     --reader-border-muted: rgb(244 241 248 / 0.16);
     /* State layer over a control. M3 asks for 8% on hover and 10% on press;
@@ -634,15 +645,8 @@
     --shadow-card: 0 4px 12px rgb(0 0 0 / 0.34);
   }
 
-  /* 「减少透明度」：系统替用户说的是「别拿透视当装饰」，而模糊正是这一档效果的
-     本体（见 reader.css 那条媒体查询）。少了一半就得把另一半补回去——底色收成不
-     透明，文字与图标的对比度才不依赖读者背后翻到哪一页。在令牌这一层收口，是因为
-     所有阅读器条状物（顶栏、底栏、页码胶囊、处理中胶囊）都从这两个变量取值：
-     逐个元素去改，迟早漏掉一个，而漏掉的那个正好落在画面上。 */
-  @media (prefers-reduced-transparency: reduce) {
-    :root {
-      --reader-chrome: #0b0b0e;
-      --reader-bar-container: #1b1c1f;
-    }
-  }
+  /* 「减少透明度」这一档现在什么都不用做：阅读模式的 chrome **本来就是不透明的**
+     （见上面那组 surface 令牌），没有半透明要收，也没有模糊要摘。留着这段是因为
+     它记着一条曾经的理由——将来若有人再把 alpha 引回顶栏/底栏，这里就是要补上的
+     那一半。 */
 }

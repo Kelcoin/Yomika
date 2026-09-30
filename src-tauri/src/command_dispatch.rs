@@ -42,6 +42,9 @@ mod tests {
         ("lib.rs", include_str!("lib.rs")),
         ("model_release.rs", include_str!("model_release.rs")),
         ("settings.rs", include_str!("settings.rs")),
+        // 新命令落进新文件时这里也要补一行，否则它就不在这条不变量底下——托盘菜单那份
+        // 就是这么被发现的（`tray_menu_state` 曾经在同步命令里取库锁）。
+        ("tray_menu.rs", include_str!("tray_menu.rs")),
     ];
 
     /// 一条挂在同步 `pub fn` 上的 `#[tauri::command]`。
