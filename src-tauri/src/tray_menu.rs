@@ -49,20 +49,29 @@ pub fn menu_origin(
 
 /// 建好那个隐藏的菜单窗口。桌面端启动时一次。
 pub fn install(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    let window = WebviewWindowBuilder::new(app, MENU_WINDOW, WebviewUrl::App("tray-menu.html".into()))
+    // 这条链里只有这几个选项是跨平台的；最大化 / 最小化 / 系统装饰 / 阴影 / 任务栏 /
+    // 置顶都在 tauri 的 `#[cfg(desktop)] impl WebviewWindowBuilder` 里，Android 目标
+    // 编不过。这个窗口只在 Windows 装（`install` 的调用点在 `lib.rs` 的 Windows
+    // 分支），但模块本身是跨平台编的，所以两截要分开写。
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, MENU_WINDOW, WebviewUrl::App("tray-menu.html".into()))
         .title("")
         .inner_size(MENU_WIDTH, MENU_HEIGHT)
         .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .decorations(false)
         // 透明：12px 圆角之外必须是桌面本身，不然四角会带一块底色。
         .transparent(true)
-        .shadow(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .visible(false)
-        .build()?;
+        .visible(false);
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .maximizable(false)
+            .minimizable(false)
+            .decorations(false)
+            .shadow(false)
+            .skip_taskbar(true)
+            .always_on_top(true);
+    }
+    let window = builder.build()?;
     // **创建**时的尺寸会被系统夹到 `SM_CXMINTRACK`（这台机器上实测 136×39），所以上面那句
     // `inner_size(96, 74)` 建出来其实是 **136×74** —— 菜单铺满窗口就成了一条 136 宽的菜单，
     // 比系统菜单（约 121）还宽，正好是用户要修的那一条。`SetWindowPos` 不受这个下限约束
@@ -139,6 +148,8 @@ pub fn tray_menu_choose(app: AppHandle, action: String) -> CommandResult<()> {
         "show" => {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.show();
+                // `unminimize` 同样只在桌面端存在。
+                #[cfg(desktop)]
                 let _ = main.unminimize();
                 let _ = main.set_focus();
             }
