@@ -19,14 +19,14 @@ describe('tray menu', () => {
     return { ok: true, value: null };
   });
 
-  it('offers one row per action, with the danger tone on quit', async () => {
+  it('offers one row per action, with no danger tone on quit', async () => {
     setInvokeAdapterForTests(adapter());
     render(<TrayMenu />);
     const menu = screen.getByRole('menu');
     const items = within(menu).getAllByRole('menuitem');
     expect(items.map((item) => item.textContent)).toEqual(['打开', '退出']);
-    expect(items[1]).toHaveClass('is-danger');
-    expect(items[0]).not.toHaveClass('is-danger');
+    // 退出只是个普通动作：从前它带 `is-danger`，悬停是一块 error 色（用户要求改成一样的）。
+    expect(items.map((item) => item.className)).toEqual(['tray-menu-item', 'tray-menu-item']);
   });
 
   it('follows the main window theme, including back to system', async () => {
@@ -56,7 +56,7 @@ describe('tray menu', () => {
     expect(calls.every((call) => call.command.startsWith('tray_menu_'))).toBe(true);
   });
 
-  it('dismisses on Escape and walks the rows with the arrow keys', async () => {
+  it('opens with nothing focused, then walks the rows with the arrow keys', async () => {
     const commands: string[] = [];
     setInvokeAdapterForTests(async (command) => {
       commands.push(command);
@@ -64,9 +64,14 @@ describe('tray menu', () => {
     });
     render(<TrayMenu />);
     const items = within(screen.getByRole('menu')).getAllByRole('menuitem');
-    // 弹出来的那一刻焦点在第一条上：否则 Esc 与方向键都没有落点。
-    await waitFor(() => expect(items[0]).toHaveFocus());
+    // 菜单弹出来时**不**预置焦点：程序化聚焦会被浏览器算成键盘操作，第一条就永远带着
+    // 一圈高亮，鼠标移开也不消失（用户报的「打开选项 hover 常驻」）。
+    await waitFor(() => expect(items[0]).not.toHaveFocus());
+    expect(items[1]).not.toHaveFocus();
 
+    // 没有落点时向下从第一条开始、向上从最后一条开始，和系统菜单一致。
+    await userEvent.keyboard('{ArrowDown}');
+    expect(items[0]).toHaveFocus();
     await userEvent.keyboard('{ArrowDown}');
     expect(items[1]).toHaveFocus();
     // 到最后一条再往下回到第一条，不会走出列表。

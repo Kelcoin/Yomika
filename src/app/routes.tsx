@@ -55,6 +55,7 @@ import { TextInputDialog } from '../components/TextInputDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { findMissingArchives } from '../lib/archiveExistence';
+import { historyShelfArchives } from '../lib/historyShelf';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { isArchiveFinished } from '../lib/archiveCardPresentation';
@@ -94,6 +95,9 @@ function formatShelfTimeline(iso: string): ShelfTimelineEntry {
 const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list: switching tabs and coming back should not
  * re-resolve the shelves and draw a new random set. */
 const HOME_SNAPSHOT_FRESH_MS = 90_000;
+
+/** 「继续阅读」这一排显示几张。历史页面能滚出整条历史，首页只有一排的位置。 */
+const CONTINUE_READING_RAIL = 6;
 
 interface HomeSnapshot {
   servers: Awaited<ReturnType<NativeLibraryRepository['listServers']>>;
@@ -196,11 +200,13 @@ function HomeWorkspace() {
       if (!readingListResult.ok) { setRecentError(readingListResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
       setHistory(historyResult.value);
       setReadingList(readingListResult.value);
-      // Resolve only the ids the rails can show. The window is wider than the
-      // rails so an id the local index has not seen yet gets backfilled by the
-      // next one instead of leaving a hole.
+      // 历史那一批解析的是**整条历史**的档案，和历史页面解析的是同一批：只解析一排
+      // 要显示的那六条，被隐藏的已读完、或镜像里暂时解析不出来的记录就会在这一排里
+      // 留下空格——两页看的是同一份历史，不该有两套口径。整条历史都是本地索引上的一次
+      // 点查（历史页面本来就这么解析），多出来的存在性探测由 `findMissingArchives` 分次
+      // 问完（每次至多 192 个，答案在会话里记住）。
       const shelfIds = [...new Set([
-        ...historyResult.value.slice(0, 6).map((item) => item.archiveId),
+        ...historyResult.value.map((item) => item.archiveId),
         ...readingListResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
       ])];
       // 书架 id 解析与随机漫游互不依赖，重叠拉取：原先是先等完书架、
@@ -253,21 +259,17 @@ function HomeWorkspace() {
       setRandomArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
     },
   });
-  const recent = useMemo(() => history.slice(0, 6), [history]);
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
-  /** 「继续阅读」的已读完开关：关闭时把进度超过 95% 的记录从 rail 里隐藏，
-   * 其余照旧。历史页面固定显示已读完，不受这个开关影响。 */
-  const continueReading = useMemo(() => {
-    const showFinished = preferences.continueReadingShowFinished;
-    return recent
-      .filter((item) => {
-        if (showFinished) return true;
-        const archive = archiveById.get(item.archiveId);
-        return !(archive && isArchiveFinished(archive.pageCount, item.pageIndex + 1));
-      })
-      .map((item) => archiveById.get(item.archiveId))
-      .filter((item): item is ArchiveRecord => Boolean(item));
-  }, [archiveById, preferences.continueReadingShowFinished, recent]);
+  /** 「继续阅读」的已读完开关：关闭时不把进度超过 95% 的记录放进这一排，其余照旧。
+   * 口径与历史页面共用（`historyShelfArchives`），所以这一排就是历史列表过滤之后的前
+   * 六条——被隐藏的记录不会在这一排里留下空格。历史页面固定显示已读完，不受开关影响。 */
+  const continueReading = useMemo(
+    () => historyShelfArchives(history, archiveById, {
+      hideFinished: !preferences.continueReadingShowFinished,
+      limit: CONTINUE_READING_RAIL,
+    }),
+    [archiveById, history, preferences.continueReadingShowFinished],
+  );
   /** 收藏夹 rail 已移除：watchlist 表里的数据（含从 Readoshi 导入的待看记录）
    * 曾在首页与 /to-read 书架两边同时出现，语义上互相打架。收藏操作本身不受
    * 影响，档案详情页与右键菜单照常读写 watchlist。 */
@@ -503,10 +505,6 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const [presets, setPresets] = useState<SearchPreset[]>([]);
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const [presetEditTarget, setPresetEditTarget] = useState<SearchPreset>();
-  const sortedHistory = useMemo(
-    () => [...history].sort((left, right) => right.visitedAt.localeCompare(left.visitedAt)),
-    [history],
-  );
   const activeWatchlist = useMemo(() => watchlist.filter((item) => !item.deleted), [watchlist]);
   /** Most recently added first. The shelves had a sort control offering "title"
    * or "recent"; recency is the only order that says anything about a shelf, so
@@ -517,15 +515,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   );
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   const shelfArchives = useMemo(() => {
+    // 历史与首页「继续阅读」共用同一份口径（顺序、解析、已读完过滤）；这里全都要。
+    if (name === 'history') return historyShelfArchives(history, archiveById);
     // 收藏夹 renders the server category's ids in the server's own order when
     // they are known; otherwise it falls back to the local watchlist.
-    const ids = name === 'history'
-      ? sortedHistory.map((item) => item.archiveId)
-      : name === 'watchlist' && favoritesIds
-        ? favoritesIds
-        : sortedWatchlist.map((item) => item.archiveId);
+    const ids = name === 'watchlist' && favoritesIds ? favoritesIds : sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
-  }, [archiveById, favoritesIds, name, sortedHistory, sortedWatchlist]);
+  }, [archiveById, favoritesIds, history, name, sortedWatchlist]);
   const visibleArchives = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return shelfArchives;

@@ -4,7 +4,7 @@
 //! （用户 2026-09-30 报的）：宽度由系统按「图标栏 + 内边距」算出来，两个双字条目也要
 //! 一百二十来像素；悬停高亮是矩形，和圆角边框对不上。这两件事都只能自己画。
 //!
-//! 所以这里是一个 96×76 的无边框透明窗口（尺寸和 `styles/tray-menu.css` 一一对应，
+//! 所以这里是一个 84×62 的无边框透明窗口（尺寸和 `styles/tray-menu.css` 一一对应，
 //! 契约测试盯着这一对），`tray-menu.html` 那个入口渲染两条菜单项。定位是纯几何，单独
 //! 测（`menu_origin`）。
 
@@ -15,11 +15,14 @@ use crate::domain::result::CommandResult;
 
 /// 菜单窗口的标签。`lib.rs` 的窗口事件里也按它认人。
 pub const MENU_WINDOW: &str = "tray-menu";
-/// 逻辑像素。CSS 里菜单是 `position: fixed; inset: 0`，也就是铺满整个窗口；两条 32px
-/// 的条目 + 容器 4px 内边距 + 1px 边框 = 74，所以窗口也是 74 高——多一像素就是底下多一条
+/// 逻辑像素。CSS 里菜单是 `position: fixed; inset: 0`，也就是铺满整个窗口；两条 26px
+/// 的条目 + 容器 4px 内边距 + 1px 边框 = 62，所以窗口也是 62 高——多一像素就是底下多一条
 /// 透明边，少一像素就是边框被切掉。
-pub const MENU_WIDTH: f64 = 96.0;
-pub const MENU_HEIGHT: f64 = 74.0;
+///
+/// 这两个数曾经是 96×74（32px 的条目、14px 的字号）：用户 2026-09-30 报「菜单太大」——
+/// 一个双字条目在 13px 字号下只有 26px 宽的文字，其余都是空处，于是整块收到 84×62。
+pub const MENU_WIDTH: f64 = 84.0;
+pub const MENU_HEIGHT: f64 = 62.0;
 
 /// 菜单左上角的位置（物理像素）。
 ///
@@ -72,10 +75,11 @@ pub fn install(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .always_on_top(true);
     }
     let window = builder.build()?;
-    // **创建**时的尺寸会被系统夹到 `SM_CXMINTRACK`（这台机器上实测 136×39），所以上面那句
-    // `inner_size(96, 74)` 建出来其实是 **136×74** —— 菜单铺满窗口就成了一条 136 宽的菜单，
-    // 比系统菜单（约 121）还宽，正好是用户要修的那一条。`SetWindowPos` 不受这个下限约束
-    // （实测把它压到 96×74 成功），所以建好之后再显式设一次。
+    // **创建**时的尺寸会被系统夹到 `SM_CXMINTRACK`（这台机器上 96 DPI 下实测 136×39，
+    // 150% 缩放下是 202×56），所以上面那句 `inner_size(84, 62)` 建出来其实是 **136×62**
+    // ——菜单铺满窗口就成了一条 136 宽的菜单，比系统菜单（约 121）还宽，正好是用户要修的
+    // 那一条。`SetWindowPos` 不受这个下限约束（实测把它压到 84×62 成功），所以建好之后再
+    // 显式设一次。
     let _ = window.set_size(tauri::LogicalSize::new(MENU_WIDTH, MENU_HEIGHT));
     Ok(window)
 }
@@ -180,31 +184,31 @@ mod tests {
     #[test]
     fn opens_up_and_to_the_left_of_the_cursor() {
         // 任务栏在右下角：菜单落在光标左上方，也就是屏幕里侧。
-        assert_eq!(menu_origin((1900.0, 1070.0), (96.0, 74.0), SCREEN), (1804.0, 996.0));
+        assert_eq!(menu_origin((1900.0, 1070.0), (84.0, 62.0), SCREEN), (1816.0, 1008.0));
     }
 
     #[test]
     fn flips_to_the_other_side_when_the_corner_has_no_room() {
         // 任务栏在左上角：往左上没有空间，翻到光标右侧与下方。
-        assert_eq!(menu_origin((4.0, 4.0), (96.0, 74.0), SCREEN), (4.0, 4.0));
+        assert_eq!(menu_origin((4.0, 4.0), (84.0, 62.0), SCREEN), (4.0, 4.0));
         // 左边缘但下方有空间：横向翻、纵向仍然往上。
-        assert_eq!(menu_origin((4.0, 900.0), (96.0, 74.0), SCREEN), (4.0, 826.0));
+        assert_eq!(menu_origin((4.0, 900.0), (84.0, 62.0), SCREEN), (4.0, 838.0));
     }
 
     #[test]
     fn never_leaves_the_monitor() {
         // 屏幕比菜单还窄：夹到左上角，而不是算出一个负坐标。
         let tiny = (0.0, 0.0, 40.0, 30.0);
-        assert_eq!(menu_origin((20.0, 15.0), (96.0, 74.0), tiny), (0.0, 0.0));
+        assert_eq!(menu_origin((20.0, 15.0), (84.0, 62.0), tiny), (0.0, 0.0));
         // 负坐标的显示器（副屏在主屏左边）：往左上展开仍在屏内，所以不翻边。
         let left_monitor = (-1920.0, 0.0, 0.0, 1080.0);
-        assert_eq!(menu_origin((-20.0, 1070.0), (96.0, 74.0), left_monitor), (-116.0, 996.0));
-        // 该显示器右边缘附近往左上展开：-106..-10 本来就在屏内，不需要夹。
-        assert_eq!(menu_origin((-10.0, 1070.0), (96.0, 74.0), left_monitor), (-106.0, 996.0));
+        assert_eq!(menu_origin((-20.0, 1070.0), (84.0, 62.0), left_monitor), (-104.0, 1008.0));
+        // 该显示器右边缘附近往左上展开：-94..-10 本来就在屏内，不需要夹。
+        assert_eq!(menu_origin((-10.0, 1070.0), (84.0, 62.0), left_monitor), (-94.0, 1008.0));
         // 真正的夹边只有「显示器比菜单还小」这种退化情形：翻边之后仍然放不下，
         // 于是被夹到左上角，而不是返回一个屏外坐标。
         let narrow = (0.0, 0.0, 60.0, 40.0);
-        assert_eq!(menu_origin((55.0, 30.0), (96.0, 74.0), narrow), (0.0, 0.0));
+        assert_eq!(menu_origin((55.0, 30.0), (84.0, 62.0), narrow), (0.0, 0.0));
     }
 
     #[test]
@@ -213,8 +217,8 @@ mod tests {
         // 透明边。CSS 那份由 design-system-contract.test.ts 一起盯着。
         let css = include_str!("../../src/styles/tray-menu.css");
         assert!(css.contains("inset: 0"), "菜单容器要铺满窗口：{css}");
-        assert_eq!(MENU_WIDTH, 96.0);
-        assert_eq!(MENU_HEIGHT, 74.0);
+        assert_eq!(MENU_WIDTH, 84.0);
+        assert_eq!(MENU_HEIGHT, 62.0);
     }
 
     /// 托盘图标是一份**单独**的资源（`icons/tray-32.png`，源头 `assets/yomika-tray.svg`）：
@@ -228,7 +232,7 @@ mod tests {
         let rgba = image.rgba();
         assert_eq!(rgba.len(), 32 * 32 * 4);
         // 必须有真正画上去的像素，而且不能是一块实心圆角方（那样就成了一个色块）。
-        // 门槛是量出来的：这一份 334 个亮像素，而应用图标那版（`icons/32x32.png`，
+        // 门槛是量出来的：这一份 333 个亮像素，而应用图标那版（`icons/32x32.png`，
         // print 标记）在同样的 32×32 上只有 **1** 个——它的笔画是 10/512，落到 32px
         // 是 0.6px，抗锯齿之后全糊成灰。所以把托盘图标换回应用图标，这条会直接失败。
         let opaque = rgba.chunks_exact(4).filter(|pixel| pixel[3] > 200).count();
@@ -236,5 +240,63 @@ mod tests {
         assert!(opaque > 400, "盘子不该是空的：{opaque} 个不透明像素");
         assert!(ink > 150, "字形不该消失：{ink} 个亮色像素");
         assert!(ink < opaque / 2, "字形不该糊满整块盘子：{ink}/{opaque}");
+    }
+
+    /// 用户报的：「主题元素四周的空隙不一致，看着不太舒服」。这条把四边的空隙都量出来对账：
+    /// 盘子就是整张位图的边界，字形盒（亮像素）到它四边的距离必须**相等**。
+    ///
+    /// 原来的 dot 在 (344,344)：它的下沿落在 448（离盘底 64 单位）而右沿只到 424（离盘右
+    /// 88 单位），于是 32px 上是 `4/4/6/4`、24px 上是 `3/3/4/3`、16px 上是 `2/2/3/2`——右边
+    /// 一条比别的都宽，整个字看起来往左偏。dot 移到 (368,368) 之后，字形盒是 64..448 的
+    /// 正方形，四边都是 64 单位（32px 上 4px、16px 上 2px），而且 dot 的四个切点也落在
+    /// 32 单位网格上（288 / 448），不再压在半像素上发虚。
+    #[test]
+    fn the_tray_glyph_keeps_the_same_air_on_all_four_sides() {
+        fn bounds(
+            width: usize,
+            height: usize,
+            hit: impl Fn(usize, usize) -> bool,
+        ) -> (usize, usize, usize, usize) {
+            let mut found = (width, height, 0, 0);
+            for y in 0..height {
+                for x in 0..width {
+                    if hit(x, y) {
+                        found.0 = found.0.min(x);
+                        found.1 = found.1.min(y);
+                        found.2 = found.2.max(x);
+                        found.3 = found.3.max(y);
+                    }
+                }
+            }
+            found
+        }
+
+        let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32.png"))
+            .expect("托盘位图应当能解码");
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        let rgba = image.rgba();
+
+        let plate = bounds(width, height, |x, y| rgba[(y * width + x) * 4 + 3] > 8);
+        let ink = bounds(width, height, |x, y| {
+            let pixel = &rgba[(y * width + x) * 4..][..4];
+            pixel[3] > 200 && pixel[0] > 200
+        });
+        assert_eq!(plate, (0, 0, 31, 31), "盘子应当铺满整张位图：{plate:?}");
+
+        let left = ink.0 - plate.0;
+        let top = ink.1 - plate.1;
+        let right = plate.2 - ink.2;
+        let bottom = plate.3 - ink.3;
+        assert!(
+            left == top && top == right && right == bottom,
+            "字形四边的空隙必须一样：左 {left} 上 {top} 右 {right} 下 {bottom}"
+        );
+        // 64/512 单位在 32px 位图上就是 4px；字形盒因此是 24×24。这个数字同时钉住了
+        // 「字形不要缩回盘子里」——只要求四边相等的话，一个缩到中间的标记也能通过。
+        assert_eq!(
+            (left, ink.2 - ink.0 + 1, ink.3 - ink.1 + 1),
+            (4, 24, 24),
+            "字形盒应当是 24×24、四边各留 4px"
+        );
     }
 }

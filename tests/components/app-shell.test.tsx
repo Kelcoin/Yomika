@@ -167,6 +167,47 @@ describe('application shell', () => {
     expect(screen.queryByRole('heading', { name: '书架还是空的' })).not.toBeInTheDocument();
   });
 
+  it('fills the continue-reading rail from the same history the history page lists', async () => {
+    // 首页那一排从前只取历史的前六条、再去掉已读完的：前六条里有一条已读完时，那一排只剩
+    // 五张，而更早的未读完记录永远补不上来——和历史页面看到的不是同一份列表（用户报的
+    // 「首页历史记录组件与历史记录页面内的记录不一致」）。
+    const history = [
+      { scopeId: 'scope-a', archiveId: 'done', pageIndex: 11, visitedAt: '2026-09-08T00:00:00Z', deviceId: 'device-a', revision: 1 },
+      ...['b', 'c', 'd', 'e', 'f'].map((id, index) => ({
+        scopeId: 'scope-a', archiveId: id, pageIndex: 1, visitedAt: `2026-09-0${7 - index}T00:00:00Z`, deviceId: 'device-a', revision: 1,
+      })),
+      { scopeId: 'scope-a', archiveId: 'g', pageIndex: 1, visitedAt: '2026-09-01T00:00:00Z', deviceId: 'device-a', revision: 1 },
+    ];
+    const archives = history.map((item) => ({
+      serverId: 'scope-a', archiveId: item.archiveId, title: `档案${item.archiveId}`,
+      pageCount: 12, updatedAt: '2026-09-01T00:00:00Z',
+    }));
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: history };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_archives_by_ids') {
+        const ids = (args as { archiveIds?: string[] } | undefined)?.archiveIds ?? [];
+        return { ok: true, value: archives.filter((item) => ids.includes(item.archiveId)) };
+      }
+      if (command === 'search_random_archives') return { ok: true, value: [] };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      // 已读完的开关关掉 = 不显示已读完（「继续阅读显示已读完」那一行的默认是开）。
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, continueReadingShowFinished: false } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderAt();
+
+    const rail = await screen.findByRole('region', { name: '继续阅读' });
+    const titles = within(rail).getAllByRole('link').map((link) => link.textContent);
+    // 已读完的 done 被隐藏，后面六条补上来——包括窗口外面的 g。
+    expect(titles).toHaveLength(6);
+    expect(titles.some((title) => title?.includes('档案done'))).toBe(false);
+    expect(within(rail).getByRole('link', { name: /档案g/ })).toBeInTheDocument();
+  });
+
   it('answers a right click on a home rail card', async () => {
     // The library list was the only surface wired to the menu, which read as the
     // app not having one at all: the rails, the recommendation rail and the

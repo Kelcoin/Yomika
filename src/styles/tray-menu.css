@@ -3,7 +3,12 @@
  *
  * 这**不是**系统菜单：系统的宽度由「图标栏 + 内边距」算出来（两个双字条目也要一百二十来
  * 像素），悬停高亮是矩形、和圆角边框对不上——两件都改不了（用户 2026-09-30 报的）。所以
- * 菜单由 `tray_menu.rs` 那个 96×76 的无边框透明窗口自己画。
+ * 菜单由 `tray_menu.rs` 那个无边框透明窗口自己画。
+ *
+ * 尺寸跟着内容走，而不是跟着"能塞多少"：条目 26px、字号与其它菜单同一档（13px）、容器
+ * 只用 4px 内边距。原先 32px 的条目 + 14px 字号 + 96px 宽，两个双字条目落在一个大半是
+ * 空白的方框里（用户 2026-09-30 报的第二条："菜单太大"）。窗口尺寸是这里算出来的和，
+ * 见 `tray_menu.rs` 与 design-system-contract 测试。
  *
  * 这里只引 tokens，不引 shell：这是一个独立文档，它要的是「和主窗同一套主题」而不是
  * 整个应用外壳。主题由 `tray_menu_state` 命令给（主窗的 `data-theme` 传不过来）。
@@ -35,7 +40,7 @@ body {
   background: var(--surface-container-high);
   color: var(--on-surface);
   font-family: var(--font-body);
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   /* 没有投影，而且是**故意**的：窗口正好是菜单那么大，`box-shadow` 会被窗口裁掉，
      留出一条硬边。要投影就得给窗口留一圈透明边距，那又要把边距写进定位里。菜单靠
@@ -47,8 +52,8 @@ body {
   align-items: center;
   box-sizing: border-box;
   width: 100%;
-  height: 32px;
-  flex: 0 0 32px;
+  height: 26px;
+  flex: 0 0 26px;
   padding: 0 var(--space-2);
   border: 0;
   /* 圆角跟着容器的内缩走：悬停高亮是一枚**内缩的胶囊**，不是顶到边框的矩形——
@@ -61,18 +66,14 @@ body {
   cursor: pointer;
 }
 
-/* 悬停与按下是同一层墨色，触屏上没有 hover 也看得见。 */
+/* 悬停与按下是同一层墨色，触屏上没有 hover 也看得见。
+ *
+ * `:focus-visible` 也在这一组里，但界面**不会**自己把焦点放到某一条上（见 TrayMenu：
+ * 程序化聚焦会被算成键盘操作，第一条就永远带着这块底色）。它只在真的按了键之后命中：
+ * 方向键走位、Tab 落到条目上。 */
 .tray-menu-item:hover,
 .tray-menu-item:is(.is-pressed, :active),
 .tray-menu-item:focus-visible {
   background: var(--surface-container-highest);
   outline: none;
-}
-
-/* 退出是破坏性动作：悬停时用 error 的容器色，和别处的危险色调同源。 */
-.tray-menu-item.is-danger:hover,
-.tray-menu-item.is-danger:is(.is-pressed, :active),
-.tray-menu-item.is-danger:focus-visible {
-  background: var(--error-container);
-  color: var(--on-error-container);
 }

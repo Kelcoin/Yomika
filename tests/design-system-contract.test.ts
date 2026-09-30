@@ -354,13 +354,22 @@ describe('design system contract', () => {
     const lib = read('src-tauri/src/lib.rs');
 
     // 窗口尺寸在 Rust 与 CSS 两处写死同一件事：对不上就是菜单被裁一半或四周多一块透明边。
-    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 96\.0;/);
-    expect(rust).toMatch(/pub const MENU_HEIGHT: f64 = 74\.0;/);
+    // 断言的是**算出来的和**，不是再抄一遍数字：容器上下各 1px 边框 + 4px 内边距，再加
+    // 两条条目——条目高度与内边距都从 CSS / tokens 里现读，所以改设计时只有一处可改。
+    const itemHeight = Number(/height:\s*(\d+)px/.exec(ruleBody(css, '.tray-menu-item'))?.[1]);
+    const space1 = Number(/--space-1:\s*(\d+)px/.exec(read('src/styles/tokens.css'))?.[1]);
+    const rows = (read('src/components/TrayMenu.tsx').match(/\{ action: '[a-z]+', label: /g) ?? []).length;
+    expect(itemHeight).toBeGreaterThan(0);
+    expect(space1).toBeGreaterThan(0);
+    expect(rows).toBe(2);
+    const expectedHeight = itemHeight * rows + space1 * 2 + 1 * 2;
+    expect(rust).toMatch(new RegExp(`pub const MENU_HEIGHT: f64 = ${expectedHeight}\\.0;`));
     expect(css).toMatch(/\.tray-menu \{[\s\S]*?inset:\s*0/);
-    // 96px 是**窄于**系统菜单的：参考图里两个双字条目的系统菜单约 121px。
-    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 96\.0;/);
-    // 创建时的尺寸会被系统夹到 SM_CXMINTRACK（实测 136），而 SetWindowPos 不受这个下限
-    // 约束——所以建好之后必须再显式设一次，否则菜单是 136 宽，比系统菜单还宽。
+    // 84px 是**窄于**系统菜单的：参考图里两个双字条目的系统菜单约 121px。
+    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 84\.0;/);
+    // 创建时的尺寸会被系统夹到 SM_CXMINTRACK（这台机器 96 DPI 下实测 136×39，150% 缩放下
+    // 202×56），而 SetWindowPos 不受这个下限约束——所以建好之后必须再显式设一次，否则菜单
+    // 是 136 宽，比系统菜单还宽。
     expect(rust).toMatch(/window\.set_size\(tauri::LogicalSize::new\(MENU_WIDTH, MENU_HEIGHT\)\)/);
     // 透明 + 无边框：12px 圆角之外必须是桌面本身。
     expect(rust).toMatch(/\.transparent\(true\)/);
@@ -381,10 +390,15 @@ describe('design system contract', () => {
     expect(ruleBody(css, '.tray-menu')).toMatch(/border-radius:\s*var\(--radius-card\)/);
     const item = ruleBody(css, '.tray-menu-item');
     expect(item).toMatch(/border-radius:\s*var\(--radius-control\)/);
-    expect(item).toMatch(/height:\s*32px/);
+    // 字号与其它菜单同一档（13px）：14px 让两个双字条目落在一个大半是空白的方框里。
+    expect(ruleBody(css, '.tray-menu')).toMatch(/font-size:\s*var\(--text-sm\)/);
     expect(css).toMatch(/\.tray-menu-item:hover,[\s\S]*?background:\s*var\(--surface-container-highest\)/);
-    // 退出用破坏性的容器色，和其它地方的危险色调同源。
-    expect(css).toMatch(/\.tray-menu-item\.is-danger:hover,[\s\S]*?background:\s*var\(--error-container\)/);
+    // 「退出」不带危险色：悬停和「打开」是同一层墨色（用户指定的）。
+    expect(css).not.toMatch(/--error-container/);
+    expect(read('src/components/TrayMenu.tsx')).not.toMatch(/is-danger/);
+    // 焦点也不预置：程序化聚焦会被浏览器算成键盘操作（`:focus-visible` 命中），第一条
+    // 就永远带着一块悬停底色——用户报的「打开选项 hover 常驻不消失」。
+    expect(read('src/components/TrayMenu.tsx')).not.toMatch(/focusItem\(0\)/);
   });
 
   it('gives the tray its own mark, not the app icon', () => {

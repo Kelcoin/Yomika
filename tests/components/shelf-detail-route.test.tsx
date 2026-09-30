@@ -72,7 +72,13 @@ describe('shelf detail route', () => {
   });
 
   it('clears the selected history records from the shelf’s own multi-select', async () => {
-    const adapter = makeAdapter({ delete_history_records: () => ({ ok: true, value: 2 }) });
+    // 清理会写库并作废快照（首页那一排与这一页都要重读），所以适配器要跟着「库」一起变，
+    // 否则重读又把清掉的记录送回来。
+    let records = [...history];
+    const adapter = makeAdapter({
+      list_reading_history: () => ({ ok: true, value: records }),
+      delete_history_records: () => { records = []; return { ok: true, value: 2 }; },
+    });
     renderApp('/history', adapter);
     fireEvent.click(await screen.findByRole('button', { name: '多选' }));
     fireEvent.click(screen.getByRole('button', { name: '全选已读完' }));

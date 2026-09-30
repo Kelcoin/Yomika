@@ -195,17 +195,22 @@ export class NativeLibraryRepository {
     }, SyncJournalRecordSchema);
   }
   /** 历史自动清理：读完的留 90 天，没读完的留 365 天；返回清掉的条数。
-   * 只有真清掉了才喊一声（清理会写下同步墓碑，值得推一次）。 */
+   *
+   * 真清掉了才算一次「书架上的历史变了」：首页那一排与历史/书架的快照都要作废，否则
+   * 清掉的记录还留在首页上——用户报的「历史里已经不显示已读完的档案，首页还在显示」
+   * 就是这条：从前的 `notifyLocalWrite` 只排了一次同步，界面上的快照没人作废。 */
   pruneHistory(): Promise<CommandResult<number>> {
     return invokeCommand('prune_history', {}, z.number().int().nonnegative()).then((result) => {
-      if (result.ok && result.value > 0) notifyLocalWrite();
+      if (result.ok && result.value > 0) invalidateShelves(result);
       return result;
     });
   }
-  /** 清理选中的历史记录（不是档案）：每条都写同步墓碑，别的设备跟着删。 */
+  /** 清理选中的历史记录（不是档案）：每条都写同步墓碑，别的设备跟着删。
+   * 清掉了就按一次书架变更处理，理由同上（`invalidateShelves` 里的 `notifyLocalWrite`
+   * 就是原来那一声同步）。 */
   deleteHistoryRecords(scopeId: string, archiveIds: string[]): Promise<CommandResult<number>> {
     return invokeCommand('delete_history_records', { scopeId, archiveIds }, z.number().int().nonnegative()).then((result) => {
-      if (result.ok && result.value > 0) notifyLocalWrite();
+      if (result.ok && result.value > 0) invalidateShelves(result);
       return result;
     });
   }
