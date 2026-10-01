@@ -559,7 +559,10 @@ describe('reader route', () => {
     const canvas = await screen.findByRole('main');
     expect(await within(canvas).findByRole('alert')).toHaveTextContent('服务器暂时不可用');
     // The route is shell-free, so it has to offer its own exit; the message also
-    // has to reach the shared toast.
+    // has to reach the shared toast. 顶栏本身默认隐藏（用户报的 ③），所以先按同一套
+    // 手势把它唤出来，再问它给不给退路。
+    expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+    fireEvent.click(canvas, { clientY: 40 });
     expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
     expect(screen.getAllByText('服务器暂时不可用').length).toBeGreaterThan(1);
 
@@ -582,11 +585,72 @@ describe('reader route', () => {
     expect(await screen.findByRole('status', { name: '正在加载页面' })).toBeInTheDocument();
     expect(screen.queryByText('正在加载页面…')).not.toBeInTheDocument();
     // 用户报的 ⑥：加载态原来只是一个转圈，阅读器的顶栏要等第一页到达才唤得出来，
-    // 加载慢或卡住时就没有退路。现在加载态自带和失败态同一条顶栏。
+    // 加载慢或卡住时就没有退路。现在加载态自带和失败态同一条顶栏，但它和加载完成
+    // 之后的顶栏一样是默认隐藏的（用户报的 ③），所以先唤出来。
+    const canvas = screen.getByRole('main');
+    expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+    fireEvent.click(canvas, { clientY: 40 });
     const back = await screen.findByRole('button', { name: '返回上一页' });
     expect(back.closest('header')).not.toBeNull();
-    expect(screen.getByRole('main').firstElementChild).toBe(back.closest('header'));
+    expect(canvas.firstElementChild).toBe(back.closest('header'));
   });
+
+  // 用户报的 ③：加载态的顶栏原来是常显的，而加载完成后那两条栏会自己藏起来——同一
+  // 屏幕上前后两种行为，进阅读模式的第一眼就顶着一个常驻的栏。现在两条路径共用同一套
+  // 判定：默认隐藏、指针进顶部感应带或点击附近出现、再点一下收起。
+  it('keeps the loading bar hidden until the pointer or a tap in the top band calls for it', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      // Never resolves: the reader stays in its loading state.
+      if (command === 'load_reader_manifest') return new Promise(() => undefined);
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    const canvas = await screen.findByRole('main');
+    expect(await screen.findByRole('status', { name: '正在加载页面' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+
+    // 指针移进顶部感应带——不是点击：和阅读态那条 hover 判定同一套。
+    fireEvent.mouseMove(canvas, { buttons: 0, clientY: 110 });
+    expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+
+    // 移回画面中间，按同一条出场动画隐去。
+    fireEvent.mouseMove(canvas, { buttons: 0, clientY: window.innerHeight / 2 });
+    await waitFor(() => expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument());
+
+    // 点击顶部附近也能唤出，再点一下收起。
+    fireEvent.click(canvas, { clientY: 110 });
+    expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+    fireEvent.click(canvas, { clientY: 110 });
+    await waitFor(() => expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument());
+  });
+
+  // 加载态唤出来的栏和阅读态那两条栏用的是同一条计时（4.5s 无人理就自己走），否则
+  // 「加载中」会变成一种要手动关掉的停留状态。这里用**真实**计时器跑一次：fake timers
+  // 下 RTL 的 waitFor 会卡住，而这条断言本身就是「过一会儿会不会自己走」，等真实的
+  // 4.5s + 0.26s 出场更可信。
+  it('lets the summoned loading bar go away on its own', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return new Promise(() => undefined);
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    const canvas = await screen.findByRole('main');
+    fireEvent.click(canvas, { clientY: 110 });
+    expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+
+    await waitFor(
+      () => expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument(),
+      { timeout: 6_000 },
+    );
+  }, 10_000);
 
   it('applies the default layout and direction, and lets the archive override them', async () => {
     const preferences = { theme: 'system', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };

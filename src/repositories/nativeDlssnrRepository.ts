@@ -108,7 +108,10 @@ export const DlssnrPassSchema = z
 
 export type DlssnrPass = z.output<typeof DlssnrPassSchema>;
 
-export const MAX_DLSSNR_PASSES = 3;
+/** 最多五层：同一张图串行跑几个 pass。上限只此一处，与 Rust 侧的
+ *  `dlssnr::settings::MAX_PASS_COUNT` 对齐——两边差一个数就会「加得上但存不下」，
+ *  或者反过来「存得下却加不上」。 */
+export const MAX_DLSSNR_PASSES = 5;
 
 export const DEFAULT_DLSSNR_PASS: DlssnrPass = {
   style: 0,

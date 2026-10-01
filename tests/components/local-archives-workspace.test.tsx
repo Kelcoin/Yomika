@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { UNTAGGED_FILTER_ID, categoryTagLabel } from '../../src/lib/tags';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
 afterEach(resetInvokeAdapterForTests);
@@ -68,7 +69,7 @@ describe('local archives workspace', () => {
     expect(screen.getByText('另一份')).toBeInTheDocument();
   });
 
-  it('runs the multi-select controls to the right of the preset button', async () => {
+  it('puts the category filter, the sort field and 多选 in the toolbar, in the library’s order', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_local_archives') return { ok: true, value: [localFile] };
       if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
@@ -77,10 +78,85 @@ describe('local archives workspace', () => {
 
     renderPage();
 
-    const preset = await screen.findByRole('button', { name: '检索预设' });
-    const select = screen.getByRole('button', { name: '多选' });
-    // 多选紧跟在预设按钮右边，和档案库把工具栏收起来时的位置一致。
-    expect(preset.closest('.search-preset-field')?.nextElementSibling).toBe(select);
+    const toolbar = await screen.findByRole('toolbar', { name: '档案库工具' });
+    const sort = await screen.findByRole('combobox', { name: '排序字段' });
+    const toggle = screen.getByRole('button', { name: '多选' });
+    // 分类筛选是从档案里推出来的，要等它们读回来才画（读完之前是一段骨架）。
+    expect(await screen.findByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
+
+    // 和档案库工具栏同一个顺序：分类筛选 → 排序方式 → 多选。
+    expect(Array.from(toolbar.querySelectorAll('[aria-label]')).map((element) => element.getAttribute('aria-label')))
+      .toEqual(['分类筛选', '排序字段', '多选']);
+    expect(sort.closest('.select-field')?.nextElementSibling).toBe(toggle);
+    // 多选不再挂在搜索行的预设按钮右边。
+    expect(screen.getByRole('button', { name: '检索预设' }).closest('.search-preset-field')?.nextElementSibling).toBeNull();
+  });
+
+  it('filters by the category the row itself shows, derived from the archive’s own tags', async () => {
+    const doujinshi = categoryTagLabel('doujinshi');
+    const other = { ...localFile, path: 'E:\\Downloads\\bbb-另一份.zip', title: '另一份', archiveId: null, serverId: null, scopeId: null, tags: ['category:doujinshi'] };
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile, other] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    await screen.findByText('测试档案');
+    const filter = await screen.findByRole('combobox', { name: '分类筛选' });
+    // 这一页没有「分类」这张表可查，取值域是从读回来的档案里现推的：分类标签
+    // 一项一个，一份都没有的那一份进「无标签」。
+    expect(within(filter).getByRole('option', { name: '全部分类' })).toBeInTheDocument();
+    expect(within(filter).getByRole('option', { name: doujinshi })).toBeInTheDocument();
+    expect(within(filter).getByRole('option', { name: '无标签' })).toBeInTheDocument();
+
+    // 行里写的那一格和下拉框里能选的那一项是同一个值。
+    const otherRow = screen.getByText('另一份').closest('.archive-row') as HTMLElement;
+    expect(within(otherRow).getByText(doujinshi)).toBeInTheDocument();
+
+    fireEvent.change(filter, { target: { value: doujinshi } });
+    await waitFor(() => expect(screen.queryByText('测试档案')).not.toBeInTheDocument());
+    expect(screen.getByText('另一份')).toBeInTheDocument();
+
+    fireEvent.change(filter, { target: { value: UNTAGGED_FILTER_ID } });
+    await waitFor(() => expect(screen.queryByText('另一份')).not.toBeInTheDocument());
+    expect(screen.getByText('测试档案')).toBeInTheDocument();
+
+    fireEvent.change(filter, { target: { value: '' } });
+    await waitFor(() => expect(screen.getByText('另一份')).toBeInTheDocument());
+  });
+
+  it('sorts by name and flips the direction when the same option is picked again', async () => {
+    const user = userEvent.setup();
+    const alpha = { ...localFile, path: 'E:\\Downloads\\alpha.cbz', title: 'Alpha', addedAt: 1_700_000_000_000, tags: [] };
+    const beta = { ...localFile, path: 'E:\\Downloads\\beta.cbz', title: 'Beta', addedAt: 1_760_000_000_000, tags: [] };
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [alpha, beta] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    await screen.findByText('Alpha');
+    const titles = () => within(screen.getByRole('list', { name: '本地档案' })).getAllByRole('listitem')
+      .map((item) => item.querySelector('strong')?.textContent);
+    // 默认仍是原生那条次序（添加时间倒序）：后加进来的 Beta 在前。
+    expect(titles()).toEqual(['Beta', 'Alpha']);
+
+    // 换一项排序字段：方向跟着上次的不动，还是降序。
+    await user.click(screen.getByRole('button', { name: '添加时间' }));
+    let menu = await screen.findByRole('listbox', { name: '排序字段' });
+    await user.click(within(menu).getByRole('button', { name: '名称' }));
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
+    expect(titles()).toEqual(['Beta', 'Alpha']);
+
+    // 再点一次已经选着的那一项 = 换个方向。
+    await user.click(screen.getByRole('button', { name: '名称' }));
+    menu = await screen.findByRole('listbox', { name: '排序字段' });
+    await user.click(within(menu).getByRole('button', { name: '名称' }));
+    await waitFor(() => expect(titles()).toEqual(['Alpha', 'Beta']));
   });
 
   it('deletes the selected files from disk and leaves the server alone', async () => {
@@ -299,7 +375,6 @@ describe('local archives workspace', () => {
     // 详情面板用的就是档案详情页那几块：事实网格、按命名空间分组的标签墙。
     const facts = document.querySelector('.archive-detail-facts');
     expect(facts).not.toBeNull();
-    expect(document.querySelector('.local-detail-facts')).toBeNull();
     expect(screen.getByLabelText('分类')).toBeInTheDocument();
     expect(screen.queryByLabelText('路径')).toBeNull();
     expect(screen.getByLabelText('体积')).toBeInTheDocument();

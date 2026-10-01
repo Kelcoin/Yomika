@@ -95,6 +95,5 @@ describe('E-Hentai comments', () => {
     const region = await screen.findByRole('region', { name: 'E-Hentai 评论' });
     expect(within(region).queryByRole('alert')).toBeNull();
     expect(await screen.findByRole('alert')).toHaveTextContent('Cloudflare 验证');
-    expect(document.querySelector('.eh-comments-error')).toBeNull();
   });
 });

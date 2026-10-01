@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   archiveCategoryKey,
   archiveCategoryLabel,
@@ -6,9 +6,16 @@ import {
   formatArchivePageMeta,
   groupCardTagLines,
   isArchiveFinished,
+  isWideCoverMarked,
   isWideCoverRatio,
   pickCardTags,
   pickRandomSample,
+  readWideCoverMarkKeys,
+  rememberWideCoverMark,
+  resetWideCoverMarksForTests,
+  wideCoverMarkKey,
+  WIDE_COVER_MARK_LIMIT,
+  withWideCoverMark,
 } from '../../src/lib/archiveCardPresentation';
 
 describe('archive card presentation', () => {
@@ -153,5 +160,44 @@ describe('archive card presentation', () => {
     expect(isArchiveFinished(259, 0)).toBe(false);
     expect(isArchiveFinished(0, 10)).toBe(false);
     expect(isArchiveFinished(20, null)).toBe(false);
+  });
+});
+
+describe('wide cover marks remembered across route round trips', () => {
+  afterEach(() => resetWideCoverMarksForTests());
+
+  it('remembers a wide cover so the next visit paints wide on the first frame', () => {
+    expect(isWideCoverMarked('local', 'archive-a')).toBe(false);
+    rememberWideCoverMark('local', 'archive-a', true);
+    expect(isWideCoverMarked('local', 'archive-a')).toBe(true);
+    // 存的就是网格和卡片共用的那一把键：带上 serverId，所以同一台服务器换一个
+    // query、或者换一台服务器，都不会拿错上一次的形状。
+    expect([...readWideCoverMarkKeys()]).toEqual([wideCoverMarkKey('local', 'archive-a')]);
+  });
+
+  it('keeps the marks apart per server', () => {
+    rememberWideCoverMark('srv-a', 'archive-a', true);
+    expect(isWideCoverMarked('srv-a', 'archive-a')).toBe(true);
+    expect(isWideCoverMarked('srv-b', 'archive-a')).toBe(false);
+  });
+
+  it('drops the oldest mark once the store reaches its cap', () => {
+    for (let index = 0; index < WIDE_COVER_MARK_LIMIT + 2; index += 1) rememberWideCoverMark('local', `archive-${index}`, true);
+
+    expect(readWideCoverMarkKeys().size).toBe(WIDE_COVER_MARK_LIMIT);
+    expect(isWideCoverMarked('local', 'archive-0')).toBe(false);
+    expect(isWideCoverMarked('local', 'archive-1')).toBe(false);
+    expect(isWideCoverMarked('local', `archive-${WIDE_COVER_MARK_LIMIT + 1}`)).toBe(true);
+  });
+
+  it('forgets a mark that turns out to be narrow again', () => {
+    rememberWideCoverMark('local', 'archive-a', true);
+    rememberWideCoverMark('local', 'archive-a', false);
+    expect(isWideCoverMarked('local', 'archive-a')).toBe(false);
+  });
+
+  it('reuses the FIFO helper whose limit the library test pins', () => {
+    expect(WIDE_COVER_MARK_LIMIT).toBe(4096);
+    expect([...withWideCoverMark(new Set(['a', 'b', 'c']), 'd', true, 3)]).toEqual(['b', 'c', 'd']);
   });
 });

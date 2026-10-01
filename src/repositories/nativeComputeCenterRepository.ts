@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
+import { MAX_DLSSNR_PASSES } from './nativeDlssnrRepository';
 
 /** 一项能力：移动端据此显示「对面有什么、能不能用」。 */
 export const ComputeCapabilitySchema = z.object({
@@ -58,8 +59,16 @@ export const RemoteOpSchema = z
     op: z.enum(['upscale', 'decensor', 'dlssnr']).default('upscale'),
     modelId: z.string().max(128).default(''),
     scale: z.number().int().min(1).max(4).default(2),
-    /** DLSSNR 的层参数，形状与本地那份一致。 */
-    dlssnrPasses: z.array(z.record(z.string(), z.union([z.number(), z.boolean()]))).max(3).default([]),
+    /** DLSSNR 的层参数，形状与本地那份一致，上限也跟本地同源（`MAX_DLSSNR_PASSES`）——
+     *  层数上限在仓库里只应该有一份数字，这里再写一个 `3` 就会两头对不上。
+     *  而且这里不比本地那份更严：超上限的层**切掉**而不是让校验失败。`serializeRemoteOps`
+     *  用的是会抛的 `.parse()`（层数过多会让这次偏好整个写不进去），`parseRemoteOps` 用的是
+     *  `safeParse`（失败就整段回默认：`enabled:false`、op 回 `upscale`）。层列表只是参数，
+     *  少几层比「用户选的远端处理一声不响地消失」好。 */
+    dlssnrPasses: z.preprocess(
+      (value) => (Array.isArray(value) ? value.slice(0, MAX_DLSSNR_PASSES) : value),
+      z.array(z.record(z.string(), z.union([z.number(), z.boolean()]))).default([]),
+    ),
   })
   .strip();
 

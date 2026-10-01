@@ -271,6 +271,11 @@ export function AppShell({ children }: AppShellProps) {
           // 栏。原来只给 `library` 放行子路径，于是从书架点开一张卡时这一页立刻换成
           // 「普通工作区」——1320px 上限 + 48px 内边距 + 居中，两栏被挤进一个四周留
           // 空的盒子里，「四周有异常空隙」就是这一条。
+          //
+          // 首页不在这里：它也有两栏（`HomeShell`），但那一页的面板必须随内容长高
+          // （`is-flow`），而这一条容器的 `overflow: hidden` 会把长出去的部分直接裁掉、
+          // 滚不到。首页的全宽与内边距由 shell.css 里 `:has(.workspace-home)` 那条规则
+          // 给——它只放宽左右，不动高度。
           className={`workspace${/^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}

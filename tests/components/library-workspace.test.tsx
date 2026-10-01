@@ -1,10 +1,21 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { LibraryWorkspace, RAIL_MAX_TICKS, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
+import { ArchiveThumbnailCard } from '../../src/components/ArchiveThumbnailCard';
+import { rememberWideCoverMark, resetWideCoverMarksForTests, isWideCoverMarked } from '../../src/lib/archiveCardPresentation';
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import type { ArchiveRecord } from '../../src/domain/library';
+
+/** 这里**不** mock `nativeImageCache`：`tests/setup.ts` 会先预加载那几个页面
+ * （ReaderRoute / DeduplicationWorkspace…），`ArchiveThumbnailCard` 因此在任何测试
+ * 文件求值之前就拿到了共享缓存实例——测试文件里的 `vi.mock` 到那时已经晚了，卡片
+ * 用的还是真的那一份（实测：组件侧缓存 memory.size = 0，mock 侧 = 1）。所以封面
+ * 相关的断言改成「真的缓存 + 假的原生桥」：`setInvokeAdapterForTests` 就是桥的那
+ * 个测试接口，测的正是卡片自己那条路。 */
 
 const archives: ArchiveRecord[] = Array.from({ length: 100 }, (_, index) => ({
   serverId: 'local',
@@ -267,7 +278,6 @@ describe('library workspace', () => {
     expect(ticks[0]).toHaveClass('is-active');
     expect(ticks[0]).toHaveAttribute('aria-current', 'true');
     expect(ticks[1]).not.toHaveClass('is-active');
-    expect(document.querySelector('.history-quick-jump')).toBeNull();
 
     // 刻度自己写着目标时间：title 要悬停才看得到，轨道上得能直接读出来。
     for (const tick of ticks) {
@@ -275,6 +285,58 @@ describe('library workspace', () => {
       expect(label).not.toBeNull();
       expect(label).toHaveAttribute('aria-hidden', 'true');
       expect(label?.textContent).toBe(tick.getAttribute('title'));
+    }
+  });
+
+  it('hangs the rail off the list panel instead of the scrolling list', () => {
+    // 用户要求这条刻度带「垂直方向居中」。它原来住在滚动容器里面（sticky + 零高度
+    // 浮动）：只能贴着列表可视区的顶边往下量一段距离，而「列表可视区有多高」在 CSS
+    // 里根本量不到，于是它一直偏下；滚到列表底部时 sticky 还会被内容高度夹住往上漂。
+    // 挂到列表外面的面板层上，`top: 50%` 量的就是列表可视高度本身 —— 既居中，也不
+    // 再跟着滚动跑。刻度密度同理：过去是「N 个刻度摊满 48vh」，现在是固定 11px 一格。
+    renderWorkspace({
+      archives: archives.slice(0, 2),
+      timelineByArchiveId: new Map([
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15', at: Date.parse('2026-09-11T08:15:00+08:00') }],
+        ['archive-1', { date: '2026-09-10', dayLabel: '昨天', time: '22:40', at: Date.parse('2026-09-10T22:40:00+08:00') }],
+      ]),
+    });
+
+    const list = screen.getByRole('list', { name: '档案' });
+    const rail = screen.getByRole('group', { name: '历史快速跳转' });
+    expect(list.contains(rail)).toBe(false);
+    expect(rail.parentElement).toHaveClass('library-list-panel-content');
+    // 一格 11px 的节距得知道有几格，高度才算得出来。
+    expect(rail.querySelector<HTMLElement>('.archive-quick-rail-track')?.style.getPropertyValue('--rail-ticks')).toBe('2');
+  });
+
+  it('leaves no quick-jump control behind in the compact layout', () => {
+    // 紧凑档的轨线整列都不画，刻度条没有落点：过去的日历下拉按钮既跳不到「哪一天」，
+    // 也和桌面端的入口重复。用户要求直接去掉，也不为紧凑档适配刻度条。
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === COMPACT_WIDTH_QUERY,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      renderWorkspace({
+        archives: archives.slice(0, 3),
+        timelineByArchiveId: new Map([
+          ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15', at: Date.parse('2026-09-11T08:15:00+08:00') }],
+          ['archive-1', { date: '2026-08-02', dayLabel: '8月2日', time: '10:00', at: Date.parse('2026-08-02T10:00:00+08:00') }],
+        ]),
+      });
+
+      expect(screen.queryByRole('button', { name: '跳转到历史时间' })).toBeNull();
+      expect(screen.queryByRole('group', { name: '历史快速跳转' })).toBeNull();
+    } finally {
+      window.matchMedia = original;
     }
   });
 
@@ -474,6 +536,38 @@ describe('library workspace', () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
     expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('judges the gesture against the element that will actually scroll', async () => {
+    const onRefresh = vi.fn();
+    const view = renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    // 紧凑档的档案库：列表是全内容高度（clientHeight === scrollHeight），真正滚的是
+    // 外面的 .workspace。挂载那一刻虚拟列表还没量出高度，宿主就被钉在了列表上，
+    // 于是列表的 scrollTop 永远是 0 —— 按「既在顶又在底」判读，每一格滚轮都会被当成
+    // 越过端点。这里把外面那层做成真正的滚动者、且停在列表中部。
+    scrollable(list, { scrollTop: 0, clientHeight: 6036, scrollHeight: 6036 });
+    scrollable(view.container, { scrollTop: 1000, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent.wheel(list, { deltaY: 120 });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    fireEvent.wheel(list, { deltaY: -200 });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('does not drag a list that cannot scroll when the wheel goes down', () => {
+    // 内容一屏装得下时列表自己既是顶又是底；向下滚没有「底部」可越，只有向上那一下
+    // 才是拉刷新。把它当成底部去拖，用户看到的就是每次滚轮都回弹一下。
+    renderWorkspace({ archives: archives.slice(0, 3), onRefresh: () => {} });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 6036, scrollHeight: 6036 });
+
+    fireEvent.wheel(list, { deltaY: 120 });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });
 
   it('bounces on the shelves too, where there is no refresh to ask for', () => {
@@ -714,5 +808,127 @@ describe('library workspace', () => {
     renderWorkspace({ archives: archives.slice(0, 1) });
 
     expect(screen.getByRole('link', { name: '阅读 Archive 0' })).toHaveAttribute('href', '/reader/archive-0?server=local');
+  });
+});
+
+/** 切页时封面先闪一下骨架：两条独立的机制——重挂载要重走一次异步取图，以及宽/窄
+ * 形状的判定只活在组件态里，路由一去一回就丢。这里把两条都钉在测试里。 */
+describe('library cover flashes between pages', () => {
+  // 宽标记是模块级的，会改变网格打包的行数，所以每个用例前后都清干净。
+  beforeEach(() => resetWideCoverMarksForTests());
+  afterEach(() => {
+    resetWideCoverMarksForTests();
+    resetInvokeAdapterForTests();
+  });
+
+  const coverIdentity = (archiveId: string) => ({
+    scopeId: 'local',
+    serverId: 'local',
+    archiveId,
+    rendition: 'cover' as const,
+    pageIndex: 0,
+  });
+
+  const card = (archive: ArchiveRecord) => (
+    <MemoryRouter><ArchiveThumbnailCard archive={archive} scopeId="local" serverId="local" /></MemoryRouter>
+  );
+  /** 原生桥：只有取封面这一条命令成功，别的（磁盘缓存查表等）都回「没有」，于是
+   * 封面一定走一次真的取图、再进内存缓存。外部缓存的单例是跨用例共用的，所以每条
+   * 用例用不同的 archiveId 避开上一条留下的那份。 */
+  const serveCover = () => setInvokeAdapterForTests(async (command) => (command === 'load_archive_thumbnail'
+    ? { ok: true, value: [1, 2, 3] }
+    : { ok: false, error: { code: 'NOT_FOUND', message: '没有缓存副本', retryable: false } }));
+
+  it('paints an already cached cover on the very first frame of a remount', async () => {
+    serveCover();
+
+    const first = render(card(archives[0]!));
+    // 缓存是空的：第一帧还是占位块——但它是「还在等」的那一种，不是失败。
+    const cold = first.container.querySelector('.archive-thumb-card-media .archive-thumb-card-skeleton');
+    expect(cold).not.toBeNull();
+    expect(cold?.className).not.toContain('is-failed');
+    await waitFor(() => expect(first.container.querySelector('.archive-thumb-card-media img')).not.toBeNull());
+    const url = first.container.querySelector('.archive-thumb-card-media img')?.getAttribute('src');
+    expect(url).toBeTruthy();
+    first.unmount();
+
+    // 回到档案库：同一张封面，第一帧就得是图，不能先摆一个骨架。
+    const second = render(card(archives[0]!));
+    const media = second.container.querySelector('.archive-thumb-card-media');
+    expect(media?.querySelector('.archive-thumb-card-skeleton')).toBeNull();
+    expect(media?.querySelector('img')?.getAttribute('src')).toBe(url);
+  });
+
+  it('leaves an unavailable cover on the placeholder it showed before', async () => {
+    // 取不到图（离线、服务器 202、图已删）时必须和从前一样：停在失败的占位块上，
+    // 不因为「记下来的宽窄」而先排成宽卡。
+    setInvokeAdapterForTests(async () => ({ ok: false, error: { code: 'UNKNOWN', message: '离线', retryable: true } }));
+
+    const view = render(card(archives[1]!));
+
+    await waitFor(() => expect(view.container.querySelector('.archive-thumb-card-skeleton.is-failed')).not.toBeNull());
+    expect(view.container.querySelector('.archive-thumb-card-media img')).toBeNull();
+    expect(view.container.querySelector('a.archive-thumb-card')?.className).not.toContain('is-wide');
+  });
+
+  it('shows a remembered wide cover as wide on the first frame', () => {
+    rememberWideCoverMark('local', 'archive-3', true);
+
+    const view = render(card(archives[3]!));
+
+    expect(view.container.querySelector('a.archive-thumb-card')?.className).toContain('is-wide');
+  });
+
+  it('remembers the ratio a cover actually measured', async () => {
+    serveCover();
+    const view = render(card(archives[4]!));
+    await waitFor(() => expect(view.container.querySelector('.archive-thumb-card-media img')).not.toBeNull());
+
+    // jsdom 不加载图片，自然宽高比要自己摆上去；`onLoad` 是卡片拿到比例的唯一入口。
+    const image = view.container.querySelector('.archive-thumb-card-media img')!;
+    Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 300 });
+    Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 100 });
+    fireEvent.load(image);
+
+    expect(view.container.querySelector('a.archive-thumb-card')?.className).toContain('is-wide');
+    // 记到了跨路由的那份记录上：同一个 archiveId 下次进来第一帧就是宽卡。
+    expect(isWideCoverMarked('local', 'archive-4')).toBe(true);
+  });
+
+  it('packs the grid with remembered wide covers without waiting for a cover to load', () => {
+    rememberWideCoverMark('local', 'archive-1', true);
+
+    const view = renderWorkspace({ archives: archives.slice(0, 4), cardStyle: 'thumbnail' });
+
+    const wide = view.container.querySelectorAll('.archive-row-wrap.is-cover-wide');
+    expect(wide).toHaveLength(1);
+    expect(wide[0]?.textContent).toContain('Archive 1');
+  });
+
+  it('keeps the cover on screen when the page hands back fresh records for the same archives', async () => {
+    const onLoadThumbnail = vi.fn(async () => ({ key: 'cover:local:archive-0', url: 'blob:held-cover', bytes: 3 }));
+    const onReleaseThumbnail = vi.fn();
+    const view = renderWorkspace({ archives: archives.slice(0, 2), cardStyle: 'thumbnail', onLoadThumbnail, onReleaseThumbnail });
+    await waitFor(() => expect(view.container.querySelectorAll('.archive-row-thumb img')).toHaveLength(2));
+
+    // 回到前台时 LibraryRouteWorkspace 会在后台重读第一页：同样的档案、新的对象。
+    view.rerender(
+      <MemoryRouter>
+        <LibraryWorkspace
+          archives={archives.slice(0, 2).map((archive) => ({ ...archive }))}
+          cardStyle="thumbnail"
+          onLoadThumbnail={onLoadThumbnail}
+          onReleaseThumbnail={onReleaseThumbnail}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(view.container.querySelectorAll('.archive-row-thumb.is-skeleton')).toHaveLength(0);
+    expect(view.container.querySelectorAll('.archive-row-thumb img')).toHaveLength(2);
+    // 正在显示的那一帧没有被撤掉：刷新这一轮里，旧句柄要等新句柄接上才放手。
+    expect(onReleaseThumbnail).not.toHaveBeenCalled();
+    await waitFor(() => expect(onReleaseThumbnail).toHaveBeenCalledTimes(2));
+    expect(view.container.querySelectorAll('.archive-row-thumb img')).toHaveLength(2);
+    expect(view.container.querySelectorAll('.archive-row-thumb.is-skeleton')).toHaveLength(0);
   });
 });

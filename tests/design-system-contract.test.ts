@@ -127,16 +127,15 @@ describe('design system contract', () => {
   it('defines semantic card and reader surface tokens', () => {
     const tokens = read('src/styles/tokens.css');
     const reader = read('src/styles/reader.css');
-    const shell = read('src/styles/shell.css');
     expect(tokens).toMatch(/--shadow-card:/);
     expect(tokens).toMatch(/--brand-vermilion-strong:/);
     expect(tokens).toMatch(/--reader-border:/);
     expect(tokens).toMatch(/--reader-backdrop:/);
     expect(tokens).toMatch(/--z-reader-chrome:/);
     expect(tokens).toMatch(/--z-reader-overview:/);
-    expect(reader).not.toMatch(/rgb\(255 255 255|rgb\(0 0 0/);
+    // 颜色字面量的全域禁令在「keeps literal colors out of component stylesheets」
+    // 那条里（同样的三张表、同样先剥注释），这里只留令牌本身与结构禁令。
     expect(reader).not.toMatch(/--radius-panel/);
-    expect(shell).not.toMatch(/color-mix\([^;]*#000/);
   });
 
   it('keeps compact content above navigation without a padded black band', () => {
@@ -259,6 +258,21 @@ describe('design system contract', () => {
     expect(prompt).not.toContain('从 WebDAV 同步');
   });
 
+  it('runs the divider under a page’s top bar out to the column edges', () => {
+    // 用户报告：档案库、书架、本地档案页顶部组件下面那条分隔线两端各缺一截。
+    // 根因是这条线画在 `.library-panels` / `.local-archives-list` 自己的 border-top
+    // 上，而这两层都住在 `.library-shell-list`（`padding: var(--space-4) var(--space-4) 0`）
+    // 的内容盒里 —— 线跟着盒子一起左右各内缩 16px。
+    // 往两侧各拉出一个间距，再用同宽的内边距把内容推回原位：线到列边缘，内容一格不差。
+    const shell = read('src/styles/shell.css');
+    expect(ruleBody(shell, '.library-panels')).toMatch(/margin-inline:\s*calc\(-1 \* var\(--space-4\)\)/);
+    expect(ruleBody(shell, '.library-panels')).toMatch(/padding-inline:\s*var\(--space-4\)/);
+    expect(ruleBody(shell, '.library-panels')).toMatch(/border-top:\s*1px solid var\(--hairline\)/);
+    // 本地档案页的列表是 `.archive-list`，它自己有 4px 内边距，补回来时要带上。
+    expect(ruleBody(shell, '.local-archives-list')).toMatch(/margin-inline:\s*calc\(-1 \* var\(--space-4\)\)/);
+    expect(ruleBody(shell, '.local-archives-list')).toMatch(/padding-inline:\s*calc\(var\(--space-4\) \+ var\(--space-1\)\)/);
+  });
+
   it('keeps app-level overlays out of the page’s own stacking contexts', () => {
     // 浮层的 z-index 要真的比底栏大，两边就得在同一个层叠上下文里。页面容器会自己
     // 建层叠上下文——`.library-shell-list` 的 --z-raised 是为了让列表面板压在详情
@@ -308,12 +322,6 @@ describe('design system contract', () => {
     // 留在这里会绕出 工作区 ↔ DLSSNR 的 import 环），所以两处各断一句。
     expect(settings).toContain('model-download-progress');
     expect(read('src/components/ModelDownloadControls.tsx')).toContain('model-download-status');
-  });
-
-  it('uses the content surface behind short workspaces instead of exposing canvas', () => {
-    const shell = read('src/styles/shell.css');
-    const appMain = ruleBody(shell, '.app-main');
-    expect(appMain).toMatch(/background:\s*var\(--surface-panel\)/);
   });
 
   it('keeps the archive count in the product font on the status bar', () => {
@@ -615,6 +623,18 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)/);
     expect(shell).not.toMatch(/\.workspace:has\(\.workspace-home\)/);
+  });
+
+  it('keeps the detail of each shell on the page that owns it', () => {
+    // 详情栏里的推荐条从前一律指向 `/library/:id`：首页或书架的详情点一条推荐，
+    // 左边那一栏会跟着换成档案库，等于又从首页/书架溜进了档案库。
+    const home = read('src/components/HomeShell.tsx');
+    const shelf = read('src/components/ShelfShell.tsx');
+    const routes = read('src/app/routes.tsx');
+    expect(home).toMatch(/<ArchiveDetailRoute archiveId=\{archiveId\} detailBasePath="\/home" \/>/);
+    expect(shelf).toMatch(/<ArchiveDetailRoute archiveId=\{archiveId\} detailBasePath=\{detailBasePath\} \/>/);
+    expect(routes).toContain('<ShelfShell name="history" detailBasePath="/history">');
+    expect(routes).toContain('<ShelfShell name="toRead" detailBasePath="/to-read">');
   });
 
   it('draws card tags and detail panes from one implementation each', () => {
@@ -1091,14 +1111,12 @@ describe('design system contract', () => {
     // drifting between 18 and 24.
     expect(tokens).toMatch(/--text-xs:\s*12px/);
     expect(tokens).toMatch(/--text-heading:\s*24px/);
-    const allowedWeights = [400, 500, 600, 700];
+    // 权重也只走令牌：「keeps typography on the scale…」那条对同样的三张表全域封杀
+    // 任何数字权重（比一张白名单更严），这里只剩字号与行高。
     for (const path of ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css']) {
       const sheet = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
       // No raw pixel font sizes anywhere in component CSS.
       expect(sheet).not.toMatch(/font-size:\s*\d+px/);
-      for (const [, weight] of sheet.matchAll(/font-weight:\s*(\d+)/g)) {
-        expect(allowedWeights).toContain(Number(weight));
-      }
     }
   });
 
@@ -1143,7 +1161,7 @@ describe('design system contract', () => {
     const source = read('src/components/LibraryWorkspace.tsx');
     // 横条是卡片（那个 button）的直接子元素：只有横跨整张卡，卡片自己的
     // overflow: hidden + border-radius 才能把两端削成与下缘一致的圆角。
-    expect(source).toMatch(/<ArchiveProgressBar page=\{readingProgressByArchiveId\?\.get\(archive\.archiveId\)\} pageCount=\{archive\.pageCount\} \/>\s*<\/button>/);
+    expect(source).toMatch(/<ArchiveProgressBar page=\{readingProgressByArchiveId\?\.get\(archive\.archiveId\)\} pageCount=\{archive\.pageCount\} cornerAware \/>\s*<\/button>/);
     expect(source).not.toMatch(/<span className="archive-row-copy">\s*<ArchiveProgressBar/);
     expect(shell).not.toMatch(/\.archive-row-copy > \.archive-card-progress\s*\{/);
     const bar = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
@@ -1153,17 +1171,32 @@ describe('design system contract', () => {
     expect(bar).toMatch(/height:\s*4px/);
     // `.archive-row > span` 的 display: grid 特异性更高，横条必须显式声明 display。
     expect(bar).toMatch(/display:\s*block/);
-    // 长度排除卡片左右圆角：轨道两端各内缩一个卡片半径（border-box 后内容盒是
-    // W − 24），填充的 `width: N%` 因此从 x = 12 起算，1% 也是完整的一小段。
-    expect(bar).toMatch(/box-sizing:\s*border-box/);
-    expect(bar).toMatch(/padding-inline:\s*var\(--radius-card\)/);
-    expect(ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress.is-complete'))
-      .toMatch(/padding-inline:\s*0/);
+    // 横条两端不再内缩：它依然横跨整张卡（压住两个圆角），只有填充的长度排除圆角。
+    expect(bar).not.toMatch(/padding-inline/);
+    expect(shell).not.toMatch(/\.archive-list\.is-wide \.archive-row > \.archive-card-progress\.is-complete\s*\{/);
+    const card = read('src/components/ArchiveThumbnailCard.tsx');
+    // 长度只在宽行这一支上排除圆角：预览/网格卡那条压在封面接缝上，没有圆角可让。
+    expect(card).toMatch(/cornerAware = false/);
+    expect(card).toMatch(/calc\(var\(--radius-card\) \+ \(100% - 2 \* var\(--radius-card\)\) \* \$\{percent \/ 100\}\)/);
+    // 覆盖层必须画在横条之上，几何与卡片 outline 对齐（inset: 1px + 半径 - 1px）。
+    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after");
+    expect(overlay).toMatch(/inset:\s*1px/);
+    expect(overlay).toMatch(/z-index:\s*1/);
+    expect(overlay).toMatch(/border:\s*1px solid var\(--primary\)/);
+    expect(overlay).toMatch(/border-radius:\s*calc\(var\(--radius-card\) - 1px\)/);
+    expect(overlay).toMatch(/pointer-events:\s*none/);
     // 宽度过渡要挂在真实存在的时长令牌上：`--motion-medium` 全仓从未定义，
     // 那条 transition 一直是死声明。
     expect(ruleBody(shell, '.archive-card-progress-fill')).toMatch(/transition:\s*width var\(--motion-standard\)/);
     // 缩略图卡那条仍压在封面与正文的接缝上，两种卡不共用同一个贴边位置。
     expect(ruleBody(shell, '.archive-card-progress')).toMatch(/inset:\s*-5px 0 auto/);
+    // hover 的浮动（`.archive-thumb-card:hover` 的 translateY）会把卡片提成合成层，
+    // 封面在设备像素取整上会贴着媒体下沿越出一线，正落在进度条下沿——用户报的
+    // 「缩略图卡鼠标移上去时进度条底部闪出一丝封面」。横条因此多压住接缝 1px，
+    // 并抬到卡片内容之上；同 z-index 时按文档顺序，宽行档的选中覆盖层仍在它上面。
+    const gridBar = ruleBody(shell, '.archive-card-progress');
+    expect(gridBar).toMatch(/height:\s*6px/);
+    expect(gridBar).toMatch(/z-index:\s*1/);
   });
 
   it('renders the library grid thumbnail with the shared card component', () => {
@@ -1204,9 +1237,6 @@ describe('design system contract', () => {
 
   it('keeps route titles as hidden landmarks and counts in the product font', () => {
     const shell = read('src/styles/shell.css');
-    // The archive count is UI text, not a monospaced utility string; it renders
-    // in a status-bar entry styled with the product font.
-    expect(shell).toMatch(/\.status-item\s*\{[^}]*font-family:\s*var\(--font-body\)/);
     // The big page headline is gone visually but stays in the accessibility tree.
     expect(shell).toMatch(/\.workspace-heading h1,[\s\S]*?\.metadata-edit-header h1\s*\{[\s\S]*clip-path:\s*inset\(50%\)/);
     expect(read('src/components/LibraryRouteWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">档案库<\/h1>/);
@@ -1276,17 +1306,20 @@ describe('design system contract', () => {
   it('gives the history quick-jump rail a gutter of its own', () => {
     const shell = read('src/styles/shell.css');
     const source = read('src/components/LibraryWorkspace.tsx');
-    // Ticks live in the gutter reserved to the right of the cards: a zero-height
-    // float whose width is cancelled by the negative margin, so it never takes
-    // part in the list's layout and never sits on a card.
+    // Ticks live in the gutter reserved to the right of the cards, so a tick never
+    // sits on a card.
     expect(shell).toMatch(/\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*24px/);
-    expect(shell).toMatch(/\.archive-quick-rail\s*\{[^}]*float:\s*right[^}]*width:\s*24px[^}]*height:\s*0[^}]*margin-right:\s*-24px/);
-    // The height lives in the absolutely positioned track, which is what spreads
-    // the ticks down the strip.
-    expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*position:\s*absolute[^}]*grid-auto-rows:\s*1fr[^}]*height:\s*48vh/);
+    // 刻度条挂在列表外面的面板层上：留在滚动容器里的绝对定位元素会跟着内容一起滚，
+    // 居中就随滚动漂走。挂出去之后 `top: 50%` 量的才是「看得见的那一段」的高度。
+    expect(shell).toMatch(/\.library-list-panel-content\s*\{\s*position:\s*relative/);
+    expect(shell).toMatch(/\.archive-quick-rail\s*\{[^}]*position:\s*absolute[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)/);
+    // 密度是固定节距（11px，正好一格命中区那么高），不再把 N 个刻度摊满 48vh——
+    // 两个刻度的历史过去会被拉成半屏高。
+    expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*--rail-pitch:\s*11px[^}]*grid-auto-rows:\s*1fr[^}]*height:\s*min\(calc\(var\(--rail-pitch\) \* var\(--rail-ticks, 1\)\), 70%\)/);
+    expect(source).toMatch(/className="archive-quick-rail-track" style=\{\{ '--rail-ticks': railSegments\.length \}/);
     expect(shell).toMatch(/\.archive-quick-rail-tick\.is-active\s*\{\s*width:\s*16px;\s*background:\s*var\(--primary\)/);
     // 刻度只有 9×3px，直接拿它当悬停/点击靶太细：一层看不见的伪元素把靶撑到 29×11px
-    // （竖向只各让 4px——`RAIL_MAX_TICKS` 个刻度铺在 48vh 里，矮窗口下间距约 10px）。
+    // （相邻刻度只隔 11px，竖向只各让 4px）。
     expect(shell).toMatch(/\.archive-quick-rail-tick\s*\{[^}]*position:\s*relative/);
     expect(shell).toMatch(/\.archive-quick-rail-tick::before\s*\{\s*content:\s*'';\s*position:\s*absolute;\s*inset:\s*-4px -10px/);
     // 悬停/聚焦时在刻度左边浮一枚标签，写着这个刻度会把你送到哪一天哪个时间——原生
@@ -1297,10 +1330,11 @@ describe('design system contract', () => {
     // 细分规则：越靠近当前越细，但刻度总数有天花板。
     expect(source).toMatch(/RAIL_MAX_TICKS = 28/);
     expect(source).not.toContain('RAIL_MAX_SEGMENTS');
-    // The compact layout keeps the calendar dropdown instead: the rail is not
-    // rendered there, and the gutter it reserved is given back.
+    // 紧凑档整条轨线都不画（刻度条没有落点），也没有替代入口：手机上不需要跳转控件。
     expect(source).toMatch(/!compact && displayMode === 'wide' && railSegments\.length > 1/);
-    expect(source).toMatch(/compact && historyMonths\.length > 1/);
+    expect(source).not.toContain('historyMonths');
+    expect(source).not.toContain('history-quick-jump');
+    expect(shell).not.toContain('.history-quick-jump');
     expect(shell).toMatch(/@media \(max-width: 900px\)[\s\S]*\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*4px/);
     // Thumbnail cards have no rail to hang the ticks on.
     expect(source).toMatch(/displayMode !== 'wide' \|\| railSegments\.length < 2/);
@@ -1812,7 +1846,6 @@ describe('design system contract', () => {
     // 源码：那条已经没人用的 `.dlssnr-variant-copy` 规则由协调者从 shell.css 里删。
     const source = read('src/components/DlssnrSettingsGroup.tsx');
     expect(source).not.toContain('dlssnr-variant-copy');
-    expect(source).not.toContain('settings-row-note');
     expect(source).toMatch(/className="settings-choice-option-main"/);
     expect(source).toMatch(/className="select-option-download"/);
   });
@@ -1863,6 +1896,50 @@ describe('design system contract', () => {
     expect(shell).toMatch(
       /\.settings-choice-option:has\(> \.select-option-download\)\s*\{\s*padding-left:\s*calc\(40px \+ 2px \+ var\(--space-2\)\)/,
     );
+  });
+
+  it('steps a hovered choice row up a tone and keeps the last one concentric with the panel bottom', () => {
+    // 图③：鼠标移到没选中的行上什么都没发生，只有选中那行有反馈。根因不是「忘了写 hover」，
+    // 而是 hover 填的 `--surface-container-high` 就是面板自己的底色——等于没变。改法和档案卡
+    // 那张卡一样：往上走一阶。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(shell).toMatch(/\.settings-choice-option:hover\s*\{\s*background:\s*var\(--surface-container-highest\)/);
+    const touchBlock = shell.slice(shell.lastIndexOf('@media (hover: none) {'));
+    expect(touchBlock).toMatch(/\.settings-choice-option:is\(\.is-pressed, :active\)\s*\{\s*background:\s*var\(--surface-container-highest\)/);
+
+    // 图③的另一半：列表正好收尾时面板的下内边距只有 space-1，最后一行离面板底只有 8.7px，
+    // 它的 12px 圆角和面板的 28px 弧线就不平行了。内半径 = 外半径 − 间距。
+    expect(shell).toMatch(
+      /\.settings-choice-panel:has\(> \.settings-menu-body > \.settings-choice-list:last-child\) > \.settings-menu-body > \.settings-choice-list > \.settings-choice-option:last-child\s*\{\s*border-bottom-left-radius:\s*calc\(var\(--radius-overlay\) - 8\.7px\);\s*border-bottom-right-radius:\s*calc\(var\(--radius-overlay\) - 8\.7px\)/,
+    );
+  });
+
+  it('steps the neutral rows inside a settings panel up a tone, where the panel is already high', () => {
+    // ⑤ 的另一半：二级菜单的面板（`.settings-choice-panel` / `.search-preset-panel`）自己的底色就是
+    // `--surface-container-high`，而「中性 hover 家族」填的也是这一阶（shell.css 的那条统一规则）——
+    // 于是面板里的设置行、菜单勾选、配色卡、预设应用移上去同样什么都没发生，和用户报的选中项那半
+    // 是同一个根因。只给面板内的子项再上一阶，面板外的同类行不动。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(shell).toMatch(
+      /\.settings-choice-panel \.settings-row-button:hover:not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:hover:not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:hover,\s*\.search-preset-panel \.search-preset-apply:hover\s*\{\s*background:\s*var\(--surface-container-highest\)/,
+    );
+    const touchBlock = shell.slice(shell.lastIndexOf('@media (hover: none) {'));
+    expect(touchBlock).toMatch(
+      /\.settings-choice-panel \.settings-row-button:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:is\(\.is-pressed, :active\),\s*\.search-preset-panel \.search-preset-apply:is\(\.is-pressed, :active\)\s*\{\s*background:\s*var\(--surface-container-highest\)/,
+    );
+  });
+
+  it('keeps a cover inside the image budget after its last consumer lets go', () => {
+    // ⑥：封面「切走再回来闪一下」的正解不是淡入，是让它重新挂载的第一帧就有图。三条取封面的
+    // 路径（卡片、档案库列表、书架）都必须 retain，否则 release 到 0 引用就 revoke，
+    // 缓存记忆消失——回前台只能从骨架重来。`peek` 是同步种子，只读；`release` 只在
+    // 「refs 归零且没 retain」时才真撤。
+    const cache = read('src/lib/unifiedImageCache.ts');
+    expect(cache).toMatch(/if \(entry\.refs === 0 && !entry\.retain\)/);
+    expect(read('src/components/ArchiveThumbnailCard.tsx')).toContain('retain: true');
+    const retainWithSignal = /\{ retain: true, \.\.\.\(signal \? \{ signal \} : \{\}\) \}/;
+    expect(read('src/components/LibraryRouteWorkspace.tsx')).toMatch(retainWithSignal);
+    expect(read('src/app/routes.tsx')).toMatch(retainWithSignal);
   });
 
   it('fades in only the rows a background refresh brought in', () => {

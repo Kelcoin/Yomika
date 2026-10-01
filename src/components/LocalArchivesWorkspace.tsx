@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowLeft, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -11,6 +11,7 @@ import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './A
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
+import { SelectField, type SelectOption } from './SelectField';
 import { StatusLine } from './StatusLine';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
@@ -18,6 +19,7 @@ import { usePageActive } from '../app/RetainedPage';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { longPressHandlers } from '../lib/longPressMenu';
+import { UNTAGGED_FILTER_ID } from '../lib/tags';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
 import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
 import { ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
@@ -70,6 +72,57 @@ function downloadStats(task: TaskRecord): string {
   return parts.join(' · ');
 }
 
+/** 页面被 `RetainedPage` 收起来时是 `display:none`：滚动容器量到的高度是 0，
+ * 虚拟列表就连一行都不剩（真浏览器里也一样），整屏的行跟着卸载；切回来那一帧
+ * 再从头建一遍行、封面、标签——这一下一上就是用户说的「固定闪烁」。
+ *
+ * 虚拟器量出来的窗口比上一次小掉两行以上、列表本身的行数又没变，就照上一次的
+ * 窗口渲染：被收起来的这段时间里列表原样留在 DOM 上，回来时还是同一批节点，
+ * 封面不用重取。真的空出一大截（筛掉了、删掉了）或者只是窗口拖小了零星一行，
+ * 行数对不上或者差得不够多，照实渲染。
+ *
+ * 档案库（`src/components/LibraryWorkspace.tsx`）有同一份实现，但它没导出，
+ * 这里不再为一个 5 行的兜底去动那个文件。 */
+function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): { items: T[]; totalSize: number } {
+  const previous = useRef({ items, totalSize, count });
+  if (items.length > 0) previous.current = { items, totalSize, count };
+  const collapsed = previous.current.count === count && previous.current.items.length - items.length >= 2;
+  return collapsed ? previous.current : { items, totalSize };
+}
+
+/** 这一页展示、也被分类筛选用的那一个维度：档案自己的分类，没有就退回语言。
+ * 本地档案没有「分类」这张表可查——镜像里只有 tags——所以筛选的取值域就从
+ * 读回来的档案里现推。行里写的和下拉框筛的必须是同一个函数算出来的值，不然
+ * 选了某一项筛出来的和屏幕上看到的对不上。 */
+function localCategoryLabel(archive: LocalArchiveRecord): string {
+  return archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
+}
+
+type LocalSortMode = 'title' | 'added';
+type LocalSortOrder = 'asc' | 'desc';
+
+/** 和档案库那两个下拉框同一套选项，顺序也一样。 */
+const SORT_OPTIONS: SelectOption[] = [
+  { value: 'title', label: '名称' },
+  { value: 'added', label: '添加时间' },
+];
+
+/** 档案库的排序在原生那边做（`ORDER BY added_at DESC, path DESC`），这一页没有
+ * 服务端查询，就在前端排。比较式和那边对齐：先按选中的字段，再按路径定序——
+ * 默认的「添加时间 / 降序」于是和改之前列表的次序完全一致，谁也没动过控件时
+ * 看不到任何变化。 */
+function compareLocalArchives(left: LocalArchiveRecord, right: LocalArchiveRecord, mode: LocalSortMode, order: LocalSortOrder): number {
+  const direction = order === 'asc' ? 1 : -1;
+  if (mode === 'title') {
+    const byTitle = left.title.localeCompare(right.title, 'zh-Hans-CN');
+    if (byTitle !== 0) return direction * byTitle;
+  } else {
+    const byAdded = left.addedAt - right.addedAt;
+    if (byAdded !== 0) return direction * byAdded;
+  }
+  return direction * left.path.localeCompare(right.path);
+}
+
 /** 列表的一行。下载任务和落地的档案混在同一条列表里，虚拟器按平铺的序号定位。 */
 type LocalListRow =
   | { kind: 'task'; key: string; task: TaskRecord }
@@ -115,7 +168,7 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
   onToggle: (path: string) => void;
   onMenu: (archive: LocalArchiveRecord, at: { x: number; y: number }) => void;
 }) {
-  const category = archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
+  const category = localCategoryLabel(archive);
   return (
     <button
       type="button"
@@ -166,6 +219,11 @@ export function LocalArchivesWorkspace() {
   const [error, setError] = useState<string>();
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  /** 默认「添加时间 / 降序」就是原生那条查询本来的次序，也是档案库路由的默认：
+   * 没人碰过这两个下拉框时，列表和加这一栏之前一模一样。 */
+  const [sortMode, setSortMode] = useState<LocalSortMode>('added');
+  const [sortOrder, setSortOrder] = useState<LocalSortOrder>('desc');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   /** 待确认的删除对象：多选栏给一批，右键/详情页给一份。留成路径而不是布尔，
@@ -235,11 +293,38 @@ export function LocalArchivesWorkspace() {
     [tasks],
   );
 
+  /** 分类下拉的取值域：从读回来的档案里现推（见 `localCategoryLabel`），排序按
+   * 显示名。选项的值就是显示名本身——筛选拿它和 `localCategoryLabel` 直接比，
+   * 中间不再插一层 id，少一处能对不上的映射。 */
+  const categoryOptions = useMemo<SelectOption[]>(() => {
+    const labels = new Set<string>();
+    for (const archive of archives) {
+      const label = localCategoryLabel(archive);
+      if (label) labels.add(label);
+    }
+    return [
+      { value: '', label: '全部分类' },
+      ...[...labels].sort((left, right) => left.localeCompare(right, 'zh-Hans-CN')).map((label) => ({ value: label, label })),
+      // 和档案库同名的那个哨兵：两份档案都没有分类/语言标签时进这一档。
+      { value: UNTAGGED_FILTER_ID, label: '无标签' },
+    ];
+  }, [archives]);
+
   const visibleArchives = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return archives;
-    return archives.filter((archive) => `${archive.title} ${archive.path} ${archive.tags.join(' ')}`.toLowerCase().includes(needle));
-  }, [archives, query]);
+    const byCategory = categoryFilter
+      ? archives.filter((archive) => {
+        const label = localCategoryLabel(archive);
+        return categoryFilter === UNTAGGED_FILTER_ID ? label === '' : label === categoryFilter;
+      })
+      : archives;
+    const matched = needle
+      ? byCategory.filter((archive) => `${archive.title} ${archive.path} ${archive.tags.join(' ')}`.toLowerCase().includes(needle))
+      : byCategory;
+    // `[...matched]`：`filter` 没筛掉东西时 returned 的就是 `archives` 本身，
+    // 原地 sort 会改到 state 里的那个数组。
+    return [...matched].sort((left, right) => compareLocalArchives(left, right, sortMode, sortOrder));
+  }, [archives, categoryFilter, query, sortMode, sortOrder]);
 
   const openArchive = (archive: LocalArchiveRecord) => {
     const next = new URLSearchParams(searchParams);
@@ -324,6 +409,7 @@ export function LocalArchivesWorkspace() {
     overscan: 6,
     initialRect: { width: 720, height: 560 },
   });
+  const shownRows = useStableVirtualRows(rowVirtualizer.getVirtualItems(), rowVirtualizer.getTotalSize(), listRows.length);
 
   const list = (
     <div className="local-archives">
@@ -356,13 +442,48 @@ export function LocalArchivesWorkspace() {
             });
           }}
         />
-        {/* 多选紧挨着预设按钮，和档案库的工具栏收起来时同一个位置。 */}
+      </div>
+      {/* 顶部这一栏和档案库同一套：分类筛选、排序方式，多选紧跟在排序方式右边。
+          行本身就是档案库的宽行，所以没有「显示模式」那一格可切，这里就不摆。 */}
+      <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
+        {/* 分类是从档案里推出来的，要等它们读回来；读完之前立着档案库同款的那段
+            骨架，下拉框才不会先短一截再长出来。 */}
+        {archivesLoaded
+          ? (
+            <SelectField
+              name="categoryFilter"
+              aria-label="分类筛选"
+              value={categoryFilter}
+              options={categoryOptions}
+              onChange={setCategoryFilter}
+            />
+          )
+          : <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}
+        <SelectField
+          name="sortMode"
+          aria-label="排序字段"
+          value={sortMode}
+          options={SORT_OPTIONS}
+          onChange={(value) => {
+            // 选中已经选着的那一项 = 换个方向，和档案库同一条规矩。
+            if (value === sortMode) {
+              setSortOrder((current) => (current === 'asc' ? 'desc' : 'asc'));
+              return;
+            }
+            if (value === 'title' || value === 'added') setSortMode(value);
+          }}
+          trailing={<span className="select-trailing" aria-hidden="true">{sortOrder === 'asc' ? <ArrowUp /> : <ArrowDown />}</span>}
+          optionTrailing={(option) => (option.value === sortMode
+            ? <span className="select-option-trailing" aria-hidden="true">{sortOrder === 'asc' ? <ArrowUp /> : <ArrowDown />}</span>
+            : null)}
+        />
         <button
-          className="icon-action library-select-toggle"
+          className="secondary-action library-select-toggle"
           type="button"
           aria-pressed={selectionMode}
           aria-label={selectionMode ? '退出多选' : '多选'}
           title={selectionMode ? '退出多选' : '多选'}
+          disabled={archives.length === 0}
           onClick={() => {
             setSelectionMode((current) => !current);
             setSelected(new Set());
@@ -393,16 +514,16 @@ export function LocalArchivesWorkspace() {
       {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && (
         <EmptyState
           icon={Download}
-          title={query ? '没有匹配的档案' : '还没有下载过档案'}
-          description={query ? '换个关键词试试。' : '右键档案卡片选「下载档案」，进度和文件都会出现在这里。'}
+          title={query || categoryFilter ? '没有匹配的档案' : '还没有下载过档案'}
+          description={query || categoryFilter ? '换个关键词或换个分类试试。' : '右键档案卡片选「下载档案」，进度和文件都会出现在这里。'}
         />
       )}
       {listRows.length > 0 && (
         /* `archive-list is-wide`：这一页的行就是档案库的宽行。行高、封面框、文案
            三格和标签瀑布全部由那一套规则给，本地档案只多写「行里写什么」。 */
         <div className="archive-list is-wide local-archives-list" data-scroll-region ref={listRef} role="list" aria-label="本地档案">
-          <div className="archive-list-inner" style={{ height: rowVirtualizer.getTotalSize() }}>
-            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          <div className="archive-list-inner" style={{ height: shownRows.totalSize }}>
+            {shownRows.items.map((virtualRow) => {
               const row = listRows[virtualRow.index];
               if (!row) return null;
               return (

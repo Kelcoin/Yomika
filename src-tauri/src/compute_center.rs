@@ -466,7 +466,7 @@ pub struct ProcessParams {
     /// 放大倍数（模型为空时的最近邻路径用）。
     #[serde(default)]
     pub scale: Option<u32>,
-    /// DLSSNR 的 1–3 层参数。
+    /// DLSSNR 的 1–5 层参数。
     #[serde(default)]
     pub dlssnr: Option<serde_json::Value>,
 }

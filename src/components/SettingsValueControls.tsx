@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Minus, Plus } from 'lucide-react';
 
 import { OverlayLayer } from './OverlayLayer';
@@ -18,10 +18,25 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
  *
  * 菜单里只有标题（图标 + 文字）和内容：标题下面那行灰色小字（`description`）
  * 统一去掉了——它把同一句话在行上、菜单里说了两遍，还把内容区往下压了一截，
- * 每个二级菜单顶上都是它。行里的 hint 留着，那是列表该说的话。 */
+ * 每个二级菜单顶上都是它。行里的 hint 留着，那是列表该说的话。
+ *
+ * 标记上有一条不能动的形状：`<OverlayLayer>` 后面紧跟着
+ * `<div className="settings-choice-overlay"`，中间不夹别的节点或注释——
+ * tests/design-system-contract.test.ts 用这个形状认「浮层挂到 body」这条合同。 */
 export function SettingsMenu({ title, icon, onClose, children }: { title: string; icon?: ReactNode; onClose: () => void; children: ReactNode }) {
   // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
   useOverlayBackGuard(true, onClose);
+  /** 「点外面关闭」判定的是按下的落点，不是那次 click 的落点。
+   *
+   * 面板里的 textarea 自带右下角的缩放柄：按下在面板里，松开时指针已经在面板外。浏览器
+   * 仍会为这一对补一次 click，落点是按下与松开的**最近公共祖先**——面板外的最近祖先就是
+   * 遮罩本身，于是这次 click 和「在遮罩上点一下」完全同形，菜单会在人只是拉了一下输入框
+   * 的时候关掉。所以这里记住按下时落在哪里：按下在面板里（target 不是遮罩自己）就不是点
+   * 外面，后面那次 click 不关；真的在遮罩上按下、又在遮罩上松开的照旧关。
+   *
+   * 用捕获阶段（`onPointerDownCapture`）：菜单里的控件有人在 pointerdown 上
+   * `stopPropagation` 也不会让遮罩看不到这一次按下。 */
+  const pressOutsideRef = useRef(true);
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', close);
@@ -29,7 +44,11 @@ export function SettingsMenu({ title, icon, onClose, children }: { title: string
   }, [onClose]);
   return (
     <OverlayLayer>
-      <div className="settings-choice-overlay" role="presentation" onClick={onClose}>
+      <div className="settings-choice-overlay"
+        role="presentation"
+        onPointerDownCapture={(event) => { pressOutsideRef.current = event.target === event.currentTarget; }}
+        onClick={() => { if (pressOutsideRef.current) onClose(); }}
+      >
         <div
           className="settings-choice-panel"
           role="dialog"

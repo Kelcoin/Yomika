@@ -22,6 +22,18 @@ export interface ImageHandle {
   bytes: number;
 }
 
+export interface ImageLoadOptions {
+  signal?: AbortSignal;
+  /** 最后一个消费者放手之后，这张图继续留在内存里（仍受下面的 LRU 预算约束），好让
+   * 重新挂载的第一帧就能用 `peek`/`peekUrl` 同步拿到它。
+   *
+   * 只有封面用它：切页、回到前台时，封面正是「还在原地、却被重新请求一次」的那一张，
+   * 而它每次重挂载都要重新走一遍异步取图，就是切换页面时那一下闪烁——先渲染占位块，
+   * 等图落地才换成 `<img>`。默认**不**保留：阅读器的整页图一放手就该撤（一页 1.5MB，
+   * 会话派生图更多），而且「重绘到 0 引用即撤销」是调用方唯一确定的回收边界。 */
+  retain?: boolean;
+}
+
 export interface UnifiedImageCacheOptions {
   createObjectURL(blob: Blob): string;
   revokeObjectURL(url: string): void;
@@ -33,6 +45,8 @@ export interface UnifiedImageCacheOptions {
 
 interface MemoryEntry extends ImageHandle {
   refs: number;
+  /** 释放到 0 引用之后是否继续留着（见 `ImageLoadOptions.retain`）。 */
+  retain: boolean;
 }
 
 interface PendingEntry {
@@ -78,7 +92,7 @@ export class UnifiedImageCache {
     this.options.revokeObjectURL(entry.url);
   }
 
-  async load(identity: ImageCacheIdentity, options: { signal?: AbortSignal } = {}): Promise<ImageHandle> {
+  async load(identity: ImageCacheIdentity, options: ImageLoadOptions = {}): Promise<ImageHandle> {
     const key = createImageCacheKey(identity);
     // Check the signal before the memory fast path: a consumer that already
     // aborted never receives the handle, so it can never release the extra
@@ -86,6 +100,7 @@ export class UnifiedImageCache {
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const existing = this.memory.get(key);
     if (existing) {
+      if (options.retain) existing.retain = true;
       this.touch(existing);
       return { key, url: existing.url, bytes: existing.bytes };
     }
@@ -111,6 +126,7 @@ export class UnifiedImageCache {
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const cached = this.memory.get(key);
     if (cached) {
+      if (options.retain) cached.retain = true;
       this.touch(cached);
       return { key, url: cached.url, bytes: cached.bytes };
     }
@@ -119,7 +135,7 @@ export class UnifiedImageCache {
     // 它的存储，视图的部分用不上第二份。
     const blob = new Blob([data.bytes], { type: data.mime || 'application/octet-stream' });
     const url = this.options.createObjectURL(blob);
-    const entry: MemoryEntry = { key, url, bytes: data.bytes.byteLength, refs: 1 };
+    const entry: MemoryEntry = { key, url, bytes: data.bytes.byteLength, refs: 1, retain: Boolean(options.retain) };
     this.memory.set(key, entry);
     this.memoryBytes += entry.bytes;
     this.evictMemory();
@@ -130,11 +146,36 @@ export class UnifiedImageCache {
     const entry = this.memory.get(handle.key);
     if (!entry) return;
     entry.refs = Math.max(0, entry.refs - 1);
-    if (entry.refs === 0) {
+    if (entry.refs === 0 && !entry.retain) {
       this.forget(entry);
       return;
     }
     this.evictMemory();
+  }
+
+  /** 同步看一眼内存里有没有这张图，命中就**增加一次引用**并把条目挪到 LRU 末尾。
+   *
+   * 引用计数规则：命中的返回值必须配一次 `release(handle)`，和 `load` 拿到的 handle
+   * 完全一样——多拿不还，条目会一直被跳过回收（`evictMemory` 不动 `refs > 0` 的）。
+   * 没命中返回 undefined，不产生引用，也不会顺路去取一次图。
+   *
+   * 存在的理由只有一个：重新挂载的第一帧要能同步拿到已经有的一图，而不是先渲染骨架
+   * 再等一次 Promise。取图入口仍然是异步的 `load`。 */
+  peek(identity: ImageCacheIdentity): ImageHandle | undefined {
+    const entry = this.memory.get(createImageCacheKey(identity));
+    if (!entry) return undefined;
+    this.touch(entry);
+    return { key: entry.key, url: entry.url, bytes: entry.bytes };
+  }
+
+  /** 渲染期用的纯读版本：只报 URL，**不动引用计数**。
+   *
+   * 这样才安全：`release` 到 0 引用时只有 `retain` 过的条目会留下，所以这里读到的
+   * URL 要么有人正拿着、要么被保留着，不会在读完之后被撤掉。反过来它不能顺手「保住」
+   * 一张图——渲染可能被丢弃（StrictMode 双跑、并发渲染里被放弃的那一版），多出来的
+   * 引用就永远没人还，条目被钉死在表里。 */
+  peekUrl(identity: ImageCacheIdentity): string | undefined {
+    return this.memory.get(createImageCacheKey(identity))?.url;
   }
 
   inFlightCount(): number {
@@ -176,8 +217,9 @@ export class UnifiedImageCache {
 
   /** 回收：从 LRU 队列（`memory` 的插入顺序）最前面开始丢，跳过还有引用的。
    *
-   * 表里留着的条目**都是**有引用的（释放到 0 引用当场就撤掉了），所以这一步实际是
-   * 兜底：超过上限时先丢最久没被碰过的那张，而且永远不动别人手上还拿着的那一张。
+   * 表里留着的条目**要么有引用、要么是被 `retain` 保留的封面**（没保留的释放到 0 引用
+   * 当场就撤掉了），所以这一步实际是兜底：超过上限时先丢最久没被碰过的那张，而且永远
+   * 不动别人手上还拿着的那一张。保留也不会无上限：96MiB / 256 条那套预算照样把它挤出去。
    * 顺序由 `touch` 维护，这里不再排序——以前每次回收都要 `Array.from(...).sort(...)`
    * 扫全表，而阅读器每翻一页都会触发一次。 */
   private evictMemory(): void {
@@ -190,4 +232,18 @@ export class UnifiedImageCache {
       this.forget(entry);
     }
   }
+}
+
+/** `peek` 的安全版本：注入进来的缓存可能是个只有 `load`/`release` 的精简替身（组件
+ * 测试里的 mock、只读适配层），直接调 `peek` 会把一整屏卡片崩掉。没有同步接口就当没
+ * 命中，照旧走异步取图——这正是引入它之前的行为。 */
+export function peekCachedImage(cache: UnifiedImageCache, identity: ImageCacheIdentity): ImageHandle | undefined {
+  if (typeof cache?.peek !== 'function') return undefined;
+  return cache.peek(identity);
+}
+
+/** `peekUrl` 的安全版本，理由同上。命中的 URL 不需要还引用（它本来就不加引用）。 */
+export function peekCachedImageUrl(cache: UnifiedImageCache, identity: ImageCacheIdentity): string | undefined {
+  if (typeof cache?.peekUrl !== 'function') return undefined;
+  return cache.peekUrl(identity);
 }

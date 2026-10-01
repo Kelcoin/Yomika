@@ -1,6 +1,6 @@
 import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, Eraser, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
@@ -61,6 +61,148 @@ function useDelayedUnmount(visible: boolean, ms: number): { mounted: boolean; le
     return () => window.clearTimeout(timer);
   }, [visible, ms]);
   return state;
+}
+
+/** 一根盒子：左/上角在视口里的位置 + 尺寸。量不到（还没布局）时按视口兜底，感应带总得
+ * 有个数可用。 */
+interface ReaderRootBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+function measureReaderRoot(element: HTMLElement | null): ReaderRootBox {
+  const rect = element?.getBoundingClientRect();
+  return {
+    left: rect?.left ?? 0,
+    top: rect?.top ?? 0,
+    width: rect?.width || element?.clientWidth || window.innerWidth,
+    height: rect?.height || element?.clientHeight || window.innerHeight,
+  };
+}
+
+/** 共享件里的指针事件只用到坐标、`target` 和「别冒泡」，所以按最宽的 `Element` 收：
+ * 这样同一份处理器也能交给 `ArchiveOverviewPanel`（它的 `onPanelClick` 就是这个类型），
+ * 不必为每一层各自包一层。 */
+type ChromePointerEvent = MouseEvent<Element>;
+
+export interface ReaderChromeOptions {
+  /** 画布元素；感应带按它的盒子算。 */
+  rootRef: RefObject<HTMLElement | null>;
+  /** 权威可见性：来自状态机，或加载态自己的状态。 */
+  visible: boolean;
+  /** 页面在前台时才走自动隐藏（保留页留在后台时不该自己走表）。 */
+  active: boolean;
+  /** 临时挂起：指针判定与自动隐藏都让位（缩略面板压在上面时）。 */
+  suspended?: boolean;
+  /** 翻开 / 收起。 */
+  onToggle: () => void;
+  /** 自动隐藏的时间到了。 */
+  onHide: () => void;
+}
+
+export interface ReaderChrome {
+  topChromeVisible: boolean;
+  bottomChromeVisible: boolean;
+  topPresence: { mounted: boolean; leaving: boolean };
+  bottomPresence: { mounted: boolean; leaving: boolean };
+  /** 指针落在哪条带上：栏本身、或上下感应带；画布中部是 `null`。 */
+  hoverTarget: (event: ChromePointerEvent) => 'top' | 'bottom' | null;
+  setHover: (next: 'top' | 'bottom' | null | undefined) => void;
+  /** 画布上的一次点击：栏开着、或点在感应带里，就翻开 / 收起。 */
+  handleCanvasClick: (event: ChromePointerEvent) => void;
+  /** 栏内部的按下：不要冒泡成「再点一下收起」，并把自动隐藏重新计时。 */
+  keepAlive: (event: ChromePointerEvent) => void;
+  /** 指针离开画布：别让上一次的 hover 定住一条栏。 */
+  clearHover: () => void;
+}
+
+/** 顶栏/底栏的可见性、感应带与自动隐藏——阅读态与加载态共用这一套。
+ *
+ * 为什么必须共用一个件：加载中那条顶栏（`ReaderRoute` 的 `.reader-error-bar`）原来是一块
+ * 常显的条，于是同一次进入阅读模式前后是两副样子——先看到一排控件，加载完又学会隐藏。
+ * 行为要一致就不能有两份实现，所以指针落点、出场动画、4.5s 自动隐藏都收在这里。
+ *
+ * 这里**不持有**「有没有被唤出」：加载态根本没有 `ReaderState`。权威可见性由调用方给
+ * （阅读态是状态机的 `chrome-visible`，加载态是一个本地 `useState`），hook 只让指针
+ * 悬停临时压过它。 */
+export function useReaderChrome({ rootRef, visible, active, suspended = false, onToggle, onHide }: ReaderChromeOptions): ReaderChrome {
+  // 盒子缓存到 resize 为止：指针事件里做 `getBoundingClientRect()` 会让阅读器每帧同步
+  // 布局一次，而鼠标移动事件的密度正好够把它变成可感的卡顿。
+  const boxRef = useRef<ReaderRootBox>({ left: 0, top: 0, width: 0, height: 0 });
+  const readBox = useCallback(() => {
+    boxRef.current = measureReaderRoot(rootRef.current);
+    return boxRef.current;
+  }, [rootRef]);
+  const box = useCallback(() => (boxRef.current.width > 0 ? boxRef.current : readBox()), [readBox]);
+  useEffect(() => {
+    // 转屏、改窗口大小之后感应带要按新的高度算，所以只把缓存作废，下次指针事件再量。
+    const invalidate = () => { boxRef.current = { left: 0, top: 0, width: 0, height: 0 }; };
+    window.addEventListener('resize', invalidate);
+    return () => window.removeEventListener('resize', invalidate);
+  }, []);
+
+  const [hoverChrome, setHoverChrome] = useState<'top' | 'bottom' | null | undefined>();
+  const hoverChromeRef = useRef<'top' | 'bottom' | null | undefined>(undefined);
+  // 值没变就不写 state：指针在栏内移动时事件很密，每次 setState 都是白重渲染一遍。
+  const setHover = useCallback((next: 'top' | 'bottom' | null | undefined) => {
+    if (hoverChromeRef.current === next) return;
+    hoverChromeRef.current = next;
+    setHoverChrome(next);
+  }, []);
+
+  const hoverTarget = useCallback((event: ChromePointerEvent): 'top' | 'bottom' | null => {
+    const rect = box();
+    const height = rect.height;
+    const y = event.clientY - rect.top;
+    const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
+    const target = event.target as Element;
+    return target.closest('.reader-toolbar') ? 'bottom'
+      : target.closest('.reader-chrome-top, .reader-error-bar') ? 'top'
+        : y <= band ? 'top'
+          : y >= height - band ? 'bottom'
+            : null;
+  }, [box]);
+
+  const [keepAliveToken, setKeepAliveToken] = useState(0);
+  const keepAlive = useCallback((event: ChromePointerEvent) => {
+    event.stopPropagation();
+    setKeepAliveToken((value) => value + 1);
+  }, []);
+
+  // 定时器和点击回调要拿到**当下**的 onToggle/onHide：调用方每次渲染都会传新函数，
+  // 而 4.5s 后才响的定时器不该拿着 4.5s 前那份闭包去改状态。
+  const callbacksRef = useRef({ onToggle, onHide });
+  callbacksRef.current = { onToggle, onHide };
+
+  useEffect(() => {
+    if (!active || !visible || suspended) return undefined;
+    const timer = window.setTimeout(() => callbacksRef.current.onHide(), CHROME_AUTO_HIDE_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, keepAliveToken, suspended, visible]);
+
+  const handleCanvasClick = useCallback((event: ChromePointerEvent) => {
+    const rect = box();
+    const height = rect.height;
+    const offset = event.clientY - rect.top;
+    const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
+    // 栏开着时点哪儿都收起；栏藏着时只有点在上下感应带里才算唤出，画面中部留给翻页。
+    if (!visible && offset > band && offset < height - band) return;
+    setHover(undefined);
+    callbacksRef.current.onToggle();
+  }, [box, setHover, visible]);
+
+  const clearHover = useCallback(() => setHover(null), [setHover]);
+
+  // `undefined` 是「指针还没给过意见」（听权威可见性），`null` 是「指针已经在画面中部 /
+  // 离开了画布」（两条栏都收）——两者不能合并。
+  const topChromeVisible = hoverChrome === undefined ? visible : hoverChrome === 'top';
+  const bottomChromeVisible = hoverChrome === undefined ? visible : hoverChrome === 'bottom';
+  const topPresence = useDelayedUnmount(topChromeVisible, CHROME_EXIT_MS);
+  const bottomPresence = useDelayedUnmount(bottomChromeVisible, CHROME_EXIT_MS);
+
+  return { topChromeVisible, bottomChromeVisible, topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive, clearHover };
 }
 
 /** One of the two derived renditions, as the reader sees it. */
@@ -238,12 +380,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * 布局**——每帧对着三张大图重排一次就是拖动跟手与否的差别。这块盒子只在窗口改
    * 尺寸、换布局时才变，所以量一次存下来（下面那个 rAF 合并过的 resize effect 里）；
    * 拿不到时再退回现场量。 */
-  const rootBoxRef = useRef<{ left: number; top: number; width: number; height: number }>({ left: 0, top: 0, width: 0, height: 0 });
+  const rootBoxRef = useRef<ReaderRootBox>({ left: 0, top: 0, width: 0, height: 0 });
   const readRootBox = useCallback(() => {
-    const rect = rootRef.current?.getBoundingClientRect();
-    const width = rect?.width || rootRef.current?.clientWidth || window.innerWidth;
-    const height = rect?.height || rootRef.current?.clientHeight || window.innerHeight;
-    rootBoxRef.current = { left: rect?.left ?? 0, top: rect?.top ?? 0, width, height };
+    rootBoxRef.current = measureReaderRoot(rootRef.current);
     return rootBoxRef.current;
   }, []);
   const rootBox = () => {
@@ -273,17 +412,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // （返回手势走 webview 历史，见 `lib/overlayBackGuard`）。
   useOverlayBackGuard(thumbnailPanelOpen, () => setThumbnailPanelOpen(false));
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
-  const [hoverChrome, setHoverChrome] = useState<'top' | 'bottom' | null | undefined>();
-  /** 同上，但给「每一次鼠标移动都会来的那条回调」用：同一个值写进 state 也是一次
-   * 调度，翻过这一层比较再写，静止在一条带里就不再重渲染。 */
-  const hoverChromeRef = useRef<'top' | 'bottom' | null | undefined>(undefined);
-  const setHover = useCallback((next: 'top' | 'bottom' | null | undefined) => {
-    if (hoverChromeRef.current === next) return;
-    hoverChromeRef.current = next;
-    setHoverChrome(next);
-  }, []);
-  /** Bumped by any press inside the chrome, which restarts its auto-hide. */
-  const [chromeKeepAlive, setChromeKeepAlive] = useState(0);
+  // 可见性、感应带与自动隐藏都在 `useReaderChrome` 里——加载态的 `ReaderRoute` 用同一个
+  // hook，所以「加载中」和「加载完」的顶栏是同一套行为，而不是两处各写一遍的近似。
+  const { topChromeVisible, bottomChromeVisible, topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive: stopChromeToggle, clearHover } = useReaderChrome({
+    rootRef,
+    visible: state.phase === 'chrome-visible',
+    active: pageActive,
+    suspended: thumbnailPanelOpen,
+    onToggle: () => setState(toggleReaderChrome),
+    onHide: () => setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current),
+  });
   const loadingPagesRef = useRef(new Set<number>());
   /** Failed loads, with their attempt count and the earliest time to try again.
    * A page that simply failed used to be retried on every render — or, once the
@@ -428,16 +566,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     setState((current) => current.pageIndex === webtoonAnchor ? current : { ...current, pageIndex: webtoonAnchor });
   }, [effectiveLayout, webtoonAnchor]);
 
-  // The bars go away on their own. Held open while the overview panel is up,
-  // because that is a deliberate stop rather than a glance, and restarted by any
-  // press inside them so a run of toolbar taps does not fight the timer.
-  useEffect(() => {
-    if (!pageActive || state.phase !== 'chrome-visible' || thumbnailPanelOpen) return undefined;
-    const timer = window.setTimeout(() => {
-      setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current);
-    }, CHROME_AUTO_HIDE_MS);
-    return () => window.clearTimeout(timer);
-  }, [chromeKeepAlive, state.phase, thumbnailPanelOpen, pageActive]);
+  // 自动隐藏（4.5s 无人搭理）现在在 `useReaderChrome` 里：它和加载态那条顶栏共用同一条
+  // 计时。上面那段注释描述的行为没变，只是搬到了共享件里。
 
   // What is on screen right now, which is a different question from what the
   // prefetch window holds. Enhancement is expensive enough that it is worth
@@ -687,20 +817,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
   }
 
-  function stopChromeToggle(event: MouseEvent) {
-    event.stopPropagation();
-    setChromeKeepAlive((value) => value + 1);
-  }
-
-  /** Whether a click landed in one of the bands that summon the chrome. */
-  function isInChromeBand(event: MouseEvent<HTMLElement>): boolean {
-    const rect = rootBox();
-    const height = rect.height;
-    const offset = event.clientY - rect.top;
-    const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
-    return offset <= band || offset >= height - band;
-  }
-
   /** Live horizontal offset while a drag is in progress, so the page follows the
    * finger. Without it the gesture had no feedback at all until release, which is
    * why it was impossible to tell whether a turn had been triggered. */
@@ -904,20 +1020,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // 画布手势：hover 判定只认指针坐标（蒙版挡不住一个 mouseMove），曾经因此能从蒙版
     // 上把底栏划出来、顺带把亮着的顶栏撤掉。面板自己内部的滚动/点击不受影响。
     if (thumbnailPanelOpen) return;
-    if (!event.buttons) {
-      const rect = rootBox();
-      const height = rect.height;
-      const y = event.clientY - rect.top;
-      const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
-      const target = event.target as Element;
-      const next: 'top' | 'bottom' | null = target.closest('.reader-toolbar') ? 'bottom' : target.closest('.reader-chrome-top') ? 'top' : y <= band ? 'top' : y >= height - band ? 'bottom' : null;
-      setHover(next);
-    }
+    if (!event.buttons) setHover(hoverTarget(event));
     if (panStart.current && event.buttons === 1) { dragZoom(event.clientX, event.clientY); return; }
     const start = pointerStartRef.current;
     if (!start || event.buttons !== 1) return;
     trackDrag(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
-  }, [setHover, trackDrag, thumbnailPanelOpen]);
+  }, [hoverTarget, setHover, trackDrag, thumbnailPanelOpen]);
 
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
     if (panStart.current) {
@@ -990,11 +1098,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     scrollToPage(index);
   }, [scrollToPage]);
 
-  const chromeVisible = state.phase === 'chrome-visible';
-  const topChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'top';
-  const bottomChromeVisible = hoverChrome === undefined ? chromeVisible : hoverChrome === 'bottom';
-  const topPresence = useDelayedUnmount(topChromeVisible, CHROME_EXIT_MS);
-  const bottomPresence = useDelayedUnmount(bottomChromeVisible, CHROME_EXIT_MS);
   // The reader route has no app title bar, so on Windows it carries its own
   // window maximize control, top-right — rendered only inside the chrome
   // header, so an unobstructed read never shows window chrome over the page.
@@ -1182,7 +1285,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         // middle of a page cannot flash the bars over what is being read. Hiding
         // is not: the bars swallow their own clicks, so if only the bands
         // dismissed there would be nowhere left to press.
-        if (chromeVisible || isInChromeBand(event)) { setHover(undefined); setState(toggleReaderChrome); }
+        // 这一句的判断与唤出/收起原来一模一样，只是整段搬到了 `useReaderChrome`
+        // （加载态那条顶栏也要同一套，所以不能只留在这一个组件里）。
+        handleCanvasClick(event);
       }}
       onDoubleClick={() => { if (effectiveLayout !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current)); }}
       onKeyDown={handleKeyDown}
@@ -1201,7 +1306,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       // Pointer capture keeps delivering the gesture after the cursor leaves the
       // canvas. Do not clear the start point here: doing so made a normal edge
       // drag cancel halfway through and made the release look like a jump.
-      onMouseLeave={() => { setHover(null); if (!pointerStartRef.current && !panStart.current && drag) finishDrag(0, 0); }}
+      onMouseLeave={() => { clearHover(); if (!pointerStartRef.current && !panStart.current && drag) finishDrag(0, 0); }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -1272,13 +1377,17 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             onClick={stopChromeToggle}
           >
               <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
+            {/* 标题是这条栏的**直接**子项，才落得进中间那条轨道（相对整条栏居中，
+                而不是相对返回按钮之后的剩余空间）。尾部控件自己一格。 */}
             <strong>{title}</strong>
-            {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
-            {renderWindowMaximize()}
+            <div className="reader-chrome-actions">
+              {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
+              {renderWindowMaximize()}
             {/* 缩略面板从底栏挪上来：它是「这块档案」的一件事，和返回、标题、阅读
                 设置同一层；底栏留给翻页与画面处理。 */}
-            <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
-            <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
+              <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
+              <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
+            </div>
           </header>
         )}
         {bottomPresence.mounted && (

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import tauriConfig from '../../src-tauri/tauri.conf.json';
 import {
   UnifiedImageCache,
+  peekCachedImage,
+  peekCachedImageUrl,
   type CachedImageData,
   type ImageCacheRepository,
   type ImageHandle,
@@ -207,6 +209,78 @@ describe('UnifiedImageCache', () => {
 
     expect(peak).toBeLessThanOrEqual(4);
     expect(repo.fetch).toHaveBeenCalledTimes(20);
+  });
+});
+
+describe('UnifiedImageCache covers that outlive a remount', () => {
+  const key = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'cover' as const, pageIndex: 0 };
+
+  it('hands back a cached cover synchronously so a remount paints it on the first frame', async () => {
+    const urls = blobUrlFactory();
+    const repo = repository();
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+
+    expect(peekCachedImage(cache, key)).toBeUndefined();
+    expect(peekCachedImageUrl(cache, key)).toBeUndefined();
+
+    const loaded = await cache.load(key, { retain: true });
+    cache.release(loaded);
+
+    // 同步接口在最后一个消费者放手之后仍然给得出这张图：这正是「切页时封面不闪」
+    // 的全部依据——重挂载的第一帧就能拿到 url，而不是先摆一个骨架。
+    const peeked = peekCachedImage(cache, key);
+    expect(peeked?.url).toBe(loaded.url);
+    expect(peekCachedImageUrl(cache, key)).toBe(loaded.url);
+    expect(repo.fetch).toHaveBeenCalledTimes(1);
+    expect(urls.revoke).not.toHaveBeenCalled();
+
+    // 同步拿到的引用必须还回去，否则这张图会被永久钉死在表里。
+    cache.release(peeked!);
+    expect(urls.revoke).not.toHaveBeenCalled();
+    expect(peekCachedImageUrl(cache, key)).toBe(loaded.url);
+  });
+
+  it('revokes an unretained cover on its last release even if it was peeked at', async () => {
+    const urls = blobUrlFactory();
+    const repo = repository();
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+
+    const loaded = await cache.load(key);
+    // 纯读的 peek（渲染期用的那个）不动引用计数——否则没人放手，条目永远撤不掉。
+    expect(peekCachedImageUrl(cache, key)).toBe(loaded.url);
+    expect(peekCachedImageUrl(cache, key)).toBe(loaded.url);
+
+    cache.release(loaded);
+    expect(urls.revoke).toHaveBeenCalledWith(loaded.url);
+    expect(peekCachedImageUrl(cache, key)).toBeUndefined();
+  });
+
+  it('still bounds retained covers, dropping the least recently used one first', async () => {
+    const urls = blobUrlFactory();
+    const repo = repository(new Uint8Array([1, 2, 3, 4]));
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 5, maxEntries: 2 });
+    const cover = (archiveId: string) => ({ scopeId: 'scope-a', archiveId, rendition: 'cover' as const, pageIndex: 0 });
+
+    const first = await cache.load(cover('a'), { retain: true });
+    cache.release(first);
+    expect(urls.revoke).not.toHaveBeenCalled();
+
+    // 保留不是无上限：96MiB / 256 条那套预算照样能把它挤出去。
+    const second = await cache.load(cover('b'), { retain: true });
+    cache.release(second);
+
+    expect(urls.revoke).toHaveBeenCalledWith(first.url);
+    expect(peekCachedImageUrl(cache, cover('a'))).toBeUndefined();
+    expect(peekCachedImageUrl(cache, cover('b'))).toBe(second.url);
+  });
+
+  it('treats a cache stand-in without the synchronous interface as a miss', () => {
+    // 有些地方注入的是精简替身（组件测试的 mock、只读适配层）：它们只有 load /
+    // release。守卫让这种替身退回异步取图，而不是 TypeError 崩一屏。
+    const stub = { load: vi.fn(), release: vi.fn() } as unknown as UnifiedImageCache;
+
+    expect(peekCachedImage(stub, key)).toBeUndefined();
+    expect(peekCachedImageUrl(stub, key)).toBeUndefined();
   });
 });
 

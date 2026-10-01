@@ -12,7 +12,7 @@ import { resetFilePickerForTests, setModelPickerForTests } from '../../src/bridg
 import { DEFAULT_PREFERENCES, type PreferenceSnapshot } from '../../src/repositories/nativeSettingsRepository';
 import { DlssnrSettingsGroup } from '../../src/components/DlssnrSettingsGroup';
 import { ToastProvider } from '../../src/components/Toast';
-import { parseDlssnrPasses, serializeDlssnrPasses } from '../../src/repositories/nativeDlssnrRepository';
+import { MAX_DLSSNR_PASSES, parseDlssnrPasses, serializeDlssnrPasses } from '../../src/repositories/nativeDlssnrRepository';
 import { parseRemoteOps, serializeRemoteOps, COMPUTE_CENTER_PAIRING_CHANGED_EVENT } from '../../src/repositories/nativeComputeCenterRepository';
 import { emitTauriEvent } from '../tauriEvents';
 
@@ -109,18 +109,20 @@ function adapterFor(handlers: Record<string, (args?: Record<string, unknown>) =>
 }
 
 describe('DLSS5 settings group', () => {
-  it('does not render when this machine cannot run DLSS5', async () => {
-    setInvokeAdapterForTests(adapterFor({
-      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ available: false, dllPresent: false, error: '没有找到 NVIDIA 显卡' }) }),
-    }));
+  it('does not render, and does not ask for a status, while the group is hidden', async () => {
+    // 平台门控在调用点（设置页把它绑在 `platform === 'windows'` 上），所以这一条盯的是
+    // 隐藏时的行为：连 status 都不问——省一次往返，也不会闪一行「正在检测」。
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
+    });
+    setInvokeAdapterForTests(adapter);
     const { container } = render(
       <ToastProvider>
         <DlssnrSettingsGroup preferences={{ ...DEFAULT_PREFERENCES }} editPreferences={() => {}} visible={false} />
       </ToastProvider>,
     );
     await waitFor(() => expect(container.querySelector('[aria-label="DLSSNR"]')).toBeNull());
-    // 平台不满足时连 status 都不问：省一次往返，也不会闪一行「正在检测」。
-    expect(setInvokeAdapterForTests).toBeTruthy();
+    expect(adapter.mock.calls.some(([command]) => command === 'dlssnr_status')).toBe(false);
   });
 
   it('allows the switch when a DLL is present without a mandatory probe', async () => {
@@ -146,7 +148,8 @@ describe('DLSS5 settings group', () => {
 
   it('does not lock the switch on a stale probe result', async () => {
     // 换过片段之后旧结论作废：界面不能显示「检测通过、可以打开」，因为进程里跑的还是
-    // 换之前那一份（NGX 一个进程只加载一份，换片段的那个进程要重启）。
+    // 换之前那一份（NGX 一个进程只加载一份，换片段的那个进程要重启）。`probeValid`
+    // 只是目录里的一条记录：开关只认「现在能不能跑」，不认「上一次检测过没过」。
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({
       dlssnr_status: () => ({
@@ -157,11 +160,15 @@ describe('DLSS5 settings group', () => {
         }),
       }),
     }));
-    renderDlssnr();
+    const edits: Array<Partial<PreferenceSnapshot>> = [];
+    renderDlssnr({ editPreferences: (patch) => edits.push(patch) });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     const toggle = within(group).getByRole('switch', { name: '启用 DLSSNR' });
+    // 旧结论作废不等于「跑不起来」：开关照常能打开，写回的还是同一条偏好。
+    expect(toggle).toBeEnabled();
     await user.click(toggle);
+    await waitFor(() => expect(edits).toContainEqual({ dlssnrEnabled: true }));
   });
 
   it('lists the downloadable variants, marks the installed one, and switches to another', async () => {
@@ -202,12 +209,74 @@ describe('DLSS5 settings group', () => {
     expect(downloadButtons[0]!.getAttribute('aria-label')).toMatch(/^下载/);
     downloadButtons.forEach((button) => expect(button.disabled).toBe(false));
 
-    // 只有没装上的那两条可以点（下载完的替换由后端负责）。
+    // 三条行体都是活的：选中的那一条也是可聚焦的按钮，只是点它不会重复下载（它是
+    // 「当前这一份」，不是不可用）。这一行原来断言「只有没装上的两条可以点」，正好把
+    // 「选中行被 disabled、文字跟着灰掉」那个毛病钉死在测试里。
     const mainButtons = [...snippets.querySelectorAll<HTMLButtonElement>('.settings-choice-option-main')];
-    expect(mainButtons.filter((button) => !button.disabled)).toHaveLength(2);
+    expect(mainButtons).toHaveLength(DLSSNR_CATALOG.variants.length);
+    mainButtons.forEach((button) => expect(button).not.toBeDisabled());
     await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
     await waitFor(() => expect(screen.getByText(/已装好并启用/)).toBeTruthy());
+  });
+
+  it('keeps the installed variant as a selectable row instead of a disabled one', async () => {
+    const user = userEvent.setup();
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
+      dlssnr_download_variant: (args) => ({ ok: true, value: { bytes: 165_840_496, variant: args?.variantId ?? 'official', variantLabel: null } }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    const installedRow = rows.find((row) => row.classList.contains('is-active'))!;
+    const installedMain = installedRow.querySelector<HTMLButtonElement>('.settings-choice-option-main')!;
+
+    // 「当前这一份」由 is-active / aria-pressed 说话，它不是不可用。压成 disabled 会让
+    // 全局那条 `button:disabled { opacity: .55 }`（base.css:378-384）把这一行的字一起
+    // 调暗——用户截图里「已选中的那行发灰」就是这个。档案库那套选择菜单
+    // （SettingsValueControls 的 SettingsChoice）里选中行也从不禁用，两边要一个样子。
+    expect(installedMain.getAttribute('aria-pressed')).toBe('true');
+    expect(installedMain.hasAttribute('disabled')).toBe(false);
+    expect(installedMain).toBeEnabled();
+    // 可聚焦：选中行不该是键盘上的死胡同。
+    installedMain.focus();
+    expect(document.activeElement).toBe(installedMain);
+
+    // 点它不会又下一次：装的就是这一份，没有要下的东西。
+    await user.click(installedMain);
+    expect(adapter.mock.calls.filter(([command]) => command === 'dlssnr_download_variant')).toHaveLength(0);
+
+    // 没装上的那两条照旧可点：点行体就是下这一条（和下载按钮同一个动作）。
+    const otherMain = rows.find((row) => !row.classList.contains('is-active'))!.querySelector<HTMLButtonElement>('.settings-choice-option-main')!;
+    expect(otherMain).toBeEnabled();
+    await user.click(otherMain);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
+  });
+
+  it('disables the variant rows while one of them is coming down', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
+      dlssnr_download_variant: () => new Promise(() => { /* 停在下载中 */ }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
+
+    // 「下载中」才是真正的不可用：后端那条下载路径一次只跑一件，这时候再点没有意义。
+    await waitFor(() => expect(snippets.querySelector('.model-download-slot.is-open')).not.toBeNull());
+    const mains = [...snippets.querySelectorAll<HTMLButtonElement>('.settings-choice-option-main')];
+    expect(mains).toHaveLength(DLSSNR_CATALOG.variants.length);
+    mains.forEach((main) => expect(main).toBeDisabled());
   });
 
   it('offers the variants even before any snippet is installed', async () => {
@@ -238,8 +307,6 @@ describe('DLSS5 settings group', () => {
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
 
-    // 私有那套两行行式（strong + small）已经不在了。
-    expect(document.querySelector('.dlssnr-variant-copy')).toBeNull();
     const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
     expect(rows).toHaveLength(DLSSNR_CATALOG.variants.length);
     rows.forEach((row, index) => {
@@ -254,7 +321,6 @@ describe('DLSS5 settings group', () => {
     });
     // 行尾换成模型菜单那一套：没装上的挂下载按钮，装上的不挂；
     // 「已选择」徽标那行文字（使用中 / 体积）整行去掉。
-    expect(snippets.querySelector('.settings-row-note')).toBeNull();
     expect(rows[0]!.querySelector('button.select-option-download')).not.toBeNull();
     expect(rows[1]!.querySelector('button.select-option-download')).toBeNull();
     expect(rows[2]!.querySelector('button.select-option-download')).not.toBeNull();
@@ -311,6 +377,40 @@ describe('DLSS5 settings group', () => {
     expect(Object.keys(second!).sort()).toEqual(Object.keys(first!).sort());
   });
 
+  it('keeps adding layers up to the cap, then frees the button again after a layer is removed', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    // 层数是写回偏好的：用一个带状态的壳子，菜单画的是偏好里那一份而不是组件内的草稿。
+    function Harness() {
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES });
+      return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => ({ ...current, ...patch }))} visible /></ToastProvider>;
+    }
+    render(<Harness />);
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    const layerList = () => screen.getByRole('dialog', { name: 'DLSSNR 层数' });
+    const addButton = () => within(layerList()).getByRole('button', { name: '添加层' });
+    const layerButtons = () => within(layerList()).getAllByRole('button', { name: /^第 \d+ 层$/ });
+
+    // 用户要的是「能一路加到五层」，所以这里把 5 写死成本可见行为，不从常量推：
+    // 用 MAX_DLSSNR_PASSES 当循环上界的话，上限还是三层时这条测试照样绿。
+    for (const count of [2, 3, 4, 5]) {
+      expect(addButton()).toBeEnabled();
+      await user.click(addButton());
+      await waitFor(() => expect(within(layerList()).getByRole('button', { name: `第 ${count} 层` })).toBeInTheDocument());
+    }
+    expect(layerButtons()).toHaveLength(5);
+    // 到顶才禁用：这一条是用户举报的那个毛病（到不了第 4、5 层）。
+    expect(addButton()).toBeDisabled();
+
+    // 从 5 层减到 4 层之后必须重新可加：禁用按当前层数算，不是一次性的锁。
+    await user.click(within(layerList()).getByRole('button', { name: '第 5 层' }));
+    await user.click(within(await screen.findByRole('dialog', { name: '第 5 层' })).getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(addButton()).toBeEnabled());
+    expect(layerButtons()).toHaveLength(4);
+  });
+
   it('edits the selected layer without changing the other layer', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
@@ -359,8 +459,6 @@ describe('DLSS5 settings group', () => {
 
     const editor = await screen.findByRole('dialog', { name: '第 1 层' });
     // 标题已经写着「第 1 层」，内容区顶上再来一行同名小标题就是同一句话说两遍。
-    expect(within(editor).queryByText(/第 1 层/, { selector: '.settings-subgroup-title' })).toBeNull();
-    expect(document.querySelector('.settings-subgroup-title')).toBeNull();
     expect(within(editor).getAllByText(/第 1 层/)).toHaveLength(1);
     // 分组本体留着：标题没了，这一组仍然要按名字念得出来。
     expect(within(editor).getByRole('group', { name: '第 1 层' })).toBeInTheDocument();
@@ -580,6 +678,57 @@ describe('derived settings storage', () => {
     expect(ops.enabled).toBe(true);
     expect(ops.op.op).toBe('dlssnr');
     expect(parseRemoteOps('not json').op.op).toBe('upscale');
+  });
+
+  it('round-trips four and five saved layers and leaves the old three-layer data intact', () => {
+    // 上限从三层提到五层之后：老用户存下的两三层要原样读回来，新存下的四五层也不能被截掉。
+    // 每层用不同的 intensity 认人（style 只有 0–2，超出范围的那一份会被整段判成坏数据）。
+    const intensities = [1, 1.1, 1.2, 1.3, 1.4];
+    const layers = intensities.map((intensity) => ({
+      style: 0, intensity, localToneStrength: 1, localStructureStrength: 1, skinStructureStrength: 0, autoMask: false, uiCorrection: false,
+    }));
+
+    expect(parseDlssnrPasses(serializeDlssnrPasses(layers.slice(0, 3)))).toHaveLength(3);
+
+    const four = parseDlssnrPasses(serializeDlssnrPasses(layers.slice(0, 4)));
+    expect(four).toHaveLength(4);
+    expect(four.map((pass) => pass.intensity)).toEqual(intensities.slice(0, 4));
+
+    const five = parseDlssnrPasses(serializeDlssnrPasses(layers));
+    expect(five).toHaveLength(MAX_DLSSNR_PASSES);
+    expect(MAX_DLSSNR_PASSES).toBe(5);
+    expect(five.map((pass) => pass.intensity)).toEqual(intensities);
+
+    // 只有超过上限的部分才截掉。
+    expect(parseDlssnrPasses(serializeDlssnrPasses([...layers, layers[0]!]))).toHaveLength(MAX_DLSSNR_PASSES);
+  });
+
+  it('keeps four and five remote DLSSNR layers instead of dropping the whole op', () => {
+    /* 远端处理参数里还有第二份「层数」形状（`RemoteOpSchema.dlssnrPasses`）。它比本地那份
+       更容易被漏掉：上限在那里又写了一份常量 3，于是存 4/5 层时——写出去的时候
+       `serializeRemoteOps` 的 `.parse()` 直接抛错，读回来的时候 `parseRemoteOps` 静默回
+       `DEFAULT_REMOTE_OPS`（`enabled:false`、op 回 `upscale`），用户选的层参数一声不响地
+       消失。三处上限必须是同一个数。 */
+    const layers = [1, 2, 3, 4, 5].map((intensity) => ({ style: 1, intensity, autoMask: false }));
+    const stored = serializeRemoteOps({
+      enabled: true,
+      op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: layers },
+      pairedDevices: [],
+    });
+    const ops = parseRemoteOps(stored);
+    expect(ops.enabled).toBe(true);
+    expect(ops.op.op).toBe('dlssnr');
+    expect(ops.op.dlssnrPasses).toHaveLength(MAX_DLSSNR_PASSES);
+    expect(ops.op.dlssnrPasses.map((pass) => pass.intensity)).toEqual([1, 2, 3, 4, 5]);
+
+    // 超过上限的仍然只截到上限，而不是整段作废。
+    const over = parseRemoteOps(JSON.stringify({
+      enabled: true,
+      op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: [...layers, layers[0]!] },
+      pairedDevices: [],
+    }));
+    expect(over.enabled).toBe(true);
+    expect(over.op.dlssnrPasses).toHaveLength(MAX_DLSSNR_PASSES);
   });
 });
 

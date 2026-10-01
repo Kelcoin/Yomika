@@ -1,4 +1,4 @@
-//! 一张图的 DLSSNR 处理：上传 → 跑 1–3 个 NGX pass → 回读。
+//! 一张图的 DLSSNR 处理：上传 → 跑 1–5 个 NGX pass → 回读。
 //!
 //! 顺序（照 NGX 对这几个参数的读法来，反汇编复核过）：
 //! 输入颜色按 `NON_PIXEL_SHADER_RESOURCE`、输出按 `UNORDERED_ACCESS`，运动与深度

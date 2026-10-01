@@ -8,11 +8,10 @@ describe('EhWorkspace', () => {
     { id: 'eh-a', label: 'EH Main', host: 'e-hentai.org', cookieRef: 'ref-a', isActive: true, status: 'verified', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
   ];
 
-  it('renders account management without an EH search field', () => {
+  it('renders account management as a labelled region, not a heading', () => {
     render(<EhWorkspace accounts={sampleAccounts} />);
     expect(screen.getByLabelText('E-Hentai 账户')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'E-Hentai 账户' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('searchbox', { name: '搜索 E-Hentai' })).not.toBeInTheDocument();
   });
 
   it('hides every login control when an account is configured', () => {

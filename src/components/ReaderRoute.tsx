@@ -1,11 +1,11 @@
 import { usePageActive } from '../app/RetainedPage';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
-import { ReaderScreen } from './ReaderScreen';
+import { ReaderScreen, useReaderChrome } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
@@ -73,6 +73,46 @@ const DERIVED_SESSION_CEILING_BYTES = 256 * 1024 * 1024;
  * 见 `runDerivedQueue`。 */
 type DerivedTier = 'visible' | 'neighbour' | 'background';
 const DERIVED_TIER_ORDER: Record<DerivedTier, number> = { visible: 0, neighbour: 1, background: 2 };
+
+/** 加载态 / 失败态那条顶栏的外壳：和阅读态那两条栏共用 `useReaderChrome`。
+ *
+ * 为什么要有这层外壳：这条顶栏原来是一块常显的条，而加载完成后那两条栏会自己藏
+ * 起来——同一次进入阅读模式、同一块屏幕，前后却是两副样子。行为一致就不能有两份
+ * 实现，所以指针落点判定、出场动画、4.5s 自动隐藏都走阅读器那套共享件。
+ *
+ * 这一支还没有 `ReaderState`，所以「有没有被唤出」就放在这里的 `useState` 里：共享件
+ * 只吃一个布尔，不关心它从哪来。初值 `false`——进阅读模式的第一眼不该顶着一排控件。 */
+function ReaderRouteChromeShell({ className, title, goBack, children }: { className: string; title: string; goBack: () => void; children: ReactNode }) {
+  // 保留页在后台时不走表，和阅读态同一个理由。
+  const pageActive = usePageActive();
+  const rootRef = useRef<HTMLElement>(null);
+  const [chromeVisible, setChromeVisible] = useState(false);
+  const { topPresence, hoverTarget, setHover, handleCanvasClick, keepAlive, clearHover } = useReaderChrome({
+    rootRef,
+    visible: chromeVisible,
+    active: pageActive,
+    onToggle: () => setChromeVisible((value) => !value),
+    onHide: () => setChromeVisible(false),
+  });
+  return (
+    <main
+      className={`reader-screen ${className}`}
+      ref={rootRef}
+      onClick={handleCanvasClick}
+      // 与阅读态同一条判定：指针落进上/下感应带（或栏本身）才唤出，画面中部不动它。
+      onMouseMove={(event) => setHover(hoverTarget(event))}
+      onMouseLeave={clearHover}
+    >
+      {topPresence.mounted && (
+        <header className={`reader-error-bar${topPresence.leaving ? ' is-leaving' : ''}`} onClick={keepAlive}>
+          <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
+          <strong>{title}</strong>
+        </header>
+      )}
+      {children}
+    </main>
+  );
+}
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
@@ -981,18 +1021,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // The canvas holds the message and a retry icon, and leaving
     // is the top bar's job rather than a second competing button.
     return (
-      <main className="reader-screen reader-screen-error">
-        <header className="reader-error-bar">
-          <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-          <strong>{title}</strong>
-        </header>
+      <ReaderRouteChromeShell className="reader-screen-error" title={title} goBack={goBack}>
         <section className="reader-error">
           <p role="alert">{error}</p>
           <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={() => setRetryToken((value) => value + 1)}>
             <RotateCcw aria-hidden="true" />
           </button>
         </section>
-      </main>
+      </ReaderRouteChromeShell>
     );
   }
   // Not just a placeholder: clearing `pages` above when `archiveId` changes routes
@@ -1003,16 +1039,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // 加载态带的是和失败态同一条顶栏：这一支原来只画一个转圈，而阅读器的 chrome
   // 要等第一页到达才唤得出来，于是「加载慢/卡住就退不出去」。顶栏的样式沿用
   // `.reader-error-bar`（同一条 M3 small top app bar，见 `src/styles/reader.css`
-  // 里 `.reader-screen-loading:has(.reader-error-bar)` 那条规则）。
+  // 里 `.reader-screen-loading:has(.reader-error-bar)` 那条规则），行为则和加载完成后
+  // 那两条栏一样是**默认隐藏、落到带上才出现**（用户报的 ③）。
   if (pages.length === 0) {
     return (
-      <main className="reader-screen reader-screen-loading">
-        <header className="reader-error-bar">
-          <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-          <strong>{title}</strong>
-        </header>
+      <ReaderRouteChromeShell className="reader-screen-loading" title={title} goBack={goBack}>
         <LoadingIndicator label="正在加载页面" size="lg" />
-      </main>
+      </ReaderRouteChromeShell>
     );
   }
   return (

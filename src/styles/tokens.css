@@ -360,8 +360,11 @@
        28px shell leaves a visibly oval corner (that was the user's report).
        When a panel's bottom padding is cut on purpose (see the
        `.settings-choice-panel:has(...)` rule in shell.css) the bottom inset is
-       smaller than the sides — one radius cannot be concentric on all four
-       edges at once; the side/top inset is the one that decides. -------------- */
+       smaller than the sides, so the *last* row needs a second radius for its
+       two bottom corners — `calc(var(--radius-overlay) - 8.7px)`, where 8.7px is
+       that reduced inset measured in the probe (1px border + `--space-1` + the
+       scroll container's own slack). Every other row keeps the single
+       `--radius-card`. ------------------------------------------------ */
     --radius-control: 8px;
     --radius-card: 12px;
     --radius-overlay: 28px;

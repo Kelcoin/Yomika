@@ -14,7 +14,7 @@ import { ArchiveDetailRoute } from './ArchiveDetailRoute';
  * 类名与档案库那套（`.library-shell*`）复用：窄屏的「详情占满、列表先收起来」就是
  * 同一份 CSS，页面在手机上仍然是钻进去再退回来。（列表由调用方作为 children
  * 传进来，这一层只管那一栏怎么摆。） */
-export function ShelfShell({ name, children }: { name: string; children: ReactNode }) {
+export function ShelfShell({ name, detailBasePath, children }: { name: string; /** 详情栏里那些卡片（推荐条）要落在哪个路由下：书架自己的前缀，由路由表传进来。 */ detailBasePath: string; children: ReactNode }) {
   const { archiveId } = useParams();
   const layout = useDefaultLayout({
     id: `shelf-shell-split-${name}`,
@@ -26,7 +26,7 @@ export function ShelfShell({ name, children }: { name: string; children: ReactNo
     <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
       <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-list-${name}`} defaultSize="58" minSize="40"><section className="library-shell-list">{children}</section></Panel>
       {archiveId && <Separator className="panel-separator" />}
-      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-detail-${name}`} defaultSize="42" minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} /></section></Panel>}
+      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-detail-${name}`} defaultSize="42" minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} detailBasePath={detailBasePath} /></section></Panel>}
     </Group>
   );
 }

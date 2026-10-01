@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -30,10 +29,10 @@ const metadata = {
   size: 1024,
 };
 
-function renderDetail() {
+function renderDetail(detailBasePath?: string) {
   return render(
     <MemoryRouter>
-      <ArchiveDetailRoute archiveId="archive-a" />
+      <ArchiveDetailRoute archiveId="archive-a" {...(detailBasePath ? { detailBasePath } : {})} />
     </MemoryRouter>,
   );
 }
@@ -525,6 +524,26 @@ describe('archive detail route', () => {
     const rail = await screen.findByRole('region', { name: '推荐' });
     expect(within(rail).getByRole('link', { name: /Kept recommendation/ })).toBeInTheDocument();
     expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps recommendation cards inside the page that owns the detail', async () => {
+    // 推荐条里的卡片从前一律指向 `/library/:id`：首页或书架的详情栏点一条推荐，
+    // 左边那一栏会跟着换成档案库——与「谁的详情谁来持有」正好相反。
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'list_archives_page') return { ok: true, value: { items: [
+        { serverId: server.id, archiveId: 'kept', title: 'Kept recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
+      ], total: 1, hasMore: false } };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderDetail('/home');
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    expect(await within(rail).findByRole('link', { name: /Kept recommendation/ })).toHaveAttribute('href', '/home/kept?server=server-a');
   });
 
   it('reuses the recommendations it already searched for on a second visit', async () => {

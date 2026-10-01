@@ -1003,7 +1003,7 @@ describe('settings workspace', () => {
     // 槽是常驻的，出现/消失靠 is-open：卸载的节点没有过渡可放。
     expect(status?.closest('.model-download-slot')).toHaveClass('is-open');
     // 右边不写百分比：条的长短已经把话说完了。
-    expect(menu.querySelector('.model-download-percent')).toBeNull();
+    expect(status?.textContent ?? '').not.toContain('%');
     expect(status).toHaveAttribute('role', 'progressbar');
     // 后端还没报总数时是不定量条：没有 aria-valuenow，走扫光。
     expect(status).not.toHaveAttribute('aria-valuenow');
@@ -1637,6 +1637,66 @@ describe('settings workspace', () => {
     await vi.waitFor(() => {
       expect(document.getElementById('yomika-custom-css')?.textContent).toBe(celadon.css);
     });
+  });
+
+  it('clears a picked basic color scheme on the way into the advanced editor, and keeps CSS the user wrote', async () => {
+    const user = userEvent.setup();
+    const loaded = { ...DEFAULT_PREFERENCES, customCss: '' };
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+
+    renderSettings('appearance');
+    await user.click(await screen.findByRole('button', { name: '自定义' }));
+    const menu = await screen.findByRole('dialog', { name: '自定义' });
+
+    // 基础层的卡片写进的就是 customCss 本身，所以那张「选中的基础配色」进了高级编辑器
+    // 就会变成一段没人写过的正文。它得被清掉，框里空着等用户写。
+    await user.click(within(menu).getByRole('button', { name: /青瓷/ }));
+    await user.click(within(menu).getByRole('button', { name: '高级' }));
+    expect(await within(menu).findByRole('textbox', { name: '自定义 CSS' })).toHaveValue('');
+
+    // 反过来，用户自己在高级里写的 CSS 不等于任何一套基础配色，来回切层级不能动它。
+    const own = ':root { --brand-vermilion: #1f6f8b; }';
+    fireEvent.change(within(menu).getByRole('textbox', { name: '自定义 CSS' }), { target: { value: own } });
+    await user.click(within(menu).getByRole('button', { name: '基础' }));
+    await user.click(within(menu).getByRole('button', { name: '高级' }));
+    expect(within(menu).getByRole('textbox', { name: '自定义 CSS' })).toHaveValue(own);
+  });
+
+  it('keeps a menu open when a drag that started inside it ends outside', async () => {
+    const user = userEvent.setup();
+    const loaded = { ...DEFAULT_PREFERENCES, customCss: '' };
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: loaded };
+      if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+
+    renderSettings('appearance');
+    await user.click(await screen.findByRole('button', { name: '自定义' }));
+    const menu = await screen.findByRole('dialog', { name: '自定义' });
+    await user.click(within(menu).getByRole('button', { name: '高级' }));
+    const textarea = await within(menu).findByRole('textbox', { name: '自定义 CSS' });
+    const overlay = document.querySelector('.settings-choice-overlay');
+    if (!overlay) throw new Error('自定义菜单没有渲染出遮罩');
+
+    // textarea 右下角的原生缩放柄：按下落在面板里，松开时指针已经出了面板。浏览器会为这
+    // 一对补一次 click，落点是按下与松开的最近公共祖先——也就是遮罩本身。它和「点外面」
+    // 长得一模一样，只有按下时的落点分得开，所以菜单不能因此关掉。
+    fireEvent.pointerDown(textarea);
+    fireEvent.click(overlay);
+    expect(screen.getByRole('dialog', { name: '自定义' })).toBeInTheDocument();
+
+    // 真在遮罩上按下、又在遮罩上松开（点外面）仍然是「点外面」，菜单要关。
+    fireEvent.pointerDown(overlay);
+    fireEvent.click(overlay);
+    expect(screen.queryByRole('dialog', { name: '自定义' })).not.toBeInTheDocument();
+    await settle();
   });
 });
 

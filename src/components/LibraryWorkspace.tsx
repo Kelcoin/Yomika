@@ -1,7 +1,7 @@
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, CalendarClock, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
@@ -16,7 +16,7 @@ import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, 
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverRatio, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberWideCoverMark, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
 import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -148,6 +148,27 @@ function scrollHost(list: HTMLElement | null, root: HTMLElement): HTMLElement | 
   return fallback ?? list ?? undefined;
 }
 
+/** The element that will actually move for a gesture that starts on `target`:
+ * the nearest scrollable ancestor with content left to scroll.
+ *
+ * The ends cannot be judged by whatever the pull is bound to. On compact — and
+ * behind the shelves — the list is exactly as tall as its content, so its
+ * scrollTop is 0 for good while the page outside it scrolls. Read there, every
+ * notch looked like it had gone past the top: the list bounced on every wheel
+ * and asked for a refresh from the middle of the list. The gesture's own target
+ * is the one element that knows which scroller it is about to move.
+ *
+ * Undefined means nothing under the cursor can scroll — then the list is its own
+ * top and bottom at once, and only the top has anything to ask for. The host is
+ * still consulted as a fallback: the panel gutters forward their wheel to the
+ * list, and that list is the scroller those notches belong to. */
+function gestureScroller(target: EventTarget | null, fallback: HTMLElement): HTMLElement | undefined {
+  for (let current = target instanceof Element ? target as HTMLElement : null; current; current = current.parentElement) {
+    if (scrollsVertically(current) && overflows(current)) return current;
+  }
+  return scrollsVertically(fallback) && overflows(fallback) ? fallback : undefined;
+}
+
 /** One shared empty set, so the uncontrolled case does not allocate per render. */
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
@@ -251,6 +272,19 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
+/** 页面被 `RetainedPage` 收起来时是 `display:none`：滚动容器量到的高度是 0，虚拟列表
+ * 只剩最前面一两行（有时一行不剩），整屏的行跟着卸载——封面句柄一放手、URL 就被
+ * 撤销，回到前台重新挂载只能从骨架开始。一整屏封面同时闪一下，就是用户报的那条。
+ * 所以「同一个列表的行数没变、窗口里的行却突然塌了一大截」时不跟着塌：沿用上一次
+ * 非空的那批行（藏起来时也不画，没有额外开销）。真空了（换了筛选、库里没有东西）
+ * 或者只是窗口拖小了零星一行，就照实渲染，免得留着一批已经没有数据的卡片。 */
+function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): { items: T[]; totalSize: number } {
+  const previous = useRef({ items, totalSize, count });
+  if (items.length > 0) previous.current = { items, totalSize, count };
+  const collapsed = previous.current.count === count && previous.current.items.length - items.length >= 2;
+  return collapsed ? previous.current : { items, totalSize };
+}
+
 export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
@@ -263,7 +297,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     return () => window.clearTimeout(timer);
   }, [archives.length, listLoading, skeletonVisible]);
   const [editingMetadata, setEditingMetadata] = useState(false);
-  const [historyJumpOpen, setHistoryJumpOpen] = useState(false);
   /** Which tick of the quick-jump rail the reader is looking at, as an index
    * into `railSegments`. Only written when the tick changes. */
   const [railActive, setRailActive] = useState(0);
@@ -306,6 +339,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    * stays mounted; the cap only ever drops a hint (the class falls back until
    * that cover reports its ratio again). */
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
+  /** 上面这份组件态一到路由切换（这个工作区被重新挂载）就没了：回到档案库先按窄卡
+   * 排一遍，等封面 load 出比例才翻成宽卡——整屏重排就是用户看到的那一下闪烁。
+   * `archiveCardPresentation` 里那份按 (服务器, archiveId) 记的模块级记录跨路由活着
+   * （有 4096 条上限，见那里的取舍），所以宽窄取「本次量到的」或「上次记下的」：
+   * 同一个 archiveId 换台服务器不会串味，因为键里带着 serverId。 */
+  const isWideCover = useCallback((archive: ArchiveRecord) => (
+    wideCoverIds.has(archive.archiveId) || isWideCoverMarked(archive.serverId, archive.archiveId)
+  ), [wideCoverIds]);
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
   /** How far the list is dragged past its ends, in on-screen pixels: positive
@@ -376,7 +417,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   //
   // It is resolved into state rather than looked up per event: the host changes
   // with the layout and not with the gesture, and reading computed styles on
-  // every wheel notch is work the compositor thread does not need.
+  // every wheel notch is work the compositor thread does not need. The host only
+  // decides who listens — which end a notch is past is asked per gesture, from
+  // the event's own target (see gestureScroller).
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
@@ -396,8 +439,15 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const wheel = (event: WheelEvent) => {
       // Deltas arrive in pixels, lines or pages; a line is about 16px.
       const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-      const beyondTop = delta < 0 && host.scrollTop <= 0;
-      const beyondBottom = delta > 0 && host.scrollTop + host.clientHeight >= host.scrollHeight - 1;
+      // 每次手势重新问一次「这一格滚轮会滚谁」：绑定的宿主只决定谁收到事件，
+      // 而档位一换（例如转成紧凑档）列表就可能不再是那个会动的元素。
+      const scroller = gestureScroller(event.target, host);
+      const position = scroller ?? host;
+      const beyondTop = delta < 0 && position.scrollTop <= 0;
+      // 没有东西可滚时列表自己既是顶又是底：只有顶能要刷新，向下的那一格没有
+      //「底部」可越——先前把它当底部拖，用户看到的就是每次滚轮都回弹一下。
+      const beyondBottom = delta > 0 && scroller !== undefined
+        && position.scrollTop + position.clientHeight >= position.scrollHeight - 1;
       if (!beyondTop && !beyondBottom) {
         // Ordinary scrolling: a gesture in flight is abandoned, not fired.
         if (overscrollRef.current !== 0 || overscrollSettleTimer.current !== undefined) cancelOverscroll();
@@ -419,9 +469,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const touchStart = (event: TouchEvent) => {
       // The end the finger lands on is the only one it may pull past; anywhere
       // else the scroller needs the finger for its own scrolling.
-      const edge = host.scrollTop <= 0
+      const position = gestureScroller(event.target, host) ?? host;
+      const edge = position.scrollTop <= 0
         ? 'top'
-        : host.scrollTop + host.clientHeight >= host.scrollHeight - 1 ? 'bottom' : undefined;
+        : position.scrollTop + position.clientHeight >= position.scrollHeight - 1 ? 'bottom' : undefined;
       overscrollEdge.current = edge;
       overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
     };
@@ -500,16 +551,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       starts.set(index, entry.dayLabel || entry.date);
     });
     return starts;
-  }, [filteredArchives, timelineByArchiveId]);
-  const historyMonths = useMemo(() => {
-    if (!timelineByArchiveId) return [];
-    const seen = new Set<string>();
-    return filteredArchives.flatMap((archive, index) => {
-      const month = timelineByArchiveId.get(archive.archiveId)?.date.slice(0, 7);
-      if (!month || seen.has(month)) return [];
-      seen.add(month);
-      return [{ month, index }];
-    });
   }, [filteredArchives, timelineByArchiveId]);
   /** 轨道的刻度：越靠近当前时间，一个刻度代表的时间跨度越小。
    *
@@ -647,9 +688,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const gridColumns = getArchiveGridColumns(gridWidth || 720);
   const gridRows = useMemo(
     () => (displayMode === 'thumbnail'
-      ? packArchiveGridRows(filteredArchives, gridColumns, (archive) => wideCoverIds.has(archive.archiveId))
+      ? packArchiveGridRows(filteredArchives, gridColumns, isWideCover)
       : []),
-    [displayMode, filteredArchives, gridColumns, wideCoverIds],
+    [displayMode, filteredArchives, gridColumns, isWideCover],
   );
   const thumbnailRows = useVirtualizer({
     count: gridRows.length,
@@ -658,6 +699,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscan: 2,
     initialRect: { width: 720, height: 560 },
   });
+  // 藏起来时别把整屏的行塌掉（见 `useStableVirtualRows`）。两个虚拟列表各调一次，
+  // 永远按同一个顺序调用，钩子位置是稳的。
+  const shownListRows = useStableVirtualRows(rows.getVirtualItems(), rows.getTotalSize(), filteredArchives.length);
+  const shownThumbnailRows = useStableVirtualRows(thumbnailRows.getVirtualItems(), thumbnailRows.getTotalSize(), gridRows.length);
 
   /** What a shift click extends from: the last row the user touched. */
   const selectionAnchor = useRef<string>();
@@ -740,7 +785,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const press = onArchiveContextMenu
       ? longPressHandlers((at) => onArchiveContextMenu(archive, at))
       : {};
-    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => withWideCoverMark(current, archive.archiveId, isWideCoverRatio(ratio)))} eager={eager} />;
+    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => {
+      // 量到的比例既留在本次会话（组件态，立刻重排），也记进跨路由的那份记录。
+      rememberWideCoverMark(archive.serverId, archive.archiveId, isWideCoverRatio(ratio));
+      setWideCoverIds((current) => withWideCoverMark(current, archive.archiveId, isWideCoverRatio(ratio)));
+    }} eager={eager} />;
     const pressed = selectedId !== undefined && archive.archiveId === selectedId;
     return (
     <>
@@ -801,7 +850,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             卡片自己的 overflow: hidden + border-radius 把横条两端削成与卡片下缘
             一致的圆角，而这只有横条横跨整张卡时才成立（放在 .archive-row-copy 里
             它只能贴到文案栏的底边，两端是直角，右侧还差一个卡片内边距）。 */}
-        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} />
+        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} cornerAware />
       </button>
     )}
     {/* The timeline belongs to the list rail, so it sits outside the clickable
@@ -943,6 +992,28 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       )}
       <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={savedPanelLayout.defaultLayout} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
         <Panel className="library-list-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
+          {/* 刻度条挂在列表外面（面板这一层）。绝对定位的子元素如果留在滚动容器里，
+              会跟着内容一起滚，居中就随滚动漂走——它得站在「看得见的那一段」的
+              中线上，那正是这一层的高度。 */}
+          {!compact && displayMode === 'wide' && railSegments.length > 1 && (
+            <div className="archive-quick-rail" role="group" aria-label="历史快速跳转">
+              <div className="archive-quick-rail-track" style={{ '--rail-ticks': railSegments.length } as CSSProperties}>
+                {railSegments.map((segment, position) => (
+                  <button
+                    key={`${segment.index}-${segment.label}`}
+                    className={`archive-quick-rail-tick${position === railActive ? ' is-active' : ''}`}
+                    type="button"
+                    title={segment.label}
+                    aria-label={`跳转到 ${segment.label}`}
+                    aria-current={position === railActive ? 'true' : undefined}
+                    onClick={() => { rows.scrollToIndex(segment.index, { align: 'start', behavior: 'smooth' }); setRailActive(position); }}
+                  >
+                    <span className="archive-quick-rail-label" aria-hidden="true">{segment.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div
             className={`archive-list ${displayMode === 'thumbnail' ? 'is-thumbnail' : ''} ${displayMode === 'wide' ? 'is-wide' : ''} ${timelineByArchiveId ? 'has-timeline' : ''}`}
             data-scroll-region
@@ -967,35 +1038,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                refresh button any more — so the wheel and the finger are the only
                way to ask for it. */
           >
-            {/* 桌面用右侧的刻度条跳转；手机那一档轨线整列都不画，刻度条没有落点，
-                所以保留原来的日历下拉（两种入口不会同时出现）。 */}
-            {!compact && displayMode === 'wide' && railSegments.length > 1 && (
-              <div className="archive-quick-rail" role="group" aria-label="历史快速跳转">
-                <div className="archive-quick-rail-track">
-                  {railSegments.map((segment, position) => (
-                    <button
-                      key={`${segment.index}-${segment.label}`}
-                      className={`archive-quick-rail-tick${position === railActive ? ' is-active' : ''}`}
-                      type="button"
-                      title={segment.label}
-                      aria-label={`跳转到 ${segment.label}`}
-                      aria-current={position === railActive ? 'true' : undefined}
-                      onClick={() => { rows.scrollToIndex(segment.index, { align: 'start', behavior: 'smooth' }); setRailActive(position); }}
-                    >
-                      <span className="archive-quick-rail-label" aria-hidden="true">{segment.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {compact && historyMonths.length > 1 && (
-              <div className="history-quick-jump">
-                <button className="icon-action" type="button" aria-label="跳转到历史时间" title="跳转到历史时间" aria-expanded={historyJumpOpen} onClick={() => setHistoryJumpOpen((open) => !open)}><CalendarClock aria-hidden="true" /></button>
-                {historyJumpOpen && <div className="history-quick-jump-menu" role="group" aria-label="选择历史时间">
-                  {historyMonths.map(({ month, index }) => <button key={month} type="button" onClick={() => { rows.scrollToIndex(index, { align: 'start', behavior: 'smooth' }); setHistoryJumpOpen(false); }}>{month}</button>)}
-                </div>}
-              </div>
-            )}
             {/* The refresh's feedback, pinned over the list rather than carried
                 by it: the list springs back on release and this stays on top,
                 spinning, until the request ends. Sticky inside the panel, so it
@@ -1029,8 +1071,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               {filteredArchives.length === 0 && !listLoading && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
               {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} timeline={Boolean(timelineByArchiveId)} exiting={!listLoading} /></div>}
               {displayMode === 'thumbnail' ? (
-                <div className="archive-list-inner" style={{ height: thumbnailRows.getTotalSize() }}>
-                  {thumbnailRows.getVirtualItems().map((virtualRow) => (
+                <div className="archive-list-inner" style={{ height: shownThumbnailRows.totalSize }}>
+                  {shownThumbnailRows.items.map((virtualRow) => (
                     <div
                       className="archive-thumb-grid-row"
                       key={virtualRow.key}
@@ -1038,7 +1080,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     >
                       {(gridRows[virtualRow.index] ?? []).map((archive) => (
                         <div
-                          className={`archive-row-wrap${wideCoverIds.has(archive.archiveId) ? ' is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
+                          className={`archive-row-wrap${isWideCover(archive) ? ' is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
                           key={archive.archiveId}
                           role="listitem"
                         >
@@ -1049,13 +1091,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   ))}
                 </div>
               ) : (
-              <div className="archive-list-inner" style={{ height: rows.getTotalSize() }}>
-                {rows.getVirtualItems().map((row) => {
+              <div className="archive-list-inner" style={{ height: shownListRows.totalSize }}>
+                {shownListRows.items.map((row) => {
                   const archive = filteredArchives[row.index];
                   if (!archive) return null;
                   return (
                     <div
-                      className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
+                      className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${isWideCover(archive) ? 'is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
                       key={archive.archiveId}
                       role="listitem"
                       // Every row is its own card; the wrap only carries the 8px
@@ -1182,14 +1224,29 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
   const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const handleRef = useRef<ImageHandle>();
+  /** 放手时要用**当时**那个回调：`onRelease` 换了新的，旧句柄还是旧回调领回来的。 */
+  const releaseRef = useRef(onRelease);
+  useEffect(() => { releaseRef.current = onRelease; }, [onRelease]);
+  /** 手上那个句柄放手的地方。同一张封面要重新取图时新旧句柄在下面交接，交给新句柄
+   * 之后再放手旧的——中间这几帧里 URL 不会被撤销，图不会先黑一下再回来。 */
+  const releaseHandle = useRef(() => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    handleRef.current = undefined;
+    releaseRef.current?.(handle);
+  });
+  // 卸载时放手最后一次。effect 重跑（返回新对象的那次后台重读）不放手：URL 一被撤销，
+  // 这一帧的图就没了——那正是回到档案库时封面先闪一下骨架的来源。
+  useEffect(() => () => releaseHandle.current(), []);
   useEffect(() => {
     if (!onLoad || !ref.current) return undefined;
     let active = true;
     let retryTimer: number | undefined;
     let observer: IntersectionObserver | undefined;
     const controller = new AbortController();
-    setSrc(undefined);
-    setFailed(false);
+    // 不在这里 `setSrc(undefined)`：这张卡片从挂载起就只对着一条档案（调用点按
+    // archiveId 给 key），effect 重跑只可能是重试或同一条档案换了对象，把已经画出来
+    // 的图撤掉就等于自己闪自己一下。
 
     const start = () => {
       void onLoad(archive, controller.signal).then((handle) => {
@@ -1198,7 +1255,9 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
           return;
         }
         if (handle) {
+          const previous = handleRef.current;
           handleRef.current = handle;
+          if (previous) onRelease?.(previous);
           setSrc(handle.url);
         } else if (retry < 2) {
           retryTimer = window.setTimeout(() => setRetry((value) => value + 1), 1200 * (retry + 1));
@@ -1225,8 +1284,6 @@ function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = fals
       controller.abort();
       observer?.disconnect();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      if (handleRef.current) onRelease?.(handleRef.current);
-      handleRef.current = undefined;
     };
   }, [archive, eager, onLoad, onRelease, retry]);
   return <div ref={ref} className={`archive-row-thumb${src ? '' : ` is-skeleton${failed ? ' is-failed' : ''}`}`}>{src ? <img src={src} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" onLoad={(event) => {

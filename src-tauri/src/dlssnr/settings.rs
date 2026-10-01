@@ -7,8 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 最多几层（同一张图串行跑几个 NGX pass；三层往上收益很小、耗时线性涨）。
-pub const MAX_PASS_COUNT: u32 = 3;
+/// 最多几层（同一张图串行跑几个 NGX pass）。这个数与前端
+/// `nativeDlssnrRepository.ts` 的 `MAX_DLSSNR_PASSES` 必须一致：否则界面加得上的层
+/// 数到了这里被截掉，用户看到的层数与真正跑掉的层数就对不上了。
+pub const MAX_PASS_COUNT: u32 = 5;
 pub const DEFAULT_PASS_COUNT: u32 = 1;
 
 /// 一层 DLSSNR 的参数。
@@ -63,7 +65,7 @@ fn clamp_strength(value: f32) -> f32 {
     }
 }
 
-/// 一次处理要跑的整套参数：1–3 层，逐层叠加。
+/// 一次处理要跑的整套参数：1–5 层，逐层叠加。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DlssnrSettings {
@@ -122,16 +124,30 @@ mod tests {
                 PassSettings::default(),
                 PassSettings::default(),
                 PassSettings::default(),
+                PassSettings::default(),
+                PassSettings::default(),
             ],
         }
         .normalized();
-        assert_eq!(settings.passes.len(), MAX_PASS_COUNT as usize, "最多三层");
+        assert_eq!(settings.passes.len(), MAX_PASS_COUNT as usize, "最多五层");
         assert_eq!(settings.passes[0].style, 2, "风格只有 0–2");
         assert_eq!(settings.passes[0].intensity, 2.0);
         assert_eq!(settings.passes[0].skin_structure_strength, 1.0, "非数落回默认");
 
         let empty = DlssnrSettings { passes: Vec::new() }.normalized();
         assert_eq!(empty.pass_count(), 1, "一层都没有时补一层默认");
+    }
+
+    #[test]
+    fn normalization_keeps_five_layers_and_drops_only_beyond_the_cap() {
+        // 上限是五层：四层、五层都得原样留着，只有第六层才该被截掉。
+        let four = DlssnrSettings { passes: vec![PassSettings::default(); 4] }.normalized();
+        assert_eq!(four.passes.len(), 4, "四层原样留着");
+        assert_eq!(four.pass_count(), 4);
+
+        let five = DlssnrSettings { passes: vec![PassSettings::default(); 5] }.normalized();
+        assert_eq!(five.passes.len(), 5, "五层原样留着");
+        assert_eq!(five.pass_count(), 5);
     }
 
     #[test]

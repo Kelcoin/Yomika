@@ -416,7 +416,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         archiveId: archive.archiveId,
         rendition: 'cover',
         pageIndex: 0,
-      }, signal ? { signal } : {});
+      }, { retain: true, ...(signal ? { signal } : {}) });
     } catch {
       return undefined;
     }

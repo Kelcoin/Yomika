@@ -1215,7 +1215,19 @@ export function SettingsWorkspace() {
                 {/* 两个层级：基础只挑配色，高级保留完整的 CSS 覆盖面。 */}
                 <div className="settings-menu-mode" role="group" aria-label="自定义方式">
                   <button type="button" className={`settings-menu-mode-button${appearanceMode === 'basic' ? ' is-active' : ''}`} aria-pressed={appearanceMode === 'basic'} onClick={() => setAppearanceMode('basic')}>基础</button>
-                  <button type="button" className={`settings-menu-mode-button${appearanceMode === 'advanced' ? ' is-active' : ''}`} aria-pressed={appearanceMode === 'advanced'} onClick={() => setAppearanceMode('advanced')}>高级</button>
+                  <button
+                    type="button"
+                    className={`settings-menu-mode-button${appearanceMode === 'advanced' ? ' is-active' : ''}`}
+                    aria-pressed={appearanceMode === 'advanced'}
+                    onClick={() => {
+                      // 基础层的卡片写进的正是 customCss 这个字段本身（见下面的卡片 onClick），
+                      // 所以「选中的那套基础配色」一进高级编辑器就成了一段没人写过的正文。它不
+                      // 是用户的 CSS，清掉：高级的框该空着等用户写。用户自己在高级里写的
+                      // （不等于任何一套基础配色）保持原样。
+                      if (COLOR_SCHEMES.some((scheme) => scheme.css === preferenceDraft.customCss)) editPreferences({ customCss: '' });
+                      setAppearanceMode('advanced');
+                    }}
+                  >高级</button>
                 </div>
                 {appearanceMode === 'basic' ? (
                   <div className="custom-scheme-grid">

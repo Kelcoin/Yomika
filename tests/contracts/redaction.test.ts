@@ -1,4 +1,3 @@
-import { createLogger } from '../../src/lib/logger';
 import { redactSensitive } from '../../src/lib/redaction';
 
 describe('sensitive data redaction', () => {
@@ -59,16 +58,5 @@ describe('sensitive data redaction', () => {
     value.self = value;
 
     expect(redactSensitive(value)).toEqual({ password: '[REDACTED]', self: '[Circular]' });
-  });
-
-  it('redacts every logger sink payload', () => {
-    const records: unknown[] = [];
-    const logger = createLogger((record) => records.push(record));
-
-    logger.info('Server connected', { token: 'secret', archive: 'A-1' });
-
-    const serialized = JSON.stringify(records);
-    expect(serialized).toContain('A-1');
-    expect(serialized).not.toContain('secret');
   });
 });

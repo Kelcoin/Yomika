@@ -38,7 +38,7 @@ interface Props {
   visible: boolean;
 }
 
-/** DLSSNR 设置组：组件、开关与 1–3 层参数。 */
+/** DLSSNR 设置组：组件、开关与 1–5 层参数。 */
 export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: Props) {
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeDlssnrRepository(), []);
@@ -211,13 +211,20 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           return <div className={`settings-choice-option${installed ? ' is-active' : ''}`} key={variant.id}>
             {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
                 鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
+            {/* 「已装上」= 「当前就用这一份」，不是不可用：它和档案库/设置里那些选择菜单的
+                选中行是同一个状态（SettingsChoice 里选中行也从不 disabled），交给 is-active
+                与 aria-pressed 说。一旦写成 disabled，全局那条
+                `button:disabled { opacity: .55 }`（base.css:378-384）就会把这一行的字一起
+                压暗——用户看见的正是「已选中的那行文字发灰」。真不可用的只有「正在下载」
+                这一刻（后端那条下载路径一次只跑一件）。 */}
             <button
               className="settings-choice-option-main"
               type="button"
-              disabled={installed || downloading !== undefined}
+              disabled={downloading !== undefined}
               aria-pressed={installed}
               title={variant.note || '下载后会被校验再装上'}
-              onClick={() => void downloadVariant(variant.id)}
+              // 已经是这一份就没有要下的东西：直接什么都不做，别把同一条再下一遍。
+              onClick={() => { if (installed) return; void downloadVariant(variant.id); }}
             >
               <span>{label}</span>
             </button>
@@ -238,7 +245,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       </div>
       </SettingsMenu>}
 
-      {/* 层数：同一张图串行跑几个 pass（1–3 层，往上收益很小）。 */}
+      {/* 层数：同一张图串行跑几个 pass（1–5 层，往上收益很小，耗时线性涨）。 */}
       <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
       {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} icon={<Layers />} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
       {selectedLayer === undefined ? <>

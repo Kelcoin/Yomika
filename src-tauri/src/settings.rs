@@ -187,7 +187,7 @@ pub struct PreferenceSnapshot {
     pub tag_translation_enabled: bool,
     #[serde(default = "default_true")]
     pub tag_count_order_enabled: bool,
-    /// DLSSNR：在阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染（仅 Windows 桌面、
+    /// DLSSNR：在阅读器里对这一页跑 1–5 层 NVIDIA 的神经渲染（仅 Windows 桌面、
     /// 且装了 DLL、检测通过时设置页才显示这一组）。
     #[serde(default)]
     pub dlssnr_enabled: bool,

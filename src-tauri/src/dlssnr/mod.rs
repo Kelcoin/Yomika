@@ -3,11 +3,11 @@
 //! 这是桌面端把一页图交给 NVIDIA 的神经渲染网络做一次同分辨率增强的路径：读入
 //! RGBA、把图与运动/深度引导传进 NGX、取回增强后的 RGBA。参数、风格与多层叠加
 //! 都走 NGX 自己的参数表（`DLSSNR.Style` / `DLSSNR.Intensity` / … ），多层就是同一
-//! 张图串行跑 1–3 个 pass。
+//! 张图串行跑 1–5 个 pass。
 //!
 //! 三个入口：
 //! * [`status`]：这台机器能不能用（显卡、装的是哪一种 DLL、NGX 自己的判定）。
-//! * [`apply`]：把一页图跑一遍（`PassSettings` 列表，1–3 层）。
+//! * [`apply`]：把一页图跑一遍（`PassSettings` 列表，1–5 层）。
 //! * [`install`]：把用户手上的某个 `nvngx_dlssnr.dll` 装进数据目录。
 //!
 //! 只做 Windows：这条路径建立在 DXGI / D3D12 / NGX 上，其它平台编译时整个模块

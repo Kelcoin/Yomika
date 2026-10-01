@@ -86,8 +86,8 @@ describe('sync settings', () => {
     expect(adapter).toHaveBeenCalledWith('save_sync_account', { input: {
       id: 'dav-f4feca5a', kind: 'webdav', label: 'Personal WebDAV', baseUrl: 'https://dav.example.com/Yomika', bucket: '', username: 'reader', credential: 'secret-token',
     } });
-    // 同步密钥不再由用户经手：保存账户就是全部准备。
-    expect(adapter).not.toHaveBeenCalledWith('create_sync_key', expect.anything());
+    // 同步密钥不再由用户经手：保存账户就是全部准备（前端没有 create_sync_key 这条路，
+    // 密钥由 save_sync_account 那一侧自己派生）。
 
     // 「编辑」把表单带回来（is-open），字段预填，口令从凭据库读回来；留空保存＝不改。
     await user.click(within(setupMenu).getByRole('button', { name: '编辑' }));

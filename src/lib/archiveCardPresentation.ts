@@ -5,6 +5,71 @@ export function isWideCoverRatio(ratio: number | null | undefined): boolean {
   return ratio != null && Number.isFinite(ratio) && ratio > 1.0;
 }
 
+/** 一张卡片记住多少条宽封面标记。每条就是一个档案键，不设上限的话这个集合会随着
+ * 工作区一直挂着而无限增长（每个划过去的宽封面留一条）。 */
+export const WIDE_COVER_MARK_LIMIT = 4096;
+
+/** 记住某一张档案的封面是宽的（或者不再记得）。和组件分开是为了让淘汰顺序能被测试
+ * 钉住：`Set` 按插入顺序迭代，所以最先掉出去的就是最久以前划过去的那些。什么都没动
+ * 的时候原样返回传进来的那个集合——每张封面都换一个新集合会让整张列表重渲染。 */
+export function withWideCoverMark(
+  current: Set<string>,
+  archiveId: string,
+  wide: boolean,
+  limit: number = WIDE_COVER_MARK_LIMIT,
+): Set<string> {
+  if (current.has(archiveId) === wide) return current;
+  const next = new Set(current);
+  if (!wide) {
+    next.delete(archiveId);
+    return next;
+  }
+  next.add(archiveId);
+  while (next.size > limit) {
+    const oldest = next.values().next();
+    if (oldest.done) break;
+    next.delete(oldest.value);
+  }
+  return next;
+}
+
+/** 宽封面标记的键。带上 serverId：切页时服务器的 query 会变、服务器本身也可能换，
+ * 只用 archiveId 当键会让另一台服务器上同名的档案套用错上一次的形状。 */
+export function wideCoverMarkKey(serverId: string, archiveId: string): string {
+  return `${serverId}\u0000${archiveId}`;
+}
+
+/** 跨路由记住的宽封面形状。
+ *
+ * 档案库的工作区在离开时不会卸载，但会被 `RetainedPage` 挂上 `hidden`（`display:none`），
+ * 虚拟列表因此量到 0 高度、把整屏的行卸掉——行里的封面句柄一起放手。重新进来时组件态
+ * 里那份「哪些封面是宽的」已经没了，于是所有卡片先按窄卡排版，等封面 load 出自然宽高比
+ * 再翻成宽卡，一屏集体重排就是那一下闪动。放在模块级、由这个文件承载（卡片和档案库网格
+ * 都 import 它，放进任何一个组件都要循环依赖），重新进来的第一帧就是对的形状。
+ *
+ * 取舍：进程内、按 session 存活的一张纯字符串小表，不落盘也不与服务器同步；它只是
+ * 「这张封面长什么样」的提示，猜错最多是排版先按窄卡、封面到手后自己纠正，不会显示
+ * 错内容。上限沿用 `WIDE_COVER_MARK_LIMIT` 的 FIFO，所以它不会无限增长。 */
+let wideCoverMarks = new Set<string>();
+
+export function rememberWideCoverMark(serverId: string, archiveId: string, wide: boolean): Set<string> {
+  wideCoverMarks = withWideCoverMark(wideCoverMarks, wideCoverMarkKey(serverId, archiveId), wide);
+  return wideCoverMarks;
+}
+
+export function isWideCoverMarked(serverId: string, archiveId: string): boolean {
+  return wideCoverMarks.has(wideCoverMarkKey(serverId, archiveId));
+}
+
+/** 挂载时播种工作区用的一份快照；返回的是活的那一份，调用方不要改它。 */
+export function readWideCoverMarkKeys(): ReadonlySet<string> {
+  return wideCoverMarks;
+}
+
+export function resetWideCoverMarksForTests(): void {
+  wideCoverMarks = new Set();
+}
+
 /** Namespaces that tell a reader what an archive is, most telling first. A card
  * has room for a handful of chips, so the choice matters more than the count:
  * `female:`/`male:` content tags and `character:`/`parody:` beat bookkeeping

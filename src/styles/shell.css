@@ -432,10 +432,22 @@ body::-webkit-scrollbar,
 
 /* Home draws rails, which want the room: a maximized window fit 8 cards with
    a strip of rail left over. Other shelf pages keep the 1320px measure.
+   首页现在穿的是和档案库同一套两栏外壳（`src/components/HomeShell.tsx`），所以
+   它的留白也只能来自同一处——外壳那个 16px 的 `.library-shell-list`。原来这里只把
+   `width` 放宽到 1680px，`.workspace` 的 `margin: 0 auto` 与 `clamp()` 左右内边距
+   还在：1920px 的窗口里首页左右各留 168px，而档案库只有 16px——这就是「首页左右
+   两侧的空隙与档案库等页面不一致」。上间距同样交还给外壳（书架/档案库也是这么来的，
+   再由 `.library-shell-list .first-run-page` 给引导页补回同一格）；下间距留着，
+   三排书架自己底部没有内边距。
    `:not([hidden])` is load-bearing: every visited route stays mounted in its own
    `route-cache-panel`, so a plain `:has(.workspace-home)` also matched after
    leaving home — and clamped every other page to 1680px, left-aligned, with the
-   rest of the window left blank. */.workspace:has(> .route-cache-panel:not([hidden]) .workspace-home) { width: min(100%, 1680px); }
+   rest of the window left blank. */.workspace:has(> .route-cache-panel:not([hidden]) .workspace-home) {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 0 var(--space-8);
+}
 
 .scroll-to-top {
   position: fixed;
@@ -990,7 +1002,8 @@ body::-webkit-scrollbar,
   padding-inline: var(--space-4);
 }
 
-/* 首页：workspace 已经给了 32px 上间距，左右也是同一个 clamp。 */
+/* 首页：两栏外壳的 `.library-shell-list` 给了 16px（与档案库同一处），上下都不再要
+   workspace 的内边距。 */
 .workspace-home > .first-run-page {
   padding-block-start: 0;
   padding-inline: 0;
@@ -1203,6 +1216,17 @@ body::-webkit-scrollbar,
     background: var(--surface-container-high);
   }
 
+  /* 二级菜单的面板（`.settings-choice-panel` / `.search-preset-panel`）自己就停在
+     --surface-container-high 上，上面那条统一家族规则填同一阶等于没填——面板里的设置行
+     （DLSSNR 层数、端口、已配对设备…）、菜单勾选、方案卡、preset 应用移上去毫无反馈。
+     只给面板内部的子项再上一阶；面板外的同类行保持原样（它们的底不是这一阶）。 */
+  .settings-choice-panel .settings-row-button:hover:not(:disabled),
+  .settings-choice-panel .settings-menu-check:hover:not(:disabled),
+  .settings-choice-panel .custom-scheme-card:hover,
+  .search-preset-panel .search-preset-apply:hover {
+    background: var(--surface-container-highest);
+  }
+
   /* The list cards rest on --surface-container-high already, so the shared hover
      step was a no-op: a themed install showed no feedback at all. One tonal step
      up keeps the MD3 state layer visible. */
@@ -1302,12 +1326,16 @@ body::-webkit-scrollbar,
   text-align: left;
 }
 
+/* 悬停要靠「比静止态亮一阶」说话，可这几行就长在 `.settings-choice-panel` 上，而面板自己
+   的底色正是 `--surface-container-high` —— 原来悬停填同一个色，等于什么都没发生，于是只有
+   选中的那一行（换成 primary 混合色）看得出鼠标在。和档案卡那次是同一个症状、同一个改法
+   （见上面 `.archive-card:hover` 那条）：往上走一阶。 */
 @media (hover: hover) {
-  .settings-choice-option:hover { background: var(--surface-container-high); }
+  .settings-choice-option:hover { background: var(--surface-container-highest); }
   .settings-choice-option.is-active:hover { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
   .settings-choice-option > .settings-choice-option-main:hover { background: transparent; }
 }
-.settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-high); }
+.settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-highest); }
 .settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
 
 .settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
@@ -2301,6 +2329,12 @@ body::-webkit-scrollbar,
   flex: 1 1 auto;
   height: 100%;
   min-height: 0;
+  /* 这条分隔线是「顶部工具条之下、列表之上」的那一根。它原本只是这一层的上边框，
+     而这一层住在 `.library-shell-list` 的 16px 左右内边距里 —— 线于是跟着盒子一起
+     左右各内缩 16px，用户看到的就是「分割线左右两侧有空隙」。把盒子向两侧各拉出
+     一个间距、再用同宽的内边距把两块面板推回原位，线就落到整列的边缘而内容不动。 */
+  margin-inline: calc(-1 * var(--space-4));
+  padding-inline: var(--space-4);
   border-top: 1px solid var(--hairline);
 }
 
@@ -2354,19 +2388,26 @@ body::-webkit-scrollbar,
 .archive-timeline-skeleton { position: absolute; top: 0; left: -76px; bottom: -12px; width: 56px; border-right: 2px solid var(--outline-variant); }
 .archive-timeline-skeleton::before { position: absolute; top: 22px; right: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--outline-variant); content: ''; }
 .archive-timeline-skeleton .skeleton-line { position: absolute; top: 22px; right: 10px; width: 45px; height: 10px; }
+/* 刻度条挂着的那一层。它必须是定位祖先：刻度条自己是绝对定位的，而绝对定位的
+   子元素如果留在滚动容器里，会跟着内容一起滚（原来的写法用 sticky + 零高度浮动
+   硬撑，就是因为这个），既没法按「看得见的那一段」居中，滚到底还会被内容高度
+   夹住往上漂。这一层就是列表的可视框，所以 `top: 50%` 量到的正是可视高度本身。 */
+.library-list-panel-content { position: relative; }
+
 /* Session-style quick jump down the right edge of the history list: one tick per
    day (per month once the history is longer than the strip can hold as separate
-   targets), the tick being read filled in. Sticky with a zero-height float — the
-   same trick .history-quick-jump uses — so it never takes part in the list's
-   layout; the negative margin cancels its width and parks it in the gutter
-   .archive-list.is-wide.has-timeline reserves. The track is the absolutely
-   positioned part, which is where the height actually lives. */
-.archive-quick-rail { position: sticky; top: var(--space-2); z-index: 5; float: right; width: 24px; height: 0; margin-right: -24px; pointer-events: none; }
-.archive-quick-rail-track { position: absolute; top: 26vh; right: 4px; display: grid; grid-auto-rows: 1fr; width: 20px; height: 48vh; }
+   targets), the tick being read filled in. The strip hangs on the panel above
+   instead of inside the scroller, so it stays centred on the visible list and
+   never drifts with the scroll. Ticks sit a fixed 11px apart — the height of the
+   hit area below — rather than "N ticks spread over 48vh", which stretched a
+   two-tick history over half the screen; the strip still stops at 70% of the
+   panel so a long history cannot run off it. */
+.archive-quick-rail { position: absolute; top: 50%; right: 4px; z-index: var(--z-raised); width: 20px; transform: translateY(-50%); pointer-events: none; }
+.archive-quick-rail-track { --rail-pitch: 11px; display: grid; grid-auto-rows: 1fr; width: 20px; height: min(calc(var(--rail-pitch) * var(--rail-ticks, 1)), 70%); }
 .archive-quick-rail-tick { position: relative; justify-self: end; align-self: center; width: 9px; height: 3px; padding: 0; border: 0; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--on-surface) 28%, transparent); cursor: pointer; pointer-events: auto; transition: width var(--motion-fast), background var(--motion-fast); }
 /* 刻度只有 9×3px，直接拿它当悬停靶太细（指针差一像素就落空）。用一层看不见的
-   伪元素把可点/可悬停的范围撑到 29×11px——`RAIL_MAX_TICKS` 个刻度铺在 48vh 里，
-   间距最小约 10px（矮窗口），所以竖向只敢各让 4px，免得和邻格抢。 */
+   伪元素把可点/可悬停的范围撑到 29×11px——相邻刻度只隔 11px，所以竖向只敢各让
+   4px，免得和邻格抢。 */
 .archive-quick-rail-tick::before { content: ''; position: absolute; inset: -4px -10px; }
 /* 悬停/聚焦时在刻度左边浮一枚小标签，写着这个刻度会把你送到哪一天哪个时间——
    原生 `title` 要等一秒、触摸设备上根本没有，这是「快速看到目标跳转时间」的答案。
@@ -2395,14 +2436,6 @@ body::-webkit-scrollbar,
 .archive-quick-rail-tick:focus-visible > .archive-quick-rail-label,
 .archive-quick-rail-tick:is(.is-pressed, :active) > .archive-quick-rail-label { opacity: 1; }
 .archive-quick-rail-tick.is-active { width: 16px; background: var(--primary); }
-.history-quick-jump { position: sticky; top: var(--space-2); z-index: 5; float: right; width: var(--control-height); height: 0; margin-right: var(--space-2); }
-.history-quick-jump > .icon-action { background: var(--surface-container-high); box-shadow: var(--shadow-overlay); }
-.history-quick-jump-menu { position: absolute; top: calc(var(--control-height) + var(--space-2)); right: 0; display: grid; max-height: min(50vh, 360px); min-width: 132px; overflow-y: auto; padding: var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-overlay); background: var(--surface-container-high); box-shadow: var(--shadow-overlay); }
-.history-quick-jump-menu button { min-height: 40px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: transparent; color: var(--on-surface); text-align: left; cursor: pointer; }
-@media (hover: hover) {
-  .history-quick-jump-menu button:hover { background: var(--primary-container); color: var(--on-primary-container); }
-}
-.history-quick-jump-menu button:is(.is-pressed, :active) { background: var(--primary-container); color: var(--on-primary-container); }
 .archive-load-more-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); padding: var(--space-3); }
 
 /* Overscroll: past either end of the list the content is dragged by hand and
@@ -3935,8 +3968,14 @@ body::-webkit-scrollbar,
    两端都顶到卡片内边缘、外边不带圆角：左侧留白会让 1% 的进度看起来是一枚悬空的
    圆点，而画满时右侧的圆角会在卡片边缘留下一小块轨道底色——两种都不像这张卡
    自己的东西。前缘的圆头只留给「还在读」的那一段（它到不了边缘，圆角就不会和
-   边缘打架），画满时由 .is-complete 收成直角。 */
-.archive-card-progress { position: absolute; inset: -5px 0 auto; display: block; height: 5px; overflow: hidden; background: var(--surface-container-highest); box-shadow: var(--shadow-progress); pointer-events: none; }
+   边缘打架），画满时由 .is-complete 收成直角。
+
+   高度是 6px（inset 的 -5px 不变）：接缝下方多压住 1px，并抬到卡片内容之上。
+   缩略图卡 hover 时会 translateY(-2px)，那一瞬卡片被提成合成层，封面在设备像素
+   取整上会贴着媒体下沿越出一线，正好落在进度条下沿——用户报的「鼠标移上去时
+   进度条底部闪出一丝封面」。多盖 1px 与抬 z-index 各挡一个方向：正文给不出这块
+   遮挡（块级背景画在内联替换内容之下）。宽行档把 height 覆写成 4px，不受影响。 */
+.archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: var(--surface-container-highest); box-shadow: var(--shadow-progress); pointer-events: none; }
 .archive-card-progress-fill { display: block; height: 100%; border-radius: 0 var(--radius-pill) var(--radius-pill) 0; background: var(--primary); transition: width var(--motion-standard); }
 .archive-card-progress.is-complete .archive-card-progress-fill { border-radius: 0; }
 .archive-row-copy { position: relative; }
@@ -3950,19 +3989,34 @@ body::-webkit-scrollbar,
       内缩、绝对定位又贴满整宽，于是它作为定位后代叠在元素自身的 outline 之上，把底部
       描边和两个下角弧线整个盖掉——「有进度条的卡片底部高亮看不见」。抬高 1px 后描边
       完整露出，`--shadow-progress` 也不会再被卡片的 overflow: hidden 裁掉。
-   ② 长度排除卡片左右圆角：轨道用 border-box 两端各内缩一个卡片半径，内容盒因此是
-      W − 24，填充的 `width: N%` 从 x = 12 起算。原来从 x = 0 起算，1% 在 862px 的行上
-      约 8.6px，全落在 12px 的圆角弧内，被卡片裁成一条上宽（≈5.5px）下窄（0.6px）的
-      楔形，最底那 0.5px 完全没有红，右侧圆头也缩成 2px——用户说的「1% 时看不出进度」。 */
+      抬高 1px 只救回最底那一条 1px：轨道是实心背景、横跨整宽，弧线在它那 4px 带里
+      的那一段仍被盖住，看上去下角「断掉」。所以选中态另加一层描边覆盖层（见下面那条），
+      高亮画在横条之上，四边和两个下角弧线才完整。
+   ② 长度排除卡片左右圆角：横条两端仍铺到卡片边缘（用户要的是「依然覆盖圆角」），
+      但填充长度只算圆角之间的直边——宽度是 `半径 + (W - 2×半径) × 进度`，由
+      `ArchiveProgressBar` 的 `cornerAware` 写成 calc()。原来从 x = 0 起算，1% 在
+      862px 的行上约 8.6px，全落在 12px 的圆角弧内，被卡片裁成一条上宽（≈5.5px）
+      下窄（0.6px）的楔形，最底那 0.5px 完全没有红，右侧圆头也缩成 2px——用户说的
+      「1% 时看不出进度」。 */
 .archive-list.is-wide .archive-row > .archive-card-progress {
   inset: auto 0 1px;
   display: block;
   height: 4px;
-  box-sizing: border-box;
-  padding-inline: var(--radius-card);
 }
-/* 画满时不内缩：两端仍铺到卡片边缘，由卡片圆角自己裁切。 */
-.archive-list.is-wide .archive-row > .archive-card-progress.is-complete { padding-inline: 0; }
+/* 选中高亮画在进度条之上：横条是卡片的定位后代，轨道又是实心背景，会把左下/右下
+   那两段 1px 描边连弧线一起盖掉（outline 永远画在定位子元素之下，抬 z-index 也没用）。
+   覆盖层的几何与卡片的 outline 完全一致：outline-offset: -1px 的描边就贴在边框盒里
+   1px 处，半径因此也小 1px；再加一层同色描边，两层完全重合，看上去仍是一条线。 */
+.archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  z-index: 1;
+  box-sizing: border-box;
+  border: 1px solid var(--primary);
+  border-radius: calc(var(--radius-card) - 1px);
+  pointer-events: none;
+}
 .settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: vertical; font: inherit; }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -4854,6 +4908,19 @@ body::-webkit-scrollbar,
   padding-bottom: var(--space-1);
 }
 
+/* 上面把下内边距收到 space-1 之后，最后一行离面板底只剩 8.7px 了（实测），可它的圆角还是
+   12px —— 面板那个 28px 的弧线在 8.7px 里面画不下一个 12px 的弧，两个弧就不平行，看着就是
+   「内外圆角不统一」。双层同心圆角的规矩是「内半径 = 外半径 − 两层之间的间距」，所以这一行
+   只有贴底的那两个角要单独收：28 − 8.7 = 19.3px。
+   8.7px 是量出来的，不是估的：探针 h4.html 复现了真机几何（1px 边框 + `--space-1` 4px 内边距
+   + 滚动内容区自身约 3.7px 的余量），和上面注释里 Batch F 在真机上量到的 8.7px 一致。
+   只订这一种情况：面板底部还有动作按钮（保存/取消那一排）时内边距是完整的 16px，按钮又是
+   胶囊（`--radius-pill`），是刻意的另一种形状，不参与同心。 */
+.settings-choice-panel:has(> .settings-menu-body > .settings-choice-list:last-child) > .settings-menu-body > .settings-choice-list > .settings-choice-option:last-child {
+  border-bottom-left-radius: calc(var(--radius-overlay) - 8.7px);
+  border-bottom-right-radius: calc(var(--radius-overlay) - 8.7px);
+}
+
 .settings-menu-strong {
   color: var(--on-surface);
   font-size: var(--text-lg);
@@ -5269,9 +5336,12 @@ body::-webkit-scrollbar,
   color: var(--ink-on-brand);
 }
 
+/* 自定义 CSS 的输入框要跟随项目正文字体：这里原本写死 `--font-utility`（等宽），
+   而 WebView2 不认 `ui-monospace`，实际落到系统默认等宽字体上，看上去就不像这个应用
+   里的字（用户报的「输入框内部的文字没有使用项目统一的字体」）。base.css 已经给
+   `textarea` 写了 `font: inherit`，所以这里不再覆盖字体族，让它跟着面板继承。 */
 .settings-choice-panel textarea {
   width: 100%;
-  font-family: var(--font-utility);
   font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
   resize: vertical;
@@ -5719,10 +5789,11 @@ body::-webkit-scrollbar,
 
    整块放在文件末尾是有意的：与静止态同特异性时后写的赢，不必靠 !important 抢。 */
 @media (hover: none) {
-  .settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-high); }
+  /* 按下态与悬停那条同色：面板自己就是这一阶的底色，退回 `--surface-container-high`
+     等于没有反馈。 */
+  .settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-highest); }
   .settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
   .settings-choice-option > .settings-choice-option-main:is(.is-pressed, :active) { background: transparent; }
-  .history-quick-jump-menu button:is(.is-pressed, :active) { background: var(--primary-container); color: var(--on-primary-container); }
   /* 历史快速跳转的刻度按下态（与悬停那条成对：触屏没有 hover，按下就是唯一的反馈）。 */
   .archive-quick-rail-tick:is(.is-pressed, :active) { background: color-mix(in srgb, var(--on-surface) 55%, transparent); }
   /* 浮动时间标签也要有按下态：触屏上按住刻度同样该看见「会跳到哪天」。 */
@@ -5766,6 +5837,14 @@ body::-webkit-scrollbar,
   .tag-suggest-option:is(.is-pressed, :active),
   .toast-close:is(.is-pressed, :active) {
     background: var(--surface-container-high);
+  }
+
+  /* 触屏孪生：面板内中性行的按下态也再上一阶（同悬停的理由）。 */
+  .settings-choice-panel .settings-row-button:is(.is-pressed, :active):not(:disabled),
+  .settings-choice-panel .settings-menu-check:is(.is-pressed, :active):not(:disabled),
+  .settings-choice-panel .custom-scheme-card:is(.is-pressed, :active),
+  .search-preset-panel .search-preset-apply:is(.is-pressed, :active) {
+    background: var(--surface-container-highest);
   }
 
   .archive-detail-panel-tabs button:is(.is-pressed, :active),
@@ -5885,10 +5964,16 @@ body::-webkit-scrollbar,
 
 /* `.archive-list` 的 height: 100% 是给「面板本身就是列表」的布局准备的；这里的
    列表在 controls 下面，得按 flex 剩余空间算。 */
+/* 同 `.library-panels`：这条线画在列表自己的上边框上，而列表在
+   `.library-shell-list` 的 16px 左右内边距里，线两端就各缺 16px。拉出去 16px 再补
+   回 16px（`+ var(--space-1)` 是 `.archive-list` 原有的 4px 内边距，别把它吃掉），
+   行宽与行距因此完全不变，只有那根线跑到列边缘。 */
 .local-archives-list {
   flex: 1 1 auto;
   height: auto;
   min-height: 0;
+  margin-inline: calc(-1 * var(--space-4));
+  padding-inline: calc(var(--space-4) + var(--space-1));
   border-top: 1px solid var(--hairline);
 }
 

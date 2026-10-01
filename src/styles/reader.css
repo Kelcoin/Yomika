@@ -199,6 +199,11 @@
 .reader-page-status .loading-indicator { color: var(--reader-ink); }
 .reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
+/* 钉在第二行：顶栏默认隐藏时它是网格里唯一的孩子，不钉住就会被排进第一行
+   （`auto`，也就是高度 0 的那条顶栏轨道）而贴到屏幕顶上；钉住之后顶栏来去
+   都不挪窝。 */
+.reader-screen-loading .loading-indicator { grid-row: 2; }
+
 .reader-error {
   width: min(100% - 32px, 480px);
   text-align: center;
@@ -212,18 +217,23 @@
   place-items: stretch;
 }
 
-/* 加载态将来也会带一条同样的顶栏（ReaderRoute 那条分支现在只画一个指示器），
-   于是它也该是「顶栏 + 中间内容」两行网格——`place-items: center` 会把那条顶栏
-   从通栏压成一枚居中的小块。写成 `:has(.reader-error-bar)` 是为了今天不动：这条
-   分支还没有顶栏，规则就没有匹配对象，等它有了会自动生效（选择器里带
-   `reader-error-bar`，也被「chrome 固定深色」那条扫描豁免）。 */
-.reader-screen-loading:has(.reader-error-bar) {
+/* 加载态是「顶栏 + 中间内容」两行网格——`place-items: center` 会把那条顶栏从通栏
+   压成一枚居中的小块。这两行现在**无条件**成立（原来是 `:has(.reader-error-bar)`
+   配一条常显的顶栏）：顶栏改成默认隐藏之后，有它没它轮到结构变一次，中间那枚指示器
+   就会跟着上下跳一下。行结构固定、指示器钉在第二行（`grid-row: 2`），露不露顶栏都
+   不影响它的位置。 */
+.reader-screen-loading {
   grid-template-rows: auto 1fr;
   place-items: stretch;
 }
 
+/* 三列网格，两侧各一条**至少一个图标宽**的 1fr 轨道：两条 1fr 等宽时中间那条轨道的
+   中心就是整条栏的中心，所以标题相对整条栏居中，而不是相对「返回按钮之后的剩余
+   空间」（`flex: 1` 那版就是后者，看着偏左）。两侧的 44px 下限保证标题再长也压不到
+   两头按钮上——标题自己带省略号，收窄的是中间那条。 */
 .reader-error-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);
   align-items: center;
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
@@ -231,24 +241,35 @@
   border-bottom: 1px solid var(--hairline);
   background: var(--surface-container);
   color: var(--on-surface);
+  animation: reader-chrome-top-in var(--motion-standard) backwards;
+}
+
+/* 出场和阅读器那两条栏同一套（`useDelayedUnmount` 在 260ms 后摘掉元素）。 */
+.reader-error-bar.is-leaving {
+  animation: reader-chrome-top-out var(--duration-exit) var(--ease-exit) forwards;
 }
 
 /* M3 title-large 是 22sp/28sp、字重 400，但 M3 的 app bar 标题在一个**自带加粗标题**的
    应用里会显得没写完：同一个档案，详情页写的是粗体（`h2` 的 UA 字重）、阅读模式写的是
    常规体，来回切看着像两个应用。所以这里跟详情页走同一条字重。 */
 .reader-error-bar strong {
-  flex: 1;
+  grid-column: 2;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   font-family: var(--font-display);
   font-size: var(--reader-title-size);
   font-weight: var(--weight-bold);
   line-height: var(--reader-title-leading);
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* `grid-row: 2` 的理由同加载态那条：顶栏收起时错误信息是唯一的孩子，不钉住就会
+   落进高度 0 的第一行而顶到屏幕最上面。 */
 .reader-screen-error .reader-error {
+  grid-row: 2;
   align-self: center;
   justify-self: center;
 }
@@ -312,7 +333,8 @@
   top: 0;
   right: 0;
   left: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);
   align-items: center;
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
@@ -326,17 +348,29 @@
 
 .reader-chrome-top.is-leaving { animation: reader-chrome-top-out var(--duration-exit) var(--ease-exit) forwards; }
 
-/* 与详情页的标题同一条字重（理由见上面 `.reader-error-bar strong` 那条）。 */
+/* 和 `.reader-error-bar` 同一条三列布局（理由见那一处）：标题相对**整条栏**居中，
+   两侧各留一个图标宽的上限/下限，标题自己收省略号。 */
 .reader-chrome-top strong {
-  flex: 1;
+  grid-column: 2;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   font-family: var(--font-display);
   font-size: var(--reader-title-size);
   font-weight: var(--weight-bold);
   line-height: var(--reader-title-leading);
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 尾部控件共处第三格：各自 `flex: none`、靠右排，中间那条轨道因此只归标题。 */
+.reader-chrome-actions {
+  display: flex;
+  grid-column: 3;
+  align-items: center;
+  justify-self: end;
+  gap: var(--space-1);
 }
 
 /* M3 gives the top app bar two icon colours: the leading navigation icon is

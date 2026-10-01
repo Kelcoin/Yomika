@@ -121,7 +121,7 @@ pub async fn dlssnr_download_variant(
     }
 }
 
-/// 阅读器的页面入口：拿缓存里的一页（或它的某个派生版本），跑 1–3 层 DLSSNR，回 PNG。
+/// 阅读器的页面入口：拿缓存里的一页（或它的某个派生版本），跑 1–5 层 DLSSNR，回 PNG。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DlssnrPageInput {

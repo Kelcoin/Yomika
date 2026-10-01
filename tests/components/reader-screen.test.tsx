@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
 
@@ -139,8 +141,71 @@ describe('reader screen', () => {
     await vi.waitFor(() => expect(screen.queryByRole('toolbar')).not.toBeInTheDocument());
   });
 
-  it('clears a pending swipe when a second finger joins', () => {
+  // 唤出来的栏过一会儿自己走（4.5s）——加载态那条栏共用同一套，所以这条也钉住了
+  // 「两条路径同一时长」。这条是回归护栏：它现在就该是绿的，重构之后必须还是绿的。
+  it('hides the summoned bars on the auto-hide clock', () => {
     vi.useFakeTimers();
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.click(reader);
+      expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+      // 4.5s 没人搭理：先是出场动画（0.26s），播完才把它摘掉。
+      act(() => vi.advanceTimersByTime(4_500));
+      act(() => vi.advanceTimersByTime(300));
+      expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  // 用户报的 ④：两条顶栏的标题都是 `flex: 1`，吃的是前导按钮**之后**的剩余宽度，
+  // 所以整条栏看起来是偏左的。这里量不出布局（jsdom 没有布局，也没开 `css: true`），
+  // 所以按样式表本身断言：整条栏是三列网格，两侧各一条「至少一个图标宽」的 1fr 轨道，
+  // 标题独占中间那条。两条 1fr 等宽时中间轨道的中心就是整条栏的中心。
+  it('centres the bar titles across the whole bar, keeping both ends reachable', () => {
+    const css = readFileSync(resolve(__dirname, '../..', 'src/styles/reader.css'), 'utf8').replace(/\r\n/g, '\n');
+    const body = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const match = new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+      if (!match) throw new Error(`reader.css 里找不到规则 ${selector}`);
+      return match[1];
+    };
+    // 两侧轨道的最小值就是一个图标按钮的宽度，所以标题再长也压不到两端按钮上。
+    const columns = 'grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);';
+    for (const bar of ['.reader-chrome-top', '.reader-error-bar']) {
+      expect(body(bar)).toContain('display: grid');
+      expect(body(bar)).toContain(columns);
+    }
+    for (const title of ['.reader-chrome-top strong', '.reader-error-bar strong']) {
+      expect(body(title)).toContain('grid-column: 2');
+      expect(body(title)).toContain('text-align: center');
+      // 窄屏：中间那条轨道可以被压到 0（minmax(0, auto)），标题自己也得能收成省略号。
+      expect(body(title)).toContain('min-width: 0');
+      expect(body(title)).toContain('max-width: 100%');
+      expect(body(title)).toContain('text-overflow: ellipsis');
+    }
+  });
+
+  it('puts the title and the trailing controls in their own grid cells', () => {
+    renderReader();
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const bar = document.querySelector('.reader-chrome-top');
+    expect(bar).not.toBeNull();
+    // 标题必须是这条栏的**直接**子项，才落在中间那条轨道上；包一层就不再是「相对整条栏」。
+    const title = bar?.querySelector('strong');
+    expect(title?.textContent).toBe('Test archive');
+    expect(title?.parentElement).toBe(bar);
+    // 右侧的几颗按钮同处第三格，不会各自去挤中间那条轨道。
+    const actions = bar?.querySelector('.reader-chrome-actions');
+    expect(actions).not.toBeNull();
+    expect(actions?.contains(screen.getByRole('button', { name: '缩略面板' }))).toBe(true);
+    expect(actions?.contains(screen.getByRole('link', { name: '阅读设置' }))).toBe(true);
+  });
+
+  it('clears a pending swipe when a second finger joins', () => {    vi.useFakeTimers();
     const view = renderReader();
     try {
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
@@ -522,7 +587,10 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
     const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    for (const button of within(toolbar).getAllByRole('button')) {
+    const buttons = within(toolbar).getAllByRole('button');
+    // 集合为空时下面的循环体一次都不跑，断言就成了摆设。
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const button of buttons) {
       expect(button.querySelector('svg')).toBeTruthy();
       expect(button.textContent?.trim()).toBe('');
     }

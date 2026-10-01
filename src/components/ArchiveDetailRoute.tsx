@@ -65,7 +65,10 @@ function DetailGlyph() {
   );
 }
 
-export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
+export function ArchiveDetailRoute({ archiveId, detailBasePath = '/library' }: { archiveId: string; /** See `ArchiveThumbnailCard`: which page owns this detail. The 推荐 rail
+ * lives inside the detail, so its cards must keep the detail in the page the
+ * reader is already on instead of pulling the left pane over to the library. */
+detailBasePath?: string | undefined }) {
   /** The server this archive belongs to, carried by the linking card; without
    * one the first configured server is the default. */
   const [searchParams] = useSearchParams();
@@ -388,7 +391,7 @@ export function ArchiveDetailRoute({ archiveId }: { archiveId: string }) {
           loading={metadataLoading && !metadata}
           colorFor={myTagColorFor}
         />
-      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} />}
+      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} detailBasePath={detailBasePath} />}
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
@@ -424,7 +427,7 @@ type RecommendationTab = 'similar' | 'creator';
  * should not pay for them again. */
 const RECOMMENDATION_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1000;
 
-function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[] }) {
+function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBasePath }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[]; detailBasePath: string }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
   const snapshot = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
   const [similar, setSimilar] = useState<ArchiveRecord[]>(snapshot?.similar ?? []);
@@ -575,7 +578,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
   // A skeleton while the searches run, rather than nothing at all: the section
   // used to pop into existence and shove the page thumbnails down.
   if (loading && !hasSimilar && !hasCreator) {
-    return <ArchiveThumbnailRail title="推荐" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} headingContent={tabs} />;
+    return <ArchiveThumbnailRail title="推荐" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} headingContent={tabs} detailBasePath={detailBasePath} />;
   }
   if (!hasSimilar && !hasCreator) return null;
 
@@ -589,6 +592,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags }: { scopeI
       headingContent={tabs}
       onRefresh={() => { invalidateRouteCache(snapshotKey); setReloadToken((value) => value + 1); }}
       onArchiveContextMenu={openContextMenu}
+      detailBasePath={detailBasePath}
     />
     {contextMenu}
     </>

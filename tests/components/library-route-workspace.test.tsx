@@ -6,6 +6,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { invalidateRouteCache, simulateRouteCacheRestartForTests, writeRouteCache } from '../../src/lib/routeCache';
+import { getNativeImageCache } from '../../src/lib/nativeImageCache';
+import { peekCachedImageUrl } from '../../src/lib/unifiedImageCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -144,7 +146,6 @@ describe('library route workspace', () => {
     renderLibrary();
 
     expect(await screen.findByRole('status', { name: '正在读取档案' })).toHaveClass('archive-list-skeleton');
-    expect(screen.queryByText('正在读取档案', { selector: '.loading-indicator-label' })).not.toBeInTheDocument();
 
     await act(async () => resolveServers({ ok: true, value: [] }));
   });
@@ -459,7 +460,6 @@ describe('library route workspace', () => {
 
     // 精确匹配只会命中错误 toast，不会命中「读取分类失败：LRR 不可用」那条。
     expect(await screen.findByText('LRR 不可用')).toBeInTheDocument();
-    expect(document.querySelector('.workspace-alert')).toBeNull();
   });
 
   it('turns missing server credentials into an actionable settings link', async () => {
@@ -808,7 +808,18 @@ describe('library route workspace', () => {
     await waitFor(() => expect(view.container.querySelector('.archive-row-thumb img')).toHaveAttribute('src', expect.stringMatching(/^blob:/)));
     expect(adapter).not.toHaveBeenCalledWith('load_archive_thumbnail', expect.anything());
     view.unmount();
-    expect(revokeObjectUrl).toHaveBeenCalled();
+    // ⑥：封面句柄归零后**不再**立刻 revokeObjectURL。切走再回来闪一下的真根因就是
+    // 「卸载＝撤销 URL＝缓存忘了这张图」，所以留一句「缓存还记得」才是修复本身；
+    // 真正的回收交给 96MiB/256 条的 LRU 上限，而同步种子 peekCachedImageUrl 让重挂载的
+    // 第一帧就是真图、不必等异步 load。
+    expect(revokeObjectUrl).not.toHaveBeenCalled();
+    expect(peekCachedImageUrl(getNativeImageCache(), {
+      scopeId: 'scope-persistent',
+      serverId: 'server-a',
+      archiveId: 'persistent-cover',
+      rendition: 'cover',
+      pageIndex: 0,
+    })).toMatch(/^blob:/);
   });
 
   it('answers a pull by re-reading the page on screen, not by rebuilding the whole index', async () => {
@@ -1006,7 +1017,6 @@ describe('library route workspace', () => {
     // workspace's as the server list resolves, so a captured node goes stale.
     await waitFor(() => expect(screen.getByRole('status', { name: '正在读取档案' })).toBeInTheDocument());
     expect(screen.queryByText('暂无档案库')).not.toBeInTheDocument();
-    expect(screen.queryByText('正在读取档案…')).not.toBeInTheDocument();
   });
 
   it('saves a search preset through a drawn dialog that can refuse the value', async () => {

@@ -81,7 +81,7 @@ export const PreferenceSnapshotSchema = z.object({
   closeToTray: z.boolean().default(false),
   tagTranslationEnabled: z.boolean().default(true),
   tagCountOrderEnabled: z.boolean().default(true),
-  /** DLSSNR：阅读器里对这一页跑 1–3 层 NVIDIA 的神经渲染。 */
+  /** DLSSNR：阅读器里对这一页跑 1–5 层 NVIDIA 的神经渲染。 */
   dlssnrEnabled: z.boolean().default(false),
   /** 每层参数的 JSON 数组（形状见 dlssnr 的 PassSettings）。存字符串是为了让后端
    * 保持平台无关：非 Windows 的构建也能原样存住这份偏好。 */
