@@ -33,6 +33,16 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# 动图逐帧过 DLSSNR 之后要编回 APNG：`image` 只解不编，`image-webp` 只有解码器，
+# `image` 自己的 WebP 编码器只能写静态 lossless——能把「多帧 + 每帧延迟 + 循环次数」
+# 一次写全的只有 `png` 的 `set_animated` 加逐帧 fcTL。这两份本来就已经躺在依赖树里
+# （`image` 的 png / webp feature 拉进来的，版本见 Cargo.lock），写出来只是为了能用
+# 它们的 API：`png` 认 APNG 的 acTL，`image-webp` 认动画 WebP 的帧数。
+#
+# `png` 必须与 `image` 依赖的 0.18 同一条：压缩档（`Compression::Fast`）与过滤档
+# （`Filter::Adaptive`）都要对上静态那条路，两代 API 的枚举名也不一样。
+png = "0.18"
+image-webp = "0.2"
 # NFKC normalization for dedup filename matching (Readoshi parity).
 unicode-normalization = "0.1"
 ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }

@@ -2014,12 +2014,23 @@ fn upscale_cached_page_with_models(
         identity.revision = Some(revision.clone());
         identity
     };
+    // 动图判定排在产物缓存命中**之前**：修复之前跑过的产物是「第一帧超分后」的静帧，
+    // 让缓存先命中就等于这次修复对用户已经读过的那一页没生效。源页因此只读一次，判定
+    // 命中就当成功原样交出去——前端把派生失败当成可重试失败（会删掉 attempted 记号并
+    // 弹「超分失败」），报错会让这一页被反复重跑，而它本来就不该被处理。
+    let source = source_identity(input, source_rendition, decensor_revision.as_deref());
+    let page = cached_derived(database, app_data, &source);
+    if let Some(bytes) = page.as_deref() {
+        if crate::cache::is_animated_image(bytes) {
+            // 复制一份交出去：`page` 后面那条正常路径还要用（这里只是极少数的一页）。
+            return CommandResult::success(bytes.to_vec());
+        }
+    }
     if let Some(hit) = cached_derived(database, app_data, &enhanced_identity) {
         return CommandResult::success(hit);
     }
 
-    let source = source_identity(input, source_rendition, decensor_revision.as_deref());
-    let page = match cached_derived(database, app_data, &source) {
+    let page = match page {
         Some(bytes) => bytes,
         // Retryable on purpose: when chaining, the de-censored page may still be
         // being produced, and the caller asks again once it lands.
@@ -2272,6 +2283,11 @@ pub(crate) fn run_upscale_bytes(
     source: &[u8],
     requested_scale: Option<u32>,
 ) -> Result<Vec<u8>, String> {
+    // 动图判定放在最前面，早于解析模型：这一页要不要被处理与装没装模型无关，出来的
+    // 超分结果只会是第一帧的动态图残骸。命中就当成功原样交回去。
+    if crate::cache::is_animated_image(source) {
+        return Ok(source.to_vec());
+    }
     let resolved = (!model_id.is_empty())
         .then(|| resolve_upscaler(models_data, model_id))
         .flatten();
@@ -2339,6 +2355,11 @@ pub(crate) fn run_decensor_bytes_cancellable(
     source: &[u8],
     cancel: &cancel::CancelToken,
 ) -> Result<Vec<u8>, String> {
+    // 与超分同理，而且必须早于 `resolve_installed_bundle`：去不去码不取决于装没装
+    // 模型包，动图去码之后也只剩第一帧。
+    if crate::cache::is_animated_image(source) {
+        return Ok(source.to_vec());
+    }
     let Some((bundle, _manifest)) = resolve_installed_bundle(models_data, model_id) else {
         return Err("No complete de-censoring bundle is installed under that id".into());
     };
@@ -2393,18 +2414,27 @@ fn decensor_cached_page(
         input.page_index,
     );
     identity.revision = Some(fingerprint);
-    // 已经跑过就直接给：同一页 + 同一份模型包是同一张图。
-    if let Some(hit) = cached_derived(database, app_data, &identity) {
-        return CommandResult::success(hit);
-    }
-
+    // 动图判定同样要早于产物缓存命中：修复之前留下的产物是「第一帧去码后」的静帧，
+    // 缓存先命中的话这次修复对已经读过的那一页就等于没生效。
     let source = crate::cache::CacheImageIdentity::new(
         &input.scope_id,
         &input.archive_id,
         "reader-page",
         input.page_index,
     );
-    let page = match cached_derived(database, app_data, &source) {
+    let page = cached_derived(database, app_data, &source);
+    if let Some(bytes) = page.as_deref() {
+        if crate::cache::is_animated_image(bytes) {
+            // 复制一份交出去：`page` 后面那条正常路径还要用。
+            return CommandResult::success(bytes.to_vec());
+        }
+    }
+    // 已经跑过就直接给：同一页 + 同一份模型包是同一张图。
+    if let Some(hit) = cached_derived(database, app_data, &identity) {
+        return CommandResult::success(hit);
+    }
+
+    let page = match page {
         Some(bytes) => bytes,
         None => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
     };
@@ -4310,6 +4340,144 @@ mod tests {
             !dir.path().join("logs/error.log").exists(),
             "成功不该留警告"
         );
+    }
+
+    /// 两帧 GIF（每帧 1×1 + 2 色全局色表，LZW 只有 clear/0/EOI 三个码）。
+    /// 手写而不是引 fixture：判定只看容器头，测试也该把容器头摆明白。
+    fn animated_gif() -> Vec<u8> {
+        let mut bytes = Vec::from(*b"GIF89a");
+        // 逻辑屏幕描述符：1×1 + packed 0x80（有全局色表，2 项）。
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
+        bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0x00, 0x00, 0x00]);
+        for _ in 0..2 {
+            bytes.push(0x2C);
+            bytes.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0, 0]);
+            // LZW 最小码长 2，一个 2 字节子块，子块链以 0 结尾。
+            bytes.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    fn animated_test_app_data(name: &str) -> std::path::PathBuf {
+        let app_data = std::env::temp_dir().join(format!(
+            "yomika-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&app_data);
+        std::fs::create_dir_all(&app_data).unwrap();
+        app_data
+    }
+
+    fn animated_test_database() -> crate::db::Database {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../migrations/0002_local_library.sql"),
+            include_str!("../migrations/0010_cache_path_sharing.sql"),
+            include_str!("../migrations/0013_unified_image_cache.sql"),
+            include_str!("../migrations/0014_cache_archive_scope.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        crate::db::Database {
+            connection: std::sync::Mutex::new(connection),
+        }
+    }
+
+    fn animated_upscale_input() -> UpscalePageInput {
+        UpscalePageInput {
+            scope_id: "scope-a".into(),
+            archive_id: "archive-a".into(),
+            page_index: 0,
+            scale: Some(2),
+            model_id: None,
+            tile_size: None,
+            tile_sleep_ms: None,
+            decensor_model: None,
+            source: None,
+            task_id: None,
+            priority: None,
+        }
+    }
+
+    #[test]
+    fn animated_bytes_are_handed_back_untouched_by_the_upscaler() {
+        // 算力中心那条路只有字节，没有归档与页码：命中动图必须原样交出去。报错会让
+        // 前端把这一页当成可重试的失败反复重跑（阅读器把派生失败当成「过会儿再问」）。
+        let dir = animated_test_app_data("animated-upscale-bytes");
+        let gif = animated_gif();
+        let bytes = run_upscale_bytes(&dir, "", &gif, Some(2)).expect("动图要当成功处理");
+        assert_eq!(bytes, gif, "原样回来，不是第一帧的 PNG");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn animated_bytes_are_handed_back_untouched_by_the_decensor() {
+        let dir = animated_test_app_data("animated-decensor-bytes");
+        let gif = animated_gif();
+        // 这一页跑不跑去码不取决于装没装模型包，所以判定必须早于解析模型包：
+        // 这里连模型都没有，仍然要原样交回。
+        let bytes = run_decensor_bytes(&dir, "no-such-model", &gif).expect("动图要当成功处理");
+        assert_eq!(bytes, gif);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reader_page_that_is_animated_is_not_upscaled() {
+        use crate::cache::{store_image_cache, CacheImageIdentity};
+        let database = animated_test_database();
+        let app_data = animated_test_app_data("animated-reader-page");
+        let gif = animated_gif();
+        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
+        store_image_cache(
+            &database.connection.lock().unwrap(),
+            &app_data,
+            &source,
+            "image/gif",
+            &gif,
+        )
+        .unwrap();
+
+        let bytes = match upscale_cached_page(&database, &app_data, &animated_upscale_input()) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("动图要当成功处理，不是失败：{other:?}"),
+        };
+        assert_eq!(bytes, gif, "阅读器这一页是动图：原样给它，不要放大后的静帧");
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn an_animated_page_beats_a_stale_enhanced_output_in_the_cache() {
+        // 修复之前跑过的页在缓存里留着一张「第一帧放大后」的静帧。判定要是排在产物
+        // 缓存后面，这次修复对已经读过那些页的用户就等于没生效。
+        use crate::cache::{store_image_cache, CacheImageIdentity};
+        let database = animated_test_database();
+        let app_data = animated_test_app_data("animated-stale-enhanced");
+        let gif = animated_gif();
+        let mut stale = Vec::new();
+        {
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut stale)
+                .write_image(&[0_u8; 16], 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
+        enhanced.revision = Some(enhanced_revision(&None, None));
+        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
+        {
+            let connection = database.connection.lock().unwrap();
+            store_image_cache(&connection, &app_data, &enhanced, "image/png", &stale).unwrap();
+            store_image_cache(&connection, &app_data, &source, "image/gif", &gif).unwrap();
+        }
+
+        let bytes = match upscale_cached_page(&database, &app_data, &animated_upscale_input()) {
+            crate::domain::result::CommandResult::Success { value, .. } => value,
+            other => panic!("动图要当成功处理，不是失败：{other:?}"),
+        };
+        assert_eq!(bytes, gif, "旧的静帧产物不该顶掉动图");
+        std::fs::remove_dir_all(app_data).unwrap();
     }
 }
 

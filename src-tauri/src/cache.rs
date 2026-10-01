@@ -155,6 +155,150 @@ pub fn sniff_image_mime(mime: &str, bytes: &[u8]) -> Option<String> {
     Some(detected.to_string())
 }
 
+/// 动图判定：只看容器头，不解码像素。
+///
+/// 动图一旦进了超分 / 去码 / DLSSNR，出来的就只有第一帧——用户会看到「这张图的
+/// 动画没了」，而且当前实现找不到「以动图为输入」的合法产物，所以判定必须发生在
+/// 任何解码与模型解析之前，代价也必须只是读头几个字节。
+///
+/// 只认结构说得清的三类（GIF / APNG / 动画 WebP）。读不懂的一律当静态：把静态页
+/// 误判成动图会让它彻底拿不到超分，比漏掉一张动图更糟。
+pub fn is_animated_image(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return matches!(gif_frame_count(bytes), Some(frames) if frames >= 2);
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return png_is_animated(bytes);
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return webp_is_animated(bytes);
+    }
+    false
+}
+
+/// 走 GIF 容器结构数「图像描述符」（`0x2C`）的个数。读不下去（截断、越界、碰上不
+/// 认识的块）时给 `None`——那样的字节不值得猜。
+///
+/// `pub(crate)`：动图 DLSSNR 要在动手之前拿帧数判预算（见
+/// `src-tauri/src/dlssnr/animation.rs`），而 `gif` crate 没有帧数 API。
+pub(crate) fn gif_frame_count(bytes: &[u8]) -> Option<usize> {
+    // 头部 6 字节 + 逻辑屏幕描述符 7 字节。
+    let mut cursor = 13usize;
+    if bytes.len() < cursor {
+        return None;
+    }
+    // packed 字节 bit7 是全局色表标志，表长 3 * 2^(n+1)。
+    let packed = bytes[10];
+    if packed & 0x80 != 0 {
+        cursor = cursor.checked_add(3usize << ((packed & 0x07) + 1))?;
+        if cursor > bytes.len() {
+            return None;
+        }
+    }
+    let mut frames = 0usize;
+    loop {
+        match *bytes.get(cursor)? {
+            0x3B => return Some(frames),
+            0x2C => {
+                // 先跨过块起始符，下面一律以描述符首字节为基准（否则色表标志会读成
+                // 高度的低位字节，子块链从 LZW 最小码长那一位错开）。
+                cursor += 1;
+                if cursor + 9 > bytes.len() {
+                    return None;
+                }
+                // 图像描述符最后一字节的 bit7 是局部色表标志，与全局色表同构。
+                let local = bytes[cursor + 8];
+                cursor += 9;
+                if local & 0x80 != 0 {
+                    cursor = cursor.checked_add(3usize << ((local & 0x07) + 1))?;
+                    if cursor > bytes.len() {
+                        return None;
+                    }
+                }
+                // 图像数据以 LZW 最小码长一个字节开头，后面才是子块链。
+                cursor = skip_gif_sub_blocks(bytes, cursor + 1)?;
+                frames += 1;
+            }
+            // 扩展块：一个标签字节 + 子块链。图形控制块与注释都算在这里，
+            // 它们不代表新的一帧。
+            0x21 => cursor = skip_gif_sub_blocks(bytes, cursor + 2)?,
+            _ => return None,
+        }
+    }
+}
+
+/// 跳过 GIF 子块链：长度字节 + 数据，遇到 0 长度字节结束。
+fn skip_gif_sub_blocks(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    loop {
+        let size = *bytes.get(cursor)? as usize;
+        cursor += 1;
+        if size == 0 {
+            return Some(cursor);
+        }
+        cursor = cursor.checked_add(size)?;
+        if cursor > bytes.len() {
+            return None;
+        }
+    }
+}
+
+/// PNG 块链：`acTL` 出现在第一个 `IDAT` 之前就是 APNG（chunk 长度不校验 CRC）。
+fn png_is_animated(bytes: &[u8]) -> bool {
+    let mut cursor = 8usize;
+    while cursor + 8 <= bytes.len() {
+        let length = u32::from_be_bytes([
+            bytes[cursor],
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+        ]) as usize;
+        let kind = &bytes[cursor + 4..cursor + 8];
+        if kind == b"acTL" {
+            return true;
+        }
+        if kind == b"IDAT" {
+            return false;
+        }
+        // 4 字节长度 + 4 字节类型 + 数据 + 4 字节 CRC；读不到块的边界就当静态。
+        match (cursor + 12).checked_add(length) {
+            Some(next) if next <= bytes.len() => cursor = next,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// 动画 WebP：`VP8X` 的 ANIM 位置位，或者 chunk 列表里出现 `ANIM`。
+fn webp_is_animated(bytes: &[u8]) -> bool {
+    let mut cursor = 12usize;
+    let mut first = true;
+    while cursor + 8 <= bytes.len() {
+        let kind = &bytes[cursor..cursor + 4];
+        let length = u32::from_le_bytes([
+            bytes[cursor + 4],
+            bytes[cursor + 5],
+            bytes[cursor + 6],
+            bytes[cursor + 7],
+        ]) as usize;
+        if first && kind == b"VP8X" {
+            if matches!(bytes.get(cursor + 8), Some(flags) if flags & 0x02 != 0) {
+                return true;
+            }
+        }
+        first = false;
+        if kind == b"ANIM" {
+            return true;
+        }
+        // RIFF chunk 按偶数字节对齐，块之间可能有一个填充字节。
+        let next = (cursor + 8).saturating_add(length + (length & 1));
+        if next <= cursor || next > bytes.len() {
+            return false;
+        }
+        cursor = next;
+    }
+    false
+}
+
 pub fn store_image_cache(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
@@ -1209,5 +1353,119 @@ mod tests {
         assert_eq!(read_cache_stats(&connection).unwrap().bytes, 50);
         assert!(!cache.join("old.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    /// 一帧 GIF：`0x2C` 图像描述符 + 无局部色表 + LZW 最小码长与一个已结束的子块链。
+    fn gif_frame() -> Vec<u8> {
+        let mut bytes = vec![0x2C];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0, 0]);
+        bytes.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        bytes
+    }
+
+    fn gif_with_frames(frames: usize) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"GIF89a");
+        // 逻辑屏幕描述符：宽高各 2 字节 + packed 0x80（带 2 色全局色表）+ 背景色 + 宽高比。
+        // 色表要在：真实 GIF 基本都带，且它把「描述符长度算错」这类的偏差暴露出来——
+        // 用不带色表的骨架测过一版，错位恰好被骨架的字节对齐掩盖了。
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
+        bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0x00, 0x00, 0x00]);
+        for _ in 0..frames {
+            bytes.extend_from_slice(&gif_frame());
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    fn png_with_chunks(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        for (kind, data) in chunks {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(*kind);
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(&[0, 0, 0, 0]); // 只走容器结构，不校验 CRC。
+        }
+        bytes
+    }
+
+    fn webp_with_vp8x_flag(flag: u8) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&[0x16, 0, 0, 0]);
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(b"VP8X");
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.push(flag);
+        bytes.extend_from_slice(&[0; 9]);
+        bytes
+    }
+
+    #[test]
+    fn a_gif_with_two_frames_is_animated() {
+        assert!(is_animated_image(&gif_with_frames(2)));
+    }
+
+    #[test]
+    fn a_gif_with_one_frame_is_still_an_image() {
+        assert!(!is_animated_image(&gif_with_frames(1)));
+    }
+
+    #[test]
+    fn a_truncated_gif_header_is_not_animated() {
+        // 只有头部、没有逻辑屏幕描述符：读不出来就当静态，不能 panic。
+        assert!(!is_animated_image(b"GIF89a"));
+        assert!(!is_animated_image(b"GIF89a\x01\x00"));
+    }
+
+    #[test]
+    fn a_png_carrying_an_actl_chunk_is_animated() {
+        let bytes = png_with_chunks(&[
+            (b"IHDR", &[0; 13]),
+            (b"acTL", &[2, 0, 0, 0, 0, 0, 0, 0]),
+            (b"IDAT", &[1, 2, 3]),
+        ]);
+        assert!(is_animated_image(&bytes));
+    }
+
+    #[test]
+    fn a_png_without_an_actl_chunk_is_not_animated() {
+        let bytes = png_with_chunks(&[(b"IHDR", &[0; 13]), (b"IDAT", &[1, 2, 3])]);
+        assert!(!is_animated_image(&bytes));
+        // acTL 出现在 IDAT 之后就不是「第一个 IDAT 之前」，也不算动图。
+        let late = png_with_chunks(&[
+            (b"IHDR", &[0; 13]),
+            (b"IDAT", &[1, 2, 3]),
+            (b"acTL", &[2, 0, 0, 0, 0, 0, 0, 0]),
+        ]);
+        assert!(!is_animated_image(&late));
+    }
+
+    #[test]
+    fn a_webp_with_the_vp8x_animation_bit_is_animated() {
+        assert!(is_animated_image(&webp_with_vp8x_flag(0x02)));
+    }
+
+    #[test]
+    fn a_webp_without_the_animation_bit_is_not_animated() {
+        assert!(!is_animated_image(&webp_with_vp8x_flag(0x00)));
+    }
+
+    #[test]
+    fn a_webp_carrying_an_anim_chunk_is_animated() {
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&[0x16, 0, 0, 0]);
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(b"VP8X");
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 10]); // 位清空，只有 ANIM 块能说明它是动图。
+        bytes.extend_from_slice(b"ANIM");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(is_animated_image(&bytes));
+    }
+
+    #[test]
+    fn bytes_that_are_not_an_image_are_not_animated() {
+        assert!(!is_animated_image(b"<html>not an image</html>"));
+        assert!(!is_animated_image(&[]));
     }
 }

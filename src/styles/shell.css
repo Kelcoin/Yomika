@@ -449,6 +449,38 @@ body::-webkit-scrollbar,
   padding: 0 0 var(--space-8);
 }
 
+/* 详情一开，首页就不能再「随内容长高」了。
+   `is-flow` 那条规则（`.route-cache-panel.is-flow`，下方）把面板高度交还给内容，于是
+   Group 内联的 `height: 100%` 落在一个不定高父级上、退化成 auto：两个 Panel 作为 flex
+   项被拉到「较高那一栏的内容高度」，详情栏自己的 `height: 100%` 也就永远等于它的
+   scrollHeight——`overflow: auto` 永远不会溢出，右栏根本滚不动；而页面上唯一的滚动容器
+   是 `.workspace`，鼠标落在哪一栏都是滚整页，两栏于是绑在一起动。
+   这一态改成档案库那样的钳定两栏：整页不再滚（`overflow: hidden`，内边距也已经由外壳
+   那 16px 接管），左栏自己成为滚动容器。书架的 key 本来就不在 flow 名单里，档案库同理，
+   所以这三条只碰首页。`:not([hidden])` 依旧承重：留在后面的隐藏首页不该把别的路由一起钳住。
+   窄屏（901px 以下）整段不生效：那时首页是「钻进去」的单栏、`.library-shell-detail` 的
+   overflow 又还原成 `visible`，靠整页滚——真把这四条放进去，详情就会被钳在一个滚不动的
+   `overflow: hidden` 盒子里。 */
+@media (min-width: 901px) {
+  .workspace:has(> .route-cache-panel:not([hidden]) .library-shell.is-home.has-detail) {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .workspace > .route-cache-panel.is-flow:has(.library-shell.is-home.has-detail) {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* 左栏那三排以前靠整页滚才能看全，现在它自己就是滚动容器。`overscroll-behavior`
+     与档案库的列表一致：到了底不要把手势甩给外面（外面已经没有可滚的了）。 */
+  .library-shell.is-home.has-detail .library-shell-list {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
 .scroll-to-top {
   position: fixed;
   z-index: var(--z-sticky);

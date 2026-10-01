@@ -203,6 +203,27 @@ fn apply_cached_page(
     );
     source.revision = revision;
     let settings = input.settings.clone().unwrap_or_default().normalized();
+    // 源页只读一次，而且读在这里是为了先判定动图：判定必须早于产物缓存命中——修复
+    // 之前跑过的产物是「第一帧 + DLSSNR」的静帧，让缓存先命中就等于这次修复对用户
+    // 已经读过的那一页没生效。读不到不在这里报错（产物缓存可能还留着这一页），失败
+    // 点留在后面原来的位置，锁也在离开这个作用域前交出。
+    let page = {
+        let connection = match database.connection.lock() {
+            Ok(value) => value,
+            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        };
+        let page = load_image_cache(&connection, data_dir, &source);
+        drop(connection);
+        page
+    };
+    // 动图走另一条路（见 `super::animation`）：DLSSNR 对每一帧都是自足的空间滤波，逐帧
+    // 跑完再编回 APNG。这里只判定「它是不是动图」——真正要字节的时候才动它。
+    //
+    // 判定必须排在这一步（已经读到源页、还没问产物缓存）：这次改动之前跑出来的产物是
+    // 「第一帧 + DLSSNR」的静帧，让缓存先命中就等于这条修复对用户已经读过的那一页没
+    // 生效。判定靠源页，所以源页必须先读——这也是它读在这个位置的原因。
+    let animated =
+        matches!(&page, Ok(Some(image)) if crate::cache::is_animated_image(&image.bytes));
     // 产物缓存先问一遍：键是「起点那一版 + 这一份 DLL + 这一套参数」。命中就整段跳过
     // ——不读页、不解码、不跑 GPU、不编码，重新挂载阅读器 / 重启应用之后也是这一条。
     // 放在 `runtime_gate` 之前：能命中就说明这同一份 DLL 已经跑出过这一页，此刻机器
@@ -219,7 +240,12 @@ fn apply_cached_page(
         &settings,
     ));
     if let Some(hit) = crate::inference::cached_derived(database, data_dir, &output) {
-        return CommandResult::success(hit);
+        // 动图页的产物必须**也是动图**：这台机器上上一版跑出来的产物是单帧静图，
+        // 它是同一个键，命中它这一页就还是那张静帧。按内容对一下，旧静帧自然落空
+        // （下次重跑并覆盖），新编出来的 APNG 照旧命中。
+        if animated == crate::cache::is_animated_image(&hit) {
+            return CommandResult::success(hit);
+        }
     }
     // 二次校验：前端那个布尔值只是「用户想用」，跑不跑得起来是这台机器此刻的
     // 事实。放在取页之前——跑不起来时连缓存都不该碰。
@@ -227,17 +253,46 @@ fn apply_cached_page(
         return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false);
     }
 
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
-    let page = match load_image_cache(&connection, data_dir, &source) {
+    let page = match page {
         Ok(Some(image)) => image,
         // 可重试：上一步（去码/超分）可能还在跑，落地之后再问一次。
         Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    drop(connection);
+
+    // 动图：逐帧过 DLSSNR，再编回 APNG 交出去。帧与帧之间是独立的（DLL 那边
+    // `DLSSNR.Reset = 1`、没有运动矢量与深度，见 `super::animation`），所以「每帧都
+    // 当一张静图跑」跟它的语义是一致的。
+    if animated {
+        let guard = crate::inference::cancel::begin(input.task_id.as_deref());
+        let processed = match super::animation::apply_dlssnr(
+            data_dir,
+            &page.bytes,
+            &settings,
+            &guard.token(),
+        ) {
+            Ok(Some(encoded)) => encoded,
+            // 「不适用」而不是「失败」：画布太小、帧太多、超像素预算、容器说不清自己
+            // 几帧——这些都在解码之前就判完了，原图本来就是能看的。**不写产物缓存**：
+            // 缓存里存的每一份都是「DLSSNR 的输出」，把原图按同一个键塞进去，下次就
+            // 分不清这一页是算过的还是没算的（也就没法再随参数变化重算）。
+            Ok(None) => return CommandResult::success(page.bytes),
+            Err(error) if error == super::filter::CANCELLED => {
+                return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
+            }
+            Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
+        };
+        drop(guard);
+        let encoded = crate::inference::finish_derived(
+            database,
+            data_dir,
+            DLSSNR_CACHE_SOURCE,
+            &output,
+            DLSSNR_MIME,
+            processed,
+        );
+        return CommandResult::success(encoded);
+    }
 
     let decoded = match image::load_from_memory(&page.bytes) {
         Ok(value) => value.to_rgba8(),
@@ -611,6 +666,86 @@ mod tests {
         let error = expect_failure(apply_cached_page(&database, dir.path(), &input));
         assert_eq!(error.code, "INFERENCE_UNAVAILABLE");
         assert!(!error.retryable, "重试不会让这台机器长出 N 卡：{}", error.message);
+    }
+
+    /// 把一页放进源页缓存（`apply_cached_page` 只读这一份，不需要真去下载）。
+    fn store_source_page(
+        database: &crate::db::Database,
+        data_dir: &std::path::Path,
+        mime: &str,
+        bytes: &[u8],
+    ) {
+        let identity = crate::cache::CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let connection = database.connection.lock().expect("库锁");
+        crate::cache::store_image_cache(&connection, data_dir, &identity, mime, bytes)
+            .expect("源页落盘");
+    }
+
+    /// 把一份产物放到这一页的产物键上。
+    fn store_product(
+        database: &crate::db::Database,
+        data_dir: &std::path::Path,
+        settings: &crate::dlssnr::DlssnrSettings,
+        bytes: &[u8],
+    ) {
+        let mut identity =
+            crate::cache::CacheImageIdentity::new("scope", "archive", DLSSNR_RENDITION, 0);
+        identity.revision = Some(crate::dlssnr::output_revision(data_dir, None, settings));
+        let connection = database.connection.lock().expect("库锁");
+        crate::cache::store_image_cache(&connection, data_dir, &identity, "image/png", bytes)
+            .expect("产物落盘");
+    }
+
+    /// 动图页的产物必须**也是动图**：上一版在这台机器上跑出来的那张「第一帧 + DLSSNR」
+    /// 挂在同一个键上，命中它这一页就还是那张静帧。这里摆一张静帧产物 + 一份真的动图源页，
+    /// 命令必须不去取那张静帧（这台机器上那一下跑不起来，所以它接着在门控上失败——这条测
+    /// 真正锁的是「不许把静帧交出去」）。
+    #[test]
+    fn a_stored_still_frame_does_not_satisfy_an_animated_page() {
+        const GIF: &[u8] = include_bytes!("testdata/animated.gif");
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        fake_dll(dir.path(), 1024);
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        store_source_page(&database, dir.path(), "image/gif", GIF);
+        let still = page_png(96, 96);
+        store_product(&database, dir.path(), &settings, &still);
+
+        match apply_cached_page(&database, dir.path(), &input_with(Some(settings))) {
+            CommandResult::Success { value, .. } => panic!(
+                "动图页不该拿到上一版留下的静帧：交出来的是 {} 字节，静帧是 {} 字节",
+                value.len(),
+                still.len()
+            ),
+            CommandResult::Failure { error, .. } => {
+                assert_eq!(error.code, "INFERENCE_UNAVAILABLE", "{}", error.message)
+            }
+        }
+    }
+
+    /// 反过来：产物本身就是动图时照旧命中。命中路径排在门控之前，所以这台机器上没有一
+    /// 份能用的片段（`fake_dll` 是零字节占位）也必须给得出来。源页与产物故意用两份不同的
+    /// 容器：不然「命中缓存」和「原样交回」这两种行为给出的字节完全一样，这条就测不到东西
+    /// 了（改动之前这里正是那个更早的动图早退）。
+    #[test]
+    fn a_stored_animation_satisfies_an_animated_page_without_touching_the_gpu() {
+        const APNG: &[u8] = include_bytes!("testdata/animated.png");
+        const WEBP: &[u8] = include_bytes!("testdata/animated.webp");
+        let dir = tempfile::tempdir().expect("临时目录");
+        let database = crate::db::Database::open_path(dir.path().join("test.sqlite")).expect("库");
+        fake_dll(dir.path(), 1024);
+        let settings = crate::dlssnr::DlssnrSettings::default().normalized();
+        store_source_page(&database, dir.path(), "image/webp", WEBP);
+        store_product(&database, dir.path(), &settings, APNG);
+
+        match apply_cached_page(&database, dir.path(), &input_with(Some(settings))) {
+            CommandResult::Success { value, .. } => {
+                assert_eq!(value, APNG, "命中的就是落盘那一份产物，不是源页")
+            }
+            CommandResult::Failure { error, .. } => {
+                panic!("该命中缓存，却失败了：{} {}", error.code, error.message)
+            }
+        }
     }
 
     #[test]

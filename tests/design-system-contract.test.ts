@@ -625,6 +625,25 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/\.workspace:has\(\.workspace-home\)/);
   });
 
+  it('lets each home column scroll on its own once the detail is open', () => {
+    // 首页平时是 flow：面板随内容长高、整页滚。详情一开，那个「随内容长高」就成了 bug——
+    // Group 的内联 height:100% 落到不定高父级上退化成 auto，两栏被拉到「较高那一栏的内容
+    // 高度」，详情栏的 height:100% 于是永远等于自己的 scrollHeight，overflow:auto 永远不
+    // 溢出、也就永远滚不动；页面上唯一的滚动容器是 .workspace，鼠标落在哪一栏都是滚整页，
+    // 两栏一起动。详情打开这一态改成档案库那样的钳定两栏，`is-home` 是那个闸门。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const home = read('src/components/HomeShell.tsx');
+    expect(home).toContain('library-shell is-home');
+    expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.library-shell\.is-home\.has-detail\)\s*\{[^}]*overflow:\s*hidden/);
+    expect(shell).toMatch(/\.route-cache-panel\.is-flow:has\(\.library-shell\.is-home\.has-detail\)\s*\{[^}]*height:\s*100%/);
+    expect(shell).toMatch(/\.library-shell\.is-home\.has-detail \.library-shell-list\s*\{[^}]*overflow-y:\s*auto/);
+    // 900px 及以下首页是「钻进去」的单栏、整页滚：`@media (max-width: 900px)` 那一段把
+    // `.library-shell` 拆成 `display: block`、把 `.library-shell-detail` 的 overflow 还原成
+    // `visible`。上面这三条要是漏进窄屏，详情栏就被钳在一个 `overflow: hidden` 的盒子里，
+    // 内容比屏幕长，而没有任何东西能滚它。
+    expect(shell).toMatch(/@media \(min-width: 901px\) \{\s*\.workspace:has\(/);
+  });
+
   it('keeps the detail of each shell on the page that owns it', () => {
     // 详情栏里的推荐条从前一律指向 `/library/:id`：首页或书架的详情点一条推荐，
     // 左边那一栏会跟着换成档案库，等于又从首页/书架溜进了档案库。

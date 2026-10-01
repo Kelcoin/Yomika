@@ -514,6 +514,17 @@ fn dlssnr_process(data: &Path, params: &ProcessParams, bytes: &[u8]) -> Result<V
             .normalized(),
         None => DlssnrSettings::default(),
     };
+    // 动图逐帧过 DLSSNR 再编回 APNG——与本地那条路共用同一份实现，两边不会跑出两种
+    // 结果。这一页没配任务 id，取消不了：worker 是「接单即做」的，客户端断开就丢掉回包。
+    if crate::cache::is_animated_image(bytes) {
+        let cancel = crate::inference::cancel::CancelToken::none();
+        match crate::dlssnr::apply_dlssnr(data, bytes, &settings, &cancel)? {
+            Some(encoded) => return Ok(encoded),
+            // 不适用（画布太小 / 帧太多 / 超像素预算 / 容器说不清）：原图本来就是能看
+            // 的，原样交回——客户端只看 content-type，动图照样播。
+            None => return Ok(bytes.to_vec()),
+        }
+    }
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| error.to_string())?
         .to_rgba8();
@@ -878,7 +889,16 @@ async fn handle_connection(
             .await
             .and_then(|inner| inner);
             match processed {
-                Ok(bytes) => write_response(&mut stream, 200, "OK", "image/png", &bytes).await,
+                // 跳过动图时回的是 GIF/WebP 的原始字节，标签跟着 sniff 走才不会撒谎；
+                // 正常路径产出 PNG，sniff 出来的仍然是 image/png，行为不变。
+                Ok(bytes) => {
+                    let content_type = crate::cache::sniff_image_mime(
+                        "application/octet-stream",
+                        &bytes,
+                    )
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                    write_response(&mut stream, 200, "OK", &content_type, &bytes).await
+                }
                 Err(error) => {
                     let body = error_body("INFERENCE_UNAVAILABLE", &format!("{op}：{error}"));
                     write_json(&mut stream, 500, "Internal Server Error", &body).await
@@ -997,6 +1017,13 @@ pub fn remote_process(
     params: &ProcessParams,
     bytes: Vec<u8>,
 ) -> Result<Vec<u8>, RemoteFailure> {
+    // 动图只有 DLSSNR 那条路认它（对面逐帧跑完编回 APNG）；超分 / 去码没有逐帧实现，
+    // 发过去只会被压成第一帧，所以照旧原样交回（前端把失败当可重试）。判定必须在下面
+    // 那次「归一成 PNG」之前——归一化本身就已经把动图压成第一帧了。
+    let animated = crate::cache::is_animated_image(&bytes);
+    if animated && params.op != "dlssnr" {
+        return Ok(bytes);
+    }
     let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
     let encoded = {
         use base64::Engine;
@@ -1007,14 +1034,22 @@ pub fn remote_process(
     };
     // 一页大图 + 一个模型的推理，给足时间；再长就该考虑把图切小。
     const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-    let normalized = image::load_from_memory(&bytes)
-        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法解码：{error}")))?
-        .to_rgba8();
-    let mut png = Vec::new();
-    use image::ImageEncoder;
-    image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(normalized.as_raw(), normalized.width(), normalized.height(), image::ExtendedColorType::Rgba8)
-        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法转换为 PNG：{error}")))?;
+    let payload = if animated {
+        // 动图原样发：对面按容器自己解（GIF / APNG / 动画 WebP）。配的是旧版 worker 时
+        // 它会原样把这串字节交回来，客户端只认 content-type 就收下——动画在客户端这边
+        // 保住了，不会因为对面不会处理而变差。
+        bytes
+    } else {
+        let normalized = image::load_from_memory(&bytes)
+            .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法解码：{error}")))?
+            .to_rgba8();
+        let mut png = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(normalized.as_raw(), normalized.width(), normalized.height(), image::ExtendedColorType::Rgba8)
+            .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法转换为 PNG：{error}")))?;
+        png
+    };
     let response = blocking_client()
         .map_err(RemoteFailure::transport)?
         .post(format!("{base}/v2/process"))
@@ -1022,7 +1057,7 @@ pub fn remote_process(
         .header("x-yomika-params", encoded)
         .header("content-type", "application/octet-stream")
         .timeout(PROCESS_TIMEOUT)
-        .body(png)
+        .body(payload)
         .send()
         .map_err(|error| {
             if error.is_timeout() {
@@ -1751,6 +1786,95 @@ mod tests {
         );
         assert!(oversized.starts_with("HTTP/1.1 413"), "{oversized}");
         assert!(oversized.contains(&MAX_BODY.to_string()), "{oversized}");
+        center.stop();
+    }
+
+    /// 两帧 GIF（每帧 1×1 + 2 色全局色表，LZW 只有 clear/0/EOI 三个码）。
+    fn animated_gif() -> Vec<u8> {
+        let mut bytes = Vec::from(*b"GIF89a");
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
+        bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0x00, 0x00, 0x00]);
+        for _ in 0..2 {
+            bytes.push(0x2C);
+            bytes.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0, 0]);
+            bytes.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    #[test]
+    fn an_animated_page_is_handed_back_by_process() {
+        // worker 收到动图就不该去超分：处理完只剩第一帧，动的部分再也回不来。
+        let dir = tempfile::tempdir().expect("临时目录");
+        let gif = animated_gif();
+        let params = ProcessParams {
+            op: "upscale".into(),
+            model_id: None,
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let bytes = process(dir.path(), dir.path(), &params, &gif).expect("动图要当成功处理");
+        assert_eq!(bytes, gif);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tiny_animated_page_is_handed_back_by_dlssnr() {
+        // 1×1 在 DLL 的 32×32 下限之下：动画路径判「不适用」原样交回，所以这台机器上
+        // 没装 DLL 也要能通过这一条（判定排在建上下文之前）。
+        let dir = tempfile::tempdir().expect("临时目录");
+        let gif = animated_gif();
+        let params = ProcessParams {
+            op: "dlssnr".into(),
+            model_id: None,
+            scale: None,
+            dlssnr: None,
+        };
+        let bytes = dlssnr_process(dir.path(), &params, &gif).expect("动图要当成功处理");
+        assert_eq!(bytes, gif);
+    }
+
+    #[test]
+    fn an_animated_page_is_handed_back_without_a_remote_round_trip() {
+        // 超分 / 去码没有逐帧实现：发过去之前那次「归一成 PNG」就已经把动图压成第一帧
+        // 了，所以这里必须连试都不试（127.0.0.1:9 上没有任何东西在听）。
+        let gif = animated_gif();
+        let params = ProcessParams {
+            op: "upscale".into(),
+            model_id: None,
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let bytes = remote_process("http://127.0.0.1:9/", "token", &params, gif.clone())
+            .expect("动图要当成功处理");
+        assert_eq!(bytes, gif);
+    }
+
+    #[test]
+    fn an_animated_page_reaches_dlssnr_as_an_animation() {
+        // 动图只有 DLSSNR 那条路认它，所以 op 是 dlssnr 时**不许**在本地把它交回去：
+        // 交回去等于这个功能对动图根本没生效。
+        let gif = animated_gif();
+        let params = ProcessParams {
+            op: "dlssnr".into(),
+            model_id: None,
+            scale: None,
+            dlssnr: None,
+        };
+        let refused = remote_process("http://127.0.0.1:9/", "token", &params, gif.clone())
+            .expect_err("op 是 dlssnr 的动图要真的发出去，不该在本地就交回来");
+        assert_eq!(refused.code, "REMOTE_UNAVAILABLE", "{}", refused.message);
+
+        // 对面收到的是 GIF 本身，不是归一化后的 PNG：1×1 在「图太小」那一步就退回，所以
+        // 它把同一串字节交回来——回包等于源字节就说明客户端没有把它压成第一帧（压了的话
+        // 对面会去走静图路径，这台机器上没 DLL，回的是 5xx 而不是这串字节）。
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let base = format!("127.0.0.1:{port}");
+        let bytes =
+            remote_process(&base, "token-123", &params, gif.clone()).expect("动图要当成功处理");
+        assert_eq!(bytes, gif);
         center.stop();
     }
 }

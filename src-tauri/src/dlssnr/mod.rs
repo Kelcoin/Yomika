@@ -80,6 +80,8 @@ pub mod commands {
     }
 }
 #[cfg(windows)]
+mod animation;
+#[cfg(windows)]
 mod device;
 #[cfg(windows)]
 mod filter;
@@ -94,6 +96,8 @@ mod settings;
 #[cfg(windows)]
 mod workspace;
 
+#[cfg(windows)]
+pub use animation::apply_dlssnr;
 #[cfg(windows)]
 pub use filter::{apply, DlssnrImage};
 #[cfg(windows)]
