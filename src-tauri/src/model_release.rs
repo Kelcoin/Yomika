@@ -1,9 +1,55 @@
 use sha2::{Digest, Sha256};
+use std::collections::{HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
-static CANCELLED_DOWNLOADS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-fn cancelled() -> &'static Mutex<std::collections::HashSet<String>> {
-    CANCELLED_DOWNLOADS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+
+/// 取消标记只在下载真被打断的那段时间里有意义，而 destination 是前端传进来的
+/// 字符串：只插不删的表会随「取消过、之后没再下同一个文件」无限增长。所以按插入
+/// 顺序淘汰，上限与 inference/cancel.rs 的 pending 表一致。
+const MAX_CANCELLED_DOWNLOADS: usize = 256;
+
+#[derive(Default)]
+struct CancelledDownloads {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl CancelledDownloads {
+    fn mark(&mut self, key: String) {
+        if self.set.insert(key.clone()) {
+            self.order.push_back(key);
+        }
+        while self.order.len() > MAX_CANCELLED_DOWNLOADS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
+
+    /// 读到即消费：已经据此中断的下载，不该把标记留给同一目标的下一次下载。
+    fn take(&mut self, key: &str) -> bool {
+        if !self.set.remove(key) {
+            return false;
+        }
+        if let Some(index) = self.order.iter().position(|item| item == key) {
+            self.order.remove(index);
+        }
+        true
+    }
+
+    /// 下载开始时清掉上一次留下的残留标记。
+    fn clear(&mut self, key: &str) {
+        let _ = self.take(key);
+    }
+
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+}
+
+static CANCELLED_DOWNLOADS: OnceLock<Mutex<CancelledDownloads>> = OnceLock::new();
+fn cancelled() -> &'static Mutex<CancelledDownloads> {
+    CANCELLED_DOWNLOADS.get_or_init(|| Mutex::new(CancelledDownloads::default()))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -483,7 +529,7 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
     mut progress: F,
 ) -> Result<(), String> {
     let key = destination.to_string_lossy().to_string();
-    cancelled().lock().unwrap().remove(&key);
+    cancelled().lock().unwrap().clear(&key);
     let mut response = reqwest::blocking::get(url).map_err(|e| format!("download failed: {e}"))?;
     if !response.status().is_success() {
         return Err(format!("download HTTP {}", response.status()));
@@ -500,7 +546,7 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
         let mut buffer = [0u8; 1024 * 128];
         let length = response.content_length();
         loop {
-            if cancelled().lock().unwrap().contains(&key) {
+            if cancelled().lock().unwrap().take(&key) {
                 return Err("download cancelled".into());
             }
             let read = response.read(&mut buffer).map_err(|e| format!("read {url}: {e}"))?;
@@ -972,7 +1018,7 @@ pub fn model_release_download(
 
 #[tauri::command]
 pub fn model_release_cancel(destination: String) -> crate::domain::result::CommandResult<()> {
-    cancelled().lock().unwrap().insert(destination);
+    cancelled().lock().unwrap().mark(destination);
     crate::domain::result::CommandResult::success(())
 }
 
@@ -1538,5 +1584,32 @@ mod tests {
         )
         .is_ok());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_cancel_table_stays_bounded_and_consumes_a_flag_on_read() {
+        let mut table = CancelledDownloads::default();
+        for index in 0..MAX_CANCELLED_DOWNLOADS + 16 {
+            table.mark(format!("download-{index}.part"));
+        }
+        assert!(
+            table.len() <= MAX_CANCELLED_DOWNLOADS,
+            "取消表条数 {} 超过上限 {MAX_CANCELLED_DOWNLOADS}",
+            table.len()
+        );
+        assert!(
+            !table.take("download-0.part"),
+            "最早的取消标记应已被淘汰"
+        );
+        assert!(
+            table.take(&format!("download-{}.part", MAX_CANCELLED_DOWNLOADS + 15)),
+            "最近的取消标记应还在"
+        );
+        assert!(
+            !table.take(&format!("download-{}.part", MAX_CANCELLED_DOWNLOADS + 15)),
+            "读到即消费：同一个标记只能中断一次下载"
+        );
+        table.clear("download-1.part");
+        assert!(!table.take("download-1.part"));
     }
 }

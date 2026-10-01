@@ -35,10 +35,16 @@ struct SyncStateObject {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct SyncStateDocument {
+pub(crate) struct SyncStateDocument {
     version: i64,
     epoch: i64,
     /// key = `{scope_id}|{object_type}|{object_id}`。
+    ///
+    /// 反序列化时按对象自己的身份（`scope_id` + `object_type` + `object_id`）去重，
+    /// 同一个身份只留最新的一版：文件里同一个对象可能出现两次（拼接出来的、手抄的、
+    /// 老版本导出又新导出叠起来的），而 `objects` 是一张表，同名键天然只剩一条——
+    /// 留哪一条不该由文本顺序决定。键与对象字段一致时原样保留键。
+    #[serde(deserialize_with = "deserialize_state_objects")]
     objects: std::collections::BTreeMap<String, SyncStateObject>,
 }
 
@@ -155,6 +161,90 @@ fn merge_sync_states(local: &SyncStateDocument, remote: &SyncStateDocument) -> S
         epoch: local.epoch.max(remote.epoch),
         objects,
     }
+}
+
+/// 同一个对象的两版谁更新：时钟大的赢；时钟平局比时刻，再比设备，最后比内容哈希。
+///
+/// 与 `state_object_wins` 的差别在于它认时刻与设备：折叠一份**文件内部**的重复项时，
+/// 两版常常出自同一台设备（时钟一样、内容不同），只比 (时钟, 哈希) 会让「谁赢」随
+/// 文本顺序变化。四层判据合起来是全序，按任意顺序折叠都得到同一版。
+fn fresher_state_object(candidate: &SyncStateObject, existing: &SyncStateObject) -> bool {
+    if remote_change_wins(
+        existing.logical_clock,
+        &existing.wall_clock,
+        &existing.device_id,
+        candidate.logical_clock,
+        &candidate.wall_clock,
+        &candidate.device_id,
+    ) {
+        return true;
+    }
+    candidate.logical_clock == existing.logical_clock
+        && compare_instants(&candidate.wall_clock, &existing.wall_clock) == std::cmp::Ordering::Equal
+        && candidate.device_id == existing.device_id
+        && candidate.payload_hash > existing.payload_hash
+}
+
+/// 反序列化 `objects`：同名键不让「文本里最后一条」赢，而是按对象身份归位、留下最新的。
+fn deserialize_state_objects<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, SyncStateObject>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::MapAccess;
+
+    struct StateObjects;
+
+    impl<'de> serde::de::Visitor<'de> for StateObjects {
+        type Value = std::collections::BTreeMap<String, SyncStateObject>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("按 scope_id|object_type|object_id 索引的同步对象表")
+        }
+
+        fn visit_map<A>(self, mut entries: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            // 身份 → （文件里写的键, 那一版）。键与对象字段一致时（正常导出）原样保留，
+            // 只在同一个身份出现两次、而两次写的键不一样时才归位到同一格。
+            let mut folded: std::collections::BTreeMap<String, (String, SyncStateObject)> =
+                std::collections::BTreeMap::new();
+            while let Some((key, object)) = entries.next_entry::<String, SyncStateObject>()? {
+                let identity =
+                    state_object_key(&object.scope_id, &object.object_type, &object.object_id);
+                match folded.get_mut(&identity) {
+                    Some((kept_key, kept)) => {
+                        if fresher_state_object(&object, kept) {
+                            *kept = object;
+                            *kept_key = key;
+                        } else if !fresher_state_object(kept, &object) && key < *kept_key {
+                            // 两版完全打平（连同内容哈希）：那点区别就只剩文件里写的键，
+                            // 按字典序定胜负，免得折叠结果取决于文本顺序。
+                            *kept_key = key;
+                        }
+                    }
+                    None => {
+                        folded.insert(identity, (key, object));
+                    }
+                }
+            }
+            let mut objects = std::collections::BTreeMap::new();
+            for (identity, (key, object)) in folded {
+                // 键被别的对象占了（键与字段不一致的怪文件）才改用身份键，保证不会有
+                // 哪一版被静默丢掉。
+                if objects.contains_key(&key) {
+                    objects.insert(identity, object);
+                } else {
+                    objects.insert(key, object);
+                }
+            }
+            Ok(objects)
+        }
+    }
+
+    deserializer.deserialize_map(StateObjects)
 }
 
 /// 折叠冗余的日志行：每个对象只留序号最大的那一版，更早的行仅当 status =
@@ -289,18 +379,20 @@ fn apply_remote_app_setting(
     object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
-    let stored = transaction
+    let stored: Option<(String, String)> = transaction
         .query_row(
-            "SELECT value_json FROM settings WHERE key = 'preferences'",
+            "SELECT value_json, updated_at FROM settings WHERE key = 'preferences'",
             [],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let gate = match stored {
-        Some(_) => remote_change_wins(
+    let gate = match &stored {
+        Some((_, updated_at)) => remote_change_wins(
             local_object_clock(transaction, &object.object_id)?,
-            "",
+            // 时钟撞车（两台设备各自离线改过、都到了同一版）时比时刻。这里以前给的是
+            // 空串，而空串输给任何时刻，于是一份同版本号的旧快照照样能盖上来。
+            updated_at,
             "",
             object.logical_clock,
             &object.wall_clock,
@@ -312,7 +404,8 @@ fn apply_remote_app_setting(
         return Ok(false);
     }
     let local: serde_json::Value = stored
-        .as_deref()
+        .as_ref()
+        .map(|(value, _)| value.as_str())
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or(serde_json::Value::Null);
     let mut merged = local.as_object().cloned().unwrap_or_default();
@@ -339,11 +432,27 @@ fn apply_remote_app_setting(
 fn apply_remote_legacy_non_duplicate(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    _object: &SyncStateObject,
+    object: &SyncStateObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let path = payload_text(payload, "path")?;
     let exact_hash = payload_text(payload, "hash")?;
+    // 这张表没有版本号列，能比的只有 updated_at：一份旧文件里的结论不能盖掉更新的
+    // 那一行（本机新算出来的哈希比从别处带进来的更有价值）。时刻比不出来就照旧覆盖，
+    // 免得两边的 CURRENT_TIMESTAMP 一模一样时互相顶。
+    let updated: Option<String> = transaction
+        .query_row(
+            "SELECT updated_at FROM dedup_features WHERE scope_id = ?1 AND path = ?2",
+            params![scope_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(updated) = updated {
+        if compare_instants(&object.wall_clock, &updated) != std::cmp::Ordering::Greater {
+            return Ok(false);
+        }
+    }
     transaction
         .execute(
             "INSERT INTO dedup_features (scope_id, path, exact_hash, algorithm_version, size)
@@ -436,24 +545,15 @@ pub(crate) struct SystemWebdavCredentialStore;
 
 impl WebdavCredentialStore for SystemWebdavCredentialStore {
     fn set_credential(&self, credential_ref: &str, credential: &str) -> Result<(), String> {
-        keyring::Entry::new(WEBDAV_KEYRING_SERVICE, credential_ref)
-            .map_err(|error| error.to_string())?
-            .set_password(credential)
-            .map_err(|error| error.to_string())
+        crate::secret_store::set_secret(WEBDAV_KEYRING_SERVICE, credential_ref, credential)
     }
 
     fn delete_credential(&self, credential_ref: &str) -> Result<(), String> {
-        keyring::Entry::new(WEBDAV_KEYRING_SERVICE, credential_ref)
-            .map_err(|error| error.to_string())?
-            .delete_credential()
-            .map_err(|error| error.to_string())
+        crate::secret_store::delete_secret(WEBDAV_KEYRING_SERVICE, credential_ref)
     }
 
     fn get_credential(&self, credential_ref: &str) -> Result<String, String> {
-        keyring::Entry::new(WEBDAV_KEYRING_SERVICE, credential_ref)
-            .map_err(|error| error.to_string())?
-            .get_password()
-            .map_err(|error| error.to_string())
+        crate::secret_store::get_secret(WEBDAV_KEYRING_SERVICE, credential_ref)
     }
 }
 
@@ -1372,16 +1472,16 @@ fn apply_remote_history(
         .and_then(|value| value.as_i64())
         .ok_or_else(|| "Remote history payload is missing pageIndex".to_string())?;
     let visited_at = payload_text(payload, "visitedAt")?;
-    let local_row: Option<(i64, String, i64)> = transaction
+    let local_row: Option<(i64, String, i64, String)> = transaction
         .query_row(
-            "SELECT page_index, visited_at, revision FROM reading_history
+            "SELECT page_index, visited_at, revision, device_id FROM reading_history
              WHERE scope_id = ?1 AND archive_id = ?2",
             params![scope_id, archive_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((local_page, local_visit, local_revision)) = local_row else {
+    let Some((local_page, local_visit, local_revision, local_device)) = local_row else {
         transaction
             .execute(
                 "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
@@ -1404,6 +1504,14 @@ fn apply_remote_history(
     } else {
         local_visit
     };
+    // 留下的那次访问是谁做的，device_id 就写谁：本地访问胜出时写远端设备，会把
+    // 「这台机器读到哪」记到别的设备头上，下一次按设备比（墓碑闸门就是这么比的）
+    // 就按错的设备算。
+    let next_device = if keep_remote_visit {
+        object.device_id.as_str()
+    } else {
+        local_device.as_str()
+    };
     transaction
         .execute(
             "UPDATE reading_history SET
@@ -1414,7 +1522,7 @@ fn apply_remote_history(
                 archive_id,
                 local_page.max(page_index),
                 next_visit,
-                object.device_id,
+                next_device,
                 local_revision.max(object.logical_clock),
             ],
         )
@@ -1681,12 +1789,12 @@ async fn sync_remote_scope_inner(
 /// 时候都不在其中——它们只在系统凭据库里。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ScopedDataExport {
+pub(crate) struct ScopedDataExport {
     kind: String,
     schema_version: i64,
     exported_at: String,
     categories: Vec<String>,
-    document: SyncStateDocument,
+    pub(crate) document: SyncStateDocument,
 }
 
 const SCOPED_EXPORT_KIND: &str = "yomika-scope-export";
@@ -1718,12 +1826,17 @@ pub struct ScopedExportReport {
 
 /// 折本机状态成同步文档信封的核心：导出命令与数据迁移（credentials::export_data）
 /// 共用这一份，保证「导出的东西」永远是同一套合并规则折出来的那些。
+///
+/// `categories` 是要装进这份文档的目录，由调用方给：数据迁移那边按弹层的勾选逐类
+/// 裁（只勾进度就只装进度），未知条目丢掉——空清单就是空文档，不回落到全部目录。
 pub(crate) fn export_scoped_document(
     connection: &Connection,
+    categories: &[String],
 ) -> Result<(serde_json::Value, usize), String> {
-    let enabled: Vec<String> = SYNC_SCOPE_CATEGORIES
+    let enabled: Vec<String> = categories
         .iter()
-        .map(|item| item.to_string())
+        .filter(|category| SYNC_SCOPE_CATEGORIES.contains(&category.as_str()))
+        .cloned()
         .collect();
     let scope_ids = local_scope_ids(connection)?;
     let refs: Vec<&str> = scope_ids.iter().map(String::as_str).collect();
@@ -1804,6 +1917,9 @@ pub struct ScopedImportReport {
 /// 合并而不是覆盖：文件可能来自另一台设备，也可能比本机旧——时钟大者胜这条规则在
 /// 这里同样成立，所以重复导入同一份文件是幂等的，旧文件也不会把新数据顶掉。
 ///
+/// 文件**内部**的重复项同样按「留最新」折叠：解析在文本上做（`parse_scoped_document`
+/// → `deserialize_state_objects`），同一个档案同一种记录最后只留最新的一版。
+///
 /// 写日志是必须的：不写，导入的数据就只活在这台机器上，下次同步推出去的文档里没有
 /// 它们，另一台设备也就永远看不到。类别没勾的不落地——勾选是「要不要这类数据」的
 /// 开关，导入不该绕过它。
@@ -1813,28 +1929,50 @@ pub fn import_scoped_data(
     categories: String,
     database: State<'_, Database>,
 ) -> CommandResult<ScopedImportReport> {
-    let value: serde_json::Value = match serde_json::from_str(&payload) {
-        Ok(value) => value,
-        Err(_) => {
-            return CommandResult::failure("INVALID_INPUT", "导入内容不是有效的 JSON", false)
-        }
+    let document = match parse_scoped_document(&payload) {
+        Ok(document) => document,
+        Err(error) => return CommandResult::failure("INVALID_INPUT", error, false),
     };
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
     let enabled = parse_sync_scope(&categories);
-    match import_scoped_document(&mut connection, value, &enabled) {
+    match import_scoped_documents(&mut connection, document, &enabled) {
         Ok(report) => CommandResult::success(report),
         Err(error) => CommandResult::failure("INVALID_INPUT", error, false),
     }
 }
 
+/// 解析一份导入内容：导出信封（`{kind,schemaVersion,categories,document}`）与裸文档
+/// （直接一份同步文档）都收。
+///
+/// 刻意**不走** `serde_json::Value`：那一步会把 `objects` 里同名的键合成文本里最后
+/// 一条，文件内部有重复项时就再也比不出哪一条更新了（见 `deserialize_state_objects`）。
+/// 两条路都在文本上直接解析成文档；都读不出来时才回退到 Value，只为给出与旧版一致的
+/// 错误文案。
+pub(crate) fn parse_scoped_document(payload: &str) -> Result<SyncStateDocument, String> {
+    if let Ok(document) = serde_json::from_str::<SyncStateDocument>(payload) {
+        return Ok(document);
+    }
+    if let Ok(export) = serde_json::from_str::<ScopedDataExport>(payload) {
+        return Ok(export.document);
+    }
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .map_err(|_| String::from("导入内容不是有效的 JSON"))?;
+    match value.get("document") {
+        Some(inner) => serde_json::from_value(inner.clone())
+            .map_err(|error| format!("导入内容的 document 结构不对：{error}")),
+        None => Err(String::from("导入内容里没有 objects（不是本应用导出的数据）")),
+    }
+}
+
 /// 导入的核心：一份**已经解析成 JSON** 的本机导出，并进本地。
 ///
-/// 单独抽出来是因为它有第二个调用方：口令加密的那份文件里也能装记录（见
-/// `credentials::import_credentials`），而那边已经锁着连接——再走一次命令层就会自己
-/// 跟自己抢锁。信封与裸文档都收：前者是现在的导出，后者是手抄一份 objects 的场景。
+/// 单独抽出来是因为它有第二个调用方：带凭据的那份文件里也装着记录
+/// （见 `credentials::import_data`），而那边已经锁着连接——再走一次命令层就会自己跟
+/// 自己抢锁。能拿到文本的调用方请走 `parse_scoped_document`：Value 里同名的键已经只
+/// 剩最后一条，这条路看不见文件内部的重复项。
 pub(crate) fn import_scoped_document(
     connection: &mut Connection,
     value: serde_json::Value,
@@ -1848,6 +1986,15 @@ pub(crate) fn import_scoped_document(
             None => return Err(String::from("导入内容里没有 objects（不是本应用导出的数据）")),
         },
     };
+    import_scoped_documents(connection, document, enabled)
+}
+
+/// 导入的核心：把一份已经折叠好的文档并进本地。
+pub(crate) fn import_scoped_documents(
+    connection: &mut Connection,
+    document: SyncStateDocument,
+    enabled: &[String],
+) -> Result<ScopedImportReport, String> {
     let objects: Vec<SyncStateObject> = document.objects.into_values().collect();
     let outcome = (|| -> Result<(usize, usize), String> {
         let transaction = connection
@@ -1864,7 +2011,7 @@ pub(crate) fn import_scoped_document(
                 continue;
             }
             applied += 1;
-            let clock: i64 = transaction
+            let next_clock: i64 = transaction
                 .query_row(
                     "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
                      WHERE scope_id = ?1 AND object_id = ?2",
@@ -1872,6 +2019,10 @@ pub(crate) fn import_scoped_document(
                     |row| row.get(0),
                 )
                 .map_err(|error| error.to_string())?;
+            // 落地的是文件里的第 N 版，本机版本号就不能只记 MAX + 1：那会比落地的版本
+            // 还低，下一份更旧的文件（时钟 2 > 1）就能把它顶掉——app_settings 的闸门
+            // 正是拿这个时钟当「本机已经到了第几版」比的。
+            let clock = next_clock.max(object.logical_clock);
             journal_object(
                 &transaction,
                 &object.scope_id,
@@ -4134,6 +4285,538 @@ mod tests {
             )
             .expect("imported mark");
         assert_eq!(exact_hash, "abc");
+    }
+
+    /// 一份带指定设备/版本的记录对象（`remote_object` 的设备是写死的，这里要自己定）。
+    fn record_object(
+        scope_id: &str,
+        object_type: &str,
+        object_id: &str,
+        device: &str,
+        logical_clock: i64,
+        wall_clock: &str,
+        payload: serde_json::Value,
+    ) -> SyncStateObject {
+        SyncStateObject {
+            scope_id: scope_id.to_string(),
+            object_type: object_type.to_string(),
+            object_id: object_id.to_string(),
+            operation: "upsert".to_string(),
+            payload,
+            payload_hash: format!("hash-{object_type}-{logical_clock}"),
+            logical_clock,
+            device_id: device.to_string(),
+            wall_clock: wall_clock.to_string(),
+        }
+    }
+
+    /// 六类记录各一条，都是同一个档案 ID 的同一种记录的一份版本：`logical_clock` 与
+    /// `wall_clock` 一起往前走，所以「新」在这两套字段上都成立。
+    fn six_record_objects(
+        device: &str,
+        logical_clock: i64,
+        wall_clock: &str,
+        page_index: i64,
+        preset_name: &str,
+        theme: &str,
+    ) -> Vec<SyncStateObject> {
+        vec![
+            record_object(
+                "scope-a",
+                "reading_progress",
+                "scope-a/archive-a",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({
+                    "archiveId": "archive-a", "pageIndex": page_index, "pageCount": 20,
+                    "layout": "paged", "direction": "ltr", "coverAlone": null,
+                }),
+            ),
+            record_object(
+                "scope-a",
+                "history",
+                "scope-a/archive-a",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({
+                    "archiveId": "archive-a", "pageIndex": page_index, "visitedAt": wall_clock,
+                }),
+            ),
+            record_object(
+                "scope-a",
+                "watchlist",
+                "scope-a/archive-b",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({"archiveId": "archive-b", "deleted": false}),
+            ),
+            record_object(
+                "scope-a",
+                "search_preset",
+                "scope-a/preset-a",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({
+                    "presetId": "preset-a", "name": preset_name, "query": "", "deleted": false,
+                }),
+            ),
+            record_object(
+                "scope-a",
+                "dedup_non_duplicate",
+                "scope-a/pair-a",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({
+                    "pairKey": "pair-a", "leftArchiveId": "archive-a",
+                    "rightArchiveId": "archive-b", "tombstoned": false,
+                }),
+            ),
+            record_object(
+                GLOBAL_SCOPE,
+                "app_setting",
+                "preferences",
+                device,
+                logical_clock,
+                wall_clock,
+                serde_json::json!({"theme": theme, "sfwMode": false}),
+            ),
+        ]
+    }
+
+    fn document_from_objects(objects: Vec<SyncStateObject>) -> SyncStateDocument {
+        SyncStateDocument {
+            version: SYNC_STATE_VERSION,
+            epoch: 0,
+            objects: objects
+                .into_iter()
+                .map(|object| {
+                    (
+                        state_object_key(&object.scope_id, &object.object_type, &object.object_id),
+                        object,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_file_with_two_versions_of_one_record_keeps_the_newest_not_the_last_line() {
+        // 文件内部同一个文件对象出现两次，旧的那一版排在后面。JSON 里同名的键在
+        // `serde_json::Value` 那一层就只剩最后一条能被看见，所以「留最新」只能在
+        // 文本上直接解析成文档时做（见 deserialize_state_objects）。
+        let payload = r#"{
+          "version": 1, "epoch": 0,
+          "objects": {
+            "scope-a|reading_progress|scope-a/archive-a": {
+              "scopeId": "scope-a", "objectType": "reading_progress",
+              "objectId": "scope-a/archive-a", "operation": "upsert",
+              "deviceId": "device-b", "logicalClock": 5,
+              "wallClock": "2026-09-20 08:00:00", "payloadHash": "hash-new",
+              "payload": {"archiveId": "archive-a", "pageIndex": 9, "pageCount": 20,
+                          "layout": "paged", "direction": "ltr", "coverAlone": null}
+            },
+            "scope-a|reading_progress|scope-a/archive-a": {
+              "scopeId": "scope-a", "objectType": "reading_progress",
+              "objectId": "scope-a/archive-a", "operation": "upsert",
+              "deviceId": "device-a", "logicalClock": 2,
+              "wallClock": "2026-09-01 08:00:00", "payloadHash": "hash-old",
+              "payload": {"archiveId": "archive-a", "pageIndex": 3, "pageCount": 20,
+                          "layout": "paged", "direction": "ltr", "coverAlone": null}
+            }
+          }
+        }"#;
+        // 文本解析是唯一看得见同名键的入口：走 serde_json::Value 只剩最后一条
+        // （修之前正是这样，所以旧版本赢了）。
+        let document = parse_scoped_document(payload).expect("parse");
+        assert_eq!(document.objects.len(), 1, "同一个对象的两版只该剩一版");
+        let mut connection = migrated_connection();
+        let report = import_scoped_documents(&mut connection, document, &["progress".to_string()])
+            .expect("import");
+        assert_eq!(report.applied, 1, "同一档案同一记录只该落一次");
+        let (page, revision): (i64, i64) = connection
+            .query_row(
+                "SELECT page_index, revision FROM reading_progress
+                 WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("imported progress");
+        assert_eq!((page, revision), (9, 5), "排在后面的旧版本不能赢");
+    }
+
+    #[test]
+    fn keys_that_differ_but_describe_one_record_collapse_to_the_newest() {
+        // 拼接或手抄出来的文件里，同一个记录的键可能写得不一样（老格式的 object_id、
+        // 复制粘贴时手改了键）。解析时按对象自己的身份归位，只留最新那一版。
+        let new = record_object(
+            "scope-a",
+            "reading_progress",
+            "scope-a/archive-a",
+            "device-b",
+            5,
+            "2026-09-20 08:00:00",
+            serde_json::json!({"archiveId": "archive-a", "pageIndex": 9, "pageCount": 20,
+                               "layout": "paged", "direction": "ltr", "coverAlone": null}),
+        );
+        let old = record_object(
+            "scope-a",
+            "reading_progress",
+            "scope-a/archive-a",
+            "device-a",
+            2,
+            "2026-09-01 08:00:00",
+            serde_json::json!({"archiveId": "archive-a", "pageIndex": 3, "pageCount": 20,
+                               "layout": "paged", "direction": "ltr", "coverAlone": null}),
+        );
+        let mut entries = serde_json::Map::new();
+        // 旧的那一版排在前面的键上，新的一版排在后面：文本顺序不该决定谁赢。
+        entries.insert(
+            "aaa|reading_progress|scope-a/archive-a".to_string(),
+            serde_json::to_value(&old).expect("old json"),
+        );
+        entries.insert(
+            "zzz|reading_progress|scope-a/archive-a".to_string(),
+            serde_json::to_value(&new).expect("new json"),
+        );
+        let value = serde_json::json!({"version": 1, "epoch": 0, "objects": entries});
+        let parsed: SyncStateDocument = serde_json::from_value(value.clone()).expect("parse");
+        assert_eq!(parsed.objects.len(), 1, "同一个记录的两版只该剩一版");
+
+        let mut connection = migrated_connection();
+        let report = import_scoped_document(&mut connection, value, &["progress".to_string()])
+            .expect("import");
+        assert_eq!(report.applied, 1, "同一个记录的两版只该落一次");
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_progress
+                 WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("imported progress");
+        assert_eq!(page, 9, "只留最新那一版");
+    }
+
+    #[test]
+    fn an_older_non_duplicate_mark_does_not_overwrite_a_newer_row() {
+        // dedup_features 没有版本号列，只有 updated_at：从 Readoshi 带进来的非重复
+        // 结论以前无条件覆盖，导入一份旧文件就会把新算出来的哈希顶掉。
+        let mut connection = migrated_connection();
+        connection
+            .execute(
+                "INSERT INTO dedup_features (scope_id, path, exact_hash, algorithm_version, size, updated_at)
+                 VALUES ('scope-a', 'x.cbz', 'hash-new', 'dedup-v2', 12, '2026-09-20 00:00:00')",
+                [],
+            )
+            .expect("local row");
+        let stale = remote_objects(
+            "scope-a",
+            vec![remote_object(
+                "legacy_non_duplicate",
+                "scope-a/x.cbz",
+                1,
+                "2026-09-01 00:00:00",
+                serde_json::json!({"path": "x.cbz", "hash": "hash-old"}),
+            )],
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &stale).expect("apply stale"),
+            0,
+            "旧结论不能盖掉更新的那一行"
+        );
+        let hash: String = connection
+            .query_row(
+                "SELECT exact_hash FROM dedup_features WHERE scope_id='scope-a' AND path='x.cbz'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row");
+        assert_eq!(hash, "hash-new");
+
+        let fresh = remote_objects(
+            "scope-a",
+            vec![remote_object(
+                "legacy_non_duplicate",
+                "scope-a/x.cbz",
+                2,
+                "2026-09-25 00:00:00",
+                serde_json::json!({"path": "x.cbz", "hash": "hash-newer"}),
+            )],
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &fresh).expect("apply fresh"),
+            1,
+            "更新的结论要落地"
+        );
+        let hash: String = connection
+            .query_row(
+                "SELECT exact_hash FROM dedup_features WHERE scope_id='scope-a' AND path='x.cbz'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row");
+        assert_eq!(hash, "hash-newer");
+    }
+
+    #[test]
+    fn every_record_category_keeps_the_newest_version_of_the_same_archive() {
+        // 六类记录各一条，同一个档案 ID 的同一种记录：先导入更新的那一份，再导入
+        // 更旧的那一份，六类都必须原地不动；换一份真正更新的，六类又都要落地。
+        let enabled = SYNC_SCOPE_CATEGORIES.map(String::from).to_vec();
+        let mut connection = migrated_connection();
+        let newer = document_from_objects(six_record_objects(
+            "device-b",
+            5,
+            "2026-09-20 08:00:00",
+            9,
+            "新名字",
+            "dark",
+        ));
+        let first = import_scoped_document(
+            &mut connection,
+            serde_json::to_value(&newer).expect("json"),
+            &enabled,
+        )
+        .expect("import newer");
+        assert_eq!((first.applied, first.skipped), (6, 0), "六类记录都该落地");
+        // 落地的版本号要留在本机：只记 MAX+1 的话，本机版本会比落地的还低，
+        // 下次导入一份更旧的文件（时钟 2 > 1）就能把它顶掉。进度与历史共用
+        // 「scope|archive」这个键，日志时钟是一串共享的序号，所以这里只要求
+        // 不低于落地的那一版。
+        let clock: i64 = connection
+            .query_row(
+                "SELECT MAX(logical_clock) FROM sync_journal
+                 WHERE scope_id = 'scope-a' AND object_type = 'reading_progress'
+                   AND object_id = 'scope-a/archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("journal clock");
+        assert!(clock >= 5, "落地的是第 5 版，本机版本不能退成 {clock}");
+
+        let older = document_from_objects(six_record_objects(
+            "device-c",
+            2,
+            "2026-09-01 08:00:00",
+            3,
+            "旧名字",
+            "light",
+        ));
+        let second = import_scoped_document(
+            &mut connection,
+            serde_json::to_value(&older).expect("json"),
+            &enabled,
+        )
+        .expect("import older");
+        assert_eq!(
+            second.applied, 1,
+            "只有历史那条会重写自己那一行（它是并集，不是时钟赛跑），其余五类都被闸门挡住"
+        );
+        let (page, revision): (i64, i64) = connection
+            .query_row(
+                "SELECT page_index, revision FROM reading_progress
+                 WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("progress");
+        assert_eq!((page, revision), (9, 5), "旧的进度不能盖掉新的");
+        let (history_page, visited): (i64, String) = connection
+            .query_row(
+                "SELECT page_index, visited_at FROM reading_history
+                 WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("history");
+        assert_eq!(
+            (history_page, visited.as_str()),
+            (9, "2026-09-20 08:00:00"),
+            "历史留更晚的一次访问，页数取更大的那个（并集语义）"
+        );
+        let list_revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM reading_list WHERE scope_id='scope-a' AND archive_id='archive-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("waitlist");
+        assert_eq!(list_revision, 5, "旧的待看不能盖掉新的");
+        let (preset_name, preset_revision): (String, i64) = connection
+            .query_row(
+                "SELECT name, revision FROM search_presets
+                 WHERE scope_id='scope-a' AND preset_id='preset-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("preset");
+        assert_eq!(
+            (preset_name.as_str(), preset_revision),
+            ("新名字", 5),
+            "旧的搜索预设不能盖掉新的"
+        );
+        let relation: (i64, i64) = connection
+            .query_row(
+                "SELECT logical_clock, tombstoned FROM dedup_non_duplicates
+                 WHERE scope_id='scope-a' AND pair_key='pair-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("relation");
+        assert_eq!(relation, (5, 0), "旧的去重关系不能盖掉新的");
+        let preferences: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='preferences'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preferences");
+        let preferences: serde_json::Value =
+            serde_json::from_str(&preferences).expect("preferences json");
+        assert_eq!(preferences["theme"], "dark", "旧的偏好不能盖掉新的");
+
+        // 反过来：真正更新的那一份，六类都要落地。
+        let newest = document_from_objects(six_record_objects(
+            "device-d",
+            9,
+            "2026-09-30 08:00:00",
+            12,
+            "更新名字",
+            "system",
+        ));
+        let third = import_scoped_document(
+            &mut connection,
+            serde_json::to_value(&newest).expect("json"),
+            &enabled,
+        )
+        .expect("import newest");
+        assert_eq!(third.applied, 6, "更新的那一份六类都要落地");
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_progress
+                 WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("progress");
+        assert_eq!(page, 12);
+        let preset_name: String = connection
+            .query_row(
+                "SELECT name FROM search_presets WHERE scope_id='scope-a' AND preset_id='preset-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preset");
+        assert_eq!(preset_name, "更新名字");
+        let preferences: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='preferences'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preferences");
+        let preferences: serde_json::Value =
+            serde_json::from_str(&preferences).expect("preferences json");
+        assert_eq!(preferences["theme"], "system");
+    }
+
+    #[test]
+    fn merging_an_older_visit_keeps_the_device_that_made_the_kept_visit() {
+        // 留下的访问是本机那一次，行里的 device_id 就该是本机的：写远端设备会把
+        // 「谁访问的」抹掉，下一次比对（比如墓碑闸门）就按错的设备算。
+        let mut connection = migrated_connection();
+        connection
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                 VALUES ('scope-a', 'archive-a', 3, '2026-09-02 08:00:00', 'device-a', 4)",
+                [],
+            )
+            .expect("local history");
+        let remote = remote_objects(
+            "scope-a",
+            vec![remote_object(
+                "history",
+                "scope-a/archive-a",
+                1,
+                "2026-09-01 08:00:00",
+                serde_json::json!({
+                    "archiveId": "archive-a", "pageIndex": 1, "visitedAt": "2026-09-01 08:00:00",
+                }),
+            )],
+        );
+        assert_eq!(apply_remote_objects(&mut connection, &remote).expect("apply"), 1);
+        let (visited, device): (String, String) = connection
+            .query_row(
+                "SELECT visited_at, device_id FROM reading_history
+                 WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("history");
+        assert_eq!(visited, "2026-09-02 08:00:00");
+        assert_eq!(
+            device, "device-a",
+            "留下的访问是 device-a 那一次，行里不该写 device-b"
+        );
+    }
+
+    #[test]
+    fn an_older_preferences_snapshot_with_the_same_clock_does_not_win() {
+        // 时钟撞车（两台设备各自离线改过、都到了第 5 版）时该看时刻：闸门以前拿空串
+        // 当本地时刻，空串输给任何时刻，于是一份更旧的偏好文件照样盖上来。
+        let enabled = vec!["app_settings".to_string()];
+        let mut connection = migrated_connection();
+        let newer = document_from_objects(vec![record_object(
+            GLOBAL_SCOPE,
+            "app_setting",
+            "preferences",
+            "device-b",
+            5,
+            "2026-09-20 08:00:00",
+            serde_json::json!({"theme": "dark"}),
+        )]);
+        let first = import_scoped_document(
+            &mut connection,
+            serde_json::to_value(&newer).expect("json"),
+            &enabled,
+        )
+        .expect("import newer");
+        assert_eq!(first.applied, 1, "本机还没有偏好，第一份要落地");
+
+        let older = document_from_objects(vec![record_object(
+            GLOBAL_SCOPE,
+            "app_setting",
+            "preferences",
+            "device-c",
+            5,
+            "2026-09-01 08:00:00",
+            serde_json::json!({"theme": "light"}),
+        )]);
+        let second = import_scoped_document(
+            &mut connection,
+            serde_json::to_value(&older).expect("json"),
+            &enabled,
+        )
+        .expect("import older");
+        assert_eq!(
+            second.applied, 0,
+            "时钟相同而时刻更旧的那一份不能盖掉刚落地的新偏好"
+        );
+        let preferences: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='preferences'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preferences");
+        let preferences: serde_json::Value =
+            serde_json::from_str(&preferences).expect("preferences json");
+        assert_eq!(preferences["theme"], "dark");
     }
 
     #[tokio::test]

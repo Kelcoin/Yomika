@@ -1614,6 +1614,18 @@ body::-webkit-scrollbar,
 .empty-state > .primary-action,
 .empty-state > .secondary-action { margin-top: var(--space-2); }
 
+/* 空状态里的多颗按钮。上面那条只认直接子元素，两颗并排时得先立一行；档案库读不
+   出来那一页就是「去设置修凭据」+「重试」两颗。 */
+.empty-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: var(--space-2);
+}
+
 /* An EmptyState is a region, so its geometry is bound to the region element it
    draws. A one-line message that borrowed the class used to get the same 320px
    box: those are StatusLine now, and this keeps the door shut. */.empty-state:not(section) {
@@ -3434,20 +3446,6 @@ body::-webkit-scrollbar,
   line-height: var(--leading-normal);
 }
 
-.workspace-alert {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  width: 100%;
-  margin: 0 0 var(--space-6);
-}
-
-.workspace-alert .form-error {
-  flex: 1 1 320px;
-  width: 100%;
-}
-
 /* The account panel is the E-Hentai section's one group frame — the same
    container the settings rows sit in, on /settings and on the /eh deep link
    alike. */.eh-account-panel {
@@ -4339,6 +4337,10 @@ body::-webkit-scrollbar,
     width: auto;
   }
 
+  .empty-state-actions > .primary-action {
+    width: auto;
+  }
+
   .primary-action {
     width: 100%;
   }
@@ -4623,6 +4625,7 @@ body::-webkit-scrollbar,
   padding: var(--space-4);
   background: var(--backdrop-overlay);
   backdrop-filter: blur(4px);
+  animation: settings-overlay-in var(--motion-fast) backwards;
 }
 
 .search-preset-panel {
@@ -4658,11 +4661,40 @@ body::-webkit-scrollbar,
   border-radius: var(--radius-overlay);
   background: var(--surface-container-high);
   box-shadow: var(--shadow-overlay);
+  animation: settings-panel-in var(--motion-standard) backwards;
 }
 
 /* 标题与说明永远占它们自己的高度：能压缩的只有下面的内容区。 */.settings-choice-panel > .settings-choice-title,
 .settings-choice-panel > .settings-menu-desc {
   flex: none;
+}
+
+/* 二级菜单的内容常常是「点一下多一块」：配对码、远端模型、设备详情。新挂上来的每一行
+   走一段极短的进场，尺寸变化读起来是「长出来」，而不是硬跳一截。已有的节点不会被
+   React 重建，所以这段只在真的多出东西时跑。 */
+.settings-menu-body > *,
+.settings-choice-panel > .settings-menu-actions {
+  animation: settings-row-in var(--motion-fast) backwards;
+}
+
+@keyframes settings-overlay-in {
+  from { opacity: 0; }
+}
+
+@keyframes settings-panel-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+}
+
+@keyframes settings-row-in {
+  from { opacity: 0; transform: translateY(-4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-choice-overlay,
+  .search-preset-overlay,
+  .settings-choice-panel,
+  .settings-menu-body > *,
+  .settings-choice-panel > .settings-menu-actions { animation: none; }
 }
 
 /* 二级菜单的标题：居中，左边一枚图标（与它来源那一行是同一个），比正文稍大一点——
@@ -5843,29 +5875,51 @@ body::-webkit-scrollbar,
   white-space: nowrap;
 }
 
-.settings-text-input {
-  font: inherit;
-  font-size: var(--text-sm);
-  color: var(--on-surface);
-  background: var(--surface-container, transparent);
-  border: 1px solid var(--outline-variant, currentColor);
-  border-radius: var(--radius-control);
-  padding: 4px var(--space-2);
-  min-width: 16ch;
-  max-width: 30ch;
+/* 二级菜单里的字段：名字在上、控件占满一行。这里原先有一条 `.settings-text-input`
+   覆盖（半透明底 + outline-variant 细边 + 4px 内边距 + 30ch 上限），把配对码框画成了
+   系统控件的模样；删掉它，输入框就回到 base.css 那一套
+   （--control-background / --control-border / --control-height），和同页别的输入框一致。 */
+.settings-menu-field {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--on-surface-variant);
 }
 
-.settings-text-input:focus-visible {
-  outline: 2px solid var(--brand-vermilion, currentColor);
-  outline-offset: 1px;
+.settings-menu-field-label {
+  font-size: var(--text-sm);
+  color: var(--on-surface-variant);
 }
-.settings-pair-address { box-sizing: border-box; width: 100%; max-width: none; min-width: 0; min-height: 44px; }
-.settings-pair-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.settings-pair-actions > button { min-width: 0; }
-.settings-port-input { display: block; box-sizing: border-box; width: min(100%, 180px); margin-inline: auto; text-align: center; appearance: textfield; }
+
+.settings-menu-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--on-surface-variant);
+}
+
+/* 六位配对码：数字等宽、字距拉开，一眼看出还差几位。 */
+.settings-code-input {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-md);
+  letter-spacing: var(--tracking-wider);
+  text-align: center;
+}
+
+.settings-port-input { display: block; box-sizing: border-box; width: 100%; appearance: textfield; font-variant-numeric: tabular-nums; }
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
-.settings-menu-field { display: grid; justify-items: center; gap: var(--space-2); color: var(--on-surface-variant); }
+
+/* 设备行：名字一行、地址一行。长地址不会再把名字挤变形，地址也不会被折成两行。 */
+.settings-device-option {
+  display: grid;
+  gap: 2px;
+  align-content: center;
+  justify-items: start;
+}
+
+.settings-device-name { font-weight: var(--weight-semibold); }
+.settings-device-address { font-size: var(--text-sm); font-variant-numeric: tabular-nums; color: var(--on-surface-variant); }
 
 /* 一层 DLSSNR 是一小组：给个标题，参数才有「这是第几层」的归属感。 */
 .settings-subgroup {

@@ -1,8 +1,10 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { useState } from 'react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -11,7 +13,8 @@ import { DEFAULT_PREFERENCES, type PreferenceSnapshot } from '../../src/reposito
 import { DlssnrSettingsGroup } from '../../src/components/DlssnrSettingsGroup';
 import { ToastProvider } from '../../src/components/Toast';
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../../src/repositories/nativeDlssnrRepository';
-import { parseRemoteOps, serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
+import { parseRemoteOps, serializeRemoteOps, COMPUTE_CENTER_PAIRING_CHANGED_EVENT } from '../../src/repositories/nativeComputeCenterRepository';
+import { emitTauriEvent } from '../tauriEvents';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -282,7 +285,7 @@ describe('compute center settings group', () => {
       }),
     }));
     renderAdvanced();
-    const group = await screen.findByRole('region', { name: '算力中心' });
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
     await waitFor(() => expect(within(group).getByRole('switch', { name: '开启本机远程后处理服务' })).toBeEnabled());
   });
 
@@ -296,12 +299,12 @@ describe('compute center settings group', () => {
     setInvokeAdapterForTests(adapter);
     renderAdvanced();
 
-    const group = await screen.findByRole('region', { name: '算力中心' });
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
     expect(within(group).queryByText(/192\.168\.1\.5:47653/)).toBeNull();
     await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
     await waitFor(() => expect(within(group).getByText(/192\.168\.1\.5:47653/)).toBeTruthy());
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', expect.objectContaining({ enabled: true, port: 47_653 })));
-    await waitFor(() => expect(screen.queryByRole('region', { name: '远端算力' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('region', { name: '远程后处理服务' })).toBeNull());
     expect(within(group).getByRole('button', { name: '端口' })).toBeEnabled();
     expect(localStorage.getItem('yomika.compute-center-status')).not.toContain('abcdef0123456789abcdef0123456789');
   });
@@ -314,7 +317,7 @@ describe('compute center settings group', () => {
     setInvokeAdapterForTests(adapter);
     renderAdvanced();
     const user = userEvent.setup();
-    const group = await screen.findByRole('region', { name: '算力中心' });
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
     await user.click(within(group).getByRole('button', { name: '端口' }));
     const menu = screen.getByRole('dialog', { name: '端口' });
     const input = within(menu).getByRole('spinbutton', { name: '远程后处理服务端口' });
@@ -334,7 +337,7 @@ describe('compute center settings group', () => {
     setInvokeAdapterForTests(adapter);
     renderAdvanced();
     const user = userEvent.setup();
-    const group = await screen.findByRole('region', { name: '算力中心' });
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
     expect(within(group).queryByText('端口')).toBeNull();
     await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
     await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
@@ -342,6 +345,61 @@ describe('compute center settings group', () => {
     await user.click(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_revoke_pairing', { id: 'client-1' }));
     expect(screen.getByRole('dialog', { name: '管理已有配对' })).toBeInTheDocument();
+  });
+
+  it('opens the management panel with a freshly read paired list', async () => {
+    let clients = [{ id: 'client-1', name: 'Phone', address: '192.168.1.9' }];
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients }) }),
+    }));
+    renderAdvanced();
+    const user = userEvent.setup();
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
+
+    // 配对是另一台设备发起的：这一份列表在设置页画出来之后、点开面板之前就变了。
+    clients = [...clients, { id: 'client-2', name: 'Tablet', address: '192.168.1.10' }];
+    await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
+
+    const panel = await screen.findByRole('dialog', { name: '管理已有配对' });
+    expect(await within(panel).findByRole('button', { name: /Tablet/ })).toBeInTheDocument();
+  });
+
+  it('picks up a device that pairs while the settings page stays open', async () => {
+    let clients = [{ id: 'client-1', name: 'Phone', address: '192.168.1.9' }];
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients }) }),
+    }));
+    renderAdvanced();
+    const user = userEvent.setup();
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
+    await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
+    const panel = await screen.findByRole('dialog', { name: '管理已有配对' });
+    expect(within(panel).queryByRole('button', { name: /Tablet/ })).toBeNull();
+
+    // 服务端在 /v2/pair/confirm 里配对成功后广播这条事件（名字与 compute_center.rs 里的
+    // PAIRING_CHANGED_EVENT 一致）——设置页收到就重拉列表，不必退出再进。
+    clients = [...clients, { id: 'client-2', name: 'Tablet', address: '192.168.1.10' }];
+    await act(async () => { emitTauriEvent('compute-center-pairing-changed', {}); });
+
+    expect(await within(panel).findByRole('button', { name: /Tablet/ })).toBeInTheDocument();
+  });
+
+  it('has no revoke-everything action in the paired-device panel', async () => {
+    const clients = [{ id: 'client-1', name: 'Phone', address: '192.168.1.9' }];
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients }) }),
+    }));
+    renderAdvanced();
+    const user = userEvent.setup();
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
+    await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
+    const panel = await screen.findByRole('dialog', { name: '管理已有配对' });
+
+    expect(within(panel).queryByRole('button', { name: /撤销全部配对/ })).toBeNull();
+
+    // 逐台撤销还在：去掉的是「全部」那一个按钮，不是撤销这条路。
+    await user.click(within(panel).getByRole('button', { name: /Phone/ }));
+    expect(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
   });
 
   it('keeps remote processing locked until pairing succeeds', async () => {
@@ -366,13 +424,13 @@ describe('compute center settings group', () => {
     setInvokeAdapterForTests(adapter);
     renderAdvanced();
 
-    const group = await screen.findByRole('region', { name: '远端算力' });
+    const group = await screen.findByRole('region', { name: '远程后处理服务' });
     const toggle = within(group).getByRole('switch', { name: '使用远程后处理服务' });
     expect(toggle).toBeDisabled();
 
     await user.click(within(group).getByRole('button', { name: '添加设备' }));
     const pairDialog = await screen.findByRole('dialog', { name: '添加设备' });
-    await user.type(within(pairDialog).getByLabelText('设备 IP'), '192.168.1.9:47653');
+    await user.type(within(pairDialog).getByLabelText('设备地址'), '192.168.1.9:47653');
     await user.click(within(pairDialog).getByRole('button', { name: /^配对$/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_request', { url: '192.168.1.9:47653' }));
     await user.type(within(pairDialog).getByLabelText('配对码'), '123456');
@@ -410,5 +468,20 @@ describe('derived settings storage', () => {
     expect(ops.enabled).toBe(true);
     expect(ops.op.op).toBe('dlssnr');
     expect(parseRemoteOps('not json').op.op).toBe('upscale');
+  });
+});
+
+describe('compute center pairing event', () => {
+  const read = (path: string) => readFileSync(resolve(__dirname, '../..', path), 'utf8').replace(/\r\n/g, '\n');
+
+  /** 事件名两边各写一份字面量（Rust 发、TS 听）。对不上不会报任何错，只是「配对后列表
+   *  永远不刷新」——以前那个「要退出再进才看得见」的毛病会安静地回来。 */
+  it('agrees on the event name across the bridge', () => {
+    const rust = read('src-tauri/src/compute_center.rs');
+    expect(rust).toContain(`pub const PAIRING_CHANGED_EVENT: &str = "${COMPUTE_CENTER_PAIRING_CHANGED_EVENT}";`);
+
+    // 而且要在配对成功那条分支上真的广播它（只定义不发射等于没修）。
+    const confirm = rust.slice(rust.indexOf('request.path == "/v2/pair/confirm"'));
+    expect(confirm.slice(0, confirm.indexOf('request.path == "/v2/ping"'))).toContain('notify_pairing_changed');
   });
 });

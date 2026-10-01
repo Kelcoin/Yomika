@@ -12,6 +12,10 @@ use crate::{db::Database, domain::result::CommandResult, settings::get_or_create
 
 const KEYRING_SERVICE: &str = "app.yomika.reader";
 
+/// `save_server_record` 收下的 API Key 的长度上限（字符数，不是字节数）。见那里的注释：
+/// 上限只为了挡住「把一整段文本当 Key 粘进来」→ 431 这条路。
+pub(crate) const MAX_API_KEY_CHARS: usize = 512;
+
 pub trait CredentialStore {
     fn set_server_api_key(&self, scope_id: &str, api_key: &str) -> Result<(), String>;
 }
@@ -20,19 +24,15 @@ pub(crate) struct SystemCredentialStore;
 
 impl CredentialStore for SystemCredentialStore {
     fn set_server_api_key(&self, scope_id: &str, api_key: &str) -> Result<(), String> {
-        keyring::Entry::new(KEYRING_SERVICE, scope_id)
-            .map_err(|error| error.to_string())?
-            .set_password(api_key)
-            .map_err(|error| error.to_string())
+        // 桌面仍旧是系统凭据库里的那一条 `app.yomika.reader` / scope_id；移动端换成
+        // 数据目录里的 secrets.json（见 `secret_store`）。条目名与格式没变。
+        crate::secret_store::set_secret(KEYRING_SERVICE, scope_id, api_key)
     }
 }
 
 impl SystemCredentialStore {
     pub(crate) fn get_server_api_key(&self, scope_id: &str) -> Result<String, String> {
-        keyring::Entry::new(KEYRING_SERVICE, scope_id)
-            .map_err(|error| error.to_string())?
-            .get_password()
-            .map_err(|error| error.to_string())
+        crate::secret_store::get_secret(KEYRING_SERVICE, scope_id)
     }
 }
 
@@ -612,6 +612,219 @@ fn lanraragi_client() -> Result<Client, String> {
                 .map_err(|error| error.to_string())
         })
         .clone()
+}
+
+/// 阅读进度写回的地址：`PUT /api/archives/{id}/progress/{page}`。
+///
+/// 契约（using-lanraragi-api 技能，`references/endpoints.md:34`）要求 `page` 是**正
+/// 整数**、且不超过总页数——也就是 **1 起算**；本地这一侧永远是 0 起算，所以这里加一。
+fn progress_push_url(base_url: &str, archive_id: &str, page_index: i64) -> String {
+    format!(
+        "{}/api/archives/{}/progress/{}",
+        base_url.trim().trim_end_matches('/'),
+        archive_id,
+        page_index + 1
+    )
+}
+
+/// 这个 scope 是不是一台远端 LANraragi 服务器？是的话把地址拿出来。
+///
+/// `servers` 里有这一行才说明档案馆在一台服务器上；本地档案在 `local_archives` 里，
+/// 没有对应的服务器行，于是这一步就把它跳过了——本地进度不需要往任何地方发。
+///
+/// **不**筛 `enabled`：那个标志是「谁的架子摆在首页」（见 `save_server_record`），不是
+/// 「还连得上」。用户完全可以一边读着某台服务器的档案，一边把另一台设成默认。
+fn progress_push_base_url(connection: &Connection, scope_id: &str) -> Option<String> {
+    let base_url: String = connection
+        .query_row(
+            "SELECT base_url FROM servers WHERE scope_id = ?1",
+            [scope_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()??;
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    (!base_url.is_empty()).then_some(base_url)
+}
+
+/// 能拿去发请求的 Key。空的（这台机器上还没有凭据）和长到不像 Key 的都放弃；
+/// 512 是 `MAX_API_KEY_CHARS`，跟保存服务器时用的是同一条线——别让一个几 KB 的头
+/// 打出去换回一个对用户毫无意义的 431。
+fn usable_api_key(api_key: &str) -> Option<String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() || api_key.chars().count() > MAX_API_KEY_CHARS {
+        return None;
+    }
+    Some(api_key.to_string())
+}
+
+/// 远端进度写回的合并器。
+///
+/// 翻页可以很快，但每一页都打一次服务器既没必要也不礼貌（技能的 Common mistakes 里
+/// 写着「预加载时不要上报」——我们只在用户真的翻到某页时才走到这里，而这里的合并让
+/// 「一分钟滚过三十页」只变成两次请求：在飞的那一次 + 最新那一页）。同一个档案的失败
+/// 也只记一条日志，错误日志不会被翻页刷屏。
+#[derive(Default)]
+struct ProgressPushState {
+    /// 正在飞的那些档案（键是 scope + archive）。
+    inflight: std::collections::HashSet<String>,
+    /// 在飞期间又翻到的页：只留最新那一页。
+    pending: std::collections::HashMap<String, i64>,
+    /// 被服务器拒过的档案（4xx：地址/Key/档案不对，或者服务端自己管进度）。
+    blocked: std::collections::HashSet<String>,
+    /// 已经为它写过日志的档案。
+    warned: std::collections::HashSet<String>,
+}
+
+impl ProgressPushState {
+    /// 交一页进来。返回 `true` 表示调用方该起一个 worker；`false` 表示已经有一次在飞
+    /// （页码记进 pending，由它收尾）或者这个档案已经放弃。
+    fn submit(&mut self, key: &str, page_index: i64) -> bool {
+        if self.blocked.contains(key) {
+            return false;
+        }
+        if self.inflight.contains(key) {
+            self.pending.insert(key.to_string(), page_index);
+            return false;
+        }
+        self.inflight.insert(key.to_string());
+        true
+    }
+
+    /// 当前这一页发完了。给出下一个要发的页码；没有就清掉在飞标记。
+    fn finish(&mut self, key: &str) -> Option<i64> {
+        match self.pending.remove(key) {
+            Some(page_index) => Some(page_index),
+            None => {
+                self.inflight.remove(key);
+                None
+            }
+        }
+    }
+
+    /// 这个档案不再试了（4xx）。
+    fn block(&mut self, key: &str) {
+        self.inflight.remove(key);
+        self.pending.remove(key);
+        self.blocked.insert(key.to_string());
+    }
+
+    /// 这条错误要不要写进错误日志：一个档案只写第一条。
+    fn should_warn(&mut self, key: &str) -> bool {
+        self.warned.insert(key.to_string())
+    }
+}
+
+fn progress_push_state() -> &'static std::sync::Mutex<ProgressPushState> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<ProgressPushState>> =
+        std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(ProgressPushState::default()))
+}
+
+#[derive(Debug)]
+enum ProgressPushOutcome {
+    Sent,
+    /// 4xx：地址、Key 或档案本身不对，也可能服务端自己管进度
+    /// （`/api/info` 的 `server_tracks_progress`）。重试多少次都一样。
+    Rejected(String),
+    /// 一时失败：网络、超时、5xx。下一次翻页再试。
+    Failed(String),
+}
+
+async fn push_reading_progress_once(
+    base_url: &str,
+    api_key: &str,
+    archive_id: &str,
+    page_index: i64,
+) -> ProgressPushOutcome {
+    let url = progress_push_url(base_url, archive_id, page_index);
+    let response = match reader_request(reqwest::Method::PUT, url, api_key.to_string()).await {
+        Ok(response) => response,
+        Err(error) => return ProgressPushOutcome::Failed(error),
+    };
+    let status = response.status();
+    if status.is_success() {
+        return ProgressPushOutcome::Sent;
+    }
+    let detail = format!("LANraragi 回 {status}");
+    // 408 / 429 是「等会儿再来」，其余 4xx 是「别来了」。
+    if status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return ProgressPushOutcome::Rejected(detail);
+    }
+    ProgressPushOutcome::Failed(detail)
+}
+
+/// 顺手把进度打到服务器上。本地那一笔此刻已经落盘了，这里成不成功都不回头。
+fn spawn_progress_push(
+    app: tauri::AppHandle,
+    base_url: String,
+    api_key: String,
+    archive_id: String,
+    first_page_index: i64,
+    key: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut page_index = first_page_index;
+        loop {
+            match push_reading_progress_once(&base_url, &api_key, &archive_id, page_index).await {
+                ProgressPushOutcome::Sent => {}
+                ProgressPushOutcome::Rejected(detail) => {
+                    report_progress_push(&app, &key, &archive_id, page_index, &detail, true);
+                    if let Ok(mut state) = progress_push_state().lock() {
+                        state.block(&key);
+                    }
+                    return;
+                }
+                ProgressPushOutcome::Failed(detail) => {
+                    report_progress_push(&app, &key, &archive_id, page_index, &detail, false);
+                }
+            }
+            let next = progress_push_state()
+                .lock()
+                .ok()
+                .and_then(|mut state| state.finish(&key));
+            match next {
+                Some(value) => page_index = value,
+                None => return,
+            }
+        }
+    });
+}
+
+/// 失败只进错误日志，而且一个档案只写第一条：翻页很快时同一条错会连着来好几次，刷屏
+/// 的会是日志本身。用户看得见的那个 toast 走的是本地保存的结果，不受这里影响。
+fn report_progress_push(
+    app: &tauri::AppHandle,
+    key: &str,
+    archive_id: &str,
+    page_index: i64,
+    detail: &str,
+    permanent: bool,
+) {
+    let first = progress_push_state()
+        .lock()
+        .map(|mut state| state.should_warn(key))
+        .unwrap_or(false);
+    if !first {
+        return;
+    }
+    let suffix = if permanent { "，不再重试" } else { "" };
+    let _ = crate::error_log::error_log_append(
+        app.clone(),
+        crate::error_log::ErrorLogAppendInput {
+            at: None,
+            level: "warn".to_string(),
+            source: "reader/progress".to_string(),
+            message: format!(
+                "阅读进度没能写回 LANraragi（{archive_id} 第 {} 页）{suffix}",
+                page_index + 1
+            ),
+            detail: Some(detail.to_string()),
+        },
+    );
 }
 
 /// `/api/categories` 的回包：一个数组，或把它包在 `data` / `categories` 里的对象
@@ -1347,24 +1560,64 @@ enum DownloadSignal {
     Aborted,
 }
 
-static DOWNLOAD_SIGNALS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<DownloadSignal>>>>> =
-    std::sync::OnceLock::new();
+/// 信号表的上限。正常只有一个下载在跑，条目在循环结束时由 `clear_download_signal`
+/// 删掉；但 `pause_download`/`cancel_download` 是拿前端给的任务 id 直接
+/// `set_download_signal` 的，对一个早就不在传输的 id 也会在这里留下一条永不清理的
+/// 条目——于是这张表会随历史任务一直涨。形状与 `MAX_PENDING_CANCELS`、
+/// `MAX_TRACKED_SCANS` 一致：插入序就是淘汰序，超限从队首丢。
+///
+/// 淘汰只摘掉表里的登记，不影响正在跑的循环：循环自己握着 `download_signal` 返回的那
+/// 个 `Arc`。要触发误伤，需要在一次下载期间出现 64 个不同的任务 id（单下载的任务模型
+/// 下不可达）；真到了那一步，丢掉的也只是那条太久没人认领的信号。
+const MAX_DOWNLOAD_SIGNALS: usize = 64;
 
-fn download_signals() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<DownloadSignal>>>> {
-    DOWNLOAD_SIGNALS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+/// 任务 id → 信号闸，外加一份插入序用于淘汰。两个字段的键集合始终一致：插入新键才
+/// `push_back`，`clear` 两边都删，淘汰从队首摘。
+#[derive(Default)]
+struct DownloadSignals {
+    by_task: std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<DownloadSignal>>>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl DownloadSignals {
+    fn signal(&mut self, task_id: &str) -> std::sync::Arc<std::sync::Mutex<DownloadSignal>> {
+        if let Some(handle) = self.by_task.get(task_id) {
+            return handle.clone();
+        }
+        let handle = std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running));
+        self.by_task.insert(task_id.to_string(), handle.clone());
+        self.order.push_back(task_id.to_string());
+        while self.order.len() > MAX_DOWNLOAD_SIGNALS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.by_task.remove(&oldest);
+            }
+        }
+        handle
+    }
+
+    fn clear(&mut self, task_id: &str) {
+        self.by_task.remove(task_id);
+        // 插入序里那条也要清：留着它会让淘汰白走一步——被摘掉的都是已经不在表里的 id，
+        // 真正的条目反而永远轮不到，表就能一直涨过上限。
+        if let Some(position) = self.order.iter().position(|id| id == task_id) {
+            self.order.remove(position);
+        }
+    }
+}
+
+static DOWNLOAD_SIGNALS: std::sync::OnceLock<std::sync::Mutex<DownloadSignals>> = std::sync::OnceLock::new();
+
+fn download_signals() -> &'static std::sync::Mutex<DownloadSignals> {
+    DOWNLOAD_SIGNALS.get_or_init(|| std::sync::Mutex::new(DownloadSignals::default()))
 }
 
 /// 取（必要时新建）一个任务的信号闸。循环跑在阻塞线程上，拿不到 Tauri 状态，所以
 /// 这份状态按任务 id 放在全局表里。
 fn download_signal(task_id: &str) -> std::sync::Arc<std::sync::Mutex<DownloadSignal>> {
-    let mut signals = match download_signals().lock() {
-        Ok(signals) => signals,
-        Err(_) => return std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running)),
-    };
-    signals
-        .entry(task_id.to_string())
-        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running)))
-        .clone()
+    match download_signals().lock() {
+        Ok(mut signals) => signals.signal(task_id),
+        Err(_) => std::sync::Arc::new(std::sync::Mutex::new(DownloadSignal::Running)),
+    }
 }
 
 fn set_download_signal(task_id: &str, signal: DownloadSignal) {
@@ -1379,7 +1632,7 @@ fn set_download_signal(task_id: &str, signal: DownloadSignal) {
 
 fn clear_download_signal(task_id: &str) {
     if let Ok(mut signals) = download_signals().lock() {
-        signals.remove(task_id);
+        signals.clear(task_id);
     }
 }
 
@@ -5349,6 +5602,19 @@ pub fn save_server_record(
     if api_key.is_empty() {
         return CommandResult::failure("INVALID_RESPONSE", "API Key is required", false);
     }
+    // `authorization_value` 只发一个 `Authorization: Bearer base64(key)` 头，别的什么都
+    // 不带，所以 LANraragi 回 431 Request Header Fields Too Large 只可能是 Key 本身太长
+    // ——用户把一整段文本当 Key 粘了进来。512 是宽松到不可能误伤真实 Key 的上限
+    // （LANraragi 的 Key 是几十字符），在这里挡住比让请求带着一个几 KB 的头打出去好：
+    // 431 的文案对用户毫无意义。
+    let api_key_length = api_key.chars().count();
+    if api_key_length > MAX_API_KEY_CHARS {
+        return CommandResult::failure(
+            "INVALID_API_KEY",
+            format!("API Key 太长（{api_key_length} 字符），看起来不像一个 API Key"),
+            false,
+        );
+    }
     if let Err(error) = credentials.set_server_api_key(&server.scope_id, api_key) {
         return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
     }
@@ -5956,6 +6222,7 @@ pub async fn verify_archives_exist(
 /// 不许占主线程。
 #[tauri::command(async)]
 pub fn save_reading_progress(
+    app: tauri::AppHandle,
     progress: ReadingProgressInput,
     database: State<'_, Database>,
 ) -> CommandResult<ReadingProgressRecord> {
@@ -5970,10 +6237,39 @@ pub fn save_reading_progress(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    match persist_reading_progress(&mut connection, progress) {
-        Ok(record) => CommandResult::success(record),
-        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    let record = match persist_reading_progress(&mut connection, progress) {
+        Ok(record) => record,
+        Err(error) => return CommandResult::failure("UNKNOWN", error, true),
+    };
+    // 本地这一笔已经落盘、也已经进同步日志了。下面只是顺手把它打到服务器上——
+    // 成不成功都不改变上面那个结果，失败也只进错误日志（见 `spawn_progress_push`）。
+    let base_url = progress_push_base_url(&connection, &record.scope_id);
+    drop(connection);
+    if let Some(base_url) = base_url {
+        // 钥匙串不要一边握着库锁一边去读。
+        if let Some(api_key) = usable_api_key(
+            &SystemCredentialStore
+                .get_server_api_key(&record.scope_id)
+                .unwrap_or_default(),
+        ) {
+            let key = format!("{}\u{0}{}", record.scope_id, record.archive_id);
+            let start = progress_push_state()
+                .lock()
+                .map(|mut state| state.submit(&key, record.page_index))
+                .unwrap_or(false);
+            if start {
+                spawn_progress_push(
+                    app,
+                    base_url,
+                    api_key,
+                    record.archive_id.clone(),
+                    record.page_index,
+                    key,
+                );
+            }
+        }
     }
+    CommandResult::success(record)
 }
 
 fn persist_reading_progress(
@@ -7480,6 +7776,30 @@ mod tests {
 
     use super::*;
 
+    /// 用户报的第 ① 条：`pause_download`/`cancel_download` 是拿前端给的任务 id 直接
+    /// `set_download_signal` 的，对一个早就不在传输的 id 也会登记一条永不清理的条目。
+    /// 登记序因此必须有上限，且是「插入序即淘汰序」。
+    #[test]
+    fn the_download_signal_table_drops_the_oldest_task_instead_of_growing() {
+        let mut signals = DownloadSignals::default();
+        for index in 0..(MAX_DOWNLOAD_SIGNALS + 8) {
+            let _ = signals.signal(&format!("task-{index}"));
+        }
+        assert_eq!(signals.by_task.len(), MAX_DOWNLOAD_SIGNALS);
+        assert_eq!(signals.order.len(), MAX_DOWNLOAD_SIGNALS);
+        assert!(!signals.by_task.contains_key("task-0"));
+        assert!(signals.by_task.contains_key(&format!("task-{}", MAX_DOWNLOAD_SIGNALS + 7)));
+        // 同一个任务重复取闸不重复占位，也不会被顶成队首。
+        let first = signals.signal("task-8");
+        let again = signals.signal("task-8");
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        assert_eq!(signals.order.front().map(String::as_str), Some("task-8"));
+        // 清理把两个字段一起摘干净（漏掉插入序那条，淘汰就会白走并且表能涨过上限）。
+        signals.clear("task-8");
+        assert!(!signals.by_task.contains_key("task-8"));
+        assert!(!signals.order.iter().any(|id| id == "task-8"));
+    }
+
     async fn test_http_server(
         responses: Vec<(u16, String)>,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -7982,6 +8302,69 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM servers", [], |row| row.get(0))
             .expect("server count");
         assert_eq!(count, 0);
+    }
+
+    /// 用户在服务器对话框里贴了一整段文本当 API Key，LANraragi 回的 `431 Request Header
+    /// Fields Too Large` 就是这么来的（原生侧只发一个 `Authorization: Bearer base64(key)`
+    /// 头，见 `authorization_value`）。超长必须在 `save_server_record`——「什么算一台合法
+    /// 的服务器」的唯一校验点——就被挡住，不能既没落库、又让请求带着几 KB 的头打出去。
+    #[test]
+    fn an_over_long_api_key_is_rejected_before_it_reaches_the_vault() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+
+        let result = save_server_record(
+            &mut connection,
+            &credentials,
+            server_input(),
+            "k".repeat(MAX_API_KEY_CHARS + 1),
+        );
+
+        match result {
+            CommandResult::Failure { error, .. } => {
+                assert_eq!(error.code, "INVALID_API_KEY");
+                assert!(
+                    error.message.contains(&(MAX_API_KEY_CHARS + 1).to_string())
+                        && error.message.contains("API Key 太长"),
+                    "文案要说清太长了多少：{}",
+                    error.message
+                );
+            }
+            other => panic!("超长 Key 必须被拒：{other:?}"),
+        }
+        assert!(
+            credentials.writes.lock().expect("credential writes").is_empty(),
+            "被拒的 Key 不许先进凭据库"
+        );
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM servers", [], |row| row.get(0))
+            .expect("server count");
+        assert_eq!(count, 0, "被拒的服务器不许落库");
+    }
+
+    /// 边界：上限本身是**收**的（判据是 `> 512`）。
+    #[test]
+    fn an_api_key_at_the_limit_is_still_accepted() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+
+        let result = save_server_record(
+            &mut connection,
+            &credentials,
+            server_input(),
+            "k".repeat(MAX_API_KEY_CHARS),
+        );
+
+        assert!(
+            matches!(result, CommandResult::Success { .. }),
+            "正好到上限的 Key 不该被拒：{result:?}"
+        );
     }
 
     #[test]
@@ -9525,5 +9908,156 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active_count, 2);
+    }
+
+    #[test]
+    fn progress_push_url_is_one_based_and_trims_the_trailing_slash() {
+        assert_eq!(
+            progress_push_url("https://lrr.example/", "abc", 0),
+            "https://lrr.example/api/archives/abc/progress/1"
+        );
+        assert_eq!(
+            progress_push_url("https://lrr.example", "abc", 232),
+            "https://lrr.example/api/archives/abc/progress/233"
+        );
+    }
+
+    #[test]
+    fn a_fast_scroll_keeps_only_the_latest_page_for_the_remote_write() {
+        let mut state = ProgressPushState::default();
+        assert!(state.submit("k", 0), "第一次翻页要起一个 worker");
+        assert!(!state.submit("k", 1), "在飞期间不再起新的");
+        assert!(!state.submit("k", 7), "在飞期间只记最新那一页");
+        assert_eq!(state.finish("k"), Some(7), "收尾时发的是最新那一页");
+        assert_eq!(state.finish("k"), None, "排空之后就该收工");
+        assert!(state.submit("k", 8), "收工之后还能再起一个");
+        state.block("k");
+        assert!(!state.submit("k", 9), "被服务器拒过的档案不再重试");
+        assert_eq!(state.finish("k"), None);
+    }
+
+    #[test]
+    fn only_the_first_failure_of_an_archive_reaches_the_error_log() {
+        let mut state = ProgressPushState::default();
+        assert!(state.should_warn("k"), "第一次失败要留一条日志");
+        assert!(!state.should_warn("k"), "同一条错连着来会刷屏");
+        assert!(!state.should_warn("k"));
+        assert!(state.should_warn("other"), "另一个档案是另一条");
+    }
+
+    #[test]
+    fn only_a_remote_scope_gets_a_progress_write_back() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let mut server = server_input();
+        server.scope_id = "scope-lrr".to_string();
+        server.base_url = "https://lrr.example/".to_string();
+        match save_server_record(&mut connection, &credentials, server, "secret".to_string()) {
+            CommandResult::Success { .. } => {}
+            CommandResult::Failure { error, .. } => panic!("server save: {}", error.message),
+        }
+
+        assert_eq!(
+            progress_push_base_url(&connection, "scope-lrr").as_deref(),
+            Some("https://lrr.example")
+        );
+        // 本地档案的 scope 在 `servers` 里没有行（它们在 `local_archives`）：不发。
+        assert_eq!(progress_push_base_url(&connection, "scope-local"), None);
+        // `enabled` 是「谁的架子摆在首页」，不是「还连得上」：读着它的档案就照样要发。
+        connection
+            .execute("UPDATE servers SET enabled = 0", [])
+            .expect("disable server");
+        assert_eq!(
+            progress_push_base_url(&connection, "scope-lrr").as_deref(),
+            Some("https://lrr.example")
+        );
+    }
+
+    #[test]
+    fn a_pasted_document_is_not_sent_as_an_api_key() {
+        assert_eq!(usable_api_key("  key-abc  ").as_deref(), Some("key-abc"));
+        assert_eq!(usable_api_key(""), None);
+        assert_eq!(usable_api_key("   "), None);
+        assert_eq!(usable_api_key(&"x".repeat(MAX_API_KEY_CHARS + 1)), None);
+        assert_eq!(
+            usable_api_key(&"x".repeat(MAX_API_KEY_CHARS)).map(|key| key.len()),
+            Some(MAX_API_KEY_CHARS),
+            "512 这一道边界按字符数算"
+        );
+    }
+
+    /// `test_http_server` 只回固定应答；这一个把请求原文留下来，好断言方法、路径与头。
+    async fn recording_http_server(
+        responses: Vec<(u16, String)>,
+    ) -> (
+        String,
+        std::sync::Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requests);
+        let task = tokio::spawn(async move {
+            let mut served = 0;
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                let read = socket.read(&mut request).await.unwrap();
+                recorded
+                    .lock()
+                    .expect("request log")
+                    .push(String::from_utf8_lossy(&request[..read]).to_string());
+                let (status, body) = &responses[served.min(responses.len() - 1)];
+                served += 1;
+                let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, requests, task)
+    }
+
+    #[tokio::test]
+    async fn reading_progress_goes_back_to_lanraragi_one_based_with_a_base64_key() {
+        let (url, requests, server) = recording_http_server(vec![(200, "{}".to_string())]).await;
+        let outcome = push_reading_progress_once(&url, "key", "archive-a", 5).await;
+        server.abort();
+        assert!(matches!(outcome, ProgressPushOutcome::Sent), "{outcome:?}");
+        let request = requests.lock().expect("request log")[0].clone();
+        assert!(
+            request.starts_with("PUT /api/archives/archive-a/progress/6 "),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!(
+                "authorization: Bearer {}",
+                BASE64_STANDARD.encode("key")
+            )),
+            "API Key 要先 base64 再放进 Bearer：{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_error_stops_the_archive_but_a_server_error_is_retried() {
+        let (url, _requests, server) =
+            recording_http_server(vec![(400, r#"{"error":"nope"}"#.to_string())]).await;
+        let rejected = push_reading_progress_once(&url, "key", "archive-a", 0).await;
+        server.abort();
+        assert!(
+            matches!(rejected, ProgressPushOutcome::Rejected(_)),
+            "{rejected:?}"
+        );
+
+        let (url, _requests, server) = recording_http_server(vec![(500, "{}".to_string())]).await;
+        let failed = push_reading_progress_once(&url, "key", "archive-a", 0).await;
+        server.abort();
+        assert!(
+            matches!(failed, ProgressPushOutcome::Failed(_)),
+            "5xx 只是一时失败，下一次翻页还要试：{failed:?}"
+        );
     }
 }

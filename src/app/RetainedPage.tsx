@@ -28,7 +28,16 @@ export function RetainedPage({ active, flow = false, children }: { active: boole
       }
     };
     document.addEventListener('scroll', save, true);
-    return () => { cancelAnimationFrame(frame); document.removeEventListener('scroll', save, true); };
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('scroll', save, true);
+      // Detached scroll regions are dead weight: the map keys DOM nodes
+      // strongly, so a re-rendered or hidden subtree would otherwise stay
+      // retained from the moment this page is first shown.
+      positions.current.forEach((_, region) => {
+        if (!region.isConnected) positions.current.delete(region);
+      });
+    };
   }, [visible]);
   return <PageActiveContext.Provider value={visible}>
     <section ref={root} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>

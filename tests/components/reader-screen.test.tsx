@@ -7,6 +7,7 @@ import { App } from '../../src/app/App';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
+import { resetOverlayBackGuardForTests } from '../../src/lib/overlayBackGuard';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -348,6 +349,26 @@ describe('reader screen', () => {
 
     expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr' });
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+  });
+
+  it('closes the thumbnail panel on the system back gesture before leaving the reader', async () => {
+    const user = userEvent.setup();
+    resetOverlayBackGuardForTests();
+    renderReader();
+
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+    expect(screen.getByRole('button', { name: '跳转到第 3 页' })).toBeInTheDocument();
+
+    // 手机返回手势落到这里就是一次 popstate（Tauri 把返回交给 webview 的历史）。
+    // 面板自己关掉时会先吃掉自己压的那条历史，那一拍是异步的，等它过去。
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+
+    expect(screen.queryByRole('button', { name: '跳转到第 3 页' })).not.toBeInTheDocument();
+    expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+    resetOverlayBackGuardForTests();
   });
 
   it('previews the thumbnail panel with the small rendition instead of pinning every full page', async () => {
@@ -905,5 +926,71 @@ describe('reader screen', () => {
     expect(await placement({ upscale: on, decensor: on })).toEqual({ layout: true, processing: false });
     // 开三个：右格 3 枚（3 对 3，左格仍不更重）。
     expect(await placement({ upscale: on, decensor: on, dlssnr: on })).toEqual({ layout: true, processing: false });
+  });
+
+  it('keeps the chrome out of the way while the thumbnail panel is open', async () => {
+    const user = userEvent.setup();
+    renderReader();
+
+    // 面板按钮住在顶栏里，所以先把顶栏从顶带唤出来（底栏这时还是收着的）。
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: 110 });
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+    expect(await screen.findByRole('button', { name: '跳转到第 3 页' })).toBeInTheDocument();
+
+    // 面板是盖在阅读器上的一层。指针滑到下面的底带时，chrome 自己必须让开：蒙版挡不住
+    // hover 判定（判定只看指针坐标），曾经因此能从蒙版上把底栏划出来、顺带把亮着的顶栏撤掉。
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+    expect(document.querySelector('.reader-chrome-top')).not.toHaveClass('is-leaving');
+  });
+
+  it('closes the thumbnail panel from the blank area without toggling the chrome', async () => {
+    const user = userEvent.setup();
+    renderReader();
+
+    // 顶栏从顶带唤出来（面板按钮住在那里）：底栏这时还没挂载，所以后面那次空白点击
+    // 有没有顺手把 chrome 翻一遍，一眼就能看出来。
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: 110 });
+    await user.click(screen.getByRole('button', { name: '缩略面板' }));
+    await screen.findByRole('button', { name: '跳转到第 3 页' });
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+
+    // 面板外的空白。main 在鼠标左键按下时会 `setPointerCapture`，Chromium 于是把这一次
+    // click 改派给 main —— 蒙版自己的 onClick 收不到（这才是「点空白关不掉面板」的真正
+    // 原因），而 main 的 onClick 还会顺手把 chrome 翻一遍。jsdom 不做指针捕获改派，所以
+    // 这里能钉住的是后半条：这次点击只关面板，不得改变 chrome。
+    const backdrop = document.querySelector('.reader-overview-backdrop') as HTMLElement;
+    await user.click(backdrop);
+
+    expect(screen.queryByRole('button', { name: '跳转到第 3 页' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('toolbar', { name: '阅读控制' })).not.toBeInTheDocument();
+  });
+
+  it('draws the top bar maximize control at the same glyph size as the other chrome icons', async () => {
+    // 窗口按钮只在 Tauri 外壳里渲染（见上一条用例），这里把桥注入 window。
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(() => Promise.resolve(false)),
+    };
+    const view = renderReader();
+    try {
+      // 顶栏本身要先唤出来，那两颗窗口按钮才存在（它们只在 chrome 里渲染）。
+      await userEvent.setup().click(screen.getByRole('main', { name: '漫画阅读器' }));
+      const maximize = await screen.findByRole('button', { name: '最大化窗口' });
+      // 触控面仍是共享的那一颗 44px 圆钮……
+      expect(maximize).toHaveClass('reader-icon-button');
+      const svg = maximize.querySelector('svg') as SVGSVGElement;
+      expect(svg.getAttribute('viewBox')).toBe('0 0 24 24');
+      // ……里面的方框不能只画 12/24：外壳标题栏那套 `WindowGlyph` 就是 12/24，放进阅读器
+      // 顶栏只有邻居（LayoutGrid/Settings）一半大，那才是「最大化按钮尺寸太小」。
+      const rect = svg.querySelector('rect') as SVGRectElement;
+      expect(Number(rect.getAttribute('width'))).toBeGreaterThanOrEqual(16);
+    } finally {
+      view.unmount();
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
   });
 });

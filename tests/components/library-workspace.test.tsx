@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-import { LibraryWorkspace } from '../../src/components/LibraryWorkspace';
+import { LibraryWorkspace, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
 import type { ArchiveRecord } from '../../src/domain/library';
 
 const archives: ArchiveRecord[] = Array.from({ length: 100 }, (_, index) => ({
@@ -201,6 +201,25 @@ describe('library workspace', () => {
     expect(rows).toHaveLength(3);
     expect(rows.map((row) => [...row.querySelectorAll('.metadata-chip')].map((chip) => chip.textContent)))
       .toEqual([['ta', 'td'], ['tb', 'te'], ['tc', 'tf']]);
+  });
+
+  it('forgets the oldest wide-cover marks instead of growing with the library', () => {
+    // The marks are one key per wide cover ever scrolled past, so they have to
+    // fall out oldest-first; a set that only ever grows lives as long as the
+    // workspace stays mounted. 4096 covers is not worth rendering in jsdom, so
+    // the order is pinned on a smaller cap.
+    expect(WIDE_COVER_MARK_LIMIT).toBe(4096);
+    let marks = new Set<string>();
+    for (const id of ['a', 'b', 'c', 'd', 'e']) marks = withWideCoverMark(marks, id, true, 3);
+    expect([...marks]).toEqual(['c', 'd', 'e']);
+    // Nothing moved: a fresh set per cover load would re-render the whole list.
+    expect(withWideCoverMark(marks, 'd', true, 3)).toBe(marks);
+    expect(withWideCoverMark(marks, 'z', false, 3)).toBe(marks);
+    // A cover measured narrow loses its mark instead of holding a slot.
+    marks = withWideCoverMark(marks, 'c', false, 3);
+    expect([...marks]).toEqual(['d', 'e']);
+    marks = withWideCoverMark(marks, 'f', true, 3);
+    expect([...marks]).toEqual(['d', 'e', 'f']);
   });
 
   it('renders history time on the connected rail outside the archive button', () => {

@@ -41,6 +41,14 @@ const PROTOCOL_VERSION: u32 = 2;
 const DISCOVERY_PORT: u16 = 47654;
 const DISCOVERY_REQUEST: &[u8] = b"YOMIKA_DISCOVER_V2";
 
+/// 配对列表变了（有新设备配对成功）：发给 webview，让正开着的设置页重拉一次。
+///
+/// 配对是**对面**发起的——它直接打本机的 `/v2/pair/confirm`，前端没有任何别的办法
+/// 知道这件事（唯一的来源是挂载设置页时那次 `compute_center_status`，所以以前要退出
+/// 再进才看得见新设备）。名字必须与 `nativeComputeCenterRepository.ts` 里的
+/// `COMPUTE_CENTER_PAIRING_CHANGED_EVENT` 一致。
+pub const PAIRING_CHANGED_EVENT: &str = "compute-center-pairing-changed";
+
 /// 一项能力：移动端据此显示「对面有什么、能不能用」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -711,6 +719,14 @@ pub struct ServerContext {
     pub app: Option<tauri::AppHandle>,
 }
 
+/// 广播 [`PAIRING_CHANGED_EVENT`]。没有壳就什么也不做——单测起的是真服务、不带 AppHandle，
+/// 事件本来就只是给 UI 的。
+fn notify_pairing_changed(context: &ServerContext) {
+    if let Some(app) = &context.app {
+        let _ = tauri::Emitter::emit(app, PAIRING_CHANGED_EVENT, serde_json::json!({}));
+    }
+}
+
 async fn serve(
     listener: TcpListener,
     token: Arc<RwLock<String>>,
@@ -781,6 +797,8 @@ async fn handle_connection(
         let code = payload.get("code").and_then(|value| value.as_str()).unwrap_or_default();
         return match pairing.confirm(&peer, request_id, code) {
             Ok(client_token) => {
+                // 列表变了：正开着的设置页要立刻看见新设备，不必退出再进。
+                notify_pairing_changed(&context);
                 write_json(&mut stream, 200, "OK", &serde_json::json!({ "token": client_token, "name": host_name() }).to_string()).await
             }
             Err(error) => write_json(&mut stream, 403, "Forbidden", &error_body("UNAUTHORIZED", &error)).await,

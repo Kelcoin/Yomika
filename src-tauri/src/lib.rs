@@ -24,6 +24,9 @@ mod model_release;
 #[cfg(target_os = "android")]
 mod mobile_host;
 mod network;
+// 凭据落盘的唯一入口：桌面走系统凭据库，移动端走数据目录里的 secrets.json
+// （keyring 3.6.3 在安卓上没有后端，会退化成一个写不进去的 mock）。
+mod secret_store;
 mod settings;
 mod tray_menu;
 

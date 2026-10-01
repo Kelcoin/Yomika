@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
 import { ServerSetupDialog } from '../../src/components/ServerSetupDialog';
+import { ToastProvider } from '../../src/components/Toast';
 import { ok } from '../../src/domain/result';
 
 describe('server setup dialog', () => {
@@ -38,9 +39,13 @@ describe('server setup dialog', () => {
     expect(screen.queryByText('secret-value')).not.toBeInTheDocument();
   });
 
-  it('keeps an actionable error visible when persistence fails', async () => {
+  it('reports a persistence failure as a toast and keeps the dialog open', async () => {
     const user = userEvent.setup();
-    render(<ServerSetupDialog onSave={async () => ({ ok: false, error: { code: 'PLATFORM_UNAVAILABLE', message: '安全存储不可用', retryable: false } })} />);
+    render(
+      <ToastProvider>
+        <ServerSetupDialog onSave={async () => ({ ok: false, error: { code: 'PLATFORM_UNAVAILABLE', message: '安全存储不可用', retryable: false } })} />
+      </ToastProvider>,
+    );
 
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     await user.type(screen.getByLabelText('名称'), 'Home');
@@ -48,7 +53,9 @@ describe('server setup dialog', () => {
     await user.type(screen.getByLabelText('API Key'), 'secret-value');
     await user.click(screen.getByRole('button', { name: '保存服务器' }));
 
-    expect(screen.getByRole('alert')).toHaveTextContent('安全存储不可用');
+    // 报错只说一次，走 toast（portal 到 body，对话框盖不住它），表单里不再有常驻红字。
+    expect(await screen.findByText('安全存储不可用')).toBeInTheDocument();
+    expect(document.querySelector('.server-form .form-error')).toBeNull();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 

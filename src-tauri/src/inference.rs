@@ -682,18 +682,59 @@ fn model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
 /// 指纹按根目录缓存：模型装好后内容不变，而逐页去码会让每个页面都走一遍
 /// 目录遍历。失效信号用根目录自身的 mtime——安装、换版本必然动到它；
 /// 只在既有版本目录里原地替换权重文件的场景才会漏，而那不是任何入口的做法。
+/// 指纹缓存也必须是有界容器：键是模型根目录，正常只有几个，但路径来自安装与
+/// 导入入口，一个只插不删的表就是无界的。插满之后按插入顺序淘汰最旧的一条，
+/// 与 inference/cancel.rs 的 pending 表是同一套做法。
+const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 64;
+
+#[derive(Default)]
+struct FingerprintCache {
+    entries: std::collections::HashMap<std::path::PathBuf, (Option<std::time::SystemTime>, String)>,
+    order: std::collections::VecDeque<std::path::PathBuf>,
+}
+
+impl FingerprintCache {
+    fn get(&self, root: &std::path::Path) -> Option<&(Option<std::time::SystemTime>, String)> {
+        self.entries.get(root)
+    }
+
+    fn insert(
+        &mut self,
+        root: std::path::PathBuf,
+        stamp: Option<std::time::SystemTime>,
+        fingerprint: String,
+    ) {
+        if self.entries.insert(root.clone(), (stamp, fingerprint)).is_none() {
+            self.order.push_back(root);
+        }
+        while self.order.len() > MAX_FINGERPRINT_CACHE_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+static FINGERPRINT_CACHE: std::sync::Mutex<Option<FingerprintCache>> =
+    std::sync::Mutex::new(None);
+
 fn cached_model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
-    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, (Option<std::time::SystemTime>, String)>>> = std::sync::Mutex::new(None);
     let stamp = root.metadata()?.modified().ok();
-    let mut guard = CACHE.lock().map_err(|_| std::io::Error::other("fingerprint cache poisoned"))?;
-    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+    let mut guard = FINGERPRINT_CACHE
+        .lock()
+        .map_err(|_| std::io::Error::other("fingerprint cache poisoned"))?;
+    let cache = guard.get_or_insert_with(FingerprintCache::default);
     if let Some((cached_stamp, cached)) = cache.get(root) {
         if *cached_stamp == stamp {
             return Ok(cached.clone());
         }
     }
     let fingerprint = model_fingerprint(root)?;
-    cache.insert(root.to_path_buf(), (stamp, fingerprint.clone()));
+    cache.insert(root.to_path_buf(), stamp, fingerprint.clone());
     Ok(fingerprint)
 }
 
@@ -4219,5 +4260,53 @@ mod tests {
             !dir.path().join("logs/error.log").exists(),
             "成功不该留警告"
         );
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_cache_bounds {
+    use super::*;
+
+    fn seed(root: &std::path::Path) -> String {
+        std::fs::create_dir_all(root.join("v1")).expect("模型目录");
+        std::fs::write(root.join("v1/weights.bin"), b"w").expect("权重");
+        cached_model_fingerprint(root).expect("指纹")
+    }
+
+    #[test]
+    fn a_repeated_fingerprint_lookup_reuses_the_cached_value() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let root = dir.path().join("models/demo");
+        let first = seed(&root);
+        assert!(first.starts_with("v3-"), "指纹前缀：{first}");
+        assert_eq!(cached_model_fingerprint(&root).expect("第二次指纹"), first);
+    }
+
+    #[test]
+    fn the_fingerprint_cache_evicts_the_oldest_root_instead_of_growing() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let total = MAX_FINGERPRINT_CACHE_ENTRIES + 16;
+        for index in 0..total {
+            seed(&dir.path().join(format!("models/m{index}")));
+        }
+        {
+            let guard = FINGERPRINT_CACHE.lock().unwrap();
+            let cache = guard.as_ref().expect("缓存已建立");
+            assert!(
+                cache.len() <= MAX_FINGERPRINT_CACHE_ENTRIES,
+                "缓存条数 {} 超过上限 {MAX_FINGERPRINT_CACHE_ENTRIES}",
+                cache.len()
+            );
+            assert!(
+                cache.get(&dir.path().join("models/m0")).is_none(),
+                "最旧的根目录应被淘汰"
+            );
+            assert!(
+                cache.get(&dir.path().join(format!("models/m{}", total - 1))).is_some(),
+                "最近的根目录应保留"
+            );
+        }
+        // 别把测试用的临时路径留在进程级缓存里。
+        *FINGERPRINT_CACHE.lock().unwrap() = None;
     }
 }

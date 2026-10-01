@@ -212,6 +212,16 @@
   place-items: stretch;
 }
 
+/* 加载态将来也会带一条同样的顶栏（ReaderRoute 那条分支现在只画一个指示器），
+   于是它也该是「顶栏 + 中间内容」两行网格——`place-items: center` 会把那条顶栏
+   从通栏压成一枚居中的小块。写成 `:has(.reader-error-bar)` 是为了今天不动：这条
+   分支还没有顶栏，规则就没有匹配对象，等它有了会自动生效（选择器里带
+   `reader-error-bar`，也被「chrome 固定深色」那条扫描豁免）。 */
+.reader-screen-loading:has(.reader-error-bar) {
+  grid-template-rows: auto 1fr;
+  place-items: stretch;
+}
+
 .reader-error-bar {
   display: flex;
   align-items: center;
@@ -457,18 +467,22 @@
    padding, actions as standard icon buttons with no gap between their boxes
    (IconButtonSpace = 0 — each box carries its own padding).
 
-   三段式，不是一排：中列是 `auto`，两侧是等宽的 `1fr`——页码因此**按网格**落在
-   栏的中间，而不是靠「两组恰好一样宽」。左右两列各自贴边（`justify-self`），
-   除了最窄的那一档（见 610px 那条查询）以外不换行。容器和顶栏同一档
-   `surface-container`：一条在上、一条在下，中间隔着画面，不再靠色调差互相区分。
-   朝向内容那一侧同样留一条 1px 分隔线。 */
+   三段式，不是一排：中列是页码，左右各一组。三列**都按内容宽**（`auto`），整排再
+   `justify-content: center`——两组因此向中间靠拢，页码仍然按网格落在栏的正中。
+   这一条曾经是 `minmax(0, 1fr) auto minmax(0, 1fr)` 加两侧各自的
+   `justify-self: start/end`：宽窗口下两组被推到栏的两端，离中间那枚页码最远
+   （user report:「底栏左右两侧按钮离中心太远」）。最窄的那一档（见 610px 那条查询）
+   本来就是居中的：那里换成可换行的 flex，页码整行居中，剩下两组跟在它下面。
+   容器和顶栏同一档 `surface-container`：一条在上、一条在下，中间隔着画面，不再靠
+   色调差互相区分。朝向内容那一侧同样留一条 1px 分隔线。 */
 .reader-toolbar {
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto;
+  justify-content: center;
   align-items: center;
   gap: var(--space-2);
   height: calc(var(--reader-toolbar-height) + var(--safe-bottom));
@@ -497,10 +511,12 @@
   padding: 2px 4px;
 }
 
-/* 三列各就各位：左=布局，中=页码，右=画面处理。DOM 顺序就是这三段。 */
-.reader-toolbar-layout { grid-column: 1; justify-self: start; }
-.reader-toolbar-pages { grid-column: 2; justify-self: center; }
-.reader-toolbar-processing { grid-column: 3; justify-self: end; }
+/* 三列各就各位：左=布局，中=页码，右=画面处理。DOM 顺序就是这三段。
+   列已经是内容宽，所以这里没有 `justify-self`——留一条就会把那一组推回自己那一列的
+   边上，又变成「离中心远」的那颗钉子。 */
+.reader-toolbar-layout { grid-column: 1; }
+.reader-toolbar-pages { grid-column: 2; }
+.reader-toolbar-processing { grid-column: 3; }
 
 /* M3 disabled: the icon drops to on-surface at 38%. */
 .reader-toolbar button:disabled {

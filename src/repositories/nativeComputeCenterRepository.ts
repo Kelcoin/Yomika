@@ -27,6 +27,13 @@ export const ComputeCenterStatusSchema = z.object({
 
 export type ComputeCenterStatus = z.output<typeof ComputeCenterStatusSchema>;
 
+/** 配对列表变了（另一台设备刚配对成功）：本机设置页收到就重拉，不必退出再进。
+ *
+ * 事件由本机 HTTP 服务的 `/v2/pair/confirm` 在配对成功后广播（Rust 侧同名常量
+ * `PAIRING_CHANGED_EVENT`，见 `src-tauri/src/compute_center.rs`）——那次配对不是
+ * 本机前端发起的，除了这条事件它没有任何别的办法知道列表变了。 */
+export const COMPUTE_CENTER_PAIRING_CHANGED_EVENT = 'compute-center-pairing-changed';
+
 export const RemoteCapabilitiesSchema = z.object({
   service: z.string(),
   version: z.number().int(),

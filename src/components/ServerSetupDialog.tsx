@@ -8,6 +8,7 @@ import type { ServerRecord } from '../domain/library';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { SettingsRowBody } from './SettingsRow';
+import { useToast } from './Toast';
 
 const repository = new NativeLibraryRepository();
 
@@ -34,10 +35,13 @@ interface ServerSetupDialogProps {
 export function ServerSetupDialog({ onSave, server, variant = 'action' }: ServerSetupDialogProps) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // 保存失败（地址不通、凭据库写不进去、API Key 太长……）由 toast 说，不再在表单
+  // 里留一条红字：那条红字会一直挂到对话框关掉为止，用户改完地址重试时它还在说上
+  // 一次的事。toast 的层级（--z-toast 70）本来就高于对话框（--z-modal 51）。
+  const { showToast } = useToast();
 
   // 返回手势先关这一层（见 overlayBackGuard）。
   useOverlayBackGuard(open, () => handleOpenChange(false));
@@ -45,7 +49,6 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
   function handleOpenChange(next: boolean) {
     setOpen(next);
     if (next) {
-      setError(undefined);
       setName(server?.name ?? '');
       setBaseUrl(server?.baseUrl ?? '');
       setApiKey('');
@@ -66,8 +69,7 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(undefined);
-      setPending(true);
+    setPending(true);
     try {
       // Editing keeps the server's original identity: the scope id keys every
       // archive, progress and history row for this server, so re-deriving it
@@ -78,9 +80,9 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
         : await createServerIdentity({ name, baseUrl });
       const result = await onSave({ identity, apiKey });
       if (result.ok) setOpen(false);
-      else setError(result.error.message);
+      else showToast(result.error.message, 'error');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '服务器配置无效');
+      showToast(cause instanceof Error ? cause.message : '服务器配置无效', 'error');
     } finally {
       setPending(false);
     }
@@ -129,12 +131,11 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
           {/* 标题与说明直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
               而 ✕ 已经去掉了——关闭改走「点空白处」与 Esc（与设置项的二级菜单同一套）。 */}
           <Dialog.Title>{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
-          <Dialog.Description>连接信息保存在此设备；API Key 存于系统安全存储，已自动读入，可直接查看或替换。</Dialog.Description>
+          <Dialog.Description>连接信息保存在此设备；API Key 存在本机的凭据存储里，已自动读入，可直接查看或替换。</Dialog.Description>
           <form className="server-form" onSubmit={handleSubmit}>
             <label>名称（可选）<input aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
-            {error && <p className="form-error" role="alert">{error}</p>}
             <div className="dialog-actions">
               <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}><Save aria-hidden="true" />{pending ? '保存中…' : '保存服务器'}</button>
             </div>

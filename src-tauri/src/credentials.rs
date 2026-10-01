@@ -10,20 +10,23 @@
 //! E-H 账户与 Cookie、同步账户与其口令；记录与设置那一半是同步文档信封，原样嵌入。
 //! 导入与导出都走系统凭据库（`keyring`），SQLite 里依旧只留 `credential_ref`。
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
     commands::{
         eh::{save_eh_account_record, SaveEhAccountInput, SystemEhCookieStore},
-        library::{save_server_record, ServerInput, SystemCredentialStore},
+        library::{
+            save_server_record, set_server_enabled_record, CredentialStore, ServerInput,
+            SystemCredentialStore,
+        },
         sync::{
             import_scoped_document, save_sync_account_record, SaveSyncAccountInput,
-            SystemWebdavCredentialStore, WebdavCredentialStore, SYNC_SCOPE_CATEGORIES,
+            SystemWebdavCredentialStore, WebdavCredentialStore,
         },
     },
-    data_transfer::{normalize_items, DATA_EXPORT_ITEMS},
+    data_transfer::{normalize_items, record_categories, DATA_RECORDS_ITEM},
     db::Database,
     domain::result::CommandResult,
 };
@@ -53,6 +56,15 @@ struct DataExportEnvelope {
     sync_accounts: Vec<SyncAccountCredential>,
     #[serde(default)]
     skipped: usize,
+}
+
+/// 只为了从**文本**里再取一次 `records`：`serde_json::Value` 会把同一键的重复项合成
+/// 最后一条，而记录类要在文本上折叠（见 `sync::parse_scoped_document`）。解析不出来
+/// 就退回信封里那份 Value，老文件照旧能导入。
+#[derive(Deserialize)]
+struct DataExportRecords {
+    #[serde(default)]
+    records: Option<crate::commands::sync::ScopedDataExport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,6 +120,8 @@ pub struct DataExportReport {
     pub skipped: usize,
 }
 
+/// 导入结果：勾选的各类各落地了多少条，以及文件里有、这次却没落地的有多少条
+/// （类没勾，或者那条记录的凭据读不出来）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataImportReport {
@@ -115,11 +129,12 @@ pub struct DataImportReport {
     pub servers: usize,
     pub eh_accounts: usize,
     pub sync_accounts: usize,
+    pub skipped: usize,
 }
 
 /// 收集这次要带走的条目。没勾的类连查都不查：没勾的东西不该从凭据库里被读出来
-/// （哪怕只是为了丢掉）。`items` 只记录**确实装了内容**的类——空类不上清单，
-/// 导入弹层的勾选框才不会给出一格空东西。
+/// （哪怕只是为了丢掉）。信封的 `items` 由 `export_items` 拼——凭据类只上确实装了
+/// 内容的，记录类按勾选的目录列；记录文档本身在 `export_data` 里嵌。
 fn collect_bundle(
     connection: &Connection,
     items: &[String],
@@ -154,18 +169,44 @@ fn collect_bundle(
         skipped += missed;
     }
 
-    envelope.items = DATA_EXPORT_ITEMS
-        .iter()
-        .filter(|item| {
-            **item == "records"
-                || (**item == "lrr_servers" && !envelope.servers.is_empty())
-                || (**item == "eh_account" && !envelope.eh_accounts.is_empty())
-                || (**item == "sync_accounts" && !envelope.sync_accounts.is_empty())
-        })
-        .map(|item| item.to_string())
-        .collect();
+    envelope.items = export_items(
+        items,
+        envelope.servers.len(),
+        envelope.eh_accounts.len(),
+        envelope.sync_accounts.len(),
+    );
     envelope.skipped = skipped;
     Ok((envelope, skipped))
+}
+
+/// 信封上的条目清单，导入弹层的勾选框按它生成。
+///
+/// 记录类列的是**勾选的目录**（`records` 原样保留：旧界面与旧文件都认这个整包 id），
+/// 凭据类只列确实装了内容的——空类不该给出一格空勾选框。两者的区别是有意的：
+/// 一个目录这次没有内容，下次有新内容时它仍在这份文件的选择里；一条凭据读不出来，
+/// 是「没带上」，如实报在 `skipped` 里。
+fn export_items(
+    items: &[String],
+    servers: usize,
+    eh_accounts: usize,
+    sync_accounts: usize,
+) -> Vec<String> {
+    let mut listed = Vec::new();
+    if items.iter().any(|item| item == DATA_RECORDS_ITEM) {
+        listed.push(DATA_RECORDS_ITEM.to_string());
+    } else {
+        listed.extend(record_categories(items));
+    }
+    if servers > 0 {
+        listed.push("lrr_servers".to_string());
+    }
+    if eh_accounts > 0 {
+        listed.push("eh_account".to_string());
+    }
+    if sync_accounts > 0 {
+        listed.push("sync_accounts".to_string());
+    }
+    listed
 }
 
 /// 服务器条目 + 凭据库里的 API Key。读不到密钥的条目**跳过**（只搬半条在另一台机器上
@@ -339,10 +380,12 @@ pub fn export_data(
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
     // 记录与设置那一半是同步文档信封：折本机状态是同步那边的活，这里只负责把它
-    // 原样嵌进文件（导入端直接交给 import_scoped_document）。
+    // 原样嵌进文件（导入端直接交给 import_scoped_document）。勾了几个目录就只装
+    // 几个——「只带走阅读进度」这类选择要在文件里成立。
+    let categories = record_categories(&items);
     let mut records_count = 0;
-    if items.iter().any(|item| item == "records") {
-        match crate::commands::sync::export_scoped_document(&connection) {
+    if !categories.is_empty() {
+        match crate::commands::sync::export_scoped_document(&connection, &categories) {
             Ok((value, objects)) => {
                 records_count = objects;
                 envelope.records = Some(value);
@@ -354,11 +397,6 @@ pub fn export_data(
         .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get::<_, String>(0))
         .unwrap_or_default();
     envelope.exported_at = exported_at;
-    envelope.items = envelope
-        .items
-        .into_iter()
-        .filter(|item| *item != "records" || envelope.records.is_some())
-        .collect();
 
     match serde_json::to_string_pretty(&envelope) {
         Ok(text) => CommandResult::success(DataExportReport {
@@ -379,7 +417,8 @@ pub fn export_data(
 ///
 /// 已存在的条目按 id 覆盖（导入的用途就是「把这份凭据搬过来」）；覆盖只发生在这一次
 /// 显式动作里，同步永远不会碰它们。勾选决定文件里哪几类落地——文件里有但没勾的类
-/// 如实跳过，而不是静默混进来。
+/// 如实跳过并数进 `skipped`，而不是静默混进来。记录类是逐目录勾的（`records` 是
+/// 旧文件的整包 id，展开成六个目录），服务器条目还会把文件里的 `enabled` 恢复回去。
 #[tauri::command(async)]
 pub fn import_data(
     payload: String,
@@ -404,34 +443,31 @@ pub fn import_data(
         servers: 0,
         eh_accounts: 0,
         sync_accounts: 0,
+        skipped: 0,
     };
 
     let wanted = |item: &str| items.iter().any(|entry| entry == item);
 
-    for server in envelope.servers {
-        if !wanted("lrr_servers") || server.api_key.trim().is_empty() || server.scope_id.trim().is_empty() {
+    for server in &envelope.servers {
+        if !wanted("lrr_servers")
+            || server.api_key.trim().is_empty()
+            || server.scope_id.trim().is_empty()
+        {
+            report.skipped += 1;
             continue;
         }
-        let result = save_server_record(
-            &mut connection,
-            &SystemCredentialStore,
-            ServerInput::new(&server.name, &server.base_url, &server.scope_id),
-            server.api_key,
-        );
-        match result {
-            crate::domain::result::CommandResult::Success { .. } => report.servers += 1,
-            crate::domain::result::CommandResult::Failure { error, .. } => {
-                return CommandResult::failure(
-                    "INVALID_INPUT",
-                    format!("导入服务器「{}」失败：{}", server.name, error.message),
-                    false,
-                )
-            }
+        match import_server_record(&mut connection, &SystemCredentialStore, server) {
+            Ok(true) => report.servers += 1,
+            // `Ok(false)`：这一条不合法（超长 Key），跳过它、继续导入其余条目——与上面
+            // 「文件里有但没勾/字段是空的」同一条既有风格。
+            Ok(false) => report.skipped += 1,
+            Err(message) => return CommandResult::failure("INVALID_INPUT", message, false),
         }
     }
 
     for account in envelope.eh_accounts {
         if !wanted("eh_account") || account.cookie.trim().is_empty() {
+            report.skipped += 1;
             continue;
         }
         let label = account.label.clone();
@@ -460,6 +496,7 @@ pub fn import_data(
 
     for account in envelope.sync_accounts {
         if !wanted("sync_accounts") || account.credential.trim().is_empty() {
+            report.skipped += 1;
             continue;
         }
         let label = account.label.clone();
@@ -489,28 +526,108 @@ pub fn import_data(
         }
     }
 
-    // 记录与设置：文件里装着、这次也勾了，就按同步那套合并规则落地（同一份文件
-    // 重复导入是幂等的）。没勾就留在文件里——界面上说明它被跳过了。
-    if let Some(value) = envelope.records {
-        if wanted("records") {
-            let all_categories = SYNC_SCOPE_CATEGORIES
-                .iter()
-                .map(|item| item.to_string())
-                .collect::<Vec<_>>();
-            match import_scoped_document(&mut connection, value, &all_categories) {
-                Ok(applied) => report.records = applied.applied,
-                Err(error) => {
-                    return CommandResult::failure(
-                        "INVALID_INPUT",
-                        format!("记录与设置导入失败：{error}"),
-                        false,
-                    )
-                }
+    // 记录与设置：文件里装着就按同步那套合并规则落地（同一份文件重复导入是幂等的）。
+    // 目录没勾的条目一样是「文件里有、这次不要」，由导入核心数进 skipped，所以一条
+    // 都没勾也照样走一趟——报出来的数才是诚实的。
+    //
+    // 认得出 records 的文本就再解析一遍：`parse_export_envelope` 走的是
+    // `serde_json::Value`，那一步已经把 records 里同名的键合成最后一条了，文件内部
+    // 有重复项时就比不出哪一条更新；文本这条路交给 sync 侧的折叠反序列化。
+    if let Some(value) = envelope.records.clone() {
+        let categories = record_categories(&items);
+        let parsed = serde_json::from_str::<DataExportRecords>(&payload)
+            .ok()
+            .and_then(|parsed| parsed.records)
+            .map(|records| records.document);
+        let outcome = match parsed {
+            Some(document) => crate::commands::sync::import_scoped_documents(
+                &mut connection,
+                document,
+                &categories,
+            ),
+            None => import_scoped_document(&mut connection, value, &categories),
+        };
+        match outcome {
+            Ok(applied) => {
+                report.records = applied.applied;
+                report.skipped += applied.skipped;
+            }
+            Err(error) => {
+                return CommandResult::failure(
+                    "INVALID_INPUT",
+                    format!("记录与设置导入失败：{error}"),
+                    false,
+                )
             }
         }
     }
 
     CommandResult::success(report)
+}
+
+/// 导入一条服务器条目：写回走设置页那条保存路径（校验与 `credential_ref` 的约定
+/// 只有那一份，凭据库由调用方传进来——测试要用一个记下来的假库，生产用系统凭据库），
+/// 再把文件里的 `enabled` 按原样恢复回去。
+///
+/// 返回值：`Ok(true)` 落地了，`Ok(false)` 这一条**不合法、应当跳过**（调用方数进
+/// `skipped`），`Err` 才是整包导入失败。目前只有一种跳过理由——文件里的 Key 长到超过
+/// `MAX_API_KEY_CHARS`（多半是把一整段文本当 Key 导出过）；它不是「这份文件读不了」，
+/// 一条坏数据不该让其余几十条服务器与记录一起失败。
+fn import_server_record(
+    connection: &mut Connection,
+    credentials: &dyn CredentialStore,
+    server: &ServerCredential,
+) -> Result<bool, String> {
+    let result = save_server_record(
+        connection,
+        credentials,
+        ServerInput::new(&server.name, &server.base_url, &server.scope_id),
+        server.api_key.clone(),
+    );
+    if let crate::domain::result::CommandResult::Failure { error, .. } = result {
+        if error.code == "INVALID_API_KEY" {
+            return Ok(false);
+        }
+        return Err(format!("导入服务器「{}」失败：{}", server.name, error.message));
+    }
+    restore_enabled_server(connection, server)?;
+    Ok(true)
+}
+
+/// 按文件里的 `enabled` 原样落库：文件说启用就启用（别的自动关掉，默认数据源只有
+/// 一台），说停用就明确写回停用。
+///
+/// 启用的一半交给 `set_server_enabled_record`——单启用规则就写在它里面，这里不再抄
+/// 一遍。停用的一半则直接写这一行的标志，**故意绕过**它的「最后一台不许停用」守卫：
+/// 那条守卫是给设置页用的（怕用户点着点着把数据源关光），而导入的语义是「回到文件里
+/// 那台机器的状态」，文件说这条当时没启用，本机就不该把它当数据源。若本机原来启用的
+/// 那台也在文件里，它自己的 `enabled: true` 条目会把它恢复回来；若文件里一条启用的
+/// 都没有，落库就一台都不启用——文件说什么就是什么。
+///
+/// 不走 `save_server_record` 的「新条目在没别的启用时自动启用」是必须的：本机刚好
+/// 没有启用的服务器时，那条规则会把文件里写着停用的条目反过来启用，导入后当数据源的
+/// 就不是文件里那台了——本机上它对应的密钥可能根本不存在，用户报的「导入后读不到
+/// 凭据」就是这么来的。
+fn restore_enabled_server(
+    connection: &mut Connection,
+    server: &ServerCredential,
+) -> Result<(), String> {
+    if server.enabled {
+        return match set_server_enabled_record(connection, &server.scope_id, true) {
+            crate::domain::result::CommandResult::Success { .. } => Ok(()),
+            crate::domain::result::CommandResult::Failure { error, .. } => Err(format!(
+                "导入服务器「{}」失败：{}",
+                server.name, error.message
+            )),
+        };
+    }
+    connection
+        .execute(
+            "UPDATE servers SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![server.scope_id],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("导入服务器「{}」失败：{error}", server.name))
 }
 
 #[cfg(test)]
@@ -569,7 +686,8 @@ mod tests {
             bundle.servers.is_empty() && bundle.eh_accounts.is_empty() && bundle.sync_accounts.is_empty()
         );
         assert_eq!(skipped, 3, "三条都没有可读的凭据，要如实报出来");
-        assert!(!bundle.items.iter().any(|item| item == "lrr_servers"));
+        // 读不出来的凭据类不上清单：导入弹层不该给出一格连不上服务器的勾选框。
+        assert!(bundle.items.is_empty(), "没有内容的类不上清单：{:?}", bundle.items);
 
         // 只勾服务器：另外两类连查都不查，所以跳过的只有那一条服务器。
         let servers_only = vec!["lrr_servers".to_string()];
@@ -578,8 +696,266 @@ mod tests {
         assert!(bundle.eh_accounts.is_empty());
         assert!(bundle.sync_accounts.is_empty());
 
+        // 记录类相反：勾了哪个目录就列哪个目录（哪怕这一趟没有内容），清单才回得来。
+        let categories_only =
+            vec!["history".to_string(), "progress".to_string(), "retired".to_string()];
+        let (bundle, skipped) = collect_bundle(&connection, &categories_only).expect("bundle");
+        assert_eq!(
+            bundle.items,
+            vec!["progress".to_string(), "history".to_string()],
+            "按词表顺序列出勾到的目录，未知条目不留"
+        );
+        assert_eq!(skipped, 0, "记录类的目录由同步那边数，这里一条都不读凭据库");
+
         // 一类都不勾：什么都不读，也不报跳过。
         let (_, skipped) = collect_bundle(&connection, &[]).expect("bundle");
         assert_eq!(skipped, 0);
+    }
+
+    /// 一台装着「一条进度 + 一条历史」的库，两条都在同步日志里（导出就是从日志折的）。
+    fn database_with_two_categories_of_records() -> crate::db::Database {
+        let database = test_database();
+        let mut connection = database.connection.lock().expect("database lock");
+        connection
+            .execute_batch(
+                "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a');
+                 INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
+                   VALUES ('scope-a', 'archive-a', 4, 20, 'paged', 'ltr', 'device-a', 1);
+                 INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
+                   VALUES ('scope-a', 'archive-a', 1, '2026-09-01 08:00:00', 'device-a', 1);",
+            )
+            .expect("source rows");
+        let transaction = connection.transaction().expect("transaction");
+        crate::commands::sync::journal_object(
+            &transaction,
+            "scope-a",
+            "reading_progress",
+            "scope-a/archive-a",
+            1,
+            serde_json::json!({
+                "archiveId": "archive-a", "pageIndex": 4, "pageCount": 20,
+                "layout": "paged", "direction": "ltr", "coverAlone": null,
+            }),
+        )
+        .expect("journal progress");
+        crate::commands::sync::journal_object(
+            &transaction,
+            "scope-a",
+            "history",
+            "scope-a/archive-a",
+            1,
+            serde_json::json!({
+                "archiveId": "archive-a", "pageIndex": 1, "visitedAt": "2026-09-01 08:00:00",
+            }),
+        )
+        .expect("journal history");
+        transaction.commit().expect("commit journal");
+        drop(connection);
+        database
+    }
+
+    #[test]
+    fn a_checked_category_subset_round_trips_only_those_categories() {
+        // 只勾「阅读进度」：文件里的同步文档只有进度对象，清单也只列 progress，
+        // 导进另一个库后历史一个字都不落。
+        let source = database_with_two_categories_of_records();
+        let items = vec!["progress".to_string()];
+        let (document, listed) = {
+            let connection = source.connection.lock().expect("database lock");
+            let (bundle, _) = collect_bundle(&connection, &items).expect("bundle");
+            let (document, objects) =
+                crate::commands::sync::export_scoped_document(&connection, &record_categories(&items))
+                    .expect("export");
+            assert_eq!(objects, 1, "只勾了进度，历史不该进文档");
+            assert_eq!(bundle.items, vec!["progress".to_string()]);
+            (document, bundle.items)
+        };
+
+        let target = test_database();
+        let mut connection = target.connection.lock().expect("database lock");
+        let report = crate::commands::sync::import_scoped_document(
+            &mut connection,
+            document,
+            &record_categories(&listed),
+        )
+        .expect("import");
+        assert_eq!((report.applied, report.skipped), (1, 0));
+        assert_eq!(record_counts(&connection), (1, 0), "没勾的历史不该落地");
+    }
+
+    #[test]
+    fn records_that_are_not_checked_are_counted_as_skipped() {
+        // 文件里两类记录都有，这次只勾进度：历史那条是「文件里有、这次不要」，
+        // 由同步那边数进 skipped，而不是静默落地或静默消失。
+        let source = database_with_two_categories_of_records();
+        let document = {
+            let connection = source.connection.lock().expect("database lock");
+            let all = record_categories(&[DATA_RECORDS_ITEM.to_string()]);
+            let (document, objects) =
+                crate::commands::sync::export_scoped_document(&connection, &all).expect("export");
+            assert_eq!(objects, 2, "整包 id 展开成全部六个目录，两类记录都要在");
+            document
+        };
+
+        let target = test_database();
+        let mut connection = target.connection.lock().expect("database lock");
+        let report = crate::commands::sync::import_scoped_document(
+            &mut connection,
+            document,
+            &["progress".to_string()],
+        )
+        .expect("import");
+        assert_eq!((report.applied, report.skipped), (1, 1));
+        assert_eq!(record_counts(&connection), (1, 0));
+    }
+
+    #[test]
+    fn an_imported_enabled_server_becomes_the_only_enabled_one() {
+        let database = test_database();
+        let mut connection = database.connection.lock().expect("database lock");
+        connection
+            .execute_batch(
+                "INSERT INTO servers (id, name, base_url, scope_id, enabled) VALUES ('old', 'Old', 'https://old.test', 'old', 1);
+                 INSERT INTO servers (id, name, base_url, scope_id, enabled) VALUES ('new', 'New', 'https://new.test', 'new', 0);",
+            )
+            .expect("rows");
+
+        // 导出端把 enabled 写进文件，这里是那条记录过一遍 JSON 再读回来——文件里说
+        // 哪台启用，落地后就是哪台（其余自动关掉，默认数据源只有一台）。
+        let imported: ServerCredential = serde_json::from_value(serde_json::json!({
+            "scopeId": "new", "name": "New", "baseUrl": "https://new.test",
+            "enabled": true, "apiKey": "key",
+        }))
+        .expect("parse server");
+        // "old" 是本机原来启用的那台，文件里也有它、且写着停用——落地后它必须停用。
+        let old: ServerCredential = serde_json::from_value(serde_json::json!({
+            "scopeId": "old", "name": "Old", "baseUrl": "https://old.test",
+            "enabled": false, "apiKey": "old-key",
+        }))
+        .expect("parse server");
+
+        restore_enabled_server(&mut connection, &imported).expect("restore enabled");
+        assert_eq!(enabled_server_ids(&connection), vec!["new".to_string()]);
+
+        restore_enabled_server(&mut connection, &old).expect("restore disabled");
+        assert_eq!(enabled_server_ids(&connection), vec!["new".to_string()]);
+
+        // 文件说停用的条目要真的停用：本机只剩它一台启用时也不例外——导入的语义是
+        // 「回到文件里那台机器的状态」，不是「无论如何保住一台数据源」。
+        let only_enabled_disabled = ServerCredential {
+            enabled: false,
+            ..imported
+        };
+        restore_enabled_server(&mut connection, &only_enabled_disabled).expect("restore disabled");
+        assert!(
+            enabled_server_ids(&connection).is_empty(),
+            "文件说没启用，就不能反过来把它启用"
+        );
+    }
+
+    /// 记下写进凭据库的 (scope_id, api_key)，用来断言导入之后那台服务器的 Key
+    /// 确实存在、且存的就是文件里那条——用户报的「导入后读不到凭据」正是这里的回归点。
+    #[derive(Default)]
+    struct RecordingCredentialStore {
+        writes: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl CredentialStore for RecordingCredentialStore {
+        fn set_server_api_key(&self, scope_id: &str, api_key: &str) -> Result<(), String> {
+            self.writes
+                .lock()
+                .expect("credential store lock")
+                .push((scope_id.to_string(), api_key.to_string()));
+            Ok(())
+        }
+    }
+
+    impl RecordingCredentialStore {
+        fn stored_key(&self, scope_id: &str) -> Option<String> {
+            self.writes
+                .lock()
+                .expect("credential store lock")
+                .iter()
+                .rev()
+                .find(|(id, _)| id == scope_id)
+                .map(|(_, key)| key.clone())
+        }
+    }
+
+    #[test]
+    fn an_imported_enabled_server_keeps_a_readable_api_key() {
+        let database = test_database();
+        let mut connection = database.connection.lock().expect("database lock");
+        let credentials = RecordingCredentialStore::default();
+        let server: ServerCredential = serde_json::from_value(serde_json::json!({
+            "scopeId": "scope-new", "name": "New", "baseUrl": "https://new.test",
+            "enabled": true, "apiKey": "key-from-file",
+        }))
+        .expect("parse server");
+
+        import_server_record(&mut connection, &credentials, &server).expect("import server");
+
+        // 启用之后走的就是这一行，所以它的 scope_id 必须能在凭据库里读到密钥。
+        assert_eq!(enabled_server_ids(&connection), vec!["scope-new".to_string()]);
+        assert_eq!(
+            credentials.stored_key("scope-new").as_deref(),
+            Some("key-from-file"),
+            "文件里的 API Key 要落在这一行的 scope_id 下"
+        );
+        // SQLite 只留指向凭据库的引用，明文密钥不进库。
+        let stored_ref: Option<String> = connection
+            .query_row(
+                "SELECT api_key_ref FROM servers WHERE id = 'scope-new'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("server row");
+        assert_eq!(stored_ref.as_deref(), Some("scope-new"));
+    }
+
+    /// 文件里一条超长 Key 不该让整包导入失败：它是「这一条不合法」，数进 `skipped`
+    /// 就好（`import_data` 的循环照这个返回值计数）。回归点：`431 Request Header Fields
+    /// Too Large` 之所以出现，正是因为这种条目本来被当成合法服务器存了下来。
+    #[test]
+    fn an_over_long_key_in_the_file_is_skipped_rather_than_failing_the_import() {
+        let database = test_database();
+        let mut connection = database.connection.lock().expect("database lock");
+        let credentials = RecordingCredentialStore::default();
+        let server: ServerCredential = serde_json::from_value(serde_json::json!({
+            "scopeId": "scope-too-long", "name": "Too long", "baseUrl": "https://long.test",
+            "enabled": true, "apiKey": "k".repeat(crate::commands::library::MAX_API_KEY_CHARS + 1),
+        }))
+        .expect("parse server");
+
+        assert!(
+            !import_server_record(&mut connection, &credentials, &server).expect("skip"),
+            "超长 Key 的条目应当是「跳过」，不是「导入成功」"
+        );
+        assert!(
+            enabled_server_ids(&connection).is_empty(),
+            "跳过的条目不许落库"
+        );
+        assert_eq!(credentials.stored_key("scope-too-long"), None);
+    }
+
+    fn enabled_server_ids(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT id FROM servers WHERE enabled = 1 ORDER BY id")
+            .expect("statement");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("rows");
+        rows.collect::<Result<Vec<_>, _>>().expect("enabled ids")
+    }
+
+    /// (进度的条数, 历史的条数)。
+    fn record_counts(connection: &Connection) -> (i64, i64) {
+        connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM reading_progress), (SELECT COUNT(*) FROM reading_history)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("record counts")
     }
 }

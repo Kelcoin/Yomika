@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, ServerCrash } from 'lucide-react';
 
 import { usePageActive } from '../app/RetainedPage';
 import type { ArchiveRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { EmptyState } from './EmptyState';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { ServerRequiredPrompt } from './ServerRequiredPrompt';
 import { useArchiveSelection } from './useArchiveSelection';
@@ -139,11 +140,17 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
    * The rendered list can be shorter once duplicates are dropped. */
   const fetchedCount = useRef(cachedPage?.fetchedCount ?? cachedPage?.archives.length ?? 0);
   const initialArchivesLoaded = useRef(Boolean(cachedPage));
-  const snapshotOnScreen = useRef(Boolean(cachedPage?.archives.length));
   const [searchQuery, setSearchQuery] = useState(requestedQuery ?? snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(snapshot?.sortOrder ?? 'desc');
   const [categoryFilter, setCategoryFilter] = useState(snapshot?.categoryFilter ?? '');
+  /** 屏幕上这份结果回答的是"哪一问"：查询词 + 排序 + 分类的合成键。任何一次首屏
+   * 读取落地（读成留下行、读败留下错误页）都记下它，重读才有比较的对象。
+   * 同一个问题的重读只换内容、不清屏——自动同步收尾、整库失效广播、从别的路由回到
+   * 档案库都是这一类，用户正看着档案时不该被一个转不完的骨架打断，等新数据到了再变；
+   * 换了问题（改搜索词/排序/分类）才必须清掉，因为屏幕上那些行回答的是另一个问题。 */
+  const listQueryKey = `${searchQuery}|${sortMode}|${sortOrder}|${categoryFilter}`;
+  const settledQueryKey = useRef(cachedPage ? listQueryKey : '');
   const [reloadToken, setReloadToken] = useState(0);
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   /** Set when the dialog was opened from a preset's rename action. */
@@ -259,8 +266,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   }, []);
 
   const loadLibrary = useCallback(async () => {
-    setLoading(true);
-    setError(undefined);
+    // 屏幕上已经有答案时（列表还在，或那张解释为什么没有列表的错误页），重读是就地的：
+    // 不进骨架、也不抹掉错误页——自动同步收尾、整库失效广播、错误页上的「重试」都要
+    // 走这里。骨架只留给一无所知的那一次首读。清错误则只在真有行可看时才做；屏幕上是
+    // 错误页时清掉它只会露出骨架，而这一读的结果马上就回来了。
+    const screenHasAnswer = settledQueryKey.current !== '';
+    setLoading(!screenHasAnswer);
+    if (screenHasAnswer && initialArchivesLoaded.current) setError(undefined);
     setNeedsCredentials(false);
     const servers = await repository.listServers();
     if (!servers.ok) {
@@ -386,11 +398,12 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     const handleInvalidation = (event: Event) => {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
       if (!prefix || prefix === 'library:') {
-        setError(undefined);
+        // 清错误页交给 loadLibrary：它只在真有行可看时才清。空屏上那张错误页是此刻仅有的
+        // 情报，先抹掉再等一次可能同样失败的重读，只会留下一段没有解释的骨架。
         // 删除一条档案之后，屏幕上那份列表仍然是要看的那份（只是少一行），所以让首页
         // 重读落在它后面而不是把它清空重建——清空会闪一次骨架，比那行自己消失难看得多。
-        // 这里借用快照在屏时的分支：列表留在原处，重读回来再换。
-        if (prefix === 'library:') snapshotOnScreen.current = true;
+        // 这件事现在由 listQueryKey/settledQueryKey 统一保证：问题没变的重读一律不清屏，
+        // 所以这里不必再特殊照顾 'library:'。
         void loadLibrary().then(() => setReloadToken((value) => value + 1));
       }
     };
@@ -408,7 +421,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     const request = ++pageRequest.current;
     // Keep the existing input/list mounted while a filter request is in flight.
     // Unmounting the workspace here loses focus after the first typed character.
-    if (!initialArchivesLoaded.current) setLoading(true);
+    // 骨架只留给空屏上的那一次首读：就地重读（background）连 `loading` 都不碰，
+    // 否则一张已经解释清楚的错误页会被骨架顶掉（`listLoading` 里 `loading` 一票即中）。
+    if (!initialArchivesLoaded.current && !options.background) setLoading(true);
     // Any first-page request, not only the first one ever: `loading` deliberately
     // stays false for a refilter so the input keeps focus, but the list is emptied
     // all the same — which is how 暂无档案库 flashed before the archives arrived.
@@ -416,19 +431,27 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // already on screen: neither the skeleton nor the list's busy state may take
     // over the page for a request nobody asked for.
     if (!options.background) setPageLoading(true);
-    setError(undefined);
+    // 「屏幕上到底有没有一份已经成型的列表」是这次失败该走哪条路的唯一判据。空屏
+    // （骨架，或者最初那次还没成功过）时不能清掉错误页：一次静默/入场刷新失败会把
+    // 它抹掉，用户只剩一个转不完的骨架和一条几秒后消失的 toast，无从知道发生了什么。
+    const hasListOnScreen = initialArchivesLoaded.current;
+    if (!options.background || hasListOnScreen) setError(undefined);
     if (options.clear) setArchives([]);
     const result = await fetchArchivePage(currentServerId, 0);
     if (request !== pageRequest.current) return false;
     if (!result.ok) {
       // A silent load is the pull's refresh, and a background one is the entry
       // refresh: the list stays exactly as it is, and the failure is a toast
-      // rather than the whole page.
-      if (options.silent || options.background) setRefreshError(result.error.message);
+      // rather than the whole page. That trade only holds while there is a list
+      // to keep — with nothing settled on screen the page has to say it itself.
+      if ((options.silent || options.background) && hasListOnScreen) setRefreshError(result.error.message);
       else {
         setNeedsCredentials(result.error.code === 'PLATFORM_UNAVAILABLE');
         setError(result.error.code === 'PLATFORM_UNAVAILABLE' ? '服务器凭据不可用，请在设置中重新保存 API Key。' : result.error.message);
       }
+      // 失败也在屏幕上留下了一个答案（那张错误页），从这一刻起这个问题的重读就该就地
+      // 进行：否则每次自动同步收尾都会先把错误页抹成骨架，再把它写回来。
+      settledQueryKey.current = listQueryKey;
       setLoading(false);
       setPageLoading(false);
       return false;
@@ -439,12 +462,16 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setArchives(unique);
     fetchedCount.current = result.value.items.length;
     initialArchivesLoaded.current = true;
+    settledQueryKey.current = listQueryKey;
+    // 就地重读成功时把上一轮的错误页收掉——它当初是因为屏幕上没有行才留下的。
+    setError(undefined);
+    setNeedsCredentials(false);
     setTotalArchives(result.value.total);
     setHasMoreArchives(result.value.hasMore);
     setLoading(false);
     setPageLoading(false);
     return true;
-  }, [fetchArchivePage]);
+  }, [fetchArchivePage, listQueryKey]);
 
   const refreshVisiblePage = useCallback(async (currentServerId: string) => {
     // A refresh re-reads the page on screen: one LANraragi request, list in
@@ -462,13 +489,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   useEffect(() => {
     if (!serverId) return;
-    // A matching cached page remains visible while its first page is re-read.
-    // A changed query still clears the old rows, since they describe a different
-    // result set.
-    const restored = snapshotOnScreen.current;
-    snapshotOnScreen.current = false;
-    void loadFirstPage(serverId, restored ? { background: true } : { clear: true });
-  }, [loadFirstPage, reloadToken, serverId]);
+    // A matching cached page remains visible while its first page is re-read, and
+    // so does whatever already answers this very question — rows, or the failure
+    // that explained why there are none. Clearing is reserved for a changed query,
+    // whose old rows describe a different result set.
+    const sameQuery = settledQueryKey.current !== '' && settledQueryKey.current === listQueryKey;
+    void loadFirstPage(serverId, sameQuery ? { background: true } : { clear: true });
+  }, [listQueryKey, loadFirstPage, reloadToken, serverId]);
 
   // The library route is retained while another route is on screen, so leaving and
   // coming back is not a remount and the effect above never re-runs — which is why
@@ -569,15 +596,30 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     }
   }, [categories, serverParam]);
 
+  // 读不出来的这一页只说「怎么办」，不再复读原生报错。
+  //
+  // 原始错误已经由上面那条 toast 说过了；这一页原先把它塞进一条整宽的红色
+  // `role="alert"` 里，右边再挂一个「打开设置重新保存 API Key」——两个元素都
+  // 撑在一条 flex 行上（`.form-error` 的基线是 320px），在 390px 的手机上那颗
+  // 按钮直接被挤出屏幕，重试按钮还落在红条外面。现在换成各处共用的空状态：一句
+  // 人话、一颗主按钮（能修就修、不能修就重试）。
   if (error) {
+    const retry = (
+      <button className={needsCredentials ? 'secondary-action' : 'primary-action'} type="button" onClick={() => void loadLibrary().then(() => setReloadToken((value) => value + 1))}><RotateCcw aria-hidden="true" />重试读取档案库</button>
+    );
     return (
       <div>
         <h1 className="visually-hidden">档案库</h1>
-        <div className="workspace-alert" role="alert">
-          <p className="form-error">{error}</p>
-          {needsCredentials && <Link className="secondary-action" to="/settings">打开设置重新保存 API Key</Link>}
-        </div>
-            <button className="secondary-action" type="button" onClick={() => void loadLibrary().then(() => setReloadToken((value) => value + 1))}><RotateCcw aria-hidden="true" />重试读取档案库</button>
+        <EmptyState
+          icon={ServerCrash}
+          title="档案库没有读出来"
+          description={needsCredentials
+            ? '本机读不到这台服务器的凭据，档案库连不上。到设置里重新保存一次 API Key，再回来看这一页。'
+            : '这次没能连上服务器。稍后再试；一直不行就到设置里检查服务器地址与凭据。'}
+          action={needsCredentials
+            ? <div className="empty-state-actions"><Link className="primary-action" to="/settings">打开设置重新保存 API Key</Link>{retry}</div>
+            : retry}
+        />
       </div>
     );
   }

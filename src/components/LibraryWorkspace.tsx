@@ -33,6 +33,37 @@ import '../styles/library-loading.css';
 /** One search hint for every page that has a search box. */
 const SEARCH_PLACEHOLDER = '搜索档案…';
 
+/** How many wide-cover marks the workspace keeps. Each mark is one archive key,
+ * so without a cap the set grows for as long as the workspace stays mounted
+ * (one entry per wide archive ever scrolled past). */
+export const WIDE_COVER_MARK_LIMIT = 4096;
+
+/** Remember that one archive's cover is wide (or stop remembering it). Kept
+ * separate from the component so the eviction order can be pinned by a test:
+ * `Set` iterates in insertion order, so the marks that fall out first are the
+ * ones scrolled past longest ago. Returns the set it was given unchanged when
+ * nothing moves — a fresh set per cover load would re-render the whole list. */
+export function withWideCoverMark(
+  current: Set<string>,
+  archiveId: string,
+  wide: boolean,
+  limit: number = WIDE_COVER_MARK_LIMIT,
+): Set<string> {
+  if (current.has(archiveId) === wide) return current;
+  const next = new Set(current);
+  if (!wide) {
+    next.delete(archiveId);
+    return next;
+  }
+  next.add(archiveId);
+  while (next.size > limit) {
+    const oldest = next.values().next();
+    if (oldest.done) break;
+    next.delete(oldest.value);
+  }
+  return next;
+}
+
 /* Overscroll. Beyond the top the list can be pulled down to refresh, beyond the
    bottom it bounces; both are damped, so the numbers are on-screen pixels and
    the gesture has to travel twice as far. */
@@ -226,6 +257,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    * archive made the top row render as pressed on every visit — including on the
    * shelves, which show no detail pane for it to be the subject of. */
   const [selectedId, setSelectedId] = useState<string>();
+  /** Archives whose cover is wider than tall, so their row packs differently.
+   * Keyed per archive, so it would otherwise grow for as long as this workspace
+   * stays mounted; the cap only ever drops a hint (the class falls back until
+   * that cover reports its ratio again). */
   const [wideCoverIds, setWideCoverIds] = useState<Set<string>>(() => new Set());
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
@@ -623,15 +658,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const press = onArchiveContextMenu
       ? longPressHandlers((at) => onArchiveContextMenu(archive, at))
       : {};
-    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => {
-      // Returning a fresh Set on every cover load would re-render the whole
-      // list once per thumbnail.
-      if (current.has(archive.archiveId) === isWideCoverRatio(ratio)) return current;
-      const next = new Set(current);
-      if (isWideCoverRatio(ratio)) next.add(archive.archiveId);
-      else next.delete(archive.archiveId);
-      return next;
-    })} eager={eager} />;
+    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => setWideCoverIds((current) => withWideCoverMark(current, archive.archiveId, isWideCoverRatio(ratio)))} eager={eager} />;
     const pressed = selectedId !== undefined && archive.archiveId === selectedId;
     return (
     <>

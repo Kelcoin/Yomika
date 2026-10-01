@@ -1423,6 +1423,44 @@ mod tests {
         assert!(seen.diagnostics.is_empty());
         assert!(registry.read("scan-2").is_none());
     }
+
+    #[test]
+    fn scan_progress_registry_drops_the_oldest_session_instead_of_growing() {
+        let registry = DedupScanRegistry::default();
+        let progress = |session: usize| DedupScanProgress {
+            session_id: format!("scan-{session}"),
+            scope_id: "server-a".into(),
+            status: "running".into(),
+            stage: "covers".into(),
+            processed: session as i64,
+            total: 100,
+            cache_hits: 0,
+            downloads: 0,
+            missing_covers: 0,
+            invalid_covers: 0,
+            pair_count: 0,
+            degraded: false,
+            checkpoint: 0,
+            diagnostics: vec![],
+            pairs: vec![],
+        };
+        for session in 0..MAX_TRACKED_SCANS + 8 {
+            registry.publish(&progress(session));
+        }
+        // 会话号是前端给的：表不能只插不删，否则跑过的每个会话都留一条到进程退出。
+        assert!(registry.read("scan-0").is_none());
+        assert!(registry.read("scan-71").is_some());
+        {
+            let entries = registry.entries.lock().unwrap();
+            assert_eq!(entries.by_session.len(), MAX_TRACKED_SCANS);
+            assert_eq!(entries.order.len(), MAX_TRACKED_SCANS);
+        }
+        // 同一个会话每批都播报：重复发布不该重复占位，也不该把自己顶成新的队首。
+        registry.publish(&progress(MAX_TRACKED_SCANS + 7));
+        let entries = registry.entries.lock().unwrap();
+        assert_eq!(entries.order.len(), MAX_TRACKED_SCANS);
+        assert_eq!(entries.order.back().map(String::as_str), Some("scan-71"));
+    }
 }
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1475,9 +1513,24 @@ pub struct DedupScanProgress {
 /// 运行中的扫描进度：`dedup_scan` 边跑边更新，前端用 `dedup_scan_progress`
 /// 轮询它画进度条。它是运行期状态，不进数据库——数据库里只留会话检查点，
 /// 因此进程重启后进度线消失而会话仍可恢复。
+///
+/// 会话号由前端给，而这张表原先只插不删：每跑完一个会话就留一条进度快照
+/// （含标签与检查点）直到进程退出，长时间不重启的机器上只涨不落。这里照
+/// `inference::cancel` 的既有范式加一个 FIFO 上限——没有哪台机器会同时轮询
+/// 六十几个扫描，超出的按最早发布的先丢，`dedup_scan_progress` 顶多报「没有
+/// 这个会话」，前端本来也要处理这种情况（重启就会遇到）。
+const MAX_TRACKED_SCANS: usize = 64;
+
 #[derive(Default)]
 pub struct DedupScanRegistry {
-    entries: std::sync::Mutex<std::collections::HashMap<String, DedupScanProgress>>,
+    entries: std::sync::Mutex<DedupScanEntries>,
+}
+
+#[derive(Default)]
+struct DedupScanEntries {
+    by_session: std::collections::HashMap<String, DedupScanProgress>,
+    /// 发布顺序，超限时逐出队首。与 `by_session` 的键集合始终一致。
+    order: VecDeque<String>,
 }
 
 impl DedupScanRegistry {
@@ -1490,11 +1543,19 @@ impl DedupScanRegistry {
         let mut snapshot = progress.clone();
         snapshot.diagnostics = Vec::new();
         snapshot.pairs = Vec::new();
-        entries.insert(snapshot.session_id.clone(), snapshot);
+        if !entries.by_session.contains_key(&snapshot.session_id) {
+            entries.order.push_back(snapshot.session_id.clone());
+        }
+        entries.by_session.insert(snapshot.session_id.clone(), snapshot);
+        while entries.order.len() > MAX_TRACKED_SCANS {
+            if let Some(oldest) = entries.order.pop_front() {
+                entries.by_session.remove(&oldest);
+            }
+        }
     }
 
     fn read(&self, session_id: &str) -> Option<DedupScanProgress> {
-        self.entries.lock().ok()?.get(session_id).cloned()
+        self.entries.lock().ok()?.by_session.get(session_id).cloned()
     }
 }
 

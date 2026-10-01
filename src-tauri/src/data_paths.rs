@@ -28,5 +28,8 @@ pub fn data_dir(app: &tauri::AppHandle) -> io::Result<PathBuf> {
 pub fn prepare(app: &tauri::AppHandle) -> Result<(), String> {
     let target = data_dir(app).map_err(|error| error.to_string())?;
     fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+    // 移动端的凭据文件（`secrets.json`）就落在这个目录里，所以要在 `create_dir_all`
+    // 之后把目录交给它。桌面端忽略这次调用——那边的凭据在系统凭据库里。
+    crate::secret_store::init(&target);
     crate::bundled_models::prepare(&target).map_err(|error| error.to_string())
 }

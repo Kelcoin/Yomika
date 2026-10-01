@@ -12,11 +12,14 @@ import { pickServer } from '../domain/server';
 import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
 import { MorePagesRoute } from '../components/MorePagesRoute';
 
-/** 每个懒加载页面一个加载器：`lazy()` 用它，启动后的空闲预热也用它。
+/** 每个懒加载页面一个加载器：`lazy()` 用它，启动后的预热也用它。
  *
  * 切页时那一闪是 Suspense 的兜底：chunk 还没到，整页被换成加载动画，到了再换回来。
  * chunk 只在第一次进入某个页面时缺，所以那一闪是偶发的（一次会话里每个页面各一次）。
- * 启动稳定之后空闲时把它们一次性取回来，之后切页不再挂起，动画自然不闪。 */
+ * 启动后尽快把它们一次性取回来：chunk 一旦在内存里，那次挂起就只剩一个微任务加一次
+ * 调度，提交兜底和渲染真内容落进同一帧，屏幕上看不见；真正看得见的只有取字节的等待。
+ * （`lazy()` 的 payload 第一次渲染总要挂起一次，所以「预热过就完全不挂起」并不成立，
+ * 但那一轮短到画不出来。） */
 export const lazyPages = {
   reader: () => import('../components/ReaderRoute'),
   settings: () => import('../components/SettingsWorkspace'),
@@ -40,10 +43,19 @@ const EhRouteWorkspace = lazy(() => lazyPages.eh().then((module) => ({ default: 
 const MetadataEditRoute = lazy(() => lazyPages.metadataEdit().then((module) => ({ default: module.MetadataEditRoute })));
 const DeduplicationWorkspace = lazy(() => lazyPages.deduplication().then((module) => ({ default: module.DeduplicationWorkspace })));
 
-/** 空闲时把上面这些页面取回来。失败不管：真的进那个页面时 Suspense 照旧兜底。 */
+/** 把上面这些页面取回来。失败不管：真的进那个页面时 Suspense 照旧兜底。
+ *
+ * 主路径是「让出一轮宏任务就取」，不是等空闲：这个函数是首帧渲染完之后才从 effect 里
+ * 调的（`App.tsx` 的 `[]`），再让一轮已经不会跟首屏抢主线程；而空闲回调要等主线程真的
+ * 静下来，首屏那几个骨架动画和封面解码足够把它推到用户点完之后——那一次切页仍旧只有
+ * 兜底可看，也就是用户报的「启动后第一次切页还是闪」。
+ *
+ * 空闲回调留着当兜底：标签页被挂起、或主线程长时间被占住时，宏任务可能被拖到很久以后，
+ * `timeout` 至少保证它最终还是会发生。 */
 export function preloadLazyPages(): void {
   if (typeof window === 'undefined') return;
   const load = () => { for (const page of Object.values(lazyPages)) void page().catch(() => {}); };
+  window.setTimeout(load, 0);
   if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(load, { timeout: 2000 });
   else window.setTimeout(load, 1200);
 }

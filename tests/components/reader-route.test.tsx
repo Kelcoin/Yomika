@@ -112,6 +112,182 @@ describe('reader route', () => {
     expect(dropped.every((index) => index >= 10)).toBe(true);
   });
 
+  it('promotes a page the reader just turned to instead of leaving it in the prefetch tier', async () => {
+    // 用户报的问题：翻页之后队列好像不跟着更新。已经在队列里、但还挂着 `neighbour`
+    // 档的那一件，翻到它时不会被升成 `visible`，于是 worker 拿到的优先级是 background
+    // ——正在看的那一页排在刚翻过去的那一页后面。这一条盯的就是那个换档。
+    const cache = getNativeImageCache();
+    const pageCount = 8;
+    const processed: Array<{ pageIndex: number; priority?: 'foreground' | 'background' | undefined }> = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstPageGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition !== 'dlssnr') {
+        return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+      }
+      processed.push({ pageIndex: identity.pageIndex, priority: identity.priority });
+      // 第 1 页那一件挂住，队列里才会攒着预取窗口排进来的第 2、3 页。
+      if (identity.pageIndex === 0) await firstPageGate;
+      return { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 };
+    });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'promote', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/promote']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    await waitFor(() => expect(processed.some((entry) => entry.pageIndex === 0)).toBe(true));
+
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await screen.findByRole('img', { name: '第 2 页' });
+    await act(async () => {});
+    await act(async () => { releaseFirst?.(); });
+
+    await waitFor(() => {
+      const second = processed.find((entry) => entry.pageIndex === 1);
+      expect(second?.priority).toBe('foreground');
+    }, { timeout: 5_000 });
+    // 只是路过预取窗口、用户没翻过去的那一页仍然是后台的事。
+    const third = processed.find((entry) => entry.pageIndex === 2);
+    expect(third?.priority).toBe('background');
+  });
+
+  it('keeps the pages right after the reader when one derived page takes a third of the budget', async () => {
+    // 现场：这台机器的 DLSSNR 三档设置下一张成品 21–27MB（用户库里 133 页 2.9GB），
+    // 而会话预算是按「一页 3–6MB」定的 64MB——只装得下两页。预扫从当前页往后由近到远
+    // 灌进来，可「下一页」永远落在预算之外、刚算完就被挤掉，用户翻过去还是要现读一遍，
+    // 看起来就是整本预处理没生效。这一条盯的是「可见页往后至少留住几页」那个下限。
+    const cache = getNativeImageCache();
+    const pageCount = 24;
+    const bytes = 24 * 1024 * 1024;
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes }
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'resident', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/resident']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    const dlssnrPages = () => load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex);
+    await waitFor(() => {
+      expect(new Set(dlssnrPages())).toEqual(new Set(Array.from({ length: pageCount }, (_, index) => index)));
+    }, { timeout: 10_000 });
+
+    const dropped = release.mock.calls
+      .map(([handle]) => Number(handle.key.replace('dlssnr-', '')))
+      .filter((index) => Number.isInteger(index));
+    // 第 1 页往后紧挨着的四页一页都不能丢：翻过去时它们就是「已经预处理过」的那几页。
+    expect(dropped.filter((index) => index <= 4)).toEqual([]);
+  });
+
+  it('retries a page whose source could not be read instead of writing it off', async () => {
+    // 源页读失败（LRR 掉线 / 超时）时不能把「尝试过」记在那一页头上：记上以后整本预扫
+    // 剩下的部分和用户真的翻到它时都会跳过它，于是这一页在这次阅读里永远是原图。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    let failOnce = true;
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition === 'reader-page' && identity.pageIndex === 2 && failOnce) {
+        failOnce = false;
+        throw new Error('LANraragi dropped the page');
+      }
+      return identity.rendition === 'dlssnr'
+        ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
+        : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+    });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'lost-source', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/lost-source']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    const sourceCalls = () => load.mock.calls.filter(([identity]) => identity.rendition === 'reader-page' && identity.pageIndex === 2).length;
+    const dlssnrPages = () => load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex);
+    // 预扫轮到第 3 页，源页读失败一次。
+    await waitFor(() => expect(sourceCalls()).toBeGreaterThanOrEqual(1));
+    // 用户翻到第 2 页：第 3 页进了预取窗口，这时候要再试一次。
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
+    await screen.findByRole('img', { name: '第 2 页' });
+    await waitFor(() => expect(dlssnrPages()).toContain(2), { timeout: 2_000 });
+  });
+
+  it('does not auto-enable upscaling when the pages already average above the threshold', async () => {
+    // 用户报的 ⑨：平均体积**高于**阈值，超分还是自己开起来了。阈值是「糊得值不值得
+    // 超分」那条线（默认 500KB/页）：这条档案一页 4MB，标签规则再匹配也不该自动开。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 }
+    ));
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', decensorModel: '', dlssnrEnabled: false } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'fat-pages', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'fat-pages', title: 'Reader', filename: 'fat.zip', tags: 'category:manga', summary: null, extension: 'zip', progress: 0, pageCount: 3, lastReadTime: 0, size: 12 * 1024 * 1024 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/reader/fat-pages']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    const upscaleRuns = () => load.mock.calls.filter(([identity]) => identity.rendition === 'enhanced').length;
+    // 标签规则是匹配的（category:manga 在白名单里），所以只可能是体积那一半在挡。
+    await waitFor(() => expect(adapter.mock.calls.some(([command]) => command === 'load_archive_metadata')).toBe(true));
+    await act(async () => {});
+    await act(async () => {});
+    expect(upscaleRuns()).toBe(0);
+    expect(screen.getByRole('button', { name: '开启超分' })).toBeInTheDocument();
+  });
+
+  it('auto-enables upscaling when the pages average below the threshold and the tags match', async () => {
+    // 上一条的反面：阈值以下 + 白名单命中还是要自动开——修方向不是把自动开启关掉。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 }
+    ));
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', decensorModel: '', dlssnrEnabled: false } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'thin-pages', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'thin-pages', title: 'Reader', filename: 'thin.zip', tags: 'category:manga', summary: null, extension: 'zip', progress: 0, pageCount: 3, lastReadTime: 0, size: 300 * 1024 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/thin-pages']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    await waitFor(() => expect(load.mock.calls.some(([identity]) => identity.rendition === 'enhanced')).toBe(true));
+    expect(await screen.findByRole('button', { name: '关闭超分' })).toBeInTheDocument();
+  });
+
   it('marks the page in the viewport as foreground and the rest of the sweep as background', async () => {
     // 用户要的「超分、去码、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
     // 字段：队列按档位给每件活打上前台/后台，原生那侧据此插队并掐掉正在跑的后台。
@@ -208,21 +384,41 @@ describe('reader route', () => {
     expect(runsForPageOne()).toBe(1);
   });
 
-  it('drops the oldest derived result once the session is holding too much', async () => {
+  it('drops the derived results the reader is least likely to need once the session is holding too much', async () => {
     // The hold is bounded: the shared image cache only evicts what nobody
     // references, so an unbounded hold would pin every upscaled page in memory.
-    const release = enhancedReader(6, async (index) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 40 * 1024 * 1024 }));
+    // 一页 40MB 时预算 = 「可见页 + 4 页」× 一页的实测体积 = 200MB，正好五页；多出来
+    // 的一律按离当前页最远先丢——远处的页重算一遍便宜，丢近的那几页才是翻页现算。
+    const enhancedIndexes: number[] = [];
+    const release = enhancedReader(12, async (index) => {
+      enhancedIndexes.push(index);
+      return { key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 40 * 1024 * 1024 };
+    });
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    // 预取窗口是 0，所以第 2 页往后的每一页都只有预扫会碰——等它整本做完。
+    await waitFor(() => expect(enhancedIndexes).toContain(11), { timeout: 10_000 });
+
+    const droppedKeys = release.mock.calls.map(([handle]) => handle.key);
+    expect(droppedKeys).toContain('enhanced-11');
+    // 紧挨着正在读的这一页的那几页一页都不能丢。
+    expect(droppedKeys).not.toContain('enhanced-1');
+    expect(droppedKeys).not.toContain('enhanced-2');
 
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
-    fireEvent.keyDown(reader, { key: 'ArrowRight' });
-    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1'));
-    await waitFor(() => expect(release).toHaveBeenCalledWith({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 40 * 1024 * 1024 }));
-    // The page just enhanced is never the one dropped for room.
-    expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1');
+    const releasesBeforeTurning = release.mock.calls.length;
+    for (let index = 1; index <= 5; index += 1) {
+      fireEvent.keyDown(reader, { key: 'ArrowRight' });
+      await screen.findByRole('img', { name: `第 ${index + 1} 页` });
+    }
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 6 页' })).toHaveAttribute('src', 'blob:enhanced-5'));
+    // The page just enhanced is never the one dropped for room: 刚补算出来的正是正在读的
+    // 这一页，腾地方腾的是身后最远的那一页。
+    const droppedWhileReadingPageSix = release.mock.calls.slice(releasesBeforeTurning).map(([handle]) => handle.key);
+    expect(droppedWhileReadingPageSix).toContain('enhanced-0');
+    expect(droppedWhileReadingPageSix).not.toContain('enhanced-5');
   });
 
   it('loads native manifest and page bytes, then persists progress on navigation', async () => {
@@ -385,6 +581,11 @@ describe('reader route', () => {
     // One indicator with an accessible name, not "正在加载页面…" as body text.
     expect(await screen.findByRole('status', { name: '正在加载页面' })).toBeInTheDocument();
     expect(screen.queryByText('正在加载页面…')).not.toBeInTheDocument();
+    // 用户报的 ⑥：加载态原来只是一个转圈，阅读器的顶栏要等第一页到达才唤得出来，
+    // 加载慢或卡住时就没有退路。现在加载态自带和失败态同一条顶栏。
+    const back = await screen.findByRole('button', { name: '返回上一页' });
+    expect(back.closest('header')).not.toBeNull();
+    expect(screen.getByRole('main').firstElementChild).toBe(back.closest('header'));
   });
 
   it('applies the default layout and direction, and lets the archive override them', async () => {

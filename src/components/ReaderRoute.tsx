@@ -39,6 +39,17 @@ interface ReaderContext {
  * upscaled page in memory and push the cache past its own limit. */
 const DERIVED_SESSION_BUDGET_BYTES = 64 * 1024 * 1024;
 
+/** 字节预算之外再兜一个「至少留住几页」的下限，以及它的硬上限。
+ *
+ * `DERIVED_SESSION_BUDGET_BYTES` 是按一页 3–6MB 定的（见 docs/44），但 DLSSNR 三档
+ * 设置下真实成品能到 20MB 以上：用户库里一个 501 页的档案留着 133 页、合计 2.9GB，
+ * 单页 21–27MB。那样 64MB 只装得下两页——预扫是从当前位置往后由近到远灌进来的，可
+ * 「下一页」永远落在预算之外、刚算完就被挤掉，用户翻过去还是要现读一遍，看起来就像
+ * 整本预处理根本没生效。所以预算按「可见页 + 下面这几页」折算：正常体积的档案碰不到
+ * 下限（字节预算先到），单页很大的档案才吃到它；硬上限保证那种档案也不撑爆会话。 */
+const DERIVED_MIN_RESIDENT_PAGES = 4;
+const DERIVED_SESSION_CEILING_BYTES = 256 * 1024 * 1024;
+
 /** 一页派生结果的三档，顺序就是优先级。
  *
  * `visible` 是屏幕上那一页，`neighbour` 是预取窗口里的，`background` 是整本预处理
@@ -179,10 +190,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** Cover, tags and byte size for the overview panel. Fetched once alongside
    * the manifest; the panel is the only consumer. */
   const [info, setInfo] = useState<{ cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined }>();
-  // Readoshi's auto rule: an archive whose pages average at or above the
-  // threshold starts this sitting already upscaled — small covers gain nothing
-  // from upscaling, dense pages do. The size loads with the optional overview
-  // facts, so this runs whenever that lands, and only before a manual choice.
+  // 自动开启超分整条规则（体积那一半 + 标签那一半）都在 `shouldAutoEnableUpscale` 里：
+  // 体积那一半是「平均一页比阈值**小**才值得超分」，本来就大的页不该自己开起来。
+  // 体积从 overview facts 里拿（字节），平均一页 = size / 页数。
   useEffect(() => {
     if (!upscaleConfigured || upscaleChosenRef.current) return;
     if (!preferences.upscaleAutoEnable) { setUpscaleWanted(false); return; }
@@ -269,6 +279,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * map's insertion order *is* the LRU order — a page that gains a new rendition
    * moves to the end. */
   const derivedBytesRef = useRef(0);
+  /** 这一轮会话里见过最大的一页派生结果，用来把「至少留住几页」折算成字节
+   * （见 `DERIVED_MIN_RESIDENT_PAGES`）。只增不减：预算不该在页与页之间来回抖。 */
+  const derivedPeakBytesRef = useRef(0);
   const retainDerived = useCallback((pageIndex: number, handle: ImageHandle) => {
     const held = derivedHandlesRef.current;
     const existing = held.get(pageIndex);
@@ -281,12 +294,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
     held.set(pageIndex, handle);
     derivedBytesRef.current += handle.bytes;
+    derivedPeakBytesRef.current = Math.max(derivedPeakBytesRef.current, handle.bytes);
     const dropped: number[] = [];
-    while (derivedBytesRef.current > DERIVED_SESSION_BUDGET_BYTES && held.size > 1) {
+    const visible = visiblePagesRef.current;
+    const budget = Math.min(
+      DERIVED_SESSION_CEILING_BYTES,
+      Math.max(
+        DERIVED_SESSION_BUDGET_BYTES,
+        derivedPeakBytesRef.current * (visible.size + DERIVED_MIN_RESIDENT_PAGES),
+      ),
+    );
+    while (derivedBytesRef.current > budget && held.size > 1) {
       // 丢「离正在读的那一页最远」的那一页，不是「最早算出来的」那一页：预扫是从
       // 当前页往后由近到远灌进来的，最早进来的正好是马上要翻到的（见
       // `pickDerivedEvictionVictim`）。
-      const visible = visiblePagesRef.current;
       const anchor = visible.size > 0 ? Math.min(...visible) : pageIndex;
       const victim = pickDerivedEvictionVictim([...held.keys()], visible, anchor);
       if (victim === undefined) break;
@@ -343,6 +364,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
     retiredDerivedRef.current.clear();
     derivedBytesRef.current = 0;
+    derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
     derivedTierRef.current.clear();
@@ -469,6 +491,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
     derivedHandlesRef.current.clear();
     derivedBytesRef.current = 0;
+    derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedQueueRef.current = [];
     derivedTierRef.current.clear();
@@ -535,7 +558,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const context = contextRef.current;
         if (!context || !mountedRef.current) break;
         derivedAttemptedRef.current.add(pageIndex);
-        if (!await loadPage(pageIndex) || job.generation !== derivedGenerationRef.current) continue;
+        if (!await loadPage(pageIndex)) {
+          // 源页这一次没读出来（LRR 掉线 / 超时 / 一时取不到）。这一页**没有**做过，
+          // 不能把「尝试过」记在它头上：记上以后整本预扫剩下的部分和用户真的翻到它时
+          // 都会跳过它，于是这一页在这次阅读里永远是原图——「翻页了也不处理」。
+          derivedAttemptedRef.current.delete(pageIndex);
+          continue;
+        }
+        if (job.generation !== derivedGenerationRef.current) continue;
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
         setDerivingStage(job.decensorModel ? 'decensor' : job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
@@ -736,14 +766,25 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         active.controller.abort();
       }
     }
-    // 只重排「看得见的那一档」：后台预处理排好的队不该因为滚了一下就被丢掉。
-    derivedQueueRef.current = derivedQueueRef.current.filter((job) => job.tier === 'background' || wanted.includes(job.pageIndex));
+    // 只重排「看得见的那一档」：后台预处理排好的队不该因为滚了一下就被丢掉——但已经
+    // 排上的活要跟着新的可见页**换档**。翻到一页时如果队列里那一件还挂着上一刻的档位
+    // （预取窗口按 `neighbour` 排进来的），`runDerivedQueue` 就只把它交给 worker 的
+    // background：用户正在看的那一页反而排在刚翻过去的那一页后面按后台跑，看起来就是
+    // 「队列不跟着翻页更新」。升档不是丢活，`neighbour` ↔ `visible` 之间来回换不影响
+    // `derivedAttemptedRef`，也不影响后台游标。
+    const visible = new Set(indexes);
+    derivedQueueRef.current = derivedQueueRef.current
+      .filter((job) => job.tier === 'background' || wanted.includes(job.pageIndex))
+      .map((job) => {
+        if (job.tier === 'background') return job;
+        const tier: DerivedTier = visible.has(job.pageIndex) ? 'visible' : 'neighbour';
+        return tier === job.tier ? job : { ...job, tier };
+      });
     for (const [index, controller] of derivedAbortsRef.current) {
       if (wanted.includes(index)) continue;
       if (derivedTierRef.current.get(index) === 'background') continue;
       controller.abort();
     }
-    const visible = new Set(indexes);
     for (const index of wanted) {
       // `derivedWarmedRef` 故意不参与这里：后台算过、又被内存预算挤掉的页，用户真的
       // 翻到它时必须重新给一次结果——跳过它就等于页面上还是原图。
@@ -910,7 +951,22 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // through here, which unmounts ReaderScreen and is what stops one archive's page
   // index, zoom and per-index page shapes from carrying into the next. React
   // Router reuses this element across param changes, so nothing else would.
-  if (pages.length === 0) return <main className="reader-screen reader-screen-loading"><LoadingIndicator label="正在加载页面" size="lg" /></main>;
+  //
+  // 加载态带的是和失败态同一条顶栏：这一支原来只画一个转圈，而阅读器的 chrome
+  // 要等第一页到达才唤得出来，于是「加载慢/卡住就退不出去」。顶栏的样式沿用
+  // `.reader-error-bar`（同一条 M3 small top app bar，见 `src/styles/reader.css`
+  // 里 `.reader-screen-loading:has(.reader-error-bar)` 那条规则）。
+  if (pages.length === 0) {
+    return (
+      <main className="reader-screen reader-screen-loading">
+        <header className="reader-error-bar">
+          <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
+          <strong>{title}</strong>
+        </header>
+        <LoadingIndicator label="正在加载页面" size="lg" />
+      </main>
+    );
+  }
   return (
     <ReaderScreen
       archiveId={archiveId}

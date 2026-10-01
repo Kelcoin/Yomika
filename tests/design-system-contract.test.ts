@@ -930,17 +930,21 @@ describe('design system contract', () => {
     expect(toolbar).not.toMatch(/color-mix|transparent/);
     expect(toolbar).not.toMatch(/var\(--reader-surface\)/);
 
-    // 三段式网格：中列 `auto`、两侧等宽 `1fr`，页码因此**按网格**落在栏的中间，而不是
-    // 靠「两组恰好一样宽」。`justify-content` 在这一条里一律不许出现——上一轮 ≤900px 的
-    // 那条查询把它压成 `flex-start`，窗口一窄，页码就从中间滑到左边。
+    // 三段式网格：三列都按内容宽（`auto`），整排再 `justify-content: center`——左右两组
+    // 因此**向中间靠拢**，页码仍然按网格落在栏的正中。这一条曾经是
+    // `minmax(0, 1fr) auto minmax(0, 1fr)` 加两侧各自的 `justify-self: start/end`：宽窗口下
+    // 两组被推到栏的两端，离中间那枚页码最远（user report:「底栏左右两侧按钮离中心太远」）。
+    // `justify-content` 在这里必须留成 `center`——上一轮 ≤900px 的那条查询把它压成
+    // `flex-start`，窗口一窄，页码就从中间滑到左边。
     expect(toolbar).toMatch(/display:\s*grid/);
-    expect(toolbar).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\)/);
-    expect(toolbar).not.toMatch(/justify-content/);
+    expect(toolbar).toMatch(/grid-template-columns:\s*auto auto auto/);
+    expect(toolbar).toMatch(/justify-content:\s*center/);
+    // 两侧不再贴边：任何 `justify-self` 都会把那一组推回自己那一列的边上，又变成「离中心远」。
     expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/grid-column:\s*1/);
-    expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/justify-self:\s*start/);
+    expect(ruleBody(reader, '.reader-toolbar-layout')).not.toMatch(/justify-self/);
     expect(ruleBody(reader, '.reader-toolbar-pages')).toMatch(/grid-column:\s*2/);
     expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/grid-column:\s*3/);
-    expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/justify-self:\s*end/);
+    expect(ruleBody(reader, '.reader-toolbar-processing')).not.toMatch(/justify-self/);
 
     // 手机档（≤610px）换成可以换行的 flex：页码整行占满、行内居中，剩下两组跟在后面，
     // 整行同样居中。这是「移动模式下底栏组件没有居中」那条 user report 的钉子。
@@ -1286,6 +1290,33 @@ describe('design system contract', () => {
     expect(layout).toMatch(/ARCHIVE_DAY_DIVIDER_HEIGHT\s*=\s*28/);
     const workspace = read('src/components/LibraryWorkspace.tsx');
     expect(workspace).toMatch(/estimateSize:\s*\(index\)\s*=>\s*ARCHIVE_LIST_ROW_STRIDE/);
+  });
+
+  it('paints the loading skeleton on the list own surface and grid', () => {
+    const shell = read('src/styles/shell.css');
+    const loading = read('src/styles/library-loading.css');
+    // 骨架层顶替的就是 `.archive-list` 里那一列卡片，而那一列的表面色是列表自己的
+    // `--surface-panel`。占位层再铺一层别的底色，第一帧整幅换色、落地时 180ms 淡掉，
+    // 就是「第一次切页闪一下」；那层不透明底色还会盖上列表背景画的时间轴轨线。
+    expect(shell).toMatch(/\.archive-list\s*\{[\s\S]{0,400}?background:\s*var\(--surface-panel\)/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer')).not.toMatch(/background/);
+    // 内边距和行距照抄真列表：4px 内边距（缩略图档位 12px）加行自己的 4px margin-block，
+    // 步距仍旧是 158 + 8，占位卡和落地后的卡片落在同一格上。
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton')).toMatch(/padding:\s*4px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-thumbnail')).toMatch(/padding:\s*var\(--space-3\)/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide')).toMatch(/gap:\s*0/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(/margin-block:\s*4px/);
+    expect(shell).toMatch(/\.archive-row-skeleton\s*\{[^}]*height:\s*158px/);
+    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[^}]*margin-block:\s*4px;[^}]*height:\s*158px/);
+    // 时间轴那一栏是行的第一列：真行是 82px 的网格列，骨架行也让出同样的 82px（而不是
+    // 靠容器的 padding-left），轨线由列表背景画，占位层不再重复画一根。
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline')).toMatch(/padding-left:\s*4px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-row-skeleton')).toMatch(/margin-left:\s*82px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton')).toMatch(/border-right:\s*0/);
+    // 节点和日期跟着真行摆：真节点圆心在列表左边缘 73px、真日期右端在 58px（= 列宽 82px
+    // 减 `.archive-row-timeline` 的 28px 右内边距）处。
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton::before')).toMatch(/right:\s*8px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton .skeleton-line')).toMatch(/right:\s*28px/);
   });
 
   it('paints detail tag groups with a hue per namespace and one chip per tag', () => {

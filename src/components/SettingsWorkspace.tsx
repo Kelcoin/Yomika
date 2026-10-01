@@ -32,7 +32,14 @@ import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } f
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
 import { scopeLabel } from '../domain/syncScope';
-import { DATA_EXPORT_ITEMS, isCredentialItem, dataExportItemLabel } from '../domain/dataExport';
+import {
+  DATA_EXPORT_CREDENTIAL_ITEMS,
+  DEFAULT_DATA_EXPORT_ITEMS,
+  DATA_EXPORT_RECORD_ITEMS,
+  isCredentialItem,
+  dataExportItemLabel,
+  type DataExportReport,
+} from '../domain/dataExport';
 import { DATA_EXPORT_KIND } from '../domain/dataExport';
 
 import type { ServerRecord } from '../domain/library';
@@ -305,8 +312,8 @@ export function SettingsWorkspace() {
   const [preferenceError, setPreferenceError] = useState(false);
   const [migrationText, setMigrationText] = useState('');
   const [migrationPending, setMigrationPending] = useState(false);
-  /** 导出弹层的勾选：默认只带记录与设置；凭据默认不勾，勾上时提醒敏感（docs/30）。 */
-  const [exportItems, setExportItems] = useState<string[]>(['records']);
+  /** 导出弹层的勾选：默认六类记录与设置；凭据默认不勾，勾上时提醒敏感（docs/30）。 */
+  const [exportItems, setExportItems] = useState<string[]>([...DEFAULT_DATA_EXPORT_ITEMS]);
   /** 导入弹层：解析后文件里实际装着的条目（勾选框按它动态生成，默认全选）。 */
   const [importAvailable, setImportAvailable] = useState<string[]>([]);
   const [importItems, setImportItems] = useState<string[]>([]);
@@ -324,6 +331,11 @@ export function SettingsWorkspace() {
   const [compactDrilled, setCompactDrilled] = useState(false);
   const showSectionList = !compact || !compactDrilled;
   const showSectionContent = !compact || compactDrilled;
+  // 一级一级退：手机上的返回手势走的是 webview 历史（`AppPlugin` 把返回键交给
+  // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
+  // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
+  // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
+  useOverlayBackGuard(compact && compactDrilled, () => setCompactDrilled(false));
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
@@ -751,31 +763,38 @@ export function SettingsWorkspace() {
   }
 
   /** 导出：按弹层勾选折一份明文 JSON（docs/30）。勾了凭据时提醒「包含敏感信息」——
-   *  防泄漏的防线是导出前的知情确认，不再是一把口令。 */
-  async function runMigrationExport() {
+   *  防泄漏的防线是导出前的知情确认，不再是一把口令。
+   *
+   *  这里只负责折出那份文本：存文件与复制各自调它一次。从前折文本是「导出数据」
+   *  这颗按钮独占的事，于是没先按过它的时候「导出为文件」是灰的——按了像是没反应。 */
+  async function buildMigrationExport(): Promise<DataExportReport | null> {
     if (exportItems.length === 0) {
       showToast('先勾选要导出的数据', 'error');
-      return;
+      return null;
     }
     setMigrationPending(true);
     const result = await settingsRepository.exportData(exportItems);
     setMigrationPending(false);
     if (!result.ok) {
       showToast(result.error.message, 'error');
-      return;
+      return null;
     }
-    setMigrationText(result.value.text);
-    if (exportItems.some(isCredentialItem)) {
-      showToast('导出文件包含凭据等敏感信息：请妥善保管，切勿分享', 'error');
-    } else {
-      const parts = [
-        result.value.records > 0 ? `记录与设置 ${result.value.records} 项` : '',
-        result.value.servers > 0 ? `服务器 ${result.value.servers}` : '',
-        result.value.ehAccounts > 0 ? `E-H 账户 ${result.value.ehAccounts}` : '',
-        result.value.syncAccounts > 0 ? `同步账户 ${result.value.syncAccounts}` : '',
-      ].filter(Boolean);
-      showToast(parts.length ? `已导出 ${parts.join(' · ')}` : '已导出（没有可带走的条目）', 'success');
+    // 凭据库里读不出来的条目（条目被删过、换台机器后凭据库是空的）后端会如实计数，
+    // 但从前的报告没人看：不出声的话，「已导出」会让人以为文件里什么都齐了。
+    if (result.value.skipped > 0) {
+      showToast(`${result.value.skipped} 条凭据在本机读不出来，没有写进文件`, 'error');
     }
+    return result.value;
+  }
+
+  /** 导出报告的条数摘要：成功提示里带上「带走的是什么」，而不是只说一句成功。 */
+  function exportSummary(report: DataExportReport): string {
+    return [
+      report.records > 0 ? `记录与设置 ${report.records} 项` : '',
+      report.servers > 0 ? `服务器 ${report.servers}` : '',
+      report.ehAccounts > 0 ? `E-H 账户 ${report.ehAccounts}` : '',
+      report.syncAccounts > 0 ? `同步账户 ${report.syncAccounts}` : '',
+    ].filter(Boolean).join(' · ');
   }
 
   /** 导入弹层的勾选：文件里有但没勾的类不会被落地。 */
@@ -799,6 +818,7 @@ export function SettingsWorkspace() {
       result.value.servers > 0 ? `服务器 ${result.value.servers}` : '',
       result.value.ehAccounts > 0 ? `E-H 账户 ${result.value.ehAccounts}` : '',
       result.value.syncAccounts > 0 ? `同步账户 ${result.value.syncAccounts}` : '',
+      result.value.skipped > 0 ? `跳过 ${result.value.skipped} 类（文件里没有内容，或本机读不出凭据）` : '',
     ].filter(Boolean);
     showToast(parts.length ? `已导入：${parts.join(' · ')}` : '勾选的类别在文件里都是空的，没有导入任何数据', parts.length ? 'success' : 'info');
     setMigrationText('');
@@ -811,7 +831,7 @@ export function SettingsWorkspace() {
     invalidateRouteCache();
   }
 
-  /** 导出弹层的勾选：默认只带记录与设置，凭据要使用者自己勾上。 */
+  /** 导出弹层的勾选：默认六类记录与设置，凭据要使用者自己勾上。 */
   function toggleExportItem(id: string) {
     setExportItems((current) => current.includes(id)
       ? current.filter((item) => item !== id)
@@ -821,27 +841,35 @@ export function SettingsWorkspace() {
   /** The export is only useful on another machine, so copying it out is part of
    * the export itself — no manual selection inside the read-only box. */
   async function copyMigrationExport() {
+    const report = await buildMigrationExport();
+    if (!report) return;
     try {
-      await writeClipboardText(migrationText);
+      await writeClipboardText(report.text);
       showToast('导出内容已复制到剪贴板', 'success');
     } catch {
-      showToast('复制失败，请手动选择导出内容复制', 'error');
+      showToast('复制失败，请改用「导出为文件」', 'error');
     }
   }
 
-  /** 导出成文件：读的是框里那一份，所以与「导出数据」看到的是同一份内容。 */
+  /** 导出成文件：折文本 → 选存哪 → 写盘，一次动作走完（不必先按一次别的东西）。 */
   async function saveMigrationToFile() {
-    const text = migrationText.trim();
-    if (!text) return;
+    const report = await buildMigrationExport();
+    if (!report) return;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const path = await pickSavePath(`yomika-export-${stamp}.json`);
     if (!path) return;
-    const result = await saveTextToFile(path, text);
+    const result = await saveTextToFile(path, report.text);
     if (!result.ok) {
       showToast(result.error.message, 'error');
       return;
     }
-    showToast(`已导出到 ${result.value}`, 'success');
+    const summary = exportSummary(report);
+    const where = `已导出到 ${result.value}`;
+    if (exportItems.some(isCredentialItem)) {
+      showToast(`${where}：含 API Key、Cookie 等敏感信息，请妥善保管`, 'error');
+      return;
+    }
+    showToast(summary ? `${where}（${summary}）` : `${where}（没有可带走的条目）`, 'success');
   }
 
   /** 从文件导入：读回来放进框里（让人看见读了什么），再走同一次导入。 */
@@ -1399,12 +1427,23 @@ export function SettingsWorkspace() {
                   label="导出数据"
                   hint="勾选要带走的数据，导出成明文 JSON 文件"
                   value={exportItems.length > 0 ? `${exportItems.length} 类` : '未选择'}
-                  onClose={() => setMigrationText('')}
                 >
                   {/* 勾选在导出弹层里当场做：没有「范围」偏好要提前配置。勾了凭据类，
-                      下面那行提醒与导出完成后的 toast 都会说一次「切勿分享」。 */}
-                  <CheckRowGroup label="要导出的数据">
-                    {DATA_EXPORT_ITEMS.map((item) => (
+                      下面那行提醒与导出完成后的 toast 都会说一次「切勿分享」。
+                      两组分开摆：记录与设置是六类可以逐类挑，凭据是另一件事。 */}
+                  <CheckRowGroup label="阅读记录与应用设置" caption="阅读记录与应用设置">
+                    {DATA_EXPORT_RECORD_ITEMS.map((item) => (
+                      <CheckRow
+                        key={item.id}
+                        label={item.label}
+                        checked={exportItems.includes(item.id)}
+                        ariaLabel={`导出${item.label}`}
+                        onToggle={() => toggleExportItem(item.id)}
+                      />
+                    ))}
+                  </CheckRowGroup>
+                  <CheckRowGroup label="服务器与账户凭据" caption="服务器与账户凭据">
+                    {DATA_EXPORT_CREDENTIAL_ITEMS.map((item) => (
                       <CheckRow
                         key={item.id}
                         label={item.label}
@@ -1417,14 +1456,13 @@ export function SettingsWorkspace() {
                   {exportItems.some(isCredentialItem) && (
                     <p className="form-error" role="alert">勾选的类别包含 API Key、Cookie 等敏感信息：导出文件请妥善保管，切勿分享。</p>
                   )}
+                  {/* 只有两颗按钮，而且都自己把文件折出来：从前那颗「导出数据」只把
+                      文本塞进框里、既看不到也没别的作用，后两颗还要等它先跑一遍。 */}
                   <div className="settings-menu-actions" role="group" aria-label="数据导出操作">
-                    <button className="secondary-action" type="button" disabled={migrationPending || exportItems.length === 0} aria-busy={migrationPending} onClick={() => void runMigrationExport()}>
-                      <FileDown aria-hidden="true" />{migrationPending ? '处理中…' : '导出数据'}
+                    <button className="secondary-action" type="button" disabled={migrationPending || exportItems.length === 0} aria-busy={migrationPending} onClick={() => void saveMigrationToFile()}>
+                      <Download aria-hidden="true" />{migrationPending ? '处理中…' : '导出为文件'}
                     </button>
-                    <button className="secondary-action" type="button" disabled={migrationPending || !migrationText.trim()} onClick={() => void saveMigrationToFile()}>
-                      <Download aria-hidden="true" />导出为文件
-                    </button>
-                    <button className="secondary-action" type="button" disabled={!migrationText.trim()} onClick={() => void copyMigrationExport()}>
+                    <button className="secondary-action" type="button" disabled={migrationPending || exportItems.length === 0} onClick={() => void copyMigrationExport()}>
                       <Copy aria-hidden="true" />复制
                     </button>
                   </div>

@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Eraser, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, Eraser, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -9,8 +9,9 @@ import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domai
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
-import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
+import { useWindowControls, useWindowMaximized } from './WindowControls';
 import { decodeImage } from '../lib/decodeImage';
+import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 
@@ -268,6 +269,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const gestureMovedRef = useRef(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
+  // 缩略面板是阅读器里的一层：返回手势先收掉它，而不是直接把阅读页带走
+  // （返回手势走 webview 历史，见 `lib/overlayBackGuard`）。
+  useOverlayBackGuard(thumbnailPanelOpen, () => setThumbnailPanelOpen(false));
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
   const [hoverChrome, setHoverChrome] = useState<'top' | 'bottom' | null | undefined>();
   /** 同上，但给「每一次鼠标移动都会来的那条回调」用：同一个值写进 state 也是一次
@@ -778,9 +782,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   const handleTouchStart = useCallback((event: TouchEvent) => {
+    // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开（含下面那次
+    // `setHover(undefined)`），指针只属于面板那一层。
+    if (thumbnailPanelOpen) return;
     setHover(undefined);
     if (sliding.current) return;
-    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview')) return;
+    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
     dragSample.current = undefined;
     const touch = event.touches[0];
     if (!touch) return;
@@ -803,7 +810,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       setPanning(true);
     }
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
-  }, []);
+  }, [thumbnailPanelOpen]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
     const pinch = pinchStart.current;
@@ -878,7 +885,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
     if (sliding.current) return;
-    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview')) return;
+    // 面板那一层（蒙版 + 面板体）是自己的，不是画布：落在它上面的按下不开始画布手势。
+    // `.reader-overview` 只匹配面板体，蒙版得自己列出来。
+    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
     dragSample.current = undefined;
     if (event.button !== 0) return;
     gestureMovedRef.current = false;
@@ -891,6 +900,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   const handleMouseMove = useCallback((event: MouseEvent<HTMLElement>) => {
+    // 缩略面板是压在阅读器上的一层。它在的时候指针既不该唤出/切换两条栏，也不该开始
+    // 画布手势：hover 判定只认指针坐标（蒙版挡不住一个 mouseMove），曾经因此能从蒙版
+    // 上把底栏划出来、顺带把亮着的顶栏撤掉。面板自己内部的滚动/点击不受影响。
+    if (thumbnailPanelOpen) return;
     if (!event.buttons) {
       const rect = rootBox();
       const height = rect.height;
@@ -904,7 +917,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const start = pointerStartRef.current;
     if (!start || event.buttons !== 1) return;
     trackDrag(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
-  }, [setHover, trackDrag]);
+  }, [setHover, trackDrag, thumbnailPanelOpen]);
 
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
     if (panStart.current) {
@@ -985,6 +998,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // The reader route has no app title bar, so on Windows it carries its own
   // window maximize control, top-right — rendered only inside the chrome
   // header, so an unobstructed read never shows window chrome over the page.
+  // 方框走 lucide 的 `Square`/`Copy`（墨色 18/24 与 20/24），和这一排的
+  // LayoutGrid/Settings 同一档。外壳标题栏那套 `WindowGlyph` 的方框画在 12/24，
+  // 放进阅读器顶栏只有邻居的一半大——「顶栏的最大化按钮尺寸太小」说的就是它
+  // （caption 那一排自己的尺寸不动：改了共享字形，那边一分一厘都跟着失衡）。
   const windowApi = useWindowControls();
   const windowMaximized = useWindowMaximized(windowApi);
   const renderWindowMaximize = () => windowApi ? (
@@ -994,7 +1011,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       aria-label={windowMaximized ? '还原窗口' : '最大化窗口'}
       title={windowMaximized ? '还原窗口' : '最大化窗口'}
       onClick={(event) => { event.stopPropagation(); void windowApi.toggleMaximize().catch(() => {}); }}
-    ><WindowGlyph kind={windowMaximized ? 'restore' : 'maximize'} /></button>
+    >{windowMaximized ? <Copy aria-hidden="true" /> : <Square aria-hidden="true" />}</button>
   ) : null;
   /** The bottom bar is three slots: how the pages are arranged, where the reader
    * is, and what is done to the page. 自动翻页 belongs with neither side of that
@@ -1158,6 +1175,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (dragPagedRef.current) { dragPagedRef.current = false; return; }
         if (gestureMovedRef.current) { gestureMovedRef.current = false; return; }
         if (event.detail > 1) return;
+        // 缩略面板开着时，关它是面板外面那一层的事：这一次点击只关面板，不顺手把
+        // chrome 翻一遍（否则点一次空白会同时收起面板和两条栏）。
+        if (thumbnailPanelOpen) return;
         // Showing is restricted to the top and bottom bands, so a tap in the
         // middle of a page cannot flash the bars over what is being read. Hiding
         // is not: the bars swallow their own clicks, so if only the bands
@@ -1168,7 +1188,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
         onPointerDown={(event) => {
-          if (event.pointerType === 'mouse' && event.button === 0 && !(event.target as Element).closest('button, a, input')) event.currentTarget.setPointerCapture?.(event.pointerId);
+          // 捕获画布上的按下是为了拖拽翻页。可是一旦抓住，Chromium 会把随后的 click
+          // 改派给被捕获的 <main>——蒙版自己的 onClick 就永远收不到，面板的「点空白
+          // 关闭」因此失效。面板那一层不参与画布手势，也就不该被捕获；输入框同理。
+          if (event.pointerType === 'mouse' && event.button === 0 && !(event.target as Element).closest('button, a, input, .reader-overview, .reader-overview-backdrop')) event.currentTarget.setPointerCapture?.(event.pointerId);
         }}
         onPointerCancel={cancelGesture}
         onPointerUp={(event) => { if (event.pointerType === 'mouse') handleMouseUp(event); }}
@@ -1322,8 +1345,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       </div>
       {thumbnailPanelOpen && (
         /* Centred overlay rather than a side drawer: it doubles as the archive
-           overview (cover, size, tags) plus the page grid. */
-        <div className="reader-overview-backdrop" onClick={() => setThumbnailPanelOpen(false)}>
+           overview (cover, size, tags) plus the page grid. Clicking the blank
+           around the panel closes it, and that click has to stop here — main's
+           own onClick would otherwise toggle the chrome behind the panel in the
+           same dispatch. */
+        <div
+          className="reader-overview-backdrop"
+          onClick={(event) => { event.stopPropagation(); setThumbnailPanelOpen(false); }}
+        >
           <ArchiveOverviewPanel
             title={title}
             pageCount={pages.length}

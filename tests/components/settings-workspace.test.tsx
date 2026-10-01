@@ -11,6 +11,14 @@ import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsReposi
 import { COLOR_SCHEMES } from '../../src/lib/cssThemePresets';
 import { readoshiServerScope } from '../../src/lib/readoshiScope';
 import { emitTauriEvent } from '../tauriEvents';
+import { resetOverlayBackGuardForTests } from '../../src/lib/overlayBackGuard';
+
+/** 空转两拍：浮层自己关掉时会调 `history.back()` 吃掉自己的守卫，jsdom 为它发的
+ * `popstate` 是异步的——抢在它前面发用户那一下，两次返回会撞在一起。 */
+async function settle() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -1112,8 +1120,8 @@ describe('settings workspace', () => {
         return {
           ok: true,
           value: {
-            text: '{"kind":"yomika-export","schemaVersion":1,"items":["records"],"records":{"kind":"yomika-scope-export"}}',
-            items: ['records'],
+            text: '{"kind":"yomika-export","schemaVersion":1,"items":["progress","history"],"records":{"kind":"yomika-scope-export"}}',
+            items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
             records: 3,
             servers: 0,
             ehAccounts: 0,
@@ -1123,19 +1131,24 @@ describe('settings workspace', () => {
           },
         };
       }
+      if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
+    setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
     renderSettings('sync');
 
     await user.click(await screen.findByRole('link', { name: /同步/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
-    await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
+    // 六类记录与设置默认全勾；凭据默认不勾。这一颗按钮自己就折文本、选路径、写盘——
+    // 不需要先按一次别的按钮（这就是「点了像没反应」的修法）。
+    await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
 
-    // 默认勾选只有记录与设置：凭据默认不勾，勾上时界面会提醒敏感。
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records'] }));
-    expect(await screen.findByText('已导出 记录与设置 3 项')).toBeInTheDocument();
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
+      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+    }));
+    expect(await screen.findByText('已导出到 C:/tmp/yomika-export.json（记录与设置 3 项）')).toBeInTheDocument();
   });
 
   it('writes the export to a file the user picks', async () => {
@@ -1158,11 +1171,10 @@ describe('settings workspace', () => {
     await user.click(await screen.findByRole('link', { name: /同步/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const menu = screen.getByRole('dialog', { name: '导出数据' });
-    await user.click(within(menu).getByRole('button', { name: '导出数据' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', expect.anything()));
 
     await user.click(within(menu).getByRole('button', { name: '导出为文件' }));
-    // 写下去的就是框里那一份（与导出、复制同一份文本）。
+    // 写下去的就是那一次导出折出来的文本。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', expect.anything()));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_text_file', {
       path: 'C:/tmp/yomika-export.json',
       contents: SCOPED_EXPORT_TEXT,
@@ -1233,28 +1245,35 @@ describe('settings workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'export_data') {
-        return { ok: true, value: { text: DATA_EXPORT_TEXT, items: ['records', 'eh_account'], records: 2, servers: 0, ehAccounts: 1, syncAccounts: 0, skipped: 0 } };
+        return { ok: true, value: { text: DATA_EXPORT_TEXT, items: args?.items as string[], records: 2, servers: 0, ehAccounts: 1, syncAccounts: 0, skipped: 0 } };
       }
+      if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
+    setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
     renderSettings('sync');
 
     await user.click(await screen.findByRole('link', { name: /同步/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
 
-    // 默认只有记录与设置：导出不带敏感信息，也没有提醒。
-    await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records'] }));
+    // 默认六类记录与设置，不含凭据：面板不提醒，导出完成的 toast 是普通成功。
+    await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
+      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+    }));
     expect(within(exportMenu).queryByText(/切勿分享/)).toBeNull();
+    expect(await screen.findByText('已导出到 C:/tmp/yomika-export.json（记录与设置 2 项 · E-H 账户 1）')).toBeInTheDocument();
 
     // 勾上 E-H 账户：面板立刻提醒包含敏感信息，导出完成后再用 toast 说一次。
     await user.click(within(exportMenu).getByRole('checkbox', { name: '导出E-Hentai 账户' }));
     expect(within(exportMenu).getByText(/切勿分享/)).toBeInTheDocument();
-    await user.click(within(exportMenu).getByRole('button', { name: '导出数据' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', { items: ['records', 'eh_account'] }));
-    expect(await screen.findByText(/包含凭据等敏感信息：请妥善保管，切勿分享/)).toBeInTheDocument();
+    await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
+      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings', 'eh_account'],
+    }));
+    expect(await screen.findByText(/含 API Key、Cookie 等敏感信息，请妥善保管/)).toBeInTheDocument();
   });
 
   it('imports a data file through dynamically generated checkboxes', async () => {
@@ -1265,7 +1284,7 @@ describe('settings workspace', () => {
       if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'import_data') {
         // 服务器在弹层里被取消勾选了：即使文件里有，也不会落地（报数为 0）。
-        return { ok: true, value: { records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0 } };
+        return { ok: true, value: { records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0, skipped: 0 } };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -1540,8 +1559,20 @@ describe('settings workspace', () => {
       await user.click(screen.getByRole('button', { name: '返回设置分类' }));
       expect(await screen.findByRole('button', { name: /关于/ })).toBeInTheDocument();
       expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
+
+      // 系统返回手势（Tauri 把返回键/滑动交给 webview 的 goBack）走的是同一层：
+      // 先退回分类列表，而不是把整个设置页带回上一页。守卫条目是 pushState 压的，
+      // 设备上按返回，最后到达页面的就是它——这里直接发那一下。
+      resetOverlayBackGuardForTests();
+      await user.click(screen.getByRole('button', { name: /通用/ }));
+      expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
+      await settle();
+      act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+      expect(await screen.findByRole('button', { name: /关于/ })).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
     } finally {
       window.matchMedia = original;
+      resetOverlayBackGuardForTests();
     }
   });
 

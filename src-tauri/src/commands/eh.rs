@@ -14,10 +14,7 @@ trait EhCookieReader {
 struct SystemEhCookieReader;
 impl EhCookieReader for SystemEhCookieReader {
     fn get_cookie(&self, reference: &str) -> Result<String, String> {
-        keyring::Entry::new(COOKIE_SERVICE, reference)
-            .map_err(|e| e.to_string())?
-            .get_password()
-            .map_err(|e| e.to_string())
+        crate::secret_store::get_secret(COOKIE_SERVICE, reference)
     }
 }
 
@@ -135,16 +132,10 @@ pub trait EhCookieStore {
 pub(crate) struct SystemEhCookieStore;
 impl EhCookieStore for SystemEhCookieStore {
     fn set_cookie(&self, reference: &str, cookie: &str) -> Result<(), String> {
-        keyring::Entry::new(COOKIE_SERVICE, reference)
-            .map_err(|e| e.to_string())?
-            .set_password(cookie)
-            .map_err(|e| e.to_string())
+        crate::secret_store::set_secret(COOKIE_SERVICE, reference, cookie)
     }
     fn delete_cookie(&self, reference: &str) -> Result<(), String> {
-        keyring::Entry::new(COOKIE_SERVICE, reference)
-            .map_err(|e| e.to_string())?
-            .delete_credential()
-            .map_err(|e| e.to_string())
+        crate::secret_store::delete_secret(COOKIE_SERVICE, reference)
     }
 }
 
@@ -152,10 +143,7 @@ impl SystemEhCookieStore {
     /// 读一条已存的 Cookie：导出凭据时要把它搬走。`EhCookieStore` 这个 trait 只有
     /// 写与删（运行时路径只需要那两件事），所以这里按需补一个只读入口。
     pub(crate) fn get_cookie(&self, reference: &str) -> Result<String, String> {
-        keyring::Entry::new(COOKIE_SERVICE, reference)
-            .map_err(|error| error.to_string())?
-            .get_password()
-            .map_err(|error| error.to_string())
+        crate::secret_store::get_secret(COOKIE_SERVICE, reference)
     }
 }
 

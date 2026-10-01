@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { writeRouteCache } from '../../src/lib/routeCache';
+import { invalidateRouteCache, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -402,11 +402,13 @@ describe('library route workspace', () => {
 
     renderLibrary();
 
-    expect(await within(screen.getByRole('main')).findByRole('alert')).toHaveTextContent('数据库读取失败');
+    // 原始报错走 toast（portal 到 body，不在 main 里），页面上只剩一句人话与重试。
+    expect(await screen.findByText('数据库读取失败')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '档案库没有读出来' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '暂无档案库' })).not.toBeInTheDocument();
   });
 
-  it('renders archive load failures in a dedicated alert region', async () => {
+  it('reports an archive load failure as a toast instead of a page-wide alert bar', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'LRR 不可用', retryable: true } };
@@ -414,9 +416,9 @@ describe('library route workspace', () => {
 
     renderLibrary();
 
-    const alert = await within(screen.getByRole('main')).findByRole('alert');
-    expect(alert).toHaveClass('workspace-alert');
-    expect(alert).toHaveTextContent('LRR 不可用');
+    // 精确匹配只会命中错误 toast，不会命中「读取分类失败：LRR 不可用」那条。
+    expect(await screen.findByText('LRR 不可用')).toBeInTheDocument();
+    expect(document.querySelector('.workspace-alert')).toBeNull();
   });
 
   it('turns missing server credentials into an actionable settings link', async () => {
@@ -427,7 +429,8 @@ describe('library route workspace', () => {
 
     renderLibrary();
 
-    expect(await within(screen.getByRole('main')).findByText('服务器凭据不可用，请在设置中重新保存 API Key。')).toBeInTheDocument();
+    expect(await screen.findByText('服务器凭据不可用，请在设置中重新保存 API Key。')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '档案库没有读出来' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '打开设置重新保存 API Key' })).toHaveAttribute('href', '/settings');
   });
 
@@ -452,6 +455,64 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('button', { name: /^Recovered\b/ })).toBeInTheDocument();
     expect(attempts).toBe(2);
+  });
+
+  it('keeps a failed entry refresh on the page instead of leaving skeletons behind', async () => {
+    const user = userEvent.setup();
+    let pageRequests = 0;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        pageRequests += 1;
+        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'LRR 不可用', retryable: true } };
+      }
+      if (command === 'list_archives_page') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '本机索引也读不到', retryable: true } };
+      return { ok: true, value: [] };
+    });
+    renderLibrary();
+
+    expect(await screen.findByRole('heading', { name: '档案库没有读出来' })).toBeInTheDocument();
+
+    // 离开再回来走的是入场刷新（background）。它失败时曾经连错误页一起抹掉，只留一条
+    // 几秒后消失的 toast——屏幕上没有列表可留，于是骨架一直转（用户图①）。
+    const sidebar = within(screen.getByRole('navigation', { name: '主导航' }));
+    await user.click(sidebar.getByRole('link', { name: '本地档案' }));
+    await screen.findByRole('heading', { name: '本地档案' });
+    await user.click(sidebar.getByRole('link', { name: '档案库' }));
+
+    await waitFor(() => expect(pageRequests).toBe(2));
+    expect(screen.getByRole('heading', { name: '档案库没有读出来' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重试读取档案库' })).toBeInTheDocument();
+  });
+
+  it('keeps the list on screen when an automatic refresh re-reads the same query', async () => {
+    let pageRequests = 0;
+    let resolvePage!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        pageRequests += 1;
+        if (pageRequests === 1) return servedPage([{ serverId: 'scope-a', archiveId: 'kept', title: 'Kept Archive', pageCount: 3, updatedAt: '2026-08-26T00:00:00Z' }]);
+        return new Promise((resolve) => { resolvePage = resolve; });
+      }
+      return { ok: true, value: [] };
+    });
+    renderLibrary();
+
+    expect(await screen.findByRole('button', { name: /^Kept Archive\b/ })).toBeInTheDocument();
+
+    // 自动同步收尾、整库失效广播都会带着同一套查询条件重读首页。用户要的是「保持缓存
+    // 显示，有更新再进行变化」：清屏会闪一次骨架，把正在看的整页档案拿走。
+    await act(async () => { invalidateRouteCache(); });
+    await waitFor(() => expect(pageRequests).toBe(2));
+
+    expect(screen.getByRole('button', { name: /^Kept Archive\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+
+    await act(async () => resolvePage(servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Fresh Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' }])));
+    expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
   });
 
   it('loads archive metadata when an archive is selected', async () => {

@@ -304,11 +304,17 @@ mod tests {
         // 系统安全存储（Windows 凭据管理器 / keyring）是一次阻塞的系统调用，偶尔会
         // 明显更慢。它不属于上面任何一类，但同理：等在 UI 线程上就是窗口卡一下。
         // `.spawn()` 那条不覆盖它，所以单独钉。
+        //
+        // 现在凭据统一从 `secret_store` 进出（移动端换成了数据目录里 `secrets.json`
+        // 的整份读改写，那也是一次实实在在的文件系统调用），所以那个模块名一并算进来：
+        // 命令直接写 `secret_store::get_secret(...)` 而绕过下面两个 store 结构体时，
+        // 只认旧名字就会漏判。
         let offenders: Vec<String> = all_sync_commands()
             .into_iter()
             .filter(|(_, command)| {
                 command.body.contains("SystemCredentialStore")
                     || command.body.contains("SystemWebdavCredentialStore")
+                    || command.body.contains("secret_store::")
                     || command.body.contains("keyring::Entry")
             })
             .map(|(file, command)| format!("{}:{} {}", file, command.line, command.name))
