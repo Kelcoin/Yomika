@@ -8,10 +8,3 @@ const MIME_SIGNATURES: Array<{ mime: string; matches: (bytes: Uint8Array) => boo
 export function detectImageMime(bytes: Uint8Array): string {
   return MIME_SIGNATURES.find(({ matches }) => matches(bytes))?.mime ?? 'image/jpeg';
 }
-
-export function bytesToImageDataUrl(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return `data:${detectImageMime(bytes)};base64,${btoa(binary)}`;
-}
