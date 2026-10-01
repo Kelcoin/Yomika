@@ -20,6 +20,9 @@ mod diagnostics;
 mod domain;
 mod error_log;
 mod inference;
+// 只为了让「离开阅读器」这件事能把已释放的页真的还给系统：Rust 释放了，Windows
+// 还不一定收。见该模块顶部。
+mod memory;
 mod model_release;
 #[cfg(target_os = "android")]
 mod mobile_host;
@@ -508,6 +511,7 @@ pub fn run() {
             error_log_read,
             error_log_clear,
             error_log_export,
+            memory::trim_process_memory,
             app_build_info,
             tray_menu::tray_menu_state,
             tray_menu::tray_menu_choose,

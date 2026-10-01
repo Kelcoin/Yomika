@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ReaderScreen } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
@@ -20,6 +21,21 @@ import { shouldAutoEnableUpscale } from '../lib/autoUpscale';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
+
+/** 让 Rust 把「已经释放、但 Windows 还挂在进程工作集里」的那些页交还给系统。
+ *
+ * 增强一页的中转缓冲是几百 MB 级的（25MP 的放大输出就是 256MB），Rust 释放之后内核
+ * 不一定马上从工作集里收回去，实测退出阅读器之后仍有 4GB 落不下来。所以只在
+ * **用户离开这一本**的那一刻调（阅读器转后台、或它被卸载），缺页的代价落在没人看的
+ * 时候。
+ *
+ * 绝不能每页都调：decensor 的 ONNX bundle（约 240MB）和 `nvngx_dlssnr.dll`（约
+ * 165MB）是常驻的，工作集一被清空它们也跟着走，下一页第一张图就要重新从磁盘读回
+ * 这几百 MB——省的是任务管理器里的数字，赔的是翻页卡顿。 */
+function trimProcessMemory(): void {
+  // 失败也不做事：`invokeCommand` 自己记错误日志并返回 Result，这里没有可补救的。
+  void invokeCommand('trim_process_memory', {}, VoidResponseSchema);
+}
 
 interface ReaderContext {
   generation: number;
@@ -476,12 +492,18 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     });
   }, []);
 
-  const releaseDerived = useCallback(() => {
+  /** 把这一本已经算好的派生渲染全部还回去。
+   *
+   * 默认把**正在显示的那几页**的旧句柄退到 `retiredDerivedRef` 而不是直接放掉：
+   * 设置换了、新的一轮还没算出来，屏幕上不该先白一下（旧 URL 还能继续显示）。
+   * `dropVisible` 用在没有屏幕可闪的场合——阅读器已经被切到后台了，留着这一页
+   * 21–27 MB 的派生结果没有任何人能看见（501 页的实测案例就这样攒到 2.9 GB）。 */
+  const releaseDerived = useCallback((options?: { dropVisible?: boolean }) => {
     derivedGenerationRef.current += 1;
     for (const controller of derivedAbortsRef.current.values()) controller.abort();
     derivedAbortsRef.current.clear();
     for (const [pageIndex, handle] of derivedHandlesRef.current) {
-      if (visiblePagesRef.current.has(pageIndex)) {
+      if (!options?.dropVisible && visiblePagesRef.current.has(pageIndex)) {
         const retired = retiredDerivedRef.current.get(pageIndex) ?? [];
         retired.push(handle);
         retiredDerivedRef.current.set(pageIndex, retired);
@@ -490,6 +512,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
     }
     derivedHandlesRef.current.clear();
+    if (options?.dropVisible) {
+      for (const retired of retiredDerivedRef.current.values()) {
+        for (const handle of retired) imageCache.release(handle);
+      }
+      retiredDerivedRef.current.clear();
+      // 隐藏着的阅读器一页都看不见，重新显示时 ReaderScreen 会再把可见页报上来。
+      visiblePagesRef.current = new Set();
+    }
     derivedBytesRef.current = 0;
     derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
@@ -725,6 +755,21 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
+  // 用户离开这一本（切到别的档案或别的页面）时，把它的派生渲染当场放掉：这时它
+  // 一页都不显示，留着只占内存——实测一页 21–27 MB，501 页那份档案攒到 2.9 GB，
+  // 而它正是「阅读档案时 8G、退出后仍回不去 4G」里回不去的那部分。
+  // 重新激活时 ReaderScreen 会把可见页重新报给 `requestDerived`，按需再算（尝试
+  // 记录已经被上面的 release 清空，所以不会误以为「这一页做过了」而跳过）。
+  // 普通页图与缩略图**不放**：它们是压缩后的字节（共享缓存本身有 96 MiB 上限），
+  // 而且 ReaderScreen 的取页逻辑在隐藏期间直接 return，回来时不会重取，放掉就是
+  // 一整屏白图。
+  useEffect(() => {
+    if (pageActive) return;
+    releaseDerived({ dropVisible: true });
+    // 页都放掉了，顺手把工作集也还给系统（见 `trimProcessMemory`）。
+    trimProcessMemory();
+  }, [pageActive, releaseDerived]);
+
   /** Called by the reader with the pages actually on screen.
    *
    * 这个函数只负责「屏幕上这几页 + 预取窗口」——它说的就是可见范围，改不得。整本
@@ -920,6 +965,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       controller.abort();
       if (contextRef.current?.generation === generation) contextRef.current = undefined;
       releaseAllPages();
+      // 阅读器真的卸载了（离开工作区、或它被保留上限挤掉）：连普通页与缩略图都
+      // 一起放掉之后，这里才值得清一次工作集。
+      trimProcessMemory();
     };
   }, [archiveId, loadPage, prefetchDistance, preferences.defaultDirection, preferences.defaultLayout, releaseAllPages, requestedPage, serverParam, retryToken]);
 

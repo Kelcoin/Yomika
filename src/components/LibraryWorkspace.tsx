@@ -219,6 +219,10 @@ interface LibraryWorkspaceProps {
    * finished records. Supplied only where "finished" is meaningful; the button
    * toggles exactly these, the way 全选当前 toggles the whole list. */
   finishedArchiveIds?: ReadonlySet<string> | undefined;
+  /** 后台刷新这一轮才第一次出现的档案 id：它们的行播一段入场动画。放在这里而不是
+   *  让列表自己比上一轮，是因为「哪一批是新来的」只有发起请求的那一层知道——列表
+   *  拿到的永远是一个全新的数组。 */
+  freshArchiveIds?: ReadonlySet<string> | undefined;
   /** Opens the card context menu at the pointer; cards are the only elements
    * that answer a right click. */
   onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined;
@@ -247,7 +251,7 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -1034,7 +1038,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     >
                       {(gridRows[virtualRow.index] ?? []).map((archive) => (
                         <div
-                          className={`archive-row-wrap ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
+                          className={`archive-row-wrap${wideCoverIds.has(archive.archiveId) ? ' is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
                           key={archive.archiveId}
                           role="listitem"
                         >
@@ -1051,7 +1055,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   if (!archive) return null;
                   return (
                     <div
-                      className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}`}
+                      className={`archive-row-wrap ${displayMode === 'wide' ? 'is-wide' : ''} ${wideCoverIds.has(archive.archiveId) ? 'is-cover-wide' : ''}${freshArchiveIds?.has(archive.archiveId) ? ' is-fresh' : ''}`}
                       key={archive.archiveId}
                       role="listitem"
                       // Every row is its own card; the wrap only carries the 8px

@@ -1247,7 +1247,19 @@ body::-webkit-scrollbar,
      行高 50.4px 而按钮 42.7px，多出来的 7.8px 全在这一行文字下面）。槽自己的
      `padding-block` 在打开时才给间距，所以这里不要任何行间距。 */
   row-gap: 0;
-  border-radius: var(--radius-control);
+  /* 圆角跟着外壳走：这一层画的是填充/高亮块，外壳是 28px 面板 + 16px 内边距，
+     内层同心值是 28 − 16 = 12（`--radius-card`）。套 `--radius-control`(8px) 时
+     高亮块四角与面板四角不同心，看着就是用户报的「内外圆角不统一」。 */
+  border-radius: var(--radius-card);
+}
+
+/* 行尾有下载/更新按钮时，左边补出同样宽度的一段留白，文字才回到这一行的中心。
+   按钮宽 40px + `margin-right: 2px`，再加行内 `gap: var(--space-2)` = 50px：
+   缺这段镜像留白时 `main` 比行窄 50px，文字中心比行中心偏左 25px（实测 25.0px，
+   与行宽无关）。更难看的是同一菜单里会跳——已装的模型不再渲染按钮，于是这一列里
+   有的行居中、有的偏左。`:has()` 只给真的有按钮的行补，没按钮的行本来就居中。 */
+.settings-choice-option:has(> .select-option-download) {
+  padding-left: calc(40px + 2px + var(--space-2));
 }
 
 /* 下载进度独占一行，挂在它自己那一项下面：这一层就是点「下载」的地方，进度必须
@@ -2700,6 +2712,21 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
+/* 后台刷新带回来的新档案：行淡入并轻轻上浮一段，不再凭空出现。
+   动的是行的子元素，不是 `.archive-row-wrap` 本身——虚拟化把
+   `transform: translateY(...)` 内联写在这一层上，加在这一层的动画会被它覆盖
+   （合同测试也钉着这一层不许挂 `data-first` 之类的钩子）。只动 opacity / transform，
+   不碰内边距与高度，虚拟化的测量结果不受影响；动画结束不回填，卡片的悬停位移照旧。
+   时长必须走令牌：`animation` 简写里不允许出现裸数字。 */
+@keyframes archive-row-fresh-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+.archive-row-wrap.is-fresh > .archive-row,
+.archive-row-wrap.is-fresh > .archive-thumb-card {
+  animation: archive-row-fresh-in var(--motion-standard) backwards;
+}
+
 /* Multi-select. The card itself is the checkbox — role, state and the tick all
    live on it — so the mark only has to say which state it is in. The outer
    shadow keeps the disc readable on bright cover art; the ring does the state
@@ -3910,13 +3937,32 @@ body::-webkit-scrollbar,
    自己的东西。前缘的圆头只留给「还在读」的那一段（它到不了边缘，圆角就不会和
    边缘打架），画满时由 .is-complete 收成直角。 */
 .archive-card-progress { position: absolute; inset: -5px 0 auto; display: block; height: 5px; overflow: hidden; background: var(--surface-container-highest); box-shadow: var(--shadow-progress); pointer-events: none; }
-.archive-card-progress-fill { display: block; height: 100%; border-radius: 0 var(--radius-pill) var(--radius-pill) 0; background: var(--primary); transition: width var(--motion-medium); }
+.archive-card-progress-fill { display: block; height: 100%; border-radius: 0 var(--radius-pill) var(--radius-pill) 0; background: var(--primary); transition: width var(--motion-standard); }
 .archive-card-progress.is-complete .archive-card-progress-fill { border-radius: 0; }
 .archive-row-copy { position: relative; }
 /* 宽行列表：进度条贴卡片自己的底边（--radius-card = 12px），靠卡片的
    overflow: hidden + border-radius 把横条两端削成与卡片下缘一致的圆角。
-   放进 .archive-row-copy 时只到文案栏底边、两端是直角，右侧还差一个内边距。 */
-.archive-list.is-wide .archive-row > .archive-card-progress { inset: auto 0 0; display: block; height: 4px; }
+   放进 .archive-row-copy 时只到文案栏底边、两端是直角，右侧还差一个内边距。
+
+   两个细节（都是用户报的问题）：
+   ① 底边留 1px：卡片的高亮就是它自己的 `outline`（outline-offset: -1px，所以画在
+      y ∈ [H-1,H]）。进度条原来 `inset: auto 0 0`，而且卡片 `border: 0` 让它没有任何
+      内缩、绝对定位又贴满整宽，于是它作为定位后代叠在元素自身的 outline 之上，把底部
+      描边和两个下角弧线整个盖掉——「有进度条的卡片底部高亮看不见」。抬高 1px 后描边
+      完整露出，`--shadow-progress` 也不会再被卡片的 overflow: hidden 裁掉。
+   ② 长度排除卡片左右圆角：轨道用 border-box 两端各内缩一个卡片半径，内容盒因此是
+      W − 24，填充的 `width: N%` 从 x = 12 起算。原来从 x = 0 起算，1% 在 862px 的行上
+      约 8.6px，全落在 12px 的圆角弧内，被卡片裁成一条上宽（≈5.5px）下窄（0.6px）的
+      楔形，最底那 0.5px 完全没有红，右侧圆头也缩成 2px——用户说的「1% 时看不出进度」。 */
+.archive-list.is-wide .archive-row > .archive-card-progress {
+  inset: auto 0 1px;
+  display: block;
+  height: 4px;
+  box-sizing: border-box;
+  padding-inline: var(--radius-card);
+}
+/* 画满时不内缩：两端仍铺到卡片边缘，由卡片圆角自己裁切。 */
+.archive-list.is-wide .archive-row > .archive-card-progress.is-complete { padding-inline: 0; }
 .settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: vertical; font: inherit; }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -4840,7 +4886,9 @@ body::-webkit-scrollbar,
   margin: 0;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--outline-variant);
-  border-radius: var(--radius-control);
+  /* 同心圆角：面板 28px 外壳 − 16px 内边距 = 12px（见 tokens.css 的形状尺度
+     注释）。这一层画了 `--control-background` 填充，是会被看出来的一员。 */
+  border-radius: var(--radius-card);
   background: var(--control-background);
   color: var(--on-surface-variant);
   font-family: var(--font-body);
@@ -4859,7 +4907,9 @@ body::-webkit-scrollbar,
   gap: 0 var(--space-3);
   min-height: 56px;
   padding: var(--space-2);
-  border-radius: var(--radius-control);
+  /* 同心圆角，和同面板的其它行一致；这个规则本身透明，但用户设备行会画出悬停
+     填充，所以半径仍按面板算（28 − 16 = 12）。 */
+  border-radius: var(--radius-card);
 }
 
 .settings-menu-account-glyph {
@@ -4920,7 +4970,9 @@ body::-webkit-scrollbar,
   min-height: 48px;
   padding: 0 var(--space-3);
   border: 0;
-  border-radius: var(--radius-control);
+  /* 同心圆角：悬停时这一层会填 `--control-background`，得和外层 28px 面板同心
+     （28 − 16 = 12）。 */
+  border-radius: var(--radius-card);
   background: transparent;
   color: var(--on-surface);
   font-size: var(--text-md);
@@ -4948,7 +5000,8 @@ body::-webkit-scrollbar,
 .settings-menu-mode-button {
   min-height: 40px;
   border: 1px solid var(--outline-variant);
-  border-radius: var(--radius-control);
+  /* 同心圆角（28px 面板 − 16px 内边距 = 12）：激活态会填 `--secondary-container`。 */
+  border-radius: var(--radius-card);
   background: transparent;
   color: var(--on-surface-variant);
   font-size: var(--text-sm);
@@ -4976,7 +5029,8 @@ body::-webkit-scrollbar,
   min-height: 76px;
   padding: var(--space-2) var(--space-1);
   border: 1px solid var(--outline-variant);
-  border-radius: var(--radius-control);
+  /* 同心圆角：激活态会画边框 + 内阴影，属同一面板家族。 */
+  border-radius: var(--radius-card);
   background: transparent;
   color: var(--on-surface);
   font-size: var(--text-xs);
@@ -5019,7 +5073,9 @@ body::-webkit-scrollbar,
   min-height: 40px;
   padding: 0 var(--space-3);
   overflow: hidden;
-  border-radius: var(--radius-control);
+  /* 同心圆角：这个搜索面板也是 28px 外壳 + 16px 内边距，悬停高亮要和外壳同心
+     （28 − 16 = 12）。 */
+  border-radius: var(--radius-card);
   color: var(--on-surface);
   font-size: var(--text-sm);
   text-align: left;

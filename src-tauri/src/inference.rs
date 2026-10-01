@@ -572,21 +572,37 @@ pub const ENHANCED_OUTPUT_SCALE: u32 = 2;
 
 /// Resamples a model's output down to `ENHANCED_OUTPUT_SCALE` times the source.
 /// Anything already at or below that is returned untouched.
+///
+/// Takes the buffer **by value** on purpose. Used to take `&[u8]` and build the
+/// image with `rgba.to_vec()`, which duplicated the whole upscaled page — a 25 MP
+/// model output is 256 MB — for the duration of the resample, with the original
+/// still alive. The `Vec` is moved into the image instead; nothing else in the
+/// enhancement path needs the model's output afterwards.
 pub fn fit_enhanced_output(
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     source_width: u32,
     source_height: u32,
-) -> (std::borrow::Cow<'_, [u8]>, u32, u32) {
+) -> (Vec<u8>, u32, u32) {
     let target_width = source_width.saturating_mul(ENHANCED_OUTPUT_SCALE);
     let target_height = source_height.saturating_mul(ENHANCED_OUTPUT_SCALE);
     if width <= target_width || height <= target_height || target_width == 0 || target_height == 0 {
-        return (std::borrow::Cow::Borrowed(rgba), width, height);
+        return (rgba, width, height);
     }
-    let Some(image) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) else {
-        return (std::borrow::Cow::Borrowed(rgba), width, height);
-    };
+    // `RgbaImage::from_raw` refuses a buffer smaller than `width * height * 4` (and
+    // a size whose product overflows `usize`), which is the same check as this one —
+    // so a buffer that gets past it is always accepted, and one that does not is
+    // handed back untouched exactly as the borrowed version did.
+    let fits = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .is_some_and(|min_len| min_len <= rgba.len());
+    if !fits {
+        return (rgba, width, height);
+    }
+    let image = image::RgbaImage::from_raw(width, height, rgba)
+        .expect("the buffer was just checked against width * height * 4");
     // Lanczos3 on the way down: the model spent its time recovering edges, and a
     // box filter would give them straight back.
     let resized = image::imageops::resize(
@@ -595,11 +611,7 @@ pub fn fit_enhanced_output(
         target_height,
         image::imageops::FilterType::Lanczos3,
     );
-    (
-        std::borrow::Cow::Owned(resized.into_raw()),
-        target_width,
-        target_height,
-    )
+    (resized.into_raw(), target_width, target_height)
 }
 
 /// The de-censoring sessions, kept for the life of the process and keyed by the
@@ -2091,7 +2103,7 @@ fn upscale_cached_page_with_models(
     // into a slot a fraction of that size. Two is the point where the detail is
     // visible and the cost is not.
     let (final_rgba, final_width, final_height) = fit_enhanced_output(
-        &upscaled.rgba,
+        upscaled.rgba,
         upscaled.width,
         upscaled.height,
         width,
@@ -2304,7 +2316,7 @@ pub(crate) fn run_upscale_bytes(
     let upscaled = upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options)
         .map_err(|error| format!("{error:?}"))?;
     let (final_rgba, final_width, final_height) =
-        fit_enhanced_output(&upscaled.rgba, upscaled.width, upscaled.height, width, height);
+        fit_enhanced_output(upscaled.rgba, upscaled.width, upscaled.height, width, height);
     let mut encoded = Vec::new();
     use image::ImageEncoder;
     image::codecs::png::PngEncoder::new(&mut encoded)
@@ -2956,17 +2968,55 @@ mod tests {
         let source = (10_u32, 8_u32);
         let quadrupled = vec![0_u8; (source.0 * 4) as usize * (source.1 * 4) as usize * 4];
         let (rgba, width, height) =
-            fit_enhanced_output(&quadrupled, source.0 * 4, source.1 * 4, source.0, source.1);
+            fit_enhanced_output(quadrupled, source.0 * 4, source.1 * 4, source.0, source.1);
         assert_eq!((width, height), (source.0 * 2, source.1 * 2));
         assert_eq!(rgba.len(), (width * height * 4) as usize);
 
         // Already at or below the target: handed back untouched rather than
-        // resampled for nothing.
+        // resampled for nothing — the same allocation, not a copy of it.
         let doubled = vec![7_u8; (source.0 * 2) as usize * (source.1 * 2) as usize * 4];
+        let allocation = doubled.as_ptr();
         let (same, w, h) =
-            fit_enhanced_output(&doubled, source.0 * 2, source.1 * 2, source.0, source.1);
+            fit_enhanced_output(doubled, source.0 * 2, source.1 * 2, source.0, source.1);
         assert_eq!((w, h), (source.0 * 2, source.1 * 2));
-        assert!(matches!(same, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(same.as_ptr(), allocation);
+        assert!(same.iter().all(|byte| *byte == 7));
+    }
+
+    #[test]
+    fn fitting_an_enhanced_page_matches_the_buffer_copying_it_replaced() {
+        // 4x4 的页，模型交回 16x16：目标是 8x8，走的正是重采样那条路。参考值按改动前
+        // 的写法算（先 `to_vec()` 拷一份再 `from_raw`），改成移动整个缓冲区之后两边
+        // 必须逐字节一致——省掉的那一份拷贝不该动到任何一个像素。
+        let source = (4_u32, 4_u32);
+        let (width, height) = (source.0 * 4, source.1 * 4);
+        let buffer: Vec<u8> = (0..(width * height * 4) as usize).map(|index| (index % 251) as u8).collect();
+        let reference = {
+            let image = image::RgbaImage::from_raw(width, height, buffer.clone()).unwrap();
+            image::imageops::resize(
+                &image,
+                source.0 * 2,
+                source.1 * 2,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .into_raw()
+        };
+
+        let (fitted, fitted_width, fitted_height) =
+            fit_enhanced_output(buffer, width, height, source.0, source.1);
+
+        assert_eq!((fitted_width, fitted_height), (source.0 * 2, source.1 * 2));
+        assert_eq!(fitted, reference);
+    }
+
+    #[test]
+    fn a_buffer_that_does_not_fit_its_dimensions_is_handed_back_untouched() {
+        // 尺寸与缓冲区对不上时旧写法也是原样退回（`from_raw` 给 None），不能因为改成
+        // 移动就变成 panic 或者半张图。
+        let short = vec![3_u8; 10];
+        let (same, width, height) = fit_enhanced_output(short, 16, 16, 4, 4);
+        assert_eq!((width, height), (16, 16));
+        assert_eq!(same, vec![3_u8; 10]);
     }
     use super::*;
 

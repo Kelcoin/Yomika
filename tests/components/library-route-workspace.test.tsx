@@ -556,6 +556,42 @@ describe('library route workspace', () => {
     expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
   });
 
+  it('marks only the rows a background refresh brought in, then clears the mark', async () => {
+    let pageRequests = 0;
+    let resolvePage!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_categories') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        pageRequests += 1;
+        if (pageRequests === 1) return servedPage([{ serverId: 'scope-a', archiveId: 'kept', title: 'Kept Archive', pageCount: 3, updatedAt: '2026-08-26T00:00:00Z' }]);
+        return new Promise((resolve) => { resolvePage = resolve; });
+      }
+      return { ok: true, value: [] };
+    });
+    renderLibrary();
+
+    const keptRow = (await screen.findByRole('button', { name: /^Kept Archive\b/ })).closest('.archive-row-wrap');
+    // 第一次成功加载是骨架换列表：整屏都是「新挂上来的」，不是后台刷新带回来的新档案。
+    expect(keptRow).not.toHaveClass('is-fresh');
+
+    await act(async () => { invalidateRouteCache(); });
+    await waitFor(() => expect(pageRequests).toBe(2));
+    await act(async () => resolvePage(servedPage([
+      { serverId: 'scope-a', archiveId: 'kept', title: 'Kept Archive', pageCount: 3, updatedAt: '2026-08-26T00:00:00Z' },
+      { serverId: 'scope-a', archiveId: 'fresh', title: 'Fresh Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
+    ])));
+
+    // 图⑤：后台刷新冒出来的新档案要有入场动画，已经在屏幕上的那些不能跟着一起动
+    // ——列表整体被替换，只有发起请求的那一层知道谁是新来的。
+    const freshRow = (await screen.findByRole('button', { name: /^Fresh Archive\b/ })).closest('.archive-row-wrap');
+    expect(freshRow).toHaveClass('is-fresh');
+    expect(screen.getByRole('button', { name: /^Kept Archive\b/ }).closest('.archive-row-wrap')).not.toHaveClass('is-fresh');
+
+    // 标记是「刚来的」这一句话，不是行的常态：动画跑完就撤掉。
+    await waitFor(() => expect(freshRow).not.toHaveClass('is-fresh'), { timeout: 2000 });
+  });
+
   it('loads archive metadata when an archive is selected', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {

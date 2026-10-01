@@ -47,6 +47,10 @@ function librarySnapshotKey(requestedServer: string | null): string {
  * fallback path uses it: online, the page size is LANraragi's to decide. */
 const OFFLINE_PAGE_SIZE = 100;
 
+/** 后台刷新带回来的新行入场动画的时长（`--motion-standard`，220ms）：类挂得比动画
+ *  久一点，动画跑完就撤，超时只是兜底，免得某次渲染之后类留在行上。 */
+const FRESH_ARCHIVE_HIGHLIGHT_MS = 700;
+
 /** First occurrence of each archive id, in order.
  *
  * A page can repeat a row the previous one already carried — the server
@@ -94,6 +98,21 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam), Infinity);
   const cachedPage = requestedQuery === undefined || requestedQuery === snapshot?.searchQuery ? snapshot : undefined;
   const [archives, setArchives] = useState<ArchiveRecord[]>(cachedPage?.archives ?? []);
+  /** 这一轮后台刷新才第一次出现的档案：交给列表给它们播一段入场动画。
+   *  只在这一层算得出来——后台刷新拿到的是一个全新的数组，列表自己分不出新旧。 */
+  const [freshArchiveIds, setFreshArchiveIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  /** 本会话见过的全部档案 id。第一次成功加载不当作「新档案」：那是骨架换成列表，
+   *  整屏都算新的，入场动画会把一次切换放大成几十行一起抖。 */
+  const seenArchiveIds = useRef<Set<string>>(new Set(cachedPage?.archives.map((archive) => archive.archiveId) ?? []));
+  // 动画跑完就把 is-fresh 撤掉：它是「刚来的」这一句话，不是行的常态。留在行上会让
+  // 之后的每次重渲染再播一遍（换 key 或虚拟化回收后重挂都会重新触发动画）。
+  useEffect(() => {
+    if (freshArchiveIds.size === 0) return;
+    const timer = window.setTimeout(() => {
+      setFreshArchiveIds((current) => (current === freshArchiveIds ? new Set<string>() : current));
+    }, FRESH_ARCHIVE_HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [freshArchiveIds]);
   const [loading, setLoading] = useState(!cachedPage);
   /** True while any first-page request is outstanding. Separate from `loading`,
    * which only covers the very first one so that refiltering does not unmount the
@@ -340,6 +359,21 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     return local;
   }, [categoryFilter, searchQuery, sortMode, sortOrder]);
 
+  /** 记下这一批档案的 id，并挑出「上次没见过的」。`animate` 只由后台/静默重读打开：
+   *  用户自己发起的翻页或换查询都是他眼前的动作，不需要解释「这些是新的」。
+   *  此前一个 id 都没有时也不挑（第一次成功加载是骨架换列表，不是新档案）。 */
+  const collectFreshArchiveIds = useCallback((next: readonly ArchiveRecord[], animate: boolean): string[] => {
+    const seen = seenArchiveIds.current;
+    const firstPopulate = seen.size === 0;
+    const fresh: string[] = [];
+    for (const item of next) {
+      if (seen.has(item.archiveId)) continue;
+      seen.add(item.archiveId);
+      if (animate && !firstPopulate) fresh.push(item.archiveId);
+    }
+    return fresh;
+  }, []);
+
   const loadMoreArchives = useCallback(async () => {
     // Scroll events fire many times before React re-renders, so the state flag
     // alone lets several requests through with the same offset.
@@ -357,6 +391,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       if (request !== pageRequest.current) return;
       if (result.ok) {
         fetchedCount.current += result.value.items.length;
+        // 翻页追加的行不播入场动画（是用户自己往下滚出来的），但 id 要记下来，
+        // 否则稍后一次后台重读会把已经看过的行当成新档案。
+        collectFreshArchiveIds(result.value.items, false);
         setArchives((current) => [
           ...current,
           ...dedupeArchives(result.value.items, new Set(current.map((item) => item.archiveId))),
@@ -368,7 +405,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [fetchArchivePage, hasMoreArchives, pageLoading, serverId]);
+  }, [collectFreshArchiveIds, fetchArchivePage, hasMoreArchives, pageLoading, serverId]);
 
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!serverId || !scopeId) return undefined;
@@ -461,6 +498,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // The first page needs the same de-duplication the later ones get: a repeated
     // row rendered twice, and gave two cards the same React key.
     const unique = dedupeArchives(result.value.items);
+    // 后台/静默重读带回来的新档案先挑出来：列表整体被替换，只有这里知道谁是新来的。
+    const fresh = collectFreshArchiveIds(unique, options.background === true || options.silent === true);
+    if (fresh.length > 0) setFreshArchiveIds(new Set(fresh));
     setArchives(unique);
     fetchedCount.current = result.value.items.length;
     initialArchivesLoaded.current = true;
@@ -473,7 +513,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     setLoading(false);
     setPageLoading(false);
     return true;
-  }, [fetchArchivePage, listQueryKey]);
+  }, [collectFreshArchiveIds, fetchArchivePage, listQueryKey]);
 
   const refreshVisiblePage = useCallback(async (currentServerId: string) => {
     // A refresh re-reads the page on screen: one LANraragi request, list in
@@ -642,6 +682,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       <LibraryWorkspace
         showDetail={showDetail}
         archives={archives}
+        freshArchiveIds={freshArchiveIds}
         metadata={metadata}
         metadataLoading={metadataLoading}
         thumbnail={thumbnail}

@@ -41,6 +41,9 @@ mod tests {
         ("error_log.rs", include_str!("error_log.rs")),
         ("inference.rs", include_str!("inference.rs")),
         ("lib.rs", include_str!("lib.rs")),
+        // 工作集回收：只在离开阅读器时调用，命令本身是 `async` 的（不占 UI 线程），
+        // 但它读的是同一份进程内存状态，所以和其它命令一样放进这条不变量底下。
+        ("memory.rs", include_str!("memory.rs")),
         ("model_release.rs", include_str!("model_release.rs")),
         ("settings.rs", include_str!("settings.rs")),
         // 新命令落进新文件时这里也要补一行，否则它就不在这条不变量底下——托盘菜单那份

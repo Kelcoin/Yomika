@@ -349,7 +349,19 @@
 
     /* ---- Shape scale (M3): control = inputs, chips and the toast; card =
        archive cards and detail blocks; overlay = dialogs and floating
-       panels; pill = buttons, badges, switches and progress tracks. ------- */
+       panels; pill = buttons, badges, switches and progress tracks.
+
+       Nesting rule (同心圆角): a filled row living inside a rounded shell must
+       not reuse the shell's radius nor pick one by taste — the inner radius is
+       the outer radius minus the shell's own inset (border + padding), so both
+       arcs share one centre. The floating panels are the only shell at
+       `--radius-overlay` with a 16px (`--space-4`) inset, so the rows inside
+       them use `--radius-card`: 28 - 16 = 12. A row that keeps `8px` under a
+       28px shell leaves a visibly oval corner (that was the user's report).
+       When a panel's bottom padding is cut on purpose (see the
+       `.settings-choice-panel:has(...)` rule in shell.css) the bottom inset is
+       smaller than the sides — one radius cannot be concentric on all four
+       edges at once; the side/top inset is the one that decides. -------------- */
     --radius-control: 8px;
     --radius-card: 12px;
     --radius-overlay: 28px;

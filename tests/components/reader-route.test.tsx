@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -1026,4 +1026,67 @@ describe('reader route', () => {
       expect.objectContaining({ args: { taskId } }),
     ));
   });
+
+  it('hands back the derived renditions it holds once the reader stops being displayed', async () => {
+    // 用户报的问题：读一本档案内存能到 8G，退出去过一段时间仍有 4G 回不来。派生
+    // 渲染是最大的一份——这台机器 DLSSNR 一页成品 21–27MB（用户库里 133 页 2.9GB）。
+    // 阅读器被切到后台时它一页都不显示，这些句柄就该当场放掉，而不是留给「也许还会
+    // 切回来」；切回来时 ReaderScreen 会重新报可见页，按需再算一遍。
+    const cache = getNativeImageCache();
+    const pageCount = 6;
+    const pageBytes = 24 * 1024 * 1024;
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const commands: string[] = [];
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
+      ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: pageBytes }
+      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
+    setInvokeAdapterForTests(async (command, args) => {
+      commands.push(command);
+      if (command === 'trim_process_memory') return { ok: true, value: null };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: String(args?.archiveId ?? 'left'), title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/left']}><ReaderNavigation /><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    const derivedLoads = () => load.mock.calls.filter(([identity]) => identity.archiveId === 'left' && identity.rendition === 'dlssnr');
+    // 等这一本整本预扫完，之后 release 里出现的就只可能是这次离开造成的。
+    await waitFor(() => {
+      expect(new Set(derivedLoads().map(([identity]) => identity.pageIndex))).toEqual(new Set(Array.from({ length: pageCount }, (_, index) => index)));
+    }, { timeout: 10_000 });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:dlssnr-0'));
+
+    release.mockClear();
+    // 切到另一本：刚才那本还留着（App 的保留上限是 2），只是不再显示。
+    fireEvent.click(screen.getByRole('button', { name: '换一本' }));
+    const releasedKeys = () => release.mock.calls.map(([handle]) => handle.key);
+    // 连屏幕上那一页的成品也要放：隐藏着的阅读器没有「不能闪」这回事。
+    await waitFor(() => expect(releasedKeys()).toContain('dlssnr-0'));
+    expect(releasedKeys().filter((key) => key.startsWith('dlssnr-'))).toEqual(expect.arrayContaining(['dlssnr-1', 'dlssnr-2']));
+
+    // 句柄放掉只是一半：Rust 那边 free 了，Windows 不一定马上把页从进程工作集里收
+    // 回去（实测退出后仍有 4GB 落不下来）。离开这一本的那一刻要叫一次工作集清理。
+    await waitFor(() => expect(commands).toContain('trim_process_memory'));
+
+    // 切回来要按需重算：尝试记录没被清掉的话，这里会一页都不算，屏幕上留着原图。
+    const beforeReturn = derivedLoads().length;
+    fireEvent.click(screen.getByRole('button', { name: '切回刚才那本' }));
+    await waitFor(() => expect(derivedLoads().length).toBeGreaterThan(beforeReturn), { timeout: 10_000 });
+  });
 });
+
+/** 只用来把阅读器切到后台再切回来：`pageActive` 由 App 的 RetainedPage 决定，
+ * 而它只跟着路由走。 */
+function ReaderNavigation() {
+  const navigate = useNavigate();
+  return <>
+    <button onClick={() => navigate('/reader/other')}>换一本</button>
+    <button onClick={() => navigate('/reader/left')}>切回刚才那本</button>
+  </>;
+}

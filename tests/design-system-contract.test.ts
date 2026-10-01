@@ -1147,10 +1147,21 @@ describe('design system contract', () => {
     expect(source).not.toMatch(/<span className="archive-row-copy">\s*<ArchiveProgressBar/);
     expect(shell).not.toMatch(/\.archive-row-copy > \.archive-card-progress\s*\{/);
     const bar = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
-    expect(bar).toMatch(/inset:\s*auto 0 0/);
+    // 底边留 1px：卡片的高亮是它自己的 outline（outline-offset: -1px → 画在
+    // y ∈ [H-1, H]），横条贴到 0 时会作为定位后代把这条描边连同两个下角弧线盖掉。
+    expect(bar).toMatch(/inset:\s*auto 0 1px/);
     expect(bar).toMatch(/height:\s*4px/);
     // `.archive-row > span` 的 display: grid 特异性更高，横条必须显式声明 display。
     expect(bar).toMatch(/display:\s*block/);
+    // 长度排除卡片左右圆角：轨道两端各内缩一个卡片半径（border-box 后内容盒是
+    // W − 24），填充的 `width: N%` 因此从 x = 12 起算，1% 也是完整的一小段。
+    expect(bar).toMatch(/box-sizing:\s*border-box/);
+    expect(bar).toMatch(/padding-inline:\s*var\(--radius-card\)/);
+    expect(ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress.is-complete'))
+      .toMatch(/padding-inline:\s*0/);
+    // 宽度过渡要挂在真实存在的时长令牌上：`--motion-medium` 全仓从未定义，
+    // 那条 transition 一直是死声明。
+    expect(ruleBody(shell, '.archive-card-progress-fill')).toMatch(/transition:\s*width var\(--motion-standard\)/);
     // 缩略图卡那条仍压在封面与正文的接缝上，两种卡不共用同一个贴边位置。
     expect(ruleBody(shell, '.archive-card-progress')).toMatch(/inset:\s*-5px 0 auto/);
   });
@@ -1822,5 +1833,54 @@ describe('design system contract', () => {
     // DLSSNR 变体行尾那行「使用中 · 体积」整行去掉，规则也删了，别再有人捡回来。
     expect(shell).not.toMatch(/\.settings-row-note\s*\{/);
     expect(source).not.toContain('settings-row-note');
+  });
+
+  it('keeps a filled row concentric with its 28px shell and mirrors the row-end button', () => {
+    // 图①：二级菜单的外壳是 28px，里面的高亮行是 8px——两个圆角各转各的圆心，看上去
+    // 就是「内外圆角不统一」。同心规则写进了 tokens 的形状尺度注释：内层 = 外层 − 外壳
+    // 自身内缩。浮动面板是全项目唯一 28px 外壳 + 16px 内缩，所以家族里的填充行用 12px。
+    const tokens = read('src/styles/tokens.css');
+    expect(tokens).toMatch(/Nesting rule \(同心圆角\)/);
+    expect(tokens).toMatch(/inner radius is\s+the outer radius minus the shell's own inset/);
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const selector of [
+      '.settings-choice-option',
+      '.settings-menu-path',
+      '.settings-menu-account',
+      '.settings-menu-check',
+      '.settings-menu-mode-button',
+      '.custom-scheme-card',
+      '.search-preset-apply',
+    ]) {
+      expect(ruleBody(shell, selector), selector).toMatch(/border-radius:\s*var\(--radius-card\)/);
+    }
+    // 从不画填充的那一层不跟着换：它 hover 被显式压成透明，半径只影响焦点环。
+    expect(ruleBody(shell, '.settings-choice-option-main')).toMatch(/border-radius:\s*var\(--radius-control\)/);
+
+    // 图②：行尾挂下载/更新按钮时（40px + margin 2px + 行内 gap 8px = 50px），文字中心
+    // 偏左 25px——半行宽无关，只看这一块。补一块等宽的镜像留白把中心顶回去；已安装的行
+    // 不渲染按钮，同一列里才会「有的居中有的偏左」，所以镜像槽必须按按钮在不在生效。
+    expect(shell).toMatch(
+      /\.settings-choice-option:has\(> \.select-option-download\)\s*\{\s*padding-left:\s*calc\(40px \+ 2px \+ var\(--space-2\)\)/,
+    );
+  });
+
+  it('fades in only the rows a background refresh brought in', () => {
+    // 图⑤：后台刷新把整个数组换成新的，屏幕上却「什么都没发生」。只有发起请求的那一层
+    // 分得出谁是新来的：它给这些行的外壳挂 is-fresh，动画落在行本身——虚拟化把
+    // translateY 内联写在 .archive-row-wrap 上，动那一层会和布局打架（:1138 也钉着）。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(shell).toMatch(/@keyframes archive-row-fresh-in\s*\{/);
+    expect(shell).toMatch(
+      /\.archive-row-wrap\.is-fresh > \.archive-row,\s*\.archive-row-wrap\.is-fresh > \.archive-thumb-card\s*\{\s*animation:\s*archive-row-fresh-in var\(--motion-standard\) backwards/,
+    );
+    const list = read('src/components/LibraryWorkspace.tsx');
+    expect(list).toContain('freshArchiveIds?: ReadonlySet<string>');
+    expect(list).toContain("' is-fresh'");
+    const workspace = read('src/components/LibraryRouteWorkspace.tsx');
+    expect(workspace).toMatch(/FRESH_ARCHIVE_HIGHLIGHT_MS = 700/);
+    // 只有后台/静默重读才播动画：翻页追加的行是用户自己滚出来的。
+    expect(workspace).toMatch(/collectFreshArchiveIds\(unique, options\.background === true \|\| options\.silent === true\)/);
+    expect(workspace).toMatch(/freshArchiveIds=\{freshArchiveIds\}/);
   });
 });
