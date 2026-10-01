@@ -28,6 +28,8 @@ mod network;
 // （keyring 3.6.3 在安卓上没有后端，会退化成一个写不进去的 mock）。
 mod secret_store;
 mod settings;
+#[cfg(target_os = "windows")]
+mod single_instance;
 mod tray_menu;
 
 use cache::{
@@ -109,6 +111,16 @@ use tauri::Manager;
 pub fn run() {
     #[cfg(target_os = "windows")]
     let background_launch = std::env::args().any(|arg| arg == "--background");
+    // 单实例：双击两次图标、或者自启之外又手动打开一次，会得到两个进程同时写同一份
+    // 数据库与图片缓存。后一个只负责把前一个的窗口叫到前面，然后自己退出。
+    // `--background`（自启）那次不抢焦点——它本来就该安静地待在托盘里。
+    #[cfg(target_os = "windows")]
+    if !single_instance::claim_app_instance() {
+        if !background_launch {
+            single_instance::focus_main_window();
+        }
+        return;
+    }
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     // 原生宿主只有 Android 有（登录面板 + SAF 写文件），别的平台那两条路走别的实现。
     #[cfg(target_os = "android")]

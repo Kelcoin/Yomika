@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Pencil, Save, Server, Trash2, X } from 'lucide-react';
+import { Pencil, Save, Server, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
@@ -155,20 +155,21 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
             input.setSelectionRange(input.value.length, input.value.length);
           }}
         >
-          {/* 标题与说明直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
-              而 ✕ 已经去掉了——关闭改走动作行里的「取消」、点空白处与 Esc。 */}
+          {/* 标题直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
+              而 ✕ 已经去掉了——关闭走点空白处、Esc 与返回手势。顶部也不再挂说明
+              小字：连接信息存哪里不影响用户做决定，地址框自己会说话。 */}
           <Dialog.Title className="dialog-title"><Server aria-hidden="true" />{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
-          <Dialog.Description>连接信息保存在此设备；API Key 存在本机的凭据存储里，已自动读入，可直接查看或替换。</Dialog.Description>
           <form className="server-form" onSubmit={handleSubmit}>
             <label>名称（可选）<input ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
-            {/* 动作行等宽平分：删除配置（仅编辑态）、取消、保存服务器各占一列。 */}
+            {/* 动作行等宽平分：删除配置（仅编辑态）与保存服务器各占一列。
+                没有「取消」——对话框本来就能点空白处或按 Esc 关掉，多一颗按钮
+                只会让「保存服务器」那一格变小、也让退出与保存看起来一样重。 */}
             <div className="dialog-actions is-balanced">
               {server && onDelete && (
                 <button className="secondary-action is-danger" type="button" onClick={() => setConfirmingDelete(true)}><Trash2 aria-hidden="true" />删除配置</button>
               )}
-              <button className="secondary-action" type="button" disabled={pending} onClick={() => handleOpenChange(false)}><X aria-hidden="true" />取消</button>
               <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}><Save aria-hidden="true" />{pending ? '保存中…' : '保存服务器'}</button>
             </div>
           </form>

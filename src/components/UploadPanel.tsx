@@ -161,8 +161,6 @@ export function UploadPanel() {
             {parsedUrls.invalid.length > 0 && <span className="is-error">{parsedUrls.invalid.length} 个无法识别</span>}
             <button className="secondary-action" type="button" disabled={parsedUrls.valid.length === 0} onClick={queueUrls}><Plus aria-hidden="true" />加入队列</button>
           </div>
-          {/* The server picks the downloader, so there is no plugin to choose. */}
-          <p className="upload-hint">链接交给 LANraragi 自己下载，由服务器决定使用哪个下载插件。</p>
         </div>
       )}
 

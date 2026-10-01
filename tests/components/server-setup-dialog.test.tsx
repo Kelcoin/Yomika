@@ -91,7 +91,7 @@ describe('server setup dialog', () => {
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     const dialog = await screen.findByRole('dialog');
 
-    // 标题行里没有 ✕：退出与删除都放在动作行（取消 / 删除配置），标题行只留图标与文字。
+    // 标题行里没有 ✕：动作行只留删除配置与保存服务器，关闭走点空白处与 Esc。
     expect(within(dialog).queryByRole('button', { name: '关闭' })).toBeNull();
 
     await user.click(document.querySelector('.dialog-overlay')!);
@@ -117,7 +117,7 @@ describe('server setup dialog', () => {
     }));
   });
 
-  it('offers 删除配置, 取消 and 保存服务器 on the edit dialog, and 取消 closes it', async () => {
+  it('offers 删除配置 and 保存服务器 on the edit dialog, with no 取消 and no top description', async () => {
     const user = userEvent.setup();
     render(
       <ServerSetupDialog
@@ -130,18 +130,32 @@ describe('server setup dialog', () => {
     await user.click(screen.getByRole('button', { name: '编辑 Home' }));
     const dialog = await screen.findByRole('dialog');
 
-    // 三颗按钮等宽平分动作行。
+    // 编辑态的两颗按钮等宽平分动作行。
     expect(dialog.querySelector('.dialog-actions')).toHaveClass('is-balanced');
     expect(within(dialog).getByRole('button', { name: '删除配置' })).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: '取消' })).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: '保存服务器' })).toBeInTheDocument();
+    // 动作行里不再有「取消」：关闭走点空白处、Esc 与返回手势。
+    expect(within(dialog).queryByRole('button', { name: '取消' })).toBeNull();
 
     // 标题按规范：居中标题行，左侧 SVG 图标、右侧文字。
     const title = within(dialog).getByText('更新 LANraragi');
     expect(title).toHaveClass('dialog-title');
     expect(title.querySelector('svg')).not.toBeNull();
 
-    await user.click(within(dialog).getByRole('button', { name: '取消' }));
+    // 顶部说明整段去掉。Radix 只在真的渲染了 Dialog.Description 时才给 Content
+    // 挂 aria-describedby，所以这个属性缺席正是「那行小字没了」的结构证据。
+    expect(dialog).not.toHaveAttribute('aria-describedby');
+    expect(within(dialog).queryByText(/连接信息保存在此设备/)).toBeNull();
+  });
+
+  it('still closes on Escape now that the 取消 button is gone', async () => {
+    const user = userEvent.setup();
+    render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} server={homeServer} />);
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
@@ -155,7 +169,8 @@ describe('server setup dialog', () => {
 
     // 还没有服务器可以被删：即使父层给了 onDelete，添加态也不显示删除配置。
     expect(within(dialog).queryByRole('button', { name: '删除配置' })).toBeNull();
-    expect(within(dialog).getByRole('button', { name: '取消' })).toBeInTheDocument();
+    // 添加态与编辑态一样没有「取消」，只留保存服务器一颗。
+    expect(within(dialog).queryByRole('button', { name: '取消' })).toBeNull();
     expect(within(dialog).getByRole('button', { name: '保存服务器' })).toBeInTheDocument();
     expect(onDelete).not.toHaveBeenCalled();
   });

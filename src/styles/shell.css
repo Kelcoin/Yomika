@@ -1283,9 +1283,6 @@ body::-webkit-scrollbar,
 }
 .settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-high); }
 .settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
-.dlssnr-variant-copy { display: grid; gap: 3px; min-width: 0; padding-block: var(--space-2); }
-.dlssnr-variant-copy strong { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
-.dlssnr-variant-copy small { color: var(--on-surface-variant); font-size: var(--text-xs); white-space: normal; }
 
 .settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
 
@@ -1405,7 +1402,9 @@ body::-webkit-scrollbar,
   font-size: var(--text-xs);
 }
 
-.segmented-control {
+/* 圆角跟着卡片那档（12px），不是控件那档（8px）：这个分段控件总是横跨面板宽度、
+   正压在同样宽度的卡片上，两档摆在一起就是「这个框比下面那几个方一截」。实测同一张
+   截图里分段控件 8px（第 5 行才到满宽）、下面的卡片 12px（第 8 行）。 */.segmented-control {
   display: flex;
   flex-wrap: wrap;
   gap: 1px;
@@ -1413,7 +1412,7 @@ body::-webkit-scrollbar,
   max-width: 100%;
   overflow: hidden;
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
   background: var(--hairline);
 }
 
@@ -4755,10 +4754,17 @@ body::-webkit-scrollbar,
 
 /* 选项列表正好是最后一个子元素时，面板的下内边距和内容区自己的 2px 会叠成一段比
    标题下面那 6px 大一截的空白（实测：标题底→第一项顶 5.8px，最后一项底→面板底
-   20.4px），看起来就是「底部空了一块」。把多出来的那层收回去，只在这一种形状下
-   生效；底下还有动作按钮的菜单（保存/取消那一排）保持原样，它们需要完整的内边距。 */
-.settings-menu-body > .settings-choice-list:last-child {
-  margin-bottom: calc(-1 * var(--space-4));
+   20.4px），看起来就是「底部空了一块」。
+   收这段空白只能动面板自己的下内边距。早先这里是给列表加 `margin-bottom` 负外边距
+   ——那是错的：`.settings-menu-body` 是滚动容器（`overflow-y: auto`），负外边距让
+   内容比容器的内容盒高出这么多，最后一项就永久有一截落在视野之外（实测初始态被切
+   10px，`scrollHeight - (last.offsetTop + last.offsetHeight) = 2px` 连滚到底都差一点
+   露不全），用户看到的就是「菜单显示不全」。改成面板下内边距收到 `space-1`：空白
+   照样收掉，而内容区不再溢出（实测 `clientHeight == scrollHeight`、最后一项底距
+   面板底 8.7px、`scrollTop` 停在 0）。
+   底下还有动作按钮的菜单（保存/取消那一排）保持完整内边距，它们需要那段空间。 */
+.settings-choice-panel:has(> .settings-menu-body > .settings-choice-list:last-child) {
+  padding-bottom: var(--space-1);
 }
 
 .settings-menu-strong {
@@ -5330,7 +5336,6 @@ body::-webkit-scrollbar,
 
 .upload-url-summary .is-error { color: var(--state-danger); }
 .upload-url-summary .secondary-action { margin-left: auto; }
-.upload-hint { margin: 0; color: var(--ink-faint); font-size: var(--text-xs); }
 
 /* The queue reads as one M3 list: borderless tonal rows with a status dot,
    instead of a box inside the card inside the panel. */.upload-queue {
@@ -5418,7 +5423,8 @@ body::-webkit-scrollbar,
   gap: var(--space-2);
 }
 .dialog-title > svg { flex: none; width: 20px; height: 20px; color: var(--on-surface-variant); }
-/* 三个动作并排的对话框（删除配置 / 取消 / 保存）：等宽平分，谁也不比谁窄。 */
+/* 动作行按子元素个数自动分列（服务器对话框是「删除配置 + 保存服务器」两个，添加态
+   只剩保存一个）：等宽平分，谁也不比谁窄。 */
 .dialog-actions.is-balanced {
   display: grid;
   grid-auto-flow: column;

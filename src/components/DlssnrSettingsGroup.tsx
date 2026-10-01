@@ -214,14 +214,25 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           const busy = downloading === variant.id;
           const percent = download?.total ? Math.round((download.completed / download.total) * 100) : undefined;
           return <div className={`settings-choice-option${installed ? ' is-active' : ''}`} key={variant.id}>
-            <button className="settings-choice-option-main" type="button" disabled={installed || downloading !== undefined} aria-pressed={installed} onClick={() => void downloadVariant(variant.id)}>
-              <span className="dlssnr-variant-copy"><strong>{variant.label}{recommended ? '（推荐）' : ''}</strong><small>{installed
-                ? `使用中${status.dllBytes ? ` · ${megabytes(status.dllBytes)}` : ''}`
-                : busy
-                  ? `下载中 ${megabytes(download?.completed ?? 0)}${download?.total ? ` / ${megabytes(download.total)} · ${percent}%` : ''}`
-                  : variant.note || `${megabytes(variant.size)} · 下载后会被校验再装上`}</small></span>
+            {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
+                鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
+            <button
+              className="settings-choice-option-main"
+              type="button"
+              disabled={installed || downloading !== undefined}
+              aria-pressed={installed}
+              title={variant.note || '下载后会被校验再装上'}
+              onClick={() => void downloadVariant(variant.id)}
+            >
+              <span>{variant.label}{recommended ? '（推荐）' : ''}</span>
             </button>
-            {installed && <span className="settings-row-note">已选择</span>}
+            {/* 状态与体积走行尾那一行（今天「已选择」徽标用的就是这个类）：进度、
+                「使用中」、体积各说各的，不必再给选项名加第二行。 */}
+            <span className="settings-row-note">{installed
+              ? `使用中${status.dllBytes ? ` · ${megabytes(status.dllBytes)}` : ''}`
+              : busy
+                ? `下载中${percent === undefined ? '' : ` ${percent}%`}`
+                : megabytes(variant.size)}</span>
           </div>;
         })}
       </div>

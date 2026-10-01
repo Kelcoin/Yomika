@@ -5,10 +5,12 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { invalidateRouteCache, writeRouteCache } from '../../src/lib/routeCache';
+import { invalidateRouteCache, simulateRouteCacheRestartForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
+  // 落盘的路由快照也要收掉：它比进程活得久，正是这条用例要利用的性质。
+  window.localStorage.removeItem('yomika.route-cache.v1');
   vi.restoreAllMocks();
 });
 
@@ -57,6 +59,45 @@ describe('library route workspace', () => {
     await waitFor(() => expect(resolvePage).toBeDefined());
     expect(screen.getByRole('button', { name: /^Cached Archive\b/ })).toBeInTheDocument();
     expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+
+    await act(async () => resolvePage(servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Fresh Archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' }])));
+    expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
+  });
+
+  it('renders a persisted snapshot after a restart instead of a skeleton', async () => {
+    // 新进程里内存快照一无所有——能救第一帧的只有上一个进程落盘的那一份。
+    writeRouteCache('library:workspace:default', {
+      archives: [{ serverId: 'scope-a', archiveId: 'persisted', title: 'Persisted Archive', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }],
+      fetchedCount: 1,
+      categories: [],
+      selectedArchiveId: undefined,
+      totalArchives: 1,
+      hasMoreArchives: false,
+      searchQuery: '',
+      sortMode: 'added',
+      sortOrder: 'desc',
+      categoryFilter: '',
+    }, { persist: true });
+    simulateRouteCacheRestartForTests();
+
+    let resolvePage!: (value: unknown) => void;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return new Promise((resolve) => { resolvePage = resolve; });
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderLibrary();
+
+    expect(screen.getByRole('button', { name: /^Persisted Archive\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton-layer')).toBeNull();
+
+    // 快照只负责先显示：首页照样在后台重读，回来了就换成新数据。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', expect.anything()));
 
     await act(async () => resolvePage(servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Fresh Archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' }])));
     expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();

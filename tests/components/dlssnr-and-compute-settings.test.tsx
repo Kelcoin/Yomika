@@ -183,7 +183,8 @@ describe('DLSS5 settings group', () => {
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
     expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
     expect(within(snippets).getByText('FP16 兼容版（RTX 20 / 30 系，性能较低）')).toBeTruthy();
-    expect(within(snippets).getByText('已选择')).toBeTruthy();
+    // 装上的那条报「使用中」，体积跟着它；以前是另起一枚「已选择」徽标。
+    expect(within(snippets).getByText('使用中 · 158.2 MB')).toBeTruthy();
     expect(within(snippets).queryByText(/NVIDIA DLSS SDK License/)).toBeNull();
 
     // 只有没装上的那两条可以点（下载完的替换由后端负责）。
@@ -206,8 +207,38 @@ describe('DLSS5 settings group', () => {
     await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     expect(within(snippets).getAllByRole('button')).toHaveLength(3);
-    // 还没有片段就没有「当前这一份」，导入那一行改说「按显卡系列选一种变体」。
-    expect(within(snippets).queryByText('已选择')).toBeNull();
+    // 还没有片段就没有「当前这一份」，三条都只有体积，没有一条报「使用中」。
+    expect(within(snippets).queryByText(/使用中/)).toBeNull();
+  });
+
+  it('lays every variant out as one line, the way the model menus do', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+
+    // 私有那套两行行式（strong + small）已经不在了。
+    expect(document.querySelector('.dlssnr-variant-copy')).toBeNull();
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    expect(rows).toHaveLength(DLSSNR_CATALOG.variants.length);
+    rows.forEach((row, index) => {
+      const variant = DLSSNR_CATALOG.variants[index]!;
+      const main = row.querySelector('.settings-choice-option-main');
+      // 选项名只占一行：骨架里那一个 span，没有第二行说明。
+      expect(main?.querySelectorAll('span')).toHaveLength(1);
+      const label = main?.querySelector('span')?.textContent ?? '';
+      expect(label).toBe(variant.id === 'community' ? `${variant.label}（推荐）` : variant.label);
+      // 那一长句兼容性说明改成悬停可见（title），不再占一行。
+      expect(main?.getAttribute('title')).toBe(variant.note);
+      // 状态与体积是行尾那一行，用的是今天「已选择」徽标同一个类。
+      expect(row.lastElementChild?.className).toBe('settings-row-note');
+    });
+    // 装上的报「使用中 · 体积」，其余只报体积。
+    const notes = rows.map((row) => row.querySelector('.settings-row-note')?.textContent);
+    expect(notes).toEqual(['158.2 MB', '使用中 · 158.2 MB', '158.1 MB']);
   });
 
   it('adds a second layer as a full set of pass parameters', async () => {

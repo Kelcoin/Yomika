@@ -1778,4 +1778,15 @@ describe('design system contract', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  it('draws the DLSSNR variant rows with the shared choice row', () => {
+    // 用户报了几次同一条：DLSSNR 的组件菜单自己造了一套两行行式（strong + small），
+    // 和「超分模型」那一排长得不是一种东西。变体行现在走同一个骨架，第二行消失，
+    // 状态与体积落在行尾那一行。这里只盯组件源码：那条已经没人用的
+    // `.dlssnr-variant-copy` 规则由协调者从 shell.css 里删。
+    const source = read('src/components/DlssnrSettingsGroup.tsx');
+    expect(source).not.toContain('dlssnr-variant-copy');
+    expect(source).toMatch(/className="settings-choice-option-main"/);
+    expect(source).toMatch(/className="settings-row-note"/);
+  });
 });

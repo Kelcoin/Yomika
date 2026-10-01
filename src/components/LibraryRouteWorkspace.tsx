@@ -87,8 +87,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const serverParam = urlSearchParams.get('server');
   // Snapshot from the last visit: switching to another route and back used to
   // start from an empty list and a closed detail pane.
-  // The route cache is memory-only. Even an old page can be shown immediately
-  // while the server refreshes it, provided it belongs to the active query.
+  // This library snapshot is one of the few entries written with `persist: true`,
+  // so it also survives a restart: the first frame after launch shows the last
+  // list instead of skeletons, and the refresh below quietly corrects it. Even an
+  // old page can be shown immediately, provided it belongs to the active query.
   const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam), Infinity);
   const cachedPage = requestedQuery === undefined || requestedQuery === snapshot?.searchQuery ? snapshot : undefined;
   const [archives, setArchives] = useState<ArchiveRecord[]>(cachedPage?.archives ?? []);
@@ -580,11 +582,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       sortMode,
       sortOrder,
       categoryFilter,
-    } satisfies LibrarySnapshot);
+    } satisfies LibrarySnapshot, { persist: true });
   }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, serverParam, sortMode, sortOrder, totalArchives]);
 
-  // The categories' own durable mirror: the route snapshot lives in memory and
-  // dies with the app, while the dropdown is the one control that must not
+  // The categories' own durable mirror. The route snapshot is durable too now, but
+  // it is one entry with a size cap; the dropdown is the one control that must not
   // flash a skeleton over data the native snapshot would answer instantly.
   useEffect(() => {
     if (categories.length === 0) return;

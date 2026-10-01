@@ -306,7 +306,8 @@ function HomeWorkspace() {
   // Snapshot for the next visit, so switching tabs and coming back is free.
   useEffect(() => {
     if (!servers) return;
-    writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, readingList, archives, randomArchives } satisfies HomeSnapshot);
+    // 首页快照也落盘：它带自己的 90 秒 TTL，过期数据不会因此复活。
+    writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, readingList, archives, randomArchives } satisfies HomeSnapshot, { persist: true });
   }, [archives, history, randomArchives, readingList, servers]);
   return (
     <div className="workspace-home">
@@ -514,7 +515,8 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   }, [name, reloadToken, serverParam, snapshot]);
   useEffect(() => {
     if (loading || error || !serverId || !scopeId) return;
-    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds ? { favoritesIds } : {}) } satisfies ShelfSnapshot);
+    // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
+    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds ? { favoritesIds } : {}) } satisfies ShelfSnapshot, { persist: true });
   }, [archives, cacheKey, error, favoritesIds, history, loading, name, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
   // Saved searches work on every shelf, not just the library.

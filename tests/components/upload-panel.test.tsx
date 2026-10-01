@@ -91,6 +91,9 @@ describe('archive upload', () => {
 
     renderUpload();
     await user.click(await screen.findByRole('tab', { name: '从互联网添加' }));
+    // 字段名与下面的统计是必要信息，唯独解释下载插件的那句灰字去掉。
+    expect(document.querySelector('.upload-hint')).toBeNull();
+    expect(screen.queryByText('链接交给 LANraragi 自己下载，由服务器决定使用哪个下载插件。')).toBeNull();
     await user.type(screen.getByLabelText('要下载的链接（一行一个）'), 'https://example.com/g/1/abc\nnot-a-url');
 
     expect(screen.getByText('1 个有效链接')).toBeInTheDocument();
