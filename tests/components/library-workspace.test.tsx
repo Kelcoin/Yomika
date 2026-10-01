@@ -431,8 +431,55 @@ describe('library workspace', () => {
 
     const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
     expect(ticks.length).toBeLessThanOrEqual(RAIL_MAX_TICKS);
-    // ceil(42 / 28) = 2：每隔一个留一个。
-    expect(ticks).toHaveLength(21);
+    // ceil(42 / 20) = 3：每隔两个留一个。
+    expect(ticks).toHaveLength(14);
+  });
+
+  it('caps the ticks by the measured panel height as well as the constant', () => {
+    // 一格 18px、最多占面板的七成：面板只有 300px 高时轨道放得下 11 个刻度
+    // （0.7 × 300 / 18），比常量上限（20）少——短窗口里 20 个刻度又会挤成密齿梯子，
+    // 而密齿正是用户报「太密了根本用不了」的样子。42 个年份等距抽到 11 个：
+    // ceil(42 / 11) = 4，每隔三个留一个。
+    const original = window.ResizeObserver;
+    const size = { blockSize: 300, inlineSize: 900 } as ResizeObserverSize;
+    window.ResizeObserver = class implements ResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      disconnect(): void {}
+      observe(target: Element): void {
+        this.callback([{
+          borderBoxSize: [size],
+          contentBoxSize: [size],
+          contentRect: { bottom: 300, height: 300, left: 0, right: 900, top: 0, width: 900, x: 0, y: 0, toJSON: () => ({}) },
+          devicePixelContentBoxSize: [size],
+          target,
+        }], this);
+      }
+      unobserve(): void {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const years = Array.from({ length: 42 }, (_, index) => 2000 - index);
+      const oldArchives: ArchiveRecord[] = years.map((_, index) => ({
+        ...archives[0]!,
+        archiveId: `short-${index}`,
+        title: `Short ${index}`,
+      }));
+      const timelineByArchiveId = new Map(oldArchives.map((archive, index) => {
+        const date = `${years[index]}-06-15`;
+        return [archive.archiveId, {
+          date,
+          dayLabel: `${date.slice(0, 4)}年6月15日`,
+          time: '12:00',
+          at: Date.parse(`${date}T12:00:00+08:00`),
+        }];
+      }));
+      renderWorkspace({ archives: oldArchives, timelineByArchiveId });
+
+      const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+      expect(ticks).toHaveLength(11);
+      expect(ticks.length).toBeLessThan(RAIL_MAX_TICKS);
+    } finally {
+      window.ResizeObserver = original;
+    }
   });
 
   it('moves the rail’s filled tick when a tick is picked', async () => {

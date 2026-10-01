@@ -74,9 +74,22 @@ const PULL_DAMPING = 0.5;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
 
-/** 刻度数上限：48vh 的轨道条上再多，每个刻度就窄到点不准了。超了就把每一行的桶级
- * 整体升一级重建（最大到「年」），到顶还超上限就等距抽稀。 */
-export const RAIL_MAX_TICKS = 28;
+/** 刻度数上限：再多每个刻度就窄到点不准了。超了就把每一行的桶级整体升一级重建
+ * （最大到「年」），到顶还超上限就等距抽稀。
+ * 真实上限还要跟列表可视高度挂钩：一格 18px、最多占面板的 70%（见下），不然短窗口
+ * 里 20 个刻度会挤成一把密齿梯子。 */
+export const RAIL_MAX_TICKS = 20;
+
+/** 一格刻度的高度（`--rail-pitch`，与 shell.css 里那条轨道一致）与它能占的面板高度
+ * 比例。刻度数是 `min(RAIL_MAX_TICKS, floor(0.7 * 面板高 / 18))`：轨道挂在这一层的
+ * 中线上，永远不超过可视高度的七成。高度还没量到时（首帧、jsdom）用常量上限。 */
+const RAIL_TICK_PITCH = 18;
+const RAIL_TICK_SPAN = 0.7;
+
+function railTickCapFor(height: number): number {
+  if (height <= 0) return RAIL_MAX_TICKS;
+  return Math.max(2, Math.min(RAIL_MAX_TICKS, Math.floor((height * RAIL_TICK_SPAN) / RAIL_TICK_PITCH)));
+}
 
 /** 桶级，越靠近现在越小：小时 → 天 → 周 → 月 → 年。 */
 const RAIL_BUCKET_LEVELS = ['hour', 'day', 'week', 'month', 'year'] as const;
@@ -552,6 +565,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     });
     return starts;
   }, [filteredArchives, timelineByArchiveId]);
+  /** 面板量出来的高度，用来算这一刻放得下几个刻度（见 `railTickCapFor`）。0 表示还
+   * 没量到（jsdom 里也一样），那时先用常量上限。 */
+  const [railPanelHeight, setRailPanelHeight] = useState(0);
+  const railTickCap = railTickCapFor(railPanelHeight);
   /** 轨道的刻度：越靠近当前时间，一个刻度代表的时间跨度越小。
    *
    * 刻度不是按行等分的。按行等分时，「读得多的一天」会独占十几个刻度（同一天里每
@@ -604,13 +621,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     };
 
     let ticks = build(0);
-    for (let offset = 1; ticks.length > RAIL_MAX_TICKS && offset < RAIL_BUCKET_LEVELS.length; offset += 1) ticks = build(offset);
-    if (ticks.length > RAIL_MAX_TICKS) {
-      const step = Math.ceil(ticks.length / RAIL_MAX_TICKS);
+    for (let offset = 1; ticks.length > railTickCap && offset < RAIL_BUCKET_LEVELS.length; offset += 1) ticks = build(offset);
+    if (ticks.length > railTickCap) {
+      const step = Math.ceil(ticks.length / railTickCap);
       ticks = ticks.filter((_, position) => position % step === 0);
     }
     return ticks;
-  }, [filteredArchives, timelineByArchiveId]);
+  }, [filteredArchives, timelineByArchiveId, railTickCap]);
   /** The tick for the row the reader is looking at: the last segment that starts
    * at or above it. */
   const railSegmentFor = useCallback((rowIndex: number) => {
@@ -678,9 +695,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     if (!element || typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver((entries) => {
       const measured = entries[0]?.contentRect.width ?? element.clientWidth;
-      if (measured <= 0) return;
-      setGridWidth((current) => getArchiveGridColumns(current || 720) === getArchiveGridColumns(measured)
-        ? current : measured);
+      const measuredHeight = entries[0]?.contentRect.height ?? element.clientHeight;
+      if (measured > 0) {
+        setGridWidth((current) => getArchiveGridColumns(current || 720) === getArchiveGridColumns(measured)
+          ? current : measured);
+      }
+      // 高度只在「刻度上限会因此改变」时才写：每次缩放都写一次会重算整条轨道。
+      setRailPanelHeight((current) => (railTickCapFor(current) === railTickCapFor(measuredHeight) ? current : measuredHeight));
     });
     observer.observe(element);
     return () => observer.disconnect();

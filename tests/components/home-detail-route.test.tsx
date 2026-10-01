@@ -60,6 +60,31 @@ function renderApp(initialEntry: string, adapter: ReturnType<typeof makeAdapter>
   );
 }
 
+/** 与 `renderApp` 同一棵树，只是外面套上 AppShell 那个工作区：首页两态的滚动容器
+ * 互换了这件事只有在 `.workspace` 真的存在时才谈得上（`HomeShell` 用它当「详情没开
+ * 时在滚谁」的答案）。 */
+function renderAppInWorkspace(initialEntry: string, adapter: ReturnType<typeof makeAdapter>) {
+  setInvokeAdapterForTests(adapter);
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <PreferencesProvider><ToastProvider>
+        <main className="workspace" id="main-content">
+          <Link to="/">to-home</Link>
+          <Link to="/library">to-library</Link>
+          <WorkspaceRoutes />
+        </main>
+      </ToastProvider></PreferencesProvider>
+    </MemoryRouter>,
+  );
+}
+
+/** jsdom has no layout, so `scrollTop` reads 0 no matter what a component writes into
+ * it: make it a plain writable property that the test (and the shell) can both set. */
+function scrollHost(element: HTMLElement): HTMLElement {
+  Object.defineProperty(element, 'scrollTop', { value: 0, configurable: true, writable: true });
+  return element;
+}
+
 afterEach(resetInvokeAdapterForTests);
 
 describe('home detail route', () => {
@@ -93,5 +118,30 @@ describe('home detail route', () => {
     fireEvent.click(screen.getByRole('link', { name: 'to-library' }));
     expect(await screen.findByRole('heading', { name: 'library-list' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'detail:archive-0' })).not.toBeInTheDocument();
+  });
+
+  it('carries the reading position over when the detail opens and closes', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    // jsdom has no layout: `scrollTop` needs to be a real, writable property or the
+    // assignment the shell makes below is swallowed by the platform getter.
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    // 详情没开时整页在滚（面板是 `is-flow`，随内容长高）。
+    page.scrollTop = 240;
+    fireEvent.scroll(page);
+
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    // 开详情换的是「谁在滚」：左栏自己成为滚动容器，整页不再滚。新容器不能从 0
+    // 开始——用户报的就是「读到一半点开详情，页面自己跳回顶部」。
+    expect(list.scrollTop).toBe(240);
+
+    // 关掉详情（回首页）是同一条路的另一边：位置得写回整页那个容器。
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    fireEvent.click(screen.getByRole('link', { name: 'to-home' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'detail:archive-0' })).not.toBeInTheDocument());
+    expect(page.scrollTop).toBe(500);
   });
 });

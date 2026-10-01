@@ -268,6 +268,14 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.library-panels')).toMatch(/margin-inline:\s*calc\(-1 \* var\(--space-4\)\)/);
     expect(ruleBody(shell, '.library-panels')).toMatch(/padding-inline:\s*var\(--space-4\)/);
     expect(ruleBody(shell, '.library-panels')).toMatch(/border-top:\s*1px solid var\(--hairline\)/);
+    // 用户报告（第 5 条）：档案库、历史、收藏、待看这四页右侧多出一段空白，首页与
+    // 本地档案没有。这四页的分隔线画在 `.library-panels` 上，而它是 react-resizable-panels
+    // 的 Group，那一层带着行内 `width: 100%`；全局 `box-sizing: border-box` 之下，100%
+    // 量到的是包含块（外壳内容盒，两侧各让出 16px），负外边距只能把整框往左推、并不能
+    // 让它变宽，于是边框盒右端短了 32px，再经自身 16px 内边距把列表又推回内侧。
+    // 上面那条 `margin-inline` 只在 `width: auto` 时才真的成立——宽度交回给
+    // 「外边距盒填满包含块」（与本地档案页的 `.local-archives-list` 同一套写法）。
+    expect(ruleBody(shell, '.library-panels')).toMatch(/width:\s*auto\s*!important/);
     // 本地档案页的列表是 `.archive-list`，它自己有 4px 内边距，补回来时要带上。
     expect(ruleBody(shell, '.local-archives-list')).toMatch(/margin-inline:\s*calc\(-1 \* var\(--space-4\)\)/);
     expect(ruleBody(shell, '.local-archives-list')).toMatch(/padding-inline:\s*calc\(var\(--space-4\) \+ var\(--space-1\)\)/);
@@ -851,6 +859,14 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*display:\s*flex[\s\S]*overflow-x:\s*auto/);
     expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*align-items:\s*flex-start/);
+    // 用户报告（第 2 条）：首页那几排卡片两侧的空隙与别的组件对不上，而且一开详情就变。
+    // 轨道自己带着左右各 16px 的内边距（6px 是给焦点环留的，不能收），骨架是首页唯一
+    // 的组件，于是卡片区域比档案库多缩进 17px；水平内边距收成 0、标题自己补 8px。
+    // 剩下的空档交给 `safe center`：装得下时两侧平分（与档案库缩略网格一致，列宽一变
+    // 两侧一起变），装不下时回落到起始对齐，第一张还在手边、能直接滚。
+    expect(ruleBody(shell, '.archive-rail')).toMatch(/padding:\s*var\(--space-4\) 0/);
+    expect(ruleBody(shell, '.archive-rail-heading')).toMatch(/padding-inline:\s*var\(--space-2\)/);
+    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/justify-content:\s*safe center/);
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);
@@ -1332,22 +1348,28 @@ describe('design system contract', () => {
     // 居中就随滚动漂走。挂出去之后 `top: 50%` 量的才是「看得见的那一段」的高度。
     expect(shell).toMatch(/\.library-list-panel-content\s*\{\s*position:\s*relative/);
     expect(shell).toMatch(/\.archive-quick-rail\s*\{[^}]*position:\s*absolute[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)/);
-    // 密度是固定节距（11px，正好一格命中区那么高），不再把 N 个刻度摊满 48vh——
-    // 两个刻度的历史过去会被拉成半屏高。
-    expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*--rail-pitch:\s*11px[^}]*grid-auto-rows:\s*1fr[^}]*height:\s*min\(calc\(var\(--rail-pitch\) \* var\(--rail-ticks, 1\)\), 70%\)/);
+    // 密度是固定节距（18px），不再把 N 个刻度摊满 70% 高——那种写法让
+    // `grid-auto-rows: 1fr` 把有限的高度再等分给每个刻度，刻度一多每格只剩 5px，
+    // 看起来就是一把密齿梯子（用户「太密了根本用不了」）。行高直接等于节距。
+    expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*--rail-pitch:\s*18px[^}]*grid-auto-rows:\s*var\(--rail-pitch\)/);
+    expect(shell).not.toMatch(/\.archive-quick-rail-track\s*\{[^}]*height:\s*min\(/);
     expect(source).toMatch(/className="archive-quick-rail-track" style=\{\{ '--rail-ticks': railSegments\.length \}/);
     expect(shell).toMatch(/\.archive-quick-rail-tick\.is-active\s*\{\s*width:\s*16px;\s*background:\s*var\(--primary\)/);
-    // 刻度只有 9×3px，直接拿它当悬停/点击靶太细：一层看不见的伪元素把靶撑到 29×11px
-    // （相邻刻度只隔 11px，竖向只各让 4px）。
+    // 刻度只有 9×3px，直接拿它当悬停/点击靶太细：一层看不见的伪元素把靶撑到 25×17px
+    // （相邻刻度隔 18px，竖向各让 7px、横向各让 8px ⇒ 正好铺满一格，不留缝）。
     expect(shell).toMatch(/\.archive-quick-rail-tick\s*\{[^}]*position:\s*relative/);
-    expect(shell).toMatch(/\.archive-quick-rail-tick::before\s*\{\s*content:\s*'';\s*position:\s*absolute;\s*inset:\s*-4px -10px/);
+    expect(shell).toMatch(/\.archive-quick-rail-tick::before\s*\{\s*content:\s*'';\s*position:\s*absolute;\s*inset:\s*-7px -8px/);
     // 悬停/聚焦时在刻度左边浮一枚标签，写着这个刻度会把你送到哪一天哪个时间——原生
     // `title` 要等一秒、触摸设备上根本没有。
     expect(shell).toMatch(/\.archive-quick-rail-label\s*\{[^}]*position:\s*absolute[^}]*right:\s*calc\(100% \+ 8px\)[^}]*opacity:\s*0[^}]*pointer-events:\s*none/);
     expect(shell).toMatch(/\.archive-quick-rail-tick:hover > \.archive-quick-rail-label\s*\{\s*opacity:\s*1/);
     expect(source).toMatch(/className="archive-quick-rail-label"/);
-    // 细分规则：越靠近当前越细，但刻度总数有天花板。
-    expect(source).toMatch(/RAIL_MAX_TICKS = 28/);
+    // 细分规则：越靠近当前越细；刻度总数既要认常量天花板，也要认左栏量出来的高度
+    // ——短窗口里 20 个刻度又会挤回密齿，所以上限按「70% 高度 ÷ 18px 节距」算。
+    expect(source).toMatch(/RAIL_MAX_TICKS = 20/);
+    expect(source).toMatch(/function railTickCapFor\(height: number\): number/);
+    expect(source).toMatch(/Math\.min\(RAIL_MAX_TICKS, Math\.floor\(\(height \* RAIL_TICK_SPAN\) \/ RAIL_TICK_PITCH\)\)/);
+    expect(source).toMatch(/const railTickCap = railTickCapFor\(railPanelHeight\)/);
     expect(source).not.toContain('RAIL_MAX_SEGMENTS');
     // 紧凑档整条轨线都不画（刻度条没有落点），也没有替代入口：手机上不需要跳转控件。
     expect(source).toMatch(/!compact && displayMode === 'wide' && railSegments\.length > 1/);

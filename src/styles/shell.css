@@ -2364,7 +2364,14 @@ body::-webkit-scrollbar,
   /* 这条分隔线是「顶部工具条之下、列表之上」的那一根。它原本只是这一层的上边框，
      而这一层住在 `.library-shell-list` 的 16px 左右内边距里 —— 线于是跟着盒子一起
      左右各内缩 16px，用户看到的就是「分割线左右两侧有空隙」。把盒子向两侧各拉出
-     一个间距、再用同宽的内边距把两块面板推回原位，线就落到整列的边缘而内容不动。 */
+     一个间距、再用同宽的内边距把两块面板推回原位，线就落到整列的边缘而内容不动
+     （`.local-archives-list` 用的就是同一套，那页一直是对的）。
+     `width: auto !important` 是这套写法的前提：react-resizable-panels 在 Group 上
+     写了行内 `width: 100%`，全局 `box-sizing: border-box`（base.css）之下它量的是
+     包含块宽 W−32，负外边距只能把整条框向左挪 16px ⇒ 右端反而比窗口右缘短 32px，
+     列表右缘离窗口 52px、左边却是 20px（用户「档案、历史、收藏、待看右侧有一段
+     强制空白」的来源）。auto 交给「外边距盒填满包含块」的规则算，负外边距才有用。 */
+  width: auto !important;
   margin-inline: calc(-1 * var(--space-4));
   padding-inline: var(--space-4);
   border-top: 1px solid var(--hairline);
@@ -2430,17 +2437,21 @@ body::-webkit-scrollbar,
    day (per month once the history is longer than the strip can hold as separate
    targets), the tick being read filled in. The strip hangs on the panel above
    instead of inside the scroller, so it stays centred on the visible list and
-   never drifts with the scroll. Ticks sit a fixed 11px apart — the height of the
-   hit area below — rather than "N ticks spread over 48vh", which stretched a
-   two-tick history over half the screen; the strip still stops at 70% of the
-   panel so a long history cannot run off it. */
+   never drifts with the scroll. Ticks sit a fixed 18px apart — the height of the
+   row whose hit area the tick fills — rather than "N ticks spread over 48vh",
+   which stretched a two-tick history over half the screen. The rows are a
+   definite length rather than `1fr`: with `1fr` a long history was squeezed into
+   whatever `70%` allowed and the pitch collapsed (a 5px ladder of 3px ticks —
+   the user's "太密了根本用不了"). How many ticks there are is decided in the
+   component from the measured panel height, so the strip still stops at 70% of
+   the panel and a long history cannot run off it. */
 .archive-quick-rail { position: absolute; top: 50%; right: 4px; z-index: var(--z-raised); width: 20px; transform: translateY(-50%); pointer-events: none; }
-.archive-quick-rail-track { --rail-pitch: 11px; display: grid; grid-auto-rows: 1fr; width: 20px; height: min(calc(var(--rail-pitch) * var(--rail-ticks, 1)), 70%); }
+.archive-quick-rail-track { --rail-pitch: 18px; display: grid; grid-auto-rows: var(--rail-pitch); width: 20px; }
 .archive-quick-rail-tick { position: relative; justify-self: end; align-self: center; width: 9px; height: 3px; padding: 0; border: 0; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--on-surface) 28%, transparent); cursor: pointer; pointer-events: auto; transition: width var(--motion-fast), background var(--motion-fast); }
 /* 刻度只有 9×3px，直接拿它当悬停靶太细（指针差一像素就落空）。用一层看不见的
-   伪元素把可点/可悬停的范围撑到 29×11px——相邻刻度只隔 11px，所以竖向只敢各让
-   4px，免得和邻格抢。 */
-.archive-quick-rail-tick::before { content: ''; position: absolute; inset: -4px -10px; }
+   伪元素把可点/可悬停的范围撑到 25×17px——一格 18px，所以竖向各让 7px 就满格了，
+   正好把整行都用上，相邻刻度之间不留缝也不重叠。 */
+.archive-quick-rail-tick::before { content: ''; position: absolute; inset: -7px -8px; }
 /* 悬停/聚焦时在刻度左边浮一枚小标签，写着这个刻度会把你送到哪一天哪个时间——
    原生 `title` 要等一秒、触摸设备上根本没有，这是「快速看到目标跳转时间」的答案。
    `pointer-events: none`：它是提示，不该挡住它左边列表里的卡片。 */
@@ -3971,13 +3982,23 @@ body::-webkit-scrollbar,
 }
 
 /* Rails are their own surface. Sitting flush on the canvas with nothing but a
-   heading, they ran into each other and into the page below. */.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
-.archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+   heading, they ran into each other and into the page below.
+   左右不留内边距（竖直那 16px 保留）：卡片区域本来在这条轨道里再内缩 16px，加上
+   `1px` 边框一共离窗口 33px，而档案库的网格是 28px、宽行是 20px、工具条是 16px，
+   同一个页面里几排卡片的起始位置就对不上（用户：「卡片区域两侧的空隙与其他组件
+   不一致」）。收成 0 之后卡片区域落在 17px 上。标题仍旧缩 8px，免得文字贴住边框。 */
+.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4) 0; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+.archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding-inline: var(--space-2); }
 .archive-rail-heading h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); }
 /* One icon per rail, in the accent the heading already carries. */.archive-rail-heading h2 svg { width: 20px; height: 20px; color: var(--primary); }
 /* 6px of padding, not 2: the global :focus-visible ring extends outside the card
    and a horizontal scroll container clips anything past its padding box, so a
-   keyboard-focused rail card had its ring sliced off. */.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
+   keyboard-focused rail card had its ring sliced off.
+   `safe center`：卡片装得下时左右空档相等（档案库缩略网格也是居中的），装不下时
+   `safe` 回落到起始对齐，第一张仍旧从左边开始、还能横着滚（居中的话它会够不到）。
+   左对齐时左边固定 6px、右边是「容器宽减掉卡片」的一大条，列宽一变两边就只变一边
+   ——用户看到的「打开详情页时那两侧空隙会变」。 */
+.archive-rail-grid { display: flex; align-items: flex-start; justify-content: safe center; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 

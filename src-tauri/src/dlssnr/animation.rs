@@ -32,9 +32,18 @@ use crate::inference::cancel::CancelToken;
 
 /// 一次动画处理接受的**总像素**（画布像素 × 帧数）上限。
 ///
-/// 按的是「解出来的 RGBA 与中间产物能撑多大」：40MP 一帧 4K 是 33MB RGBA，一段
-/// 40MP 的动画在 8 帧 4K 上下。超过就原样交回，不进 DLSSNR。
-pub const ANIMATION_PIXEL_BUDGET: u64 = 40_000_000;
+/// 按的是「这一次要花多少时间、产出多少字节」，**不是**「帧集合占多少内存」——这条
+/// 路是逐帧流式的：一帧进来、处理完、编进 APNG 就丢，驻留的是编码产物本身。
+///
+/// 实测（720×720、用户设置里的三层、社区 DLL）：首帧 1.23s 建 feature，之后
+/// 12ms/帧；一帧 720×720 编成 APNG 约 317KB（0.61 字节/像素）。于是 128MP 的最坏
+/// 情况是 240 帧 ≈ 4s、约 78MB 产物，而 720p 那一档真正卡住的应该是**帧数**上限
+/// （720×720×240 = 124,416,000 正好落在预算内），4K 一档则是 15 帧。
+///
+/// 旧值 40MP 是按「一帧 4K 的 RGBA 有 33MB」估的：那个理由把流式实现当成了攒帧实
+/// 现，结果 720×720 的 128 帧动图（66,355,200 像素）被判出界、原图静默交回，看上去
+/// 就像「开了 DLSSNR 但完全没生效」。
+pub const ANIMATION_PIXEL_BUDGET: u64 = 128_000_000;
 /// 一次动画处理接受的帧数上限。再长就不是「翻到的那张图」而是一段片子了。
 pub const ANIMATION_FRAME_LIMIT: u32 = 240;
 
@@ -157,6 +166,42 @@ fn frame_delay(frame: &image::Frame) -> u16 {
     millis.min(u64::from(u16::MAX)) as u16
 }
 
+/// 这一份字节该不该动手。
+///
+/// 拆出来是因为它有**两个**消费者：`transcode` 拿它当门，`apply_dlssnr` 拿它解释
+/// 「为什么跳过了」。两处各自重写一遍判断迟早会分叉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnimationVerdict {
+    /// 动手。
+    Process,
+    /// 容器读不懂，或者根本不是动图。
+    NotAnAnimation,
+    /// 画布小于 DLSSNR 自己的下限。
+    TooSmall,
+    /// 帧数超上限。
+    TooManyFrames,
+    /// 总像素超预算。
+    OverBudget,
+}
+
+/// 只读容器头就能给出的判断（一道门都不碰像素）。
+fn decide(bytes: &[u8], limits: AnimationLimits) -> AnimationVerdict {
+    let Some(shape) = shape(bytes).filter(|shape| shape.frames >= 2) else {
+        return AnimationVerdict::NotAnAnimation;
+    };
+    if shape.width < MIN_EDGE || shape.height < MIN_EDGE {
+        return AnimationVerdict::TooSmall;
+    }
+    if shape.frames > limits.frames {
+        return AnimationVerdict::TooManyFrames;
+    }
+    let pixels = u64::from(shape.width) * u64::from(shape.height) * u64::from(shape.frames);
+    if pixels > limits.pixels {
+        return AnimationVerdict::OverBudget;
+    }
+    AnimationVerdict::Process
+}
+
 /// 逐帧过一遍 `process`，编回 APNG。
 ///
 /// 返回 `Ok(None)` 表示**这一份不该处理，原样交回**：容器读不懂、不是动图、画布
@@ -175,20 +220,14 @@ pub fn transcode<F>(
 where
     F: FnMut(Vec<u8>, u32, u32) -> Result<Vec<u8>, String>,
 {
-    let shape = match shape(bytes) {
-        Some(shape) if shape.frames >= 2 => shape,
-        _ => return Ok(None),
+    if decide(bytes, limits) != AnimationVerdict::Process {
+        return Ok(None);
+    }
+    // 再读一次头：两处读的都是容器头（WebP 也只是建个 decoder），换来的是「门只
+    // 有一个地方定义」。
+    let Some(shape) = shape(bytes) else {
+        return Ok(None);
     };
-    if shape.width < MIN_EDGE || shape.height < MIN_EDGE {
-        return Ok(None);
-    }
-    if shape.frames > limits.frames {
-        return Ok(None);
-    }
-    let pixels = u64::from(shape.width) * u64::from(shape.height) * u64::from(shape.frames);
-    if pixels > limits.pixels {
-        return Ok(None);
-    }
 
     let (mut frames, plays) = frames_of(bytes)?;
     let mut encoded = Vec::new();
@@ -264,18 +303,75 @@ pub fn apply_dlssnr(
     settings: &DlssnrSettings,
     cancel: &CancelToken,
 ) -> Result<Option<Vec<u8>>, String> {
-    transcode(
-        bytes,
-        AnimationLimits::default(),
-        cancel,
-        |rgba, width, height| {
-            let image = super::filter::DlssnrImage::new(width, height, rgba)?;
-            // 逐帧走 `apply_with_token`（而不是 `dlssnr::apply_rgba`）：那段动画有
-            // 几十上百帧，切页之后要能在帧与帧之间立刻停。
-            super::filter::apply_with_token(data_dir, &image, settings, cancel)
-                .map(|out| out.rgba)
-        },
-    )
+    let limits = AnimationLimits::default();
+    // 被上限挡下来的两种情形要留一笔。调用方把原图当**成功**交回是刻意的（原图本
+    // 来就能看），代价是这个跳过在界面上与「处理过了」长得一模一样：用户翻到一页动
+    // 图，开着 DLSSNR，看到的还是原图，界面上没有任何一处说得出为什么。第一次发现
+    // 这件事是从缓存里把原文件翻出来数帧数——不该再有第二次。
+    //
+    // 该记哪几类、不该记哪几类见 `skip_note`。
+    if let Some((message, detail)) = skip_note(decide(bytes, limits), limits) {
+        note_skip(data_dir, message, &detail, bytes);
+    }
+    transcode(bytes, limits, cancel, |rgba, width, height| {
+        let image = super::filter::DlssnrImage::new(width, height, rgba)?;
+        // 逐帧走 `apply_with_token`（而不是 `dlssnr::apply_rgba`）：那段动画有
+        // 几十上百帧，切页之后要能在帧与帧之间立刻停。
+        super::filter::apply_with_token(data_dir, &image, settings, cancel).map(|out| out.rgba)
+    })
+}
+
+/// 这一份动图该不该在错误日志里留一笔，留的话写什么。
+///
+/// 只有**因为限额**被挡下来的两类值得记：`TooSmall`（每页都有的小图标）与
+/// `NotAnAnimation`（静图）在漫画库里满地都是，记了只会把日志淹掉，而「原样交回」
+/// 对它们本来就是正确答案，不是意外。反过来，被帧数/像素上限挡下来的动图**本该**
+/// 能处理，用户看到的却和「处理过了」一模一样，所以必须有个地方说得出为什么。
+///
+/// 抽成纯函数是为了能不碰 GPU 就守住「只记这两类」——真去 `apply_dlssnr` 一份能处理
+/// 的动图会把这个进程的 DLSSNR 上下文初始化到测试的临时目录上，而 feature 是进程级
+/// 的、只能对着一个数据目录初始化一次。
+fn skip_note(verdict: AnimationVerdict, limits: AnimationLimits) -> Option<(&'static str, String)> {
+    match verdict {
+        AnimationVerdict::TooManyFrames => Some((
+            "动图帧数超出上限，本页保持原图",
+            format!("frames_limit={}", limits.frames),
+        )),
+        AnimationVerdict::OverBudget => Some((
+            "动图总像素超出预算，本页保持原图",
+            format!("pixel_budget={}", limits.pixels),
+        )),
+        AnimationVerdict::Process
+        | AnimationVerdict::NotAnAnimation
+        | AnimationVerdict::TooSmall => None,
+    }
+}
+
+/// 把「这一页为什么没处理」写进错误日志（`<data>/logs/error.log`，界面里那个错误日
+/// 志面板读的就是它）。
+///
+/// 只记形状与上限，不记图片内容：日志是给用户自己查的，不是给我们收集素材的。日志
+/// 写不上不算失败——这一页照样原样交回，屏幕上不会因此少一张图。
+fn note_skip(data_dir: &Path, message: &str, detail: &str, bytes: &[u8]) {
+    let described = match shape(bytes) {
+        Some(shape) => format!(
+            "{} 帧 {}×{}（{} 像素）",
+            shape.frames,
+            shape.width,
+            shape.height,
+            u64::from(shape.width) * u64::from(shape.height) * u64::from(shape.frames)
+        ),
+        None => "容器头里读不出帧数".to_string(),
+    };
+    if let Err(error) = crate::error_log::record_at_data_dir(
+        data_dir,
+        "warn",
+        "dlssnr/animation",
+        &format!("{message}：{described}"),
+        Some(detail),
+    ) {
+        eprintln!("yomika: 动图跳过的原因没能写进错误日志：{error}");
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +489,15 @@ mod tests {
         encoder.encode_frames(built).expect("GIF 帧应当写得下去");
         drop(encoder);
         out
+    }
+
+    /// 把夹具 GIF 的**逻辑屏幕尺寸**改大。`shape()` 只读固定头部那 4 个字节，所以不
+    /// 用真造上百 MB 像素就能把「超预算」那道门推开。
+    fn gif_with_patched_canvas(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = GIF.to_vec();
+        bytes[6..8].copy_from_slice(&width.to_le_bytes());
+        bytes[8..10].copy_from_slice(&height.to_le_bytes());
+        bytes
     }
 
     /// 手写一份 APNG。`declared` 是写进 acTL 的帧数、`written` 是真正写出去的帧数：
@@ -533,6 +638,78 @@ mod tests {
         assert_eq!(calls, 0, "超预算不该解出一帧来");
     }
 
+    /// 用户实测那份动图就长这样：720×720、128 帧。40MP 那一版预算把它判出界，
+    /// `transcode` 返回 `Ok(None)`、命令把原图当成功交回——界面上就是「开了 DLSSNR
+    /// 但对这张动图完全没生效」。
+    #[test]
+    fn the_default_budget_covers_a_720p_animation_of_128_frames() {
+        let limits = AnimationLimits::default();
+        let pixels = 720u64 * 720 * 128;
+        assert!(
+            pixels <= limits.pixels,
+            "720×720 的 128 帧是 {pixels} 像素，预算只有 {}：这一档必须落在里面",
+            limits.pixels
+        );
+        // 720p 那一档真正卡住的应当是**帧数**上限，不是像素预算。否则同尺寸的动图
+        // 会「128 帧能跑、240 帧悄悄跳过」，用户无从预期哪一张会生效。
+        assert!(
+            720u64 * 720 * u64::from(limits.frames) <= limits.pixels,
+            "帧数上限 {} 也得落在像素预算 {} 之内",
+            limits.frames,
+            limits.pixels
+        );
+    }
+
+    /// 被上限挡下来的动图要留一笔：调用方把原图当**成功**交回是刻意的（原图本来
+    /// 就能看），代价是这个跳过在界面上与「处理过了」长得一模一样。
+    #[test]
+    fn an_animation_over_the_pixel_budget_leaves_a_note_in_the_error_log() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = gif_with_patched_canvas(60_000, 60_000);
+        let out = apply_dlssnr(
+            dir.path(),
+            &source,
+            &DlssnrSettings::default(),
+            &CancelToken::none(),
+        )
+        .expect("超预算不是错误");
+        assert_eq!(out, None, "超预算应当原样交回");
+
+        let log = std::fs::read_to_string(dir.path().join("logs").join("error.log"))
+            .expect("跳过要写进错误日志");
+        assert!(log.contains("总像素"), "日志要说清是被像素预算挡下的：{log}");
+        assert!(
+            log.contains("60000×60000"),
+            "日志要带上画布与帧数，否则查不下去：{log}"
+        );
+    }
+
+    /// 能处理的动图不该往日志里写东西——否则漫画库里那几百页正常动图会把日志淹掉。
+    ///
+    /// 不跑 GPU：这条守的是**记不记**，不是处理得对不对。真拿一份能处理的动图去
+    /// `apply_dlssnr`，会把这个进程的 DLSSNR 上下文初始化到临时数据目录上，而 feature
+    /// 是进程级的、只能对着一个数据目录初始化一次——`dlssnr::tests` 里那几条查计数的
+    /// 用例随后就会因为「换过数据目录」而失败（实测过）。
+    #[test]
+    fn a_processable_animation_is_not_worth_a_note() {
+        let limits = AnimationLimits::default();
+        assert_eq!(
+            decide(GIF, limits),
+            AnimationVerdict::Process,
+            "夹具本身得是能处理的那一类，否则这条守了个寂寞"
+        );
+        assert!(
+            skip_note(AnimationVerdict::Process, limits).is_none(),
+            "预算之内的动图不该出现在错误日志里"
+        );
+        // 另外两类直出也是满地都是的小东西，同样不许记。
+        assert!(skip_note(AnimationVerdict::TooSmall, limits).is_none());
+        assert!(skip_note(AnimationVerdict::NotAnAnimation, limits).is_none());
+        // 而被限额挡下来的两类必须记，否则用户没有任何地方能看出「为什么没生效」。
+        assert!(skip_note(AnimationVerdict::TooManyFrames, limits).is_some());
+        assert!(skip_note(AnimationVerdict::OverBudget, limits).is_some());
+    }
+
     #[test]
     fn hands_the_bytes_back_when_there_are_too_many_frames() {
         let limits = AnimationLimits {
@@ -598,4 +775,5 @@ mod tests {
         assert_eq!(error, crate::dlssnr::filter::CANCELLED);
         assert_eq!(seen, 1, "取消之后不该再跑第二帧");
     }
+
 }
