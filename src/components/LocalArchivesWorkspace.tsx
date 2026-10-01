@@ -1,12 +1,13 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowLeft, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
+import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
@@ -16,6 +17,7 @@ import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { longPressHandlers } from '../lib/longPressMenu';
 import type { LocalArchiveRecord, TaskRecord } from '../domain/library';
 import { CARD_TAG_LIMIT_WIDE, archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatByteSize } from '../lib/archiveCardPresentation';
 import { ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
@@ -104,13 +106,14 @@ function DownloadRow({ task, pending, onControl }: {
   );
 }
 
-function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onToggle }: {
+function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onToggle, onMenu }: {
   archive: LocalArchiveRecord;
   selectionMode: boolean;
   selected: boolean;
   active: boolean;
   onOpen: (archive: LocalArchiveRecord) => void;
   onToggle: (path: string) => void;
+  onMenu: (archive: LocalArchiveRecord, at: { x: number; y: number }) => void;
 }) {
   const category = archiveCategoryLabel(archive) || archiveLanguageLabel(archive);
   return (
@@ -121,6 +124,14 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
         ? { role: 'checkbox', 'aria-checked': selected, 'aria-label': `选择 ${archive.title}` }
         : { 'aria-pressed': active })}
       onClick={() => { if (selectionMode) onToggle(archive.path); else onOpen(archive); }}
+      // 右键（桌面的读法）和长按（触屏的读法，长按抬手那一下的 click 由
+      // longPressHandlers 自己吃掉）走同一个菜单，和档案库卡片一样。
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onMenu(archive, { x: event.clientX, y: event.clientY });
+      }}
+      {...longPressHandlers((at) => onMenu(archive, at))}
     >
       {archive.scopeId && archive.serverId && archive.archiveId
         ? <ArchiveThumbMedia scopeId={archive.scopeId} serverId={archive.serverId} archiveId={archive.archiveId} />
@@ -157,9 +168,12 @@ export function LocalArchivesWorkspace() {
   const [query, setQuery] = useState('');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  /** 待确认的删除对象：多选栏给一批，右键/详情页给一份。留成路径而不是布尔，
+   * 右键删的那一份才不会顺手动到多选的勾选。 */
+  const [deletePaths, setDeletePaths] = useState<readonly string[]>();
+  const [menuTarget, setMenuTarget] = useState<LocalArchiveContextMenuTarget>();
   // 返回手势先关确认框（忙的时候拒绝，守卫会自己补回去）。
-  useOverlayBackGuard(confirmingDelete, () => { if (!busy) setConfirmingDelete(false); });
+  useOverlayBackGuard(deletePaths !== undefined, () => { if (!busy) setDeletePaths(undefined); });
   const [busy, setBusy] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string>();
   const [presetDialog, setPresetDialog] = useState<{ preset?: SearchPreset } | undefined>();
@@ -247,16 +261,15 @@ export function LocalArchivesWorkspace() {
     return next;
   });
 
-  async function removeSelected() {
-    const paths = [...selected];
+  async function remove(paths: readonly string[]) {
     if (paths.length === 0 || busy) return;
     setBusy(true);
     try {
-      const result = await repository.deleteLocalArchives(paths);
+      const result = await repository.deleteLocalArchives([...paths]);
       if (!result.ok) { showToast(result.error.message, 'error'); return; }
       showToast(`已从本地删除 ${result.value} 个档案`, 'success');
       setSelected(new Set());
-      setConfirmingDelete(false);
+      setDeletePaths(undefined);
       if (openPath && paths.includes(openPath)) closeDetail();
       await loadArchives();
     } finally {
@@ -367,7 +380,7 @@ export function LocalArchivesWorkspace() {
           <button className="secondary-action is-icon" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
             <SquareCheckBig aria-hidden="true" />
           </button>
-          <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setConfirmingDelete(true)}>
+          <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setDeletePaths([...selected])}>
             <Trash2 aria-hidden="true" />
           </button>
           <button className="secondary-action is-icon archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
@@ -411,6 +424,7 @@ export function LocalArchivesWorkspace() {
                         active={openPath === row.archive.path}
                         onOpen={openArchive}
                         onToggle={toggleOne}
+                        onMenu={(archive, at) => setMenuTarget({ path: archive.path, title: archive.title, ...at })}
                       />
                     )}
                 </div>
@@ -446,18 +460,29 @@ export function LocalArchivesWorkspace() {
           });
         }}
       />
-      {confirmingDelete && (
-        <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) setConfirmingDelete(false); }}>
+      {/* 右键/长按档案卡片、或详情页右上角的「更多操作」：菜单挂在同一棵树里，
+          位置由指针/按钮坐标给。 */}
+      <LocalArchiveContextMenu
+        target={menuTarget}
+        onClose={() => setMenuTarget(undefined)}
+        onOpen={(target) => {
+          const archive = archives.find((item) => item.path === target.path);
+          if (archive) openArchive(archive);
+        }}
+        onDelete={(target) => setDeletePaths([target.path])}
+      />
+      {deletePaths && (
+        <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) setDeletePaths(undefined); }}>
           <Dialog.Portal>
             <Dialog.Overlay className="dialog-overlay" />
             <Dialog.Content className="dialog-content local-delete-dialog">
               <Dialog.Title>删除本地档案</Dialog.Title>
               <Dialog.Description>
-                将从磁盘删除选中的 {selected.size} 个文件，服务器上的档案不受影响。此操作不可撤销。
+                将从磁盘删除{deletePaths.length > 1 ? `选中的 ${deletePaths.length} 个文件` : '这个本地文件'}，服务器上的档案不受影响。此操作不可撤销。
               </Dialog.Description>
               <div className="dialog-actions">
-                <button className="secondary-action" type="button" disabled={busy} onClick={() => setConfirmingDelete(false)}><X aria-hidden="true" />取消</button>
-                <button className="primary-action" type="button" disabled={busy} onClick={() => void removeSelected()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
+                <button className="secondary-action" type="button" disabled={busy} onClick={() => setDeletePaths(undefined)}><X aria-hidden="true" />取消</button>
+                <button className="primary-action" type="button" disabled={busy} onClick={() => void remove(deletePaths)}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
               </div>
             </Dialog.Content>
           </Dialog.Portal>
@@ -487,7 +512,8 @@ export function LocalArchivesWorkspace() {
           <LocalArchiveDetail
             archive={detail}
             onClose={closeDetail}
-            onDelete={() => { setSelected(new Set([detail.path])); setConfirmingDelete(true); }}
+            onDelete={() => setDeletePaths([detail.path])}
+            onMenu={(at) => setMenuTarget({ path: detail.path, title: detail.title, ...at })}
             onSelectTag={(query) => { setDraft(query); setQuery(query); }}
           />
         </section>
@@ -501,10 +527,11 @@ export function LocalArchivesWorkspace() {
  * 分组的标签墙，事实的顺序也和档案详情页一致（页数/体积/分类/时间）。差别只有
  * 内容：这一页说的是磁盘上的事（大小、下载时间），阅读走下载来源那台服务器，
  * 动作只有资源管理器定位（Windows）和本地删除。 */
-function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
+function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }: {
   archive: LocalArchiveRecord;
   onClose: () => void;
   onDelete: () => void;
+  onMenu: (at: { x: number; y: number }) => void;
   onSelectTag: (query: string) => void;
 }) {
   const { showToast } = useToast();
@@ -539,6 +566,18 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onSelectTag }: {
       <header className="archive-detail-route-header">
         <button type="button" className="reader-icon-button" aria-label="返回列表" title="返回" onClick={onClose}><ArrowLeft aria-hidden="true" /></button>
         <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>
+        {/* 和档案详情页的头部同形：返回钮在左、标题占中、图标钮贴右。 */}
+        <button
+          type="button"
+          className="reader-icon-button"
+          aria-label="更多操作"
+          aria-haspopup="menu"
+          title="更多操作"
+          onClick={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            onMenu({ x: bounds.right, y: bounds.bottom });
+          }}
+        ><MoreVertical aria-hidden="true" /></button>
       </header>
       <div className="archive-detail-overview">
         <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} />

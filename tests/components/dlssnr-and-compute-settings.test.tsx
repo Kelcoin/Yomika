@@ -270,6 +270,40 @@ describe('DLSS5 settings group', () => {
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '保存' }));
     expect(screen.getByRole('dialog', { name: 'DLSSNR 层数' })).toBeInTheDocument();
   });
+
+  it('names a layer once: the menu title, not a repeated sub-heading inside the editor', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    const layerList = await screen.findByRole('dialog', { name: 'DLSSNR 层数' });
+    await user.click(within(layerList).getByRole('button', { name: '第 1 层' }));
+
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+    // 标题已经写着「第 1 层」，内容区顶上再来一行同名小标题就是同一句话说两遍。
+    expect(within(editor).queryByText(/第 1 层/, { selector: '.settings-subgroup-title' })).toBeNull();
+    expect(document.querySelector('.settings-subgroup-title')).toBeNull();
+    expect(within(editor).getAllByText(/第 1 层/)).toHaveLength(1);
+    // 分组本体留着：标题没了，这一组仍然要按名字念得出来。
+    expect(within(editor).getByRole('group', { name: '第 1 层' })).toBeInTheDocument();
+  });
+
+  it('draws an icon in each layer editor action button', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+    // 图标对无障碍名没有影响（aria-hidden），念出来的还是「保存」「删除」。
+    expect(within(editor).getByRole('button', { name: '保存' }).querySelector('svg')).not.toBeNull();
+    expect(within(editor).getByRole('button', { name: '删除' }).querySelector('svg')).not.toBeNull();
+  });
 });
 
 describe('compute center settings group', () => {
@@ -432,7 +466,9 @@ describe('compute center settings group', () => {
     const pairDialog = await screen.findByRole('dialog', { name: '添加设备' });
     await user.type(within(pairDialog).getByLabelText('设备地址'), '192.168.1.9:47653');
     await user.click(within(pairDialog).getByRole('button', { name: /^配对$/ }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_request', { url: '192.168.1.9:47653' }));
+    // 配对请求还会带上这台设备自报的名字与类型（Tauri 对缺失的参数键也会报错，
+    // 所以仓库层永远显式送这两个键，未识别时是 null）。
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_request', expect.objectContaining({ url: '192.168.1.9:47653' })));
     await user.type(within(pairDialog).getByLabelText('配对码'), '123456');
     await user.click(within(pairDialog).getByRole('button', { name: '完成配对' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_pair_confirm', { url: '192.168.1.9:47653', requestId: 'request-1', code: '123456' }));

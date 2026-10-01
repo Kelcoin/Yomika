@@ -242,6 +242,45 @@ describe('application shell', () => {
     expect(within(rail).getByRole('link', { name: /档案h11/ })).toBeInTheDocument();
   });
 
+  it('caps each home rail at twenty archives', async () => {
+    // 用户要求首页两排各有上限（`HOME_RAIL_LIMIT = 20`）。历史页面与待看页面仍然列全量：
+    // 上限是首页那一排的展示口，不是数据口径。这一排从前不截断、待看写死八条。
+    const history = Array.from({ length: 24 }, (_, index) => ({
+      scopeId: 'scope-a', archiveId: `h${index}`, pageIndex: 1, visitedAt: `2026-09-${String(24 - index).padStart(2, '0')}T00:00:00Z`, deviceId: 'device-a', revision: 1,
+    }));
+    const readingList = Array.from({ length: 24 }, (_, index) => ({
+      scopeId: 'scope-a', archiveId: `w${index}`, addedAt: `2026-09-${String(24 - index).padStart(2, '0')}T00:00:00Z`, updatedAt: '2026-09-01T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false,
+    }));
+    const archives = [...history.map((item) => item.archiveId), ...readingList.map((item) => item.archiveId)]
+      .map((archiveId) => ({ serverId: 'scope-a', archiveId, title: `档案${archiveId}`, pageCount: 12, updatedAt: '2026-09-01T00:00:00Z' }));
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'list_reading_history') return { ok: true, value: history };
+      if (command === 'list_watchlist') return { ok: true, value: [] };
+      if (command === 'list_reading_list') return { ok: true, value: readingList };
+      if (command === 'list_archives_by_ids') {
+        const ids = (args as { archiveIds?: string[] } | undefined)?.archiveIds ?? [];
+        return { ok: true, value: archives.filter((item) => ids.includes(item.archiveId)) };
+      }
+      if (command === 'search_random_archives') return { ok: true, value: [] };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderAt();
+
+    const continueRail = await screen.findByRole('region', { name: '继续阅读' });
+    await waitFor(() => expect(within(continueRail).getAllByRole('link')).toHaveLength(20));
+    // 第 21 条（最旧的几条）被上限挡在门外——那是上限的意思，不是「没读到」。
+    expect(within(continueRail).getByRole('link', { name: /档案h19/ })).toBeInTheDocument();
+    expect(within(continueRail).queryByRole('link', { name: /档案h20/ })).toBeNull();
+
+    const toReadRail = await screen.findByRole('region', { name: '待看档案' });
+    await waitFor(() => expect(within(toReadRail).getAllByRole('link')).toHaveLength(20));
+  });
+
   it('answers a right click on a home rail card', async () => {
     // The library list was the only surface wired to the menu, which read as the
     // app not having one at all: the rails, the recommendation rail and the

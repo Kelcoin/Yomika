@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Download, ImageUpscale, Layers, Loader2, Plus, Scan, Sparkles } from 'lucide-react';
+import { Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
@@ -237,8 +237,9 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         const index = selectedLayer;
         const pass = draftPass;
         return <>
+        {/* 组里不再重复写「第 N 层」：菜单标题已经写着它，这里再来一行等于同一句话说两遍。
+            分组本身留着——那道分界线和 aria-label 是这一组参数的边界。 */}
         <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`}>
-          <p className="settings-subgroup-title">第 {index + 1} 层{index === 0 ? '（起点）' : ''}</p>
           <SettingsChoice
             icon={<ImageUpscale />}
             label="风格"
@@ -302,7 +303,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             checked={pass.uiCorrection}
             onToggle={() => updateDraftPass({ uiCorrection: !pass.uiCorrection })}
           />
-          <div className="settings-inline-actions"><button className="secondary-action" type="button" disabled={layerCount <= 1} onClick={deleteLayer}>删除</button><button className="primary-action" type="button" onClick={saveLayer}>保存</button></div>
+          <div className="settings-inline-actions"><button className="secondary-action" type="button" disabled={layerCount <= 1} onClick={deleteLayer}><Trash2 aria-hidden="true" />删除</button><button className="primary-action" type="button" onClick={saveLayer}><Save aria-hidden="true" />保存</button></div>
         </div></>;
       })()}
       </SettingsMenu>}

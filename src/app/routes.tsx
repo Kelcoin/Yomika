@@ -108,6 +108,11 @@ const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list:
  * re-resolve the shelves and draw a new random set. */
 const HOME_SNAPSHOT_FRESH_MS = 90_000;
 
+/** 首页「继续阅读」与「待看档案」两排的显示上限：一排横向书架摆满一屏之后，
+ * 剩下的既看不见也懒得翻；20 本够翻一会儿，又不至于让首屏挂上几百张卡片。
+ * 历史页、待看书架页与搜索仍然是全量，这里只收首页这两排的口。 */
+const HOME_RAIL_LIMIT = 20;
+
 interface HomeSnapshot {
   servers: Awaited<ReturnType<NativeLibraryRepository['listServers']>>;
   history: ReadingHistoryRecord[];
@@ -270,13 +275,14 @@ function HomeWorkspace() {
   });
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   /** 「继续阅读」的已读完开关：关闭时不把进度超过 95% 的记录放进这一排，其余照旧。
-   * 口径与历史页面共用（`historyShelfArchives`），而且**不截断**——这一排从前只取前六
-   * 条，用户看到的就是「历史页里明明有几十本没读完，首页只摆六本」。横向滚动本来就不
-   * 需要截断：封面是懒加载的（`ArchiveThumbMedia` 用共享 IntersectionObserver，480px
-   * rootMargin 之内才去取图），挂上去的只是一层轻量卡片。 */
+   * 口径与历史页面共用（`historyShelfArchives`），首页这一排只取前 `HOME_RAIL_LIMIT`
+   * 条——历史页仍然列全量，这里只是一屏书架的量。横向滚动本来就不用取太多：封面是
+   * 懒加载的（`ArchiveThumbMedia` 用共享 IntersectionObserver，480px rootMargin 之内
+   * 才去取图），挂上去的只是一层轻量卡片。 */
   const continueReading = useMemo(
     () => historyShelfArchives(history, archiveById, {
       hideFinished: !preferences.continueReadingShowFinished,
+      limit: HOME_RAIL_LIMIT,
     }),
     [archiveById, history, preferences.continueReadingShowFinished],
   );
@@ -284,7 +290,7 @@ function HomeWorkspace() {
    * 曾在首页与 /to-read 书架两边同时出现，语义上互相打架。收藏操作本身不受
    * 影响，档案详情页与右键菜单照常读写 watchlist。 */
   const toRead = useMemo(
-    () => readingList.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, 8),
+    () => readingList.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, HOME_RAIL_LIMIT),
     [archiveById, readingList],
   );
   const progressByArchiveId = useMemo(() => new Map(history.map((item) => [item.archiveId, item.pageIndex + 1])), [history]);
@@ -791,3 +797,5 @@ function ReaderRoute() {
   const { archiveId = '' } = useParams();
   return <ReaderRouteScreen archiveId={archiveId} />;
 }
+
+

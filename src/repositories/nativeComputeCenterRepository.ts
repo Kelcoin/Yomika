@@ -22,7 +22,9 @@ export const ComputeCenterStatusSchema = z.object({
   capabilities: z.array(ComputeCapabilitySchema),
   /** 保留的状态字段；允许先启动再安装模型。 */
   canStart: z.boolean(),
-  pairedClients: z.array(z.object({ id: z.string(), name: z.string(), address: z.string() })).default([]),
+  /** `kind` 是配对时对面报上来的设备类型（`phone` / `tablet` / `desktop`）；这一版之前
+   *  配的对没有这个字段，旧记录照样要能读——缺了就是「不知道」，界面画通用图标。 */
+  pairedClients: z.array(z.object({ id: z.string(), name: z.string(), address: z.string(), kind: z.string().nullish() })).default([]),
 });
 
 export type ComputeCenterStatus = z.output<typeof ComputeCenterStatusSchema>;
@@ -100,8 +102,14 @@ export class NativeComputeCenterRepository {
     return invokeCommand('compute_discover', {}, z.array(DiscoveredDeviceSchema));
   }
 
-  requestPair(url: string): Promise<CommandResult<z.output<typeof PairRequestSchema>>> {
-    return invokeCommand('compute_pair_request', { url }, PairRequestSchema);
+  /** 请求配对，顺带报上**这一台**是谁：`name` 是设备名、`kind` 是类型。
+   *
+   * 以前对面只能自己猜名字，而它猜的是后端 `host_name()`——Android 上没有
+   * `COMPUTERNAME`/`HOSTNAME`，于是每台手机在对面列表里都叫「Yomika」。两个键都要
+   * 发出去（Tauri 的 `Option<String>` 参数不允许缺键，缺了整条命令会被判「缺参数」），
+   * 空值一律发 `null`，Rust 侧收到 `None` 再自己兜底。 */
+  requestPair(url: string, name?: string, kind?: string): Promise<CommandResult<z.output<typeof PairRequestSchema>>> {
+    return invokeCommand('compute_pair_request', { url, name: name ?? null, kind: kind ?? null }, PairRequestSchema);
   }
 
   confirmPair(url: string, requestId: string, code: string): Promise<CommandResult<z.output<typeof PairResultSchema>>> {

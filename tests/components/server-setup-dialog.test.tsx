@@ -6,6 +6,13 @@ import { ServerSetupDialog } from '../../src/components/ServerSetupDialog';
 import { ToastProvider } from '../../src/components/Toast';
 import { ok } from '../../src/domain/result';
 
+const homeServer = {
+  name: 'Home',
+  baseUrl: 'https://example.com',
+  scopeId: 'scope_original',
+  enabled: true,
+};
+
 describe('server setup dialog', () => {
   it('does not submit when the API key is empty', async () => {
     const user = userEvent.setup();
@@ -78,17 +85,14 @@ describe('server setup dialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
-  it('closes on a click outside, with no ✕ or 取消 in the way', async () => {
+  it('closes on a click outside, with no ✕ in the title row', async () => {
     const user = userEvent.setup();
     render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} />);
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
     const dialog = await screen.findByRole('dialog');
 
-    // 关闭只有一条路：点空白处（Esc 仍在）。右上角的 ✕ 与左下角的取消曾是另外两条，
-    // 而它们一个在标题行里占一角、一个把动作行撑成两颗按钮——这个表单真正要做的事
-    // 只有「保存服务器」一件。
+    // 标题行里没有 ✕：退出与删除都放在动作行（取消 / 删除配置），标题行只留图标与文字。
     expect(within(dialog).queryByRole('button', { name: '关闭' })).toBeNull();
-    expect(within(dialog).queryByRole('button', { name: '取消' })).toBeNull();
 
     await user.click(document.querySelector('.dialog-overlay')!);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -111,5 +115,109 @@ describe('server setup dialog', () => {
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       identity: expect.objectContaining({ name: 'Home NAS', scopeId: 'scope_original' }),
     }));
+  });
+
+  it('offers 删除配置, 取消 and 保存服务器 on the edit dialog, and 取消 closes it', async () => {
+    const user = userEvent.setup();
+    render(
+      <ServerSetupDialog
+        onSave={async ({ identity }) => ok(identity)}
+        onDelete={async () => true}
+        server={homeServer}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    const dialog = await screen.findByRole('dialog');
+
+    // 三颗按钮等宽平分动作行。
+    expect(dialog.querySelector('.dialog-actions')).toHaveClass('is-balanced');
+    expect(within(dialog).getByRole('button', { name: '删除配置' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '保存服务器' })).toBeInTheDocument();
+
+    // 标题按规范：居中标题行，左侧 SVG 图标、右侧文字。
+    const title = within(dialog).getByText('更新 LANraragi');
+    expect(title).toHaveClass('dialog-title');
+    expect(title.querySelector('svg')).not.toBeNull();
+
+    await user.click(within(dialog).getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('does not offer 删除配置 on the add dialog', async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn(async () => true);
+    render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} onDelete={onDelete} />);
+
+    await user.click(screen.getByRole('button', { name: '添加服务器' }));
+    const dialog = await screen.findByRole('dialog');
+
+    // 还没有服务器可以被删：即使父层给了 onDelete，添加态也不显示删除配置。
+    expect(within(dialog).queryByRole('button', { name: '删除配置' })).toBeNull();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '保存服务器' })).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('confirms before deleting and closes the editor when the parent resolves true', async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn(async () => true);
+    render(
+      <ServerSetupDialog
+        onSave={async ({ identity }) => ok(identity)}
+        onDelete={onDelete}
+        server={homeServer}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    await user.click(await screen.findByRole('button', { name: '删除配置' }));
+
+    // 删除要先确认：点了删除配置只是打开确认框，还没有真的删。
+    expect(await screen.findByText('删除「Home」的配置？')).toBeInTheDocument();
+    // 档案馆藏与阅读记录留在本地，重新添加同一地址即可接回，确认文案要说清楚。
+    expect(screen.getByText(/重新添加同一地址/)).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByText('更新 LANraragi')).not.toBeInTheDocument());
+  });
+
+  it('keeps the editor open when the parent reports the delete failed', async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn(async () => false);
+    render(
+      <ServerSetupDialog
+        onSave={async ({ identity }) => ok(identity)}
+        onDelete={onDelete}
+        server={homeServer}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    await user.click(await screen.findByRole('button', { name: '删除配置' }));
+    await user.click(await screen.findByRole('button', { name: '删除' }));
+
+    await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1));
+    // 父层已经报过错；编辑器留着，用户可以改完再存或再删一次。
+    expect(await screen.findByLabelText('名称')).toHaveValue('Home');
+    expect(screen.queryByText('删除「Home」的配置？')).not.toBeInTheDocument();
+  });
+
+  it('puts the caret at the end of the name instead of selecting it whole', async () => {
+    const user = userEvent.setup();
+    render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} server={homeServer} />);
+
+    await user.click(screen.getByRole('button', { name: '编辑 Home' }));
+    const name = (await screen.findByLabelText('名称')) as HTMLInputElement;
+
+    // Radix 打开对话框时会聚焦第一个文本框并全选内容，编辑服务器时等于替用户选中了名字，
+    // 一敲键盘就把名字整段替换掉。光标应该落在末尾。
+    expect(document.activeElement).toBe(name);
+    expect(name.value).toBe('Home');
+    expect(name.selectionStart).toBe(name.value.length);
+    expect(name.selectionEnd).toBe(name.value.length);
   });
 });

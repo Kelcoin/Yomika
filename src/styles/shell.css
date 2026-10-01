@@ -1251,8 +1251,19 @@ body::-webkit-scrollbar,
   flex: 1 0 100%;
 }
 
+/* 选项文字按作者写的 `text-align: left` 排——但只写这一条是没用的：Chromium 给
+   `<button>` 的内容盒套了一层自己的居中布局（计算值 `justify-content: center`），
+   所以按钮里的子盒会缩成 fit-content 再居中。表现就是超分/去码模型那些短标签看着
+   居中、DLSSNR 变体那两行 strong/small 各自宽度不同、左右边对不齐（实测：按钮
+   `textAlign=left` 而 `justify=center`，标签 `offsetInBtn` 随文字宽度变化）。
+   把它显式拉回 flex-start，三类菜单才都是「左对齐、共享左边缘」的一套行。 */
 .settings-choice-option-main {
-  flex: 1 1 auto;
+  display: flex;
+  /* `basis: 0`：写成 `auto` 时按钮的主尺寸取长注释那一行的 max-content 宽，父层又是
+     `flex-wrap: wrap`，于是行尾的「已选择」会被挤到第二行、还贴在左边。 */
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: flex-start;
   min-width: 0;
   min-height: 44px;
   padding: 0 var(--space-3);
@@ -4742,6 +4753,14 @@ body::-webkit-scrollbar,
   line-height: var(--leading-relaxed);
 }
 
+/* 选项列表正好是最后一个子元素时，面板的下内边距和内容区自己的 2px 会叠成一段比
+   标题下面那 6px 大一截的空白（实测：标题底→第一项顶 5.8px，最后一项底→面板底
+   20.4px），看起来就是「底部空了一块」。把多出来的那层收回去，只在这一种形状下
+   生效；底下还有动作按钮的菜单（保存/取消那一排）保持原样，它们需要完整的内边距。 */
+.settings-menu-body > .settings-choice-list:last-child {
+  margin-bottom: calc(-1 * var(--space-4));
+}
+
 .settings-menu-strong {
   color: var(--on-surface);
   font-size: var(--text-lg);
@@ -5390,6 +5409,24 @@ body::-webkit-scrollbar,
   font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
 }
+/* 带图标的对话框标题：图标在文字左侧、整行居中（规范与二级菜单的
+   .settings-choice-title 同一条）。标题下面那条说明仍然左对齐，说的事更长。 */
+.dialog-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.dialog-title > svg { flex: none; width: 20px; height: 20px; color: var(--on-surface-variant); }
+/* 三个动作并排的对话框（删除配置 / 取消 / 保存）：等宽平分，谁也不比谁窄。 */
+.dialog-actions.is-balanced {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.dialog-actions.is-balanced > .primary-action,
+.dialog-actions.is-balanced > .secondary-action { justify-content: center; }
 /* The sync option reads as an MD3 switch list item: its own tonal row between
    the supporting text and the trailing actions, not a loose control floating
    beside them. */.archive-delete-dialog .preference-toggle {
@@ -5852,12 +5889,19 @@ body::-webkit-scrollbar,
   max-width: 40ch;
 }
 
+/* DLSSNR 层编辑页底部那一对「删除 / 保存」：等宽平分、图标+文字居中。以前是右对齐的
+   flex 换行，两个按钮各按自己文字宽站着，看着像随手摆的。只有这一处用它。 */
 .settings-inline-actions {
-  display: flex;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--space-3);
   align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: flex-end;
+}
+
+.settings-inline-actions > .primary-action,
+.settings-inline-actions > .secondary-action {
+  justify-content: center;
 }
 
 /* 令牌只露前 8 位：整串贴在这一行里会把其它控件挤出去，完整值放 title、
@@ -5906,35 +5950,46 @@ body::-webkit-scrollbar,
   text-align: center;
 }
 
-.settings-port-input { display: block; box-sizing: border-box; width: 100%; appearance: textfield; font-variant-numeric: tabular-nums; }
+/* 端口这类纯数字输入：数字居中、等宽，和配对码同一套读法（左对齐的 47653 看着像
+   没写完的一行字）。 */
+.settings-port-input { display: block; box-sizing: border-box; width: 100%; appearance: textfield; font-variant-numeric: tabular-nums; text-align: center; }
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
-/* 设备行：名字一行、地址一行。长地址不会再把名字挤变形，地址也不会被折成两行。 */
+/* 设备行：左边一枚设备类型的图标（手机 / 平板 / 桌面），右边名字一行、地址一行。
+   长地址不会再把名字挤变形，地址也不会被折成两行。 */
 .settings-device-option {
   display: grid;
-  gap: 2px;
-  align-content: center;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
   justify-items: start;
 }
+
+.settings-device-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+}
+
+.settings-device-icon svg { width: 17px; height: 17px; }
+
+.settings-device-copy { display: grid; gap: 2px; min-width: 0; }
 
 .settings-device-name { font-weight: var(--weight-semibold); }
 .settings-device-address { font-size: var(--text-sm); font-variant-numeric: tabular-nums; color: var(--on-surface-variant); }
 
-/* 一层 DLSSNR 是一小组：给个标题，参数才有「这是第几层」的归属感。 */
+/* 一层 DLSSNR 是一小组：给一段分界线，参数才有「这是第几层」的归属感。层名只说一次
+   ——菜单标题就是「第 N 层」，组里再写一行只是重复。 */
 .settings-subgroup {
   border-top: 1px solid var(--outline-variant, currentColor);
   padding-top: var(--space-2);
   display: flex;
   flex-direction: column;
-}
-
-.settings-subgroup-title {
-  margin: 0;
-  padding: 0 var(--space-2);
-  color: var(--on-surface-variant);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
 }
 
 /* 转圈的图标（正在检测 / 正在连接）。放在这里而不是各自的组件里：它只有

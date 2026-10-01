@@ -120,7 +120,7 @@ function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children 
     <>
       <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
       {open && (
-        <SettingsMenu title={ariaLabel ?? label} description={hint} icon={icon} onClose={close}>
+        <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={close}>
           {children}
         </SettingsMenu>
       )}
@@ -925,6 +925,18 @@ export function SettingsWorkspace() {
     return result;
   }
 
+  /** 删除一台服务器的配置。档案、进度与历史都挂在同一个 scope id 上，重新添加同一地址还能接上，所以后端只删配置本身。 */
+  async function deleteServer(server: ServerRecord): Promise<boolean> {
+    const result = await repository.deleteServer(server.id);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      return false;
+    }
+    setServers(result.value);
+    showToast(`已删除服务器 ${server.name} 的配置`, 'success');
+    return true;
+  }
+
   /** 切换启用的服务器。仓库层会失效书架与首页的路由缓存，面板上的行就地更新。 */
   async function enableServer(server: ServerRecord) {
     if (server.enabled) return;
@@ -1723,7 +1735,7 @@ export function SettingsWorkspace() {
                 )}
                 {servers.map((server) => (
                   <div className="settings-item server-row" key={server.id}>
-                    <ServerSetupDialog variant="row" onSave={saveServer} server={server} />
+                    <ServerSetupDialog variant="row" onSave={saveServer} server={server} onDelete={() => deleteServer(server)} />
                     {/* 一次只允许启用一台：首页、书架与档案库的数据源就是它
                         （当前标记跟在名字旁）。已启用的行不可再关（停用最后一
                         台会让应用没有数据源），所以只有未启用的行有启用按钮。 */}

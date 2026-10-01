@@ -83,6 +83,12 @@ pub struct PairedClient {
     pub id: String,
     pub name: String,
     pub address: String,
+    /// 发起配对那一端自报的设备类型（`phone` / `tablet` / `desktop`），只用来挑图标。
+    ///
+    /// `default`：这一版之前存下的 `compute-center-clients.json` 里没有这个键，读回来必须
+    /// 还是「好文件」，不能因为少一个装饰性字段就把整份配对列表丢掉。
+    #[serde(default)]
+    pub kind: Option<String>,
     token: String,
 }
 
@@ -118,12 +124,13 @@ struct PendingPair {
     code: String,
     peer: String,
     name: String,
+    kind: Option<String>,
     expires: std::time::Instant,
     attempts: u8,
 }
 
 impl PairingState {
-    fn begin(&self, peer: &str, name: &str) -> Result<(String, String), String> {
+    fn begin(&self, peer: &str, name: &str, kind: Option<String>) -> Result<(String, String), String> {
         let mut pending = self.pending.lock().map_err(|_| "配对状态不可用")?;
         if pending.as_ref().is_some_and(|item| item.expires > std::time::Instant::now()) {
             return Err("已有配对请求，请稍后重试".into());
@@ -137,6 +144,7 @@ impl PairingState {
             code: code.clone(),
             peer: peer.to_string(),
             name: name.chars().take(80).collect(),
+            kind,
             expires: std::time::Instant::now() + std::time::Duration::from_secs(90),
             attempts: 0,
         });
@@ -159,11 +167,12 @@ impl PairingState {
             return Err("配对码错误".into());
         }
         let name = item.name.clone();
+        let kind = item.kind.clone();
         *pending = None;
         let token = fresh_token();
         let mut clients = self.clients.lock().map_err(|_| "配对列表不可用")?;
         let mut next = clients.clone();
-        next.push(PairedClient { id: fresh_token(), name, address: peer.to_string(), token: token.clone() });
+        next.push(PairedClient { id: fresh_token(), name, address: peer.to_string(), kind, token: token.clone() });
         self.persist(&next)?;
         *clients = next;
         Ok(token)
@@ -776,7 +785,9 @@ async fn handle_connection(
         let peer = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_string();
         let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
         let name = payload.get("name").and_then(|value| value.as_str()).filter(|name| !name.trim().is_empty()).unwrap_or(&peer);
-        return match pairing.begin(&peer, name) {
+        // 对面自报的类型可以没有（旧客户端不发）：没有就由前端退回通用图标。
+        let kind = payload.get("kind").and_then(|value| value.as_str()).map(str::to_string);
+        return match pairing.begin(&peer, name, kind) {
             Ok((request_id, code)) => {
                 if let Some(app) = &context.app {
                     use tauri_plugin_dialog::DialogExt;
@@ -938,11 +949,19 @@ pub struct PairResult {
     pub name: String,
 }
 
-pub fn request_pairing(url: &str) -> Result<PairRequest, String> {
+/// 向对面报到：报上的是**这一台**设备的名字与类型，对面把它存进自己的配对列表，
+/// 用来在「管理已有配对」里认出是谁。
+///
+/// 名字为空时退回 `host_name()`——桌面端 UA 里没有机型，前端会刻意交空串，而
+/// `COMPUTERNAME` 正是那边最像名字的东西。
+pub fn request_pairing(url: &str, name: Option<String>, kind: Option<String>) -> Result<PairRequest, String> {
     let base = normalize_base(url)?;
     let response = blocking_client()?
         .post(format!("{base}/v2/pair/request"))
-        .json(&serde_json::json!({ "name": host_name() }))
+        .json(&serde_json::json!({
+            "name": name.filter(|value| !value.trim().is_empty()).unwrap_or_else(host_name),
+            "kind": kind,
+        }))
         .timeout(std::time::Duration::from_secs(8))
         .send().map_err(|error| format!("连不上 {base}：{error}"))?;
     let status = response.status();
@@ -1336,8 +1355,8 @@ pub async fn compute_discover() -> CommandResult<Vec<DiscoveredDevice>> {
 }
 
 #[tauri::command]
-pub async fn compute_pair_request(url: String) -> CommandResult<PairRequest> {
-    match tauri::async_runtime::spawn_blocking(move || request_pairing(&url)).await {
+pub async fn compute_pair_request(url: String, name: Option<String>, kind: Option<String>) -> CommandResult<PairRequest> {
+    match tauri::async_runtime::spawn_blocking(move || request_pairing(&url, name, kind)).await {
         Ok(Ok(result)) => CommandResult::success(result),
         Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
@@ -1473,7 +1492,7 @@ mod tests {
     #[test]
     fn pairing_codes_expire_and_cannot_be_replayed() {
         let pairing = PairingState::default();
-        let (request_id, code) = pairing.begin("127.0.0.1", "Phone").expect("start pairing");
+        let (request_id, code) = pairing.begin("127.0.0.1", "Phone", None).expect("start pairing");
         assert_ne!(request_id, code);
         assert!(pairing.confirm("127.0.0.1", &request_id, "invalid").is_err());
         assert!(pairing.confirm("127.0.0.2", &request_id, &code).is_err());
@@ -1486,9 +1505,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp directory");
         let pairing = PairingState::default();
         pairing.set_storage(dir.path());
-        let (first_request, first_code) = pairing.begin("127.0.0.1", "Phone").unwrap();
+        let (first_request, first_code) = pairing.begin("127.0.0.1", "Phone", None).unwrap();
         let first = pairing.confirm("127.0.0.1", &first_request, &first_code).unwrap();
-        let (second_request, second_code) = pairing.begin("127.0.0.2", "Tablet").unwrap();
+        let (second_request, second_code) = pairing.begin("127.0.0.2", "Tablet", None).unwrap();
         let second = pairing.confirm("127.0.0.2", &second_request, &second_code).unwrap();
         assert_ne!(first, second);
         let listed = pairing.listed();
@@ -1508,9 +1527,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pairing = PairingState::default();
         pairing.set_storage(&dir.path().join("missing"));
-        let (request, code) = pairing.begin("127.0.0.1", "Phone").unwrap();
+        let (request, code) = pairing.begin("127.0.0.1", "Phone", None).unwrap();
         assert!(pairing.confirm("127.0.0.1", &request, &code).is_err());
         assert!(pairing.listed().is_empty());
+    }
+
+    #[test]
+    fn a_client_file_written_before_kind_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        // 这一版之前的文件：没有 kind 这个键。少一个装饰性字段不该让整份列表消失。
+        std::fs::write(
+            dir.path().join("compute-center-clients.json"),
+            br#"[{"id":"old-1","name":"SM-G991B","address":"192.168.1.9","token":"0123456789abcdef"}]"#,
+        )
+        .unwrap();
+
+        let pairing = PairingState::default();
+        pairing.set_storage(dir.path());
+
+        let listed = pairing.listed();
+        assert_eq!(listed.len(), 1, "旧文件必须还是能被读出来");
+        assert_eq!(listed[0].name, "SM-G991B");
+        assert_eq!(listed[0].kind, None, "没有 kind 就是不知道，不该编一个");
+        // 读回来还得是**能用**的记录：只认列表、不认令牌就等于把人锁在门外。
+        assert!(pairing.authorized("0123456789abcdef"));
+        assert!(!pairing.authorized("fedcba9876543210"));
+    }
+
+    #[test]
+    fn the_reported_kind_survives_confirmation_and_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = PairingState::default();
+        pairing.set_storage(dir.path());
+
+        let (request, code) = pairing.begin("192.168.1.9", "Pixel 7 Pro", Some("phone".to_string())).unwrap();
+        pairing.confirm("192.168.1.9", &request, &code).unwrap();
+        let (plain_request, plain_code) = pairing.begin("192.168.1.10", "DESKTOP-PC", None).unwrap();
+        pairing.confirm("192.168.1.10", &plain_request, &plain_code).unwrap();
+
+        let listed = pairing.listed();
+        assert_eq!(listed[0].kind.as_deref(), Some("phone"), "列表里要带着类型给界面挑图标");
+        assert_eq!(listed[1].kind, None, "对面没说类型就老实留空，让界面自己退到通用图标");
+
+        let restarted = PairingState::default();
+        restarted.set_storage(dir.path());
+        let reloaded = restarted.listed();
+        assert_eq!(reloaded[0].kind.as_deref(), Some("phone"));
+        assert_eq!(reloaded[1].kind, None);
     }
 
     #[test]

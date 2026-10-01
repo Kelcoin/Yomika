@@ -534,6 +534,42 @@ describe('settings workspace', () => {
     expect(screen.getByRole('button', { name: '启用' })).toBeInTheDocument();
   });
 
+  it('deletes a server configuration from its editor and updates the rows in place', async () => {
+    // 删除配置只删服务器本身：档案、进度与阅读历史都挂在同一个 scope id 上，
+    // 重新添加同一地址还能接上，所以后端返回剩下的一台，面板就地更新。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [
+        { id: 'scope-a', name: 'Home', baseUrl: 'https://a.example.com', scopeId: 'scope-a', enabled: true },
+        { id: 'scope-b', name: 'Office', baseUrl: 'https://b.example.com', scopeId: 'scope-b', enabled: false },
+      ] };
+      if (command === 'read_server_api_key') return { ok: true, value: 'key-a' };
+      if (command === 'delete_server') {
+        expect(args).toEqual({ serverId: 'scope-a' });
+        return { ok: true, value: [
+          { id: 'scope-b', name: 'Office', baseUrl: 'https://b.example.com', scopeId: 'scope-b', enabled: true },
+        ] };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderSettings();
+
+    await user.click(await screen.findByRole('link', { name: /通用/ }));
+    await user.click(await screen.findByRole('button', { name: '编辑 Home' }));
+    // 编辑态才有「删除配置」，且它先开一层确认：配置删掉就回不来了。
+    await user.click(await screen.findByRole('button', { name: /删除配置/ }));
+    expect(await screen.findByText('删除「Home」的配置？')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '删除' }));
+
+    expect(adapter).toHaveBeenCalledWith('delete_server', { serverId: 'scope-a' });
+    await waitFor(() => expect(screen.queryByText('Home')).toBeNull());
+    expect(screen.getByText('Office')).toBeInTheDocument();
+    expect(await screen.findByText('已删除服务器 Home 的配置')).toBeInTheDocument();
+  });
+
   it('shows a newly saved server without reloading the page', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {

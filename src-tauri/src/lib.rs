@@ -38,7 +38,7 @@ use commands::legacy::{import_legacy_export, import_worker_export};
 use error_log::{error_log_append, error_log_append_batch, error_log_clear, error_log_export, error_log_read};
 use commands::library::{
     add_archive_to_category, cancel_download, check_server_status, create_task, delete_archive,
-    delete_local_archives, delete_search_preset, download_archive, download_url, list_archive_identities,
+    delete_local_archives, delete_search_preset, delete_server, download_archive, download_url, list_archive_identities,
     list_archives,
     list_archives_by_ids,
     list_archives_page, list_categories, list_local_archives, list_metadata_plugins,
@@ -341,6 +341,7 @@ pub fn run() {
             save_server,
             set_server_enabled,
             read_server_api_key,
+            delete_server,
             replace_archives,
             refresh_archives,
             probe_new_archives,

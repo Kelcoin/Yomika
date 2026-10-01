@@ -5747,6 +5747,131 @@ pub fn set_server_enabled_record(
     CommandResult::success(record)
 }
 
+/// The server list in the order the command layer hands it out: the enabled one
+/// first, then by name. `delete_server` returns the same list so the frontend can
+/// replace its state wholesale.
+fn read_servers(connection: &Connection) -> CommandResult<Vec<ServerRecord>> {
+    let mut statement = match connection.prepare(
+        "SELECT id, name, base_url, scope_id, enabled FROM servers
+         ORDER BY enabled DESC, name COLLATE NOCASE, id",
+    ) {
+        Ok(statement) => statement,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    let rows = match statement.query_map([], |row| {
+        Ok(ServerRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            base_url: row.get(2)?,
+            scope_id: row.get(3)?,
+            enabled: row.get::<_, i64>(4)? != 0,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    match rows.collect::<Result<Vec<_>, _>>() {
+        Ok(servers) => CommandResult::success(servers),
+        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+/// Removes one `servers` row and hands back the scope id the credential was
+/// stored under (keyring account = scope id, not the row id).
+///
+/// Only the row goes. `archives` — and through it `pages` and
+/// `archive_categories` — carries `ON DELETE CASCADE` against `servers(id)`, and
+/// `servers.id` *is* the scope id, so a plain DELETE would take the whole local
+/// index with it. Archives, reading progress and reading history are keyed by
+/// that scope id and stay on this device on purpose: re-adding a server at the
+/// same address derives the same scope id and reconnects them. `delete_server`
+/// therefore suspends the foreign keys around this call.
+fn delete_server_row(connection: &mut Connection, server_id: &str) -> CommandResult<String> {
+    let transaction = match connection.transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    let scope_id: String = match transaction
+        .query_row(
+            "SELECT scope_id FROM servers WHERE id = ?1",
+            params![server_id],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(Some(scope_id)) => scope_id,
+        Ok(None) => return CommandResult::failure("NOT_FOUND", "服务器不存在", false),
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    if let Err(error) = transaction.execute("DELETE FROM servers WHERE id = ?1", params![server_id]) {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    if let Err(error) = transaction.commit() {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    CommandResult::success(scope_id)
+}
+
+/// Deletes a server configuration: its row, its stored credential, and nothing
+/// else. When the removed server was the enabled one and others remain, the
+/// first remaining server takes over as the data source instead of leaving the
+/// app silently without one. Returns the fresh list, exactly like `list_servers`.
+pub fn delete_server_record(
+    connection: &mut Connection,
+    server_id: &str,
+    forget_credential: impl FnOnce(&str),
+) -> CommandResult<Vec<ServerRecord>> {
+    // 外键是连接级的开关，删除期间挂起、随后立刻装回去；这两步与删除共用
+    // `database.connection` 的那把锁，别的语句插不进来。
+    if let Err(error) = connection.execute_batch("PRAGMA foreign_keys = OFF") {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    let deleted = delete_server_row(connection, server_id);
+    // 不论删成没删成都要装回去：漏掉它，之后所有删除都会失去级联。
+    if let Err(error) = connection.execute_batch("PRAGMA foreign_keys = ON") {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    let scope_id = match deleted {
+        CommandResult::Success { value, .. } => value,
+        CommandResult::Failure { error, .. } => {
+            return CommandResult::failure(error.code, error.message, error.retryable)
+        }
+    };
+    forget_credential(&scope_id);
+    // 删掉的若是当前启用的那台，而还有别的服务器，就立刻启用第一台：否则首页、书架与
+    // 档案库会停在「没有数据源」上，界面上再没有东西能把它救回来。这里直接走
+    // `set_server_enabled_record`，与手动切换共用同一套不变量。
+    let enabled_count: i64 = match connection.query_row(
+        "SELECT COUNT(*) FROM servers WHERE enabled = 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(count) => count,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    if enabled_count == 0 {
+        let next_id: Option<String> = match connection
+            .query_row(
+                "SELECT id FROM servers ORDER BY name COLLATE NOCASE, id LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+        {
+            Ok(next_id) => next_id,
+            Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+        };
+        if let Some(next_id) = next_id {
+            if let CommandResult::Failure { error, .. } =
+                set_server_enabled_record(connection, &next_id, true)
+            {
+                return CommandResult::failure(error.code, error.message, error.retryable);
+            }
+        }
+    }
+    read_servers(connection)
+}
+
 #[tauri::command(async)]
 pub fn set_server_enabled(
     server_id: String,
@@ -5887,29 +6012,25 @@ pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRe
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let mut statement = match connection.prepare(
-        "SELECT id, name, base_url, scope_id, enabled FROM servers
-         ORDER BY enabled DESC, name COLLATE NOCASE, id",
-    ) {
-        Ok(statement) => statement,
-        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    read_servers(&connection)
+}
+
+/// 删除一台服务器的配置（连接信息与凭据）。档案馆藏、阅读进度与阅读记录按 scope id
+/// 留在本机，重新添加同一地址即可接回（见 `delete_server_record`）。
+#[tauri::command(async)]
+pub fn delete_server(
+    server_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<Vec<ServerRecord>> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let rows = match statement.query_map([], |row| {
-        Ok(ServerRecord {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            base_url: row.get(2)?,
-            scope_id: row.get(3)?,
-            enabled: row.get::<_, i64>(4)? != 0,
-        })
-    }) {
-        Ok(rows) => rows,
-        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
-    };
-    match rows.collect::<Result<Vec<_>, _>>() {
-        Ok(servers) => CommandResult::success(servers),
-        Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
-    }
+    delete_server_record(&mut connection, &server_id, |scope_id| {
+        // 凭据条目挂在 scope id 上。删不到（本来就没存过）不算失败：目标状态是「没有
+        // 这条凭据」，而 secret_store 对缺失条目一律报错（系统凭据库与文件存储都一样）。
+        let _ = crate::secret_store::delete_secret(KEYRING_SERVICE, scope_id);
+    })
 }
 
 #[tauri::command]
@@ -8544,6 +8665,132 @@ mod tests {
             .lock()
             .expect("credential writes")
             .is_empty());
+    }
+
+    #[test]
+    fn deleting_a_server_removes_its_row_and_credential_and_returns_the_rest() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        save_server_record(&mut connection, &credentials, server_input(), "secret".into());
+        let mut second = server_input();
+        second.name = "Office".to_string();
+        second.scope_id = "scope-b".to_string();
+        save_server_record(&mut connection, &credentials, second, "secret-b".into());
+
+        // 藏档、阅读进度与阅读记录按 scope id 留在本机：删除配置只是一句「怎么连上它」，
+        // 它们必须活下来，之后用同一地址重新添加会算出同一个 scope id，自己接回去。
+        connection
+            .execute(
+                "INSERT INTO archives (server_id, archive_id, title) VALUES ('scope-b', 'arc-1', 'Archive')",
+                [],
+            )
+            .expect("archive row");
+        connection
+            .execute(
+                "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction)
+                 VALUES ('scope-b', 'arc-1', 3, 12, 'paged', 'ltr')",
+                [],
+            )
+            .expect("progress row");
+        connection
+            .execute(
+                "INSERT INTO reading_history (scope_id, archive_id, page_index, device_id)
+                 VALUES ('scope-b', 'arc-1', 3, 'device-1')",
+                [],
+            )
+            .expect("history row");
+
+        let forgotten = Mutex::new(Vec::new());
+        let remaining = match delete_server_record(&mut connection, "scope-b", |scope_id| {
+            forgotten
+                .lock()
+                .expect("forgotten lock")
+                .push(scope_id.to_string());
+        }) {
+            CommandResult::Success { value, .. } => value,
+            CommandResult::Failure { error, .. } => panic!("delete: {}", error.message),
+        };
+
+        assert_eq!(
+            forgotten.lock().expect("forgotten lock").as_slice(),
+            ["scope-b".to_string()],
+            "the credential is stored under the scope id"
+        );
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "scope-a");
+        assert!(remaining[0].enabled, "the untouched server keeps the data source");
+        assert_eq!(
+            enabled_flags(&connection),
+            vec![("scope-a".to_string(), 1)]
+        );
+
+        for (table, query) in [
+            ("archives", "SELECT COUNT(*) FROM archives WHERE server_id = 'scope-b'"),
+            ("reading_progress", "SELECT COUNT(*) FROM reading_progress WHERE scope_id = 'scope-b'"),
+            ("reading_history", "SELECT COUNT(*) FROM reading_history WHERE scope_id = 'scope-b'"),
+        ] {
+            let count: i64 = connection.query_row(query, [], |row| row.get(0)).expect(table);
+            assert_eq!(count, 1, "{table} must survive the server deletion");
+        }
+        let foreign_keys: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys pragma");
+        assert_eq!(foreign_keys, 1, "the pragma has to be restored after the delete");
+    }
+
+    #[test]
+    fn deleting_the_enabled_server_hands_the_data_source_to_the_first_remaining_one() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        save_server_record(&mut connection, &credentials, server_input(), "secret".into());
+        let mut second = server_input();
+        second.name = "Office".to_string();
+        second.scope_id = "scope-b".to_string();
+        save_server_record(&mut connection, &credentials, second, "secret-b".into());
+
+        let remaining = match delete_server_record(&mut connection, "scope-a", |_| {}) {
+            CommandResult::Success { value, .. } => value,
+            CommandResult::Failure { error, .. } => panic!("delete: {}", error.message),
+        };
+
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].id, "scope-b",
+            "the app must not be left without a data source"
+        );
+        assert!(remaining[0].enabled);
+        assert_eq!(
+            enabled_flags(&connection),
+            vec![("scope-b".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn deleting_an_unknown_server_reports_not_found_and_touches_nothing() {
+        let mut connection = migrated_connection();
+        let credentials = MemoryCredentialStore {
+            writes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        save_server_record(&mut connection, &credentials, server_input(), "secret".into());
+
+        let result = delete_server_record(&mut connection, "scope-gone", |_| {});
+
+        assert!(matches!(result, CommandResult::Failure { .. }));
+        assert_eq!(
+            enabled_flags(&connection),
+            vec![("scope-a".to_string(), 1)]
+        );
+        let foreign_keys: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys pragma");
+        assert_eq!(foreign_keys, 1);
     }
 
     #[test]

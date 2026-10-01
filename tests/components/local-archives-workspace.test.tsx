@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -110,6 +110,88 @@ describe('local archives workspace', () => {
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('delete_local_archives', { paths: [localFile.path] }));
     expect(adapter.mock.calls.some(([command]) => command === 'delete_archive')).toBe(false);
+  });
+
+  it('answers a right click on a local archive with the menu this page can run', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    renderPage();
+
+    const row = (await screen.findByText('测试档案')).closest('.archive-row');
+    expect(row).not.toBeNull();
+    fireEvent.contextMenu(row!, { clientX: 120, clientY: 80 });
+
+    const menu = await screen.findByRole('menu');
+    // 这一页真做得到的两件：打开详情、从磁盘删掉。服务器的身份不是这一份档案的
+    // 主语（侧放进来时连 archiveId 都没有），所以阅读器/元数据那几条不摆。
+    expect(within(menu).getByRole('menuitem', { name: '查看详情' })).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: '删除本地档案' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: '无痕阅读' })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: '编辑元数据' })).not.toBeInTheDocument();
+
+    await user.click(within(menu).getByRole('menuitem', { name: '查看详情' }));
+    // 「查看详情」和点这一行是同一件事。
+    expect(await screen.findByRole('button', { name: '本地删除' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '更多操作' })).toBeInTheDocument();
+  });
+
+  it('deletes a right-clicked local file through the page confirmation', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      if (command === 'delete_local_archives') {
+        expect(args?.paths).toEqual([localFile.path]);
+        return { ok: true, value: 1 };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderPage();
+
+    const row = (await screen.findByText('测试档案')).closest('.archive-row');
+    fireEvent.contextMenu(row!, { clientX: 120, clientY: 80 });
+    await user.click(await screen.findByRole('menuitem', { name: '删除本地档案' }));
+
+    // 走的是页面自己那条确认（说明、繁忙态、取消），不是裸 confirm()。
+    expect(screen.getByText(/这个本地文件/)).toBeInTheDocument();
+    expect(screen.getByText(/服务器上的档案不受影响/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('delete_local_archives', { paths: [localFile.path] }));
+    expect(adapter.mock.calls.some(([command]) => command === 'delete_archive')).toBe(false);
+  });
+
+  it('opens the same menu from the more button in the detail header', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
+      if (command === 'delete_local_archives') {
+        expect(args?.paths).toEqual([localFile.path]);
+        return { ok: true, value: 1 };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderPage();
+
+    await user.click(await screen.findByText('测试档案'));
+    await user.click(await screen.findByRole('button', { name: '更多操作' }));
+
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: '查看详情' })).toBeInTheDocument();
+    await user.click(within(menu).getByRole('menuitem', { name: '删除本地档案' }));
+
+    await user.click(await screen.findByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('delete_local_archives', { paths: [localFile.path] }));
   });
 
   it('shows a running download with its progress, speed and controls', async () => {

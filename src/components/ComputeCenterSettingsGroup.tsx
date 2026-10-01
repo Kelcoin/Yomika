@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Link2, Plus, RefreshCw, Server, Unlink, Wand2 } from 'lucide-react';
+import { Link2, Monitor, MonitorSmartphone, Plus, RefreshCw, Save, Server, Smartphone, Tablet, Unlink, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsMenu } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
+import { deviceDisplayName, deviceKind } from '../lib/deviceIdentity';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import {
   COMPUTE_CENTER_PAIRING_CHANGED_EVENT,
@@ -26,6 +27,30 @@ const OP_OPTIONS = [
 
 function cacheDisplayStatus(status: ComputeCenterStatus): void {
   try { localStorage.setItem('yomika.compute-center-status', JSON.stringify({ ...status, token: '' })); } catch { /* storage unavailable */ }
+}
+
+/** 设备行左边那枚图标：类型是**对面配对时报上来的**（`kind`）。
+ *
+ * 认不出来就用通用图标——老记录没有这个字段，而画一台手机去猜一台平板，比画一个
+ * 「某台设备」更不诚实。 */
+function DeviceGlyph({ kind }: { kind?: string | null | undefined }) {
+  if (kind === 'phone') return <Smartphone aria-hidden="true" />;
+  if (kind === 'tablet') return <Tablet aria-hidden="true" />;
+  if (kind === 'desktop') return <Monitor aria-hidden="true" />;
+  return <MonitorSmartphone aria-hidden="true" />;
+}
+
+/** 设备行：左边一枚类型图标，右边名字一行、地址一行。`.settings-device-option` 现在
+ * 是两列网格（图标 + 文字），所以三处设备列表都得是这个形状，不然名字和地址会被摆成
+ * 并排的两列。 */
+function DeviceRowBody({ name, address, kind }: { name: string; address: string; kind?: string | null | undefined }) {
+  return <>
+    <span className="settings-device-icon" aria-hidden="true"><DeviceGlyph kind={kind} /></span>
+    <span className="settings-device-copy">
+      <span className="settings-device-name">{name}</span>
+      <span className="settings-device-address">{address}</span>
+    </span>
+  </>;
 }
 
 interface Props {
@@ -171,7 +196,9 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
   async function startPairing() {
     if (!address.trim()) return;
     setPairBusy(true);
-    const result = await repository.requestPair(address.trim());
+    // 报上**这一台**的名字与类型：对面的列表就是靠它显示「是哪台设备」。名字在
+    // Android 上只有 UA 里有（后端 `host_name()` 认不出机型，只能回「Yomika」）。
+    const result = await repository.requestPair(address.trim(), deviceDisplayName(), deviceKind());
     setPairBusy(false);
     if (result.ok) setRequestId(result.value.requestId);
     else showToast(result.error.message, 'error');
@@ -224,23 +251,24 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
           value={String(status.port)}
           onClick={verified ? () => { setPortDraft(status.port); setPortMenu(true); } : undefined}
         />}
-        {portMenu && <SettingsMenu title="端口" description="其他设备填「本机地址:端口」连过来" icon={<Server />} onClose={() => setPortMenu(false)}>
+        {portMenu && <SettingsMenu title="端口" icon={<Server />} onClose={() => setPortMenu(false)}>
           <label className="settings-menu-field">
             <span className="settings-menu-field-label">远程后处理服务端口</span>
             <input className="settings-port-input" type="number" min={1024} max={65535} value={portDraft} aria-label="远程后处理服务端口" onChange={(event) => setPortDraft(Number(event.target.value))} />
           </label>
           <div className="settings-menu-actions">
-            <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}>保存</button>
+            <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}><Save aria-hidden="true" />保存</button>
           </div>
         </SettingsMenu>}
         {status?.running && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => { setLocalPairMenu(true); void refresh(); } : undefined} />}
         {localPairMenu && <SettingsMenu
           title={selectedPairClient?.name ?? '管理已有配对'}
-          description={selectedPairClient?.address ?? '点一台设备可以单独撤销它的配对'}
           icon={<Link2 />}
           onClose={() => { if (selectedClient) setSelectedClient(undefined); else setLocalPairMenu(false); }}
         >
           {selectedPairClient ? <>
+            {/* 标题只剩名字：这一台是谁就落到正文里的地址上（菜单顶上那行小字删了）。 */}
+            <p className="settings-menu-note">{selectedPairClient.address}</p>
             <p className="settings-menu-note">撤销后这台设备要重新配对，才能继续把图片交给本机处理。</p>
             <div className="settings-menu-actions">
               <button className="secondary-action" type="button" onClick={() => void revokeClient(selectedPairClient.id)}><Unlink aria-hidden="true" />撤销配对</button>
@@ -249,8 +277,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             <div className="settings-choice-list">
               {status?.pairedClients?.map((client) => <div className="settings-choice-option" key={client.id}>
                 <button className="settings-choice-option-main settings-device-option" type="button" onClick={() => setSelectedClient(client.id)}>
-                  <span className="settings-device-name">{client.name}</span>
-                  <span className="settings-device-address">{client.address}</span>
+                  <DeviceRowBody name={client.name} address={client.address} kind={client.kind} />
                 </button>
               </div>)}
               {status?.pairedClients?.length === 0 && <p className="settings-choice-empty">暂无已配对设备</p>}
@@ -280,8 +307,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
                 aria-pressed={preferences.remoteComputeUrl === device.address}
                 onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}
               >
-                <span className="settings-device-name">{device.name}</span>
-                <span className="settings-device-address">{device.address}</span>
+                <DeviceRowBody name={device.name} address={device.address} />
               </button>
             </div>)}
             {remoteOps.pairedDevices.length === 0 && <p className="settings-choice-empty">还没有配对过的设备</p>}
@@ -308,7 +334,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             <input className="settings-port-input" type="number" min={1} max={4} aria-label="远端放大倍数" value={remoteOps.op.scale} onChange={(event) => updateRemoteOp({ scale: Math.min(4, Math.max(1, Number(event.target.value) || 1)) })} />
           </label>}
         </SettingsMenu>}
-        {pairMenu && <SettingsMenu title="添加设备" description="选一台局域网里的设备，或直接填它的地址" icon={<Plus />} onClose={() => { setPairMenu(false); setRequestId(''); }}>
+        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { setPairMenu(false); setRequestId(''); }}>
           <div className="settings-choice-list">
             {devices.map((device) => <div className="settings-choice-option" key={device.address}>
               <button
@@ -317,8 +343,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
                 aria-pressed={address === device.address}
                 onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}
               >
-                <span className="settings-device-name">{device.name}</span>
-                <span className="settings-device-address">{device.address}</span>
+                <DeviceRowBody name={device.name} address={device.address} />
               </button>
             </div>)}
             {devices.length === 0 && <p className="settings-choice-empty">没搜到其他设备，可以填地址直接配对</p>}

@@ -11,7 +11,7 @@ import { isArchiveFinished } from './archiveCardPresentation';
  * - 顺序：访问时间倒序，和历史页面的时间线同一顺序。
  * - 解析不出档案的记录不算一条：档案可能已经不在本机镜像里。
  * - `hideFinished`：进度超过 95% 的记录不进来（首页那个开关；历史页面固定全显示）。
- * - `limit`：只要前几条（首页那一排是六条）。
+ * - `limit`：只要前几条（首页那一排是 20 条；历史页面不传，列全量）。
  */
 export function historyShelfArchives(
   history: readonly ReadingHistoryRecord[],

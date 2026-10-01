@@ -1,12 +1,13 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Pencil, Save, Server } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { Pencil, Save, Server, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { CommandResult } from '../domain/result';
 import { createServerIdentity, normalizeServerUrl, type ServerIdentity } from '../domain/server';
 import type { ServerRecord } from '../domain/library';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { ConfirmDialog } from './ConfirmDialog';
 import { SettingsRowBody } from './SettingsRow';
 import { useToast } from './Toast';
 
@@ -27,17 +28,24 @@ function ServerActiveMark() {
 interface ServerSetupDialogProps {
   onSave: (input: { identity: ServerIdentity; apiKey: string }) => Promise<CommandResult<ServerIdentity>>;
   server?: Pick<ServerRecord, 'name' | 'baseUrl' | 'scopeId' | 'enabled'>;
+  /** 删除这台服务器的配置。只有编辑已存在的服务器时才会用到；父层负责 toast，
+   * 返回 true 表示删掉了（对话框收起），false 表示失败（父层已报错，编辑器留着）。 */
+  onDelete?: (() => Promise<boolean>) | undefined;
   /** 'row' renders the trigger as a settings row (icon, name, address, state) so
    * the whole strip opens the dialog; 'action' keeps the old compact trigger. */
   variant?: 'action' | 'row';
 }
 
-export function ServerSetupDialog({ onSave, server, variant = 'action' }: ServerSetupDialogProps) {
+export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action' }: ServerSetupDialogProps) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // 打开编辑时 Radix 会聚焦第一个输入框并全选内容，等于替用户选中了整个名称：
+  // 随手敲一个字就把名字换掉了。用 ref 在自动聚焦时把光标放到末尾。
+  const nameRef = useRef<HTMLInputElement>(null);
   // 保存失败（地址不通、凭据库写不进去、API Key 太长……）由 toast 说，不再在表单
   // 里留一条红字：那条红字会一直挂到对话框关掉为止，用户改完地址重试时它还在说上
   // 一次的事。toast 的层级（--z-toast 70）本来就高于对话框（--z-modal 51）。
@@ -52,6 +60,7 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
       setName(server?.name ?? '');
       setBaseUrl(server?.baseUrl ?? '');
       setApiKey('');
+      setConfirmingDelete(false);
     }
   }
 
@@ -86,6 +95,13 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
     } finally {
       setPending(false);
     }
+  }
+
+  /** 确认框点了删除：结果由父层说（成功/失败都 toast），这里只决定编辑器留不留。 */
+  async function handleDelete() {
+    if (!onDelete) return;
+    const deleted = await onDelete();
+    if (deleted) setOpen(false);
   }
 
   return (
@@ -127,19 +143,47 @@ export function ServerSetupDialog({ onSave, server, variant = 'action' }: Server
       )}
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content">
+        <Dialog.Content
+          className="dialog-content"
+          onOpenAutoFocus={(event) => {
+            // Radix 的自动聚焦会选中第一个文本框的全部内容；编辑服务器时那正是
+            // 名称，光标应该落在末尾，免得一次击键抹掉整个名字。
+            event.preventDefault();
+            const input = nameRef.current;
+            if (!input) return;
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+          }}
+        >
           {/* 标题与说明直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
-              而 ✕ 已经去掉了——关闭改走「点空白处」与 Esc（与设置项的二级菜单同一套）。 */}
-          <Dialog.Title>{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
+              而 ✕ 已经去掉了——关闭改走动作行里的「取消」、点空白处与 Esc。 */}
+          <Dialog.Title className="dialog-title"><Server aria-hidden="true" />{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
           <Dialog.Description>连接信息保存在此设备；API Key 存在本机的凭据存储里，已自动读入，可直接查看或替换。</Dialog.Description>
           <form className="server-form" onSubmit={handleSubmit}>
-            <label>名称（可选）<input aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
+            <label>名称（可选）<input ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
-            <div className="dialog-actions">
+            {/* 动作行等宽平分：删除配置（仅编辑态）、取消、保存服务器各占一列。 */}
+            <div className="dialog-actions is-balanced">
+              {server && onDelete && (
+                <button className="secondary-action is-danger" type="button" onClick={() => setConfirmingDelete(true)}><Trash2 aria-hidden="true" />删除配置</button>
+              )}
+              <button className="secondary-action" type="button" disabled={pending} onClick={() => handleOpenChange(false)}><X aria-hidden="true" />取消</button>
               <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}><Save aria-hidden="true" />{pending ? '保存中…' : '保存服务器'}</button>
             </div>
           </form>
+          {confirmingDelete && (
+            <ConfirmDialog
+              title={`删除「${server?.name ?? ''}」的配置？`}
+              // 档案馆藏、阅读进度与阅读记录都按 scope id 存在本机，删配置不动它们；
+              // 之后用同一地址重新添加会算出同一个 scope id，也就把那些数据接了回来。
+              description="档案馆藏、阅读进度与阅读记录都留在本机。删除后重新添加同一地址即可接回它们；只有这份连接信息与 API Key 会被移除。"
+              confirmLabel="删除"
+              danger
+              onClose={() => setConfirmingDelete(false)}
+              onConfirm={handleDelete}
+            />
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

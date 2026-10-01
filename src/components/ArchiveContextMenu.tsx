@@ -144,3 +144,49 @@ export function ArchiveContextMenu({
     </DropdownMenu.Root>
   );
 }
+
+/** 本地档案的右键菜单：同一层壳、同一批条目类（`.archive-context-menu`、
+ * `.archive-context-menu-item`、`.is-danger`），能做的事只有这一页真有的两件。
+ *
+ * 上面那个认的是 ArchiveRecord——阅读要走阅读器和服务器副本、编辑元数据要走
+ * 档案库详情、加入待看要拿服务器上的成员关系，而磁盘上这一份的身份是路径：
+ * 侧放进来、认不出来源时连 archiveId 都是 null，把 LocalArchiveRecord 硬塞进
+ * ArchiveContextMenuTarget 就得编一个假的服务器身份，它还会照着假身份去发
+ * 那些 IPC。条目名也会是错的（本地文件没有「无痕阅读」）。所以只能另起一个
+ * 薄壳，样式一字不差地复用。 */
+export interface LocalArchiveContextMenuTarget {
+  path: string;
+  title: string;
+  x: number;
+  y: number;
+}
+
+export function LocalArchiveContextMenu({ target, onClose, onOpen, onDelete }: {
+  target: LocalArchiveContextMenuTarget | undefined;
+  onClose: () => void;
+  onOpen: (target: LocalArchiveContextMenuTarget) => void;
+  onDelete: (target: LocalArchiveContextMenuTarget) => void;
+}) {
+  if (!target) return null;
+  return (
+    <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DropdownMenu.Trigger asChild>
+        <span
+          aria-hidden="true"
+          style={{ position: 'fixed', left: target.x, top: target.y, width: 0, height: 0 }}
+        />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={`${target.title} 操作`}>
+          <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onOpen(target)}>
+            <BookOpen aria-hidden="true" />查看详情
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="archive-context-menu-separator" />
+          <DropdownMenu.Item className="archive-context-menu-item is-danger" onSelect={() => onDelete(target)}>
+            <Trash2 aria-hidden="true" />删除本地档案
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}

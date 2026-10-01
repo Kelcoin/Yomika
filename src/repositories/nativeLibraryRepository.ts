@@ -384,6 +384,16 @@ export class NativeLibraryRepository {
     });
   }
 
+  /** 删除一台服务器的配置（连接信息与凭据）。档案馆藏、阅读进度与阅读记录按
+   * scope id 留在本机，重新添加同一地址即可接回；这里仍然全量失效，因为服务器
+   * 列表、当前数据源与所有按服务器缓存的快照都可能变。 */
+  deleteServer(serverId: string): Promise<CommandResult<ServerRecord[]>> {
+    return invokeCommand('delete_server', { serverId }, z.array(ServerRecordSchema)).then((result) => {
+      if (result.ok) invalidateRouteCache();
+      return result;
+    });
+  }
+
   /** 编辑已配置服务器时读回系统安全存储中的 API Key，供弹窗展示与预填。 */
   readServerApiKey(scopeId: string): Promise<CommandResult<string>> {
     return invokeCommand('read_server_api_key', { scopeId }, z.string());

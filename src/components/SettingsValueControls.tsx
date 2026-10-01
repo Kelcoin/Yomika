@@ -14,8 +14,12 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
  * switches, steppers, option lists, text areas — so the second level always
  * reads as the same thing, wherever it was opened from. Escape belongs to the
  * menu wherever the focus is: it can be lost to the row behind it, and a menu
- * that only answers a focused Escape is a trap. */
-export function SettingsMenu({ title, description, icon, onClose, children }: { title: string; description?: string | undefined; icon?: ReactNode; onClose: () => void; children: ReactNode }) {
+ * that only answers a focused Escape is a trap.
+ *
+ * 菜单里只有标题（图标 + 文字）和内容：标题下面那行灰色小字（`description`）
+ * 统一去掉了——它把同一句话在行上、菜单里说了两遍，还把内容区往下压了一截，
+ * 每个二级菜单顶上都是它。行里的 hint 留着，那是列表该说的话。 */
+export function SettingsMenu({ title, icon, onClose, children }: { title: string; icon?: ReactNode; onClose: () => void; children: ReactNode }) {
   // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
   useOverlayBackGuard(true, onClose);
   useEffect(() => {
@@ -38,7 +42,6 @@ export function SettingsMenu({ title, description, icon, onClose, children }: { 
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
             {title}
           </h2>
-          {description && <p className="settings-menu-desc">{description}</p>}
           <div className="settings-menu-body">{children}</div>
         </div>
       </div>
@@ -112,7 +115,7 @@ export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, f
           above it unlocks. */}
       <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
       {open && (
-        <SettingsMenu title={label} description={hint} icon={icon} onClose={() => setOpen(false)}>
+        <SettingsMenu title={label} icon={icon} onClose={() => setOpen(false)}>
           <div className="settings-menu-stepper">
             <button className="icon-action" type="button" aria-label={`减小${label}`} disabled={value <= min} onClick={() => onChange(clamp(value - step))}><Minus aria-hidden="true" /></button>
             <input
