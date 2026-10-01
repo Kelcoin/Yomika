@@ -5,6 +5,7 @@ import { Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Tr
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
+import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
 import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
@@ -25,12 +26,6 @@ const STYLE_OPTIONS = [
   { value: '1', label: '自然' },
   { value: '2', label: '电影' },
 ];
-
-const MEGABYTE = 1024 * 1024;
-
-function megabytes(bytes: number): string {
-  return `${(bytes / MEGABYTE).toFixed(1)} MB`;
-}
 
 /** 换片段之后要重启才生效：NGX 一个进程只加载一份片段，这次已经跑过的话，手上这份
  *  还是上一份。这句话跟着两条换片段的提示一起给用户。 */
@@ -212,7 +207,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           const installed = status.variant === variant.id;
           const recommended = status.recommendedVariant === variant.id;
           const busy = downloading === variant.id;
-          const percent = download?.total ? Math.round((download.completed / download.total) * 100) : undefined;
+          const label = `${variant.label}${recommended ? '（推荐）' : ''}`;
           return <div className={`settings-choice-option${installed ? ' is-active' : ''}`} key={variant.id}>
             {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
                 鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
@@ -224,15 +219,20 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
               title={variant.note || '下载后会被校验再装上'}
               onClick={() => void downloadVariant(variant.id)}
             >
-              <span>{variant.label}{recommended ? '（推荐）' : ''}</span>
+              <span>{label}</span>
             </button>
-            {/* 状态与体积走行尾那一行（今天「已选择」徽标用的就是这个类）：进度、
-                「使用中」、体积各说各的，不必再给选项名加第二行。 */}
-            <span className="settings-row-note">{installed
-              ? `使用中${status.dllBytes ? ` · ${megabytes(status.dllBytes)}` : ''}`
-              : busy
-                ? `下载中${percent === undefined ? '' : ` ${percent}%`}`
-                : megabytes(variant.size)}</span>
+            {/* 行尾走模型菜单那一套动作槽：还没装上的那条挂下载按钮，已装上的那条
+                （按钮自己不画）右侧就是空的。装的是哪一条由 is-active 与 aria-pressed
+                说，「使用中」与 DLL 体积不再写成行尾那行字。 */}
+            <ModelDownloadButton
+              option={{ value: variant.id, label }}
+              installed={installed}
+              pending={downloading !== undefined}
+              className="select-option-download"
+              onDownload={() => void downloadVariant(variant.id)}
+            />
+            {/* 进度只挂在正在下载的那一条下面：和其它模型菜单同一个槽，靠 is-open 长出条。 */}
+            {busy && <ModelDownloadSlot open label={variant.label} progress={download} />}
           </div>;
         })}
       </div>

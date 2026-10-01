@@ -1241,6 +1241,12 @@ body::-webkit-scrollbar,
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  /* `row-gap: 0`——上一条 `gap` 会给换行留 8px，哪怕换下来的那一行是**空的**：
+     模型菜单每一行都挂着常驻的下载进度槽（关着时高度 0），于是每一行都比它自己的
+     按钮高 8px，高亮块也跟着往下多出一截，看着就是「底部空隙过大」（实测：探针里
+     行高 50.4px 而按钮 42.7px，多出来的 7.8px 全在这一行文字下面）。槽自己的
+     `padding-block` 在打开时才给间距，所以这里不要任何行间距。 */
+  row-gap: 0;
   border-radius: var(--radius-control);
 }
 
@@ -1251,19 +1257,22 @@ body::-webkit-scrollbar,
   flex: 1 0 100%;
 }
 
-/* 选项文字按作者写的 `text-align: left` 排——但只写这一条是没用的：Chromium 给
-   `<button>` 的内容盒套了一层自己的居中布局（计算值 `justify-content: center`），
-   所以按钮里的子盒会缩成 fit-content 再居中。表现就是超分/去码模型那些短标签看着
-   居中、DLSSNR 变体那两行 strong/small 各自宽度不同、左右边对不齐（实测：按钮
-   `textAlign=left` 而 `justify=center`，标签 `offsetInBtn` 随文字宽度变化）。
-   把它显式拉回 flex-start，三类菜单才都是「左对齐、共享左边缘」的一套行。 */
+/* 选项文字居中——用户报的：模型选择菜单里的名字全贴着左边排，和高亮块/面板不是
+   一个中心。
+ *
+ * 这里要和 Chromium 给 `<button>` 内容盒套的那层居中布局对齐口径：只写 `text-align`
+ * 是没用的，按钮里的子盒会先缩成 fit-content 再按父层的 `justify-content` 摆；所以
+ * 显式写 `justify-content: center`，内联轴与外块轴都是居中。
+ *
+ * 例外是「设备行」（管理已有配对 / 添加设备）：那是图标 + 名字/地址的网格，属于另一
+ * 族行式，文字保持左对齐（见下面 `.settings-device-option` 那条）。 */
 .settings-choice-option-main {
   display: flex;
   /* `basis: 0`：写成 `auto` 时按钮的主尺寸取长注释那一行的 max-content 宽，父层又是
-     `flex-wrap: wrap`，于是行尾的「已选择」会被挤到第二行、还贴在左边。 */
+     `flex-wrap: wrap`，于是行尾的下载按钮会被挤到第二行、还贴在左边。 */
   flex: 1 1 0;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   min-width: 0;
   min-height: 44px;
   padding: 0 var(--space-3);
@@ -1272,8 +1281,13 @@ body::-webkit-scrollbar,
   background: transparent;
   color: inherit;
   font-size: var(--text-md);
-  text-align: left;
+  text-align: center;
   cursor: pointer;
+}
+
+.settings-choice-option-main.settings-device-option {
+  justify-content: flex-start;
+  text-align: left;
 }
 
 @media (hover: hover) {
@@ -2337,10 +2351,37 @@ body::-webkit-scrollbar,
    positioned part, which is where the height actually lives. */
 .archive-quick-rail { position: sticky; top: var(--space-2); z-index: 5; float: right; width: 24px; height: 0; margin-right: -24px; pointer-events: none; }
 .archive-quick-rail-track { position: absolute; top: 26vh; right: 4px; display: grid; grid-auto-rows: 1fr; width: 20px; height: 48vh; }
-.archive-quick-rail-tick { justify-self: end; align-self: center; width: 9px; height: 3px; padding: 0; border: 0; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--on-surface) 28%, transparent); cursor: pointer; pointer-events: auto; transition: width var(--motion-fast), background var(--motion-fast); }
+.archive-quick-rail-tick { position: relative; justify-self: end; align-self: center; width: 9px; height: 3px; padding: 0; border: 0; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--on-surface) 28%, transparent); cursor: pointer; pointer-events: auto; transition: width var(--motion-fast), background var(--motion-fast); }
+/* 刻度只有 9×3px，直接拿它当悬停靶太细（指针差一像素就落空）。用一层看不见的
+   伪元素把可点/可悬停的范围撑到 29×11px——`RAIL_MAX_TICKS` 个刻度铺在 48vh 里，
+   间距最小约 10px（矮窗口），所以竖向只敢各让 4px，免得和邻格抢。 */
+.archive-quick-rail-tick::before { content: ''; position: absolute; inset: -4px -10px; }
+/* 悬停/聚焦时在刻度左边浮一枚小标签，写着这个刻度会把你送到哪一天哪个时间——
+   原生 `title` 要等一秒、触摸设备上根本没有，这是「快速看到目标跳转时间」的答案。
+   `pointer-events: none`：它是提示，不该挡住它左边列表里的卡片。 */
+.archive-quick-rail-label {
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-highest);
+  color: var(--on-surface);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+  box-shadow: var(--shadow-overlay);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast);
+}
 @media (hover: hover) {
   .archive-quick-rail-tick:hover { width: 15px; background: color-mix(in srgb, var(--on-surface) 55%, transparent); }
+  .archive-quick-rail-tick:hover > .archive-quick-rail-label { opacity: 1; }
 }
+.archive-quick-rail-tick:focus-visible > .archive-quick-rail-label,
+.archive-quick-rail-tick:is(.is-pressed, :active) > .archive-quick-rail-label { opacity: 1; }
 .archive-quick-rail-tick.is-active { width: 16px; background: var(--primary); }
 .history-quick-jump { position: sticky; top: var(--space-2); z-index: 5; float: right; width: var(--control-height); height: 0; margin-right: var(--space-2); }
 .history-quick-jump > .icon-action { background: var(--surface-container-high); box-shadow: var(--shadow-overlay); }
@@ -5628,6 +5669,8 @@ body::-webkit-scrollbar,
   .history-quick-jump-menu button:is(.is-pressed, :active) { background: var(--primary-container); color: var(--on-primary-container); }
   /* 历史快速跳转的刻度按下态（与悬停那条成对：触屏没有 hover，按下就是唯一的反馈）。 */
   .archive-quick-rail-tick:is(.is-pressed, :active) { background: color-mix(in srgb, var(--on-surface) 55%, transparent); }
+  /* 浮动时间标签也要有按下态：触屏上按住刻度同样该看见「会跳到哪天」。 */
+  .archive-quick-rail-tick:is(.is-pressed, :active) > .archive-quick-rail-label { opacity: 1; }
   /* 日志记录的标题行按下态（与悬停那条成对：触屏没有 hover，按下就是唯一的反馈）。 */
   .error-log-entry-toggle:is(.is-pressed, :active) { background: var(--surface-muted); }
   .error-log-icon:is(.is-pressed, :active) { background: var(--secondary-container); color: var(--on-secondary-container); }
@@ -5884,16 +5927,10 @@ body::-webkit-scrollbar,
 }
 
 /* ---------------------------------------------------------------------------
-   DLSSNR 与远端处理那两组：层级标题、行尾的小字说明、行内输入。
-   都用现成的 token，跟其它设置行同一套值。 */
-
-.settings-row-note {
-  color: var(--on-surface-variant);
-  font-size: var(--text-xs);
-  line-height: var(--leading-normal);
-  text-align: right;
-  max-width: 40ch;
-}
+   DLSSNR 与远端处理那两组：层级标题、底部动作行、行内输入。
+   都用现成的 token，跟其它设置行同一套值。
+   （原先这里还有一条 `.settings-row-note`——DLSSNR 变的行尾小字「使用中 · 体积」。
+   那一行已经删掉，变体行改用模型菜单的下载按钮 + 进度槽，这条规则随之成了死码。） */
 
 /* DLSSNR 层编辑页底部那一对「删除 / 保存」：等宽平分、图标+文字居中。以前是右对齐的
    flex 换行，两个按钮各按自己文字宽站着，看着像随手摆的。只有这一处用它。 */

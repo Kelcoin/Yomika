@@ -183,14 +183,29 @@ describe('DLSS5 settings group', () => {
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
     expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
     expect(within(snippets).getByText('FP16 兼容版（RTX 20 / 30 系，性能较低）')).toBeTruthy();
-    // 装上的那条报「使用中」，体积跟着它；以前是另起一枚「已选择」徽标。
-    expect(within(snippets).getByText('使用中 · 158.2 MB')).toBeTruthy();
     expect(within(snippets).queryByText(/NVIDIA DLSS SDK License/)).toBeNull();
 
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    // 行里不再有「使用中」「DLL 体积」「下载中 N%」那行文字：这一排和模型菜单同一个样子。
+    expect(within(snippets).queryByText(/使用中/)).toBeNull();
+    expect(within(snippets).queryByText(/MB/)).toBeNull();
+    expect(within(snippets).queryByText(/下载中/)).toBeNull();
+
+    // 装上的那一条：高亮 + aria-pressed，右侧没有下载按钮（没东西可下）。
+    const installedRow = rows.find((row) => row.classList.contains('is-active'))!;
+    expect(installedRow.querySelector('.settings-choice-option-main')?.getAttribute('aria-pressed')).toBe('true');
+    expect(installedRow.querySelector('button.select-option-download')).toBeNull();
+
+    // 没装上的两条右侧各有一个可点的下载按钮，无障碍名以「下载」开头。
+    const downloadButtons = [...snippets.querySelectorAll<HTMLButtonElement>('button.select-option-download')];
+    expect(downloadButtons).toHaveLength(2);
+    expect(downloadButtons[0]!.getAttribute('aria-label')).toMatch(/^下载/);
+    downloadButtons.forEach((button) => expect(button.disabled).toBe(false));
+
     // 只有没装上的那两条可以点（下载完的替换由后端负责）。
-    const buttons = within(snippets).getAllByRole('button').filter((button) => !button.hasAttribute('disabled'));
-    expect(buttons).toHaveLength(2);
-    await user.click(buttons[0]!);
+    const mainButtons = [...snippets.querySelectorAll<HTMLButtonElement>('.settings-choice-option-main')];
+    expect(mainButtons.filter((button) => !button.disabled)).toHaveLength(2);
+    await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
     await waitFor(() => expect(screen.getByText(/已装好并启用/)).toBeTruthy());
   });
@@ -206,9 +221,12 @@ describe('DLSS5 settings group', () => {
     expect(within(group).getByRole('switch', { name: '启用 DLSSNR' })).toBeDisabled();
     await userEvent.setup().click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
-    expect(within(snippets).getAllByRole('button')).toHaveLength(3);
-    // 还没有片段就没有「当前这一份」，三条都只有体积，没有一条报「使用中」。
+    // 三条变体的主按钮 + 每条右侧那个下载按钮（一条都还没装上，三个都能下）。
+    expect(within(snippets).getAllByRole('button')).toHaveLength(6);
+    expect(within(snippets).getAllByRole('button', { name: /^下载/ })).toHaveLength(3);
+    // 还没有片段就没有「当前这一份」，没有一条报「使用中」，也没有体积那行字。
     expect(within(snippets).queryByText(/使用中/)).toBeNull();
+    expect(within(snippets).queryByText(/MB/)).toBeNull();
   });
 
   it('lays every variant out as one line, the way the model menus do', async () => {
@@ -233,12 +251,39 @@ describe('DLSS5 settings group', () => {
       expect(label).toBe(variant.id === 'community' ? `${variant.label}（推荐）` : variant.label);
       // 那一长句兼容性说明改成悬停可见（title），不再占一行。
       expect(main?.getAttribute('title')).toBe(variant.note);
-      // 状态与体积是行尾那一行，用的是今天「已选择」徽标同一个类。
-      expect(row.lastElementChild?.className).toBe('settings-row-note');
     });
-    // 装上的报「使用中 · 体积」，其余只报体积。
-    const notes = rows.map((row) => row.querySelector('.settings-row-note')?.textContent);
-    expect(notes).toEqual(['158.2 MB', '使用中 · 158.2 MB', '158.1 MB']);
+    // 行尾换成模型菜单那一套：没装上的挂下载按钮，装上的不挂；
+    // 「已选择」徽标那行文字（使用中 / 体积）整行去掉。
+    expect(snippets.querySelector('.settings-row-note')).toBeNull();
+    expect(rows[0]!.querySelector('button.select-option-download')).not.toBeNull();
+    expect(rows[1]!.querySelector('button.select-option-download')).toBeNull();
+    expect(rows[2]!.querySelector('button.select-option-download')).not.toBeNull();
+    // 没有一条在下载：进度槽不该常驻挂在行里。
+    expect(snippets.querySelector('.model-download-slot')).toBeNull();
+  });
+
+  it('grows the download progress slot on the variant that is coming down', async () => {
+    const user = userEvent.setup();
+    // 下载这条命令要等整个文件下完才回：用一条挂着的 promise 把「正在下载」那一刻钉住。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
+      dlssnr_download_variant: () => new Promise(() => { /* 停在下载中 */ }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
+
+    // 进度槽挂在正在下载的那一条下面，和模型菜单一样靠 is-open 长出来。
+    await waitFor(() => expect(snippets.querySelector('.model-download-slot.is-open')).not.toBeNull());
+    expect(snippets.querySelectorAll('.model-download-slot')).toHaveLength(1);
+    const bar = within(snippets).getByRole('progressbar', { name: /下载进度/ });
+    expect(bar).toBeTruthy();
+    // 下载中不再往那一行写字。
+    expect(within(snippets).queryByText(/下载中/)).toBeNull();
   });
 
   it('adds a second layer as a full set of pass parameters', async () => {

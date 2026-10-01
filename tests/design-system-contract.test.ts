@@ -304,8 +304,10 @@ describe('design system contract', () => {
     expect(settings).toContain('<EhMark size={20} plate={false} />');
     expect(mark).toContain('scale(0.0909)');
     // 模型下载的进度来自后端的 model-download-progress 事件，行内给进度条与百分比。
+    // 监听还在工作区里；进度条那截标记后来搬进了共享控件文件（DLSSNR 的变体行也要用它，
+    // 留在这里会绕出 工作区 ↔ DLSSNR 的 import 环），所以两处各断一句。
     expect(settings).toContain('model-download-progress');
-    expect(settings).toContain('model-download-status');
+    expect(read('src/components/ModelDownloadControls.tsx')).toContain('model-download-status');
   });
 
   it('uses the content surface behind short workspaces instead of exposing canvas', () => {
@@ -1272,6 +1274,18 @@ describe('design system contract', () => {
     // the ticks down the strip.
     expect(shell).toMatch(/\.archive-quick-rail-track\s*\{[^}]*position:\s*absolute[^}]*grid-auto-rows:\s*1fr[^}]*height:\s*48vh/);
     expect(shell).toMatch(/\.archive-quick-rail-tick\.is-active\s*\{\s*width:\s*16px;\s*background:\s*var\(--primary\)/);
+    // 刻度只有 9×3px，直接拿它当悬停/点击靶太细：一层看不见的伪元素把靶撑到 29×11px
+    // （竖向只各让 4px——`RAIL_MAX_TICKS` 个刻度铺在 48vh 里，矮窗口下间距约 10px）。
+    expect(shell).toMatch(/\.archive-quick-rail-tick\s*\{[^}]*position:\s*relative/);
+    expect(shell).toMatch(/\.archive-quick-rail-tick::before\s*\{\s*content:\s*'';\s*position:\s*absolute;\s*inset:\s*-4px -10px/);
+    // 悬停/聚焦时在刻度左边浮一枚标签，写着这个刻度会把你送到哪一天哪个时间——原生
+    // `title` 要等一秒、触摸设备上根本没有。
+    expect(shell).toMatch(/\.archive-quick-rail-label\s*\{[^}]*position:\s*absolute[^}]*right:\s*calc\(100% \+ 8px\)[^}]*opacity:\s*0[^}]*pointer-events:\s*none/);
+    expect(shell).toMatch(/\.archive-quick-rail-tick:hover > \.archive-quick-rail-label\s*\{\s*opacity:\s*1/);
+    expect(source).toMatch(/className="archive-quick-rail-label"/);
+    // 细分规则：越靠近当前越细，但刻度总数有天花板。
+    expect(source).toMatch(/RAIL_MAX_TICKS = 28/);
+    expect(source).not.toContain('RAIL_MAX_SEGMENTS');
     // The compact layout keeps the calendar dropdown instead: the rail is not
     // rendered there, and the gutter it reserved is given back.
     expect(source).toMatch(/!compact && displayMode === 'wide' && railSegments\.length > 1/);
@@ -1781,12 +1795,32 @@ describe('design system contract', () => {
 
   it('draws the DLSSNR variant rows with the shared choice row', () => {
     // 用户报了几次同一条：DLSSNR 的组件菜单自己造了一套两行行式（strong + small），
-    // 和「超分模型」那一排长得不是一种东西。变体行现在走同一个骨架，第二行消失，
-    // 状态与体积落在行尾那一行。这里只盯组件源码：那条已经没人用的
-    // `.dlssnr-variant-copy` 规则由协调者从 shell.css 里删。
+    // 和「超分模型」那一排长得不是一种东西。变体行现在与模型菜单同一套行式：选项名
+    // 一行，行尾挂同一个下载按钮——「使用中 · 体积」那行字整行去掉，已安装与否由
+    // 高亮（is-active）与 aria-pressed 说，进度走和模型菜单同一个槽。这里只盯组件
+    // 源码：那条已经没人用的 `.dlssnr-variant-copy` 规则由协调者从 shell.css 里删。
     const source = read('src/components/DlssnrSettingsGroup.tsx');
     expect(source).not.toContain('dlssnr-variant-copy');
+    expect(source).not.toContain('settings-row-note');
     expect(source).toMatch(/className="settings-choice-option-main"/);
-    expect(source).toMatch(/className="settings-row-note"/);
+    expect(source).toMatch(/className="select-option-download"/);
+  });
+
+  it('packs choice rows with no phantom second line and centres their labels', () => {
+    // 模型菜单每一项都挂着常驻的下载进度槽（关着时高度 0）。`gap` 会给换下来的那条
+    // **空**行照样留 8px 行间距，于是每行都比自己的按钮高 8px、高亮块跟着多出一截，
+    // 看上去就是「底部空隙过大」（探针实测：行高 50.4px / 按钮 42.7px）。
+    // 注释里也写着 `row-gap: 0` 这几个字（解释为什么必须为 0），所以先剥注释再断言，
+    // 否则「声明被改回 8px」这种回归会被注释里的字面量蒙混过去。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const source = read('src/components/DlssnrSettingsGroup.tsx');
+    expect(shell).toMatch(/\.settings-choice-option\s*\{[^}]*row-gap:\s*0/);
+    // 用户报的：选项名字全贴着左边，和高亮块不是一个中心。
+    expect(shell).toMatch(/\.settings-choice-option-main\s*\{[^}]*justify-content:\s*center[^}]*text-align:\s*center/);
+    // 例外：「设备行」（管理已有配对 / 添加设备）是图标 + 名字/地址的网格，保持左对齐。
+    expect(shell).toMatch(/\.settings-choice-option-main\.settings-device-option\s*\{\s*justify-content:\s*flex-start;\s*text-align:\s*left/);
+    // DLSSNR 变体行尾那行「使用中 · 体积」整行去掉，规则也删了，别再有人捡回来。
+    expect(shell).not.toMatch(/\.settings-row-note\s*\{/);
+    expect(source).not.toContain('settings-row-note');
   });
 });

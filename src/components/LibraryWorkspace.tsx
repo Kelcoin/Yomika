@@ -74,10 +74,47 @@ const PULL_DAMPING = 0.5;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
 
-/** Ticks the right-hand quick-jump rail can show before they stop being
- * clickable: a 48vh strip gives each one about 5px at this count. A longer
- * history falls back to one tick per month rather than an unclickable comb. */
-const RAIL_MAX_SEGMENTS = 60;
+/** 刻度数上限：48vh 的轨道条上再多，每个刻度就窄到点不准了。超了就把每一行的桶级
+ * 整体升一级重建（最大到「年」），到顶还超上限就等距抽稀。 */
+export const RAIL_MAX_TICKS = 28;
+
+/** 桶级，越靠近现在越小：小时 → 天 → 周 → 月 → 年。 */
+const RAIL_BUCKET_LEVELS = ['hour', 'day', 'week', 'month', 'year'] as const;
+type RailBucketLevel = (typeof RAIL_BUCKET_LEVELS)[number];
+
+const DAY_MS = 86_400_000;
+
+/** 一行「多久以前」决定它从哪一级起算：一天内按小时、一周内按天、两个月内按周、
+ * 两年内按月，再往前按年。越近的行，一个刻度代表的时间跨度越小。 */
+function railBaseLevel(ageMs: number): RailBucketLevel {
+  if (ageMs <= DAY_MS) return 'hour';
+  if (ageMs <= 7 * DAY_MS) return 'day';
+  if (ageMs <= 60 * DAY_MS) return 'week';
+  if (ageMs <= 730 * DAY_MS) return 'month';
+  return 'year';
+}
+
+/** 一周的键取那一周的周一，写成 `YYYY-MM-DD`：同一周里每一行都得算出同一个键。 */
+function railWeekKey(date: string): string {
+  const [year, month, day] = date.split('-').map(Number);
+  const at = new Date(year ?? 0, (month ?? 1) - 1, day ?? 1);
+  if (Number.isNaN(at.getTime())) return date;
+  // getDay() 里周日是 0，而它是 ISO 一周的最后一天，不是第一天。
+  at.setDate(at.getDate() - ((at.getDay() + 6) % 7));
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
+/** 一个桶的键：键相同且相邻的行只留一个刻度。 */
+function railBucketKey(level: RailBucketLevel, date: string, at: number | undefined): string {
+  switch (level) {
+    case 'hour': return at === undefined ? date : `${date}T${String(new Date(at).getHours()).padStart(2, '0')}`;
+    case 'week': return railWeekKey(date);
+    case 'month': return date.slice(0, 7);
+    case 'year': return date.slice(0, 4);
+    default: return date;
+  }
+}
 
 const scrollsVertically = (element: HTMLElement) => {
   const { overflowY } = getComputedStyle(element);
@@ -120,6 +157,9 @@ export interface ShelfTimelineEntry {
   date: string;
   dayLabel: string;
   time: string;
+  /** 该行的时间戳（epoch 毫秒）。快速跳转条靠它按「距最新一行多久」选时间粒度；
+   * 没有它的旧调用点按 `date` 退化成「天」这一级。 */
+  at?: number | undefined;
 }
 
 interface LibraryWorkspaceProps {
@@ -467,26 +507,64 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       return [{ month, index }];
     });
   }, [filteredArchives, timelineByArchiveId]);
-  /** The rail's ticks: evenly sampled rows, not one per day.
+  /** 轨道的刻度：越靠近当前时间，一个刻度代表的时间跨度越小。
    *
-   * 一天一个刻度在长历史里太稀：240 条记录压在 61 天里，轨道上只有 61 个目标，而且
-   * 一旦超过 `RAIL_MAX_SEGMENTS` 就整体退化成「一个月一个刻度」（这本历史只剩四个），
-   * 想跳到「今天下午」是做不到的。现在按行等分采样——册数比上限多就每 `step` 行放
-   * 一个，最多 `RAIL_MAX_SEGMENTS` 个刻度，每个刻度带自己那一行的日期与时间。 */
+   * 刻度不是按行等分的。按行等分时，「读得多的一天」会独占十几个刻度（同一天里每
+   * `step` 行一个），而空白的几个月只有一个——疏密正好反了：最需要精确跳转的最近
+   * 几天被摊薄，几年前的密集记录反而把轨道占满。
+   *
+   * 现在每一行先按「距最新一行多久」落进一个桶级（≤24 小时按小时、≤7 天按天、
+   * ≤60 天按周、≤730 天按月、更早按年），相邻两行落在同一个桶键上就只发一个刻度，
+   * 刻度落在这个桶最新的那一行（列表是倒序的，第一行最新）。桶键分别是
+   * `date + 'T' + 两位小时`、`date`、那一周周一的 `YYYY-MM-DD`、`date.slice(0, 7)`、
+   * `date.slice(0, 4)`。
+   *
+   * 总刻度数超过 `RAIL_MAX_TICKS` 时，把所有行的桶级整体升一级重建，一直到「年」；
+   * 那时还超上限就等距抽稀。 */
   const railSegments = useMemo(() => {
     if (!timelineByArchiveId) return [];
-    const rowCount = filteredArchives.length;
-    if (rowCount === 0) return [];
-    const step = Math.max(1, Math.ceil(rowCount / RAIL_MAX_SEGMENTS));
-    const segments: Array<{ index: number; label: string }> = [];
-    for (let index = 0; index < rowCount; index += step) {
-      const archive = filteredArchives[index];
-      const entry = archive ? timelineByArchiveId.get(archive.archiveId) : undefined;
-      const day = entry?.dayLabel || entry?.date || '';
-      const label = [day, entry?.time].filter(Boolean).join(' ').trim();
-      segments.push({ index, label: label || `第 ${index + 1} 行` });
+    if (filteredArchives.length === 0) return [];
+    const rowData: Array<{ index: number; date: string; dayLabel: string; time: string; at: number | undefined }> =
+      filteredArchives.map((archive, index) => {
+        const entry = timelineByArchiveId.get(archive.archiveId);
+        return { index, date: entry?.date ?? '', dayLabel: entry?.dayLabel ?? '', time: entry?.time ?? '', at: entry?.at };
+      });
+    const labelFor = (row: { index: number; date: string; dayLabel: string; time: string }) =>
+      [row.dayLabel || row.date, row.time].filter(Boolean).join(' ').trim() || `第 ${row.index + 1} 行`;
+
+    // 锚点是能取到的时间戳里的最大值，不是本次渲染的「现在」：轨道只描述这本历史
+    // 自己的疏密，也不该随系统时钟漂移。
+    let anchorAt = Number.NEGATIVE_INFINITY;
+    for (const row of rowData) {
+      const at = row.at ?? Date.parse(row.date);
+      if (!Number.isNaN(at) && at > anchorAt) anchorAt = at;
     }
-    return segments;
+    // 一条可信时间都取不到（旧调用点只剩下空的或坏的 `date`）：按「每行一个」兜底，
+    // 也就是这条规则之前的粒度——总好过把一堆行凭空合并成一个刻度。
+    if (anchorAt === Number.NEGATIVE_INFINITY) return rowData.map((row) => ({ index: row.index, label: labelFor(row) }));
+
+    const baseLevels = rowData.map((row) => (row.at === undefined ? 'day' : railBaseLevel(anchorAt - row.at)));
+    const build = (offset: number) => {
+      const ticks: Array<{ index: number; label: string }> = [];
+      let previousKey: string | undefined;
+      rowData.forEach((row, position) => {
+        const base = Math.max(0, RAIL_BUCKET_LEVELS.indexOf(baseLevels[position] ?? 'day'));
+        const level = RAIL_BUCKET_LEVELS[Math.min(RAIL_BUCKET_LEVELS.length - 1, base + offset)] ?? 'year';
+        const key = railBucketKey(level, row.date, row.at);
+        if (key === previousKey) return;
+        previousKey = key;
+        ticks.push({ index: row.index, label: labelFor(row) });
+      });
+      return ticks;
+    };
+
+    let ticks = build(0);
+    for (let offset = 1; ticks.length > RAIL_MAX_TICKS && offset < RAIL_BUCKET_LEVELS.length; offset += 1) ticks = build(offset);
+    if (ticks.length > RAIL_MAX_TICKS) {
+      const step = Math.ceil(ticks.length / RAIL_MAX_TICKS);
+      ticks = ticks.filter((_, position) => position % step === 0);
+    }
+    return ticks;
   }, [filteredArchives, timelineByArchiveId]);
   /** The tick for the row the reader is looking at: the last segment that starts
    * at or above it. */
@@ -899,7 +977,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                       aria-label={`跳转到 ${segment.label}`}
                       aria-current={position === railActive ? 'true' : undefined}
                       onClick={() => { rows.scrollToIndex(segment.index, { align: 'start', behavior: 'smooth' }); setRailActive(position); }}
-                    />
+                    >
+                      <span className="archive-quick-rail-label" aria-hidden="true">{segment.label}</span>
+                    </button>
                   ))}
                 </div>
               </div>

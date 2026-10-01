@@ -88,7 +88,9 @@ const workspaces = {
 
 /** Timeline facts for a shelf row: the day it belongs to (for grouping), a short
  * day label for the day's first row, and the clock time for the row itself. The
- * history rail reads as a sequence instead of one repeated date. */
+ * history rail reads as a sequence instead of one repeated date. `at` is the raw
+ * epoch millisecond value, which the history quick-jump rail needs to size its
+ * time buckets by how recent a row is. */
 function formatShelfTimeline(iso: string): ShelfTimelineEntry {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return { date: '', dayLabel: '', time: '' };
@@ -101,7 +103,7 @@ function formatShelfTimeline(iso: string): ShelfTimelineEntry {
     : dayDelta === 1
       ? '昨天'
       : at.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
-  return { date, dayLabel, time: at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) };
+  return { date, dayLabel, time: at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }), at: at.getTime() };
 }
 
 const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list: switching tabs and coming back should not

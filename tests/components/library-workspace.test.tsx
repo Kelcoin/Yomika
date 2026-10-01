@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-import { LibraryWorkspace, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
+import { LibraryWorkspace, RAIL_MAX_TICKS, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
 import type { ArchiveRecord } from '../../src/domain/library';
 
 const archives: ArchiveRecord[] = Array.from({ length: 100 }, (_, index) => ({
@@ -245,7 +245,41 @@ describe('library workspace', () => {
     expect(secondTimeline).toHaveTextContent('09:30');
   });
 
-  it('offers a quick-jump tick for every row while the history fits the rail', () => {
+  it('gives each hour near the newest row its own tick, and merges the hours that share one', () => {
+    renderWorkspace({
+      archives: archives.slice(0, 3),
+      timelineByArchiveId: new Map([
+        // 同一小时里的两条（08:15 与 08:20）只发一个刻度：刻度代表的是「08 点」这一
+        // 桶，落在桶里最新的那一行上。
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15', at: Date.parse('2026-09-11T08:15:00+08:00') }],
+        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '08:20', at: Date.parse('2026-09-11T08:20:00+08:00') }],
+        // 隔了近十个小时：另一个小时，另一个刻度。
+        ['archive-2', { date: '2026-09-10', dayLabel: '昨天', time: '22:40', at: Date.parse('2026-09-10T22:40:00+08:00') }],
+      ]),
+    });
+
+    const rail = screen.getByRole('group', { name: '历史快速跳转' });
+    const ticks = [...rail.querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天 08:15', '昨天 22:40']);
+    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天 08:15', '跳转到 昨天 22:40']);
+    // 第一条就是「正在看的那一行」；桌面端不再同时挂着日历下拉（两个入口挤在
+    // 同一角会互相重叠）。
+    expect(ticks[0]).toHaveClass('is-active');
+    expect(ticks[0]).toHaveAttribute('aria-current', 'true');
+    expect(ticks[1]).not.toHaveClass('is-active');
+    expect(document.querySelector('.history-quick-jump')).toBeNull();
+
+    // 刻度自己写着目标时间：title 要悬停才看得到，轨道上得能直接读出来。
+    for (const tick of ticks) {
+      const label = tick.querySelector<HTMLElement>('.archive-quick-rail-label');
+      expect(label).not.toBeNull();
+      expect(label).toHaveAttribute('aria-hidden', 'true');
+      expect(label?.textContent).toBe(tick.getAttribute('title'));
+    }
+  });
+
+  it('falls back to one tick per day for callers that only send a date', () => {
+    // 旧调用点只有 `date`，不知道「多久以前」，只能退到最粗的可信粒度「天」。
     renderWorkspace({
       archives: archives.slice(0, 3),
       timelineByArchiveId: new Map([
@@ -255,35 +289,88 @@ describe('library workspace', () => {
       ]),
     });
 
-    const rail = screen.getByRole('group', { name: '历史快速跳转' });
-    const ticks = [...rail.querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
-    // 一行一个刻度，不是一天一个：同一天的两条记录要能各自跳到（长历史里一天几十条，
-    // 共用一个刻度等于那一整天只能跳到开头）。
-    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天 08:15', '今天 09:30', '昨天 22:40']);
-    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天 08:15', '跳转到 今天 09:30', '跳转到 昨天 22:40']);
-    // 第一条就是「正在看的那一行」；桌面端不再同时挂着日历下拉（两个入口挤在
-    // 同一角会互相重叠）。
-    expect(ticks[0]).toHaveClass('is-active');
-    expect(ticks[0]).toHaveAttribute('aria-current', 'true');
-    expect(ticks[1]).not.toHaveClass('is-active');
-    expect(document.querySelector('.history-quick-jump')).toBeNull();
+    const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    expect(ticks.map((tick) => tick.getAttribute('title'))).toEqual(['今天 08:15', '昨天 22:40']);
+    expect(ticks.map((tick) => tick.getAttribute('aria-label'))).toEqual(['跳转到 今天 08:15', '跳转到 昨天 22:40']);
   });
 
-  it('samples rows instead of collapsing to one tick per month on a long history', () => {
-    const entryFor = (index: number) => ({
-      date: `2026-0${(index % 9) + 1}-0${(index % 9) + 1}`,
-      dayLabel: `${(index % 9) + 1}月${(index % 9) + 1}日`,
-      time: `0${index % 10}:${10 + (index % 50)}`,
-    });
-    const timelineByArchiveId = new Map(archives.map((archive, index) => [archive.archiveId, entryFor(index)]));
-    renderWorkspace({ archives, timelineByArchiveId });
+  it('collapses the days far from the newest row into one coarse tick', () => {
+    // 三个月前的十天挤进一个月刻度：远处的日子再多也不该占满轨道（它们本来也跳不
+    // 到「哪一天」，只有「大概那时候」）。刻度落在这个桶最新的那一行上。
+    const oldDays = Array.from({ length: 10 }, (_, offset) => `2026-06-${String(19 - offset).padStart(2, '0')}`);
+    const timelineByArchiveId = new Map<string, { date: string; dayLabel: string; time: string; at: number }>([
+      ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15', at: Date.parse('2026-09-11T08:15:00+08:00') }],
+      ...oldDays.map((date, offset): [string, { date: string; dayLabel: string; time: string; at: number }] => [
+        `archive-${offset + 1}`,
+        {
+          date,
+          dayLabel: `${Number(date.slice(5, 7))}月${Number(date.slice(8))}日`,
+          time: '12:00',
+          at: Date.parse(`${date}T12:00:00+08:00`),
+        },
+      ]),
+    ]);
+    renderWorkspace({ archives: archives.slice(0, 11), timelineByArchiveId });
 
     const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
-    // 100 行、上限 60 个刻度 → 每 2 行一个，50 个；不再是「超过 60 天就退化成一个月
-    // 一个刻度」（那本历史只剩四个目标）。
-    expect(ticks).toHaveLength(50);
-    expect(ticks[0]).toHaveAttribute('title', '1月1日 00:10');
-    expect(ticks.at(-1)).toHaveAttribute('title', `${entryFor(98).dayLabel} ${entryFor(98).time}`);
+    expect(ticks).toHaveLength(2);
+    expect(ticks[0]).toHaveAttribute('title', '今天 08:15');
+    expect(ticks[1]).toHaveAttribute('title', '6月19日 12:00');
+  });
+
+  it('honours the tick budget by coarsening every bucket a tier', () => {
+    // 120 行、每小时一行：按「小时」会发 25 个刻度，再叠上外面的「天」桶，超过上限，
+    // 于是整体升一级（小时→天、天→周）重建。
+    const hourly: ArchiveRecord[] = Array.from({ length: 120 }, (_, index) => ({
+      ...archives[0]!,
+      archiveId: `hourly-${index}`,
+      title: `Hourly ${index}`,
+    }));
+    const anchorAt = Date.parse('2026-09-11T08:15:00+08:00');
+    const pad = (part: number) => String(part).padStart(2, '0');
+    const timelineByArchiveId = new Map(hourly.map((archive, index) => {
+      const at = anchorAt - index * 3_600_000;
+      const moment = new Date(at);
+      return [archive.archiveId, {
+        date: `${moment.getFullYear()}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())}`,
+        dayLabel: '9月11日',
+        time: `${pad(moment.getHours())}:${pad(moment.getMinutes())}`,
+        at,
+      }];
+    }));
+    renderWorkspace({ archives: hourly, timelineByArchiveId });
+
+    const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    expect(ticks.length).toBeLessThanOrEqual(RAIL_MAX_TICKS);
+    // 是「升一级」而不是「抽稀」：整段历史只剩个位数个刻度，第一个还是最新的那行。
+    expect(ticks.length).toBeGreaterThan(1);
+    expect(ticks.length).toBeLessThan(8);
+    expect(ticks[0]).toHaveClass('is-active');
+  });
+
+  it('thins the ticks evenly when even year buckets overflow the budget', () => {
+    // 极端旧历史：42 个不同年份，「年」已经是最粗的一级，只能等距抽稀。
+    const years = Array.from({ length: 42 }, (_, index) => 2000 - index);
+    const oldArchives: ArchiveRecord[] = years.map((_, index) => ({
+      ...archives[0]!,
+      archiveId: `old-${index}`,
+      title: `Old ${index}`,
+    }));
+    const timelineByArchiveId = new Map(oldArchives.map((archive, index) => {
+      const date = `${years[index]}-06-15`;
+      return [archive.archiveId, {
+        date,
+        dayLabel: `${date.slice(0, 4)}年6月15日`,
+        time: '12:00',
+        at: Date.parse(`${date}T12:00:00+08:00`),
+      }];
+    }));
+    renderWorkspace({ archives: oldArchives, timelineByArchiveId });
+
+    const ticks = [...screen.getByRole('group', { name: '历史快速跳转' }).querySelectorAll<HTMLElement>('.archive-quick-rail-tick')];
+    expect(ticks.length).toBeLessThanOrEqual(RAIL_MAX_TICKS);
+    // ceil(42 / 28) = 2：每隔一个留一个。
+    expect(ticks).toHaveLength(21);
   });
 
   it('moves the rail’s filled tick when a tick is picked', async () => {
@@ -291,9 +378,9 @@ describe('library workspace', () => {
     renderWorkspace({
       archives: archives.slice(0, 3),
       timelineByArchiveId: new Map([
-        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15' }],
-        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '09:30' }],
-        ['archive-2', { date: '2026-09-10', dayLabel: '昨天', time: '22:40' }],
+        ['archive-0', { date: '2026-09-11', dayLabel: '今天', time: '08:15', at: Date.parse('2026-09-11T08:15:00+08:00') }],
+        ['archive-1', { date: '2026-09-11', dayLabel: '今天', time: '09:30', at: Date.parse('2026-09-11T09:30:00+08:00') }],
+        ['archive-2', { date: '2026-09-10', dayLabel: '昨天', time: '22:40', at: Date.parse('2026-09-10T22:40:00+08:00') }],
       ]),
     });
 
