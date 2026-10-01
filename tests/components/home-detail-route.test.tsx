@@ -87,6 +87,13 @@ function scrollHost(element: HTMLElement): HTMLElement {
 
 afterEach(resetInvokeAdapterForTests);
 
+/** 某个面板当前的比例。react-resizable-panels 把「id → flexGrow」这份布局写在内联样式
+ * 上，所以 DOM 里读得到真正生效的比例，而不是我们以为写了多少。（按 id 取而不是按
+ * `[data-panel]` 的顺序取：书架那一页的列表里还嵌着档案库自己的一层单面板 Group。） */
+function panelGrow(id: string): string | undefined {
+  return document.getElementById(id)?.style.flexGrow;
+}
+
 describe('home detail route', () => {
   it('opens a home rail card on the home page instead of the library', async () => {
     renderApp('/', makeAdapter());
@@ -142,6 +149,59 @@ describe('home detail route', () => {
     fireEvent.scroll(list);
     fireEvent.click(screen.getByRole('link', { name: 'to-home' }));
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'detail:archive-0' })).not.toBeInTheDocument());
-    expect(page.scrollTop).toBe(500);
+    await waitFor(() => expect(page.scrollTop).toBe(500));
+  });
+
+  it('keeps trying while the fresh scroller still clamps the offset', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    page.scrollTop = 240;
+    fireEvent.scroll(page);
+
+    // 真机上的新容器不是「随时能滚」：换容器那一帧它还没长到 240 那么高，浏览器会把
+    // 这一写**夹成 0**。这里把这件事做出来——前两次写进去都收不下，第三次才宽到装得下。
+    // 一发式的写法会停在 0（那一发正好被夹掉），而打包带走位置的那一份也不能再被
+    // 这个元素的 0 覆写。
+    let stored = 0;
+    let writes = 0;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => stored,
+      set: (value: number) => {
+        writes += 1;
+        stored = Math.min(value, writes >= 3 ? 9999 : 0);
+      },
+    });
+
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    await waitFor(() => expect(list.scrollTop).toBe(240));
+    expect(writes).toBeGreaterThan(1);
+  });
+
+  it('starts every two-pane shell at the declared ratio instead of an even split', async () => {
+    // `Panel` 自己的 `defaultSize` 在 react-resizable-panels v4 里不生效（4.12.3 实测：
+    // 两个面板写 `defaultSize="58"`/`"42"`，渲染出来都是 `flex-grow: 50`），比例只能由
+    // `Group` 的 `defaultLayout` 给——见 `src/lib/panelLayout.ts`。用户报的「首页的双页
+    // 比例和别的页不一样」，根子就是没存过布局的页面全在五五开。
+    const home = renderAppInWorkspace('/', makeAdapter());
+    fireEvent.click(await screen.findByRole('link', { name: /Archive 0/ }));
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    expect([panelGrow('home-shell-list'), panelGrow('home-shell-detail')]).toEqual(['58', '42']);
+    home.unmount();
+
+    // 档案库、书架与首页是同一份声明，落下来也该是同一个比例。
+    const cases = [
+      { entry: '/library/archive-0', list: 'library-shell-list', detail: 'library-shell-detail' },
+      { entry: '/history/archive-0', list: 'shelf-shell-list-history', detail: 'shelf-shell-detail-history' },
+    ];
+    for (const { entry, list, detail } of cases) {
+      const view = renderAppInWorkspace(entry, makeAdapter());
+      expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+      expect([panelGrow(list), panelGrow(detail)], entry).toEqual(['58', '42']);
+      view.unmount();
+    }
   });
 });

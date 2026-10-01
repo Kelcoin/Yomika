@@ -118,13 +118,30 @@ fn shape(bytes: &[u8]) -> Option<Shape> {
     None
 }
 
-/// `image` 的循环语义 → acTL 的 `num_plays`：`Infinite` 就是「一直播」的 0。
+/// `image` 的循环语义 → 圈数：`Infinite` 就是「一直播」的 0。
+///
+/// 只用来**读**源文件声明的圈数（测试拿它对照，也让人看得出我们在丢掉什么）。
 fn plays(loops: image::metadata::LoopCount) -> u32 {
     match loops {
         image::metadata::LoopCount::Infinite => 0,
         image::metadata::LoopCount::Finite(value) => value.get(),
     }
 }
+
+/// 产物写进 acTL 的 `num_plays`：**一律 0，也就是一直播**，不照抄源文件的圈数。
+///
+/// 三种容器的「循环次数」语义并不统一，照抄会把「源里写着播一遍」原样搬过来：
+/// - WebP 的 `ANIM` Loop Count 是**圈数**（Chromium `webp_image_decoder.cc`：
+///   `repetition_count_ = count == 0 ? kAnimationLoopInfinite : count - 1`，注释原文
+///   “WebP defines loop count as the number of cycles, with 0 meaning infinite”）——
+///   所以 `Loop Count = 1` 就是「播一遍」。用户库里那 5 份动图 WebP 全写着 1（下载器
+///   写死的），界面上的表现就是「动图只播一遍就停了」。
+/// - GIF 的 Netscape 块、APNG 的 acTL 又各有一套（0 都表示无限，非 0 的含义不同）。
+///
+/// 阅读器里的动图是内容：播一遍停在半路等于坏图。作者写的那点圈数是给播放器的提示，
+/// 不是给阅读者的限制，所以这里统一成一直播。代价是「本来只想播两遍」的动图也会一直
+/// 播——那正是阅读时想要的。
+const READER_PLAYS: u32 = 0;
 
 /// 三种容器解出来都是同一个迭代器形状（整画布 RGBA 帧），这里的盒子只为把三种
 /// 解码器收成一个类型，免得下面的循环写三遍。
@@ -211,6 +228,8 @@ fn decide(bytes: &[u8], limits: AnimationLimits) -> AnimationVerdict {
 /// `process` 拿到的是**一帧整画布**的 RGBA（三种解码器都会把帧合成到整画布、左上
 /// 角为 0，所以这里不需要处理 offset），返回同尺寸的 RGBA。测试传恒等函数就能在
 /// 没有 GPU 的机器上走完整条链路。
+///
+/// 循环次数**不照抄**源文件，一律写成一直播，理由见 [`READER_PLAYS`]。
 pub fn transcode<F>(
     bytes: &[u8],
     limits: AnimationLimits,
@@ -229,7 +248,8 @@ where
         return Ok(None);
     };
 
-    let (mut frames, plays) = frames_of(bytes)?;
+    // 源声明的圈数直接丢掉（`_source_plays`）：产物一直是 `READER_PLAYS`。
+    let (mut frames, _source_plays) = frames_of(bytes)?;
     let mut encoded = Vec::new();
     let mut writer = {
         let mut encoder = png::Encoder::new(&mut encoded, shape.width, shape.height);
@@ -242,7 +262,7 @@ where
         encoder.set_compression(png::Compression::Fast);
         encoder.set_filter(png::Filter::Adaptive);
         encoder
-            .set_animated(shape.frames, plays)
+            .set_animated(shape.frames, READER_PLAYS)
             .map_err(|error| error.to_string())?;
         encoder.write_header().map_err(|error| error.to_string())?
     };
@@ -432,8 +452,9 @@ mod tests {
         (delays, colors, plays)
     }
 
-    /// 恒等跑一遍：断言输出是 APNG，且帧数/尺寸/延迟/像素/循环次数都与源文件解出来
-    /// 的一致。返回源文件解出来的那份，供各容器的用例再补几条硬断言。
+    /// 恒等跑一遍：断言输出是 APNG，且帧数/尺寸/延迟/像素都与源文件解出来的一致。
+    /// 返回源文件解出来的那份（延迟、像素、**源里写的循环次数**），供各容器的用例再
+    /// 补几条硬断言；循环次数是唯一不照抄的东西——产物必须一直播。
     fn round_trip(source: &[u8]) -> (Vec<u32>, Vec<[u8; 3]>, u32) {
         let (delays, colors, plays) = source_frames(source);
         let mut seen = 0u32;
@@ -460,7 +481,10 @@ mod tests {
         assert_eq!(seen, FRAMES, "每一帧都应当过一遍");
         assert_eq!(decoded.delays, delays, "每帧延迟应当原样保留");
         assert_eq!(decoded.colors, colors, "每帧像素应当原样保留");
-        assert_eq!(decoded.plays, plays, "循环次数应当原样保留");
+        assert_eq!(
+            decoded.plays, 0,
+            "循环次数不照抄源：产物一律写「一直播」"
+        );
         (delays, colors, plays)
     }
 
@@ -594,18 +618,70 @@ mod tests {
         assert_ne!(colors[1], colors[2]);
     }
 
+    /// 把夹具 WebP 的 `ANIM` 循环次数改成 `count`——用户那份动图里写的就是 1。
+    ///
+    /// `ANIM` 的载荷是「背景色 u32 + Loop Count u16」，所以 Loop Count 落在 `'ANIM'`
+    /// 这个标签之后 12 字节处。（我第一版按 6 读，读到的是 chunk 长度的高字节，全是
+    /// 0，差点得出「用户的动图本来就是无限循环」的错结论。）
+    fn webp_with_patched_loop_count(count: u16) -> Vec<u8> {
+        let mut bytes = WEBP.to_vec();
+        let at = bytes
+            .windows(4)
+            .position(|window| window == b"ANIM")
+            .expect("夹具 WebP 里应当有 ANIM");
+        bytes[at + 12..at + 14].copy_from_slice(&count.to_le_bytes());
+        bytes
+    }
+
+    /// 源里写「播 N 圈」，产物也必须一直播。
+    ///
+    /// 用户库里那 5 份动图 WebP 的 `ANIM` 全写着 `Loop Count = 1`，而按 WebP 规范与
+    /// Chromium 的读法（`webp_image_decoder.cc`：`count == 0 ? kAnimationLoopInfinite
+    /// : count - 1`，注释原文是 “WebP defines loop count as the number of cycles,
+    /// with 0 meaning infinite”）那是**播一遍**。照抄它，界面上就是「动图只播一遍就
+    /// 停」——阅读器里的动图是内容，播一遍停在半路等于坏图。
     #[test]
-    fn carries_a_finite_loop_count_across() {
-        let source = write_apng(2, 6, &[(100, 1000), (100, 1000)], 2, SHAPE);
-        let out = transcode(&source, AnimationLimits::default(), &CancelToken::none(), |rgba, _, _| {
-            Ok(rgba)
-        })
+    fn writes_forever_even_when_the_source_counts_its_cycles() {
+        for source_plays in [1, 6] {
+            let source = write_apng(2, source_plays, &[(100, 1000), (100, 1000)], 2, SHAPE);
+            assert_eq!(
+                source_frames(&source).2,
+                source_plays,
+                "夹具里写的圈数要真的被解码器读出来"
+            );
+            let out = transcode(
+                &source,
+                AnimationLimits::default(),
+                &CancelToken::none(),
+                |rgba, _, _| Ok(rgba),
+            )
+            .expect("转码不该失败")
+            .expect("这份动图应当被处理");
+            assert_eq!(
+                decode_apng(&out).plays,
+                0,
+                "源里写着 {source_plays} 圈，产物也得一直播"
+            );
+        }
+    }
+
+    /// 用户那份文件的形状：动图 WebP + `ANIM Loop Count = 1`。
+    #[test]
+    fn loops_a_webp_that_asks_for_a_single_cycle() {
+        let source = webp_with_patched_loop_count(1);
+        assert_eq!(source_frames(&source).2, 1, "夹具得真的写着「一圈」");
+        let out = transcode(
+            &source,
+            AnimationLimits::default(),
+            &CancelToken::none(),
+            |rgba, _, _| Ok(rgba),
+        )
         .expect("转码不该失败")
         .expect("这份动图应当被处理");
         assert_eq!(
             decode_apng(&out).plays,
-            6,
-            "有限循环次数应当写进 acTL 的 num_plays"
+            0,
+            "源里写着「播一遍」，产物也得一直播"
         );
     }
 

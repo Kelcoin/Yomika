@@ -3983,22 +3983,24 @@ body::-webkit-scrollbar,
 
 /* Rails are their own surface. Sitting flush on the canvas with nothing but a
    heading, they ran into each other and into the page below.
-   左右不留内边距（竖直那 16px 保留）：卡片区域本来在这条轨道里再内缩 16px，加上
-   `1px` 边框一共离窗口 33px，而档案库的网格是 28px、宽行是 20px、工具条是 16px，
-   同一个页面里几排卡片的起始位置就对不上（用户：「卡片区域两侧的空隙与其他组件
-   不一致」）。收成 0 之后卡片区域落在 17px 上。标题仍旧缩 8px，免得文字贴住边框。 */
-.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4) 0; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
-.archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding-inline: var(--space-2); }
+   四边都要留这 16px：卡片区域的两侧空隙就是它给的（轨道自己的 1px 边框 + 网格那
+   6px 焦点环内边距再各加一点，和档案库的网格/宽行同一档）。曾经为了「和别的组件
+   对齐」把水平那圈收成 0，结果整排卡片贴着框边，用户看到的是「随机漫游和继续阅读
+   左右直接没有空隙了」。 */
+.archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+.archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .archive-rail-heading h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); }
 /* One icon per rail, in the accent the heading already carries. */.archive-rail-heading h2 svg { width: 20px; height: 20px; color: var(--primary); }
 /* 6px of padding, not 2: the global :focus-visible ring extends outside the card
    and a horizontal scroll container clips anything past its padding box, so a
    keyboard-focused rail card had its ring sliced off.
-   `safe center`：卡片装得下时左右空档相等（档案库缩略网格也是居中的），装不下时
-   `safe` 回落到起始对齐，第一张仍旧从左边开始、还能横着滚（居中的话它会够不到）。
-   左对齐时左边固定 6px、右边是「容器宽减掉卡片」的一大条，列宽一变两边就只变一边
-   ——用户看到的「打开详情页时那两侧空隙会变」。 */
-.archive-rail-grid { display: flex; align-items: flex-start; justify-content: safe center; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
+   这一排**不能**居中：货架上只有一两张卡片时，`justify-content: center` 会把它们
+   推到框子正中间、两侧留下巨大的空档（用户：「待看则是巨大无比，似乎是变成居中
+   显示了」），而 `safe center` 在 Chromium 里溢出时并没有回落到起始对齐，第一张
+   卡片直接被切在框外。默认的起始对齐不会藏内容；「右边那条没用上的尾巴」是固定宽
+   卡片排成一条轨道的固有结果，不是空隙——空隙由上面那条 `padding` 决定，两侧永远
+   一样宽。 */
+.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 

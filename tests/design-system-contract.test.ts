@@ -859,14 +859,17 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*display:\s*flex[\s\S]*overflow-x:\s*auto/);
     expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*align-items:\s*flex-start/);
-    // 用户报告（第 2 条）：首页那几排卡片两侧的空隙与别的组件对不上，而且一开详情就变。
-    // 轨道自己带着左右各 16px 的内边距（6px 是给焦点环留的，不能收），骨架是首页唯一
-    // 的组件，于是卡片区域比档案库多缩进 17px；水平内边距收成 0、标题自己补 8px。
-    // 剩下的空档交给 `safe center`：装得下时两侧平分（与档案库缩略网格一致，列宽一变
-    // 两侧一起变），装不下时回落到起始对齐，第一张还在手边、能直接滚。
-    expect(ruleBody(shell, '.archive-rail')).toMatch(/padding:\s*var\(--space-4\) 0/);
-    expect(ruleBody(shell, '.archive-rail-heading')).toMatch(/padding-inline:\s*var\(--space-2\)/);
-    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/justify-content:\s*safe center/);
+    // 用户报告（第 2 条，随后第 1 条）：首页那几排卡片两侧的空隙与别的组件对不上，而且
+    // 一开详情就变。卡片区域的两侧空隙由轨道自己的 `padding` 给（四边 16px，与档案库的
+    // 网格、宽行同一档），水平那圈不能收成 0——收掉之后整排卡片贴着框边，用户看到的正是
+    // 「随机漫游和继续阅读左右直接没有空隙了」。
+    // 那一排也不能居中：货架上只有一两张卡片时它们会被推到框子正中间、两侧留下巨大的空档
+    // （「待看则是巨大无比，似乎是变成居中显示了」），而 `safe center` 在 Chromium 里溢出
+    // 时并没有回落到起始对齐，第一张卡片直接被切在框外。默认的起始对齐不藏内容；「右边
+    // 那条没用上的尾巴」是固定宽卡片排成一条轨道的固有结果，不是空隙。
+    expect(ruleBody(shell, '.archive-rail')).toMatch(/padding:\s*var\(--space-4\);/);
+    expect(ruleBody(shell, '.archive-rail-heading')).not.toMatch(/padding-inline/);
+    expect(ruleBody(shell, '.archive-rail-grid')).not.toContain('justify-content');
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);

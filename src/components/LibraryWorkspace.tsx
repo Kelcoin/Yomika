@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import type { Layout } from 'react-resizable-panels';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import type { ArchiveRecord } from '../domain/library';
@@ -24,6 +25,7 @@ import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
 import { TagSearchLink } from './TagSearchLink';
 import { ArchiveProgressBar, ArchiveThumbCardBody, ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
 import { useEhMyTags } from './useEhMyTags';
+import { panelLayout } from '../lib/panelLayout';
 import '../styles/library-loading.css';
 
 /** Chips a thumbnail card offers. Generous on purpose: the fill waterfall drops
@@ -539,6 +541,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     storage: window.localStorage,
     onlySaveAfterUserInteractions: true,
   });
+  /** 没存过布局时档案库列表与详情那一栏的比例（64/36；只有一个面板时按满宽算）。 */
+  const listPanelLayout: Layout = showDetail ? { 'library-list': 64, 'library-detail': 36 } : { 'library-list': 100 };
   const navigate = useNavigate();
   useTagTranslations();
 
@@ -1011,8 +1015,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </div>
         </div>
       )}
-      <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={savedPanelLayout.defaultLayout} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
-        <Panel className="library-list-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-list" defaultSize={showDetail ? '64' : '100'} minSize="40">
+      <Group className={`library-panels ${showDetail ? '' : 'library-panels-list-only'}`} orientation="horizontal" defaultLayout={panelLayout(savedPanelLayout.defaultLayout, listPanelLayout)} onLayoutChanged={savedPanelLayout.onLayoutChanged}>
+        <Panel className="library-list-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-list" minSize="40">
           {/* 刻度条挂在列表外面（面板这一层）。绝对定位的子元素如果留在滚动容器里，
               会跟着内容一起滚，居中就随滚动漂走——它得站在「看得见的那一段」的
               中线上，那正是这一层的高度。 */}
@@ -1135,7 +1139,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           </div>
         </Panel>
         {showDetail && <><Separator className="panel-separator" />
-        <Panel id="library-detail" defaultSize="36" minSize="30">
+        <Panel id="library-detail" minSize="30">
           {selected && (
             <section className="archive-detail" aria-labelledby="archive-detail-title">
               <h2 id="archive-detail-title">{selected.title}</h2>

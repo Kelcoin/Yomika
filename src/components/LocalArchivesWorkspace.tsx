@@ -4,6 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import type { Layout } from 'react-resizable-panels';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
@@ -16,6 +17,7 @@ import { StatusLine } from './StatusLine';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
+import { panelLayout } from '../lib/panelLayout';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { longPressHandlers } from '../lib/longPressMenu';
@@ -392,6 +394,8 @@ export function LocalArchivesWorkspace() {
     storage: window.localStorage,
     onlySaveAfterUserInteractions: true,
   });
+  /** 没存过布局时本地档案两栏的比例，与首页、档案库、书架同一份（58/42）。 */
+  const splitLayout: Layout = { 'local-archives-list': 58, 'local-archives-detail': 42 };
 
   // 列表交给虚拟器：几百行全量渲染时，每一行的标签瀑布和封面都在滚动里重排，
   // 拖动就是一顿一顿的。行座的高度交给 measureElement 去量——下载行在窄屏上
@@ -623,12 +627,12 @@ export function LocalArchivesWorkspace() {
     );
   }
   return (
-    <Group className="library-shell has-detail" orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
-      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-list" defaultSize="58" minSize="40">
+    <Group className="library-shell has-detail" orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, splitLayout)} onLayoutChanged={layout.onLayoutChanged}>
+      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-list" minSize="40">
         <section className="library-shell-list">{list}</section>
       </Panel>
       <Separator className="panel-separator" />
-      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-detail" defaultSize="42" minSize="30">
+      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-detail" minSize="30">
         <section className="library-shell-detail" data-scroll-region>
           <LocalArchiveDetail
             archive={detail}
