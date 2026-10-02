@@ -7,9 +7,16 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { panelLayout } from '../lib/panelLayout';
 import { ArchiveDetailRoute } from './ArchiveDetailRoute';
 
-/** 换容器后重写位置的帧数上限：8 帧 ≈ 130ms，够布局与重排落定，又不至于跟用户
- * 自己动手滚较劲。 */
-const POSITION_RETRY_FRAMES = 8;
+/** 换容器后重写位置的帧数上限：60 帧 ≈ 1s。
+ *
+ * 正常情况下用不到它——连续两帧读到目标值就收手了。它管的是「写进去收不下」的那一段：
+ * 新容器头几百毫秒还装不下那么高（左栏里的封面还在解码，内容高度还没长起来），写进去
+ * 的值会被浏览器夹成 0，得一直试到它真的装得下为止（真机上这可能是半秒级的事）。窗口
+ * 长一点不会跟在滚的人较劲：用户一动手这一轮就立刻收手（见 [`USER_INPUT_EVENTS`]）。 */
+const POSITION_RETRY_FRAMES = 60;
+
+/** 用户自己动手的信号：出现一个就说明位置该由他决定了，这一轮的改写立刻停。 */
+const USER_INPUT_EVENTS = ['wheel', 'pointerdown', 'keydown', 'touchstart'] as const;
 
 /** 换容器前记下的内容锚：从滚动口顶端数起第一排还没滚过去的轨道 + 它离顶端的距离。
  *
@@ -96,16 +103,29 @@ export function HomeShell({ children }: { children: ReactNode }) {
     const scroller = section ? scrollerFor(section) : null;
     if (!scroller) return undefined;
     // **换了容器就不许再读初值**：新容器那一刻还没定高，读出来的是被夹的 0，会把刚
-    // 从旧容器记下的位置当场抹掉——真机上「点开详情跳回顶部」就是这么来的（一发式
-    // 写 + 这一读，两次都踩在同一个还没定高的元素上）。位置只认滚动事件里那一份。
+    // 从旧容器记下的位置当场抹掉。位置只认事件里那一份——滚动，以及换容器那次点击的
+    // 捕获阶段（见下）。
     if (watchingRef.current === null) offsetRef.current = scroller.scrollTop;
     watchingRef.current = scroller;
     const remember = () => {
+      // 容器已经拆掉了就别再记：`querySelectorAll` 在残骸上会量出「没有轨道」，把一份
+      // 好端端的锚覆盖成 null。
+      if (!scroller.isConnected) return;
       offsetRef.current = scroller.scrollTop;
       anchorRef.current = homeScrollAnchor(scroller);
     };
+    // 换容器是由一次点击或回车触发的，这里在**捕获阶段**补记一份：那一刻读到的必然还是
+    // 旧容器。只认 scroll 事件会漏掉一类情况——内容自己挪了（封面解码完把下面整排推下去
+    // 十几像素），却没有产生任何 scroll 事件，那份锚就是过期的；照它换算会把画面平白推
+    // 回去十几像素，也就是用户报的「打开详情页时页面滚动一点点」。
+    document.addEventListener('pointerdown', remember, true);
+    document.addEventListener('keydown', remember, true);
     scroller.addEventListener('scroll', remember, { passive: true });
-    return () => scroller.removeEventListener('scroll', remember);
+    return () => {
+      document.removeEventListener('pointerdown', remember, true);
+      document.removeEventListener('keydown', remember, true);
+      scroller.removeEventListener('scroll', remember);
+    };
   }, [scrollerFor]);
 
   const wasDetailOpen = useRef(detailOpen);
@@ -119,17 +139,23 @@ export function HomeShell({ children }: { children: ReactNode }) {
     // 换过去之后旧的容器已经不再溢出（详情没开时是 `overflow: hidden` 的整页），
     // 它的 `scrollTop` 那一刻永远是 0——位置只能靠换之前记下来的这一份。
     if (!scroller) return undefined;
+    // **这一轮只认换容器那一刻的快照。** 写 `scrollTop` 会让浏览器回一个 `scroll` 事件，
+    // 它在下一次动画帧之前到达，`remember` 会把它记成「用户现在在这儿」——可那正是我们
+    // 自己刚写进去的值（还可能已经被新容器夹小了）。目标跟着被改写成「当前位置」之后，
+    // 循环下一帧就判定稳定并停在原地：用户看到的是「只要不在顶部，打开/关闭详情就跳到
+    // 某个固定的位置」。所以这里读一次，之后一整轮都不再碰那份会回声的状态。
+    const restore = { offset: offsetRef.current, anchor: anchorRef.current };
     // **每一帧都按内容锚重算**，不是算一次就照抄：换过去之后左栏变窄，横向滚动条可能
     // 出现、标题可能换行，下面整排东西会挪十几像素。锚算出来的位置对当前滚动是幂等的
     // （`rect.top` 跟着 `scrollTop` 走），所以它既能把内容按原样钉住，又不会跟浏览器
-    // 自己的滚动锚定对着干——两边要的是同一件事。量不出内容时退回记下的数值。
-    const positionFor = () => homeScrollTarget(scroller, anchorRef.current) ?? offsetRef.current;
+    // 自己的滚动锚定对着干——两边要的是同一件事。量不出内容时退回快照里的数值。
+    const positionFor = () => homeScrollTarget(scroller, restore.anchor) ?? restore.offset;
     // 而且这一发不一定收得下：换容器那一帧新容器还没长到那么高时，浏览器会把这一写
-    // 夹成 0；写进去之后重排还会再挪。所以每个动画帧重写一遍，**连续两帧读到同一个
-    // 值**才收手（最多 `POSITION_RETRY_FRAMES` 帧 ≈ 130ms，再长就是在跟用户自己动手
-    // 滚较劲了）。
+    // 夹成 0；写进去之后重排还会再挪。所以每个动画帧重写一遍，直到**目标没变、位置也
+    // 对上了**连续两帧（只比位置的话，目标自己还在挪的那一帧也会被当成稳定）。
     let frames = 0;
     let settled = 0;
+    let lastTarget: number | null = null;
     let handle = 0;
     const apply = () => {
       const target = positionFor();
@@ -137,14 +163,23 @@ export function HomeShell({ children }: { children: ReactNode }) {
         scroller.scrollTop = target;
         settled = 0;
       } else {
-        settled += 1;
+        settled = lastTarget === target ? settled + 1 : 0;
       }
+      lastTarget = target;
       frames += 1;
       if (settled >= 2 || frames >= POSITION_RETRY_FRAMES) return;
       handle = requestAnimationFrame(apply);
     };
+    const yieldToUser = () => {
+      if (handle) cancelAnimationFrame(handle);
+      handle = 0;
+    };
+    for (const type of USER_INPUT_EVENTS) window.addEventListener(type, yieldToUser, { capture: true, passive: true });
     handle = requestAnimationFrame(apply);
-    return () => cancelAnimationFrame(handle);
+    return () => {
+      if (handle) cancelAnimationFrame(handle);
+      for (const type of USER_INPUT_EVENTS) window.removeEventListener(type, yieldToUser, { capture: true });
+    };
   }, [detailOpen, scrollerFor]);
 
   return (

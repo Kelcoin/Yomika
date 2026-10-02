@@ -168,9 +168,39 @@ describe('home detail route', () => {
     fireEvent.scroll(page);
 
     // 真机上的新容器不是「随时能滚」：换容器那一帧它还没长到 240 那么高，浏览器会把
-    // 这一写**夹成 0**。这里把这件事做出来——前两次写进去都收不下，第三次才宽到装得下。
-    // 一发式的写法会停在 0（那一发正好被夹掉），而打包带走位置的那一份也不能再被
-    // 这个元素的 0 覆写。
+    // 这一写**夹成 0**。这里把这件事做出来——前 11 次写进去都收不下（左栏里的封面还在
+    // 解码，内容高度就是没长起来），第十二次才宽到装得下。一发式的写法会停在 0；重试
+    // 窗口只有一开始那几个帧（8 帧 ≈ 130ms）同样会停在 0，用户看到的是「跳到一个固定
+    // 的位置」。
+    let stored = 0;
+    let writes = 0;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => stored,
+      set: (value: number) => {
+        writes += 1;
+        stored = Math.min(value, writes >= 12 ? 9999 : 0);
+      },
+    });
+
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    await waitFor(() => expect(list.scrollTop).toBe(240));
+    expect(writes).toBeGreaterThan(1);
+  });
+
+  it('holds the position it was asked for even though its own writing comes back as a scroll event', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    page.scrollTop = 240;
+    fireEvent.scroll(page);
+
+    // 真机上是两件事一起发生：新容器头几帧还装不下那么高（写进去被夹成 0），而且**每一次
+    // 写都会换来一个 scroll 事件**——浏览器就是这么做的，它不区分「用户滚的」和「代码写的」。
+    // 把这个回声当成「用户现在在这儿」，下一帧算出来的目标就变成它自己，循环立刻判定稳定、
+    // 停在 0：用户看到的正是「只要不在顶部，打开详情就跳到某个固定的位置」。
     let stored = 0;
     let writes = 0;
     Object.defineProperty(list, 'scrollTop', {
@@ -179,13 +209,73 @@ describe('home detail route', () => {
       set: (value: number) => {
         writes += 1;
         stored = Math.min(value, writes >= 3 ? 9999 : 0);
+        fireEvent.scroll(list);
       },
     });
 
     fireEvent.click(card);
     expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
     await waitFor(() => expect(list.scrollTop).toBe(240));
-    expect(writes).toBeGreaterThan(1);
+    // 被夹掉的写不算数：循环必须一直试到新容器真的装得下为止（0、0、240 ⇒ 三次以上）。
+    expect(writes).toBeGreaterThan(2);
+  });
+
+  it('holds the position when the page takes the scrolling back too', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+
+    // 关闭是同一条路的另一边：位置要写回整页那个容器，而它同样会把写进去的值夹掉并回一个
+    // scroll 事件（目标随之被改写成「当前位置」，500 就没了）。
+    let stored = 0;
+    let writes = 0;
+    Object.defineProperty(page, 'scrollTop', {
+      configurable: true,
+      get: () => stored,
+      set: (value: number) => {
+        writes += 1;
+        stored = Math.min(value, writes >= 3 ? 9999 : 0);
+        fireEvent.scroll(page);
+      },
+    });
+
+    fireEvent.click(screen.getByRole('link', { name: 'to-home' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'detail:archive-0' })).not.toBeInTheDocument());
+    await waitFor(() => expect(page.scrollTop).toBe(500));
+    expect(writes).toBeGreaterThan(2);
+  });
+
+  it('re-measures the rail at the moment of the click instead of trusting a stale anchor', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    const rails = Array.from(document.querySelectorAll<HTMLElement>('.archive-rail'));
+    expect(rails.length).toBeGreaterThan(0);
+
+    let contentTop = 340;
+    let active: HTMLElement = page;
+    for (const rail of rails) {
+      rail.getBoundingClientRect = () => rect(contentTop - active.scrollTop, 180);
+    }
+    page.scrollTop = 240;
+    fireEvent.scroll(page); // 锚：这一排在滚动口顶端下方 100px
+
+    // 用户没再滚过，但内容自己长高了 25px（封面解码完，把下面整排推下去）。上一次滚动
+    // 记下的那份锚已经过期——照它换算要写 280，画面会平白往上跳 25px，正是用户说的
+    // 「打开详情页时页面滚动一点点」。按下（换容器之前）重量一次，写的就是 255。
+    contentTop = 365;
+    fireEvent.pointerDown(card);
+    contentTop = 380;
+    active = list;
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    await waitFor(() => expect(list.scrollTop).toBe(255));
   });
 
   it('follows the content when the narrower column pushes it down', async () => {
