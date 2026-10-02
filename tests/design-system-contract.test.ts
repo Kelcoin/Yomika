@@ -870,6 +870,14 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.archive-rail')).toMatch(/padding:\s*var\(--space-4\);/);
     expect(ruleBody(shell, '.archive-rail-heading')).not.toMatch(/padding-inline/);
     expect(ruleBody(shell, '.archive-rail-grid')).not.toContain('justify-content');
+    // 另一半原因（用户第 ④ 轮第 1 条：「首页待看的左侧空隙又回退到之前的比别的组件宽
+    // 一点的状态了，依然打开详情页时会变成一致的」）：snapport 默认是滚动口的 padding box，
+    // 所以卡片的 `scroll-snap-align: start` 第一个吸附位置落在 `scrollLeft = 6px`，正好把
+    // 网格那 6px 内边距滚出视野。能滚的轨道被吸附到 6px、从不溢出的停在 0，同一条轨道于是
+    // 有两种左空隙；左栏一变窄再重新吸附，两者又合并。`scroll-padding-inline` 必须与网格的
+    // 6px 内边距相等，吸附位置才会回到 0、藏不掉内边距。
+    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/padding:\s*6px 6px var\(--space-2\);/);
+    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/scroll-padding-inline:\s*6px;/);
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);
@@ -1216,12 +1224,15 @@ describe('design system contract', () => {
     // 长度只在宽行这一支上排除圆角：预览/网格卡那条压在封面接缝上，没有圆角可让。
     expect(card).toMatch(/cornerAware = false/);
     expect(card).toMatch(/calc\(var\(--radius-card\) \+ \(100% - 2 \* var\(--radius-card\)\) \* \$\{percent \/ 100\}\)/);
-    // 覆盖层必须画在横条之上，几何与卡片 outline 对齐（inset: 1px + 半径 - 1px）。
+    // 覆盖层必须画在横条之上，几何与卡片 outline 完全重合（inset: 0 + 同一个半径）。
+    // 曾经写成 inset: 1px + 半径 - 1px，那是「往里缩一格」而不是「同一条环」：在
+    // DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条、上/右中间空出一个设备
+    // 像素的背景，于是选中态看起来是两条线（用户报「顶部和右侧会有两条」）。
     const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after");
-    expect(overlay).toMatch(/inset:\s*1px/);
+    expect(overlay).toMatch(/inset:\s*0/);
     expect(overlay).toMatch(/z-index:\s*1/);
     expect(overlay).toMatch(/border:\s*1px solid var\(--primary\)/);
-    expect(overlay).toMatch(/border-radius:\s*calc\(var\(--radius-card\) - 1px\)/);
+    expect(overlay).toMatch(/border-radius:\s*var\(--radius-card\)/);
     expect(overlay).toMatch(/pointer-events:\s*none/);
     // 宽度过渡要挂在真实存在的时长令牌上：`--motion-medium` 全仓从未定义，
     // 那条 transition 一直是死声明。

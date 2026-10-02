@@ -85,6 +85,13 @@ function scrollHost(element: HTMLElement): HTMLElement {
   return element;
 }
 
+/** jsdom 里所有 `getBoundingClientRect` 都是 0；要测「按内容对齐」就得自己给一份布局。 */
+function rect(top: number, height: number): DOMRect {
+  return {
+    top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top, toJSON: () => ({}),
+  } as DOMRect;
+}
+
 afterEach(resetInvokeAdapterForTests);
 
 /** 某个面板当前的比例。react-resizable-panels 把「id → flexGrow」这份布局写在内联样式
@@ -179,6 +186,66 @@ describe('home detail route', () => {
     expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
     await waitFor(() => expect(list.scrollTop).toBe(240));
     expect(writes).toBeGreaterThan(1);
+  });
+
+  it('follows the content when the narrower column pushes it down', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    const rails = Array.from(document.querySelectorAll<HTMLElement>('.archive-rail'));
+    expect(rails.length).toBeGreaterThan(0);
+
+    // 真机上 `rect.top` 是跟着 `scrollTop` 一起动的（`rect.top = 内容里的位置 - scrollTop`），
+    // 这里照这个模型伪造一份布局：jsdom 里所有 rect 都是 0，量不出高度的锚会被丢掉、退回
+    // 数值路径，那就测不到这一条了。
+    let contentTop = 340;
+    let active: HTMLElement = page;
+    for (const rail of rails) {
+      rail.getBoundingClientRect = () => rect(contentTop - active.scrollTop, 180);
+    }
+    page.scrollTop = 240;
+    fireEvent.scroll(page); // 记下锚：这一排轨道在滚动口顶端下方 100px
+
+    // 详情一开，左栏变窄、横向滚动条出现，下面整排东西在内容坐标里下沉 15px。照搬数值
+    // 240 落到新布局上就是「打开详情页时页面滚动一点点」（用户报的第 2 条）；按内容对齐
+    // 要写的是 255——同一排轨道仍然在顶端下方 100px。
+    contentTop = 355;
+    active = list;
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    await waitFor(() => expect(list.scrollTop).toBe(255));
+  });
+
+  it('writes again when the fresh scroller drifts right after the first write', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    page.scrollTop = 240;
+    fireEvent.scroll(page);
+
+    // 换容器之后内容还会继续重排：写进去的 240 会被浏览器的滚动锚定挪走 2px，而这一挪
+    // **比写入本身晚一拍**。收手太早（写成功一次就完）就会把这个漂移留在屏幕上，用户
+    // 看到的就是「滚一点点」。
+    let stored = 0;
+    let writes = 0;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => stored,
+      set: (value: number) => {
+        writes += 1;
+        stored = value;
+        if (writes === 1) setTimeout(() => { stored += 2; }, 0);
+      },
+    });
+
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    await waitFor(() => expect(writes).toBeGreaterThan(1));
+    // 让那一挪真的落地，再看最终停在哪儿。
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+    expect(list.scrollTop).toBe(240);
   });
 
   it('starts every two-pane shell at the declared ratio instead of an even split', async () => {

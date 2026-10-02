@@ -11,6 +11,39 @@ import { ArchiveDetailRoute } from './ArchiveDetailRoute';
  * 自己动手滚较劲。 */
 const POSITION_RETRY_FRAMES = 8;
 
+/** 换容器前记下的内容锚：从滚动口顶端数起第一排还没滚过去的轨道 + 它离顶端的距离。
+ *
+ * 只搬 `scrollTop` 的数值是不够的：左栏在详情打开时会变窄，内容的**高度**也会变
+ * （横向滚动条出现、标题换行、图片落位都会把下面整排东西搬十几像素），同一个数值
+ * 落到新布局上就是另一个画面——用户报的「打开详情页时页面滚动一点点」。对齐到内容
+ * 本身才稳。没有布局信息（量不出高度）时退回数值，见 [`homeScrollAnchor`]。 */
+type HomeScrollAnchor = { index: number; top: number };
+
+/** 量一次锚点：优先取「顶端还没滚过去的」那一排轨道。
+ *
+ * `rect.height > 0` 是「这一排真的被排版了」的判据：量不出高度（jsdom、还没定高
+ * 的那一帧）就不记锚，换容器时退回数值路径。 */
+function homeScrollAnchor(scroller: HTMLElement): HomeScrollAnchor | null {
+  const rails = scroller.querySelectorAll('.archive-rail');
+  const origin = scroller.getBoundingClientRect().top;
+  for (let index = 0; index < rails.length; index += 1) {
+    const rect = rails[index]?.getBoundingClientRect();
+    if (!rect || rect.height <= 0) continue;
+    const top = rect.top - origin;
+    if (top >= -1) return { index, top };
+  }
+  return null;
+}
+
+/** 锚点在新布局里对应的滚动位置；量不出来时 `null`，调用方退回记下的数值。 */
+function homeScrollTarget(scroller: HTMLElement, anchor: HomeScrollAnchor | null): number | null {
+  if (!anchor) return null;
+  const rail = scroller.querySelectorAll('.archive-rail')[anchor.index];
+  const rect = rail?.getBoundingClientRect();
+  if (!rect || rect.height <= 0) return null;
+  return scroller.scrollTop + (rect.top - anchor.top);
+}
+
 /** 没存过布局时首页两栏的比例，与档案库、书架、本地档案同一份（58/42）。 */
 const HOME_SPLIT_LAYOUT: Layout = { 'home-shell-list': 58, 'home-shell-detail': 42 };
 
@@ -37,6 +70,8 @@ export function HomeShell({ children }: { children: ReactNode }) {
   const listRef = useRef<HTMLElement>(null);
   /** 换容器之前，用户看到的那个位置。 */
   const offsetRef = useRef(0);
+  /** 换容器之前，那个位置对着的是哪一排内容（见 [`homeScrollAnchor`]）。 */
+  const anchorRef = useRef<HomeScrollAnchor | null>(null);
   /** 现在这个 effect 盯的是哪个元素，用来分辨「第一次接管」与「换了容器」。 */
   const watchingRef = useRef<HTMLElement | null>(null);
   const layout = useDefaultLayout({
@@ -59,7 +94,10 @@ export function HomeShell({ children }: { children: ReactNode }) {
     // 写 + 这一读，两次都踩在同一个还没定高的元素上）。位置只认滚动事件里那一份。
     if (watchingRef.current === null) offsetRef.current = scroller.scrollTop;
     watchingRef.current = scroller;
-    const remember = () => { offsetRef.current = scroller.scrollTop; };
+    const remember = () => {
+      offsetRef.current = scroller.scrollTop;
+      anchorRef.current = homeScrollAnchor(scroller);
+    };
     scroller.addEventListener('scroll', remember, { passive: true });
     return () => scroller.removeEventListener('scroll', remember);
   }, [scrollerFor]);
@@ -75,17 +113,28 @@ export function HomeShell({ children }: { children: ReactNode }) {
     // 换过去之后旧的容器已经不再溢出（详情没开时是 `overflow: hidden` 的整页），
     // 它的 `scrollTop` 那一刻永远是 0——位置只能靠换之前记下来的这一份。
     if (!scroller) return undefined;
-    const target = offsetRef.current;
-    // 而且这一发不一定收得下：换容器那一帧新容器还没长到 target 那么高时，浏览器会
-    // 把这一写夹成 0；卡片又因为左栏变窄而重排，滚动锚定随后还可能再挪一次。所以每
-    // 个动画帧重写一遍，写进去了就收手（最多 `POSITION_RETRY_FRAMES` 帧 ≈ 130ms，
-    // 再长就是在跟用户自己动手滚较劲了）。
+    // **每一帧都按内容锚重算**，不是算一次就照抄：换过去之后左栏变窄，横向滚动条可能
+    // 出现、标题可能换行，下面整排东西会挪十几像素。锚算出来的位置对当前滚动是幂等的
+    // （`rect.top` 跟着 `scrollTop` 走），所以它既能把内容按原样钉住，又不会跟浏览器
+    // 自己的滚动锚定对着干——两边要的是同一件事。量不出内容时退回记下的数值。
+    const positionFor = () => homeScrollTarget(scroller, anchorRef.current) ?? offsetRef.current;
+    // 而且这一发不一定收得下：换容器那一帧新容器还没长到那么高时，浏览器会把这一写
+    // 夹成 0；写进去之后重排还会再挪。所以每个动画帧重写一遍，**连续两帧读到同一个
+    // 值**才收手（最多 `POSITION_RETRY_FRAMES` 帧 ≈ 130ms，再长就是在跟用户自己动手
+    // 滚较劲了）。
     let frames = 0;
+    let settled = 0;
     let handle = 0;
     const apply = () => {
-      if (scroller.scrollTop !== target) scroller.scrollTop = target;
+      const target = positionFor();
+      if (scroller.scrollTop !== target) {
+        scroller.scrollTop = target;
+        settled = 0;
+      } else {
+        settled += 1;
+      }
       frames += 1;
-      if (scroller.scrollTop === target || frames >= POSITION_RETRY_FRAMES) return;
+      if (settled >= 2 || frames >= POSITION_RETRY_FRAMES) return;
       handle = requestAnimationFrame(apply);
     };
     handle = requestAnimationFrame(apply);

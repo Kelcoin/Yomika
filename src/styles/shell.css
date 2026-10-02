@@ -4000,7 +4000,15 @@ body::-webkit-scrollbar,
    卡片直接被切在框外。默认的起始对齐不会藏内容；「右边那条没用上的尾巴」是固定宽
    卡片排成一条轨道的固有结果，不是空隙——空隙由上面那条 `padding` 决定，两侧永远
    一样宽。 */
-.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-snap-type: x proximity; touch-action: pan-x; }
+/* `scroll-padding-inline` 必须和上面那 6px 相等：snapport 默认取滚动口的 padding
+   box，于是卡片 `scroll-snap-align: start` 的第一吸附位置是 `scrollLeft = 6px`——
+   正好把这 6px 内边距滚出视野。同一条轨道因此有两种左空隙：卡片多到能滚的被吸附到
+   6px（左空隙少 6px），卡片少、从不溢出的停在 0（左空隙多 6px）；左栏一变窄、重新
+   吸附，两种状态又合并。用户报了三轮的就是这 6px：「首页待看的左侧空隙又回退到之前
+   的比别的组件宽一点的状态了，依然打开详情页时会变成一致的」。让 snapport 也内缩
+   6px 后，第一张卡的吸附位置回到 0，吸附再也藏不掉内边距，左空隙与轨道宽度、滚动
+   状态无关。代价是吸附点与自然位置重合（吸附基本变成 no-op），无害。 */
+.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: pan-x; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -4060,16 +4068,19 @@ body::-webkit-scrollbar,
 }
 /* 选中高亮画在进度条之上：横条是卡片的定位后代，轨道又是实心背景，会把左下/右下
    那两段 1px 描边连弧线一起盖掉（outline 永远画在定位子元素之下，抬 z-index 也没用）。
-   覆盖层的几何与卡片的 outline 完全一致：outline-offset: -1px 的描边就贴在边框盒里
-   1px 处，半径因此也小 1px；再加一层同色描边，两层完全重合，看上去仍是一条线。 */
+   覆盖层必须与卡片自己的 outline 落在同一条 1px 环上：outline-offset: -1px 的描边
+   画在边框盒的 y ∈ [0,1] / x ∈ [0,1]（半径仍是 --radius-card），所以这里 inset: 0、
+   半径不缩。曾经写成 inset: 1px + 半径 - 1px，注释里还断言「两层完全重合」——实际是
+   往里挪了一格：DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条，上/右之间
+   空出一个设备像素的卡片底色，选中态就成了两条线（用户：「顶部和右侧会有两条」）。 */
 .archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after {
   content: '';
   position: absolute;
-  inset: 1px;
+  inset: 0;
   z-index: 1;
   box-sizing: border-box;
   border: 1px solid var(--primary);
-  border-radius: calc(var(--radius-card) - 1px);
+  border-radius: var(--radius-card);
   pointer-events: none;
 }
 .settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: vertical; font: inherit; }

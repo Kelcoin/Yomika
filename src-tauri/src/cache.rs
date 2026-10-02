@@ -299,6 +299,155 @@ fn webp_is_animated(bytes: &[u8]) -> bool {
     false
 }
 
+/// PNG 的 8 字节签名。
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// 动图的循环次数统一成「一直播」（0），返回可以照原样送出去的字节。
+///
+/// 为什么在字节层面做，而不是在解码 / 编码那几层：送给阅读器的图片字节有六七条来路
+/// （磁盘缓存命中、服务器刚取回、超分与去码把动图原样当成功交回、DLSSNR 的旧产物、
+/// 帧数或预算超限时的原图、远端引擎的回声），它们唯一的共同必经之路是 IPC 出站
+/// （[`crate::domain::result::into_binary_response`]）。用户报「动图只播一遍」时每一条
+/// 路都要救——只有收在这里才不会漏。
+///
+/// 只认 [`is_animated_image`] 认得的三类容器；认不出、读不下去、或者改动会破坏结构时
+/// 一律原样返回：宁可只播一遍，也不能把一张图改坏。
+pub fn force_infinite_loop(mut bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        if matches!(gif_frame_count(&bytes), Some(frames) if frames >= 2) {
+            gif_force_infinite_loop(&mut bytes);
+        }
+        return bytes;
+    }
+    if bytes.starts_with(&PNG_SIGNATURE) {
+        png_force_infinite_loop(&mut bytes);
+        return bytes;
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        webp_force_infinite_loop(&mut bytes);
+    }
+    bytes
+}
+
+/// GIF 的 Netscape 应用扩展块：`21 FF 0B` + `"NETSCAPE2.0"` + `03 01` + loop(u16 LE) + `00`。
+///
+/// 有这一块就改它的 loop；没有就**插到全局色表之后**（第一个块之前）。浏览器对没有
+/// 这一块的 GIF 只播一遍，而下载器写出来的动图里相当一部分根本没有这块——只改字段
+/// 救不了它们。
+fn gif_force_infinite_loop(bytes: &mut Vec<u8>) {
+    const NETSCAPE: &[u8] = b"NETSCAPE2.0";
+    /// 标准写法的 Netscape 块，循环次数写 0：`21 FF 0B` + 标签 + `03 01` + `00 00` + `00`。
+    const INFINITE_EXTENSION: [u8; 19] = [
+        0x21, 0xFF, 0x0B, b'N', b'E', b'T', b'S', b'C', b'A', b'P', b'E', b'2', b'.', b'0', 0x03,
+        0x01, 0x00, 0x00, 0x00,
+    ];
+    if let Some(at) = bytes
+        .windows(NETSCAPE.len())
+        .position(|window| window == NETSCAPE)
+    {
+        // 标签之后是子块长度与子块 id（标准写法 03 01），再两字节才是循环次数。写法
+        // 不是这样就不猜了——宁可不动，也不要改到别的字段上。
+        let field = at + NETSCAPE.len();
+        if bytes.get(field) == Some(&0x03)
+            && bytes.get(field + 1) == Some(&0x01)
+            && field + 4 <= bytes.len()
+        {
+            bytes[field + 2..field + 4].copy_from_slice(&0u16.to_le_bytes());
+        }
+        return;
+    }
+    if let Some(at) = gif_first_block_offset(bytes) {
+        bytes.splice(at..at, INFINITE_EXTENSION);
+    }
+}
+
+/// 第一个块的起点：头部 6 字节 + 逻辑屏幕描述符 7 字节 + （有的话）全局色表。
+fn gif_first_block_offset(bytes: &[u8]) -> Option<usize> {
+    let packed = *bytes.get(10)?;
+    let mut at = 13usize;
+    if packed & 0x80 != 0 {
+        at = at.checked_add(3usize << ((packed & 0x07) + 1))?;
+    }
+    (at <= bytes.len()).then_some(at)
+}
+
+/// APNG 的 `acTL`：载荷是 `num_frames u32 BE` + `num_plays u32 BE`，0 就是一直播。
+///
+/// 改完必须重算这一块的 CRC：浏览器（libpng）会直接丢掉 CRC 不对的**辅助块**，那样
+/// acTL 一没整张图就退化成静态图——比只播一遍更糟。
+fn png_force_infinite_loop(bytes: &mut Vec<u8>) {
+    let mut cursor = PNG_SIGNATURE.len();
+    while cursor + 12 <= bytes.len() {
+        let length = u32::from_be_bytes([
+            bytes[cursor],
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+        ]) as usize;
+        // 4 字节长度 + 4 字节类型 + 数据 + 4 字节 CRC。
+        let next = match (cursor + 12).checked_add(length) {
+            Some(next) if next <= bytes.len() => next,
+            _ => return,
+        };
+        if &bytes[cursor + 4..cursor + 8] == b"acTL" {
+            // 数据从 cursor + 8 起：num_frames 在 +8..+12，num_plays 在 +12..+16。
+            if length >= 8 && bytes[cursor + 12..cursor + 16] != [0, 0, 0, 0] {
+                bytes[cursor + 12..cursor + 16].copy_from_slice(&[0, 0, 0, 0]);
+                // CRC 覆盖「类型 + 数据」，也就是校验和字段之前的 4 字节起的 length+4 字节。
+                let crc = png_crc32(&bytes[cursor + 4..next - 4]);
+                bytes[next - 4..next].copy_from_slice(&crc.to_be_bytes());
+            }
+            return;
+        }
+        cursor = next;
+    }
+}
+
+/// 动画 WebP 的 `ANIM`：载荷 = 背景色 u32 LE + Loop Count u16 LE（0 就是一直播）。
+///
+/// 这一条是用户手上那几张图的主因：Chromium 的 `webp_image_decoder.cc` 把 WebP 的
+/// Loop Count 读成**圈数**（`repetition_count_ = count == 0 ? kAnimationLoopInfinite
+/// : count - 1`），于是下载器写死的 `Loop Count = 1` 到浏览器里就是「播一遍就停」。
+fn webp_force_infinite_loop(bytes: &mut Vec<u8>) {
+    let mut cursor = 12usize;
+    while cursor + 8 <= bytes.len() {
+        let length = u32::from_le_bytes([
+            bytes[cursor + 4],
+            bytes[cursor + 5],
+            bytes[cursor + 6],
+            bytes[cursor + 7],
+        ]) as usize;
+        if &bytes[cursor..cursor + 4] == b"ANIM" {
+            // 载荷从 cursor + 8 起：背景色在 +8..+12，Loop Count 在 +12..+14。
+            if length >= 6 && cursor + 14 <= bytes.len() && bytes[cursor + 12..cursor + 14] != [0, 0] {
+                bytes[cursor + 12..cursor + 14].copy_from_slice(&[0, 0]);
+            }
+            return;
+        }
+        // RIFF 块按偶数字节对齐，块之间可能有一个填充字节。
+        let next = (cursor + 8).saturating_add(length + (length & 1));
+        if next <= cursor || next > bytes.len() {
+            return;
+        }
+        cursor = next;
+    }
+}
+
+/// PNG 块用的 CRC-32（IEEE，反射多项式 `0xEDB88320`）。
+///
+/// `png` crate 没有公开的 CRC 实现，为一个 8 字节块的重算引一个依赖不值得。
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 pub fn store_image_cache(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
@@ -990,6 +1139,8 @@ pub fn cache_evict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `loop_count` 是 `AnimationDecoder` 上的方法，不是三个解码器的固有方法。
+    use image::AnimationDecoder;
 
     fn cache_db() -> rusqlite::Connection {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
@@ -1467,5 +1618,183 @@ mod tests {
     fn bytes_that_are_not_an_image_are_not_animated() {
         assert!(!is_animated_image(b"<html>not an image</html>"));
         assert!(!is_animated_image(&[]));
+    }
+
+    // ---- 动图循环次数归一（用户报「动图只播一遍」）----
+    //
+    // 夹具就是动图 DLSSNR 那三份（`dlssnr/testdata/animated.*`，3 帧、无限循环），
+    // 用例先把循环字段改成有限圈数，再看 [`force_infinite_loop`] 能不能归一。
+
+    const ANIMATED_GIF: &[u8] = include_bytes!("dlssnr/testdata/animated.gif");
+    const ANIMATED_PNG: &[u8] = include_bytes!("dlssnr/testdata/animated.png");
+    const ANIMATED_WEBP: &[u8] = include_bytes!("dlssnr/testdata/animated.webp");
+
+    fn loop_plays(loops: image::metadata::LoopCount) -> u32 {
+        match loops {
+            image::metadata::LoopCount::Infinite => 0,
+            image::metadata::LoopCount::Finite(value) => value.get(),
+        }
+    }
+
+    fn gif_plays(bytes: &[u8]) -> u32 {
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        loop_plays(decoder.loop_count())
+    }
+
+    fn png_plays(bytes: &[u8]) -> u32 {
+        let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        loop_plays(decoder.apng().unwrap().loop_count())
+    }
+
+    fn webp_plays(bytes: &[u8]) -> u32 {
+        let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        loop_plays(decoder.loop_count())
+    }
+
+    fn has_netscape(bytes: &[u8]) -> bool {
+        bytes
+            .windows(b"NETSCAPE2.0".len())
+            .any(|window| window == b"NETSCAPE2.0")
+    }
+
+    fn netscape_at(bytes: &[u8]) -> usize {
+        bytes
+            .windows(b"NETSCAPE2.0".len())
+            .position(|window| window == b"NETSCAPE2.0")
+            .expect("夹具里应当有 Netscape 块")
+    }
+
+    /// 把夹具的 Netscape 块整段摘掉（`21 FF 0B` + 标签 + `03 01` + loop + `00`，19 字节），
+    /// 做出「下载器没写循环次数」的那种 GIF。
+    fn gif_without_netscape() -> Vec<u8> {
+        let mut bytes = ANIMATED_GIF.to_vec();
+        let at = netscape_at(&bytes);
+        bytes.drain(at - 3..at + 16);
+        assert!(!has_netscape(&bytes), "摘干净了才做得了这条用例");
+        assert_eq!(gif_frame_count(&bytes), Some(3), "摘掉 Netscape 块不能改变帧数");
+        bytes
+    }
+
+    /// 夹具 APNG 的 `acTL` 改成「播 N 遍」。CRC 必须跟着重算——解码器根本不认校验
+    /// 不过的辅助块，那样连用例的前置断言都过不去。
+    fn png_with_plays(count: u32) -> Vec<u8> {
+        let mut bytes = ANIMATED_PNG.to_vec();
+        let at = bytes
+            .windows(4)
+            .position(|window| window == b"acTL")
+            .expect("夹具是 APNG");
+        bytes[at + 8..at + 12].copy_from_slice(&count.to_be_bytes());
+        let length = u32::from_be_bytes([
+            bytes[at - 4],
+            bytes[at - 3],
+            bytes[at - 2],
+            bytes[at - 1],
+        ]) as usize;
+        let crc = png_crc32(&bytes[at..at + 4 + length]);
+        bytes[at + 4 + length..at + 8 + length].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_gif_that_counts_its_loops_plays_forever() {
+        let mut source = ANIMATED_GIF.to_vec();
+        let at = netscape_at(&source);
+        source[at + 13..at + 15].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(gif_plays(&source), 3, "夹具里写的圈数要真的被解码器读出来");
+
+        let patched = force_infinite_loop(source);
+        assert_eq!(gif_plays(&patched), 0);
+        assert_eq!(gif_frame_count(&patched), Some(3), "只改循环字段，不该动帧数");
+    }
+
+    #[test]
+    fn a_gif_without_a_loop_block_gains_one_that_plays_forever() {
+        let source = gif_without_netscape();
+
+        let patched = force_infinite_loop(source.clone());
+        assert!(has_netscape(&patched), "没有 Netscape 块的 GIF 只会播一遍，得补一块");
+        assert_eq!(patched.len(), source.len() + 19, "补的就是标准那 19 字节");
+        assert_eq!(gif_frame_count(&patched), Some(3), "补块不能改变帧数");
+        assert_eq!(gif_plays(&patched), 0);
+    }
+
+    #[test]
+    fn a_webp_loop_count_of_one_plays_forever() {
+        let mut source = ANIMATED_WEBP.to_vec();
+        let at = source
+            .windows(4)
+            .position(|window| window == b"ANIM")
+            .expect("夹具是动画 WebP");
+        source[at + 12..at + 14].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(
+            u16::from_le_bytes([source[at + 12], source[at + 13]]),
+            1,
+            "夹具里写的 Loop Count 要真的是 1"
+        );
+        assert_eq!(
+            webp_plays(&source),
+            1,
+            "WebP 的 Loop Count 就是圈数，1 到 Chromium 里就是播一遍"
+        );
+
+        let patched = force_infinite_loop(source);
+        assert_eq!(
+            u16::from_le_bytes([patched[at + 12], patched[at + 13]]),
+            0
+        );
+        assert_eq!(webp_plays(&patched), 0);
+    }
+
+    #[test]
+    fn an_apng_that_counts_its_plays_plays_forever_and_keeps_the_chunk_crc() {
+        let source = png_with_plays(2);
+        assert_eq!(png_plays(&source), 2, "夹具里写的遍数要真的被解码器读出来");
+
+        let patched = force_infinite_loop(source);
+        assert_eq!(png_plays(&patched), 0);
+        let at = patched
+            .windows(4)
+            .position(|window| window == b"acTL")
+            .unwrap();
+        let length = u32::from_be_bytes([
+            patched[at - 4],
+            patched[at - 3],
+            patched[at - 2],
+            patched[at - 1],
+        ]) as usize;
+        let expected = png_crc32(&patched[at..at + 4 + length]);
+        assert_eq!(
+            u32::from_be_bytes([
+                patched[at + 4 + length],
+                patched[at + 5 + length],
+                patched[at + 6 + length],
+                patched[at + 7 + length],
+            ]),
+            expected,
+            "acTL 改过就得重算 CRC：libpng 会丢掉校验不过的辅助块，acTL 一没整张图就成静态"
+        );
+    }
+
+    #[test]
+    fn normalizing_twice_is_the_same_as_normalizing_once() {
+        let once = force_infinite_loop(png_with_plays(4));
+        let twice = force_infinite_loop(once.clone());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_static_image_and_a_non_image_are_left_alone() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        assert_eq!(force_infinite_loop(jpeg.clone()), jpeg);
+        let zip = b"PK\x03\x04\x14\x00\x00\x00\x08\x00".to_vec();
+        assert_eq!(force_infinite_loop(zip.clone()), zip);
+        assert_eq!(force_infinite_loop(Vec::new()), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn the_ipc_binary_boundary_normalizes_the_loop() {
+        // 出站那一步是把「服务器刚取回」「增强层原样交回」「DLSSNR 旧产物」等所有来路
+        // 收成一条的地方；这条断言只是不让人把接线拆掉（真正的行为用例在上面）。
+        assert!(include_str!("domain/result.rs").contains("cache::force_infinite_loop"));
     }
 }
