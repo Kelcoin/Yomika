@@ -268,10 +268,10 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="强度"
-            hint="网络参与的力度：1 保持原样，越高越“重绘”"
+            hint="网络参与的力度：0 是原图，1 是完全采用处理结果"
             value={pass.intensity}
             min={0}
-            max={2}
+            max={1}
             step={0.1}
             format={(value) => value.toFixed(2)}
             onChange={(value) => updateDraftPass({ intensity: value })}
@@ -299,7 +299,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="皮肤结构"
-            hint="默认关闭：漫画里人脸多的时候再开"
+            hint="要配着「自动遮罩」一起用，单开没有效果"
             value={pass.skinStructureStrength}
             min={0}
             max={2}

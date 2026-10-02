@@ -455,6 +455,30 @@ describe('DLSS5 settings group', () => {
     }
   });
 
+  it('caps the strength where the network stops caring', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+
+    // 真机上量过：强度 1.5 / 2.0 与 1.0 逐字节相同（风格 0/1/2 下、别的旋钮拉满时也一样），
+    // 而 0 就是「原图原封不动」——这个旋钮的有效区间只有 0–1，再往上给滑块就是骗人。
+    await user.click(within(editor).getByRole('button', { name: '强度' }));
+    const strength = await screen.findByRole('dialog', { name: '强度' });
+    expect(within(strength).getByRole('spinbutton', { name: '强度' })).toHaveAttribute('max', '1');
+
+    // 另外三个还是 0–2：它们两头都真的在动，没有被压过。
+    for (const label of ['局部色调', '局部结构', '皮肤结构']) {
+      await user.click(within(editor).getByRole('button', { name: label }));
+      const stepper = await screen.findByRole('dialog', { name: label });
+      expect(within(stepper).getByRole('spinbutton', { name: label })).toHaveAttribute('max', '2');
+    }
+  });
+
   it('keeps one overlay while entering and leaving a layer editor', async () => {
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     renderDlssnr();

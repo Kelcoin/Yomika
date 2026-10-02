@@ -339,8 +339,7 @@ fn record_page(
         &image.rgba,
     )?;
 
-    // 层与层之间仍是取消点。（整页只有一次提交，所以这里的取消等于整页作废：
-    // 一条命令都还没发出去，已经花掉的只有记录的时间和一次上传的行拷贝。）
+    // 测试用：模拟「记录这一页时出错」，看不写产物的那条路走得通不通。
     #[cfg(test)]
     if FAIL_RECORD.swap(false, std::sync::atomic::Ordering::SeqCst) {
         return Err(CANCELLED.to_string());

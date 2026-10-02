@@ -1160,6 +1160,107 @@ mod tests {
         filter::force_passthrough(0);
     }
 
+    /// 每一层都真的拿自己那份参数评估过。
+    ///
+    /// 「加一层画面会变」不足以证明每层都在算（加层本来就会让结果变），所以判据是**同一套
+    /// 层数下只改第 k 层的参数**：改哪一层，输出都必须跟着变。反之，任何一层被 DLL 悄悄
+    /// 跳过（评估了但没参与），这一条就会红。
+    #[test]
+    fn every_layer_evaluates_with_its_own_parameters() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let page = synthetic_image(600, 800);
+        let tone = |tone: f32| PassSettings {
+            local_tone_strength: tone,
+            ..PassSettings::default()
+        };
+        let run = |passes: Vec<PassSettings>| {
+            let settings = DlssnrSettings { passes }.normalized();
+            filter::apply_with_dll(&dir, &dll, &page, &settings)
+                .expect("评估")
+                .rgba
+        };
+        let gap = |left: &[u8], right: &[u8]| mean_absolute_difference(left, right);
+
+        let one = run(vec![tone(1.0)]);
+        let two = run(vec![tone(1.0), tone(1.0)]);
+        let three = run(vec![tone(1.0), tone(1.0), tone(1.0)]);
+
+        // 加层真的要多跑一趟。
+        assert!(
+            gap(&one, &two) > 0.05,
+            "第 2 层没有真的跑：2 层的结果与 1 层相同"
+        );
+        assert!(
+            gap(&two, &three) > 0.05,
+            "第 3 层没有真的跑：3 层的结果与 2 层相同"
+        );
+
+        // 只改某一层的参数，只有那一层变了才解释得通。
+        let single_moved = run(vec![tone(0.2)]);
+        assert!(
+            gap(&one, &single_moved) > 0.05,
+            "层参数没进网络：只改这一层的色调，结果没变"
+        );
+        let second_moved = run(vec![tone(1.0), tone(2.0)]);
+        assert!(
+            gap(&two, &second_moved) > 0.05,
+            "第 2 层的参数没进网络：只改第 2 层，结果没变"
+        );
+        let third_moved = run(vec![tone(1.0), tone(1.0), tone(2.0)]);
+        assert!(
+            gap(&three, &third_moved) > 0.05,
+            "第 3 层的参数没进网络：只改第 3 层，结果没变"
+        );
+        let first_moved = run(vec![tone(2.0), tone(1.0), tone(1.0)]);
+        assert!(
+            gap(&three, &first_moved) > 0.05,
+            "第 1 层的参数没进网络：只改第 1 层，结果没变"
+        );
+    }
+
+    /// 强度 0 就是「完全保留原图」，DLL 真的会把输入原样交回。
+    ///
+    /// 实测（合成图与四张真页）：`DLSSNR.Intensity` 是「DLSSNR 结果与原图之间的混合权重」，
+    /// 0 → 逐字节等于输入，1 → 完全采用，1.5 / 2.0 与 1.0 逐字节相同（1 以上没有额外效果）。
+    /// 所以这里不再当产物交出去，而是如实报 [`filter::PASSTHROUGH`]，由 `commands` 决定
+    /// 「原图交回、不写缓存、记一条日志」。
+    #[test]
+    fn a_zero_intensity_layer_is_reported_instead_of_cached() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let page = synthetic_image(600, 800);
+        let settings = DlssnrSettings {
+            passes: vec![PassSettings {
+                intensity: 0.0,
+                ..PassSettings::default()
+            }],
+        }
+        .normalized();
+
+        match filter::apply_with_dll(&dir, &dll, &page, &settings) {
+            Err(error) => assert_eq!(
+                error,
+                filter::PASSTHROUGH,
+                "强度 0 这一页该报「原样交回」，而不是别的错"
+            ),
+            Ok(output) => panic!(
+                "强度 0 被当成产物交出来了（与输入差 {:.3}）",
+                mean_absolute_difference(&page.rgba, &output.rgba)
+            ),
+        }
+    }
+
     /// 取消（记录期出错）**不该**动上下文，也不该把工作区销毁掉。
     ///
     /// 取消是常态：后台整本预扫被前台当前页抢断时就掐掉正在跑的那一页，所以每取消一次
