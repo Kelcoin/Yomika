@@ -217,6 +217,51 @@ describe('home detail route', () => {
     await waitFor(() => expect(list.scrollTop).toBe(255));
   });
 
+  it('measures the rail and its anchor in the same frame of reference', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    const rails = Array.from(document.querySelectorAll<HTMLElement>('.archive-rail'));
+    expect(rails.length).toBeGreaterThan(0);
+
+    // 真机上滚动口自己也不在窗口顶端：它上面有标题栏、下面有状态栏，`.workspace` 里还有
+    // 内边距。`getBoundingClientRect().top` 量到的是**视口**坐标，而锚记的是「离滚动口顶端
+    // 多远」——两者相减时必须把滚动口自己那个 y 也减掉。少了这一步，滚动口的视口顶端坐标
+    // 会被当成滚动量加进去（用户报的「滚动程度更大了，关闭也会触发」）。
+    const scrollerTop = 100;
+    page.getBoundingClientRect = () => rect(scrollerTop, 600);
+    list.getBoundingClientRect = () => rect(scrollerTop, 600);
+    // 三排轨道在内容里各差 380px，这样滚过第一排之后锚会落到下一排（真机上就是这样）。
+    const railBase = rails.map((_, index) => 340 + index * 380);
+    // 详情一开左栏变窄，内容整体下沉 15px（横向滚动条、标题换行都会做这件事）。
+    let shift = 0;
+    let active: HTMLElement = page;
+    rails.forEach((rail, index) => {
+      rail.getBoundingClientRect = () => rect(scrollerTop + (railBase[index] ?? 0) + shift - active.scrollTop, 180);
+    });
+    page.scrollTop = 240;
+    fireEvent.scroll(page); // 锚：第一排在滚动口顶端下方 100px
+
+    shift = 15;
+    active = list;
+    fireEvent.click(card);
+    expect(await screen.findByRole('heading', { name: 'detail:archive-0' })).toBeInTheDocument();
+    // 同一排仍然要在顶端下方 100px：内容里的位置 355 减 100 ⇒ 255。
+    await waitFor(() => expect(list.scrollTop).toBe(255));
+
+    // 关掉详情是同一件事的反面：位置要写回整页那个容器，而整页也在同一个 y 上。
+    // （这份 fixture 里只有「继续阅读」这一排会渲染：待看与随机漫游都是空的。）
+    list.scrollTop = 200;
+    fireEvent.scroll(list);
+    shift = 0;
+    active = page;
+    fireEvent.click(screen.getByRole('link', { name: 'to-home' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'detail:archive-0' })).not.toBeInTheDocument());
+    // 200 减回去那 15px 的下沉 ⇒ 185；多了滚动口那 100px 就会写成 285。
+    await waitFor(() => expect(page.scrollTop).toBe(185));
+  });
+
   it('writes again when the fresh scroller drifts right after the first write', async () => {
     renderAppInWorkspace('/', makeAdapter());
     const card = await screen.findByRole('link', { name: /Archive 0/ });

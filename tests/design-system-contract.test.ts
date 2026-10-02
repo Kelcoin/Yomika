@@ -408,6 +408,10 @@ describe('design system contract', () => {
     expect(ruleBody(css, '.tray-menu')).toMatch(/border-radius:\s*var\(--radius-card\)/);
     const item = ruleBody(css, '.tray-menu-item');
     expect(item).toMatch(/border-radius:\s*var\(--radius-control\)/);
+    // 文字居中：这一层是 flex，文字是一个匿名 flex item，横向位置只认 `justify-content`
+    // （`text-align: start` 在 flex 里管不着它，菜单看起来就偏左——用户报的）。
+    expect(item).toMatch(/justify-content:\s*center/);
+    expect(item).not.toMatch(/text-align:\s*start/);
     // 字号与其它菜单同一档（13px）：14px 让两个双字条目落在一个大半是空白的方框里。
     expect(ruleBody(css, '.tray-menu')).toMatch(/font-size:\s*var\(--text-sm\)/);
     expect(css).toMatch(/\.tray-menu-item:hover,[\s\S]*?background:\s*var\(--surface-container-highest\)/);

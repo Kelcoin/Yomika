@@ -35,13 +35,19 @@ function homeScrollAnchor(scroller: HTMLElement): HomeScrollAnchor | null {
   return null;
 }
 
-/** 锚点在新布局里对应的滚动位置；量不出来时 `null`，调用方退回记下的数值。 */
+/** 锚点在新布局里对应的滚动位置；量不出来时 `null`，调用方退回记下的数值。
+ *
+ * `rect.top` 是**视口**坐标，而锚记的 `top` 是「离滚动口顶端多远」——两者要先放进同一个
+ * 参考系里才能相减，所以这里也得减去滚动口自己的视口 `top`。少了这一步，滚动口在窗口里的
+ * 那个 y（标题栏、状态栏、`.workspace` 的内边距加起来上百像素）就被当成了滚动量：每一帧
+ * 收敛到同一个偏大的值，用户看到的是开关详情两侧都多滚一段（「程度更大了，关闭也会触发」）。 */
 function homeScrollTarget(scroller: HTMLElement, anchor: HomeScrollAnchor | null): number | null {
   if (!anchor) return null;
   const rail = scroller.querySelectorAll('.archive-rail')[anchor.index];
   const rect = rail?.getBoundingClientRect();
   if (!rect || rect.height <= 0) return null;
-  return scroller.scrollTop + (rect.top - anchor.top);
+  const origin = scroller.getBoundingClientRect().top;
+  return scroller.scrollTop + (rect.top - origin) - anchor.top;
 }
 
 /** 没存过布局时首页两栏的比例，与档案库、书架、本地档案同一份（58/42）。 */

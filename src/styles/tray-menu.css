@@ -62,7 +62,11 @@ body {
   background: transparent;
   color: inherit;
   font: inherit;
-  text-align: start;
+  /* 两条都是双字，居中才落在同一条中线上。横向位置只认 `justify-content`：这一层是
+      flex，文字被包成一个匿名 flex item，`text-align` 在 flex 容器上管不着它（从前这里
+     写的是 `text-align: start`，所以菜单里的字一直贴着左边——用户 2026-10-02 报的）。 */
+  justify-content: center;
+  text-align: center;
   cursor: pointer;
 }
 
