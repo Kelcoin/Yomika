@@ -436,6 +436,25 @@ describe('DLSS5 settings group', () => {
     await waitFor(() => expect(parseDlssnrPasses(latest).map((pass) => pass.autoMask)).toEqual([false, true]));
   });
 
+  it('steps every layer parameter by a tenth', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+
+    // 0.05 的步进会让 1.1 走到 1.15：用户要的是一格 0.1（浮点残渣由 SettingsNumber
+    // 自己吸收，见 settings-number-stepper.test.tsx）。
+    for (const label of ['强度', '局部色调', '局部结构', '皮肤结构']) {
+      await user.click(within(editor).getByRole('button', { name: label }));
+      const stepper = await screen.findByRole('dialog', { name: label });
+      expect(within(stepper).getByRole('spinbutton', { name: label })).toHaveAttribute('step', '0.1');
+    }
+  });
+
   it('keeps one overlay while entering and leaving a layer editor', async () => {
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     renderDlssnr();

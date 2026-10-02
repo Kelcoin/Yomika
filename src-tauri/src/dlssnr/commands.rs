@@ -320,6 +320,23 @@ fn apply_cached_page(
         Err(error) if error == super::filter::CANCELLED => {
             return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
         }
+        // 两次评估都把输入原样交回（见 `super::filter::PASSTHROUGH`）：这一页这次确实
+        // 没被处理过。原图交回是看得见的诚实结果；**不写产物缓存**——写进去就等于把
+        // 「没处理过」固化下来，用户那一页会一直停在未处理的样子（真机缓存里抓到过三
+        // 例——同样的键、同样的字节、还被阅读器读走显示过）。机制本身还没复现，所以留
+        // 一条日志：下次撞上时能对上尺寸与参数。
+        Err(error) if error == super::filter::PASSTHROUGH => {
+            if let Err(log_error) = crate::error_log::record_at_data_dir(
+                data_dir,
+                "warn",
+                "dlssnr/passthrough",
+                &format!("这一页的评估两次都原样交回了输入，这次不写产物缓存：{width}×{height}"),
+                Some(&serde_json::to_string(&settings).unwrap_or_default()),
+            ) {
+                eprintln!("yomika: DLSSNR 原样交回没能写进错误日志：{log_error}");
+            }
+            return CommandResult::success(page.bytes);
+        }
         Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
     };
     drop(guard);

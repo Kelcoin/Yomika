@@ -304,9 +304,13 @@ pub fn dll_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// 所以「磁盘上这一页是哪一份 DLL 用哪一套参数跑出来的」只能由知道这两件事的这里回答。
 /// 任何一项变了就是另一版，旧产物不许顶上来。
 ///
-/// 版本前缀是 `v2`：v1 认的是「字节数 + 修改时间」，复制、解包、同步、恢复备份都能让
-/// 一份完全不同的 DLL 在这两项上与原来那份一样（审计报告 P1-2），所以 v1 的产物一律
-/// 不再认。内容哈希不放在热路径上，见 [`cached_fingerprint`]。
+/// 版本前缀是 `v3`：v2 的产物里混着「评估把输入原样交回、却被当成产物存下来」的行
+/// （真机缓存里抓到三例：内容与起点页逐像素相同，并且已经被阅读器读走显示过，见
+/// `filter::PASSTHROUGH`）。产物行本身不带代码版本，事后分不出哪一行是这种，所以 v2
+/// 的产物一律不再认，让它们按新前缀重算——按需，翻到哪页算哪页。v1 认的是「字节数 +
+/// 修改时间」，复制、解包、同步、恢复备份都能让一份完全不同的 DLL 在这两项上与原来
+/// 那份一样（审计报告 P1-2），所以 v1 的产物也不认。内容哈希不放在热路径上，见
+/// [`cached_fingerprint`]。
 #[cfg(windows)]
 pub fn output_revision(
     data_dir: &std::path::Path,
@@ -314,7 +318,7 @@ pub fn output_revision(
     settings: &DlssnrSettings,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dlssnr-out:v2\0");
+    hasher.update(b"dlssnr-out:v3\0");
     hasher.update(dll_identity(data_dir).as_bytes());
     hasher.update(b"\0");
     hasher.update(source_revision.unwrap_or("reader-page").as_bytes());
@@ -322,7 +326,7 @@ pub fn output_revision(
     // `settings` 传进来之前已经 `normalized()` 过（层数与数值都收过范围），所以
     // 「默认」与「显式写出默认值」在这里是同一串。
     hasher.update(serde_json::to_string(settings).unwrap_or_default().as_bytes());
-    format!("dlssnr:v2:{}", hasher.finalize().to_hex())
+    format!("dlssnr:v3:{}", hasher.finalize().to_hex())
 }
 
 /// 「这一份 DLL 是哪一份」——按**内容**认（SHA-256 + 字节数）。
@@ -898,103 +902,6 @@ mod tests {
         assert!(stacked_difference > 0.05);
     }
 
-    /// 临时探针：一页到底花在哪。`YOMIKA_DLSSNR_TIMING=1 cargo test --release --lib
-    /// dlssnr::tests::timing_probe -- --nocapture`。
-    #[test]
-    fn timing_probe() {
-        let _gpu = gpu_test_lock();
-        let Some(dll) = test_dll() else { return };
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
-        std::fs::create_dir_all(&dir).expect("数据目录");
-        let one = DlssnrSettings::default();
-        // 库里 reader-page 的中位数是 3.1MP（1478x2100 那一档），p90 是 26MP。
-        let a = synthetic_image(1478, 2100);
-        let b = synthetic_image(1500, 2100); // 下一页：尺寸差 22 像素
-        let c = synthetic_image(2000, 3000);
-        let run = |label: &str, image: &DlssnrImage, settings: &DlssnrSettings| {
-            let started = std::time::Instant::now();
-            let output = filter::apply_with_dll(&dir, &dll, image, settings);
-            let elapsed = started.elapsed().as_millis();
-            match output {
-                Ok(_) => println!("{label:<28} {elapsed:>6} ms"),
-                Err(error) => println!("{label:<28} 失败：{error}"),
-            }
-        };
-        println!("--- 整条原生链路（A=1478x2100 3.1MP） ---");
-        run("A #1 冷启动", &a, &one);
-        run("A #2 同尺寸复用", &a, &one);
-        run("A #3 同尺寸复用", &a, &one);
-        let two = DlssnrSettings { passes: vec![PassSettings::default(), PassSettings::default()] };
-        let three = DlssnrSettings {
-            passes: vec![PassSettings::default(), PassSettings::default(), PassSettings::default()],
-        };
-        run("A 两层（重建+2 pass）", &a, &two);
-        run("A 两层 复用", &a, &two);
-        run("A 三层（重建+3 pass）", &a, &three);
-        run("A 三层 复用", &a, &three);
-        println!("--- 换尺寸（真实翻页：每页尺寸都不一样） ---");
-        run("B #1 换尺寸", &b, &one);
-        run("B #2 复用", &b, &one);
-        run("A #4 换回 A", &a, &one);
-        run("C #1 2000x3000 6MP", &c, &one);
-        run("C #2 复用", &c, &one);
-
-        // p90 的长条页（26MP 一档）：库里这类页不少，而它决定「翻一页要等多久」。
-        let d = synthetic_image(1800, 14000);
-        println!("--- 长条页 1800x14000 = 25.2MP（RGBA 100MB） ---");
-        run("D #1 冷（含重建）", &d, &one);
-        run("D #2 复用", &d, &one);
-        let started = std::time::Instant::now();
-        {
-            use image::ImageEncoder;
-            let mut out = Vec::new();
-            image::codecs::png::PngEncoder::new(&mut out)
-                .write_image(&d.rgba, d.width, d.height, image::ExtendedColorType::Rgba8)
-                .expect("编码 PNG");
-            println!("{:<28} {:>6} ms（{} KB）", "编码 25.2MP PNG", started.elapsed().as_millis(), out.len() / 1024);
-        }
-
-        println!("--- 纯 CPU 部分 ---");
-        // 输入解码：真实输入是 LANraragi 给的 JPEG。
-        let jpeg = {
-            let rgb: Vec<u8> = a.rgba.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
-            let mut buffer = std::io::Cursor::new(Vec::new());
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 92)
-                .encode(&rgb, a.width, a.height, image::ExtendedColorType::Rgb8)
-                .expect("编码 JPEG");
-            buffer.into_inner()
-        };
-        println!("输入 JPEG 体积：{} KB", jpeg.len() / 1024);
-        let started = std::time::Instant::now();
-        let decoded = image::load_from_memory(&jpeg).expect("解码 JPEG").to_rgba8();
-        println!("{:<28} {:>6} ms（{}x{}）", "解码 JPEG → RGBA8", started.elapsed().as_millis(), decoded.width(), decoded.height());
-
-        // 输出编码：命令层回给前端的正是这份 PNG。
-        let started = std::time::Instant::now();
-        let mut encoded = Vec::new();
-        {
-            use image::ImageEncoder;
-            image::codecs::png::PngEncoder::new(&mut encoded)
-                .write_image(&a.rgba, a.width, a.height, image::ExtendedColorType::Rgba8)
-                .expect("编码 PNG");
-        }
-        println!("{:<28} {:>6} ms（{} KB）", "编码结果 PNG（默认压缩）", started.elapsed().as_millis(), encoded.len() / 1024);
-        let started = std::time::Instant::now();
-        let fast = {
-            use image::ImageEncoder;
-            let mut out = Vec::new();
-            image::codecs::png::PngEncoder::new_with_quality(
-                &mut out,
-                image::codecs::png::CompressionType::Fast,
-                image::codecs::png::FilterType::NoFilter,
-            )
-            .write_image(&a.rgba, a.width, a.height, image::ExtendedColorType::Rgba8)
-            .expect("编码 PNG");
-            out
-        };
-        println!("{:<28} {:>6} ms（{} KB）", "编码结果 PNG（Fast/NoFilter）", started.elapsed().as_millis(), fast.len() / 1024);
-    }
-
     /// 「一个 bucket 工作区吃同一本档案里各种尺寸的页」成不成立。
     ///
     /// 判据只有一条：**输出要和按页尺寸建 feature 时几乎一样**（同一张图、同一层
@@ -1207,6 +1114,50 @@ mod tests {
             (workspaces_after, features_after),
             "恢复之后同样的页要接着用那个工作区"
         );
+    }
+
+    /// 网络偶尔把输入原样交回（真机产物缓存里抓到过三例：产物与起点页逐像素相同）。
+    ///
+    /// 一次原样交回就当成那一页没被评估：重试一次。连着两次就必须如实报
+    /// [`filter::PASSTHROUGH`]，宁可报错也不能再交出一个「看起来像产物」的输入——
+    /// `commands` 那一层就是靠这个信号决定「原图交回、不写产物缓存」的（写进去，用户
+    /// 那一页会一直停在未处理的样子，只有再动一次参数才会重算）。
+    #[test]
+    fn a_passthrough_is_retried_before_it_is_believed() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let settings = DlssnrSettings::default().normalized();
+        let page = synthetic_image(600, 800);
+
+        // 一次原样交回：重试应当把它救回来，交出来的必须是被改过的图。
+        filter::force_passthrough(1);
+        let recovered =
+            filter::apply_with_dll(&dir, &dll, &page, &settings).expect("重试之后应当给出真的产物");
+        let gap = mean_absolute_difference(&page.rgba, &recovered.rgba);
+        assert!(
+            gap > 0.05,
+            "重试之后仍然与输入逐像素同源（差 {gap:.3}）：这一次评估没被重试"
+        );
+
+        // 连着两次原样交回：如实报出去，不能拿输入当产物。
+        filter::force_passthrough(2);
+        match filter::apply_with_dll(&dir, &dll, &page, &settings) {
+            Err(error) => assert_eq!(
+                error,
+                filter::PASSTHROUGH,
+                "两次原样交回之后该报「原样交回」"
+            ),
+            Ok(output) => panic!(
+                "两次原样交回之后还是给了一个结果（与输入差 {:.3}）",
+                mean_absolute_difference(&page.rgba, &output.rgba)
+            ),
+        }
+        filter::force_passthrough(0);
     }
 
     /// 取消（记录期出错）**不该**动上下文，也不该把工作区销毁掉。

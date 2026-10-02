@@ -272,7 +272,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             value={pass.intensity}
             min={0}
             max={2}
-            step={0.05}
+            step={0.1}
             format={(value) => value.toFixed(2)}
             onChange={(value) => updateDraftPass({ intensity: value })}
           />
@@ -282,7 +282,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             value={pass.localToneStrength}
             min={0}
             max={2}
-            step={0.05}
+            step={0.1}
             format={(value) => value.toFixed(2)}
             onChange={(value) => updateDraftPass({ localToneStrength: value })}
           />
@@ -292,7 +292,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             value={pass.localStructureStrength}
             min={0}
             max={2}
-            step={0.05}
+            step={0.1}
             format={(value) => value.toFixed(2)}
             onChange={(value) => updateDraftPass({ localStructureStrength: value })}
           />
@@ -303,7 +303,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             value={pass.skinStructureStrength}
             min={0}
             max={2}
-            step={0.05}
+            step={0.1}
             format={(value) => value.toFixed(2)}
             onChange={(value) => updateDraftPass({ skinStructureStrength: value })}
           />

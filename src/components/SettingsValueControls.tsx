@@ -110,6 +110,29 @@ export function SettingsChoice({ icon, label, hint, ariaLabel, value, options, o
   );
 }
 
+/** 步进按钮的结果要不要吸掉浮点残渣：`1.1 + 0.05` 在 IEEE754 下是
+ * `1.1500000000000001`，`1.1 + 0.1` 是 `1.2000000000000002`——用户按一下就真的在
+ * 输入框里读到这一串。
+ *
+ * 位数取「参与运算的两个数里小数位更多的那个」，所以它只消残渣，不会把用户手敲的
+ * 1.125 吸到 0.1 的网格上；12 位上限是给旧版本已经写坏的值留的后路
+ * （`1.1500000000000001 + 0.1` 该收成 1.25，而不是继续带着尾巴走）。输入框本身仍然
+ * 原样透传：半途的值归 autosave 判断，不归步进。 */
+function steppedValue(value: number, step: number, direction: 1 | -1): number {
+  const next = value + direction * step;
+  if (!Number.isFinite(next)) return next;
+  const decimals = Math.min(12, Math.max(decimalPlaces(value), decimalPlaces(step)));
+  return Number(next.toFixed(decimals));
+}
+
+/** 十进制写法里的小数位数。`1e-7` 这类指数写法落回 0 位：本应用的步进量级到不了
+ * 那里，真到了也只是少吸一位。 */
+function decimalPlaces(value: number): number {
+  const text = String(value);
+  const dot = text.indexOf('.');
+  return dot < 0 ? 0 : text.length - dot - 1;
+}
+
 /** A numeric setting, edited with a stepper around the same input the old rows
  * used. Half-typed values still pass through untouched: autosave, not the
  * stepper, decides what is valid. */
@@ -136,7 +159,7 @@ export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, f
       {open && (
         <SettingsMenu title={label} icon={icon} onClose={() => setOpen(false)}>
           <div className="settings-menu-stepper">
-            <button className="icon-action" type="button" aria-label={`减小${label}`} disabled={value <= min} onClick={() => onChange(clamp(value - step))}><Minus aria-hidden="true" /></button>
+            <button className="icon-action" type="button" aria-label={`减小${label}`} disabled={value <= min} onClick={() => onChange(clamp(steppedValue(value, step, -1)))}><Minus aria-hidden="true" /></button>
             <input
               className="settings-number"
               aria-label={label}
@@ -147,7 +170,7 @@ export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, f
               value={value}
               onChange={(event) => onChange(Number(event.target.value))}
             />
-            <button className="icon-action" type="button" aria-label={`增大${label}`} disabled={value >= max} onClick={() => onChange(clamp(value + step))}><Plus aria-hidden="true" /></button>
+            <button className="icon-action" type="button" aria-label={`增大${label}`} disabled={value >= max} onClick={() => onChange(clamp(steppedValue(value, step, 1)))}><Plus aria-hidden="true" /></button>
           </div>
         </SettingsMenu>
       )}

@@ -62,6 +62,14 @@ const MIN_EDGE: u32 = 32;
 /// 由调用方翻译成 `INFERENCE_CANCELLED`。
 pub const CANCELLED: &str = "dlssnr: cancelled";
 
+/// 评估把输入原样交回时返回的错误串。
+///
+/// 真机缓存里抓到过这种产物：内容与起点页逐像素相同（三例，全是某一次参数调整之后的
+/// 头三页，并且被阅读器读走显示过）。它不是「滤镜选择了保守」，而是这一页**根本没被
+/// 评估**——把这种结果当产物写进缓存，用户那一页就会一直停在未处理的样子，只有再动
+/// 一次参数才会重算。所以调用方要把它当「这次没处理」：原图交回、不写产物缓存。
+pub const PASSTHROUGH: &str = "dlssnr: passthrough";
+
 /// 测试用：让下一次 `record_page` 在记完上传之后报一次取消。
 ///
 /// 真实的「层间取消」要另一个线程掐着时间置 flag（`apply_with_dll_bucket` 开头就有
@@ -72,6 +80,37 @@ static FAIL_RECORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 #[cfg(test)]
 pub fn fail_next_record(fail: bool) {
     FAIL_RECORD.store(fail, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 测试用：把接下来 `times` 次评估伪装成「网络把输入原样交回」。
+///
+/// 真机上撞见这条路径要看运气（本机是在用户的产物缓存里抓到的三例），所以注入：
+/// `run` 的「重试一次」与「两次都交回就如实报 [`PASSTHROUGH`]」两条路都得走到。
+#[cfg(test)]
+static FORCE_PASSTHROUGH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn force_passthrough(times: usize) {
+    FORCE_PASSTHROUGH.store(times, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn take_forced_passthrough() -> bool {
+    use std::sync::atomic::Ordering;
+    let mut left = FORCE_PASSTHROUGH.load(Ordering::SeqCst);
+    while left > 0 {
+        match FORCE_PASSTHROUGH.compare_exchange(
+            left,
+            left - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(now) => left = now,
+        }
+    }
+    false
 }
 
 /// 把一张图跑一遍 DLSSNR。
@@ -162,7 +201,33 @@ pub fn context_counts(data_dir: &Path, dll: &Path) -> Result<(u64, u64), String>
     })
 }
 
+/// 一张图跑一遍 DLSSNR：评估一次，必要时再评估一次。
+///
+/// 网络偶尔会把输入原样交回（真机产物缓存里抓到过三例：内容与起点页逐像素相同）。
+/// 那不是「滤镜选择保守」，而是这一页根本没被评估；当产物交出去又写进缓存，用户那一页
+/// 就一直停在未处理的样子。所以这里再看一眼：与输入逐像素相同就**再评估一次**（一次
+/// 评估本来就是翻页路径上的开销，重评不至于让这一次翻页变得难等），第二次仍然相同就
+/// 如实报 [`PASSTHROUGH`]，由调用方决定「原图交回、不写缓存」。
 fn run(
+    context: &mut GpuContext,
+    image: &DlssnrImage,
+    settings: &DlssnrSettings,
+    cancel: &CancelToken,
+    forced: Option<(u32, u32)>,
+) -> Result<DlssnrImage, String> {
+    let first = evaluate(context, image, settings, cancel, forced)?;
+    if first.rgba != image.rgba {
+        return Ok(first);
+    }
+    let second = evaluate(context, image, settings, cancel, forced)?;
+    if second.rgba == image.rgba {
+        return Err(PASSTHROUGH.to_string());
+    }
+    Ok(second)
+}
+
+/// 一次评估：取/建工作区 → 把一页的整套命令记进命令表 → 提交并等 GPU → 映射回读。
+fn evaluate(
     context: &mut GpuContext,
     image: &DlssnrImage,
     settings: &DlssnrSettings,
@@ -235,6 +300,13 @@ fn run(
     };
     phase("映射回读", &mut mark);
     context.release_workspace(workspace);
+    #[cfg(test)]
+    let rgba = if take_forced_passthrough() {
+        // 伪装成「网络原样交回」（见 `force_passthrough`）：重试与如实报错两条路都靠它覆盖。
+        image.rgba.clone()
+    } else {
+        rgba
+    };
     Ok(DlssnrImage {
         width,
         height,
