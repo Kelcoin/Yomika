@@ -656,6 +656,13 @@ describe('design system contract', () => {
     expect(shell).toMatch(/@media \(min-width: 901px\) \{\s*\.workspace:has\(/);
   });
 
+  it('preserves the home scroll tail when transferring scrolling into the split list', () => {
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    // 保留首页 32px 底部留白，避免换成左栏滚动时可滚范围缩短、位置被夹小。
+    expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)\s*\{[^}]*padding:\s*0 0 var\(--space-8\)/);
+    expect(shell).toMatch(/\.library-shell\.is-home\.has-detail \.library-shell-list\s*\{[^}]*padding-bottom:\s*var\(--space-8\)/);
+  });
+
   it('keeps the detail of each shell on the page that owns it', () => {
     // 详情栏里的推荐条从前一律指向 `/library/:id`：首页或书架的详情点一条推荐，
     // 左边那一栏会跟着换成档案库，等于又从首页/书架溜进了档案库。

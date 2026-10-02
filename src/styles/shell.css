@@ -478,6 +478,8 @@ body::-webkit-scrollbar,
   .library-shell.is-home.has-detail .library-shell-list {
     overflow-y: auto;
     overscroll-behavior: contain;
+    /* 接管滚动时也接管首页底部留白，避免可滚范围缩短使 scrollTop 被夹小。 */
+    padding-bottom: var(--space-8);
   }
 }
 
