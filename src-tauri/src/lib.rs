@@ -102,7 +102,7 @@ use model_release::{
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
 use dlssnr::commands::{
     dlssnr_apply_page, dlssnr_catalog, dlssnr_download_variant, dlssnr_import_dll, dlssnr_probe,
-    dlssnr_status,
+    dlssnr_release_workspaces, dlssnr_status,
 };
 use compute_center::{
     compute_center_configure, compute_center_revoke_pairing, compute_center_status, compute_discover, compute_pair_request,
@@ -324,6 +324,11 @@ pub fn run() {
                             .and_then(|connection| settings::load_preferences_from(&connection).ok()))
                         .is_some_and(|snapshot| snapshot.close_to_tray);
                     if close_to_tray {
+                        // 藏进托盘之后没有任何前端代码在跑：这一本可能还开着、阅读器的
+                        // 派生缓存与 DLSSNR 的工作区都还挂着（实测几个 GB 的提交内存）。
+                        // 这里正好是「用户不再看图」的时刻，把工作区交回（只放纹理，不动
+                        // 工作集：那份 165MB 的 DLL 与 240MB 的 ONNX 下次还要用）。
+                        crate::dlssnr::release_cached_workspaces();
                         let _ = window.hide();
                     } else {
                         let _ = window.destroy();
@@ -428,6 +433,7 @@ pub fn run() {
             dlssnr_catalog,
             dlssnr_download_variant,
             dlssnr_apply_page,
+            dlssnr_release_workspaces,
             compute_center_status,
             compute_center_configure,
             compute_center_revoke_pairing,

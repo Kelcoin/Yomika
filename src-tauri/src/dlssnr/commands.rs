@@ -58,6 +58,22 @@ pub async fn dlssnr_probe(app: tauri::AppHandle, force: Option<bool>) -> Command
     }
 }
 
+/// 把进程里缓存着的 DLSSNR 工作区交回系统，返回交回了几个。
+///
+/// 工作区（以及它内部每个 NGX feature 自己的资源）是按「层数 × 页面积」占**提交
+/// 内存**的：真机实测五层在 2731×4096 的一页上，两份缓存档加起来把进程提交内存抬到
+/// 9.5GB（见 `device::release_cached_workspaces` 上那段数字）。翻页期间它们是速度的
+/// 来源（重建一次 feature 几十到几百毫秒），所以这条命令留给「没事做」的时候：前端
+/// 在离开阅读器、以及整本预处理停下来一会儿之后各调一次。
+///
+/// 刻意**不**顺手做 `memory::trim_process_memory` 那件事：清空工作集会把 decensor 的
+/// ONNX（约 240MB）与那份 DLL（约 165MB）一起扫出去，下一页的第一张图要重新读盘。
+/// 这条命令只交回几个 GB 的提交内存，不动那些还在用的页。
+#[tauri::command(async)]
+pub fn dlssnr_release_workspaces() -> CommandResult<u32> {
+    CommandResult::success(super::release_cached_workspaces() as u32)
+}
+
 /// 导入一份 `nvngx_dlssnr.dll`（用户在文件选择器里指的那一份）。
 #[tauri::command(async)]
 pub fn dlssnr_import_dll(app: tauri::AppHandle, path: String) -> CommandResult<InstalledDll> {

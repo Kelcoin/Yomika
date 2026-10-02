@@ -37,6 +37,27 @@ function trimProcessMemory(): void {
   void invokeCommand('trim_process_memory', {}, VoidResponseSchema);
 }
 
+/** 让 Rust 把 DLSSNR 缓存的工作区交回给系统（只交纹理，不清工作集）。
+ *
+ * 工作区与它内部每个 NGX feature 的资源是按「层数 × 页面积」占**提交内存**的：
+ * 实测一页 2731×4096 跑五层，进程提交内存从 45MB 涨到 9.5GB，交回之后立刻回到
+ * 1.0GB 上下（`docs/69`）。它跟进程同寿、上限还是两份，所以「没人再看图」的时候必须
+ * 交回；代价只是下一页第一趟重建 feature（几十到几百毫秒）。
+ *
+ * 与 `trimProcessMemory` 分开：那条会顺手把 165MB 的 DLL 与 240MB 的 ONNX 一起扫出
+ * 工作集，下一页第一张图要重新读盘，所以只留给「离开这一本」那一刻；这条只交回几个
+ * GB 的纹理，整本预处理停下来一会儿之后也可以做。 */
+function releaseDlssnrWorkspaces(): void {
+  void invokeCommand('dlssnr_release_workspaces', {}, VoidResponseSchema);
+}
+
+/** 整本预处理停下来多久之后交回 DLSSNR 的工作区。
+ *
+ * 翻页是阵发的：连翻几页时每一页都会重排一次队列，只有真的停手了才值得交回。定成
+ * 30 秒是因为重建 feature 是几十到几百毫秒（`src-tauri/src/dlssnr/workspace.rs` 顶部
+ * 那组数字），宽限期给足就不会把「用户还在看」误判成「用户走了」。 */
+const WORKSPACE_IDLE_RELEASE_MS = 30_000;
+
 interface ReaderContext {
   generation: number;
   serverId: string;
@@ -407,7 +428,28 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     for (const handle of retired) imageCache.release(handle);
   }, []);
 
+  /** 无人看图一段时间之后把 DLSSNR 的工作区交回（见 `releaseDlssnrWorkspaces`）。
+   *
+   * 交回是「滚回上一页就得重建」的代价换几个 GB 的提交内存，所以判据是**队列空了**
+   * 而不是「翻页了」：只有没人再要下一张的时候挂着的那几份纹理才没有意义。定时器归
+   * 阅读器生命周期管——`releaseAllPages` 与离开这一本都会取消它，免得离开之后还朝
+   * 后端发一次没人需要的请求。 */
+  const workspaceReleaseRef = useRef<number>();
+  const cancelWorkspaceRelease = useCallback(() => {
+    if (workspaceReleaseRef.current === undefined) return;
+    window.clearTimeout(workspaceReleaseRef.current);
+    workspaceReleaseRef.current = undefined;
+  }, []);
+  const scheduleWorkspaceRelease = useCallback(() => {
+    cancelWorkspaceRelease();
+    workspaceReleaseRef.current = window.setTimeout(() => {
+      workspaceReleaseRef.current = undefined;
+      releaseDlssnrWorkspaces();
+    }, WORKSPACE_IDLE_RELEASE_MS);
+  }, [cancelWorkspaceRelease]);
+
   const releaseAllPages = useCallback(() => {
+    cancelWorkspaceRelease();
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
     // 离开阅读器时把正在跑的原生推理也掐掉：那一件重活占着全局闸，而用户已经在别处了。
@@ -434,7 +476,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (coverHandleRef.current) imageCache.release(coverHandleRef.current);
     coverHandleRef.current = undefined;
     pendingPagesRef.current.clear();
-  }, []);
+  }, [cancelWorkspaceRelease]);
 
   // Small per-page rendition for the thumbnail panel; the reader-page rendition
   // would pull every page of the archive in at full size.
@@ -612,6 +654,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const runDerivedQueue = useCallback(async () => {
     if (derivedBusyRef.current) return;
     derivedBusyRef.current = true;
+    // 又有活要干了：把挂起的「交回工作区」取消掉，这一趟排空时会重新排一个。
+    cancelWorkspaceRelease();
     try {
       for (;;) {
         // 用户已经离开阅读器（路由被留在后面）时不该再占着那一道全局推理闸：整本
@@ -790,8 +834,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
     } finally {
       derivedBusyRef.current = false;
+      // 队列排空了（这一趟没有新的活进来）：过一会儿把 DLSSNR 的工作区交回。
+      scheduleWorkspaceRelease();
     }
-  }, [loadPage, retainDerived, markDeriving, noticeStageFailure]);
+  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, scheduleWorkspaceRelease]);
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
@@ -808,7 +854,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     releaseDerived({ dropVisible: true });
     // 页都放掉了，顺手把工作集也还给系统（见 `trimProcessMemory`）。
     trimProcessMemory();
-  }, [pageActive, releaseDerived]);
+    // 还有另一半内存不归工作集管：DLSSNR 缓存的工作区（实测几个 GB 的提交内存，
+    // 见 `releaseDlssnrWorkspaces`）。离开这一本时正好一起交回。
+    cancelWorkspaceRelease();
+    releaseDlssnrWorkspaces();
+  }, [pageActive, releaseDerived, cancelWorkspaceRelease]);
 
   /** Called by the reader with the pages actually on screen.
    *

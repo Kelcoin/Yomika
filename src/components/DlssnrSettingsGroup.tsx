@@ -84,10 +84,16 @@ const HELP_GAP = 8;
 const HELP_MARGIN = 12;
 const HELP_MIN_HEIGHT = 180;
 const HELP_GRACE_MS = 160;
+/** 气泡的宽度取下方那张菜单面板的宽度。量不到面板时（首帧、或者面板不在 DOM 里）
+ *  退回 `HELP_FALLBACK_WIDTH`；面板窄到放不下正文时至少给 `HELP_MIN_WIDTH`；两者
+ *  都再受窗口宽度约束，免得气泡被切掉。 */
+const HELP_FALLBACK_WIDTH = 340;
+const HELP_MIN_WIDTH = 240;
 
 interface HelpAnchor {
   top: number;
   right: number;
+  width: number;
   height: number;
 }
 
@@ -108,7 +114,12 @@ function LayerHelpBubble({ anchor, onEnter, onLeave }: {
         className="settings-help-bubble"
         role="note"
         aria-label="层参数说明"
-        style={{ top: `${anchor.top}px`, right: `${anchor.right}px`, maxHeight: `${anchor.height}px` }}
+        style={{
+          top: `${anchor.top}px`,
+          right: `${anchor.right}px`,
+          width: `${anchor.width}px`,
+          maxHeight: `${anchor.height}px`,
+        }}
         onPointerEnter={onEnter}
         onPointerLeave={onLeave}
       >
@@ -196,9 +207,16 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     const measure = () => {
       const rect = helpToggleRef.current?.getBoundingClientRect();
       if (!rect) return;
+      // 宽度与右边缘取下方那张菜单面板（这一屏里被解释的就是它，同宽同右沿才算一体）；
+      // 上沿仍从问号按钮的下沿算起，否则气泡会盖住标题行。首帧量不到面板时退回固定宽度。
+      const panelRect = helpToggleRef.current?.closest('.settings-choice-panel')?.getBoundingClientRect();
+      const measured = panelRect && panelRect.width > 0 ? panelRect : undefined;
       setHelpAnchor({
         top: rect.bottom + HELP_GAP,
-        right: Math.max(HELP_MARGIN, window.innerWidth - rect.right),
+        right: Math.max(HELP_MARGIN, window.innerWidth - (measured ? measured.right : rect.right)),
+        width: measured
+          ? Math.min(Math.max(measured.width, HELP_MIN_WIDTH), window.innerWidth - HELP_MARGIN * 2)
+          : HELP_FALLBACK_WIDTH,
         height: Math.max(HELP_MIN_HEIGHT, window.innerHeight - rect.bottom - HELP_GAP - HELP_MARGIN),
       });
     };

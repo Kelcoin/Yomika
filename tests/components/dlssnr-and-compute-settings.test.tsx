@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -563,6 +563,43 @@ describe('DLSS5 settings group', () => {
     await user.click(toggle);
     await user.unhover(toggle);
     await waitFor(() => expect(note()).toBeNull());
+  });
+
+  it('sizes the help bubble to the menu panel it explains', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+    const toggle = within(editor).getByRole('button', { name: '参数说明' });
+    await user.hover(toggle);
+    const bubble = await screen.findByRole('note', { name: '层参数说明' });
+
+    // jsdom 没有布局，矩形全是 0：把「面板」与问号的位置捏出来，再踢一次 resize 让气泡
+    // 重新量（真实浏览器里这一步由窗口变化触发）。
+    const panel = editor.closest('.settings-choice-panel') ?? editor;
+    const rect = ({ width, top, right, bottom }: { width: number; top: number; right: number; bottom: number }) => ({
+      width,
+      top,
+      right,
+      bottom,
+      height: bottom - top,
+      left: right - width,
+      x: right - width,
+      y: top,
+      toJSON: () => ({ width, top, right, bottom }),
+    } as DOMRect);
+    panel.getBoundingClientRect = () => rect({ width: 320, top: 100, right: 900, bottom: 700 });
+    toggle.getBoundingClientRect = () => rect({ width: 28, top: 120, right: 880, bottom: 148 });
+    fireEvent(window, new Event('resize'));
+
+    // 气泡跟下面那张菜单一样宽、右边缘对齐（用户要的「匹配下方的菜单」），上沿仍落在
+    // 问号下面——不然它会盖住标题行。
+    await waitFor(() => expect(bubble).toHaveStyle({ width: '320px' }));
+    expect(bubble).toHaveStyle({ right: `${window.innerWidth - 900}px`, top: '156px' });
   });
 
   it('applies a 3DCG preset over the current layer settings', async () => {

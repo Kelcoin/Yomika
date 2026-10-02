@@ -4986,13 +4986,14 @@ body::-webkit-scrollbar,
 /* 层参数说明的气泡：挂在 body 上（`.settings-help-bubble` 必须离开面板）。
    面板是固定高度 + `overflow: hidden` 的弹层，说明块一进内容流就会把它撑高、把问号顶走，
    指针还停在原地而按钮已经挪开，于是来回抖。气泡用 fixed 定位在面板之外，面板的几何不变；
-   `right` 由问号的位置算出来，宽度按窗口收，高度由可用空间决定、内容多了自己滚。 */
+   `top`/`right`/`width` 都由问号与它所在面板的位置算出来（宽度取面板宽度，和下面那张菜单
+   一样宽、右边缘对齐），所以这里只兜一道窗口上限，高度由可用空间决定、内容多了自己滚。 */
 .settings-help-bubble {
   position: fixed;
   z-index: var(--z-modal);
   display: grid;
   gap: var(--space-3);
-  width: min(340px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-4);

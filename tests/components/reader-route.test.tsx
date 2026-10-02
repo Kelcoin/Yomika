@@ -1100,6 +1100,10 @@ describe('reader route', () => {
     const pageCount = 6;
     const pageBytes = 24 * 1024 * 1024;
     const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    // 抓「排空之后过一会儿再交回 DLSSNR 工作区」那个定时器：宽限期是 30 秒，等真的
+    // 30 秒过完不现实，所以在这里手动触发它一次（见 `scheduleWorkspaceRelease`）。
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+    const armedIdleRelease = () => setTimeoutSpy.mock.calls.find(([, delay]) => delay === 30_000);
     const commands: string[] = [];
     const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: pageBytes }
@@ -1107,6 +1111,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command, args) => {
       commands.push(command);
       if (command === 'trim_process_memory') return { ok: true, value: null };
+      if (command === 'dlssnr_release_workspaces') return { ok: true, value: 0 };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: String(args?.archiveId ?? 'left'), title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
@@ -1127,6 +1132,15 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:dlssnr-0'));
 
     release.mockClear();
+    // 还有另一半内存不归句柄管：DLSSNR 缓存的工作区是**提交**内存（实测一页
+    // 2731×4096 跑五层，进程从 45MB 涨到 9.5GB，`docs/69`），它跟进程同寿、上限两份。
+    // 队列排空就说明没人再要下一张了，这时排一个 30 秒的宽限定时器（翻页是阵发的，
+    // 立刻交回会让连翻的每一页都重建一次 feature）。
+    await waitFor(() => expect(armedIdleRelease()).toBeDefined());
+    expect(commands).not.toContain('dlssnr_release_workspaces');
+    (armedIdleRelease()?.[0] as () => void)();
+    await waitFor(() => expect(commands).toContain('dlssnr_release_workspaces'));
+
     // 切到另一本：刚才那本还留着（App 的保留上限是 2），只是不再显示。
     fireEvent.click(screen.getByRole('button', { name: '换一本' }));
     const releasedKeys = () => release.mock.calls.map(([handle]) => handle.key);

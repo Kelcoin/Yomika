@@ -78,6 +78,12 @@ pub mod commands {
             ),
         ))
     }
+
+    /// 非 Windows 上没有任何工作区可交回，报 0 份（形状与 Windows 那份一致）。
+    #[tauri::command]
+    pub fn dlssnr_release_workspaces() -> CommandResult<u32> {
+        CommandResult::success(0)
+    }
 }
 #[cfg(windows)]
 mod animation;
@@ -102,6 +108,16 @@ pub use animation::apply_dlssnr;
 pub use filter::{apply, DlssnrImage};
 #[cfg(windows)]
 pub use gpu::GpuInfo;
+/// 把进程里缓存着的 DLSSNR 工作区交回系统（见 [`device::release_cached_workspaces`]）。
+///
+/// 非 Windows 上这条路径根本不存在，但调用点（`crate::memory::trim_working_set` 与
+/// `dlssnr_release_workspaces`）在其它平台上也要能编，所以留一个永远返回 0 的壳。
+#[cfg(windows)]
+pub use device::release_cached_workspaces;
+#[cfg(not(windows))]
+pub fn release_cached_workspaces() -> usize {
+    0
+}
 #[cfg(windows)]
 pub use settings::{DlssnrSettings, PassSettings, DEFAULT_PASS_COUNT, MAX_PASS_COUNT};
 
@@ -1309,6 +1325,51 @@ mod tests {
             mean_absolute_difference(&first.rgba, &second.rgba),
             0.0,
             "取消之后再跑同一页，结果该一模一样"
+        );
+    }
+
+    /// 「没人看的时候把工作区交回去」必须真的收回那些纹理。
+    ///
+    /// 这条是内存回归的守卫：工作区缓存与进程同寿，而它按「层数 × 页面积」占的是
+    /// **提交内存**——真机实测一页 2731×4096 跑五层留下几个 GB（台账见 `docs/69`），
+    /// 上限还是两份。判据三条：跑完一页缓存里确实有一份、交回之后**当下**的数量归零
+    /// （不是只改了计数器）、紧接着同一页还能跑出逐像素相同的结果（纹理放掉再建回来，
+    /// 语义没变）。把 `release_cached_workspaces` 改成空实现，第一条 `dropped >= 1` 就红。
+    #[test]
+    fn releasing_the_cached_workspaces_gives_the_textures_back() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let page = synthetic_image(700, 900);
+        let settings = DlssnrSettings::default();
+        let first = match filter::apply_with_dll(&dir, &dll, &page, &settings) {
+            Ok(output) => output,
+            Err(error) => {
+                println!("跳过：DLSSNR 没跑起来 —— {error}");
+                return;
+            }
+        };
+        assert!(
+            super::device::cached_workspace_count() >= 1,
+            "跑完一页之后缓存里该留着一份工作区，不然「翻页不重建 feature」就没有着落"
+        );
+        let dropped = super::device::release_cached_workspaces();
+        assert!(dropped >= 1, "缓存里明明有工作区，却一个都没放掉");
+        assert_eq!(
+            super::device::cached_workspace_count(),
+            0,
+            "交回之后缓存里不该还挂着工作区"
+        );
+        let second = filter::apply_with_dll(&dir, &dll, &page, &settings)
+            .expect("交回工作区之后同一页要还能跑");
+        assert_eq!(
+            mean_absolute_difference(&first.rgba, &second.rgba),
+            0.0,
+            "交回工作区只该多花一次重建，结果必须逐像素相同"
         );
     }
 }

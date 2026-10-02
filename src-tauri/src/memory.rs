@@ -19,6 +19,14 @@
 //!
 //! 命令挂的是 `#[tauri::command(async)]`：清一个几 GB 的工作集要走内核的页表，不该
 //! 压在那条同时管着 `WM_MOVING` 的 UI 线程上（同理见 `src/command_dispatch.rs`）。
+//!
+//! **离开阅读器时还有另一半要做，它不在这里**：DLSSNR 的工作区与每个 NGX feature 的
+//! 资源是按「层数 × 页面积」占**提交内存**的（实测一页 2731×4096 五层 → 提交内存
+//! 9.5GB，见 `dlssnr::device::release_cached_workspaces`），清工作集**收不回**提交
+//! 内存。所以前端离开阅读器时连着调两条命令：`dlssnr_release_workspaces` 交回纹理、
+//! `trim_process_memory` 清工作集。这里刻意不把两件事并进一条命令：清工作集会把那份
+//! 165MB 的 DLL 和 240MB 的 ONNX 一起扫出去，而「交回纹理」这件事在别的时候（整本预
+//! 处理停下来一会儿）也需要单独做一次。
 
 /// 尽量把当前进程的工作集还给系统。失败就失败——它只是让内存晚点还，不影响正确性。
 pub fn trim_working_set() {

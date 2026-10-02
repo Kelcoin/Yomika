@@ -93,6 +93,22 @@ pub fn context_builds() -> u64 {
     CONTEXT_BUILDS.load(Ordering::Relaxed)
 }
 
+/// 测试用：缓存里现在挂着几份工作区。
+///
+/// 与 [`context_builds`] 不同，这是**当下**的数量——`release_cached_workspaces` 之后
+/// 它必须归零，这条断言才说明纹理真的被放掉了而不是只改了计数器。
+#[cfg(test)]
+pub fn cached_workspace_count() -> usize {
+    let cell = CONTEXT.get_or_init(|| Mutex::new(ContextState::Empty));
+    let Ok(guard) = cell.lock() else {
+        return 0;
+    };
+    match &*guard {
+        ContextState::Ready { context, .. } => context.workspaces.len(),
+        _ => 0,
+    }
+}
+
 /// 测试用：下一次提交直接按「栅栏信号失败」处理。
 ///
 /// 真的等一次 30 秒的栅栏超时没法进测试，但它与 `Signal` 失败、命令表重置失败走的
@@ -279,6 +295,38 @@ fn create_and_run<T>(
             Err(message)
         }
     }
+}
+
+/// 把缓存里的工作区全部放掉，返回放掉了几个。
+///
+/// 工作区缓存是为了「翻下一页不用重建 feature」而存在的，可它和进程同寿：阅读器早就
+/// 停在某一页、甚至已经退回书架，那几份按 bucket 量化出来的纹理还留在缓存里。真机
+/// 实测这些纹理的主体不在我们自己分配的那几张图上，而在每个 NGX feature 内部：
+/// 一页 2731×4096 跑一层，进程**提交内存**（`PrivateMemorySize64`）从 45MB 涨到
+/// 2.2GB；同尺寸跑五层涨到 9.5GB；把两份缓存档全部放掉，立刻回到 1.0GB 上下。
+/// 也就是说「一页五层」这一档每趟会留下几个 GB 的提交内存，而缓存上限是两份。
+///
+/// 空闲时它们一个字节都没在干活，所以**离开阅读器**（或整本预处理停下来一会儿，
+/// 见 `src/components/ReaderRoute.tsx`）时就交回：代价只是下一页第一趟重建 feature，
+/// 实测几十到几百毫秒（见 `src-tauri/src/dlssnr/workspace.rs` 顶部那组数字），换来
+/// 的是空闲占用落回基线。
+///
+/// 只放工作区，不动上下文本身：device / queue / NGX 的初始化比建 feature 贵得多，
+/// 而且换一份 DLL 之后进程内不该再初始化 NGX（`ContextState::Failed` 就是为它留的）。
+pub fn release_cached_workspaces() -> usize {
+    let cell = CONTEXT.get_or_init(|| Mutex::new(ContextState::Empty));
+    let Ok(mut guard) = cell.lock() else {
+        return 0;
+    };
+    let ContextState::Ready { context, .. } = &mut *guard else {
+        return 0;
+    };
+    let dropped = context.workspaces.len();
+    let core = &context.core;
+    for mut workspace in context.workspaces.drain(..) {
+        workspace.release(core);
+    }
+    dropped
 }
 
 impl GpuContext {
