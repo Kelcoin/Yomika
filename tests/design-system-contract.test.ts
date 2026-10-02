@@ -496,6 +496,23 @@ describe('design system contract', () => {
     expect(menuIcons).toHaveLength(3);
   });
 
+  it('pins a menu-level action to the title row without pushing the title off centre', () => {
+    const shell = read('src/styles/shell.css');
+    // 标题是居中的（上一条），所以菜单自己的动作必须脱出文档流钉在行右端：跟着 flex
+    // 排在标题后面会把它整条推偏，而「这一屏是什么」比旁边那枚按钮更该留在正中。
+    expect(ruleBody(shell, '.settings-choice-title')).toMatch(/position:\s*relative/);
+    const action = ruleBody(shell, '.settings-choice-action');
+    expect(action).toMatch(/position:\s*absolute/);
+    expect(action).toMatch(/inset-inline-end:\s*0/);
+    // 没传 action 的菜单一个节点都不多渲染：这一格是 opt-in 的。
+    expect(read('src/components/SettingsValueControls.tsx'))
+      .toMatch(/\{action && <span className="settings-choice-action">/);
+    // 层参数说明那枚问号比 .icon-action 小一号——40px 会把标题行撑高。
+    const toggle = ruleBody(shell, '.settings-help-toggle');
+    expect(toggle).toMatch(/width:\s*28px/);
+    expect(toggle).toMatch(/height:\s*28px/);
+  });
+
   it('closes overlays with the back gesture instead of leaving the page', () => {
     // 返回手势（以及浏览器后退、iOS 侧滑）走的是 webview 历史：没有守卫的话，菜单开着按返回
     // 会把**下面的页面**带走。每一个浮层都要挂上那道守卫（见 lib/overlayBackGuard）。
@@ -817,8 +834,21 @@ describe('design system contract', () => {
       }
 
       const pressed = new Map<string, string>();
-      for (const rule of ruleBody(sheet, '@media (hover: none)').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        for (const selector of splitSelectors(rule[1] ?? '')) pressed.set(selector, rule[2] ?? '');
+      // 每一块 `@media (hover: none)` 都要读。原先只读第一块（ruleBody 取首个匹配），
+      // 于是「按下态攒在哪一块里」变成了没有声明的隐含约定：谁在别处再开一块（哪怕只是
+      // 想让新组件的悬停与按下挨着写），第一块之后的所有按下态就一起退出检查范围——
+      // 而且报出来的错是「没有按下态」，指向的根本不是出错的规则。
+      for (let at = stripped.indexOf('@media (hover: none)'); at >= 0; at = stripped.indexOf('@media (hover: none)', at + 1)) {
+        const open = stripped.indexOf('{', at);
+        let depth = 0;
+        let end = open;
+        for (let index = open; index < stripped.length; index += 1) {
+          if (stripped[index] === '{') depth += 1;
+          else if (stripped[index] === '}' && (depth -= 1) === 0) { end = index; break; }
+        }
+        for (const rule of stripped.slice(open + 1, end).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+          for (const selector of splitSelectors(rule[1] ?? '')) pressed.set(selector, rule[2] ?? '');
+        }
       }
 
       for (const [selector, body] of hovered) {

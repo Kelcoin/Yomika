@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2 } from 'lucide-react';
+import { CircleHelp, Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
@@ -20,7 +20,8 @@ import {
   type DlssnrStatus,
 } from '../repositories/nativeDlssnrRepository';
 
-/** 风格：NGX 认的 0–2（默认 / 自然 / 电影三档）。 */
+/** 风格：NGX 认的 0–2（默认 / 自然 / 电影三档；OptiScaler 把 0 叫 Standard——同一个
+ *  档位，就是模型自带的默认外观）。 */
 const STYLE_OPTIONS = [
   { value: '0', label: '默认' },
   { value: '1', label: '自然' },
@@ -30,6 +31,64 @@ const STYLE_OPTIONS = [
 /** 换片段之后要重启才生效：NGX 一个进程只加载一份片段，这次已经跑过的话，手上这份
  *  还是上一份。这句话跟着两条换片段的提示一起给用户。 */
 const RESTART_NOTE = '；若这次已经跑过 DLSSNR，重启应用后才会换成它';
+
+/** 每个层参数的说明，供层编辑菜单右上角那枚问号展开。
+ *
+ *  NGX 的 DLSSNR 没有公开的参数文档，所以这些句子不能只照我们的直觉写：依据是
+ *  ① Magpie 随片段附带的参数标签（`docs/Magpie/src/Effects/DLSSNR/DLSSNR_AI_Filter.hlsl`）、
+ *  ② OptiScaler 的 `OptiScaler/dlssnr/DlssNr_Menu.cpp` 帮助文本、
+ *  ③ ComfyUI 的两个封装仓库（ComfyUI-DLSS5-NR、ComfyUI-RH-DLSS5）的说明，
+ *  ④ 本机在官方 310.8.0.0 片段上逐字段实测到的差别。
+ *  写的时候刻意把「文档这么说」和「本机测到这样」分开——后者不是规范，只是这台机器
+ *  的行为；哪天换了片段，得重新量，别把这里的话当成保证。 */
+const LAYER_HELP: ReadonlyArray<{ name: string; text: string }> = [
+  {
+    name: '风格',
+    text: '网络按哪一档外观重建：0 是模型自带的默认档（OptiScaler 里叫 Standard，Magpie 里叫 Default），1 自然，2 电影。它只选档位，力度归「强度」管。',
+  },
+  {
+    name: '强度',
+    text: '这一层的整体增强力度。1 是默认的满量；小于 1 是往原图回混（轻降噪就靠它），0 就是原图本身——那样这一层没跑出东西，我们不会把它当结果交出去。大于 1 是实验区间：文档的说法是运行时可能直接钳掉或忽略，本机实测 1.5 与 2.0 的结果和 1.0 逐字节相同。',
+  },
+  {
+    name: '局部色调',
+    text: '交给网络改的是低频的明暗与光照：调高更有局部对比、亮暗层次更足，调低更平。多层叠加时后面的层通常设成 0——一趟趟重复映射明暗会累积。',
+  },
+  {
+    name: '局部结构',
+    text: '交给网络改的是高频细节与局部对比：调高更锐、纹理更多；调低更柔更干净——画面出现「塑料感」时降它。',
+  },
+  {
+    name: '皮肤结构',
+    text: '只作用在「模型判定为皮肤」的像素上的细节强度：0 是减少皮肤细节，1 跟「局部结构」一样。参考实现里还有 −1（交给模型自己定），我们这条链路只给 0–2。它必须配着「自动遮罩」用：本机实测单开时输出逐字节不变。',
+  },
+  {
+    name: '自动遮罩',
+    text: '让模型自己找画面里的皮肤，并把「皮肤结构」施加在上面——它等于皮肤结构的总开关，自己单开就已经在改画面。',
+  },
+  {
+    name: '界面修正',
+    text: '画面里叠着界面元素（HUD、水印这类）时，让网络别把它们一起重建。参考实现（video2dlssnr）是在建网络实例时就打开它的，我们这条链路是在评估时给；本机实测开关它对结果没有可测量的差别。',
+  },
+];
+
+/** 层编辑菜单里那段「每个参数是干什么的」。 */
+function LayerHelp() {
+  return (
+    <div className="settings-help" role="note" aria-label="层参数说明">
+      <p className="settings-help-lead">每一层都是同一张图串行跑的一趟，用的是这一层自己的参数。下面先说旋钮管什么，再说本机实测到的边界。</p>
+      <dl className="settings-help-list">
+        {LAYER_HELP.map(({ name, text }) => (
+          <div className="settings-help-entry" key={name}>
+            <dt>{name}</dt>
+            <dd>{text}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="settings-help-note">依据：Magpie 的参数标签、OptiScaler 的帮助文本、两个 ComfyUI 封装仓库的说明，加上本机在官方 310.8.0.0 片段上的实测。</p>
+    </div>
+  );
+}
 
 interface Props {
   preferences: PreferenceSnapshot;
@@ -65,6 +124,11 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const [draftPass, setDraftPass] = useState<DlssnrPass>();
   const [layerMenu, setLayerMenu] = useState(false);
   const [variantMenu, setVariantMenu] = useState(false);
+  /** 层参数说明：指针停上去先看一眼，点一下钉住——不然鼠标一移开说明就收回去，
+   *  没法边看边调。进另一层时两个状态都复位。 */
+  const [helpPinned, setHelpPinned] = useState(false);
+  const [helpHover, setHelpHover] = useState(false);
+  const helpOpen = helpPinned || helpHover;
 
   const refresh = useCallback(async () => {
     const result = await repository.status();
@@ -118,7 +182,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const passes = useMemo(() => parseDlssnrPasses(preferences.dlssnrPasses), [preferences.dlssnrPasses]);
   const updatePasses = (next: DlssnrPass[]) => editPreferences({ dlssnrPasses: serializeDlssnrPasses(next) });
   const updateDraftPass = (patch: Partial<DlssnrPass>) => setDraftPass((current) => current ? { ...current, ...patch } : current);
-  const openLayer = (index: number) => { setSelectedLayer(index); setDraftPass({ ...passes[index]! }); };
+  const openLayer = (index: number) => { setSelectedLayer(index); setDraftPass({ ...passes[index]! }); setHelpPinned(false); setHelpHover(false); };
   const saveLayer = () => {
     if (selectedLayer !== undefined && draftPass) updatePasses(passes.map((pass, index) => index === selectedLayer ? draftPass : pass));
     setSelectedLayer(undefined);
@@ -247,7 +311,25 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
 
       {/* 层数：同一张图串行跑几个 pass（1–5 层，往上收益很小，耗时线性涨）。 */}
       <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
-      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} icon={<Layers />} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
+      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} icon={<Layers />} {...(selectedLayer === undefined ? {} : {
+        // 问号只挂在层编辑这一步：列表面板里每个旋钮都还没有，说明也无从对照。
+        action: (
+          <button
+            className="settings-help-toggle"
+            type="button"
+            aria-label="参数说明"
+            aria-expanded={helpOpen}
+            onPointerEnter={() => setHelpHover(true)}
+            onPointerLeave={() => setHelpHover(false)}
+            onClick={() => setHelpPinned((current) => !current)}
+          >
+            <CircleHelp aria-hidden="true" />
+          </button>
+        ),
+      })} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
+      {/* 说明展开时排在内容流最前面，控件还在下面（面板自己滚）：悬停只是「偷看一眼」，
+          松手就能接着调，不用先把它收起来。 */}
+      {helpOpen && selectedLayer !== undefined && <LayerHelp />}
       {selectedLayer === undefined ? <>
         {passes.map((pass, index) => <SettingsRow key={index} icon={<Layers />} label={`第 ${index + 1} 层`} value={STYLE_OPTIONS[pass.style]?.label ?? '默认'} onClick={() => openLayer(index)} />)}
         <button className="secondary-action" type="button" disabled={layerCount >= MAX_DLSSNR_PASSES} onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}><Plus aria-hidden="true" />添加层</button>
@@ -279,6 +361,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="局部色调"
+            hint="低频的明暗与光照：调高更有局部对比，调低更平"
             value={pass.localToneStrength}
             min={0}
             max={2}
@@ -289,6 +372,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="局部结构"
+            hint="高频细节与局部对比：调高更锐，调低更柔"
             value={pass.localStructureStrength}
             min={0}
             max={2}
@@ -299,7 +383,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="皮肤结构"
-            hint="要配着「自动遮罩」一起用，单开没有效果"
+            hint="只作用在模型判为皮肤的位置；要配着「自动遮罩」用，单开没有效果"
             value={pass.skinStructureStrength}
             min={0}
             max={2}
@@ -310,14 +394,14 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsSwitch
             icon={<Scan />}
             label="自动遮罩"
-            hint="让网络自己圈出该处理的区域"
+            hint="让模型自己找皮肤：它就是皮肤结构的总开关"
             checked={pass.autoMask}
             onToggle={() => updateDraftPass({ autoMask: !pass.autoMask })}
           />
           <SettingsSwitch
             icon={<Scan />}
             label="界面修正"
-            hint="文字与线条保持原样（拟声词、边框）"
+            hint="别把叠在画面上的界面元素一起重建"
             checked={pass.uiCorrection}
             onToggle={() => updateDraftPass({ uiCorrection: !pass.uiCorrection })}
           />

@@ -4924,6 +4924,8 @@ body::-webkit-scrollbar,
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
+  /* 标题行里可能钉着菜单自己的动作（层参数说明的问号），它相对这一行定位。 */
+  position: relative;
   margin: 0 0 var(--space-2);
   color: var(--on-surface);
   font-size: var(--text-lg);
@@ -4939,6 +4941,82 @@ body::-webkit-scrollbar,
 }
 
 .settings-choice-icon svg { width: 20px; height: 20px; }
+
+/* 菜单级动作的窝：标题是居中的，所以动作必须脱出文档流钉在行右端——跟着 flex 排在
+   标题后面会把它整条推偏，而「这一屏是什么」比「旁边那枚按钮」更该留在正中。 */
+.settings-choice-action {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* 层参数说明那枚问号：比 `.icon-action` 小一号——它挂在标题行里，40px 会把行撑高。 */
+.settings-help-toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  transition: color var(--motion-standard), background-color var(--motion-standard);
+}
+
+.settings-help-toggle svg { width: 16px; height: 16px; }
+
+@media (hover: hover) {
+  .settings-help-toggle:hover {
+    background: var(--surface-container-highest);
+    color: var(--on-surface);
+  }
+}
+
+@media (hover: none) {
+  .settings-help-toggle:is(.is-pressed, :active) {
+    background: var(--surface-container-highest);
+    color: var(--on-surface);
+  }
+}
+
+/* 层参数说明：它就在内容流最前面，控件还在下面，所以面板会变高、由内容区自己滚。
+   悬停只是偷看一眼，松手就能接着调，不用先收起来。 */
+.settings-help {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+}
+
+.settings-help-lead,
+.settings-help-note {
+  margin: 0;
+}
+
+.settings-help-lead { color: var(--on-surface); }
+
+.settings-help-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.settings-help-entry { display: grid; gap: 2px; }
+
+.settings-help-entry dt {
+  color: var(--on-surface);
+  font-weight: var(--weight-bold);
+}
+
+.settings-help-entry dd { margin: 0; }
 
 /* ---- Menu content: the second level every setting opens -------------------- */.settings-menu-body {
   display: grid;

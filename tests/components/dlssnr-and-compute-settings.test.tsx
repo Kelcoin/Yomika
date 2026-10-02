@@ -521,6 +521,42 @@ describe('DLSS5 settings group', () => {
     expect(within(editor).getByRole('button', { name: '保存' }).querySelector('svg')).not.toBeNull();
     expect(within(editor).getByRole('button', { name: '删除' }).querySelector('svg')).not.toBeNull();
   });
+
+  it('explains every layer parameter, on hover for a glance and pinned for a read', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+    const editor = await screen.findByRole('dialog', { name: '第 1 层' });
+    const note = () => within(editor).queryByRole('note', { name: '层参数说明' });
+
+    // 默认不占地方：说明是问出来的，不是每次都糊在参数上面并把保存按钮顶下去。
+    expect(note()).toBeNull();
+
+    const toggle = within(editor).getByRole('button', { name: '参数说明' });
+    await user.hover(toggle);
+    await waitFor(() => expect(note()).not.toBeNull());
+    const help = note()!;
+    // 七个旋钮一个一个交代：少一条，用户就只能从行上那行 hint 里猜。
+    for (const name of ['风格', '强度', '局部色调', '局部结构', '皮肤结构', '自动遮罩', '界面修正']) {
+      expect(within(help).getByText(name)).toBeInTheDocument();
+    }
+
+    // 鼠标移开就收回去——悬停是「瞄一眼」。
+    await user.unhover(toggle);
+    await waitFor(() => expect(note()).toBeNull());
+    // 点一下才钉住：移开鼠标也还在，才能边看边调。
+    await user.click(toggle);
+    await user.unhover(toggle);
+    expect(note()).not.toBeNull();
+    // 再点一下解钉，移开后收回去。
+    await user.click(toggle);
+    await user.unhover(toggle);
+    await waitFor(() => expect(note()).toBeNull());
+  });
 });
 
 describe('compute center settings group', () => {

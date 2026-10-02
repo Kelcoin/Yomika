@@ -22,8 +22,12 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
  *
  * 标记上有一条不能动的形状：`<OverlayLayer>` 后面紧跟着
  * `<div className="settings-choice-overlay"`，中间不夹别的节点或注释——
- * tests/design-system-contract.test.ts 用这个形状认「浮层挂到 body」这条合同。 */
-export function SettingsMenu({ title, icon, onClose, children }: { title: string; icon?: ReactNode; onClose: () => void; children: ReactNode }) {
+ * tests/design-system-contract.test.ts 用这个形状认「浮层挂到 body」这条合同。
+ *
+ * `action` 是给「菜单自己的动作」留的口子（层参数说明的问号就是这样进来的）：
+ * 它钉在标题行右端，因为标题行是这一屏里唯一一条横跨整个面板、又只属于菜单的
+ * 条带。放进内容区就得为它单开一行，而那行会跟着内容一起滚走。 */
+export function SettingsMenu({ title, icon, action, onClose, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; children: ReactNode }) {
   // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
   useOverlayBackGuard(true, onClose);
   /** 「点外面关闭」判定的是按下的落点，不是那次 click 的落点。
@@ -60,6 +64,7 @@ export function SettingsMenu({ title, icon, onClose, children }: { title: string
           <h2 className="settings-choice-title">
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
             {title}
+            {action && <span className="settings-choice-action">{action}</span>}
           </h2>
           <div className="settings-menu-body">{children}</div>
         </div>
