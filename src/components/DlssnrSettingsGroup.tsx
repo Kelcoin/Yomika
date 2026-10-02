@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { CircleHelp, Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2 } from 'lucide-react';
+import { CircleHelp, Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2, Wand } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
+import { OverlayLayer } from './OverlayLayer';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
 import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
+import { DLSSNR_PRESETS, presetOf } from '../domain/dlssnrPresets';
 import {
   DEFAULT_DLSSNR_PASS,
   MAX_DLSSNR_PASSES,
@@ -34,59 +36,105 @@ const RESTART_NOTE = '；若这次已经跑过 DLSSNR，重启应用后才会换
 
 /** 每个层参数的说明，供层编辑菜单右上角那枚问号展开。
  *
- *  NGX 的 DLSSNR 没有公开的参数文档，所以这些句子不能只照我们的直觉写：依据是
- *  ① Magpie 随片段附带的参数标签（`docs/Magpie/src/Effects/DLSSNR/DLSSNR_AI_Filter.hlsl`）、
- *  ② OptiScaler 的 `OptiScaler/dlssnr/DlssNr_Menu.cpp` 帮助文本、
- *  ③ ComfyUI 的两个封装仓库（ComfyUI-DLSS5-NR、ComfyUI-RH-DLSS5）的说明，
- *  ④ 本机在官方 310.8.0.0 片段上逐字段实测到的差别。
- *  写的时候刻意把「文档这么说」和「本机测到这样」分开——后者不是规范，只是这台机器
- *  的行为；哪天换了片段，得重新量，别把这里的话当成保证。 */
-const LAYER_HELP: ReadonlyArray<{ name: string; text: string }> = [
+ *  照说明文档写：一个参数一段，先说它改什么、取值范围与默认值，再说往哪边调会怎样；
+ *  不写「依据」「实测」这类过程话——那是 `docs/68` 的事，用户要的是怎么用。 */
+const LAYER_HELP: ReadonlyArray<{
+  name: string;
+  text: string;
+  values?: ReadonlyArray<{ value: string; meaning: string }>;
+}> = [
   {
     name: '风格',
-    text: '网络按哪一档外观重建：0 是模型自带的默认档（OptiScaler 里叫 Standard，Magpie 里叫 Default），1 自然，2 电影。它只选档位，力度归「强度」管。',
+    text: '重建的外观档位。它只选档位，力度由「强度」决定。',
+    values: [
+      { value: '0', meaning: '默认｜模型自带的档位' },
+      { value: '1', meaning: '自然' },
+      { value: '2', meaning: '电影' },
+    ],
   },
   {
     name: '强度',
-    text: '这一层的整体增强力度。1 是默认的满量；小于 1 是往原图回混（轻降噪就靠它），0 就是原图本身——那样这一层没跑出东西，我们不会把它当结果交出去。大于 1 是实验区间：文档的说法是运行时可能直接钳掉或忽略，本机实测 1.5 与 2.0 的结果和 1.0 逐字节相同。',
+    text: '本层的整体增强强度，0–1，默认 1。1 表示完全采用本层结果；小于 1 与原图混合，可用于轻度降噪；0 表示不处理，本层不产生结果。',
   },
   {
     name: '局部色调',
-    text: '交给网络改的是低频的明暗与光照：调高更有局部对比、亮暗层次更足，调低更平。多层叠加时后面的层通常设成 0——一趟趟重复映射明暗会累积。',
+    text: '低频明暗与光照的重建强度，0–2，默认 1。调高加强局部对比与亮暗层次，调低更平；多层叠加时，后续层建议保持 0。',
   },
   {
     name: '局部结构',
-    text: '交给网络改的是高频细节与局部对比：调高更锐、纹理更多；调低更柔更干净——画面出现「塑料感」时降它。',
+    text: '高频细节与局部对比的重建强度，0–2，默认 1。调高更锐利、纹理更多，调低更柔和干净；画面出现塑料感时调低。',
   },
   {
     name: '皮肤结构',
-    text: '只作用在「模型判定为皮肤」的像素上的细节强度：0 是减少皮肤细节，1 跟「局部结构」一样。参考实现里还有 −1（交给模型自己定），我们这条链路只给 0–2。它必须配着「自动遮罩」用：本机实测单开时输出逐字节不变。',
+    text: '皮肤区域的细节重建强度，0–2，默认 0。0 减弱皮肤细节，1 与「局部结构」一致，2 更强。仅在启用「自动遮罩」时生效。',
   },
   {
     name: '自动遮罩',
-    text: '让模型自己找画面里的皮肤，并把「皮肤结构」施加在上面——它等于皮肤结构的总开关，自己单开就已经在改画面。',
+    text: '由模型检测画面中的皮肤区域，并把「皮肤结构」施加其上。关闭时「皮肤结构」不起作用。',
   },
   {
     name: '界面修正',
-    text: '画面里叠着界面元素（HUD、水印这类）时，让网络别把它们一起重建。参考实现（video2dlssnr）是在建网络实例时就打开它的，我们这条链路是在评估时给；本机实测开关它对结果没有可测量的差别。',
+    text: '抑制画面中的界面元素（HUD、水印等）被一并重建。',
   },
 ];
 
-/** 层编辑菜单里那段「每个参数是干什么的」。 */
-function LayerHelp() {
+/** 气泡与按钮之间的缝、与窗口边的距离，以及指针跨过那条缝时的宽限期（毫秒）。
+ *  没有宽限期的话，指针从按钮移向气泡的途中会经过那条缝，气泡在到达之前就收了。 */
+const HELP_GAP = 8;
+const HELP_MARGIN = 12;
+const HELP_MIN_HEIGHT = 180;
+const HELP_GRACE_MS = 160;
+
+interface HelpAnchor {
+  top: number;
+  right: number;
+  height: number;
+}
+
+/** 参数说明气泡：走门户挂到 body 上，位置取问号按钮的 `getBoundingClientRect()`。
+ *
+ *  为什么不折进菜单里：菜单面板是固定高度的 `overflow: hidden` 弹层
+ *  （`tests/design-system-contract.test.ts` 钉住了那条形状），说明块一进内容流，面板就会
+ *  被撑高、问号跟着挪位——指针还停在原地，按钮已经从光标下面走开，于是来回抖。门户 +
+ *  `position: fixed` 让说明浮在面板之外，面板的几何一点不变。 */
+function LayerHelpBubble({ anchor, onEnter, onLeave }: {
+  anchor: HelpAnchor;
+  onEnter: () => void;
+  onLeave: () => void;
+}) {
   return (
-    <div className="settings-help" role="note" aria-label="层参数说明">
-      <p className="settings-help-lead">每一层都是同一张图串行跑的一趟，用的是这一层自己的参数。下面先说旋钮管什么，再说本机实测到的边界。</p>
-      <dl className="settings-help-list">
-        {LAYER_HELP.map(({ name, text }) => (
-          <div className="settings-help-entry" key={name}>
-            <dt>{name}</dt>
-            <dd>{text}</dd>
-          </div>
-        ))}
-      </dl>
-      <p className="settings-help-note">依据：Magpie 的参数标签、OptiScaler 的帮助文本、两个 ComfyUI 封装仓库的说明，加上本机在官方 310.8.0.0 片段上的实测。</p>
-    </div>
+    <OverlayLayer>
+      <aside
+        className="settings-help-bubble"
+        role="note"
+        aria-label="层参数说明"
+        style={{ top: `${anchor.top}px`, right: `${anchor.right}px`, maxHeight: `${anchor.height}px` }}
+        onPointerEnter={onEnter}
+        onPointerLeave={onLeave}
+      >
+        <p className="settings-help-lead">每一层都是对同一张图串行执行的一趟处理，参数只作用于本层的结果。</p>
+        <dl className="settings-help-list">
+          {LAYER_HELP.map(({ name, text, values }) => (
+            <div className="settings-help-entry" key={name}>
+              <dt>{name}</dt>
+              <dd>
+                {text}
+                {values && (
+                  <dl className="settings-help-values">
+                    {values.map(({ value, meaning }) => (
+                      <div className="settings-help-value" key={value}>
+                        <dt>{value}</dt>
+                        <dd>{meaning}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </aside>
+    </OverlayLayer>
   );
 }
 
@@ -123,12 +171,41 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const [selectedLayer, setSelectedLayer] = useState<number | undefined>();
   const [draftPass, setDraftPass] = useState<DlssnrPass>();
   const [layerMenu, setLayerMenu] = useState(false);
+  const [presetMenu, setPresetMenu] = useState(false);
   const [variantMenu, setVariantMenu] = useState(false);
   /** 层参数说明：指针停上去先看一眼，点一下钉住——不然鼠标一移开说明就收回去，
    *  没法边看边调。进另一层时两个状态都复位。 */
   const [helpPinned, setHelpPinned] = useState(false);
   const [helpHover, setHelpHover] = useState(false);
   const helpOpen = helpPinned || helpHover;
+  /** 气泡钉在问号下面，所以要先量按钮的位置；量不到就不画。 */
+  const helpToggleRef = useRef<HTMLButtonElement | null>(null);
+  const [helpAnchor, setHelpAnchor] = useState<HelpAnchor>();
+  const helpTimer = useRef<number | undefined>(undefined);
+  const holdHelp = useCallback(() => {
+    window.clearTimeout(helpTimer.current);
+    setHelpHover(true);
+  }, []);
+  const releaseHelp = useCallback(() => {
+    window.clearTimeout(helpTimer.current);
+    helpTimer.current = window.setTimeout(() => setHelpHover(false), HELP_GRACE_MS);
+  }, []);
+  useEffect(() => () => window.clearTimeout(helpTimer.current), []);
+  useEffect(() => {
+    if (!helpOpen) { setHelpAnchor(undefined); return; }
+    const measure = () => {
+      const rect = helpToggleRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setHelpAnchor({
+        top: rect.bottom + HELP_GAP,
+        right: Math.max(HELP_MARGIN, window.innerWidth - rect.right),
+        height: Math.max(HELP_MIN_HEIGHT, window.innerHeight - rect.bottom - HELP_GAP - HELP_MARGIN),
+      });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [helpOpen]);
 
   const refresh = useCallback(async () => {
     const result = await repository.status();
@@ -180,9 +257,16 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   }, []);
 
   const passes = useMemo(() => parseDlssnrPasses(preferences.dlssnrPasses), [preferences.dlssnrPasses]);
+  const activePreset = useMemo(() => presetOf(passes), [passes]);
   const updatePasses = (next: DlssnrPass[]) => editPreferences({ dlssnrPasses: serializeDlssnrPasses(next) });
   const updateDraftPass = (patch: Partial<DlssnrPass>) => setDraftPass((current) => current ? { ...current, ...patch } : current);
-  const openLayer = (index: number) => { setSelectedLayer(index); setDraftPass({ ...passes[index]! }); setHelpPinned(false); setHelpHover(false); };
+  const openLayer = (index: number) => {
+    setSelectedLayer(index);
+    setDraftPass({ ...passes[index]! });
+    window.clearTimeout(helpTimer.current);
+    setHelpPinned(false);
+    setHelpHover(false);
+  };
   const saveLayer = () => {
     if (selectedLayer !== undefined && draftPass) updatePasses(passes.map((pass, index) => index === selectedLayer ? draftPass : pass));
     setSelectedLayer(undefined);
@@ -311,34 +395,63 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
 
       {/* 层数：同一张图串行跑几个 pass（1–5 层，往上收益很小，耗时线性涨）。 */}
       <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
-      {layerMenu && <SettingsMenu title={selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`} icon={<Layers />} {...(selectedLayer === undefined ? {} : {
-        // 问号只挂在层编辑这一步：列表面板里每个旋钮都还没有，说明也无从对照。
+      {layerMenu && <SettingsMenu
+        title={presetMenu ? 'DLSSNR 预设' : selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`}
+        icon={presetMenu ? <Wand /> : <Layers />}
+        {...(selectedLayer === undefined ? {} : {
         action: (
           <button
+            ref={helpToggleRef}
             className="settings-help-toggle"
             type="button"
             aria-label="参数说明"
             aria-expanded={helpOpen}
-            onPointerEnter={() => setHelpHover(true)}
-            onPointerLeave={() => setHelpHover(false)}
+            onPointerEnter={holdHelp}
+            onPointerLeave={releaseHelp}
             onClick={() => setHelpPinned((current) => !current)}
           >
             <CircleHelp aria-hidden="true" />
           </button>
         ),
-      })} onClose={() => { if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false); }}>
-      {/* 说明展开时排在内容流最前面，控件还在下面（面板自己滚）：悬停只是「偷看一眼」，
-          松手就能接着调，不用先把它收起来。 */}
-      {helpOpen && selectedLayer !== undefined && <LayerHelp />}
-      {selectedLayer === undefined ? <>
+      })} onClose={() => {
+        // 预设是一层临时视图，退出先回到层列表；再退才关菜单。
+        if (presetMenu) { setPresetMenu(false); return; }
+        window.clearTimeout(helpTimer.current);
+        setHelpPinned(false);
+        setHelpHover(false);
+        if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false);
+      }}>
+      {helpOpen && selectedLayer !== undefined && helpAnchor && (
+        <LayerHelpBubble anchor={helpAnchor} onEnter={holdHelp} onLeave={releaseHelp} />
+      )}
+      {presetMenu ? <>
+        {DLSSNR_PRESETS.map((preset) => (
+          <SettingsRow
+            key={preset.id}
+            icon={<Sparkles />}
+            label={preset.label}
+            hint={preset.note}
+            value={activePreset === preset.id ? '当前' : `${preset.passes.length} 层`}
+            onClick={() => {
+              updatePasses(preset.passes.map((layer) => ({ ...layer })));
+              setPresetMenu(false);
+            }}
+          />
+        ))}
+      </> : selectedLayer === undefined ? <>
         {passes.map((pass, index) => <SettingsRow key={index} icon={<Layers />} label={`第 ${index + 1} 层`} value={STYLE_OPTIONS[pass.style]?.label ?? '默认'} onClick={() => openLayer(index)} />)}
-        <button className="secondary-action" type="button" disabled={layerCount >= MAX_DLSSNR_PASSES} onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}><Plus aria-hidden="true" />添加层</button>
+        <div className="settings-layer-actions">
+          <button className="secondary-action" type="button" onClick={() => setPresetMenu(true)}><Wand aria-hidden="true" />预设</button>
+          <button className="secondary-action" type="button" disabled={layerCount >= MAX_DLSSNR_PASSES} onClick={() => updatePasses([...passes, { ...DEFAULT_DLSSNR_PASS }])}><Plus aria-hidden="true" />添加层</button>
+        </div>
       </> : draftPass && (() => {
         const index = selectedLayer;
         const pass = draftPass;
         return <>
         {/* 组里不再重复写「第 N 层」：菜单标题已经写着它，这里再来一行等于同一句话说两遍。
             分组本身留着——那道分界线和 aria-label 是这一组参数的边界。 */}
+        {/* 每个旋钮的解释都在右上角那枚问号里，行上不再重复一遍：同一句话写在两处，
+            改一处就会对不上。 */}
         <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`}>
           <SettingsChoice
             icon={<ImageUpscale />}
@@ -350,7 +463,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="强度"
-            hint="网络参与的力度：0 是原图，1 是完全采用处理结果"
             value={pass.intensity}
             min={0}
             max={1}
@@ -361,7 +473,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="局部色调"
-            hint="低频的明暗与光照：调高更有局部对比，调低更平"
             value={pass.localToneStrength}
             min={0}
             max={2}
@@ -372,7 +483,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="局部结构"
-            hint="高频细节与局部对比：调高更锐，调低更柔"
             value={pass.localStructureStrength}
             min={0}
             max={2}
@@ -383,7 +493,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsNumber
             icon={<Sparkles />}
             label="皮肤结构"
-            hint="只作用在模型判为皮肤的位置；要配着「自动遮罩」用，单开没有效果"
             value={pass.skinStructureStrength}
             min={0}
             max={2}
@@ -394,14 +503,12 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           <SettingsSwitch
             icon={<Scan />}
             label="自动遮罩"
-            hint="让模型自己找皮肤：它就是皮肤结构的总开关"
             checked={pass.autoMask}
             onToggle={() => updateDraftPass({ autoMask: !pass.autoMask })}
           />
           <SettingsSwitch
             icon={<Scan />}
             label="界面修正"
-            hint="别把叠在画面上的界面元素一起重建"
             checked={pass.uiCorrection}
             onToggle={() => updateDraftPass({ uiCorrection: !pass.uiCorrection })}
           />

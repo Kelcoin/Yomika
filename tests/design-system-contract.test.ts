@@ -513,6 +513,17 @@ describe('design system contract', () => {
     expect(toggle).toMatch(/height:\s*28px/);
   });
 
+  it('floats the layer help away from the panel that toggles it', () => {
+    const shell = read('src/styles/shell.css');
+    // 说明气泡得是门户 + fixed：菜单面板是固定高度 + overflow:hidden 的弹层，说明块一写进
+    // 内容流就会把面板撑高、把问号挤走——指针还停在原地而按钮已经挪开，于是来回抖。
+    const bubble = ruleBody(shell, '.settings-help-bubble');
+    expect(bubble).toMatch(/position:\s*fixed/);
+    // 面板自己占 --z-overlay(50)，气泡要压得住它才看得见。
+    expect(bubble).toMatch(/z-index:\s*var\(--z-modal\)/);
+    expect(read('src/components/DlssnrSettingsGroup.tsx')).toMatch(/<OverlayLayer>/);
+  });
+
   it('closes overlays with the back gesture instead of leaving the page', () => {
     // 返回手势（以及浏览器后退、iOS 侧滑）走的是 webview 历史：没有守卫的话，菜单开着按返回
     // 会把**下面的页面**带走。每一个浮层都要挂上那道守卫（见 lib/overlayBackGuard）。

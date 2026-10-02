@@ -531,7 +531,9 @@ describe('DLSS5 settings group', () => {
     await user.click(within(group).getByRole('button', { name: '层数' }));
     await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
     const editor = await screen.findByRole('dialog', { name: '第 1 层' });
-    const note = () => within(editor).queryByRole('note', { name: '层参数说明' });
+    // 说明是挂在 body 上的气泡：它绝不能进这个面板——面板是固定高度 + overflow:hidden 的
+    // 弹层，说明块一进内容流就把面板撑高、把问号挤走，指针还停在原地而按钮已经挪开。
+    const note = () => screen.queryByRole('note', { name: '层参数说明' });
 
     // 默认不占地方：说明是问出来的，不是每次都糊在参数上面并把保存按钮顶下去。
     expect(note()).toBeNull();
@@ -540,10 +542,15 @@ describe('DLSS5 settings group', () => {
     await user.hover(toggle);
     await waitFor(() => expect(note()).not.toBeNull());
     const help = note()!;
+    expect(within(editor).queryByRole('note', { name: '层参数说明' })).toBeNull();
     // 七个旋钮一个一个交代：少一条，用户就只能从行上那行 hint 里猜。
     for (const name of ['风格', '强度', '局部色调', '局部结构', '皮肤结构', '自动遮罩', '界面修正']) {
       expect(within(help).getByText(name)).toBeInTheDocument();
     }
+    // 「风格」的三个取值单独列出来，不比别的旋钮更含糊。
+    expect(within(help).getByText(/模型自带的档位/)).toBeInTheDocument();
+    // 行上不再重复一遍：参数界面下面不该再挂说明文字。
+    expect(within(editor).queryByText(/网络参与的力度/)).toBeNull();
 
     // 鼠标移开就收回去——悬停是「瞄一眼」。
     await user.unhover(toggle);
@@ -556,6 +563,50 @@ describe('DLSS5 settings group', () => {
     await user.click(toggle);
     await user.unhover(toggle);
     await waitFor(() => expect(note()).toBeNull());
+  });
+
+  it('applies a 3DCG preset over the current layer settings', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    // 层数与参数都是写回偏好的：用带状态的壳子，菜单画的才是选完之后的这一份。
+    let latest = DEFAULT_PREFERENCES.dlssnrPasses;
+    function Harness() {
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES });
+      return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => {
+        const next = { ...current, ...patch };
+        latest = next.dlssnrPasses;
+        return next;
+      })} visible /></ToastProvider>;
+    }
+    render(<Harness />);
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    const layerList = await screen.findByRole('dialog', { name: 'DLSSNR 层数' });
+    // 预设排在「添加层」左边：先「挑一套」再「加一层」，两个动作同一行。
+    const actions = within(layerList).getAllByRole('button');
+    expect(actions[actions.length - 2]).toHaveTextContent('预设');
+    expect(actions[actions.length - 1]).toHaveTextContent('添加层');
+
+    await user.click(within(layerList).getByRole('button', { name: '预设' }));
+    const presets = await screen.findByRole('dialog', { name: 'DLSSNR 预设' });
+    // 三套预设各按层数标出来——「1/3/5 层」本身就是它们之间最大的差别。
+    expect(within(presets).getByRole('button', { name: '轻度' })).toHaveTextContent('1 层');
+    expect(within(presets).getByRole('button', { name: '标准' })).toHaveTextContent('3 层');
+    expect(within(presets).getByRole('button', { name: '强化' })).toHaveTextContent('5 层');
+
+    await user.click(within(presets).getByRole('button', { name: '强化' }));
+    // 选择就是覆盖：回到层列表已经是五层。
+    const applied = await screen.findByRole('dialog', { name: 'DLSSNR 层数' });
+    await waitFor(() => expect(within(applied).getAllByRole('button', { name: /^第 \d+ 层$/ })).toHaveLength(5));
+    // 写回去的是整套参数，不是只改了层数：第一层还是最强的那个出效果的人。
+    const passes = parseDlssnrPasses(latest);
+    expect(passes).toHaveLength(5);
+    expect(passes[0]).toMatchObject({ style: 0, intensity: 1, localToneStrength: 0.4, localStructureStrength: 0.8 });
+    // 再打开预设，命中当前设置的那一套标「当前」。
+    await user.click(within(applied).getByRole('button', { name: '预设' }));
+    const reopened = await screen.findByRole('dialog', { name: 'DLSSNR 预设' });
+    expect(within(reopened).getByRole('button', { name: '强化' })).toHaveTextContent('当前');
   });
 });
 

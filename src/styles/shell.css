@@ -4983,29 +4983,33 @@ body::-webkit-scrollbar,
   }
 }
 
-/* 层参数说明：它就在内容流最前面，控件还在下面，所以面板会变高、由内容区自己滚。
-   悬停只是偷看一眼，松手就能接着调，不用先收起来。 */
-.settings-help {
+/* 层参数说明的气泡：挂在 body 上（`.settings-help-bubble` 必须离开面板）。
+   面板是固定高度 + `overflow: hidden` 的弹层，说明块一进内容流就会把它撑高、把问号顶走，
+   指针还停在原地而按钮已经挪开，于是来回抖。气泡用 fixed 定位在面板之外，面板的几何不变；
+   `right` 由问号的位置算出来，宽度按窗口收，高度由可用空间决定、内容多了自己滚。 */
+.settings-help-bubble {
+  position: fixed;
+  z-index: var(--z-modal);
   display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-control);
-  background: var(--surface-container);
+  gap: var(--space-3);
+  width: min(340px, calc(100vw - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-elevated);
   color: var(--on-surface-variant);
+  box-shadow: var(--shadow-overlay);
   font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
 }
 
-.settings-help-lead,
-.settings-help-note {
-  margin: 0;
-}
-
-.settings-help-lead { color: var(--on-surface); }
+.settings-help-lead { margin: 0; color: var(--on-surface); }
 
 .settings-help-list {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin: 0;
 }
 
@@ -5017,6 +5021,26 @@ body::-webkit-scrollbar,
 }
 
 .settings-help-entry dd { margin: 0; }
+
+/* 取值表：风格三档这种「一句话一个值」的东西排成两列，比揉进正文好扫。 */
+.settings-help-values {
+  display: grid;
+  gap: 2px;
+  margin: var(--space-1) 0 0;
+}
+
+.settings-help-value {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: var(--space-2);
+}
+
+.settings-help-value dt { color: var(--on-surface); }
+.settings-help-value dd { margin: 0; }
+
+/* 「添加层」左边那枚「预设」：两个按钮同宽占满一行，仍然是一眼看得完的一个动作组。 */
+.settings-layer-actions { display: flex; gap: var(--space-2); }
+.settings-layer-actions > .secondary-action { flex: 1 1 0; }
 
 /* ---- Menu content: the second level every setting opens -------------------- */.settings-menu-body {
   display: grid;
