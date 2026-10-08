@@ -92,6 +92,16 @@ export const DomainErrorCodeSchema = z.enum([
 
 export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
 
+/** 这些码说的是「你看到的那个东西现在就是这样」，不是「哪里坏了」：调用方照样按失败
+ * 处理（该分支的分支、该提示的提示），只是不往设置页那份错误日志里记——日志是给人查
+ * 现场的，塞满正常状态就等于把现场埋了。
+ *
+ * - `LRR_NOT_FOUND`：档案已经从 LANraragi 上移除了，本地索引清掉就行。档案详情页本来
+ *   就会说「该档案已从 LANraragi 移除，本地索引已清理」。
+ * - `INFERENCE_CANCELLED` / `COMPUTE_CANCELLED`：取消是这一页这一档的结果，不是失败
+ *   （`INFERENCE_CANCELLED` 上面那条注释早就写着「取消的结果既不该进错误日志」）。 */
+export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set(['LRR_NOT_FOUND', 'INFERENCE_CANCELLED', 'COMPUTE_CANCELLED']);
+
 export interface DomainError {
   code: DomainErrorCode;
   message: string;

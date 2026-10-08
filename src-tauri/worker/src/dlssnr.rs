@@ -64,6 +64,33 @@ pub use yomika_compute_protocol::DLSSNR_ENGINE_ID;
 /// 各写一份漂了不会报错，只会让那份片段永远攒着。
 const DATA_DIR_NAME: &str = yomika_compute_protocol::SCRATCH_DIR_NAME;
 
+/// 一张 D3D12 纹理能有的最大边长（`D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION`）。
+///
+/// 与 `filter::MIN_EDGE` 一起界定了「这一页能不能进这条链路」：下界是 NGX 自己拒绝小图
+/// （它那边的 `Evaluate` 会失败，给出的还是看不懂的话），上界是这条链路上连一张纹理都
+/// 放不下。两种都是**这一页**的条件，不是「计算进程坏了」——所以照动图超预算那条路办：
+/// 原图交回、如实报 passthrough，而不是报 [`DLSSNR_FAILED_CODE`]。
+///
+/// 用户那份错误日志里就有一对这种行：一张页被报成 `COMPUTE_INTERNAL`、`retryable: true`、
+/// 还进了用户看得见的那份日志，而它其实只是「这一页没有可算的东西」。
+const MAX_TEXTURE_EDGE: u32 = 16_384;
+
+/// 这一页的尺寸能不能算。`Err` 里是给人看的理由。
+fn page_fits(width: u32, height: u32) -> Result<(), String> {
+    if width < filter::MIN_EDGE || height < filter::MIN_EDGE {
+        return Err(format!(
+            "这一页 {width}×{height} 比 DLSSNR 要的最小边长还小（{}）",
+            filter::MIN_EDGE
+        ));
+    }
+    if width > MAX_TEXTURE_EDGE || height > MAX_TEXTURE_EDGE {
+        return Err(format!(
+            "这一页 {width}×{height} 比一张纹理能有的最大边长还大（{MAX_TEXTURE_EDGE}）"
+        ));
+    }
+    Ok(())
+}
+
 /// 一份已经落好的片段：哪份授权、落在哪里。
 ///
 /// 键里带 `content_hash`：换一份片段就是另一个键，也就是「要重新落一次」（而 NGX 那边
@@ -260,6 +287,13 @@ impl Engine for DlssnrEngine {
         let source = std::fs::read(input.path())
             .map_err(|error| StageError::input_invalid(format!("读不到这一阶段的输入：{error}")))?;
         let (probe_width, probe_height) = probe_dimensions(&source)?;
+        // 这一页本身能不能进这条链路：太小/太大的页在 NGX 那边只会得到一句看不懂的错，
+        // 而它们其实是「这一页没有可算的东西」。判在**落片段与解参数之前**：不合条件的
+        // 页不该为它装一份 165 MB 的片段。
+        if let Err(why) = page_fits(probe_width, probe_height) {
+            eprintln!("[worker] DLSSNR 跳过这一页：{why}");
+            return self.hand_back(&request, &source);
+        }
         let source_pixels = u64::from(probe_width).saturating_mul(u64::from(probe_height));
         if source_pixels > request.run.budgets.max_pixels {
             return Err(StageError::failed(
@@ -635,6 +669,64 @@ mod tests {
             }
             other => panic!("不认识的引擎名：{other}"),
         }
+    }
+
+    /// 太小的页是「这一页没有可算的东西」，不是「计算进程坏了」。
+    ///
+    /// 32×32 是 NGX 自己的下限（`filter::MIN_EDGE`）。用户那份错误日志里就有一条这样的行：
+    /// 同一页被报成 `COMPUTE_INTERNAL`、`retryable: true`、还进了用户看得见的那份日志，
+    /// 而它其实只是「这一页没东西可算」——照动图超预算那条路办：原图交回、如实报 passthrough。
+    ///
+    /// 这一条不碰 GPU（也不碰真片段）：摆一份几十字节的假片段，任何「真的去装片段」的尝试
+    /// 都会当场露出来。
+    #[test]
+    fn a_page_below_the_ngx_floor_is_handed_back_instead_of_reported_as_a_broken_engine() {
+        let root = root("yomika-dlssnr-unit-too-small");
+        let staging = root.join("staging");
+        let sink = StageSink::new(&staging);
+        let cancel = CancelToken::none();
+        let run = run();
+        let grant = DlssnrGrant {
+            feature: staged(&root, "ab/feature.dll", b"not a real dll"),
+            settings: staged(&root, "ab/settings.json", SETTINGS),
+        };
+        let page = noise_png(16, 16);
+        let page_path = root.join("ab/page.png");
+        std::fs::write(&page_path, &page).expect("摆一页进去");
+        let input = StageInput::Granted {
+            relative: "ab/page.png".to_string(),
+            path: page_path,
+        };
+        let stage = stage(Some(grant), None);
+        let engine = DlssnrEngine::new(root.clone());
+        let output = engine
+            .execute(request(&stage, &run, Some(&input), &sink, &cancel))
+            .expect("太小的页该原样交回，不该报成计算进程坏了");
+        assert_eq!(
+            output.engine.id, PASSTHROUGH_ENGINE_ID,
+            "太小的页报告成算过了：{}",
+            output.engine.id
+        );
+        let written =
+            std::fs::read(root.join("staging").join(&output.relative_name)).expect("读产物");
+        assert_eq!(written, page, "原样交回，产物该与源逐字节相同");
+        assert_eq!((output.width, output.height), (16, 16));
+        // 没有可算的东西，就不该为它装一份片段。
+        assert!(
+            !yomika_compute_core::dlssnr::dll_path(&staging.join(DATA_DIR_NAME)).exists(),
+            "不合条件的页不该落片段"
+        );
+    }
+
+    /// 两头的界：下界是 NGX 的，上界是 D3D12 给 2D 纹理的硬指标。
+    #[test]
+    fn the_page_bounds_are_the_ngx_floor_and_the_texture_edge() {
+        assert!(page_fits(32, 32).is_ok(), "32×32 正是 NGX 的下限");
+        assert!(page_fits(16_384, 32).is_ok(), "16384 正是纹理的上限");
+        let small = page_fits(31, 512).expect_err("31 宽该被拒");
+        assert!(small.contains("31×512"), "理由里要说清是哪一页：{small}");
+        let big = page_fits(512, 16_385).expect_err("16385 高该被拒");
+        assert!(big.contains("512×16385"), "理由里要说清是哪一页：{big}");
     }
 
     /// 仓库里那一份片段在哪（与核心的 `test_dll()` 同一套候选）。

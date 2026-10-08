@@ -166,38 +166,38 @@ textarea,
 
 /* 下载进度：与下载按钮同属模型选择项，所以放在同一处。
  *
- * 槽常驻挂载、用 `is-open` 开关：0fr → 1fr 的行高过渡让进度条长出来/收回去，同时把
- * 菜单一起撑开/收回（菜单高度本来就是内容撑的）。
+ * 槽贴在这一项自己的底边上（`position: absolute`），和档案卡那条阅读进度同一个
+ * 形状：4px、圆头、`--primary` 填充、底边留 1px。**它不参与行布局**——原来它是
+ * 换行下来的第二个 flex 子项（`flex: 1 0 100%`），一开下载就把那一项撑高十几像素，
+ * 用户报的正是「下载时那一栏变高」。定位过的盒子没有这条约束，行高由按钮自己
+ * （`min-height: 44px`）决定，开不开下载都一样。
  *
- * 两条容易踩空的：子元素必须自己写 `overflow: hidden`，否则 `fr` 轨道的自动最小尺寸
- * 是内容的 min-content 高度，`0fr` 会被撑在内容高度上（收起时看着就是「没反应」）；
- * 竖直内边距只能挂在**槽**上，不能挂在被裁的那个元素上——padding 的下限进 min-content，
- * 挂在里面同样收不到 0。 */
+ * 相应地也不再需要 `0fr → 1fr` 那套：`fr` 轨道的自动最小尺寸是内容的 min-content
+ * 高度，得靠子元素自己 `overflow: hidden` 才收得到 0（竖直内边距也只能挂在槽上）；
+ * 收起/展开现在只是一次 opacity。 */
 .model-download-slot {
-  display: grid;
-  grid-template-rows: 0fr;
-  overflow: hidden;
-  padding: 0 var(--space-4);
+  position: absolute;
+  inset: auto 0 1px;
+  height: 4px;
   opacity: 0;
-  transition: grid-template-rows var(--motion-standard), padding-block var(--motion-standard), opacity var(--motion-standard);
+  transition: opacity var(--motion-standard);
+  pointer-events: none;
 }
 
 .model-download-slot.is-open {
-  grid-template-rows: 1fr;
-  padding-block: var(--space-1) var(--space-2);
   opacity: 1;
 }
 
-.model-download-slot > * {
-  min-height: 0;
-  overflow: hidden;
+.model-download-slot > .model-download-status {
+  height: 100%;
 }
 
-/* MD3 线性进度条：6px 圆头轨道 + primary 填充，与去重页那条同一套数值。后端没报
-   总数时走不定量扫光条，让人看出它还在动。 */
+/* 轨道与填充取档案卡那一条的数值（轨道 `--surface-container-highest`、填充
+   `--primary`），末端给圆头：这条横条两端是自由的（那一项没有裁切），
+   直角端会正好杵在选项自己的圆角外面。 */
 .model-download-track {
   position: relative;
-  height: 6px;
+  height: 100%;
   overflow: hidden;
   border-radius: var(--radius-pill);
   background: var(--surface-container-highest);

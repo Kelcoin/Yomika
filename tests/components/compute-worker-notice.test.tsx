@@ -52,6 +52,12 @@ describe('compute worker notice', () => {
     current.status = { kind: 'ready', epoch: 2, peerPid: 4243, limitsApplied: true, limitsNote: null };
     await waitForAnotherCall(seen);
     await waitFor(() => expect(notice()).toBeNull());
+    // 闲下来收摊（`stopped`）也不是「正在恢复」：进程按需起、闲下来就把缓存交回并退出，
+    // 把「没有要跑的东西」读成「正在恢复」正是那句话永远挂在屏幕顶上的原因。
+    seen = statusCalls();
+    current.status = { kind: 'stopped' };
+    await waitForAnotherCall(seen);
+    await waitFor(() => expect(notice()).toBeNull());
   });
 
   it('says unavailable and offers the retry the host actually exposes', async () => {

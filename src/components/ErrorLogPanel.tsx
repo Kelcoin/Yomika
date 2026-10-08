@@ -26,17 +26,6 @@ function formatEntryTime(value: string): string {
   return at.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** 面板顶上那一行：上次运行留下的记录单独说，别混进「本次运行」的计数里——它们恰恰是最
- * 要紧的（闪退现场就在里头），看到的第一眼就该知道那不是这次的。 */
-function summaryOf(entries: ErrorLogEntry[]): string {
-  const carried = entries.filter((entry) => entry.source.startsWith(LAST_RUN_PREFIX)).length;
-  const current = entries.length - carried;
-  if (entries.length === 0) return '本次与上次运行都没有记录到错误。';
-  if (current === 0) return `上次运行记录到 ${carried} 条，本次还没有。`;
-  if (carried === 0) return `本次运行记录到 ${current} 条。`;
-  return `本次运行 ${current} 条，上次运行 ${carried} 条。`;
-}
-
 /** 与原生侧 `read_buckets` 拼的是同一个前缀。 */
 const LAST_RUN_PREFIX = '上次运行 · ';
 
@@ -253,9 +242,9 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
 
   return <div className="error-log-panel">
     <div className="error-log-head">
-      {entries === undefined
-        ? <StatusLine busy>正在读取…</StatusLine>
-        : <p className="error-log-summary">{summaryOf(entries)}</p>}
+      {/* 标题底下不再挂那行「本次运行 N 条，上次运行 M 条。」（用户要的）：它把两个动作
+          挤到中间，而且每次都要读一遍。上一次运行的记录自己带着「上次运行 · 」的来源前缀。 */}
+      {entries === undefined && <StatusLine busy>正在读取…</StatusLine>}
       <button className="secondary-action is-icon" type="button" disabled={busy} aria-busy={busy} aria-label="刷新日志" title="刷新" onClick={() => void reload()}>
         <RefreshCw aria-hidden="true" />
       </button>

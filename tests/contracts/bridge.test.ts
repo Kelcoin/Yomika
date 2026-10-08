@@ -6,9 +6,11 @@ import {
   setInvokeAdapterForTests,
 } from '../../src/bridge/invoke';
 import { getPlatformCapabilities } from '../../src/bridge/platform';
+import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../../src/lib/errorLog';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
+  setErrorLogSinkForTests();
 });
 
 describe('typed invoke bridge', () => {
@@ -48,6 +50,30 @@ describe('typed invoke bridge', () => {
       ok: false,
       error: { code: 'UNKNOWN', message: 'Native command failed', retryable: true },
     });
+  });
+
+  it('keeps a state that is not a failure out of the error log, while still failing the call', async () => {
+    const written: ErrorLogRecord[] = [];
+    setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
+    setInvokeAdapterForTests(async (command: string) => command === 'load_archive_metadata'
+      ? { ok: false, error: { code: 'LRR_NOT_FOUND', message: '该档案已从 LANraragi 移除', retryable: false } }
+      : { ok: false, error: { code: 'LRR_UNAUTHORIZED', message: '钥匙不对', retryable: false } });
+
+    await expect(invokeCommand('load_archive_metadata', {}, z.object({}))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'LRR_NOT_FOUND' },
+    });
+    await expect(invokeCommand('list_archives', {}, z.object({}))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'LRR_UNAUTHORIZED' },
+    });
+    await flushErrorLog();
+
+    // 「档案已经不在 LANraragi 上了」是**眼下的事实**，不是哪里坏了：档案详情页本来就会
+    // 告诉用户「该档案已从 LANraragi 移除，本地索引已清理」。它照样按失败返回（调用方
+    // 照旧分支），只是不往设置页那份错误日志里塞——日志是给人查现场的。
+    expect(written.map((record) => record.source)).toEqual(['bridge/list_archives']);
+    expect(written[0]!.message).toContain('LRR_UNAUTHORIZED');
   });
 
   it('reports explicit browser capabilities without user-agent detection', async () => {

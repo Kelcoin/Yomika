@@ -75,11 +75,15 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
 
 
 /** A setting whose answer is one of a few. */
-export function SettingsChoice({ icon, label, hint, ariaLabel, value, options, onChange, optionAction, optionStatus, children }: {
+export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, options, onChange, optionAction, optionStatus, children }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
   ariaLabel?: string | undefined;
+  /** 名字旁的一枚小签（「有更新」这类）。它属于**名称**，不是控件槽：行尾那一格
+   * 放的是当前值，而这里要说的是「这个设置项里有东西该换了」——打开菜单之前就该
+   * 看得见，所以不放在菜单里的选项行上。 */
+  mark?: ReactNode | undefined;
   value: string;
   options: Array<{ value: string; label: string }>;
   onChange: (value: string) => void;
@@ -93,7 +97,17 @@ export function SettingsChoice({ icon, label, hint, ariaLabel, value, options, o
   const selected = options.find((option) => option.value === value) ?? options[0];
   return (
     <>
-      <SettingsRow icon={icon} label={label} hint={hint} value={selected?.label} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} busy={!selected} />
+      <SettingsRow
+        icon={icon}
+        label={mark === undefined ? label : <>{label}<span className="settings-row-mark">{mark}</span></>}
+        hint={hint}
+        value={selected?.label}
+        onClick={() => setOpen(true)}
+        /* 名称带上小签之后 `label` 是个节点，行自己读不出可访问名——这里必须点名。 */
+        ariaLabel={ariaLabel ?? label}
+        expanded={open}
+        busy={!selected}
+      />
       {children}
       {open && (
         <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={() => setOpen(false)}>

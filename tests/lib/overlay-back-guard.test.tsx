@@ -93,6 +93,28 @@ describe('overlay back guard', () => {
     // 设备上它是浏览器自己的同文档遍历，一定会发。
   });
 
+  it('leaves a layer that a real jump closed alone instead of rewinding the jump', async () => {
+    // 确认框的主按钮会把用户送到别处（「去更新」→ 设置页），然后才关掉自己那一层。
+    // 关掉它不能顺手 `history.back()`：那一下正好把刚跳过去的那一格退回来，看着就是
+    // 「点了没反应」——用户报的就是这个。
+    const back = vi.spyOn(window.history, 'back');
+    window.history.replaceState({}, '', '/library');
+    render(<Layer name="dialog" />);
+    act(() => { window.history.pushState({}, '', '/settings?section=advanced'); });
+
+    await act(async () => { screen.getByRole('button', { name: '自己关' }).click(); });
+    await settle();
+
+    expect(
+      back,
+      '跳转之后关掉这一层不能再退一格：那一下正好把刚跳过去的那页退回来',
+    ).not.toHaveBeenCalled();
+    expect(`${window.location.pathname}${window.location.search}`).toBe('/settings?section=advanced');
+
+    back.mockRestore();
+    window.history.replaceState({}, '', '/');
+  });
+
   it('keeps the guard when a layer refuses to close', async () => {
     const onClose = vi.fn();
     render(<StubbornLayer onClose={onClose} />);

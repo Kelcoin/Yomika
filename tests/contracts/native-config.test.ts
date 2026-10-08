@@ -1010,6 +1010,21 @@ describe('native shell configuration', () => {
     expect(storm, '读同页必须是另一件任务，不是并进上一件').toContain(
       'again.job_id, submitted.job_id,',
     );
+    // 这一条容忍的是「判完任务」与「记账/熔断」之间的那条缝（`end_session` 的顺序：先给
+    // 任务结论，再重启记账）。容忍的边界要写清楚：只有「没有一个 Ready 的 worker 能接活」
+    // 才算这种现场；状态是 Ready 就说明这一代还活着，那时再被判 UNAVAILABLE 别的原因，
+    // 照旧红。熔断本身的严格语义由另一条用例（`a_tripped_breaker_judges_...`）钉着。
+    expect(storm, '容忍的只有「这一代接不了活」这一种现场').toContain(
+      'let no_worker_can_take_it = !matches!(manager.worker_status(), WorkerStatus::Ready { .. });',
+    );
+    expect(storm, '缝里被当场判掉几次要说出来，不能悄悄吞掉').toContain(
+      '其中 {judged_in_the_gap} 次是「读同页」撞上那条缝被当场判掉的',
+    );
+    const manager = read('../../src-tauri/src/compute/manager.rs');
+    // 判掉一件排队的活，状态就得跟它说同一件事：界面是照状态决定要不要给「重试」的。
+    expect(manager, '熔断判活与状态必须同一个说法').toContain(
+      'if let Some(reason) = self.broken.clone() {',
+    );
 
     const large = read('../../src-tauri/tests/compute_soak.rs');
     expect(large, '§12.4 ③ 的三档尺寸').toContain(
@@ -1245,8 +1260,8 @@ describe('native shell configuration', () => {
     expect(notice, '状态条把「state」摆在 DOM 上，仪器才有得量').toContain(
       'data-worker-state={notice.state}',
     );
-    expect(notice, '只有这一代真起来过，掉线才算「正在恢复」；不然第一次起进程也会被说成恢复').toContain(
-      'if (seenReadyEpoch >= 0) {',
+    expect(notice, '只有这一代真起来过、且宿主说它正在起，才叫「正在恢复」；stopped 是常态（没有要跑的活就没有 worker），不许读成恢复').toContain(
+      "if (status.kind === 'starting' && seenReadyEpoch >= 0) {",
     );
     expect(app, '这条状态挂在全应用上：挂在某条路由里，从阅读器退出来就看不见了').toContain('<ComputeWorkerNotice />');
     expect(read('../../tests/components/compute-worker-notice.test.tsx'), '这条状态有人看着').toContain(
@@ -1786,19 +1801,31 @@ describe('native shell configuration', () => {
 
   it('judges a page that arrives while the breaker is lit, and lets the two orderings agree', () => {
     const manager = read('../../src-tauri/src/compute/manager.rs');
-    expect(manager, '熔断亮着的时候也要看一眼队列').toContain('if self.broken.is_some() {');
+    expect(manager, '熔断亮着的时候也要看一眼队列').toContain(
+    'if let Some(reason) = self.broken.clone() {',
+  );
     expect(manager, '这句话得留在代码里：为什么不许像「没有活要跑」那样直接 return').toContain(
       '熔断亮着：这台机器/这个包在用户动手（点重试）之前都跑不了，**排队的活当场给结论**。',
     );
     expect(manager, '排队的活当场拿结论，不是等用户点重试').toContain(
-      `        if self.broken.is_some() {
+      `        if let Some(reason) = self.broken.clone() {
+            // 这一条判的是用户看得见的活，状态就得跟它说同一件事：\`end_session\` 在退避与熔断
+            // 之间可能已经把状态收回 \`Stopped\`（那一下队列还空着），而界面是照状态决定要不要
+            // 给「重试」的。「页面被判成不可用」和「界面说不忙」不能是两套说法。
             let now_ms = self.shared.now_ms();
             let failed = self.shared.with_state(|state| {
+                state.status = WorkerStatus::Broken { reason };
                 state.scheduler.fail_queued(WORKER_UNAVAILABLE_CODE, now_ms)
             });
             self.shared.emit(&failed);
             return;
         }`,
+    );
+    expect(manager, '判活与状态要落在同一个闭包里：分开写就有中间态').toContain(
+      `            let failed = self.shared.with_state(|state| {
+                state.status = WorkerStatus::Broken { reason };
+                state.scheduler.fail_queued(WORKER_UNAVAILABLE_CODE, now_ms)
+            });`,
     );
     expect(manager, '「熔断亮着」不许再和「没有活要跑」挤在同一个 return 里').not.toContain(
       'if self.session.is_some() || self.broken.is_some() || !self.has_queued() {',
@@ -1831,14 +1858,53 @@ describe('native shell configuration', () => {
     expect(storm, '用户点过重试之后，同一页要照样算出来').toContain(
       'assert_eq!(state, JobState::Completed, "点过重试之后同一页该算出来");',
     );
-    expect(storm, '20 轮那条用例要容忍「熔断正好在检查与提交之间亮起」这条缝').toContain(
-      'let tripped_in_the_gap = matches!(',
+    expect(storm, '20 轮那条用例要容忍「熔断/退避正好在检查与提交之间」这条缝').toContain(
+      'let judged_unavailable = matches!(',
     );
     expect(storm, '容忍是有界的：只允许这一种现场重来，别的一律照旧红').toContain(
-      'if tripped_in_the_gap && attempt < 3 {',
+      'if judged_unavailable && no_worker_can_take_it && attempt < 3 {',
     );
     expect(storm, '这条缝本身要写在注释里，不然下一个人会把它当偶发').toContain(
-      '熔断正好在这中间亮起的话',
+      '`end_session` 先把任务判完、再去\n        // 重启记账，中间那一段是缝',
+    );
+  });
+
+  it('refuses a page DLSSNR cannot take without calling it a broken engine, and keeps the reason', () => {
+    const stage = read('../../src-tauri/worker/src/dlssnr.rs');
+    const manager = read('../../src-tauri/src/compute/manager.rs');
+    const proxy = read('../../src-tauri/src/compute/proxy.rs');
+
+    // 太小/太大是「这一页没有可算的东西」，不是引擎坏了：原图交回、不报错，也不为它
+    // 装片段（`hand_back` 在那道门后面才轮得到）。
+    expect(stage, '两道尺寸门写在代码里，不是散在 if 里').toContain(
+      'fn page_fits(width: u32, height: u32) -> Result<(), String> {',
+    );
+    expect(stage, '下界是核心那个常量，不许再抄一遍 32').toContain(
+      'if width < filter::MIN_EDGE || height < filter::MIN_EDGE {',
+    );
+    expect(stage, '上界是 D3D12 给 2D 纹理的硬指标').toContain(
+      'const MAX_TEXTURE_EDGE: u32 = 16_384;',
+    );
+    expect(stage, '拒了就是原图交回，别报成引擎坏了').toContain(
+      'return self.hand_back(&request, &source);',
+    );
+    expect(stage, '交回这件事要留一句在 stderr（本地跑的时候看得见）').toContain(
+      'eprintln!("[worker] DLSSNR 跳过这一页：{why}");',
+    );
+
+    // worker 自己那句「为什么」不能丢：码是给前端认的，话是给人查的。
+    expect(manager, '失败原因只在这一条消息里出现一次，要当场抄下来').toContain(
+      'state.remember_failure_note(&failed.job_id, &failed.message);',
+    );
+    expect(manager, '抄下来的份数要封顶（失败是逐页发生的）').toContain(
+      'const MAX_FAILURE_NOTES: usize = 64;',
+    );
+    expect(manager, '代理要有一个窄口子拿到它').toContain(
+      'pub fn failure_note(&self, job_id: &str) -> Option<String> {',
+    );
+    expect(proxy, '文案里要带上 worker 的原话').toContain('Some(note) => format!("{message}：{note}"),');
+    expect(proxy, '前端的码仍然只认翻译后的那一个').toContain(
+      'let note = manager.failure_note(&submitted.job_id);',
     );
   });
 });

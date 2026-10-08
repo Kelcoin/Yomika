@@ -1557,6 +1557,9 @@ export function SettingsWorkspace() {
                 <SettingsChoice
                   icon={<ImageUpscale />}
                   label="超分模型"
+                  /* 更新是同一个下载动作，只是入口在菜单里那一行：这一枚小签是
+                     「进去看看」的唯一提示——不打开菜单也该知道有东西该换了。 */
+                  mark={outdatedUpscaleIds.size > 0 ? '有更新' : undefined}
                   value={upscaleSelectedModel}
                   options={upscaleModelOptions}
                   onChange={(value) => editPreferences({ upscaleModel: value })}

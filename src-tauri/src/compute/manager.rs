@@ -85,6 +85,12 @@ const INPUT_INVALID_CODE: &str = "COMPUTE_INPUT_INVALID";
 /// 探不到物理内存时的兜底：宁可把阈值算小（更早停后台），也不要假装内存无限。
 const FALLBACK_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// 留几件任务的失败原因（[`State::failure_notes`]）。
+///
+/// 失败是逐页发生的，而这份记录只在「同一件任务的终态刚出来、代理正在翻文案」那一瞬有
+/// 用；64 已经比任何并发度都宽，再多的就是泄漏。
+const MAX_FAILURE_NOTES: usize = 64;
+
 /// 控制线程的节拍。所有期限（握手、心跳、取消宽限、闲置、退避）都在这个粒度上检查，
 /// 所以它要明显小于最短的那个期限（2 秒）。
 const TICK: Duration = Duration::from_millis(200);
@@ -391,9 +397,37 @@ struct State {
     artifacts: HashMap<String, Vec<ArtifactRecord>>,
     progress: HashMap<String, JobProgress>,
     cancel_reasons: HashMap<String, String>,
+    /// job_id → worker **自己报的**失败原因（协议 `Failed.message`）。
+    ///
+    /// 调度器那份 `JobState::Failed` 只带码：前端的旧词汇只认码，翻译那一步也只看码。可
+    /// 「为什么算不出来」只有 worker 知道（NGX 说尺寸不对、模型说张量不对……），丢掉它
+    /// 用户看到的就是一句「计算进程没能交出这一页」——上一次就是这样查不出 DLSSNR 到底
+    /// 卡在哪。所以在这里抄一份，让代理把那句话翻进文案里。
+    failure_notes: HashMap<String, String>,
+    /// `failure_notes` 的入驻顺序：只留最近 [`MAX_FAILURE_NOTES`] 条。Map 里没有顺序，
+    /// 而且失败是**每页**都会发生的事，不封顶就等于让一张坏页拖着一串名字。
+    note_order: VecDeque<String>,
     /// 最近一次压力读数（§8.1/§8.4）。由 supervisor 每拍采一次；`Injected` 时它是摆设，
     /// 准入判断现读仪表盘。
     pressure: resource_policy::PressureReading,
+}
+
+impl State {
+    /// 记下 worker 对某件任务失败原因的原话（空话不收——「没说」不该占一个位置）。
+    fn remember_failure_note(&mut self, job_id: &str, message: &str) {
+        let message = message.trim();
+        if message.is_empty() {
+            return;
+        }
+        if self.failure_notes.insert(job_id.to_string(), message.to_string()).is_none() {
+            self.note_order.push_back(job_id.to_string());
+        }
+        while self.note_order.len() > MAX_FAILURE_NOTES {
+            if let Some(oldest) = self.note_order.pop_front() {
+                self.failure_notes.remove(&oldest);
+            }
+        }
+    }
 }
 
 enum Command {
@@ -486,6 +520,8 @@ impl ComputeManager {
                 artifacts: HashMap::new(),
                 progress: HashMap::new(),
                 cancel_reasons: HashMap::new(),
+                failure_notes: HashMap::new(),
+                note_order: VecDeque::new(),
                 pressure: resource_policy::PressureReading::unknown(),
             }),
             events,
@@ -604,6 +640,14 @@ impl ComputeManager {
         self.shared.with_state(|state| {
             state.artifacts.get(job_id).cloned().unwrap_or_default()
         })
+    }
+
+    /// worker 自己对这件任务失败原因的原话（没有就是 `None`：旧包不一定报原因）。
+    ///
+    /// 给代理翻文案用：码是给前端认的，这句话是给人查的（§9.1 ⑦ 的「日志里看得见」）。
+    pub fn failure_note(&self, job_id: &str) -> Option<String> {
+        self.shared
+            .with_state(|state| state.failure_notes.get(job_id).cloned())
     }
 
     pub fn job_progress(&self, job_id: &str) -> Option<JobProgress> {
@@ -1070,6 +1114,11 @@ impl Supervisor {
             }
             Message::Failed(failed) => {
                 self.finish_running(&failed.job_id);
+                // worker 那句「为什么」只在这一条消息里出现一次。调度器与前端词汇都只认
+                // 码，所以先抄一份下来，等代理翻文案时带上（`failure_note`）。
+                self.shared.with_state(|state| {
+                    state.remember_failure_note(&failed.job_id, &failed.message);
+                });
                 self.apply(
                     WorkerEvent::Failed {
                         job_id: failed.job_id.clone(),
@@ -1658,8 +1707,15 @@ impl Supervisor {
                 state.status = WorkerStatus::Broken { reason };
             });
         } else if self.broken.is_none() {
+            // 退避窗口里队列还有人等着 ⇒ 报 `Starting`（这一代正在回来）；否则 `Stopped`。
+            let status = restart_status(
+                restart,
+                self.spawn_at.is_some(),
+                self.has_queued(),
+                next_epoch,
+            );
             self.shared.with_state(|state| {
-                state.status = WorkerStatus::Stopped;
+                state.status = status;
                 prune_templates(state);
             });
         } else {
@@ -1670,16 +1726,32 @@ impl Supervisor {
 
     /// 按需起来。没有要跑的东西就不起——启动界面不为计算付代价。
     fn maybe_spawn(&mut self) {
-        if self.session.is_some() || !self.has_queued() {
+        if self.session.is_some() {
+            return;
+        }
+        if !self.has_queued() {
+            // 没人要算：排好的重启也一起作废。不这么做的话，崩溃之后退避排上、队列却空了
+            // 的那几秒会停在「正在恢复」上，而这一代永远不会来——进程按需起，闲着的机器
+            // 不为「待会儿可能有人来」付代价。状态跟着收回 `Stopped`，界面那句就撤掉了。
+            if self.spawn_at.take().is_some() && self.broken.is_none() {
+                self.shared.with_state(|state| {
+                    state.status = WorkerStatus::Stopped;
+                });
+                self.shared.emit_all();
+            }
             return;
         }
         // 熔断亮着：这台机器/这个包在用户动手（点重试）之前都跑不了，**排队的活当场给结论**。
         // 不这么做的后果是「交上来的东西一直躺在队列里」——界面看见的是「计算进程不可用」，
         // 而任务那一边什么都没有发生；等用户点了重试，它们会被一起派下去算，算的还可能是
         // 他已经翻过去的那几页。
-        if self.broken.is_some() {
+        if let Some(reason) = self.broken.clone() {
+            // 这一条判的是用户看得见的活，状态就得跟它说同一件事：`end_session` 在退避与熔断
+            // 之间可能已经把状态收回 `Stopped`（那一下队列还空着），而界面是照状态决定要不要
+            // 给「重试」的。「页面被判成不可用」和「界面说不忙」不能是两套说法。
             let now_ms = self.shared.now_ms();
             let failed = self.shared.with_state(|state| {
+                state.status = WorkerStatus::Broken { reason };
                 state.scheduler.fail_queued(WORKER_UNAVAILABLE_CODE, now_ms)
             });
             self.shared.emit(&failed);
@@ -2192,6 +2264,29 @@ fn settle_job(
     shared.with_state(|state| state.scheduler.apply_worker_event(epoch, event, now_ms));
 }
 
+/// 一代 worker 结束之后该报什么状态。
+///
+/// `Stopped` 自己的说法是「没有要跑的东西，也就没有 worker。不是『坏了』」——它不含
+/// 「马上会回来」这层意思。可崩溃之后的退避窗口里，队列里还有人等着，这一代是**要回来的**：
+/// 那时报 `Starting`，界面那句「正在恢复」才是事实（§12.3 要的 2 秒也才有落点）。
+///
+/// 三条同时成立才算「正在回来」：这次结束是崩溃那条路（`restart`）、退避已经排好
+/// （`backoff_scheduled`，熔断点亮时它不排）、而且真有人等着（`has_queued`）。
+/// 闲下来的收摊（`restart == false`）与「没有人等着」的崩溃都落回 `Stopped`：界面把
+/// `stopped` 读成「正在恢复」会让那句话永远挂在顶上（这一轮修的就是这个）。
+fn restart_status(
+    restart: bool,
+    backoff_scheduled: bool,
+    has_queued: bool,
+    epoch: u64,
+) -> WorkerStatus {
+    if restart && backoff_scheduled && has_queued {
+        WorkerStatus::Starting { epoch }
+    } else {
+        WorkerStatus::Stopped
+    }
+}
+
 fn prune_templates(state: &mut State) {
     // 快照被回收之后模板就没用了；顺手清掉，免得这份账跟着终态快照一起无限长。
     let gone: Vec<String> = state
@@ -2508,6 +2603,63 @@ mod tests {
     use super::*;
     use yomika_compute_protocol::{EngineFallback, EnginePolicy, EngineReport, Precision};
 
+    /// worker 的原话要留得住、要封顶、空话不占位置。
+    ///
+    /// 这三条都是「不封顶就等于泄漏」那个毛病的一部分：失败是逐页发生的，而这份记录只在
+    /// 同一件任务的终态刚出来那一瞬有用。
+    #[test]
+    fn a_workers_failure_note_is_kept_bounded_and_never_blank() {
+        let mut state = State {
+            scheduler: Scheduler::new(1),
+            status: WorkerStatus::Stopped,
+            build: None,
+            templates: HashMap::new(),
+            artifacts: HashMap::new(),
+            progress: HashMap::new(),
+            cancel_reasons: HashMap::new(),
+            failure_notes: HashMap::new(),
+            note_order: VecDeque::new(),
+            pressure: resource_policy::PressureReading::unknown(),
+        };
+        state.remember_failure_note("job-1", "  图太小（16x16）：DLSSNR 至少要 32x32  ");
+        assert_eq!(
+            state.failure_notes.get("job-1").map(String::as_str),
+            Some("图太小（16x16）：DLSSNR 至少要 32x32"),
+            "原话要照抄，两头的空白不算话"
+        );
+        state.remember_failure_note("job-2", "   ");
+        assert!(!state.failure_notes.contains_key("job-2"), "没说就别占位置");
+        assert_eq!(state.note_order.len(), 1, "空话也不该进顺序表");
+
+        for index in 0..MAX_FAILURE_NOTES + 8 {
+            state.remember_failure_note(&format!("job-{index}"), "算不出来");
+        }
+        assert_eq!(
+            state.failure_notes.len(),
+            MAX_FAILURE_NOTES,
+            "留的份数要封顶"
+        );
+        assert_eq!(state.note_order.len(), MAX_FAILURE_NOTES, "顺序表跟着封顶");
+        assert!(
+            !state.failure_notes.contains_key("job-1"),
+            "最先来的那份要让位给后来的"
+        );
+        assert!(
+            state
+                .failure_notes
+                .contains_key(&format!("job-{}", MAX_FAILURE_NOTES + 7)),
+            "最后来的那份得在"
+        );
+        // 同一件任务再报一次不该在顺序表里插第二行（否则封顶会提前挤掉别人）。
+        state.remember_failure_note("job-0", "换了个说法");
+        assert_eq!(state.note_order.len(), MAX_FAILURE_NOTES);
+        assert_eq!(
+            state.failure_notes.get("job-0").map(String::as_str),
+            Some("换了个说法"),
+            "同一件任务的新说法要盖掉旧的"
+        );
+    }
+
     /// 读数要对「量不到」诚实：没有 worker 就没有提交读数（留空，不是 0——0 会被读成
     /// 「一点内存都没占」），显存余量不该比预算大。这条同时钉住
     /// `GetProcessMemoryInfo` 那一趟（`PrivateUsage` 只在 `_EX` 那版里，写错了这里就红）。
@@ -2552,6 +2704,37 @@ mod tests {
             value.get("peer_pid"),
             None,
             "snake_case 的字段名会让 `ComputeWorkerStatusSchema.safeParse` 失败，界面永远读不到 worker"
+        );
+    }
+
+    /// 会话结束之后报什么，由三条事实一起决定：这次结束是不是崩溃那条路、退避有没有
+    /// 排上、队列里还有没有人等着。**只有三条都成立**才是「正在回来」。
+    ///
+    /// 从前这里只有一句 `Stopped`，而界面把「见过 ready 之后的 stopped」读成「正在恢复」：
+    /// 闲下来收摊也会挂出那句话，而且再也下不去（用户报的图 1）。反过来，要是把 `stopped`
+    /// 一律当「没什么事」，崩溃退避那几秒里界面就一声不吭——§12.3 的 2 秒门槛就是这么丢的。
+    /// 所以四条现场要各自量到。
+    #[test]
+    fn a_finished_session_only_claims_to_be_coming_back_when_someone_is_waiting() {
+        assert_eq!(
+            restart_status(true, true, true, 7),
+            WorkerStatus::Starting { epoch: 7 },
+            "崩溃后的退避里还有活等着：这一代正在回来"
+        );
+        assert_eq!(
+            restart_status(true, true, false, 7),
+            WorkerStatus::Stopped,
+            "崩溃了但没人等着：没有要起的东西，不该说正在恢复"
+        );
+        assert_eq!(
+            restart_status(true, false, true, 7),
+            WorkerStatus::Stopped,
+            "熔断点亮时退避没有排上：这一代不会自己回来，报 Starting 就是撒谎"
+        );
+        assert_eq!(
+            restart_status(false, false, true, 7),
+            WorkerStatus::Stopped,
+            "闲下来的收摊（与故意换代）不是崩溃：队列里那几件在等下一次提交，不该说正在恢复"
         );
     }
 

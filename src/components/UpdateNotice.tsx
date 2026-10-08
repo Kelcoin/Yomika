@@ -138,7 +138,9 @@ export function UpdateNotice() {
                 setBusy(true);
                 const done = prompt.url
                   ? openExternalUrl(prompt.url).then((result) => { if (!result.ok) showToast(result.error.message, 'error'); })
-                  : Promise.resolve(navigate('/settings?section=advanced'));
+                  // `replace`：这一步正好把浮层那条守卫条目换成设置页，历史里不留没人认领的一格
+                  // （守卫关掉时看见地址变了就不会再退一格，见 `overlayBackGuard`）。
+                  : Promise.resolve(navigate('/settings?section=advanced', { replace: true }));
                 void done.then(() => close(prompt), () => {}).finally(() => setBusy(false));
               }}
             >{prompt.url ? <Download aria-hidden="true" /> : <Sparkles aria-hidden="true" />}{prompt.confirmLabel}</button>

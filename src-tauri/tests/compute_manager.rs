@@ -655,6 +655,70 @@ fn a_worker_that_dies_mid_job_marks_it_worker_lost_and_the_next_one_still_runs()
     manager.shutdown();
 }
 
+/// 崩溃之后退避的那几秒：队列里还有人等着，这一代是**要回来的**——状态得是 `Starting`
+/// （带着下一代的号）。从前它报 `Stopped`，而界面把「见过 ready 之后的 `stopped`」读成
+/// 「正在恢复」；两边都含糊的结果就是那句话永远下不去（用户报的那张图）。这一条把
+/// 「有人等着」那一格钉住：没有它，谁把 `Starting` 改回 `Stopped` 都不会有人发现。
+#[test]
+fn a_crash_with_a_page_still_waiting_says_the_next_worker_is_coming() {
+    let sandbox = Sandbox::new("crash-status");
+    let mut config = config(&sandbox);
+    // 第一件要慢慢算，好让第二件确实还排在队列里。
+    config.extra_env = vec![(
+        "YOMIKA_WORKER_TEST_DELAY_MS".to_string(),
+        "10000".to_string(),
+    )];
+    let manager = ComputeManager::start(config, no_events()).expect("起 supervisor");
+
+    let running = submit_foreground(&manager, "book", 0);
+    let pid = wait_until("worker 接手", HANDOFF, || match manager.worker_status() {
+        WorkerStatus::Ready { peer_pid, .. } => Some(peer_pid),
+        _ => None,
+    });
+    wait_until("第一件进入非排队状态", HANDOFF, || {
+        manager
+            .job(&running.job_id)
+            .filter(|snapshot| snapshot.state != JobState::Queued)
+            .map(|_| ())
+    });
+    // 后台那一件排在后面：前台占着唯一那个槽位，它只能在队列里等。
+    let waiting = submit_background(&manager, "book", 1);
+    assert_eq!(
+        manager.job(&waiting.job_id).map(|snapshot| snapshot.state),
+        Some(JobState::Queued),
+        "第二件该还排在队列里（在跑的那件还没完）"
+    );
+
+    kill_process(pid);
+
+    let state = wait_until("worker 丢失被记下来", HANDOFF, || {
+        terminal_of(&manager, &running.job_id)
+    });
+    assert_eq!(
+        state,
+        JobState::Failed {
+            code: "COMPUTE_WORKER_LOST".to_string()
+        },
+        "进程没了，这件任务的结论必须是 worker_lost"
+    );
+
+    // 退避窗口里：有人等着 ⇒ 报换代中，而不是一声不吭。
+    let epoch = wait_until("换代中要报 Starting", HANDOFF, || {
+        match manager.worker_status() {
+            WorkerStatus::Starting { epoch } => Some(epoch),
+            _ => None,
+        }
+    });
+    assert!(epoch >= 2, "换代之后的号要往前走：{epoch}");
+
+    let state = wait_until("重启后跑完排队那件", Duration::from_secs(30), || {
+        terminal_of(&manager, &waiting.job_id)
+    });
+    assert_eq!(state, JobState::Completed, "重启之后要接着把排队那件跑完");
+
+    manager.shutdown();
+}
+
 #[test]
 fn a_worker_that_never_connects_does_not_block_the_caller_and_eventually_breaks_the_breaker() {
     let sandbox = Sandbox::new("no-handshake");

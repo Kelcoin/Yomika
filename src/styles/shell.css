@@ -735,8 +735,10 @@ body::-webkit-scrollbar,
    菜单面板（.settings-choice-panel）已经是这一块的框，所以这里只排内容。
    参照的是 PiliPlus 的日志页：一条记录一行标题 + 一行时间，展开才是一个现场。 */
 .error-log-panel { display: grid; gap: var(--space-3); min-width: 0; }
-.error-log-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.error-log-summary { margin: 0; min-width: 0; flex: 1 1 auto; color: var(--ink-secondary); font-size: var(--text-sm); }
+/* 标题下面是空的：那行「本次运行 N 条，上次运行 M 条。」去掉了（用户要的），所以两个
+   动作靠右站；只在读取中那半拍，左边才有那行字。 */
+.error-log-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; justify-content: flex-end; }
+.error-log-head > .status-line { margin-inline-end: auto; }
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */
 .error-log-list {
   display: grid;
@@ -750,10 +752,13 @@ body::-webkit-scrollbar,
   background: var(--surface-container-low);
   list-style: none;
 }
-/* 严重程度走左侧一条色带（inset 阴影，不占布局），行与行之间只留发丝线。 */
-.error-log-entry { display: grid; gap: 0; border-bottom: 1px solid var(--hairline); box-shadow: inset 3px 0 0 var(--state-danger); }
+/* 严重程度走左侧一条色带，行与行之间只留发丝线。色带是**占位**的左边框而不是
+   `box-shadow: inset 3px 0 0`：阴影画在行内容盒的下面，而悬停底色（`.error-log-entry-toggle`
+   的圆角矩形）正好压在它上面，放大看就是色带被高亮切成两段（用户报的「hover 效果
+   溢出」）。占了一格之后，悬停底色再也盖不到它。 */
+.error-log-entry { display: grid; gap: 0; border-bottom: 1px solid var(--hairline); border-left: 3px solid var(--state-danger); }
 .error-log-entry:last-child { border-bottom: 0; }
-.error-log-entry.is-warn { box-shadow: inset 3px 0 0 var(--state-warning); }
+.error-log-entry.is-warn { border-left-color: var(--state-warning); }
 .error-log-entry.is-open { background: var(--surface-container-high); }
 
 /* 标题行：整行是展开/收起的开关，复制是它右边独立的一个动作——复制不是「展开」，
@@ -790,7 +795,10 @@ body::-webkit-scrollbar,
 .error-log-caret.is-open { transform: rotate(180deg); }
 @media (prefers-reduced-motion: reduce) { .error-log-caret { transition: none; } }
 
-/* 展开的那一段：错误详情 + 堆栈跟踪，各一个等宽框。 */
+/* 展开的那一段：错误详情 + 堆栈跟踪，各一个框。字体跟着面板继承**正文**那一族：
+   这里原本写死 `--font-utility`（等宽），而 WebView2 不认 `ui-monospace`，实际落到
+   系统默认等宽上，看上去就不像这个应用里的字（用户报的「错误日志里的字体没用项目
+   统一字体」）。框、底色、字号都留着，它照旧读得出是一段现场。 */
 .error-log-entry-body { display: grid; gap: var(--space-1); padding: 0 var(--space-3) var(--space-3) var(--space-3); }
 .error-log-entry-body h4 { margin: var(--space-2) 0 0; color: var(--state-warning); font-size: var(--text-xs); font-weight: var(--weight-bold); }
 .error-log-code {
@@ -800,7 +808,6 @@ body::-webkit-scrollbar,
   border-radius: var(--radius-control);
   background: var(--control-background, var(--surface-container-low));
   color: var(--on-surface);
-  font-family: var(--font-utility);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
   white-space: pre-wrap;
@@ -857,9 +864,11 @@ body::-webkit-scrollbar,
 .error-log-facts-section dt { color: var(--ink-secondary); font-size: var(--text-xs); }
 .error-log-facts-section dd { margin: 0; color: var(--on-surface); font-size: var(--text-xs); overflow-wrap: anywhere; }
 
-/* 日志动作菜单：与档案右键菜单同一套浮层长相（同一份 surface/阴影/圆角 token）。 */
+/* 日志动作菜单：与档案右键菜单同一套浮层长相（同一份 surface/阴影/圆角 token）。
+   z 序用 `--z-menu-over-modal`：这个菜单开在设置面板**里面**，而面板与菜单都挂在
+   body 上，菜单排在面板后面就会整层被盖住（用户报的「更多操作点了没反应」）。 */
 .log-menu {
-  z-index: var(--z-menu);
+  z-index: var(--z-menu-over-modal);
   min-width: 168px;
   padding: 6px;
   border: 1px solid var(--outline-variant);
@@ -1209,6 +1218,22 @@ body::-webkit-scrollbar,
   line-height: var(--leading-normal);
 }
 
+/* 名字旁的一枚小签（「有更新」）：跟在名字后面、跟「当前服务器」那盏亮点同一个
+   位置，占的是名称的位置而不是控件槽。它说的是一件**事**，不是一步操作，所以不做成
+   按钮的形状——行尾那种能点的东西才长按钮。 */
+.settings-row-mark {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+  vertical-align: 1px;
+}
+
 /* 账户的端点/域名一行放不下就省略号截断：换行的长域名会把卡片文案撑成三行，
    「是什么地址」反而读不出来。完整地址悬停可读（title）。 */
 .settings-menu-account-copy > span {
@@ -1299,12 +1324,16 @@ body::-webkit-scrollbar,
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  /* `row-gap: 0`——上一条 `gap` 会给换行留 8px，哪怕换下来的那一行是**空的**：
-     模型菜单每一行都挂着常驻的下载进度槽（关着时高度 0），于是每一行都比它自己的
-     按钮高 8px，高亮块也跟着往下多出一截，看着就是「底部空隙过大」（实测：探针里
-     行高 50.4px 而按钮 42.7px，多出来的 7.8px 全在这一行文字下面）。槽自己的
-     `padding-block` 在打开时才给间距，所以这里不要任何行间距。 */
+  /* `row-gap: 0`——上一条 `gap` 会给换行留 8px：行尾的下载按钮被挤到第二行时，
+     那 8px 就落在行文字下面，看着是「底部空隙过大」（实测：探针里行高 50.4px
+     而按钮 42.7px）。下载进度槽现在贴在这一项的底边上、不参与换行（见下面那条），
+     所以这里只剩按钮这一个还会换行的子项。 */
   row-gap: 0;
+  /* 下载进度的定位上下文：槽贴在这一项的底边上（base.css 里 `.model-download-slot`
+     那条画形状）。不复用设置项那一层——这一层才是点「下载」的地方，进度必须在这里
+     看得见；画在设置项上等于画在菜单那层遮罩的后面，而两条同时出现时看的人不知道
+     该信哪一条。 */
+  position: relative;
   /* 圆角跟着外壳走：这一层画的是填充/高亮块，外壳是 28px 面板 + 16px 内边距，
      内层同心值是 28 − 16 = 12（`--radius-card`）。套 `--radius-control`(8px) 时
      高亮块四角与面板四角不同心，看着就是用户报的「内外圆角不统一」。 */
@@ -1318,13 +1347,6 @@ body::-webkit-scrollbar,
    有的行居中、有的偏左。`:has()` 只给真的有按钮的行补，没按钮的行本来就居中。 */
 .settings-choice-option:has(> .select-option-download) {
   padding-left: calc(40px + 2px + var(--space-2));
-}
-
-/* 下载进度独占一行，挂在它自己那一项下面：这一层就是点「下载」的地方，进度必须
-   在这里看得见——画在设置项上等于画在菜单那层遮罩的后面。设置项那边不再有第二条：
-   两条同时出现时，看的人不知道该信哪一条。 */
-.settings-choice-option > .model-download-slot {
-  flex: 1 0 100%;
 }
 
 /* 选项文字居中——用户报的：模型选择菜单里的名字全贴着左边排，和高亮块/面板不是
@@ -1573,7 +1595,9 @@ body::-webkit-scrollbar,
   width: 100%;
   min-width: 0;
   resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  /* 输入框跟随项目正文字体：这里原本写死等宽，而 WebView2 不认 `ui-monospace`，
+     落到系统默认等宽上就不像这个应用里的字。base.css 已经给 textarea 写了
+     `font: inherit`，这里不再覆盖。 */
 }
 
 .legacy-import-form > input {
@@ -5658,7 +5682,8 @@ body::-webkit-scrollbar,
 
 .upload-url-form textarea {
   width: 100%;
-  font-family: var(--font-utility);
+  /* 要在里面写字的控件跟随项目正文字体（base.css 的 `font: inherit`）；等宽只留给
+     只读的短机器值。 */
   font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
   resize: vertical;

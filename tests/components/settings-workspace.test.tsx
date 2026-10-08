@@ -115,7 +115,8 @@ describe('settings workspace', () => {
 
     await user.click(row);
     const menu = await screen.findByRole('dialog', { name: '错误日志' });
-    expect(within(menu).getByText(/本次运行记录到 1 条/)).toBeInTheDocument();
+    // 顶上那行「本次运行 N 条，上次运行 M 条。」已经去掉：留下来的是记录本身。
+    expect(within(menu).queryByText(/本次运行/)).not.toBeInTheDocument();
     expect(within(menu).getByText('bridge/list_archives')).toBeInTheDocument();
     expect(within(menu).getByText('LANraragi 不可达')).toBeInTheDocument();
     // 顶上那两句说明文字已经去掉：留着的都是眼下的事实。
@@ -156,8 +157,9 @@ describe('settings workspace', () => {
     await user.click(within(about).getByRole('button', { name: '错误日志' }));
     const menu = await screen.findByRole('dialog', { name: '错误日志' });
 
-    await vi.waitFor(() => expect(menu.textContent).toContain('本次运行 1 条，上次运行 1 条'));
-    expect(within(menu).getByText('上次运行 · eh/in-app-login')).toBeInTheDocument();
+    // 顶上那行「本次运行 N 条，上次运行 M 条。」已经去掉：区分靠每条自己的来源前缀。
+    await vi.waitFor(() => expect(within(menu).getByText('上次运行 · eh/in-app-login')).toBeInTheDocument());
+    expect(menu.textContent).not.toContain('本次运行');
     expect(within(menu).getByText('navigate：准备导航到登录页')).toBeInTheDocument();
   });
 
@@ -839,6 +841,10 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
 
+    // 目录还没读回来（这一跑全是空表）：没有该换的东西，就没有小签——「不知道」
+    // 不能画成「有更新」。
+    expect(screen.queryByText('有更新')).toBeNull();
+
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
     await user.click(await screen.findByRole('button', { name: '下载waifu2x' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
@@ -944,6 +950,12 @@ describe('settings workspace', () => {
     // 这一份 fixture 正好也是「有模型可以更新」：启动检查会盖一层弹窗上来，先把那层
     // 收掉再操作页面（弹窗自己的行为在 update-notice.test.tsx 里验）。
     await user.click(await screen.findByRole('button', { name: '跳过该版本' }));
+    // 设置项自己挂着标记：不打开菜单也该知道「这一项里有东西该换了」。它是名称旁的
+    // 一枚小签（`span`），不是行尾那种能点的东西——能点的是菜单里那一行。
+    const upscaleRow = screen.getByRole('button', { name: '超分模型' });
+    const mark = within(upscaleRow).getByText('有更新');
+    expect(mark.tagName).toBe('SPAN');
+    expect(mark.closest('.settings-row-copy')).not.toBeNull();
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
     // 同一个下载动作，只是说法变了：装着的那个不是最新版，就该能再点一次。
     const update = await screen.findByRole('button', { name: '更新Real-CUGAN 2x 漫画（强降噪）' });

@@ -71,6 +71,17 @@ describe('error log panel', () => {
     expect(screen.getByText(/at Fo \(index\.js:6:1\)/)).toBeInTheDocument();
   });
 
+  it('leaves the running count out of the panel head, so the title stands alone', async () => {
+    serve([panicEntry]);
+    renderPanel();
+
+    await screen.findByText('state() called before manage()');
+    // 用户报的「顶部标题下方的小字」：那行「本次运行 N 条，上次运行 M 条。」已经去掉。
+    // 上次运行的记录本来就带着「上次运行 · 」的来源前缀，区分不靠这行字。
+    expect(screen.queryByText(/本次运行/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/上次运行/)).not.toBeInTheDocument();
+  });
+
   it('shows a panic location as the detail with no stack section', async () => {
     const user = userEvent.setup();
     serve([panicEntry]);
@@ -117,7 +128,8 @@ describe('error log panel', () => {
     await user.click(within(dialog).getByRole('button', { name: '清空' }));
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_clear', {}));
-    expect(await screen.findByText('本次与上次运行都没有记录到错误。')).toBeInTheDocument();
+    // 清空之后整块列表收起来（顶上那行计数已经不在界面上，落点是空的列表本身）。
+    expect(screen.queryByRole('list', { name: '错误记录' })).not.toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('已清空 1 条记录');
   });
 

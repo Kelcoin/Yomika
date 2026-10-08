@@ -374,6 +374,7 @@ fn twenty_rounds_of_cancel_and_kill_leave_nothing_behind() {
     let mut cancelled = 0usize;
     let mut lost = 0usize;
     let mut broken_rounds = 0usize;
+    let mut judged_in_the_gap = 0usize;
     let count = rounds();
 
     for round in 0..count {
@@ -441,11 +442,10 @@ fn twenty_rounds_of_cancel_and_kill_leave_nothing_behind() {
         // 读同页。key 一模一样：上一件已经终态，所以这必须是**另一件**任务，
         // 而不是被合并进上一件。
         //
-        // 这里得容忍上面那句检查与下面那次提交之间的那条缝：`end_session` 先把任务判成
-        // `Failed{WORKER_LOST}`（用户先看见的是任务的结论），之后才做重启记账、才把 worker
-        // 判成 `Broken`。熔断正好在这中间亮起的话，这件刚入队的活会被当场判掉（排队的
-        // 东西不许永远躺着），于是这一轮的重试点晚了一步——照界面再做一次就是：点重试，
-        // 再读一次。只有这一种现场允许重来，别的一律照旧红。
+        // 这一轮的重试点：打断本身就可能是熔断那一下（`end_session` 先把任务判完、再去
+        // 重启记账，中间那一段是缝），所以「读到 UNAVAILABLE 且此刻没有一个能干活的
+        // worker」就该照界面再点一次重试，而不是判它失败。**只有这一种现场**允许重来：
+        // 状态是 `Ready` 就说明这一代还活着，那 UNAVAILABLE 别的原因，照旧红。
         let mut attempt = 0u32;
         let (again, read) = loop {
             attempt += 1;
@@ -462,12 +462,15 @@ fn twenty_rounds_of_cancel_and_kill_leave_nothing_behind() {
             if read == JobState::Completed {
                 break (again, read);
             }
-            let tripped_in_the_gap = matches!(
+            let judged_unavailable = matches!(
                 &read,
                 JobState::Failed { code } if code == "COMPUTE_WORKER_UNAVAILABLE"
-            ) && matches!(manager.worker_status(), WorkerStatus::Broken { .. });
-            if tripped_in_the_gap && attempt < 3 {
+            );
+            // 熔断亮着、退避里等着、或者干脆没有会话 —— 三种情况下这一代都接不了活。
+            let no_worker_can_take_it = !matches!(manager.worker_status(), WorkerStatus::Ready { .. });
+            if judged_unavailable && no_worker_can_take_it && attempt < 3 {
                 broken_rounds += 1;
+                judged_in_the_gap += 1;
                 manager.retry_worker();
                 continue;
             }
@@ -505,7 +508,7 @@ fn twenty_rounds_of_cancel_and_kill_leave_nothing_behind() {
         "{count} 轮打断下来熔断一次都没亮过 —— 那说明这套用例没走进「重试」那段路"
     );
     println!(
-        "{count} 轮：取消 {cancelled} 次、强杀 {lost} 次；熔断亮了 {broken_rounds} 次，每次都按界面的做法点了重试"
+        "{count} 轮：取消 {cancelled} 次、强杀 {lost} 次；熔断亮了 {broken_rounds} 次，每次都按界面的做法点了重试；其中 {judged_in_the_gap} 次是「读同页」撞上那条缝被当场判掉的"
     );
     // 进程号被复用这件事不是猜的：把这一跑里重复出现过的号数出来。数大于 0 就说明
     // 「拿号问活着」这类断言在这一跑里本来就会问错人（见 `WorkerId`）。

@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, useLocation } from 'react-router-dom';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { ToastProvider } from '../../src/components/Toast';
@@ -147,6 +147,39 @@ describe('update notice', () => {
     await user.click(within(dialog).getByRole('button', { name: '去更新' }));
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/settings?section=advanced'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('really lands on the advanced settings page when the history is the browser one', async () => {
+    // `MemoryRouter` 不碰 `window.history`，所以「跳过去」在那下面永远看不出毛病；
+    // 这里换成真的浏览器历史：地址栏要停在设置页，关浮层那一下也不许把这一格退回来。
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'app_release_latest') return UP_TO_DATE;
+      if (command === 'inference_list_models') return MODELS_INSTALLED_OLD;
+      if (command === 'model_release_list_upscalers') return CATALOG_NEW;
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    const back = vi.spyOn(window.history, 'back');
+    window.history.replaceState({}, '', '/library');
+    render(
+      <BrowserRouter>
+        <ToastProvider>
+          <UpdateNotice />
+          <LocationProbe />
+        </ToastProvider>
+      </BrowserRouter>,
+    );
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: '去更新' }));
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/settings?section=advanced'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(`${window.location.pathname}${window.location.search}`).toBe('/settings?section=advanced');
+    expect(back, '关掉更新提醒不能顺手退回一页').not.toHaveBeenCalled();
+
+    back.mockRestore();
+    window.history.replaceState({}, '', '/');
   });
 
   it('moves on to the model prompt once the release one is skipped', async () => {

@@ -56,6 +56,8 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
         pushGuard(stack.length);
       },
     };
+    // 压守卫时这一页是哪个地址：关掉它的时候要拿这个判断「还是不是我们那一格」。
+    const guardUrl = currentUrl();
     stack.push(overlay);
     pushGuard(stack.length);
     return () => {
@@ -63,10 +65,20 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
       // 历史里那一条已经被返回手势弹掉了（正是它关掉了这一层），这里不用再动历史。
       if (index < 0) return;
       stack.splice(index, 1);
+      // 这一层是**被一次真跳转带走的**（确认框点了「去更新」、把人送到设置页之类）：地址已经
+      // 不是压守卫时那一个了，说明有人在这条守卫上面压了新的一格（或把它替换掉了）。
+      // 这时再 `history.back()` 正好把刚跳过去的那一格退回来——用户看到的就是「点了没反应」。
+      // 那一条由这次跳转自己收拾，守卫什么都不做。
+      if (currentUrl() !== guardUrl) return;
       selfPops += 1;
       window.history.back();
     };
   }, [open]);
+}
+
+/** 当前地址（不含 hash）：守卫条目压的就是它。 */
+function currentUrl(): string {
+  return `${window.location.pathname}${window.location.search}`;
 }
 
 /** URL 不变，所以路由不动；`idx` 之类的既有状态照搬，react-router 靠它算 pop 的方向。 */

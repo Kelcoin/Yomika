@@ -115,7 +115,10 @@
   top: calc(var(--safe-top) + var(--space-3));
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2;
+  /* 这一层里的序位（不是相对画面）：压住画面靠的是祖先 `.reader-chrome`（它是带
+     z-index 的定位元素，自己开一层）。两条栏在它上面（见 `.reader-chrome-top` /
+     `.reader-toolbar` 的 z-index），所以栏一上来就把这枚胶囊盖住。 */
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -137,7 +140,11 @@
   white-space: nowrap;
   pointer-events: none;
 }
-.reader-chrome:has(.reader-chrome-top) .reader-deriving { top: calc(var(--safe-top) + 68px); }
+/* 「处理中」胶囊**只待在一个地方**。它从前会在顶栏出现时往下挪 68px 去躲那条栏，
+   于是在加载中碰一下顶栏，屏幕上的加载指示就跳一下（用户报的就是这个）——而且那条
+   `:has()` 是拿「栏在不在」当布局输入，等于让装饰去改布局。现在分工反过来：胶囊不
+   动，两条栏是这一层里的最上面一层（z-index 见下），栏上来就把胶囊盖住；栏是**不
+   透明**的（`surface-container`），盖住时看不见它，栏收回去它原地还在。 */
 
 .reader-deriving .loading-mark { display: flex; }
 /* 指示器落在阅读器自己的深色画布上，用亮墨（与 .reader-page-status 同一条）。 */
@@ -330,6 +337,9 @@
    outline-variant 的角色）。 */
 .reader-chrome-top {
   position: absolute;
+  /* 这一层里的最上面一层：栏要盖住「处理中」胶囊，也要盖住画面（画面在
+     `.reader-chrome` 这一层之下，见 `.reader-deriving` 与 `.reader-chrome`）。 */
+  z-index: 2;
   top: 0;
   right: 0;
   left: 0;
@@ -511,6 +521,8 @@
    色调差互相区分。朝向内容那一侧同样留一条 1px 分隔线。 */
 .reader-toolbar {
   position: absolute;
+  /* 与顶栏同一层：两条栏都在胶囊之上（理由见 `.reader-deriving` 上面那段）。 */
+  z-index: 2;
   right: 0;
   bottom: 0;
   left: 0;

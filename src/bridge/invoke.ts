@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { DomainErrorSchema } from '../domain/errors';
+import { DomainErrorSchema, QUIET_ERROR_CODES } from '../domain/errors';
 import { err, ok, type CommandResult } from '../domain/result';
 import { logError } from '../lib/errorLog';
 
@@ -46,8 +46,12 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
     }
 
     if (!parsed.data.ok) {
-      // 失败的命令都要留下现场：这是设置页那份错误日志的主要来源。
-      logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+      // 失败的命令都要留下现场：这是设置页那份错误日志的主要来源。例外是那几个
+      // 「现在就是这样」的码（档案已经不在服务器上、这一页的推理被取消）——它们照样
+      // 按失败返回，但不进日志，免得把真正的现场埋掉。
+      if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
+        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+      }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
 
@@ -86,7 +90,9 @@ export async function invokeBinaryCommand<TRequest extends Record<string, unknow
       return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
     }
     if (!parsed.data.ok) {
-      logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+      if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
+        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+      }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
 

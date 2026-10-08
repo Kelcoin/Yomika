@@ -1300,6 +1300,69 @@ describe('design system contract', () => {
     expect(gridBar).toMatch(/z-index:\s*1/);
   });
 
+  it('draws the model download bar on the option’s own edge instead of growing the row', () => {
+    const base = read('src/styles/base.css');
+    const shell = read('src/styles/shell.css');
+    // 进度槽是这一项的定位后代、贴它自己的底边：它不参与行布局，所以「一下载那一栏
+    // 就变高」不会发生（用户报的正是这个）。设置项那一层不是它的定位上下文——进度
+    // 必须画在点「下载」的那一层里，否则它在菜单遮罩后面。
+    expect(ruleBody(shell, '.settings-choice-option')).toMatch(/position:\s*relative/);
+    const slot = ruleBody(base, '.model-download-slot');
+    expect(slot).toMatch(/position:\s*absolute/);
+    expect(slot).toMatch(/inset:\s*auto 0 1px/);
+    expect(slot).toMatch(/height:\s*4px/);
+    expect(slot).toMatch(/opacity:\s*0/);
+    // 收起/展开只剩一次 opacity：`fr` 轨道那套（grid-template-rows、子元素的
+    // min-height/overflow、槽上的 padding-block）正是把行撑高的东西，不能留着。
+    expect(slot).not.toMatch(/grid-template-rows/);
+    expect(slot).not.toMatch(/padding/);
+    expect(ruleBody(base, '.model-download-slot.is-open')).toMatch(/opacity:\s*1/);
+    expect(ruleBody(base, '.model-download-slot > .model-download-status')).toMatch(/height:\s*100%/);
+    // 轨道与填充取档案卡那一条的数值（轨道 `--surface-container-highest`、填充
+    // `--primary`、圆头），只有高度按这一行的量级收成 4px。
+    const track = ruleBody(base, '.model-download-track');
+    expect(track).toMatch(/height:\s*100%/);
+    expect(track).toMatch(/background:\s*var\(--surface-container-highest\)/);
+    expect(track).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    const fill = ruleBody(base, '.model-download-fill');
+    expect(fill).toMatch(/background:\s*var\(--primary\)/);
+    expect(fill).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    // 行里不再有「换行下来的第二行」：那条 `flex: 1 0 100%` 只会在流里再占一行的高度。
+    expect(shell).not.toMatch(/\.settings-choice-option > \.model-download-slot\s*\{/);
+  });
+
+  it('marks a setting whose models have an update without shaping the mark like a button', () => {
+    const shell = read('src/styles/shell.css');
+    const mark = ruleBody(shell, '.settings-row-mark');
+    expect(mark).toMatch(/background:\s*var\(--primary-container\)/);
+    expect(mark).toMatch(/color:\s*var\(--on-primary-container\)/);
+    expect(mark).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    // 小签挂在名称上而不是控件槽里，而且它是一件**事**：`span`，不是能点的东西
+    // （能点的是菜单里那一行的下载/更新按钮）。
+    const choice = read('src/components/SettingsValueControls.tsx');
+    expect(choice).toMatch(/<span className="settings-row-mark">\{mark\}<\/span>/);
+    expect(choice).toMatch(/mark\?: ReactNode \| undefined;/);
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    expect(settings).toMatch(/mark=\{outdatedUpscaleIds\.size > 0 \? '有更新' : undefined\}/);
+  });
+
+  it('keeps the reader chrome on a layer of its own instead of moving the page it covers', () => {
+    const reader = read('src/styles/reader.css');
+    // 「处理中」胶囊只待在一个地方。从前它在顶栏出现时被一条 `:has()` 往下挪 68px 去
+    // 躲那条栏——于是在加载中碰一下顶栏，屏幕上的加载指示就跳一下（用户报的正是这个），
+    // 而且那条选择器等于拿「栏在不在」当布局输入。
+    expect(reader).not.toMatch(/\.reader-chrome:has\(\.reader-chrome-top\)\s+\.reader-deriving/);
+    const capsule = ruleBody(reader, '.reader-deriving');
+    expect(capsule).toMatch(/z-index:\s*1/);
+    // 两条栏在这一层里最上面：栏上来就把胶囊盖住（栏是不透明的），胶囊不必动。
+    for (const bar of ['.reader-chrome-top', '.reader-toolbar']) {
+      expect(ruleBody(reader, bar), `${bar} 要盖在胶囊与画面之上`).toMatch(/z-index:\s*2/);
+    }
+    // 而「压住画面」这件事只由那一层容器负责：它自己有 z-index，所以子元素各自往哪排
+    // 都还在画面之上，不必每个装饰都去抬一层。
+    expect(ruleBody(reader, '.reader-chrome')).toMatch(/z-index:\s*var\(--z-reader-chrome\)/);
+  });
+
   it('renders the library grid thumbnail with the shared card component', () => {
     const source = read('src/components/LibraryWorkspace.tsx');
     const card = read('src/components/ArchiveThumbnailCard.tsx');
@@ -2066,5 +2129,71 @@ describe('design system contract', () => {
     // 只有后台/静默重读才播动画：翻页追加的行是用户自己滚出来的。
     expect(workspace).toMatch(/collectFreshArchiveIds\(unique, options\.background === true \|\| options\.silent === true\)/);
     expect(workspace).toMatch(/freshArchiveIds=\{freshArchiveIds\}/);
+  });
+
+  it('opens a menu that lives inside a settings panel above that panel', () => {
+    // 图②（用户报的「更多操作点了没反应，过一会儿再点就变成了复制日志」）：Radix 把菜单
+    // portal 到 body，设置面板也挂在 body 上（OverlayLayer），两者是兄弟——菜单的 z 序
+    // 只要比面板小就被整层盖住：先看不见，而 Radix 又把文档其余部分设成
+    // pointer-events: none、只给自己 auto，于是后面落在那片位置的点击正好打在**看不见的
+    // 那一项**上。这一档只能靠 token 的数值关系钉住：肉眼在 jsdom 里看不见。
+    const tokens = read('src/styles/tokens.css');
+    const layer = (token: string): number => {
+      const match = new RegExp(`${token}:\\s*(\\d+);`).exec(tokens);
+      if (!match) throw new Error(`z 层 token 不见了：${token}`);
+      return Number(match[1]);
+    };
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const usedToken = (selector: string): string => {
+      const match = /z-index:\s*var\((--z-[\w-]+)\)/.exec(ruleBody(shell, selector));
+      if (!match) throw new Error(`${selector} 没有声明 z-index`);
+      return match[1]!;
+    };
+
+    const menu = layer(usedToken('.log-menu'));
+    expect(menu, '设置面板里的菜单要排在面板上面，不然它整层都在面板后面').toBeGreaterThan(layer(usedToken('.settings-choice-overlay')));
+    expect(menu, '面板那一层就是 --z-modal：菜单得在它之上').toBeGreaterThan(layer('--z-modal'));
+    expect(menu, '但仍在 toast 与跳转链接之下').toBeLessThan(layer('--z-skip-link'));
+  });
+
+  it('lets the error log inherit the project font, and keeps literal families out of the sheets', () => {
+    // ④（用户报的「错误日志里的字体没用项目统一字体」）：WebView2 不认 `ui-monospace`，
+    // 写死的等宽（或任何字体族字面量）会落到系统默认字体上，看上去就不像这个应用里的字。
+    // 自定义 CSS 那个输入框报的是同一件事，shell.css 里那条修复注释写着同样的理由。
+    const sheets = ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css', 'src/styles/tokens.css'];
+    const seen: string[] = [];
+    const offenders: string[] = [];
+    for (const sheet of sheets) {
+      const css = read(sheet).replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const match of css.matchAll(/font-family:\s*([^;}]+)/g)) {
+        const value = match[1]!.trim();
+        seen.push(`${sheet}: ${value}`);
+        if (!/^(?:var\(--font-(?:body|display|utility)\)|inherit)$/.test(value)) offenders.push(`${sheet}: font-family: ${value}`);
+      }
+    }
+    expect(offenders, '样式表里的字体族只许引 token：写死的族在 WebView2 上会落到系统字体').toEqual([]);
+    expect(seen.length, '这条判据要真的扫到东西，不然它什么都没保证').toBeGreaterThan(10);
+
+    const css = (sheet: string) => read(sheet).replace(/\/\*[\s\S]*?\*\//g, '');
+    const writingSurfaces = sheets.flatMap((sheet) => [...css(sheet).matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+      .filter(([, selector, body]) => /(?:^|[\s,>+~])(?:textarea|input)(?![-\w])/.test(selector!) && body!.includes('font-family'))
+      .map(([, selector]) => `${sheet}: ${selector!.trim().split('\n').pop()}`));
+    expect(writingSurfaces, '要在里面写字的控件跟随正文字体（base.css 的 `font: inherit` 就是那条规则）').toEqual([]);
+
+    const errorLogFamilies = [...read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*\.error-log-[\w-]*[^{}]*)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => body!.includes('font-family'))
+      .map(([, selector]) => selector!.trim().split('\n').pop());
+    expect(errorLogFamilies, '错误日志里的字要跟着项目正文走，展开的详情也是').toEqual([]);
+  });
+
+  it('keeps the severity band of an error log row out of the hover paint', () => {
+    // 图②那一半（「hover 效果溢出」）：色带原来是 `box-shadow: inset 3px 0 0`，而悬停底色
+    // 画在行内容盒里、圆角还压在色带上——放大看就是色带被高亮底色切成两段。色带改成占位
+    // 的左边框：它有自己的那一格，悬停底色再也盖不到它。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const entry = ruleBody(shell, '.error-log-entry');
+    expect(entry, '严重度色带要占住自己那一格，不能是 inset 阴影').toMatch(/border-left:\s*3px solid var\(--state-danger\)/);
+    expect(entry, 'inset 阴影会被悬停底色盖住').not.toMatch(/box-shadow/);
+    expect(ruleBody(shell, '.error-log-entry.is-warn')).toMatch(/border-left-color:\s*var\(--state-warning\)/);
   });
 });

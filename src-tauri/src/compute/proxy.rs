@@ -440,7 +440,10 @@ fn run_finished(
             message: "这一页的处理已取消".to_string(),
             retryable: false,
         }),
-        JobState::Failed { code } => Err(failure(code)),
+        JobState::Failed { code } => {
+            let note = manager.failure_note(&submitted.job_id);
+            Err(failure(code, note.as_deref()))
+        }
         // 终态之外的状态不可能从这里出去（`wait_for_terminal` 只看终态）；真出现了
         // 说明调度器坏了，不能装作成功。
         other => Err(ProxyError {
@@ -556,7 +559,12 @@ const TRANSIENT_CODES: [&str; 6] = [
     "COMPUTE_INTERNAL",
 ];
 
-fn failure(code: String) -> ProxyError {
+/// 把 worker 报的失败码翻成前端认识的那一个，并把「为什么」一起写进文案。
+///
+/// `note` 是 worker 自己对这次失败的原话（`ComputeManager::failure_note`）。调度器只把码
+/// 交出来，所以重试/翻译那一套都只看码——可码说不清「算不出来」是哪一种，机器上真出事
+/// 时只有这句话能指路。它是**给日志的**，不是给程序判断的：码仍然只认这里翻出来的那个。
+fn failure(code: String, note: Option<&str>) -> ProxyError {
     // 第一遍：旧词汇里有对应词的就翻过去（同一条命令不许两套词）。
     let legacy = match code.as_str() {
         "COMPUTE_RESOURCE_LIMIT" | "GPU_BACKEND_UNAVAILABLE" | "GPU_OUTPUT_INVALID"
@@ -586,6 +594,11 @@ fn failure(code: String) -> ProxyError {
     let message = match mapped == code.as_str() {
         true => format!("计算进程没能交出这一页（{code}）"),
         false => format!("计算进程没能交出这一页（{code} ⇒ {mapped}）"),
+    };
+    // worker 的原话跟在后面。空话（旧包不报原因）就当没说过。
+    let message = match note.map(str::trim).filter(|note| !note.is_empty()) {
+        Some(note) => format!("{message}：{note}"),
+        None => message,
     };
     ProxyError {
         code: mapped,
@@ -632,7 +645,7 @@ mod tests {
             ("COMPUTE_ARTIFACT_INVALID", "COMPUTE_ARTIFACT_INVALID", true),
         ];
         for (incoming, expected_code, expected_retryable) in cases {
-            let error = failure(incoming.to_string());
+            let error = failure(incoming.to_string(), None);
             assert_eq!(error.code, expected_code, "码翻译错了：{incoming}");
             assert_eq!(
                 error.retryable, expected_retryable,
@@ -648,7 +661,7 @@ mod tests {
     /// 否则日志里再也查不到它到底是什么。
     #[test]
     fn an_unknown_code_is_not_invented_into_something_familiar() {
-        let error = failure("COMPUTE_SOMETHING_NEW".to_string());
+        let error = failure("COMPUTE_SOMETHING_NEW".to_string(), None);
         assert_eq!(error.code, "COMPUTE_INTERNAL");
         assert!(!error.retryable, "说不清能不能重试时不许说能");
         assert!(
@@ -658,9 +671,42 @@ mod tests {
         );
     }
 
+    /// worker 自己那句「为什么」要跟着码一起进文案：码能让人知道该不该重试，只有这句话
+    /// 能让人知道这台机器上到底卡在哪一步（NGX 说尺寸不对、模型说张量不对……）。
+    #[test]
+    fn a_workers_own_reason_rides_along_with_the_code() {
+        let note = "DLSSNR 在这一页上没跑成：图太小（16x16）：DLSSNR 至少要 32x32";
+        let error = failure("COMPUTE_INTERNAL".to_string(), Some(note));
+        assert_eq!(error.code, "COMPUTE_INTERNAL", "码是给前端认的，翻译只看码");
+        assert!(
+            error.message.contains("COMPUTE_INTERNAL"),
+            "原码得留下：{}",
+            error.message
+        );
+        assert!(
+            error.message.contains(note),
+            "worker 的原话被吞了：{}",
+            error.message
+        );
+        // 翻译过的码也一样带着那句话（两条路只差前半句）。
+        let translated = failure("COMPUTE_RESOURCE_LIMIT".to_string(), Some(note));
+        assert_eq!(translated.code, "INFERENCE_UNAVAILABLE");
+        assert!(translated.message.contains(note), "{}", translated.message);
+        // 「没说」与「说了个空」都不该在文案尾巴上留一个孤零零的冒号。
+        for silent in [None, Some(""), Some("   ")] {
+            let quiet = failure("COMPUTE_INTERNAL".to_string(), silent);
+            assert_eq!(
+                quiet.message, "计算进程没能交出这一页（COMPUTE_INTERNAL）",
+                "没报原因就不该多出标点：{}",
+                quiet.message
+            );
+        }
+    }
+
     /// 扩展名只按内容认：一段真文件头就够，字节本身用不着能解码。
     #[test]
     fn the_extension_follows_the_bytes_not_the_caller() {
+
         assert_eq!(extension_for(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a]), "png");
         assert_eq!(extension_for(&[0xff, 0xd8, 0xff, 0xe0]), "jpg");
         assert_eq!(extension_for(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "webp");
