@@ -64,4 +64,22 @@ describe('NativeImageCacheAdapter', () => {
     const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', op: 'dlssnr', modelId: '', scale: 2, passes: '' });
     expect(createImageCacheKey(identity)).not.toBe(createImageCacheKey({ ...identity, transform: otherDevice }));
   });
+
+  it('refuses to run a model in the host for the two computed renditions', async () => {
+    // 去码与超分这两版现在整条由 compute 那条链产出（宿主提交、worker 执行、产物认领）。
+    // 拦一道不是为了「不拦就会读错图」——不拦会掉到下面那句笼统的 `Unsupported image
+    // request`——而是因为出了这种事，日志里得写清楚：这两版归 compute 管，别在宿主里开模型。
+    const adapter = vi.fn(async (command: string) => {
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeImageCacheAdapter();
+
+    for (const rendition of ['decensored', 'enhanced'] as const) {
+      await expect(
+        repository.fetch({ scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition, pageIndex: 0 }),
+      ).rejects.toThrow(/compute/);
+    }
+    expect(adapter).not.toHaveBeenCalled();
+  });
 });

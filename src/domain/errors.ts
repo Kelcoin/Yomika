@@ -56,6 +56,38 @@ export const DomainErrorCodeSchema = z.enum([
   /** GitHub 那边没回话/超时。分开记是因为这一个值得过一会儿再试，前者通常是
    * 我们的解析或网络配置的问题。 */
   'APP_RELEASE_UNREACHABLE',
+  /** 重计算（宿主编排 + 独立 worker 进程）那一路的码，见 docs/71 §6.6。
+   *
+   * 这张表是闭集，桥接拿它校验**整条**错误信封：没登记过的码不是「原样透传」，而是
+   * 整条被判成 `INVALID_RESPONSE`——真正的理由（worker 起不来、GPU 拿不到、排队满）
+   * 反而看不见。所以宿主会发的每一个码都必须在这里有一行；上面 NETWORK 那几行的
+   * 注释说的就是同一个坑。
+   */
+  'COMPUTE_WORKER_UNAVAILABLE',
+  'COMPUTE_PROTOCOL_MISMATCH',
+  'COMPUTE_WORKER_LOST',
+  /** 同一个 worker 同时只伺候一个重任务：它正忙的时候第二份提交会被拒。 */
+  'COMPUTE_WORKER_BUSY',
+  'COMPUTE_QUEUE_FULL',
+  'COMPUTE_RESOURCE_LIMIT',
+  'COMPUTE_TIMEOUT',
+  'GPU_OUTPUT_INVALID',
+  'GPU_BACKEND_UNAVAILABLE',
+  'COMPUTE_ARTIFACT_INVALID',
+  'COMPUTE_ARTIFACT_REJECTED',
+  /** 交给 worker 的那份只读输入读不到、或者内容和声明对不上：这次运行没开始算就作废。 */
+  'COMPUTE_INPUT_INVALID',
+  /** 这一段要的模型在这台机器上没有可用的那份（没下载、没装完、安装目录有歧义）。 */
+  'COMPUTE_MODEL_UNAVAILABLE',
+  'COMPUTE_CANCELLED',
+  'COMPUTE_INTERNAL',
+  'COMPUTE_BAD_REQUEST',
+  /** 编排没起来（worker 可执行文件不在、控制线程起不来）：现在算不了，但这不是崩溃。 */
+  'COMPUTE_UNAVAILABLE',
+  /** 图片租借：URL 只认租借号，这三种都是「这张图现在取不了」。 */
+  'COMPUTE_LEASE_UNKNOWN',
+  'COMPUTE_LEASE_EXPIRED',
+  'COMPUTE_LEASE_WRONG_WINDOW',
 ]);
 
 export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;

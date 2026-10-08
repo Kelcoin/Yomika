@@ -1,0 +1,61 @@
+[package]
+name = "yomika-compute-worker"
+version = "0.1.0"
+description = "Yomika 计算 worker：不启动 Tauri 的独立进程，只跑重算（docs/71 §5.1、Task 3）"
+edition = "2021"
+license = "MIT"
+
+# 这个包同时是 lib 与 bin：bin 是真正要交付的 worker 可执行文件，lib 让它的协议会话
+# 能脱离进程边界被测（`tests/worker_protocol.rs` 用内存双工冒充宿主）。
+[lib]
+name = "yomika_compute_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yomika-compute-worker"
+path = "src/main.rs"
+
+[dependencies]
+# 只依赖协议、计算核心与传输：worker 不链接 tauri/rusqlite/reqwest，也不认识宿主侧的
+# 任何东西（docs/71 §5.2 的同一条边界）。
+#
+# `cpu` feature 把 ONNX 执行体（`yomika_compute_core::onnx`）与运行库策略（`runtime`）
+# 编进 worker。DirectML 在下面的 windows 段里合并进来——与宿主完全同形，理由见那一段。
+yomika-compute-core = { path = "../crates/compute-core", features = ["cpu"] }
+yomika-compute-protocol = { path = "../crates/compute-protocol" }
+# 命名管道两端归传输 crate 所有：宿主与 worker 共用同一份重叠 IO 实现。
+yomika-compute-transport = { path = "../crates/compute-transport" }
+# artifact 的 contentHash。宿主会自己重新 stream 一遍 hash（§7.3 第 2 步），worker 报的
+# 只是元数据；但这一栏是必填，且回贴给宿主后要能对上。
+blake3 = "1"
+# 真引擎要解一张宿主授权的图（PNG/JPEG/WebP）、算完再编码成 PNG 写回 staging。
+# 与宿主用同一个版本与同一组格式开关（`src-tauri/Cargo.toml` 里那条 image）——两边解的
+# 必须是同一张图，不能因为解码器版本不同而漂（docs/71 §5.3）。
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# GPU 那条路（docs/71 §5.1：把重算搬出去是为了让它在显卡上跑，而不是只为了不卡界面）。
+#
+# Task 8-b 之前这里只开 `cpu`，理由是「GPU 只在 Windows 桌面上，那一条由宿主的 windows
+# 段决定」——那个理由有一半是错的：宿主开 feature **不会**传播给一个独立 `-p` 构建的
+# worker（`cargo build -p yomika-compute-worker` 的依赖图里没有宿主），所以真到打包时
+# worker 只能是 CPU 进程。docs/81 把这件事记成了欠账，钉子 `pipeline.rs` 里那条测试
+# 就是它的判据。
+#
+# feature 会合并：桌面全平台要 `cpu`（上面的 base 依赖），Windows 上再要 `directml`，
+# 与宿主 `src-tauri/Cargo.toml` 的写法逐字同形。运行时不需要额外搬运：worker 与主程序
+# 同目录（`compute::worker_binary_path`），而 `onnxruntime.dll` / `DirectML.dll` 正是
+# 宿主那一份需要摆在那儿的库（`.github/scripts/build-windows.ps1` 负责）。
+#
+# `dlssnr` 是 Task 8-g④ 加的那一档：NGX 的初始化只能在 worker 里发生（docs/71 §11 Task 8
+# 第 2 条），而 NGX 引擎本体住在计算核心里（`crates/compute-core/src/dlssnr/`，docs/103）。
+# 它同时把核心那半边的 `image/gif|png|webp` 打开——DLSSNR 要逐帧解码动图再编回 APNG。
+[target."cfg(windows)".dependencies]
+yomika-compute-core = { path = "../crates/compute-core", features = ["directml", "dlssnr"] }
+
+[target."cfg(windows)".dev-dependencies]
+# `tests/worker_process.rs` 要自己当一次宿主：建命名管道、接上自己 spawn 的 worker、
+# 核对 peer PID。生产侧的管道服务器在传输 crate 里（`server.rs`），这里只借同一组
+# Win32 调用把「独立进程闭环」这条退出条件测出来。
+# 除管道本身，`CreateNamedPipeW` 还被 Security/Storage_FileSystem 门住、
+# `ConnectNamedPipe` 被 System_IO 门住（OVERLAPPED 参数），照编译器给的清单补齐。
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }

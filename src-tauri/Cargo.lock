@@ -5601,12 +5601,9 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "blake3",
- "cc",
  "image",
- "image-webp",
  "keyring",
  "ort",
- "png 0.18.1",
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
@@ -5621,7 +5618,55 @@ dependencies = [
  "unicode-normalization",
  "url",
  "windows 0.62.2",
+ "yomika-compute-core",
+ "yomika-compute-protocol",
+ "yomika-compute-transport",
  "zip",
+]
+
+[[package]]
+name = "yomika-compute-core"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "cc",
+ "image",
+ "image-webp",
+ "ort",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "windows 0.62.2",
+ "yomika-compute-protocol",
+]
+
+[[package]]
+name = "yomika-compute-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "yomika-compute-transport"
+version = "0.1.0"
+dependencies = [
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "yomika-compute-worker"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "image",
+ "windows 0.62.2",
+ "yomika-compute-core",
+ "yomika-compute-protocol",
+ "yomika-compute-transport",
 ]
 
 [[package]]

@@ -100,25 +100,6 @@ export class NativeInferenceRepository {
   static modelAssetUrl(mirror: ModelMirrorId, ownerRepo: string, tag: string, path: string, customPrefix = ''): string {
     return buildModelAssetUrl(mirrorPrefix(mirror, customPrefix), ownerRepo, tag, path);
   }
-  /** Upscales one cached reader page; the result is stored as the `enhanced`
-   * rendition, keyed by scale and model version. */
-  /** `modelId` names an installed model; the native side resolves its newest
-   * version and reads the scale from that model's manifest, so the caller does
-   * not get to ask for a scale the model cannot produce. */
-  /** `source` says which rendition this step reads: the plain page (default) or
-   * `decensored`, the previous step's output. With `decensored` the native side
-   * also needs `decensorModel` — the rendition is keyed by the bundle that made
-   * it, so it can only be found by the same id. */
-  upscalePage(input: { scopeId: string; archiveId: string; pageIndex: number; scale?: number; modelId?: string; decensorModel?: string; source?: 'reader-page' | 'decensored'; tileSize?: number; tileSleepMs?: number; taskId?: string; priority?: 'foreground' | 'background' }): Promise<CommandResult<ArrayBuffer>> {
-    return invokeBinaryCommand('inference_upscale_page', { input });
-  }
-
-  /** Runs the de-censoring bundle over one cached reader page; the result is
-   * stored as the `decensored` rendition, keyed by bundle version. */
-  decensorPage(input: { scopeId: string; archiveId: string; pageIndex: number; modelId: string; taskId?: string; priority?: 'foreground' | 'background' }): Promise<CommandResult<ArrayBuffer>> {
-    return invokeBinaryCommand('inference_decensor_page', { input });
-  }
-
   /** 取消一个正在跑的阅读器推理任务（切页、关开关、离开阅读器）。
    *
    * 前端丢掉结果不等于原生停手：一页 4K 在 CPU 上要十几秒，而全局只允许一件重活，

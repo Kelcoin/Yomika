@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$Release,
     [switch]$SkipFrontend,
@@ -108,6 +108,17 @@ try {
     # 产物里的构建戳必须等于构建时的 HEAD（审计 P2-3）。对不上就在这里失败：脚本打印
     # 「构建成功」与产物真的换了是两件事。
     & (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $output
+
+    # 计算 worker 是**另一份 exe**，`cargo build -p yomika` 不会顺手编它（Task 10 第①条）。
+    # 宿主按 exe 同级目录找它，所以交付目录 = 主 exe 所在目录；两半读同一个
+    # `YOMIKA_BUILD_COMMIT`（上面已经放进环境），握手时对得上才肯用。
+    $workerArgs = @{
+        Destination = $targetDir
+    }
+    if (-not $Release) { $workerArgs["DebugBuild"] = $true }
+    if ($UseHostTools) { $workerArgs["UseHostTools"] = $true }
+    if ($ToolchainRoot) { $workerArgs["ToolchainRoot"] = $ToolchainRoot }
+    & (Join-Path $PSScriptRoot "build-compute-worker.ps1") @workerArgs
     # Ship the bundled model beside the portable executable so a fresh package
     # works immediately and uses the same fixed data/models path as the app.
     $bundledModel = Join-Path $repoRoot "src-tauri\resources\models\waifu2x-upconv7"
@@ -124,6 +135,20 @@ try {
         Write-Host "Bundled model copied to: $portableModel"
     }
     Write-Host "Windows portable executable: $output"
+
+    # 交付包自检（`docs/71:660`）：主 exe / worker / 运行库 / 随包模型这一份便携目录得自洽
+    # ——版本一致、运行库是真文件、没有随包的 NGX 垫片与片段。用 `-Stage`：源目录旁边是
+    # 开发机的构建残渣与用户的活数据，把那些算成包只会让这条判据在开发机上永远红着。
+    #
+    # 单起一个 pwsh：那个脚本用 `exit 1` 报不过，同一个进程里 `&` 调用会把这一趟构建
+    # 一起结束掉（`exit` 退的是整个会话，不只是那个脚本）。
+    $packageCheck = Join-Path ([System.IO.Path]::GetTempPath()) ("yomika-package-check-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        & pwsh -NoProfile -File (Join-Path $PSScriptRoot "verify-compute-package.ps1") -Stage $packageCheck
+        if ($LASTEXITCODE -ne 0) { throw "交付包自检没过（exit=$LASTEXITCODE）" }
+    } finally {
+        if (Test-Path -LiteralPath $packageCheck) { Remove-Item -LiteralPath $packageCheck -Recurse -Force }
+    }
 } finally {
     Pop-Location
     $env:Path = $oldPath

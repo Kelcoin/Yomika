@@ -6362,3 +6362,18 @@ body::-webkit-scrollbar,
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
+
+/* 「计算进程不在 / 不可用」那一条（§12.3）。
+ *
+ * 位置：顶部居中、贴着阅读器自己的 chrome 之上（z-index 取 --z-toast，和提示条同层：
+ * 它是全应用的一条状态，不该被某条路由的层叠上下文关在里面）。用顶部而不是角落，是因为
+ * 它要能压住全屏阅读器，而阅读器的上下两条栏都在顶部/底部——放中间横一条最不会被误当成页面内容。
+ *
+ * 触控穿透：整条只做陈述，只有「重试」那个按钮收点击（pointer-events 在容器上关掉、
+ * 在按钮上打开）。一条状态条吞掉页面上的点按，就是网页在告诉用户它是网页。
+ *
+ * 颜色走主题自己的 tonality：不可用用 --error，恢复中用 --primary，两个主题下都读得清。 */
+.compute-worker-notice { position: fixed; z-index: var(--z-toast); top: var(--space-5); left: 50%; display: flex; align-items: center; gap: var(--space-3); max-width: min(720px, calc(100vw - 32px)); padding: 8px var(--space-3) 8px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-pill); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); font-size: var(--text-sm); line-height: var(--leading-snug); transform: translateX(-50%); pointer-events: none; overflow-wrap: anywhere; }
+.compute-worker-notice[data-worker-state='unavailable'] { color: var(--error); }
+.compute-worker-notice[data-worker-state='recovering'] { color: var(--primary); }
+.compute-worker-retry { padding: 4px 12px; border: 1px solid currentColor; border-radius: var(--radius-pill); background: transparent; color: inherit; font: inherit; font-weight: var(--weight-semibold); cursor: pointer; pointer-events: auto; }

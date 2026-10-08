@@ -505,30 +505,34 @@ fn validate_reader_archive_path(candidate: &str) -> Result<String, String> {
     Ok(candidate.to_string())
 }
 
-fn reader_page_cache_key(scope_id: &str, archive_id: &str, page_index: i64) -> String {
-    crate::cache::image_cache_key(&crate::cache::CacheImageIdentity::new(
-        scope_id,
-        archive_id,
-        "reader-page",
-        page_index,
-    ))
+fn reader_page_identity(
+    scope_id: &str,
+    archive_id: &str,
+    page_index: i64,
+) -> crate::cache::CacheImageIdentity {
+    crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index)
 }
 
+fn reader_page_cache_key(scope_id: &str, archive_id: &str, page_index: i64) -> String {
+    crate::cache::image_cache_key(&reader_page_identity(scope_id, archive_id, page_index))
+}
+
+/// 这两条走的是「锁外落盘/读盘」的那一版：一页图可能上兆，读文件与算摘要都不该
+/// 占着全局 DB 锁（偏好、书架、搜索都排在那把锁后面）。
 fn load_reader_page_cache(
-    connection: &rusqlite::Connection,
+    database: &crate::db::Database,
     app_data: &std::path::Path,
     scope_id: &str,
     archive_id: &str,
     page_index: i64,
 ) -> Result<Option<Vec<u8>>, String> {
-    let identity =
-        crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
-    crate::cache::load_image_cache(connection, app_data, &identity)
+    let identity = reader_page_identity(scope_id, archive_id, page_index);
+    crate::cache::read_cached_image(database, app_data, &identity)
         .map(|image| image.map(|image| image.bytes))
 }
 
 fn store_reader_page_cache(
-    connection: &rusqlite::Connection,
+    database: &crate::db::Database,
     app_data: &std::path::Path,
     scope_id: &str,
     archive_id: &str,
@@ -536,9 +540,8 @@ fn store_reader_page_cache(
     mime: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let identity =
-        crate::cache::CacheImageIdentity::new(scope_id, archive_id, "reader-page", page_index);
-    crate::cache::store_image_cache(connection, app_data, &identity, mime, bytes)
+    let identity = reader_page_identity(scope_id, archive_id, page_index);
+    crate::cache::write_cached_image(database, app_data, &identity, mime, bytes)
 }
 
 fn server_connection(
@@ -3696,13 +3699,7 @@ async fn load_reader_page_bytes(
             ))
         }
     };
-    let cached = database
-        .connection
-        .lock()
-        .map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| {
-            load_reader_page_cache(&connection, &app_data, &scope_id, &archive_id, page_index)
-        });
+    let cached = load_reader_page_cache(&database, &app_data, &scope_id, &archive_id, page_index);
     match cached {
         Ok(Some(bytes)) => return Ok(CommandResult::success(bytes)),
         Ok(None) => {}
@@ -3752,20 +3749,18 @@ async fn load_reader_page_bytes(
         .to_string();
     match response.bytes().await {
         Ok(bytes) => {
-            if let Ok(connection) = database.connection.lock() {
-                // A failed cache write means every later read re-fetches, so it
-                // must not vanish silently.
-                if let Err(error) = store_reader_page_cache(
-                    &connection,
-                    &app_data,
-                    &scope_id,
-                    &archive_id,
-                    page_index,
-                    &mime,
-                    &bytes,
-                ) {
-                    eprintln!("yomika: reader page cache write failed: {error}");
-                }
+            // A failed cache write means every later read re-fetches, so it
+            // must not vanish silently.
+            if let Err(error) = store_reader_page_cache(
+                &database,
+                &app_data,
+                &scope_id,
+                &archive_id,
+                page_index,
+                &mime,
+                &bytes,
+            ) {
+                eprintln!("yomika: reader page cache write failed: {error}");
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -3815,13 +3810,7 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         }
     };
     let cache_identity = crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "cover", 0);
-    match database
-        .connection
-        .lock()
-        .map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| {
-            crate::cache::load_image_cache(&connection, &app_data, &cache_identity)
-        }) {
+    match crate::cache::read_cached_image(&database, &app_data, &cache_identity) {
         Ok(Some(image)) => return Ok(CommandResult::success(image.bytes)),
         Ok(None) => {}
         Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
@@ -3952,16 +3941,14 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         .to_string();
     match response.bytes().await {
         Ok(bytes) => {
-            if let Ok(connection) = database.connection.lock() {
-                if let Err(error) = crate::cache::store_image_cache(
-                    &connection,
-                    &app_data,
-                    &cache_identity,
-                    &mime,
-                    &bytes,
-                ) {
-                    eprintln!("yomika: image cache write failed: {error}");
-                }
+            if let Err(error) = crate::cache::write_cached_image(
+                &database,
+                &app_data,
+                &cache_identity,
+                &mime,
+                &bytes,
+            ) {
+                eprintln!("yomika: image cache write failed: {error}");
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
@@ -4023,13 +4010,7 @@ async fn load_archive_page_thumbnail_bytes(
     };
     let cache_identity =
         crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "page-thumbnail", page - 1);
-    match database
-        .connection
-        .lock()
-        .map_err(|_| "Database lock failed".to_string())
-        .and_then(|connection| {
-            crate::cache::load_image_cache(&connection, &app_data, &cache_identity)
-        }) {
+    match crate::cache::read_cached_image(&database, &app_data, &cache_identity) {
         Ok(Some(image)) => return Ok(CommandResult::success(image.bytes)),
         Ok(None) => {}
         Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
@@ -4048,16 +4029,14 @@ async fn load_archive_page_thumbnail_bytes(
         Ok(CommandResult::Success { value, .. }) => value,
         other => return other,
     };
-    if let Ok(connection) = database.connection.lock() {
-        if let Err(error) = crate::cache::store_image_cache(
-            &connection,
-            &app_data,
-            &cache_identity,
-            "application/octet-stream",
-            &bytes,
-        ) {
-            eprintln!("yomika: image cache write failed: {error}");
-        }
+    if let Err(error) = crate::cache::write_cached_image(
+        &database,
+        &app_data,
+        &cache_identity,
+        "application/octet-stream",
+        &bytes,
+    ) {
+        eprintln!("yomika: image cache write failed: {error}");
     }
     Ok(CommandResult::success(bytes))
 }
@@ -9174,7 +9153,11 @@ mod tests {
 
     #[test]
     fn reader_page_file_cache_is_content_addressed_scoped_and_self_healing() {
-        let connection = migrated_connection();
+        // 走 `Database` 而不是裸连接：这两条助手现在是「自己拿锁、锁外读盘/落盘」
+        // 的那一版，测试要量的就是产品实际走的那条路。
+        let database = crate::db::Database {
+            connection: std::sync::Mutex::new(migrated_connection()),
+        };
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -9186,7 +9169,7 @@ mod tests {
         let bytes = b"reader page";
 
         store_reader_page_cache(
-            &connection,
+            &database,
             &app_data,
             "scope-a",
             "archive-a",
@@ -9196,15 +9179,15 @@ mod tests {
         )
         .expect("stored page");
         assert_eq!(
-            load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(),
+            load_reader_page_cache(&database, &app_data, "scope-a", "archive-a", 0).unwrap(),
             Some(bytes.to_vec())
         );
         assert_eq!(
-            load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(),
+            load_reader_page_cache(&database, &app_data, "scope-b", "archive-a", 0).unwrap(),
             None
         );
         store_reader_page_cache(
-            &connection,
+            &database,
             &app_data,
             "scope-b",
             "archive-a",
@@ -9214,18 +9197,24 @@ mod tests {
         )
         .expect("shared content stored for second scope");
         assert_eq!(
-            load_reader_page_cache(&connection, &app_data, "scope-b", "archive-a", 0).unwrap(),
+            load_reader_page_cache(&database, &app_data, "scope-b", "archive-a", 0).unwrap(),
             Some(bytes.to_vec())
         );
         assert_eq!(
-            connection
+            database
+                .connection
+                .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             2
         );
 
-        let relative_path: String = connection
+        let relative_path: String = database
+            .connection
+            .lock()
+            .unwrap()
             .query_row(
                 "SELECT path FROM cache_entries WHERE key=?1",
                 [reader_page_cache_key("scope-a", "archive-a", 0)],
@@ -9248,11 +9237,14 @@ mod tests {
 
         std::fs::write(&stored_path, b"corrupt").unwrap();
         assert_eq!(
-            load_reader_page_cache(&connection, &app_data, "scope-a", "archive-a", 0).unwrap(),
+            load_reader_page_cache(&database, &app_data, "scope-a", "archive-a", 0).unwrap(),
             None
         );
         assert_eq!(
-            connection
+            database
+                .connection
+                .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),

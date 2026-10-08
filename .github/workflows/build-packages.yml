@@ -66,21 +66,11 @@ jobs:
         run: ./.github/scripts/build-windows.ps1 -Release -UseHostTools
       - name: Package Windows zip
         shell: pwsh
-        run: |
-          $target = 'src-tauri/target/release'
-          $exe = Join-Path $target 'yomika.exe'
-          $directMl = Join-Path $target 'DirectML.dll'
-          $model = Join-Path $target 'data/models/waifu2x-upconv7'
-          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing portable executable: $exe" }
-          if (-not (Test-Path -LiteralPath $directMl)) { throw "Missing runtime library: $directMl" }
-          if (-not (Test-Path -LiteralPath $model -PathType Container)) { throw "Missing bundled model: $model" }
-          $stage = 'artifacts/yomika-windows'
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item -LiteralPath $exe -Destination $stage -Force
-          Copy-Item -LiteralPath $directMl -Destination $stage -Force
-          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data/models') | Out-Null
-          Copy-Item -LiteralPath $model -Destination (Join-Path $stage 'data/models') -Recurse -Force
-          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'artifacts/yomika-windows.zip' -Force
+        # 打包这件事只在这里写一遍。原来那段内联的 Copy-Item 漏了计算进程那一份
+        # 可执行文件：包里没有 worker 时主窗照样起得来，只是算力那一栏只能报
+        # 「找不到 worker 可执行文件」（冷启动自检在 2026-10-08 就是这么红的）。
+        # 脚本里那四样缺一件就红，末尾还会跑一遍包自检。
+        run: ./.github/scripts/package-windows.ps1 -TargetDir src-tauri/target/release -Stage artifacts/yomika-windows -Output artifacts/yomika-windows.zip -Manifest artifacts/release-manifest.json
       - name: Publish the Windows package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -88,10 +78,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 清单跟着包一起发：它写着逐文件 sha256、随包模型、两份构建戳、协议大版本、
+          # 许可证与已知限制指针（docs/71:666）。原来只有 CI 摘要里那一行 hash，
+          # 翻不回来；现在下载页上多一个 json，谁都能拿它对一遍。
           bash .github/scripts/publish-assets.sh \
             "${{ needs.prepare-release.outputs.tag }}" \
             "${{ needs.prepare-release.outputs.draft }}" \
-            windows-x64 artifacts/yomika-windows.zip
+            windows-x64 artifacts/yomika-windows.zip artifacts/release-manifest.json
 
   android:
     needs: [prepare-release]

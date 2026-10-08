@@ -33,6 +33,9 @@ mod tests {
         ("commands/library.rs", include_str!("commands/library.rs")),
         ("commands/platform.rs", include_str!("commands/platform.rs")),
         ("commands/sync.rs", include_str!("commands/sync.rs")),
+        // 重计算编排的命令层：只入队 / 只读小状态，一条都不等计算。登记在这里是因为它
+        // 同样是「新命令别把等待搬回 UI 线程」这条不变量的管辖范围。
+        ("compute/commands.rs", include_str!("compute/commands.rs")),
         ("compute_center.rs", include_str!("compute_center.rs")),
         ("credentials.rs", include_str!("credentials.rs")),
         ("dedup.rs", include_str!("dedup.rs")),

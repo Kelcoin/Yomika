@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 
@@ -8,20 +9,293 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { getNativeImageCache } from '../../src/lib/nativeImageCache';
 import type { ImageHandle } from '../../src/lib/unifiedImageCache';
 
+/** 这一页算出来的成品（会话预算按 `bytes` 算，`url` 就是上屏那一个）。 */
+interface HostLease {
+  url: string;
+  bytes: number;
+  estimatedDecodedBytes?: number;
+}
+
+/** 宿主那道门（`compute_submit_reader_page`）在这一组测试里的替身。
+ *
+ * 这里**不能** `vi.mock('src/lib/readerComputedPage')`：`tests/setup.ts:13-15` 在测试文件
+ * 之前就把 `ReaderRoute` 预加载了，组件那时已经绑定了真的那个模块；测试文件里的 `vi.mock`
+ * 只换得掉测试自己这一侧的引用（这一轮真踩过：门绑的还是真函数，`mock.calls` 永远是 0，
+ * 而页面上的行为又确实发生了）。仓库里既有的那条路是 `setInvokeAdapterForTests`：命令名、
+ * 参数名、应答形状与真实宿主一致（见 `src/repositories/nativeComputeRepository.ts`），
+ * 阅读器那一侧跑的是真代码——比换掉整扇门更值得信。
+ *
+ * 门自己的协议（先订阅再提交、只认核验过的产物、取消、认领不重复还租借）由
+ * `tests/lib/reader-computed-page.test.ts` 逐条钉住；这里要的是「阅读器会不会去叫它、
+ * 叫了几次、什么时候把它退掉」。 */
+/** 一份任务里的两个阶段。链式两阶段（去码 → 超分）是**一件任务**，产物按阶段各一件。 */
+type HostStage = 'decensor' | 'upscale';
+
+let hostLease: (pageIndex: number, stage: HostStage) => Promise<HostLease> = async (pageIndex, stage) => ({
+  url: `blob:${stage === 'decensor' ? 'decensored' : 'enhanced'}-${pageIndex}`,
+  bytes: 1,
+});
+let hostSubmitFails = false;
+let hostAcquireNeverLands = false;
+/** jobId → 哪一页、这件任务有几个阶段：产物与租借那几条命令只带 jobId（+ 产物号）。 */
+const hostJobs = new Map<string, { pageIndex: number; stages: HostStage[] }>();
+/** 一份成品只问一次：门自己要问两次（列表 + 租借），用例给的成品是一份。按阶段分开记。 */
+const hostLeases = new Map<string, Promise<HostLease>>();
+let hostJobSequence = 0;
+/** 门收到了哪些命令，按顺序。用例拿它数「算了几次」、验「租借还回去了没有」。 */
+let hostCommands: string[] = [];
+/** 宿主在这份产物上报的引擎交代（7-b-ix 的两栏）。默认「没交代」：老 worker 的形态。 */
+let hostEnginePolicy: 'auto' | 'cpu' | 'gpu' | null = null;
+let hostEngineFallback: { requested: string; used: string; reason: string } | null = null;
+/** 宿主让这次任务以这个码失败（`null` = 正常跑）。 */
+let hostFailCode: string | null = null;
+/** 宿主让这个阶段**跑起来之后再失败**（租借那一步答失败）：全任务级的 `failCode` 分不出阶段。 */
+let hostFailStage: HostStage | null = null;
+let hostFailStageCode = 'COMPUTE_INTERNAL';
+
+function leaseFor(jobId: string, pageIndex: number, stage: HostStage): Promise<HostLease> {
+  const key = `${jobId}:${stage}`;
+  let pending = hostLeases.get(key);
+  if (pending === undefined) {
+    pending = hostLease(pageIndex, stage);
+    hostLeases.set(key, pending);
+  }
+  return pending;
+}
+
+function installHost(options: {
+  lease?: (pageIndex: number, stage: HostStage) => Promise<HostLease>;
+  submitFails?: boolean;
+  acquireNeverLands?: boolean;
+  /** 产物上写「被问的是哪条政策」以及真回退时想要谁 / 用了谁 / 为什么。 */
+  enginePolicy?: 'auto' | 'cpu' | 'gpu' | null;
+  engineFallback?: { requested: string; used: string; reason: string } | null;
+  /** 任务以这个码失败（`GPU_OUTPUT_INVALID` 这类强制失败的码也走这里）。 */
+  failCode?: string;
+  /** 只让这一个阶段失败（产物已经在列表里，租借那一步答失败）。 */
+  failStage?: HostStage;
+  failStageCode?: string;
+} = {}): void {
+  hostLease = options.lease ?? (async (pageIndex, stage) => ({ url: `blob:${stage === 'decensor' ? 'decensored' : 'enhanced'}-${pageIndex}`, bytes: 1 }));
+  hostSubmitFails = options.submitFails ?? false;
+  hostAcquireNeverLands = options.acquireNeverLands ?? false;
+  hostEnginePolicy = options.enginePolicy ?? null;
+  hostEngineFallback = options.engineFallback ?? null;
+  hostFailCode = options.failCode ?? null;
+  hostFailStage = options.failStage ?? null;
+  hostFailStageCode = options.failStageCode ?? 'COMPUTE_INTERNAL';
+  hostCommands = [];
+  hostJobs.clear();
+  hostLeases.clear();
+  hostJobSequence = 0;
+}
+
+/** 提交那两条门共用的应答：建一个任务号、把它有几个阶段记下来、答「已经在跑」。
+ *
+ * 一律答「已经在跑」：宿主扫得动就会跑，而门不看状态就永远停在等结果——真的那道门也是提交
+ * 回来立刻去问产物（合并进正在跑的、或直接命中缓存完成）。 */
+function submitJob(args: Record<string, unknown> | undefined, stages: HostStage[]): unknown {
+  if (hostSubmitFails) {
+    return { ok: false, error: { code: 'COMPUTE_WORKER_UNAVAILABLE', message: 'worker 起不来', retryable: true } };
+  }
+  const payload = args?.payload as { pageIndex: number; generation: number; priority: 'foreground' | 'background' };
+  hostJobSequence += 1;
+  const jobId = `host-job-${payload.pageIndex}-${payload.generation}-${hostJobSequence}`;
+  hostJobs.set(jobId, { pageIndex: payload.pageIndex, stages });
+  return {
+    ok: true,
+    value: {
+      jobId,
+      subscriptionId: 1,
+      coalesced: false,
+      evicted: null,
+      snapshot: {
+        jobId,
+        priority: payload.priority,
+        // 任务以失败告终的那一条：门是在提交应答自带的快照上看见它的（事件可能永远不来）。
+        state: hostFailCode === null
+          ? { running: { stage: stages[stages.length - 1]!, index: 0 } }
+          : { failed: { code: hostFailCode } },
+        subscribers: 1,
+        sequence: 1,
+        createdMs: 0,
+        settledMs: null,
+        key: {
+          inputId: `a:${payload.pageIndex}`,
+          settingsId: 'test',
+          sourceRevision: 'reader-page',
+          backend: 'cpu',
+          generation: payload.generation,
+        },
+      },
+    },
+  };
+}
+
+/** 门那条命令的应答；`null` = 不是它的命令，交给用例自己的适配器。 */
+async function hostUpscaleAnswer(command: string, args?: Record<string, unknown>): Promise<unknown | null> {
+  if (!command.startsWith('compute_')) return null;
+  hostCommands.push(command);
+  switch (command) {
+    case 'compute_submit_reader_page':
+      // 「原图 → 超分」那一道门：一件任务一个阶段。
+      return submitJob(args, ['upscale']);
+    case 'compute_submit_decensor_page': {
+      // 链式两阶段：点名了超分模型才有第二个阶段——宿主那侧的 `plan_decensor_page` 也是这么定的
+      // （两个阶段共用一份 `Run`，所以只能是**一件任务里的两步**）。
+      const payload = args?.payload as { upscaleModelId?: string } | undefined;
+      return submitJob(args, payload?.upscaleModelId ? ['decensor', 'upscale'] : ['decensor']);
+    }
+    case 'compute_job_artifacts': {
+      const jobId = String(args?.jobId ?? '');
+      const job = hostJobs.get(jobId);
+      if (job === undefined) return { ok: true, value: [] };
+      // 一件产物一个阶段。这里**不许** await 租借：第二阶段还没落地时，await 会把第一阶段
+      // 那一条也一起卡在列表里——「先看上屏那一版、最终那一版晚点换」正是靠列表先回来。
+      return {
+        ok: true,
+        value: job.stages.map((stage) => ({
+          jobId,
+          stageId: stage,
+          artifactId: `artifact-${jobId}-${stage}`,
+          stagingName: `${jobId}-${stage}.bin`,
+          // 宿主的正式落点：`cacheRelative` 为 null 的产物一律不许拿，所以这里必须给一个。
+          path: `/staging/${jobId}-${stage}.bin`,
+          cacheRelative: `cache/images/aa/${jobId}-${stage}.bin`,
+          byteLength: 1,
+          contentHash: `hash-${stage}`,
+          width: 8,
+          height: 8,
+          engineId: 'cpu',
+          enginePrecision: 'Fp32',
+          enginePolicy: hostEnginePolicy,
+          engineFallback: hostEngineFallback,
+          pipelineRevision: 'test',
+          verified: true,
+        })),
+      };
+    }
+    case 'compute_artifact_acquire': {
+      const jobId = String(args?.jobId ?? '');
+      const artifactId = String(args?.artifactId ?? '');
+      const job = hostJobs.get(jobId);
+      if (job === undefined) return { ok: false, error: { code: 'COMPUTE_NOT_FOUND', message: '没有这个任务', retryable: false } };
+      const stage = job.stages.find((candidate) => artifactId.endsWith(`-${candidate}`));
+      if (stage === undefined) return { ok: false, error: { code: 'COMPUTE_NOT_FOUND', message: '没有这件产物', retryable: false } };
+      // 「在 CPU 上要跑十几秒」那一条：租借一直不回来，只看阅读器会不会把任务退掉。
+      // 只卡最终那一版——第一阶段挡在这里的话，用例连「先看上屏那一版」都验不了。
+      if (hostAcquireNeverLands && stage === 'upscale') return new Promise(() => undefined);
+      // 一个阶段跑起来之后再失败：产物发布过、租借这一步才失败，与「派发期被拒」不是一回事。
+      if (hostFailStage === stage) {
+        return { ok: false, error: { code: hostFailStageCode, message: `${stage} 这一步算失败了`, retryable: false } };
+      }
+      const lease = await leaseFor(jobId, job.pageIndex, stage);
+      return {
+        ok: true,
+        value: {
+          leaseId: `lease-${jobId}-${stage}`,
+          artifactId,
+          jobId,
+          url: lease.url,
+          mime: 'image/png',
+          byteLength: lease.bytes,
+          width: 8,
+          height: 8,
+          estimatedDecodedBytes: lease.estimatedDecodedBytes ?? lease.bytes,
+          pipelineRevision: 'test',
+          expiresInMs: 60_000,
+        },
+      };
+    }
+    case 'compute_artifact_release':
+      return { ok: true, value: null };
+    case 'compute_cancel':
+      return { ok: true, value: 'alreadyTerminal' };
+    default:
+      return null;
+  }
+}
+
+/** 一本只有「原图 → 超分」这一条路的档案：原图那几版仍走老的 `cache.load`，超分走宿主那道门。
+ *
+ * `archiveId` 必须能让用例各用各的：派生那些版本按「档案 + 页 + 模型」记在**整个进程共用**
+ * 的那个图片账上（会话级保留就是它的功能），两条例用同一个档案时，后一条会直接命中前一条
+ * 留下的那一版，根本不去问宿主——用例之间的串味就是这么来的。 */
+function enhancedReader(
+  pageCount: number,
+  lease: (pageIndex: number) => Promise<HostLease> = async (pageIndex) => ({ url: `blob:enhanced-${pageIndex}`, bytes: 1 }),
+  /** 宿主这次怎么交代引擎、或者怎么失败（见 `installHost`），以及这本档案叫什么。 */
+  host: { archiveId?: string; enginePolicy?: 'auto' | 'cpu' | 'gpu' | null; engineFallback?: { requested: string; used: string; reason: string } | null; failCode?: string } = {},
+) {
+  const { archiveId = 'enhancement-test', ...hostOptions } = host;
+  installHost({ ...hostOptions, lease });
+  const cache = getNativeImageCache();
+  const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+    { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 }
+  ));
+  const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+  setInvokeAdapterForTests(async (command, args) => {
+    const hostReply = await hostUpscaleAnswer(command, args);
+    if (hostReply !== null) return hostReply;
+    if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'cpu', upscaleModel: 'test' } };
+    if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+    if (command === 'load_reader_manifest') return { ok: true, value: { archiveId, title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
+    if (command === 'load_reading_progress') return { ok: true, value: null };
+    return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+  });
+  render(<MemoryRouter initialEntries={[`/reader/${archiveId}`]}><App /></MemoryRouter>);
+  return release;
+}
+
 afterEach(() => {
   resetInvokeAdapterForTests();
   vi.restoreAllMocks();
 });
 
 describe('reader route', () => {
+  it('shows the initial page without waiting for a slow neighbour prefetch', async () => {
+    const cache = getNativeImageCache();
+    const pending: Array<() => void> = [];
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation((identity) => {
+      const handle = { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:initial-${identity.pageIndex}`, bytes: 1 };
+      if (identity.rendition === 'reader-page' && identity.pageIndex > 0) {
+        return new Promise<ImageHandle>((resolve) => { pending.push(() => resolve(handle)); });
+      }
+      return Promise.resolve(handle);
+    });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: {
+        theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr',
+        cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: false,
+      } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'slow-neighbour', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const view = render(<MemoryRouter initialEntries={['/reader/slow-neighbour']}><App /></MemoryRouter>);
+    try {
+      expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:initial-0');
+    } finally {
+      view.unmount();
+      for (const resolve of pending) resolve();
+    }
+  });
+
   it('starts DLSSNR only from its reader control and keeps the final rendition', async () => {
     const cache = getNativeImageCache();
     const processed = { key: 'dlssnr-0', url: 'blob:dlssnr-0', bytes: 1 };
     const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    installHost();
     const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
       ? processed
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
-    setInvokeAdapterForTests(async (command) => {
+    setInvokeAdapterForTests(async (command, args) => {
+      // 本地去码这一版由宿主那道门给（8-f 起本地那一档整体翻了进去）。这一条盯的是
+      // DLSSNR：它自己那一版仍然走本地缓存，起点是去码那一版而不是原图。
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
@@ -41,13 +315,92 @@ describe('reader route', () => {
     expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
     await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
+  it('runs the DLSS5 prerequisites through the compute chain', async () => {
+    // 更高档（dlssnr / remote）的本地前置两版从前走的是 `inference_decensor_page` /
+    // `inference_upscale_page` 这两条只有宿主会跑模型的旧命令：出来的图不在 compute 账上，
+    // 也没法按修订号找回来（8-c 被挡住的那条根因）。8-g① 在取产物那一步给 compute 产物挂上
+    // 缓存行之后，本地这两步就只剩一条路——DLSS5 按身份把它的产物当**输入**读回来，
+    // 宿主进程里那两条旧命令一次都不该被叫到。
+    const commands: string[] = [];
+    const decensorPayloads: Array<{ upscaleModelId?: string }> = [];
+    let dlssnrSource: string | undefined;
+    installHost();
+    setInvokeAdapterForTests(async (command: string, args) => {
+      commands.push(command);
+      if (command === 'compute_submit_decensor_page') {
+        decensorPayloads.push((args?.payload ?? {}) as { upscaleModelId?: string });
+      }
+      if (command === 'dlssnr_apply_page') {
+        dlssnrSource = (args?.input as { source?: string } | undefined)?.source;
+        return { ok: true, value: [0x89, 0x50, 0x4e, 0x47] };
+      }
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
+      if (command === 'load_preferences') {
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    // 去码 + 超分是**一件任务里的两步**（第二阶段只能吃第一阶段的产物），所以超分模型
+    // 跟着同一次提交走，而不是另排一件。
+    await waitFor(() => expect(decensorPayloads[0]?.upscaleModelId).toBe('realcugan-2x'));
+    expect(commands.filter((command) => command === 'compute_submit_decensor_page')).toHaveLength(1);
+    // 宿主进程里那两条旧命令一次都没被叫到。
+    expect(commands).not.toContain('inference_decensor_page');
+    expect(commands).not.toContain('inference_upscale_page');
+    // DLSS5 的输入就是本地算出来的那一版（超分那一版），不是原图。
+    await waitFor(() => expect(dlssnrSource).toBe('enhanced'));
+  });
+  it('does not retain source page handles for background-only preprocessing', async () => {
+    const cache = getNativeImageCache();
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => ({
+      key: `${identity.rendition}-${identity.pageIndex}`,
+      url: `blob:${identity.rendition}-${identity.pageIndex}`,
+      bytes: 1,
+    }));
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'source-window', title: 'Reader', pages: Array.from({ length: 6 }, (_, i) => `${i}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const view = render(<MemoryRouter initialEntries={['/reader/source-window']}><App /></MemoryRouter>);
+    try {
+      await screen.findByRole('img', { name: '第 1 页' });
+      fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+      await waitFor(() => expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr')).toBe(true));
+      await waitFor(() => expect(release.mock.calls.map(([handle]) => handle.key)).toContain('reader-page-1'));
+      expect(release.mock.calls.map(([handle]) => handle.key)).not.toContain('reader-page-0');
+    } finally {
+      view.unmount();
+    }
+  });
+
   it('preprocesses the whole archive, not just the pages in the viewport', async () => {
     // 用户报的问题：开着 DLSSNR，只有视口里那几页会被处理，后面的页要翻到才现算。
     // 队列原来每次可见页变化都把自己筛回「可见页 + 预取窗口」，所以整本档案里其余
     // 的页永远不会被排上。可见页那一档后面现在接着一条后台队列，这一条盯的就是它。
     const cache = getNativeImageCache();
     const pageCount = 12;
-    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
     const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
@@ -72,6 +425,16 @@ describe('reader route', () => {
     }, { timeout: 10_000 });
     // 可见的那一页排在后台那些页前面——预处理不该让正在读的这页等。
     expect(dlssnrPages()[0]).toBe(0);
+    // Preprocessing reads every source, but must not pin all raw pages for the
+    // entire session: only visible+prefetch pages belong to the display window.
+    await waitFor(() => {
+      const released = release.mock.calls.map(([handle]) => handle.key);
+      expect(released).toEqual(expect.arrayContaining(
+        Array.from({ length: pageCount - 2 }, (_, index) => `reader-page-${index + 2}`),
+      ));
+      expect(released).not.toContain('reader-page-0');
+      expect(released).not.toContain('reader-page-1');
+    });
   });
   it('keeps the pages the reader is about to reach when the session budget overflows', async () => {
     // 用户报的问题：DLSSNR 明明预扫过了，翻到那一页却还要现算。会话预算 64MB、一页
@@ -156,8 +519,14 @@ describe('reader route', () => {
       expect(second?.priority).toBe('foreground');
     }, { timeout: 5_000 });
     // 只是路过预取窗口、用户没翻过去的那一页仍然是后台的事。
-    const third = processed.find((entry) => entry.pageIndex === 2);
-    expect(third?.priority).toBe('background');
+    //
+    // 这一条必须**等**它出现再断言档位：预取那一件要等前一页让出队列才排进去，而第 1 页
+    // 刚在上面被放行——直接读 `processed` 会早读几毫秒（实测两次读之间差 3ms），看起来像
+    // 「这一页没被排进去」。等的只是「它出现」，档位仍然必须是 background：等成 foreground
+    // 照样红。
+    await waitFor(() => {
+      expect(processed.find((entry) => entry.pageIndex === 2)?.priority).toBe('background');
+    }, { timeout: 5_000 });
   });
 
   it('keeps the pages right after the reader when one derived page takes a third of the budget', async () => {
@@ -256,12 +625,14 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
-    const upscaleRuns = () => load.mock.calls.filter(([identity]) => identity.rendition === 'enhanced').length;
+    const upscaleRuns = () => adapter.mock.calls.filter(([command]) => command === 'compute_submit_reader_page').length;
     // 标签规则是匹配的（category:manga 在白名单里），所以只可能是体积那一半在挡。
     await waitFor(() => expect(adapter.mock.calls.some(([command]) => command === 'load_archive_metadata')).toBe(true));
     await act(async () => {});
     await act(async () => {});
     expect(upscaleRuns()).toBe(0);
+    // 原图那一页确实读进来了，所以「没算超分」不是因为它压根没打开。
+    expect(load.mock.calls.some(([identity]) => identity.rendition === 'reader-page')).toBe(true);
     expect(screen.getByRole('button', { name: '开启超分' })).toBeInTheDocument();
   });
 
@@ -269,10 +640,13 @@ describe('reader route', () => {
     // 上一条的反面：阈值以下 + 白名单命中还是要自动开——修方向不是把自动开启关掉。
     const cache = getNativeImageCache();
     vi.spyOn(cache, 'release').mockImplementation(() => {});
-    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
-      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 }
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 }
     ));
-    setInvokeAdapterForTests(async (command) => {
+    installHost();
+    setInvokeAdapterForTests(async (command, args) => {
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', decensorModel: '', dlssnrEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'thin-pages', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
@@ -284,7 +658,8 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
-    await waitFor(() => expect(load.mock.calls.some(([identity]) => identity.rendition === 'enhanced')).toBe(true));
+    await waitFor(() => expect(hostCommands).toContain('compute_submit_reader_page'));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     expect(await screen.findByRole('button', { name: '关闭超分' })).toBeInTheDocument();
   });
 
@@ -320,45 +695,30 @@ describe('reader route', () => {
     expect(new Set(pagesWith('foreground'))).toEqual(new Set([0]));
   });
 
-  function enhancedReader(pageCount: number, enhanced: (index: number) => Promise<ImageHandle>) {
-    const cache = getNativeImageCache();
-    vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'enhanced'
-      ? enhanced(identity.pageIndex)
-      : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 });
-    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
-    setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'cpu', upscaleModel: 'test' } };
-      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
-      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'enhancement-test', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
-      if (command === 'load_reading_progress') return { ok: true, value: null };
-      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
-    });
-    render(<MemoryRouter initialEntries={['/reader/enhancement-test']}><App /></MemoryRouter>);
-    return release;
-  }
-
   it('discards enhancement completed after its switch is disabled', async () => {
-    let complete!: (handle: ImageHandle) => void;
-    const enhance = vi.fn(() => new Promise<ImageHandle>((resolve) => { complete = resolve; }));
-    const release = enhancedReader(1, enhance);
+    let complete!: (lease: HostLease) => void;
+    const enhance = vi.fn(() => new Promise<HostLease>((resolve) => { complete = resolve; }));
+    enhancedReader(1, enhance);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     expect(enhance).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(enhance).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '关闭超分' }));
-    const handle = { key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 };
-    await act(async () => complete(handle));
+    // 关掉之后才落地的那一版：页面上不能换掉手里的原图，任务也得让宿主停下来（不然那份
+    // 内容还占着 worker 与全局唯一的那件重活）。它在阅读器这一侧看不见，所以查宿主收到的命令。
+    await act(async () => complete({ url: 'blob:enhanced-0', bytes: 1 }));
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:plain-0');
-    expect(release).toHaveBeenCalledWith(handle);
+    await waitFor(() => expect(hostCommands).toContain('compute_cancel'));
+    // 再开一次：这一页要重新向宿主开口（上一次那件已经被退掉了），换了版本才上屏。
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(enhance).toHaveBeenCalledTimes(2));
-    await act(async () => complete(handle));
-    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
+    await act(async () => complete({ url: 'blob:enhanced-0', bytes: 1 }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
   it('keeps derived images for the whole session, so going back does not re-run inference', async () => {
-    const enhance = vi.fn(async (index: number) => ({ key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 1 }));
+    const enhance = vi.fn(async (index: number) => ({ url: `blob:enhanced-${index}`, bytes: 1 }));
     const release = enhancedReader(14, enhance);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
@@ -374,7 +734,7 @@ describe('reader route', () => {
     // Ten pages later the result is still held. It used to be released as its page
     // left the window, and since the attempt had already been spent, going back
     // showed the *plain* page for the rest of the sitting.
-    expect(release).not.toHaveBeenCalledWith({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 });
+    expect(release.mock.calls.map(([handle]) => handle.url)).not.toContain('blob:enhanced-0');
 
     for (let index = 0; index < 10; index += 1) {
       fireEvent.keyDown(reader, { key: 'ArrowLeft' });
@@ -392,7 +752,7 @@ describe('reader route', () => {
     const enhancedIndexes: number[] = [];
     const release = enhancedReader(12, async (index) => {
       enhancedIndexes.push(index);
-      return { key: `enhanced-${index}`, url: `blob:enhanced-${index}`, bytes: 40 * 1024 * 1024 };
+      return { url: `blob:enhanced-${index}`, bytes: 40 * 1024 * 1024 };
     });
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
@@ -401,11 +761,11 @@ describe('reader route', () => {
     // 预取窗口是 0，所以第 2 页往后的每一页都只有预扫会碰——等它整本做完。
     await waitFor(() => expect(enhancedIndexes).toContain(11), { timeout: 10_000 });
 
-    const droppedKeys = release.mock.calls.map(([handle]) => handle.key);
-    expect(droppedKeys).toContain('enhanced-11');
+    const droppedKeys = release.mock.calls.map(([handle]) => handle.url);
+    expect(droppedKeys).toContain('blob:enhanced-11');
     // 紧挨着正在读的这一页的那几页一页都不能丢。
-    expect(droppedKeys).not.toContain('enhanced-1');
-    expect(droppedKeys).not.toContain('enhanced-2');
+    expect(droppedKeys).not.toContain('blob:enhanced-1');
+    expect(droppedKeys).not.toContain('blob:enhanced-2');
 
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const releasesBeforeTurning = release.mock.calls.length;
@@ -416,9 +776,9 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 6 页' })).toHaveAttribute('src', 'blob:enhanced-5'));
     // The page just enhanced is never the one dropped for room: 刚补算出来的正是正在读的
     // 这一页，腾地方腾的是身后最远的那一页。
-    const droppedWhileReadingPageSix = release.mock.calls.slice(releasesBeforeTurning).map(([handle]) => handle.key);
-    expect(droppedWhileReadingPageSix).toContain('enhanced-0');
-    expect(droppedWhileReadingPageSix).not.toContain('enhanced-5');
+    const droppedWhileReadingPageSix = release.mock.calls.slice(releasesBeforeTurning).map(([handle]) => handle.url);
+    expect(droppedWhileReadingPageSix).toContain('blob:enhanced-0');
+    expect(droppedWhileReadingPageSix).not.toContain('blob:enhanced-5');
   });
 
   it('loads native manifest and page bytes, then persists progress on navigation', async () => {
@@ -461,11 +821,15 @@ describe('reader route', () => {
     // update check runs here too: it asks once for the release and the model
     // catalog, and a failure (offline, or a test adapter that does not know the
     // command) just goes quiet.
+    //
+    // `compute_worker_status` 也是外壳的：计算进程那一条状态（§12.3）挂在 App 上，
+    // 所以任何一页都会看到它问一次——它在这里出现不代表阅读器自己要用计算。
     expect(new Set(calls)).toEqual(new Set([
       'list_servers', 'load_preferences', 'load_reader_manifest', 'load_archive_metadata',
       'load_reading_progress', 'load_archive_thumbnail', 'cache_read_image', 'load_reader_page',
       'save_reading_progress',
       'app_release_latest', 'inference_list_models', 'model_release_list_upscalers',
+      'compute_worker_status',
     ]));
     expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
     expect(calls.at(-1)).toBe('save_reading_progress');
@@ -731,10 +1095,12 @@ describe('reader route', () => {
 
   it('serves the upscaled page when a model is selected, and falls back when it fails', async () => {
     const commands: string[] = [];
-    let upscaleWorks = true;
     let model = 'realesr-general-x4v3';
-    setInvokeAdapterForTests(async (command: string) => {
+    installHost({ lease: async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }) });
+    setInvokeAdapterForTests(async (command, args) => {
       commands.push(command);
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: model } };
       }
@@ -743,48 +1109,162 @@ describe('reader route', () => {
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
-      if (command === 'inference_upscale_page') {
-        return upscaleWorks
-          ? { ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] }
-          : { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'Page is not cached yet', retryable: true } };
-      }
-      throw new Error(`Unexpected command: ${command}`);
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
 
     const view = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(commands).not.toContain('inference_upscale_page');
+    expect(commands).not.toContain('compute_submit_reader_page');
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
-    await waitFor(() => expect(commands).toContain('inference_upscale_page'));
+    await waitFor(() => expect(commands).toContain('compute_submit_reader_page'));
     view.unmount();
 
     // A failing upscale must leave the plain page on screen.
-    upscaleWorks = false;
+    hostSubmitFails = true;
     commands.length = 0;
     const failed = render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
-    expect(commands).not.toContain('inference_upscale_page');
+    expect(commands).not.toContain('compute_submit_reader_page');
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
-    await waitFor(() => expect(commands).toContain('inference_upscale_page'));
+    await waitFor(() => expect(commands).toContain('compute_submit_reader_page'));
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', expect.stringMatching(/^blob:/));
     failed.unmount();
 
     // A backend with no model would run the nearest-neighbour fallback, which
     // returns the same pixels at four times the size. Not worth a round trip.
-    upscaleWorks = true;
+    hostSubmitFails = false;
     model = '';
     commands.length = 0;
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(commands).not.toContain('inference_upscale_page');
+    expect(commands).not.toContain('compute_submit_reader_page');
+  });
+
+  it('says out loud when the page was not computed by the runtime it asked for', async () => {
+    // 「点的是显卡、跑的是 CPU」以前只有「成功」这一个结果，界面什么都不说（docs/71:126
+    // 要求 auto 显式回退并展示原因）。交代来自产物上的那两栏，而且只说一次——同一台机器上
+    // 每翻一页都是同一条原因（去重的键里带的是原因，不是页码）。
+    enhancedReader(2, async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }), {
+      archiveId: 'engine-notice-test',
+      enginePolicy: 'auto',
+      engineFallback: { requested: 'directml', used: 'cpu', reason: 'directml 在这台机器上不可用' },
+    });
+
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    const first = screen.getByRole('img', { name: '第 1 页' });
+    await waitFor(() => expect(first).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(await screen.findByText(/没有用 directml 算/)).toBeInTheDocument();
+    expect(screen.getByText(/实际用的是 cpu/)).toBeInTheDocument();
+
+    // 第二页走的是另一份产物（另一个 jobId），但交代是同一件事实：不该再弹一遍。
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await screen.findByRole('img', { name: '第 2 页' });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1'));
+    expect(screen.getAllByText(/没有用 directml 算/)).toHaveLength(1);
+  });
+
+  it('tells a forced-GPU failure apart from a step that just did not run', async () => {
+    // 点名要显卡却失败了，绝不能听起来像「只是慢了一档」：`Gpu` 是承诺（docs/71 §5.1/§12.1），
+    // 拿不到显卡、或这个模型在这条运行库上实测不通过就是失败，决不许悄悄用 CPU 顶上。
+    // 宿主这次让任务以 `GPU_OUTPUT_INVALID` 结束（提交应答里的快照就带着它）。
+    enhancedReader(1, async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }), {
+      archiveId: 'forced-gpu-test',
+      failCode: 'GPU_OUTPUT_INVALID',
+    });
+
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    expect(await screen.findByText(/点名要显卡这一步没跑成：GPU_OUTPUT_INVALID/)).toBeInTheDocument();
+    // 普通那句讲的是另一件事（它是每一档失败共用的那句话），这里不该出现：说成「没跑成」
+    // 会让人以为只是降级，而事实上是「你要的那条路给不了」。
+    expect(screen.queryByText(/超分这一步没跑成/)).not.toBeInTheDocument();
+    expect(hostCommands).toContain('compute_submit_reader_page');
+    // 页面上留下的仍是原图那一版：失败不许变成黑图。
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:plain-0');
+  });
+
+  it('keeps reading while the worker is dead, and asks again once it is back', async () => {
+    // docs/71:645 第四句的界面那一半：worker 被杀不等于阅读器坏了。失败是在**提交应答自带的
+    // 快照**上看见的（`COMPUTE_WORKER_LOST`，事件可能永远不来），所以这一页必须立刻退回可用
+    // 的那一版并说一次，翻页照走；等宿主把 worker 拉回来（它自己会重启，见
+    // `compute_manager.rs` 那条 IT），翻回这一页要**再问一次**并换上新版——一次进程死亡不许
+    // 把这一页在这一整次阅读里写死。
+    enhancedReader(2, async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }), {
+      archiveId: 'worker-died-test',
+      failCode: 'COMPUTE_WORKER_LOST',
+    });
+
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    // ① 页面上留下的是原图那一版，而且用户被告知这一步没跑成：失败不许变成空白。
+    expect(await screen.findByText(/超分这一步没跑成/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:plain-0');
+
+    // ② 界面还能用：翻页照走，第二页照样读得出来。
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    expect(await screen.findByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:plain-1');
+
+    // ③ worker 回来了（`hostFailCode = null` 之后提交能成）——翻回第一页要重新提交。
+    hostFailCode = null;
+    const submits = hostCommands.filter((command) => command === 'compute_submit_reader_page').length;
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    const first = await screen.findByRole('img', { name: '第 1 页' });
+    // 先量「有没有再问一次」：这一页失败之后要是被记成「试过了」，翻回去不重问，它就永远
+    // 停在原图——那不是「可用的一版」，是这一次阅读里再也拿不到结果。
+    await waitFor(() => expect(
+      hostCommands.filter((command) => command === 'compute_submit_reader_page').length,
+    ).toBeGreaterThan(submits));
+    await waitFor(() => expect(first).toHaveAttribute('src', 'blob:enhanced-0'));
+  });
+
+  it('does not ask again for a page the host says can never run', async () => {
+    // 上一条的边界：只有**阵发性**的失败才配再问一次。点名要显卡、模型没装这类是这一页
+    // （或这台机器）的定局，再问一次还是同一个结果——真那么做的话，用户每翻回来一次就
+    // 重撞一次，日志里刷满同一条。
+    enhancedReader(2, async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }), {
+      archiveId: 'permanent-failure-test',
+      failCode: 'GPU_OUTPUT_INVALID',
+    });
+
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+
+    expect(await screen.findByText(/点名要显卡这一步没跑成/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:plain-0');
+
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    expect(await screen.findByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:plain-1');
+
+    const submits = hostCommands.filter((command) => command === 'compute_submit_reader_page').length;
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    // 等一拍：真要是又问了，这一拍足够它把命令发出去。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(hostCommands.filter((command) => command === 'compute_submit_reader_page')).toHaveLength(submits);
   });
 
   it('runs the de-censoring bundle for the page on screen', async () => {
+    // 8-f 起本地去码整体搬进了 worker：阅读器提交的是一件「去码 [+ 超分]」的任务，
+    // 不再让宿主在进程里跑模型（那是 `inference_decensor_page`，正在被删掉的那条路）。
     const commands: string[] = [];
-    setInvokeAdapterForTests(async (command: string) => {
+    installHost();
+    setInvokeAdapterForTests(async (command: string, args) => {
       commands.push(command);
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
       }
@@ -793,23 +1273,33 @@ describe('reader route', () => {
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
-      if (command === 'inference_decensor_page') return { ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] };
       throw new Error(`Unexpected command: ${command}`);
     });
 
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(commands).not.toContain('inference_decensor_page');
+    expect(commands).not.toContain('compute_submit_decensor_page');
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
-    await waitFor(() => expect(commands).toContain('inference_decensor_page'));
+    await waitFor(() => expect(commands).toContain('compute_submit_decensor_page'));
+    // 跑完那一版真的上了屏（不是「提交过了就算」）。
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:decensored-0'));
+    expect(commands.filter((command) => command === 'compute_submit_decensor_page')).toHaveLength(1);
+    expect(commands).not.toContain('inference_decensor_page');
   });
 
   it('says the page is being de-censored while the bundle runs', async () => {
     // 一页在 CPU 上要好几秒；这段时间页面上压着一枚「去码处理中」的胶囊，
     // 让等待有交代——不然按下「去码」看上去就是没反应。
-    let releaseDecensor: ((value: { ok: true; value: number[] }) => void) | undefined;
-    setInvokeAdapterForTests(async (command: string) => {
+    let releaseDecensor: (() => void) | undefined;
+    installHost();
+    setInvokeAdapterForTests(async (command: string, args) => {
+      if (command === 'compute_submit_decensor_page') {
+        // 提交这一下压在手里：这正是「原生还在算」的那几秒。
+        return new Promise((resolve) => { releaseDecensor = () => resolve(submitJob(args, ['decensor'])); });
+      }
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
       }
@@ -818,9 +1308,6 @@ describe('reader route', () => {
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
-      if (command === 'inference_decensor_page') {
-        return new Promise<{ ok: true; value: number[] }>((resolve) => { releaseDecensor = resolve; });
-      }
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -832,7 +1319,7 @@ describe('reader route', () => {
     fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
 
     expect(await screen.findByText('去码处理中…')).toBeInTheDocument();
-    await act(async () => { releaseDecensor?.({ ok: true, value: [137, 80, 78, 71, 13, 10, 26, 10] }); });
+    await act(async () => { releaseDecensor?.(); });
     await waitFor(() => expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument());
   });
 
@@ -850,8 +1337,11 @@ describe('reader route', () => {
     });
     vi.spyOn(cache, 'release').mockImplementation(() => {});
     const commands: string[] = [];
-    setInvokeAdapterForTests(async (command: string) => {
+    installHost();
+    setInvokeAdapterForTests(async (command: string, args) => {
       commands.push(command);
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
       }
@@ -937,22 +1427,28 @@ describe('reader route', () => {
   });
 
   it('shows the de-censored page first and swaps in the enlarged one when it lands', async () => {
-    // 双开时这是**两步**：去码先出来（几秒），超分再它之上换成最终那一版。以前两步
-    // 折在一次调用里，用户要么等全程、要么在超分失败时连去码结果一起丢。
+    // 双开时这是**一件任务里的两步**：去码先出来（几秒），超分再在它之上换成最终那一版。
+    // 从前两步折在一次调用里，用户要么等全程、要么在超分失败时连去码结果一起丢。
     const cache = getNativeImageCache();
-    const sources: Array<string | undefined> = [];
-    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
-    let releaseUpscale: ((handle: ImageHandle) => void) | undefined;
-    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      if (identity.rendition === 'enhanced') {
-        sources.push(identity.source);
-        return new Promise<ImageHandle>((resolve) => {
-          releaseUpscale = (handle) => resolve(handle);
-        });
-      }
-      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+    let releaseUpscale: ((lease: HostLease) => void) | undefined;
+    installHost({
+      lease: async (pageIndex, stage) => {
+        // 第二阶段压在手里：用例自己决定最终那一版什么时候落地。
+        if (stage === 'upscale') return new Promise<HostLease>((resolve) => { releaseUpscale = resolve; });
+        return { url: `blob:decensored-${pageIndex}`, bytes: 1 };
+      },
     });
-    setInvokeAdapterForTests(async (command: string) => {
+    const adopt = vi.spyOn(cache, 'adopt');
+    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      // 去码与超分两版都必须走宿主那道门：本地缓存这条路只剩原图。真去问它就要一个错——
+      // 不然「走了旧路」也会得到同一张图，这条用例就成了白测。
+      if (identity.rendition !== 'reader-page') throw new Error(`这一版不该再走本地缓存：${identity.rendition}`);
+      return { key: `reader-page-${identity.pageIndex}`, url: `blob:reader-page-${identity.pageIndex}`, bytes: 1 };
+    });
+    setInvokeAdapterForTests(async (command: string, args) => {
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
       }
@@ -969,32 +1465,37 @@ describe('reader route', () => {
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
     const image = screen.getByRole('img', { name: '第 1 页' });
-    // 第一步的产物先上屏。
+    // 第一步的产物先上屏（这时最终那一版还没算完）。
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
-    // 超分读的正是这一步的产物（不是原图）。
-    await waitFor(() => expect(sources).toContain('decensored'));
-    await act(async () => { releaseUpscale?.({ key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 }); });
+    const decensored = adopt.mock.results[0]!.value as ImageHandle;
+    await act(async () => { releaseUpscale?.({ url: 'blob:enhanced-0', bytes: 1 }); });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
-    expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
+    // 第二步要的正是第一步的产物：它那一版的身份写着起点是 `decensored`（不是原图）。
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({ rendition: 'enhanced', source: 'decensored' }),
+      expect.anything(),
+    );
+    // 换版之前不许把它放掉：放掉到 0 引用会把 blob URL 撤销，页面上那一张就成了坏图。
+    expect(release).not.toHaveBeenCalledWith(decensored);
     fireEvent.load(image);
-    expect(release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
+    expect(release).toHaveBeenCalledWith(decensored);
   });
 
   it('still enlarges the plain page when the de-censoring step fails', async () => {
     // 四种组合里这是最容易出错的一种：去码失败不该把超分一起带走。这一版没有去码，
     // 但它是可用的结果，而且用户会被告知去码那一步没跑成。
     const cache = getNativeImageCache();
-    const sources: Array<string | undefined> = [];
+    // 去码这一阶段**跑起来之后再失败**（产物发过了、租借那一步答失败）——与「派发期整件被拒」
+    // 不是一回事：这时候超分仍该从原图接着做，页面上也不能是黑图。
+    installHost({ failStage: 'decensor' });
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      if (identity.rendition === 'decensored') throw new Error('去码模型包没装齐');
-      if (identity.rendition === 'enhanced') {
-        sources.push(identity.source);
-        return { key: 'enhanced-0', url: 'blob:enhanced-0', bytes: 1 };
-      }
+      if (identity.rendition === 'decensored') throw new Error('这一版不该再走本地缓存：本地去码 8-f 起搬进 worker 了');
       return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
     });
     vi.spyOn(cache, 'release').mockImplementation(() => {});
-    setInvokeAdapterForTests(async (command: string) => {
+    setInvokeAdapterForTests(async (command, args) => {
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
       }
@@ -1012,8 +1513,9 @@ describe('reader route', () => {
 
     const image = screen.getByRole('img', { name: '第 1 页' });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
-    // 起点退回原图：没有去码产物可读。
-    expect(sources).toEqual(['reader-page']);
+    // 起点退回原图（没有去码产物可读）：这一步走的是宿主那道门。载荷里没有「起点」这一项
+    // ——宿主按 `rendition` 自己决定——所以这里能验的就是门确实被叫了、结果也上了屏。
+    expect(hostCommands).toContain('compute_submit_reader_page');
     expect(await screen.findByText(/去码这一步没跑成/)).toBeInTheDocument();
   });
 
@@ -1022,14 +1524,16 @@ describe('reader route', () => {
     // 过一次，第二次落到同一个句柄时**不能**当成「换新版」把它释放掉：释放到 0 引用
     // 会把 blob URL 撤销，页面上那一张就成了坏图。
     const cache = getNativeImageCache();
-    const censored: ImageHandle = { key: 'decensored-0', url: 'blob:decensored-0', bytes: 1 };
+    // 第一阶段成了、第二阶段跑起来之后失败：这是这条用例真正要的那一种失败。
+    installHost({ failStage: 'upscale' });
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      if (identity.rendition === 'decensored') return censored;
-      if (identity.rendition === 'enhanced') throw new Error('超分模型跑不起来');
-      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+      if (identity.rendition !== 'reader-page') throw new Error(`这一版不该再走本地缓存：${identity.rendition}`);
+      return { key: `reader-page-${identity.pageIndex}`, url: `blob:reader-page-${identity.pageIndex}`, bytes: 1 };
     });
     const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
-    setInvokeAdapterForTests(async (command: string) => {
+    setInvokeAdapterForTests(async (command: string, args) => {
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens' } };
       }
@@ -1048,16 +1552,19 @@ describe('reader route', () => {
     const image = screen.getByRole('img', { name: '第 1 页' });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
     await waitFor(() => expect(screen.getByText(/超分这一步没跑成/)).toBeInTheDocument());
-    expect(release).not.toHaveBeenCalledWith(censored);
+    expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
     expect(image).toHaveAttribute('src', 'blob:decensored-0');
   });
 
   it('cancels the native task when the reader stops wanting it', async () => {
     // 前端丢掉结果不等于原生停手：一页 4K 在 CPU 上要十几秒，而全局只允许一件重活。
-    // 离开阅读器 / 关掉开关时，那个任务号要发回原生让循环停下来。
+    // 离开阅读器 / 关掉开关时，那个任务号要发回宿主让它停下来（`compute_cancel`）。
     const calls: Array<{ command: string; args?: Record<string, unknown> | undefined }> = [];
+    installHost({ acquireNeverLands: true });
     setInvokeAdapterForTests(async (command: string, args) => {
       calls.push({ command, args });
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
         return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan' } };
       }
@@ -1066,9 +1573,6 @@ describe('reader route', () => {
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
-      // 超分这一步一直不回来（在 CPU 上就是这样），直到被取消。
-      if (command === 'inference_upscale_page') return new Promise(() => undefined);
-      if (command === 'inference_cancel_page') return { ok: true, value: true };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
 
@@ -1077,17 +1581,17 @@ describe('reader route', () => {
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
-    const upscale = await waitFor(() => {
-      const call = calls.find((entry) => entry.command === 'inference_upscale_page');
+    // 超分这一步一直不回来（在 CPU 上就是这样），租借也就一直拿不到。
+    const submitted = await waitFor(() => {
+      const call = calls.find((entry) => entry.command === 'compute_submit_reader_page');
       expect(call).toBeDefined();
       return call!;
     });
-    const taskId = (upscale.args?.input as { taskId?: string } | undefined)?.taskId;
-    expect(taskId).toBeTruthy();
+    expect((submitted.args?.payload as { pageIndex?: number } | undefined)?.pageIndex).toBe(0);
 
     view.unmount();
-    await waitFor(() => expect(calls.filter((entry) => entry.command === 'inference_cancel_page')).toContainEqual(
-      expect.objectContaining({ args: { taskId } }),
+    await waitFor(() => expect(calls.filter((entry) => entry.command === 'compute_cancel')).toContainEqual(
+      expect.objectContaining({ args: expect.objectContaining({ jobId: expect.stringMatching(/^host-job-0-/), subscriptionId: 1 }) }),
     ));
   });
 
@@ -1111,7 +1615,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command, args) => {
       commands.push(command);
       if (command === 'trim_process_memory') return { ok: true, value: null };
-      if (command === 'dlssnr_release_workspaces') return { ok: true, value: 0 };
+      if (command === 'dlssnr_release_workspaces' || command === 'inference_release_sessions') return { ok: true, value: 0 };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: String(args?.archiveId ?? 'left'), title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
@@ -1140,6 +1644,7 @@ describe('reader route', () => {
     expect(commands).not.toContain('dlssnr_release_workspaces');
     (armedIdleRelease()?.[0] as () => void)();
     await waitFor(() => expect(commands).toContain('dlssnr_release_workspaces'));
+    expect(commands).toContain('inference_release_sessions');
 
     // 切到另一本：刚才那本还留着（App 的保留上限是 2），只是不再显示。
     fireEvent.click(screen.getByRole('button', { name: '换一本' }));
@@ -1156,6 +1661,52 @@ describe('reader route', () => {
     const beforeReturn = derivedLoads().length;
     fireEvent.click(screen.getByRole('button', { name: '切回刚才那本' }));
     await waitFor(() => expect(derivedLoads().length).toBeGreaterThan(beforeReturn), { timeout: 10_000 });
+  });
+
+  it('a run whose signal was already aborted cannot latch the failure screen onto pages that arrived', async () => {
+    // 现场来自真窗口（`debug_outputs/task9f/reader-trace.json`）：StrictMode 下这个 effect 跑两遍，
+    // 第一遍在信号被 abort 之后才拿到 manifest——代码里「我是不是最新那一遍」判的是
+    // `contextRef.current`，而它是**新那一遍取回 manifest 时**才换的，所以旧那一遍在这段空隙里
+    // 仍然算数：它把 contextRef 抢回去，随后必然 abort 的取页全都落空，于是写下
+    // 「阅读页面加载失败」；新那一遍把页面都取回来了，却没人清掉那个错误，屏幕停在失败态。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation(async (identity, options) => {
+      // 真缓存第一句就是这个：带着已经 abort 的信号来的消费者一个字节也拿不到。
+      if (options?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 };
+    });
+    let serversCalls = 0;
+    let manifests = 0;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '' } };
+      if (command === 'list_servers') {
+        // 两遍都会走到这里（它前面没有 await 之后的 staleness 判断），所以它是「effect 跑了两遍」
+        // 的证人；`load_reader_manifest` 不行——修好之后旧那一遍根本走不到那一步。
+        serversCalls += 1;
+        return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      }
+      if (command === 'load_reader_manifest') {
+        manifests += 1;
+        // 只让**第二遍**晚一步回来：旧那一遍这时仍是 `contextRef` 的主人，它的失败因此落得下来；
+        // 真窗口里两遍的先后正是这样（旧那遍先跑完取页、新那遍的 manifest 后到）。
+        if (manifests === 2) await new Promise((resolve) => setTimeout(resolve, 50));
+        return { ok: true, value: { archiveId: 'stale-run', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      }
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(
+      <StrictMode>
+        <MemoryRouter initialEntries={['/reader/stale-run']}><App /></MemoryRouter>
+      </StrictMode>,
+    );
+    // 这条用例问的是「两遍都在跑」这件事本身：StrictMode 不双跑，底下就什么都没测到。
+    await waitFor(() => expect(serversCalls).toBe(2));
+    // 旧那一遍的失败在新那一遍的 manifest 之前落下；两边都落定之后再看屏幕上是哪一支。
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
+    expect(screen.queryAllByText('阅读页面加载失败')).toHaveLength(0);
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeTruthy();
   });
 });
 

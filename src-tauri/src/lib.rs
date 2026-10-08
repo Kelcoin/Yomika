@@ -6,7 +6,16 @@ mod cache;
 #[cfg(test)]
 mod command_dispatch;
 mod commands;
-mod compute_center;
+// 计算编排：Task 4 先落纯状态的队列/状态机（`compute/scheduler.rs`），
+// 进程、Job Object 与命令在它之上。宿主不碰模型，重活在 worker 进程里。
+//
+// `pub` 只是为了集成测试能从 crate 外面 drive 真进程闭环（`tests/compute_manager.rs`）；
+// 命令层仍从 `commands/` 走，前端拿不到这里的类型。
+pub mod compute;
+// 与 `compute` 同一个道理：本地那一侧的重活已经全在 worker 里了，远端发来的字节也要走同一条
+// 路，而这件事只有在 crate 外面起一份编排 + 一个真 worker 进程才验得了
+// （`tests/legacy_upscale_proxy.rs`）。`process` 与 `ProcessParams` 本来就是 `pub`。
+pub mod compute_center;
 mod credentials;
 mod data_paths;
 mod data_transfer;
@@ -87,9 +96,9 @@ use dedup::{
 };
 use inference::{
     inference_cancel, inference_cancel_page, inference_checkpoint, inference_clear_cache,
-    inference_decensor_page, inference_get_job, inference_import_model_path,
+    inference_get_job, inference_import_model_path,
     inference_install_decensor_bundle, inference_install_model, inference_list_models,
-    inference_pause, inference_probe, inference_resume, inference_start, inference_upscale_page,
+    inference_pause, inference_release_sessions, inference_probe, inference_resume, inference_start,
     inference_validate_model,
 };
 use app_release::app_release_latest;
@@ -108,6 +117,13 @@ use compute_center::{
     compute_center_configure, compute_center_revoke_pairing, compute_center_status, compute_discover, compute_pair_request,
     compute_pair_confirm, remote_compute_capabilities, remote_compute_process,
 };
+// 重计算编排的命令层（`docs/71` §6.6 的前半：提交 / 查询 / 取消 / 晋级）。
+use compute::commands::{
+    compute_artifact_acquire, compute_artifact_release, compute_cancel, compute_drop_generation,
+    compute_job_artifacts, compute_job_get, compute_job_progress, compute_jobs, compute_promote,
+    compute_retry_worker, compute_submit, compute_submit_decensor_page, compute_submit_reader_page,
+    compute_worker_status,
+};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -124,7 +140,15 @@ pub fn run() {
         }
         return;
     }
-    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        // 算好的图走 URL 而不是 IPC 二进制体（`docs/71` §7.5）：渲染器直接按
+        // `yomika-image://asset/{leaseId}` 取字节，几十 MB 的衍生图就不再经过 JS。
+        // 处理器体在 `compute/asset_protocol.rs`：它立刻把活交给新线程，因为自己跑在
+        // WebView 的消息线程上。
+        .register_asynchronous_uri_scheme_protocol(compute::asset_protocol::SCHEME, |ctx, request, responder| {
+            compute::asset_protocol::serve(ctx, request, responder);
+        });
     // 原生宿主只有 Android 有（登录面板 + SAF 写文件），别的平台那两条路走别的实现。
     #[cfg(target_os = "android")]
     let builder = builder.plugin(mobile_host::plugin());
@@ -135,6 +159,13 @@ pub fn run() {
             // 线索），再挂上 panic 钩子。
             error_log::rotate(app.handle());
             error_log::install_panic_hook(app.handle());
+            // DLSSNR 的动图路径遇到跳过时要留一行「为什么跳过」，但它住在计算核心那一层
+            // （`docs/71` Task 8：宿主不再持有 NGX），那边不认识这个宿主的日志目录策略，
+            // 所以口子从这里装上去（`dlssnr::install_skip_logger`：装的是
+            // `error_log::record_at_data_dir`）；没装的地方（worker、纯核心测试）它会
+            // 退回 stderr。
+            #[cfg(windows)]
+            dlssnr::install_skip_logger();
             let database = Database::open(app.handle()).map_err(std::io::Error::other)?;
             app.manage(database);
             app.manage(DedupScanRegistry::default());
@@ -147,6 +178,17 @@ pub fn run() {
             if let Err(error) = compute_center::restore_on_launch(app.handle()) {
                 eprintln!("无法恢复远端处理服务：{error}");
             }
+            // 重计算编排（`docs/71` §8）：进程内一份句柄，只起 supervisor 线程，**不**起
+            // worker——worker 要等真有任务排队，所以启动界面不为计算付代价。存成
+            // `ComputeHandle`（而不是直接存 `Arc<ComputeManager>`）是为了万一编排没起来
+            // 时命令还能回答「现在算不了」，而不是 `State` 取不到直接 panic 闪退。
+            app.manage(match compute::start(app.handle()) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    eprintln!("无法启动重计算编排：{error}");
+                    compute::unavailable()
+                }
+            });
             #[cfg(target_os = "windows")]
             {
                 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
@@ -328,7 +370,11 @@ pub fn run() {
                         // 派生缓存与 DLSSNR 的工作区都还挂着（实测几个 GB 的提交内存）。
                         // 这里正好是「用户不再看图」的时刻，把工作区交回（只放纹理，不动
                         // 工作集：那份 165MB 的 DLL 与 240MB 的 ONNX 下次还要用）。
-                        crate::dlssnr::release_cached_workspaces();
+                        // 工作区在 worker 进程里，所以是请它交回；这条路**不等**回信——
+                        // 用户要的是窗口马上消失，而且没有会话/正忙着时它就是白等。
+                        if let Some(manager) = crate::compute::manager_from_app(&app) {
+                            manager.release_idle_async();
+                        }
                         let _ = window.hide();
                     } else {
                         let _ = window.destroy();
@@ -427,6 +473,7 @@ pub fn run() {
             export_data,
             import_data,
             inference_probe,
+            inference_release_sessions,
             dlssnr_status,
             dlssnr_probe,
             dlssnr_import_dll,
@@ -442,6 +489,25 @@ pub fn run() {
             compute_pair_confirm,
             remote_compute_capabilities,
             remote_compute_process,
+            // 重计算编排：只入队 / 只读小状态（见 `src/command_dispatch.rs` 的不变量）。
+            compute_submit,
+            // 阅读器那条来路：身份（settingsId / sourceRevision / 管线）由宿主铸。
+            compute_submit_reader_page,
+            // 去码那条来路：宿主只摆三份模型与这一页，检测与修补都在 worker（docs/94）。
+            compute_submit_decensor_page,
+            compute_job_get,
+            compute_jobs,
+            compute_worker_status,
+            compute_job_artifacts,
+            compute_job_progress,
+            compute_cancel,
+            compute_promote,
+            compute_drop_generation,
+            compute_retry_worker,
+            // 产物租借（§7.4）：开租借拿 URL、放租借还 pin。两条都不等计算，
+            // 拿库锁的时间也只是两句单行 UPDATE。
+            compute_artifact_acquire,
+            compute_artifact_release,
             inference_start,
             inference_get_job,
             inference_cancel,
@@ -467,8 +533,6 @@ pub fn run() {
             model_release_validate_archive,
             model_release_activate,
             model_release_validate_local,
-            inference_upscale_page,
-            inference_decensor_page,
             inference_cancel_page,
             save_eh_account,
             login_eh_account,

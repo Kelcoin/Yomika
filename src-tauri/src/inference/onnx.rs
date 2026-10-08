@@ -1,299 +1,22 @@
-//! ONNX Runtime backing for the upscaler.
+//! 宿主侧的真模型测试：这份构建发布出去的那几份 ONNX 图，真的跑得起来吗。
 //!
-//! The tiling pipeline in `upscale.rs` already handles cropping, padding,
-//! reassembly and the pixel budget; this is only the part that puts one tile
-//! through a model. Super-resolution models take NCHW float RGB in [0, 1] and
-//! have no notion of an alpha channel, so alpha is carried across separately by
-//! the same nearest-neighbour scaler that stands in when no model is installed.
+//! 一次推理怎么做（张量布局、边缘生长、形状与有限性检查、GPU 实测探针）全在
+//! `yomika_compute_core::onnx`，产品路径上一页都不从这里走（8-g③-iv 之后连宿主的
+//! 会话都没有了）。留着这个模块是因为这些用例是**唯一**拿真图、真资源路径跑的证据：
+//! 核心那边验证的是布局假设自洽，证明不了这些假设与仓库里那几份图一致；而
+//! `tests/realcugan_dml_parity.rs` 那类夹具量的是另一件事。所以它整体进 `#[cfg(test)]`
+//! （见 `inference.rs` 的模块声明）：模型文件与目录结构属于宿主仓库，测试二进制为此
+//! 仍旧链 ONNX Runtime，出厂的那份二进制不链。
 
 use std::path::Path;
-use std::sync::Mutex;
 
-use super::upscale::UpscaleEngine;
-use super::{cpu_scale_rgba, InferenceError};
-
-/// A loaded ONNX super-resolution model.
-///
-/// `Session::run` needs `&mut`, and `UpscaleEngine::upscale_tile` takes `&self`
-/// because the pipeline holds the engine for the whole image — hence the mutex.
-/// It is uncontended in practice: one page is upscaled at a time.
-pub struct OnnxEngine {
-    session: Mutex<ort::session::Session>,
-    scale: u32,
-    max_pixels: usize,
-    /// Smallest edge the graph accepts, in source pixels. Real-CUGAN reflects 18
-    /// px inside the graph and refuses an edge below 20, while the tiler happily
-    /// hands it a 9 px strip at the right edge of a page; below this the tile is
-    /// grown (edge-replicated) and the answer cropped back.
-    min_input_edge: u32,
-}
-
-impl OnnxEngine {
-    /// Opens `model_path`, which must be the `.onnx` file itself.
-    ///
-    /// `scale` comes from the installed model's manifest rather than from the
-    /// graph: an ONNX output shape is usually dynamic, so the file cannot be
-    /// asked how much bigger it makes things. `min_input_edge` comes from there
-    /// too, for the same reason: only the manifest knows what the graph's own
-    /// padding needs.
-    pub fn open(
-        model_path: &Path,
-        scale: u32,
-        max_pixels: usize,
-        min_input_edge: u32,
-    ) -> Result<Self, InferenceError> {
-        if scale == 0 {
-            return Err(InferenceError::InvalidManifest(
-                "model scale must be at least 1".into(),
-            ));
-        }
-        let session = ort::session::Session::builder()
-            .and_then(|mut builder| builder.commit_from_file(model_path))
-            .map_err(|error| {
-                InferenceError::InvalidInput(format!("ONNX session failed: {error}"))
-            })?;
-        Ok(Self {
-            session: Mutex::new(session),
-            scale,
-            max_pixels,
-            min_input_edge: min_input_edge.max(1),
-        })
-    }
-}
-
-/// RGBA bytes to the NCHW float RGB layout every super-resolution model expects.
-fn rgba_to_nchw(rgba: &[u8], width: u32, height: u32) -> Vec<f32> {
-    let pixels = width as usize * height as usize;
-    let mut planar = vec![0_f32; pixels * 3];
-    for channel in 0..3 {
-        let plane = &mut planar[channel * pixels..(channel + 1) * pixels];
-        for (index, slot) in plane.iter_mut().enumerate() {
-            *slot = f32::from(rgba[index * 4 + channel]) / 255.0;
-        }
-    }
-    planar
-}
-
-/// Grows an RGBA tile to `width`×`height` by repeating its last row/column.
-///
-/// Replication rather than reflection: this is a size floor, not a border
-/// treatment, and the model does its own reflect padding once the tile is big
-/// enough. Replication is also the only mode that works for a one-pixel edge.
-fn pad_rgba_edges(
-    rgba: &[u8],
-    from_width: u32,
-    from_height: u32,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..height {
-        let source_y = y.min(from_height - 1);
-        for x in 0..width {
-            let source_x = x.min(from_width - 1);
-            let index = ((source_y * from_width + source_x) as usize) * 4;
-            out.extend_from_slice(&rgba[index..index + 4]);
-        }
-    }
-    out
-}
-
-/// Writes the model's NCHW float RGB output over the RGB channels of `rgba`,
-/// leaving its alpha alone.
-///
-/// The plane's own width and height come separately from the destination's: when
-/// the engine had to grow the input, the model answers for the grown tile and
-/// only the part that belongs to the original one is copied.
-fn nchw_over_rgba(
-    planar: &[f32],
-    plane_width: usize,
-    plane_height: usize,
-    width: usize,
-    height: usize,
-    rgba: &mut [u8],
-) {
-    let plane = plane_width * plane_height;
-    for channel in 0..3 {
-        let values = &planar[channel * plane..(channel + 1) * plane];
-        for row in 0..height {
-            for column in 0..width {
-                // Models can and do overshoot the nominal [0, 1] range at edges.
-                let value = values[row * plane_width + column];
-                rgba[(row * width + column) * 4 + channel] =
-                    (value * 255.0).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-}
-
-impl UpscaleEngine for OnnxEngine {
-    fn scale(&self) -> u32 {
-        self.scale
-    }
-
-    fn upscale_tile(
-        &self,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>, InferenceError> {
-        if rgba.len() != width as usize * height as usize * 4 {
-            return Err(InferenceError::InvalidInput(
-                "RGBA tile dimensions do not match".into(),
-            ));
-        }
-        // The nearest-neighbour result is both the alpha carrier and the shape
-        // the caller expects back, so a model that answers with the wrong size
-        // cannot produce a mismatched buffer.
-        let mut output = cpu_scale_rgba(rgba, width, height, self.scale, self.max_pixels)?.rgba;
-
-        let (input_width, input_height) = (
-            width.max(self.min_input_edge),
-            height.max(self.min_input_edge),
-        );
-        let grown;
-        let source = if (input_width, input_height) == (width, height) {
-            rgba
-        } else {
-            grown = pad_rgba_edges(rgba, width, height, input_width, input_height);
-            &grown[..]
-        };
-
-        let input = ort::value::Tensor::from_array((
-            vec![
-                1_i64,
-                3,
-                i64::from(input_height),
-                i64::from(input_width),
-            ],
-            rgba_to_nchw(source, input_width, input_height),
-        ))
-        .map_err(|error| InferenceError::InvalidInput(format!("ONNX input failed: {error}")))?;
-
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| InferenceError::InvalidInput("ONNX session lock poisoned".into()))?;
-        let outputs = session
-            .run(ort::inputs![input])
-            .map_err(|error| InferenceError::InvalidInput(format!("ONNX run failed: {error}")))?;
-        let (shape, values) = outputs[0].try_extract_tensor::<f32>().map_err(|error| {
-            InferenceError::InvalidInput(format!("ONNX output failed: {error}"))
-        })?;
-
-        let expected = [
-            1_i64,
-            3,
-            i64::from(input_height) * i64::from(self.scale),
-            i64::from(input_width) * i64::from(self.scale),
-        ];
-        if shape.as_ref() != expected {
-            // Almost always a manifest whose `scale` does not match the model, or
-            // a graph that does not preserve the size it was handed.
-            return Err(InferenceError::InvalidManifest(format!(
-                "ONNX output shape {shape:?} does not match the declared x{} scale",
-                self.scale
-            )));
-        }
-        nchw_over_rgba(
-            values,
-            (input_width * self.scale) as usize,
-            (input_height * self.scale) as usize,
-            (width * self.scale) as usize,
-            (height * self.scale) as usize,
-            &mut output,
-        );
-        Ok(output)
-    }
-}
+pub use yomika_compute_core::onnx::OnnxEngine;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rgba_round_trips_through_the_planar_layout() {
-        // One pixel per channel plus an alpha the model never sees.
-        let rgba = vec![10, 20, 30, 40, 200, 210, 220, 230];
-        let planar = rgba_to_nchw(&rgba, 2, 1);
-        // Planar means all reds, then all greens, then all blues.
-        assert_eq!(
-            planar,
-            vec![
-                10.0 / 255.0,
-                200.0 / 255.0,
-                20.0 / 255.0,
-                210.0 / 255.0,
-                30.0 / 255.0,
-                220.0 / 255.0
-            ]
-        );
-
-        let mut restored = vec![0, 0, 0, 40, 0, 0, 0, 230];
-        nchw_over_rgba(&planar, 2, 1, 2, 1, &mut restored);
-        assert_eq!(
-            restored, rgba,
-            "alpha must survive a round trip the model cannot see"
-        );
-    }
-
-    #[test]
-    fn a_grown_plane_is_cropped_to_the_tile_that_asked_for_it() {
-        // The model answered for a 2x2 input (the engine grew a 1x1 tile); only
-        // the top-left pixel belongs in the buffer. Reading the planes with the
-        // destination's width instead of the plane's own would pull the wrong
-        // channel out — 0.5 instead of 0.1 in red.
-        let planar = vec![
-            0.1_f32, 0.2, 0.3, 0.4, // red
-            0.5, 0.6, 0.7, 0.8, // green
-            0.9, 1.0, 0.0, 0.0, // blue
-        ];
-        let mut rgba = vec![0, 0, 0, 255];
-        nchw_over_rgba(&planar, 2, 2, 1, 1, &mut rgba);
-        assert_eq!(
-            rgba,
-            vec![
-                (0.1_f32 * 255.0).round() as u8,
-                (0.5_f32 * 255.0).round() as u8,
-                (0.9_f32 * 255.0).round() as u8,
-                255,
-            ]
-        );
-    }
-
-    #[test]
-    fn padding_a_tile_repeats_its_last_row_and_column() {
-        // 2x2 with distinct corners, grown to 3x3.
-        let rgba = vec![
-            1, 1, 1, 9, 2, 2, 2, 9, //
-            3, 3, 3, 9, 4, 4, 4, 9,
-        ];
-        let padded = pad_rgba_edges(&rgba, 2, 2, 3, 3);
-        let pixel = |x: usize, y: usize| padded[(y * 3 + x) * 4];
-        assert_eq!((pixel(0, 0), pixel(1, 0), pixel(2, 0)), (1, 2, 2));
-        assert_eq!((pixel(0, 1), pixel(1, 1), pixel(2, 1)), (3, 4, 4));
-        assert_eq!((pixel(0, 2), pixel(1, 2), pixel(2, 2)), (3, 4, 4));
-    }
-
-    #[test]
-    fn out_of_range_model_output_is_clamped_not_wrapped() {
-        // Super-resolution models overshoot at high-contrast edges. Casting a
-        // negative or >1 float straight to u8 wraps around and speckles the page.
-        let planar = vec![-0.4_f32, 1.6, 0.5, 0.5, 0.5, 0.5];
-        let mut rgba = vec![0, 0, 0, 255, 0, 0, 0, 255];
-        nchw_over_rgba(&planar, 2, 1, 2, 1, &mut rgba);
-        assert_eq!(rgba[0], 0);
-        assert_eq!(rgba[4], 255);
-    }
-
-    #[test]
-    fn a_zero_scale_manifest_is_rejected_before_the_model_is_opened() {
-        let error = match OnnxEngine::open(Path::new("does-not-exist.onnx"), 0, 1_000, 1) {
-            Ok(_) => panic!("a zero scale must not open a session"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, InferenceError::InvalidManifest(_)));
-    }
+    use crate::inference::upscale::UpscaleEngine;
+    use yomika_compute_core::runtime::RuntimeId;
 
     /// A gradient tile whose red rises left to right and green top to bottom, both
     /// spanning the full range so a wrap-around or a channel swap is visible.
@@ -312,9 +35,9 @@ mod tests {
     /// One hosted model, run for real: size, channel order and alpha are all
     /// checked, so a bad export cannot reach the release.
     ///
-    /// 本文件其它测试都是在验证我自己的布局假设自洽；这一组是唯一能证明这些假设与
-    /// 真实的图一致的检查——一个转置的、或 channels-last 的模型能通过其它所有测试，
-    /// 却输出垃圾。
+    /// 核心那边的测试验证的是我自己的布局假设自洽；这一组是唯一能证明这些假设与真实
+    /// 的图一致的检查——一个转置的、或 channels-last 的模型能通过其它所有测试，却输出
+    /// 垃圾。
     fn assert_model_upscales(model: &std::path::Path, scale: u32, min_input_edge: u32) {
         let engine = match OnnxEngine::open(model, scale, 64_000_000, min_input_edge) {
             Ok(engine) => engine,
@@ -466,4 +189,99 @@ mod tests {
             .rgba;
         assert_ne!(upscaled.rgba, nearest);
     }
+
+    /// 分块不是整页，而且**换多大的边距都救不回来**：这几份图里各有四处 `ReduceMean`
+    /// 在**每块自己的特征图上**做空间池化（结构上由
+    /// `tests/gpu/realcugan-parity/scan_global_attention.py -ScanTiling` 扫出来），
+    /// 于是「这一块算出来的东西」取决于这块有多大、里面有什么。要是把注意力那几处
+    /// 的池化在整页统计上做，或者整页一次推理，才谈得上精确；tile 变大只是把差距
+    /// 压小（docs/89 的曲线）。
+    ///
+    /// 这条钉的是**曲线的方向**（大块更接近整页）与数量级，不是某台机器的绝对值：
+    /// 换 CPU、换一版 ORT，绝对值会动，方向不会。整页与分块两边都是真模型真推理，
+    /// 所以它同时是「分块管道没被改坏」的回归线。
+    #[test]
+    fn a_tiled_page_is_not_the_whole_page_and_a_bigger_tile_comes_closer() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/models");
+        let model = directory.join("realcugan-2x-conservative.onnx");
+        if !model.exists() {
+            eprintln!("skipping: {} is not present", model.display());
+            return;
+        }
+        let (width, height) = (1024_u32, 768_u32);
+        let rgba = gradient_rgba(width, height);
+        let engine = OnnxEngine::open(&model, 2, 64_000_000, 20).expect("engine");
+        let whole = engine
+            .upscale_tile(&rgba, width, height)
+            .expect("the whole page in one pass");
+        let error = |tile: u32| -> (f64, usize) {
+            let options = crate::inference::upscale::UpscaleOptions {
+                tile_size: tile,
+                tile_padding: crate::inference::upscale::DEFAULT_TILE_PADDING,
+                max_pixels: 64_000_000,
+                ..crate::inference::upscale::UpscaleOptions::default()
+            };
+            let tiled =
+                crate::inference::upscale::upscale_rgba(&engine, &rgba, width, height, options)
+                    .expect("upscale the page in tiles");
+            let difference = tiled
+                .rgba
+                .iter()
+                .zip(whole.iter())
+                .map(|(tiled, page)| tiled.abs_diff(*page) as f64)
+                .sum::<f64>()
+                / whole.len() as f64;
+            (difference, tiled.tiles)
+        };
+        let (small, small_tiles) = error(128);
+        let (big, big_tiles) = error(512);
+        assert!(
+            small_tiles > big_tiles && big_tiles > 1,
+            "两条都要真的是分块：tile 128 走了 {small_tiles} 块，tile 512 走了 {big_tiles} 块"
+        );
+        eprintln!(
+            "分块 vs 整页 {width}x{height}（平均字节差，1/255 = {:.3e}）：tile 128 = {small:.3e}（{small_tiles} 块），tile 512 = {big:.3e}（{big_tiles} 块）",
+            1.0 / 255.0
+        );
+        // 方向要**明显**：实测这条梯度页上 128 是 512 的 1.76 倍，结构化页上是 2.14 倍，
+        // 所以 1.3 倍是留了余量的下限；只写 `> big` 的话，差了 0.1% 也算过。
+        assert!(
+            small > big * 1.3,
+            "tile 变大不再明显更接近整页：128 = {small:.3e}，512 = {big:.3e}"
+        );
+        assert!(
+            big > 0.0,
+            "分块与整页逐位相同——图里的空间池化不见了，这条断言要先重写"
+        );
+        // 上限只是「有没有别的东西坏掉了」的报警线，不是质量指标：这条梯度页离自然图像
+        // 统计很远（一条纯斜坡），绝对值比 docs/89 里那些页状输入大一个量级，实测
+        // 8.952e-02，所以线放在 2e-1。真要收紧质量，得拿页状输入去测。
+        assert!(
+            small < 2.0e-1,
+            "分块与整页的差距比实测大了一个量级：{small:.3e}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_selected_provider_matches_cpu_reference_for_real_models() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/models");
+        for (id, scale, floor) in [("waifu2x-upconv7", 2, 1), ("realcugan-2x-conservative", 2, 20), ("realcugan-2x-denoise3x", 2, 20), ("realesr-general-x4v3", 4, 1)] {
+            let path = if id == "waifu2x-upconv7" { Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models/waifu2x-upconv7/model.onnx") } else { root.join(format!("{id}.onnx")) };
+            if !path.is_file() { continue; }
+            let chosen = OnnxEngine::open(&path, scale, 64_000_000, floor).unwrap();
+            // 强制 CPU 参照：同一个文件、同一个形状，只换运行库。
+            let cpu = OnnxEngine::open_with_runtime(&path, RuntimeId::Cpu, scale, 64_000_000, floor).unwrap();
+            let rgba = gradient_rgba(72, 64);
+            let a = chosen.upscale_tile(&rgba, 72, 64).unwrap();
+            let b = cpu.upscale_tile(&rgba, 72, 64).unwrap();
+            let mean = a.iter().zip(&b).map(|(a,b)| a.abs_diff(*b) as u64).sum::<u64>() as f64 / a.len() as f64;
+            let row = (64 * scale / 2 * 72 * scale * 4) as usize;
+            assert!(mean < 1.0, "{id}: 选中的运行库与 CPU 参照相差 {mean}");
+            // 打出**实际**选中的那条：DirectML 在负 pad 上算错，Real-CUGAN 会因此
+            // 被实测探针打回 CPU，这一行是那种回退唯一可见的地方。
+            eprintln!("{id}: runtime={} mean byte error={mean:.3}; ref row ends={}/{}", chosen.runtime().as_str(), b[row], b[row+(72*scale*4) as usize-4]);
+        }
+    }
+
 }

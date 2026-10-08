@@ -1,0 +1,12 @@
+[package]
+name = "yomika-compute-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Yomika compute worker wire types and framing; no engine dependencies"
+
+# 刻意只依赖 serde/serde_json：协议层不得拉 ort/NGX/tauri（docs/71 §5.1），
+# 否则宿主与 worker 之间的类型一致就无从验证。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

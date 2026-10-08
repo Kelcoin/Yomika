@@ -6,15 +6,25 @@ authors = ["Yomika contributors"]
 edition = "2021"
 license = "MIT"
 
+# 宿主的算法要搬进 worker，第一步是把「不含 Tauri/DB 的纯计算」与「协议」变成
+# 独立可测的 crate（docs/71 §5.1 / Task 2）。宿主自己仍是工作区根包，因此既有的
+# `--manifest-path src-tauri/Cargo.toml` 命令照旧只作用于宿主；要连带成员一起跑
+# 就显式加 `--workspace`。
+[workspace]
+members = [
+    "crates/compute-protocol",
+    "crates/compute-core",
+    "crates/compute-transport",
+    "worker",
+]
+resolver = "2"
+
 [lib]
 name = "yomika_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# 把 NGX 核心的垫片（vendor/ngx/ngx_shim.c，/MT）编成一个小 DLL：我们的 Rust 是
-# /MD，直接链 SDK 那份静态库会被链接器按 LNK2038 挡下来。
-cc = "1"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -33,19 +43,24 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-# 动图逐帧过 DLSSNR 之后要编回 APNG：`image` 只解不编，`image-webp` 只有解码器，
-# `image` 自己的 WebP 编码器只能写静态 lossless——能把「多帧 + 每帧延迟 + 循环次数」
-# 一次写全的只有 `png` 的 `set_animated` 加逐帧 fcTL。这两份本来就已经躺在依赖树里
-# （`image` 的 png / webp feature 拉进来的，版本见 Cargo.lock），写出来只是为了能用
-# 它们的 API：`png` 认 APNG 的 acTL，`image-webp` 认动画 WebP 的帧数。
-#
-# `png` 必须与 `image` 依赖的 0.18 同一条：压缩档（`Compression::Fast`）与过滤档
-# （`Filter::Adaptive`）都要对上静态那条路，两代 API 的枚举名也不一样。
-png = "0.18"
-image-webp = "0.2"
+# 这里原来还直接依赖 `png = "0.18"` 与 `image-webp = "0.2"`：动图逐帧过 DLSSNR 之后要
+# 编回 APNG（`image` 只解不编），那套编码器当时住在宿主进程里。8-g④ 把引擎整块搬进
+# `compute-core` 之后，宿主源码里已经一处 `png::` / `image_webp::` 都没有（只剩 `image`
+# 自己的 `image::codecs::png::PngEncoder`），这两行是搬家的遗留——留着会让人以为宿主还在
+# 编动图。谁要再用，先想清楚它为什么必须在宿主里，而不是在 worker 里。
 # NFKC normalization for dedup filename matching (Readoshi parity).
 unicode-normalization = "0.1"
-ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
+# 计算核心与协议（docs/71 §5.1）：纯算法 + 线协议，不依赖 tauri/rusqlite/reqwest，
+# 目的是让重算能离开 UI 进程，并且能独立 `cargo test`。宿主只要它那些**不算模型**的
+# 部分（尺寸折算、缩放规划、嗅探、几何），所以这里一条 feature 都不开：核心的
+# `cpu`/`directml` feature 打开的正是它那层 ONNX 会话，而宿主的模型计算（超分、去码、
+# 检测、修补）在 8-g③-iv 之后全部在 worker 里。要链运行库的只有测试，见下面的
+# `[dev-dependencies]`。
+yomika-compute-core = { path = "crates/compute-core" }
+yomika-compute-protocol = { path = "crates/compute-protocol" }
+# 命名管道传输（重叠 IO 的读写两端）。宿主用它的服务端一半接 worker；不经过 worker 的
+# 库，免得把 worker 的引擎/执行器拉进主进程的依赖图（docs/71 §5.2）。
+yomika-compute-transport = { path = "crates/compute-transport" }
 
 [features]
 # Tauri tells production builds apart from development ones with this feature:
@@ -55,7 +70,15 @@ ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 # hand-rolled `cargo build` has to pass `--features custom-protocol` itself.
 custom-protocol = ["tauri/custom-protocol"]
 
+# 测试二进制仍然链 ONNX Runtime。
+#
+# 出厂的那份宿主二进制不链（`cargo tree -e normal` 与 PE 导入表看得见），但
+# `inference/{session,onnx}.rs` 里那些真模型用例（GPU 与 CPU 对照、provider 归因、
+# 分块曲线）和 `tests/realcugan_dml_parity.rs` 那份夹具是 Task 1/7 的测量证据——删掉
+# 它们等于把证据一起删掉。resolver = "2" 让 bin 构建不激活这一段，所以「证据」与
+# 「宿主无 ORT」可以同时成立。
 [dev-dependencies]
+yomika-compute-core = { path = "crates/compute-core", features = ["cpu"] }
 
 # Native clipboard write: the webview API prompts WebView2 users for clipboard
 # permission on every export, the OS board does not. arboard has no Android
@@ -67,7 +90,28 @@ arboard = "3"
 [target."cfg(windows)".dependencies]
 # Win32_Security 只为了 `CreateMutexW` 的 cfg 门（单实例守卫要用它）——同一个 crate
 # 自带这个 feature，不用多拉一个依赖。
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+# DLSSNR 引擎（8-g④）：`docs/71` Task 8 的出口要求宿主不再持有 NGX 资源，而 NGX 只能
+# 在计算进程里初始化、worker 又不许依赖 Tauri（§5.2），所以引擎住在核心那一层，这边
+# 只留壳（命令 + DLL 的下载策略，见 `src/dlssnr/mod.rs`）。
+#
+# 这一行**不开 `dlssnr`**（8-g④-b3）：宿主现在要的只有「按需纯元数据」那一半（设置、
+# 变体身份、`dll_path`、`output_revision`、探针记账、合成图与像素差、显卡枚举）——b1
+# 把这一半留在不门的模块里，就是为了让这一行能一条 feature 都不开。改之前宿主这一份
+# 开着 `dlssnr`：引擎与垫片照编，只靠链接器的死代码消除才没进 exe（实测：那时 exe 里
+# 既没有 `d3d12.dll` 的导入，也没有垫片的字节）——「宿主无 NGX」落在编译器的优化上，
+# 而不是落在依赖图上。摘掉之后它连编都不编，垫片也不再由这个 crate 的 build.rs 现编。
+yomika-compute-core = { path = "crates/compute-core" }
+
+# 测试用的那一份：`directml` 给 `session.rs` 里那两条证据测试开 DirectML 会话，
+# `realcugan_dml_parity.rs` 则自己直接开 `ort`；`dlssnr` 只给 `src/dlssnr/mod.rs` 的
+# `the_engines_skip_notes_land_in_the_error_log`——那条用例要真跑一次 `apply_dlssnr`，
+# 才证得了「动图跳过的那行诊断落进了宿主的 error.log」。resolver = "2" 让 bin 构建不
+# 激活这一段，所以出厂 exe 里没有它（判据在 `tests/contracts/native-config.test.ts` 与
+# `scripts/compute/task8g4b3-pe-evidence.ps1`）。
+[target."cfg(windows)".dev-dependencies]
+ort = { version = "2.0.0-rc.13", features = ["directml"] }
+yomika-compute-core = { path = "crates/compute-core", features = ["directml", "dlssnr"] }
 
 # 发布构建不带符号表。
 #

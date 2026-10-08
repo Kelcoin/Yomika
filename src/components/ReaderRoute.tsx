@@ -2,11 +2,14 @@ import { usePageActive } from '../app/RetainedPage';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
+import { z } from 'zod';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { getNativeComputeRepository } from '../repositories/nativeComputeRepository';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ReaderScreen, useReaderChrome } from './ReaderScreen';
 import { LoadingIndicator } from './LoadingIndicator';
+import { RETRYABLE_COMPUTE_ERROR_CODES } from '../domain/compute';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
 import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
@@ -15,12 +18,15 @@ import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
 import { parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
-import type { ImageHandle } from '../lib/unifiedImageCache';
+import { loadLocalRenditions, loadReaderComputedPage, READER_UPSCALE_STAGE_ID, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
+import type { ImageCacheIdentity } from '../domain/cache';
+import { imageResidentBytes, type ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { shouldAutoEnableUpscale } from '../lib/autoUpscale';
 
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
+const computeRepository = getNativeComputeRepository();
 
 /** 让 Rust 把「已经释放、但 Windows 还挂在进程工作集里」的那些页交还给系统。
  *
@@ -48,7 +54,9 @@ function trimProcessMemory(): void {
  * 工作集，下一页第一张图要重新读盘，所以只留给「离开这一本」那一刻；这条只交回几个
  * GB 的纹理，整本预处理停下来一会儿之后也可以做。 */
 function releaseDlssnrWorkspaces(): void {
-  void invokeCommand('dlssnr_release_workspaces', {}, VoidResponseSchema);
+  void invokeCommand('dlssnr_release_workspaces', {}, z.number().int().nonnegative());
+  // ONNX sessions are also caches, not process-lifetime allocations.
+  void invokeCommand('inference_release_sessions', {}, z.number().int().nonnegative());
 }
 
 /** 整本预处理停下来多久之后交回 DLSSNR 的工作区。
@@ -326,6 +334,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const censoredFailureRef = useRef(new Set<string>());
   const upscaleFailureRef = useRef(new Set<string>());
   const dlssnrFailureRef = useRef(new Set<string>());
+  /** 已经说过一次的「引擎交代」与「点名要显卡却没给上」：都按内容去重。
+   *
+   * 同一台机器上每翻一页都会得到同一条回退原因，说一遍就够了；不按页去重是因为
+   * 这句话讲的是**这台机器**，不是这一页。 */
+  const engineNoticeRef = useRef(new Set<string>());
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -367,11 +380,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (existing === handle) return;
     if (existing) {
       held.delete(pageIndex);
-      derivedBytesRef.current -= existing.bytes;
+      derivedBytesRef.current -= imageResidentBytes(existing);
     }
     held.set(pageIndex, handle);
-    derivedBytesRef.current += handle.bytes;
-    derivedPeakBytesRef.current = Math.max(derivedPeakBytesRef.current, handle.bytes);
+    derivedBytesRef.current += imageResidentBytes(handle);
+    derivedPeakBytesRef.current = Math.max(derivedPeakBytesRef.current, imageResidentBytes(handle));
     const dropped: number[] = [];
     const visible = visiblePagesRef.current;
     const budget = Math.min(
@@ -391,7 +404,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const evicted = held.get(victim);
       held.delete(victim);
       if (!evicted) break;
-      derivedBytesRef.current -= evicted.bytes;
+      derivedBytesRef.current -= imageResidentBytes(evicted);
       imageCache.release(evicted);
       const retired = retiredDerivedRef.current.get(victim);
       if (retired) {
@@ -613,6 +626,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     censoredFailureRef.current.clear();
     upscaleFailureRef.current.clear();
     dlssnrFailureRef.current.clear();
+    engineNoticeRef.current.clear();
     setDerivingPages((current) => current.size === 0 ? current : new Set());
     setDerivingStage(undefined);
     setDerivedPages((current) => current.size === 0 ? current : new Map());
@@ -630,6 +644,38 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     const label = stage === 'decensor' ? '去码' : stage === 'upscale' ? '超分' : 'DLSSNR';
     showToast(`${label}这一步没跑成，这一页显示的是可用的那一版（细节在错误日志里）。`, 'error');
   }, [showToast]);
+
+  /** 引擎交代：这一版**不是**首选那条运行库算的。
+   *
+   * 「点的是显卡、跑的是 CPU」这句话以前没人说，界面只显示成功——所以这里必须开口
+   * （docs/71:126：auto 可以显式回退，但要展示原因）。同一台机器上每翻一页都是同一条
+   * 原因，所以按内容去重而不是按页。 */
+  const noticeEngineFallback = useCallback((model: string, engine: ReaderPageEngine) => {
+    const fallback = engine.fallback;
+    if (!fallback) return;
+    const key = `fallback:${model}:${fallback.requested}:${fallback.used}:${fallback.reason}`;
+    if (engineNoticeRef.current.has(key)) return;
+    engineNoticeRef.current.add(key);
+    showToast(`这一页没有用 ${fallback.requested} 算：实际用的是 ${fallback.used}（${fallback.reason}）。`, 'info');
+  }, [showToast]);
+
+  /** 超分这一步没成。分两种说法：点名要显卡却没给上，是**强制失败**，不是普通降级。
+   *
+   * `Gpu` 是承诺（docs/71 §5.1/§12.1）：拿不到显卡、或这个模型在这条运行库上实测不通过
+   * 就直接失败，绝不能悄悄用 CPU 顶上——所以它的措辞必须与「后台这一步没跑成」不同，
+   * 否则用户会以为只是慢了一档。 */
+  const noticeUpscaleFailure = useCallback((model: string, failure: ReaderPageFailure) => {
+    if (failure.code === 'GPU_BACKEND_UNAVAILABLE' || failure.code === 'GPU_OUTPUT_INVALID') {
+      const key = `gpu:${model}:${failure.code}`;
+      if (engineNoticeRef.current.has(key)) return;
+      engineNoticeRef.current.add(key);
+      // 占掉「超分没跑成」那个位子：这条话已经把这一页交代清楚了，别再弹第二遍。
+      upscaleFailureRef.current.add(`upscale:${model}`);
+      showToast(`点名要显卡这一步没跑成：${failure.code}。这一页显示的是可用的那一版。`, 'error');
+      return;
+    }
+    noticeStageFailure('upscale', model, upscaleFailureRef.current);
+  }, [showToast, noticeStageFailure]);
 
   /** 把后台游标上的下一页放进队列。
    *
@@ -694,45 +740,91 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         // 正在跑的后台那一件。判据是 tier——`visible` 是当前窗口里的页，其它（预扫
         // 的 `background`、邻页的 `neighbour`）都往后站。
         const priority = job.tier === 'visible' ? ('foreground' as const) : ('background' as const);
+        /** 这件任务最后报出来的失败码。`loadLocalRenditions` 的返回值里**没有**它（返回值只答
+         * 「谁落地了」），失败只从 `onFailure` 这一条路出来，所以这里得自己接住。 */
+        let jobFailure: ReaderPageFailure | undefined;
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
-          /** 第一步：去码（双开时也单独跑，不再塞进超分那一次调用里）。
+          /** 本地这两步（去码 → 超分）在这一版里是**一条链**，任何一档都先走它。
            *
-           * 这两步是**先后两件事**，不是一件事：去码产物先上屏（几秒就能看到），
-           * 超分再它之上换成最终那一版。以前去码被折进超分调用内部，于是「去码成功、
-           * 超分失败」时前端手上什么都没有——页面上还是原图。 */
-          const censored = job.decensorModel
-            ? await imageCache.load(
-              { ...identity, rendition: 'decensored', modelId: job.decensorModel, priority, taskId: `${taskBase}:decensor` },
-              { signal: controller.signal },
-            ).catch(() => undefined)
-            : undefined;
-          // Abort is a lifecycle transition, not a failed processing stage. Do
-          // not continue into fallback/notice handling after the controller has
-          // been cancelled while the native request was in flight.
-          if (controller.signal.aborted) {
-            if (censored) imageCache.release(censored);
-            continue;
-          }
-          if (censored && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
-            retainDerived(pageIndex, censored);
-          }
-          const stillCurrent = job.generation === derivedGenerationRef.current;
-          // 第二步：超分。起点是上一步的产物；去码没跑成（或没开）就从原图放大——
-          // 一次「只有超分」的降级，页面上会写明这一点（见下面的 notice）。
-          if (stillCurrent && job.upscaleModel) setDerivingStage('upscale');
-          const enhanced = stillCurrent && job.upscaleModel
-            ? await imageCache.load({
-              ...identity,
-              rendition: 'enhanced',
-              modelId: job.upscaleModel,
-              ...(censored && job.decensorModel
-                ? { decensorModelId: job.decensorModel, source: 'decensored' as const }
-                : { source: 'reader-page' as const }),
-              priority,
-              taskId: `${taskBase}:enhanced`,
-            }, { signal: controller.signal }).catch(() => undefined)
-            : undefined;
+           * 为什么要一条链：链的第二阶段只能吃第一阶段的产物，而那份产物只有内容寻址的
+           * 落点、没有按修订号登记的缓存行——出了这件任务，没人能按身份把它找回来。8-g① 在
+           * 取产物那一步把行补上了（`cache::adopt_published_blob`），所以更高档
+           * （dlssnr / remote）终于能把本地这一版当**输入**按身份读回来：它们接着这条路往下
+           * 多走一步，不再各走一条「只有宿主会在进程里跑模型」的旧命令。
+           *
+           * 链的第一阶段一拿到就先上屏，所以「几秒就能看到去码版」这件事没丢；第二阶段
+           * 没成，第一阶段那一版留着（§9.1 ⑦）。阶梯（`loadLocalRenditions` 里那三段）对
+           * 每一档都适用：链式两阶段整件被拒时退到「只去码」，都拿不到才退回「从原图超分」。 */
+          const chainDecensorModel = job.decensorModel || undefined;
+          const chainUpscaleModel = job.upscaleModel || undefined;
+          const decensoredIdentity: ImageCacheIdentity = {
+            ...identity,
+            rendition: 'decensored',
+            modelId: job.decensorModel,
+            priority,
+            taskId: `${taskBase}:decensor`,
+          };
+          const enhancedFromDecensoredIdentity: ImageCacheIdentity = {
+            ...identity,
+            rendition: 'enhanced',
+            modelId: job.upscaleModel,
+            decensorModelId: job.decensorModel,
+            source: 'decensored',
+            priority,
+            taskId: `${taskBase}:enhanced`,
+          };
+          const enhancedFromPageIdentity: ImageCacheIdentity = {
+            ...identity,
+            rendition: 'enhanced',
+            modelId: job.upscaleModel,
+            source: 'reader-page',
+            priority,
+            taskId: `${taskBase}:enhanced`,
+          };
+          const renditions = await loadLocalRenditions({
+            repository: computeRepository,
+            cache: imageCache,
+            signal: controller.signal,
+            scopeId: context.scopeId,
+            archiveId: context.archiveId,
+            pageIndex,
+            generation: job.generation,
+            priority,
+            decensorModel: chainDecensorModel,
+            upscaleModel: chainUpscaleModel,
+            decensoredIdentity,
+            enhancedFromDecensoredIdentity,
+            enhancedFromPageIdentity,
+            onDecensored: (handle) => {
+              // 中间那一版先上屏，认的还是原来那套账（字节预算、淘汰、离开阅读器时统一
+              // 释放，判据都是 `ImageHandle`）。页已经翻走、或已经不在这一代，就不认领，
+              // 把租借当场还掉。
+              if (
+                controller.signal.aborted
+                || !mountedRef.current
+                || contextRef.current?.generation !== context.generation
+                || job.generation !== derivedGenerationRef.current
+              ) {
+                imageCache.release(handle);
+                return;
+              }
+              retainDerived(pageIndex, handle);
+              // 去码那一版上屏的同时，终点那一阶段才刚开始：小胶囊跟着换名字。
+              if (job.upscaleModel) setDerivingStage('upscale');
+            },
+            onEngine: (model, engine) => noticeEngineFallback(model, engine),
+            // 账记在**没落地的那一阶段**头上（`loadLocalRenditions` 判的），不是记在被点名的
+            // 那一个头上：链式两阶段整件被拒时，真凶常常是去码模型包。
+            onFailure: (stage, model, failure) => {
+              jobFailure = failure;
+              if (stage === 'decensor') noticeStageFailure('decensor', model, censoredFailureRef.current);
+              else noticeUpscaleFailure(model, failure);
+            },
+          });
+          const censored = renditions.censored;
+          const enhanced = renditions.enhanced;
+          // 从这儿往下两条路共用：谁拿到了句柄谁进这套账。
           if (controller.signal.aborted) {
             if (enhanced) imageCache.release(enhanced);
             continue;
@@ -803,7 +895,18 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             // 不写「远端失败」的提示：远端地址与令牌的失败在错误日志里，而且那一档本
             // 来就是本机处理的可选替代（本机这一版已经画出来了）。
           }
-          if (!derived) continue;
+          if (!derived) {
+            // 一页什么都没落地，它就**不算「做过」**——但只对阵发性的失败这样算。worker 被杀、
+            // 队列满、超时都是现场问题（看门狗会把 worker 拉回来），而「做过」这个记号是给
+            // `requestDerived` 和整本预扫跳过用的：记上以后用户翻回去也只有原图，这一页在这
+            // 一次阅读里再也拿不到结果——那正是 docs/71:645 第四句要防的事。模型没装、输入
+            // 坏了这类再问一次还是同一个结果，记着才对（不然每翻一次就重撞一次）。同一件事
+            // 在「源页这一次没读出来」那条路上已经办过一次。
+            if (jobFailure !== undefined && RETRYABLE_COMPUTE_ERROR_CODES.has(jobFailure.code)) {
+              derivedAttemptedRef.current.delete(pageIndex);
+            }
+            continue;
+          }
           if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
             imageCache.release(derived);
             continue;
@@ -826,6 +929,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             // 永远漏掉这一页（让位只发生在用户翻页时，所以它很快会再轮到）。
             if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
           }
+          // The whole-archive sweep warms disk, not the reader's raw-image
+          // residency. Re-check the current viewport after awaits: a background
+          // page may have become visible while it was being processed.
+          const visible = [...visiblePagesRef.current];
+          const neighbours = visible.length > 0
+            ? getPrefetchPages(visible[0]!, context.paths.length, prefetchDistance)
+            : [];
+          if (contextRef.current === context && !visible.includes(pageIndex) && !neighbours.includes(pageIndex)) {
+            releasePage(pageIndex);
+          }
           derivedAbortsRef.current.delete(pageIndex);
           derivedTierRef.current.delete(pageIndex);
           markDeriving(pageIndex, false);
@@ -837,7 +950,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       // 队列排空了（这一趟没有新的活进来）：过一会儿把 DLSSNR 的工作区交回。
       scheduleWorkspaceRelease();
     }
-  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, scheduleWorkspaceRelease]);
+  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease]);
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
@@ -968,6 +1081,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     mountedRef.current = true;
     const generation = generationRef.current + 1;
     generationRef.current = generation;
+    // 「我是不是最新那一遍」不能拿 `contextRef.current` 来判：它要到**新那一遍取回 manifest
+    // 时**才换（见下面 `contextRef.current = context`），而旧那一遍的信号早就被 abort 了——
+    // 浏览器里每次 IPC 上百毫秒，这段空隙足够旧那一遍走完剩下的 await，把必然 AbortError 的
+    // 取页读成「阅读页面加载失败」，而那个错误没人清，于是新那一遍的页面被错误屏盖住。
+    // 代数在 setup 里就 +1，新那一遍一开始跑，旧那一遍立刻认得出来。
+    const stillCurrent = () => mountedRef.current && generationRef.current === generation;
     const controller = new AbortController();
     contextRef.current = undefined;
     releaseAllPages();
@@ -977,18 +1096,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
 
     void (async () => {
       const servers = await repository.listServers();
-      if (!mountedRef.current || !servers.ok || !servers.value.length) {
-        if (mountedRef.current) setError(servers.ok ? '尚未配置服务器' : servers.error.message);
+      if (!stillCurrent()) return;
+      if (!servers.ok || !servers.value.length) {
+        setError(servers.ok ? '尚未配置服务器' : servers.error.message);
         return;
       }
       const server = pickServer(servers.value, serverParam);
       if (!server) {
-        if (mountedRef.current) setError('尚未配置服务器');
+        setError('尚未配置服务器');
         return;
       }
       const manifest = await repository.loadReaderManifest(server.id, archiveId);
-      if (!mountedRef.current || !manifest.ok) {
-        if (mountedRef.current && !manifest.ok) setError(manifest.error.message);
+      if (!stillCurrent()) return;
+      if (!manifest.ok) {
+        setError(manifest.error.message);
         return;
       }
       const context: ReaderContext = {
@@ -1004,7 +1125,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       // Overview facts load in the background: the panel is optional chrome, so
       // it must not delay the first page.
       void repository.loadArchiveMetadata(server.id, archiveId).then((metadata) => {
-        if (!mountedRef.current || contextRef.current !== context || !metadata.ok) return;
+        if (!stillCurrent() || !metadata.ok) return;
         setInfo((current) => ({
           ...current,
           tags: metadata.value.tags ? metadata.value.tags.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
@@ -1013,7 +1134,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       });
       void imageCache.load({ scopeId: server.scopeId, serverId: server.id, archiveId, rendition: 'cover', pageIndex: 0 })
         .then((handle) => {
-          if (!mountedRef.current || contextRef.current !== context) {
+          if (!stillCurrent()) {
             imageCache.release(handle);
             return;
           }
@@ -1022,7 +1143,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         })
         .catch(() => undefined);
       const progress = await repository.loadProgress(server.scopeId, archiveId);
-      if (!mountedRef.current || contextRef.current !== context) return;
+      if (!stillCurrent()) return;
       const firstPage = requestedPage !== undefined
         ? Math.min(requestedPage, Math.max(0, manifest.value.pages.length - 1))
         : progress.ok && progress.value
@@ -1036,17 +1157,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const stored = progress.ok ? progress.value : null;
       setReadingLayout(stored?.layout === 'continuous' ? 'webtoon' : preferences.defaultLayout);
       setReadingDirection(stored?.direction ?? preferences.defaultDirection);
-      const indices = [firstPage, ...getPrefetchPages(firstPage, manifest.value.pages.length, prefetchDistance)];
-      const loaded = await Promise.all(indices.map(async (index) => [index, await loadPage(index, controller.signal)] as const));
-      if (!mountedRef.current || contextRef.current !== context) return;
-      // Only the page the reader opens on is required. A failed neighbour
-      // prefetch must not block reading a page that loaded fine.
-      if (!loaded.find(([index]) => index === firstPage)?.[1]) {
+      // ReaderScreen owns asynchronous neighbouring-page loading. Waiting for
+      // Promise.all(prefetch) here made a ready first page wait for a slow LRR
+      // neighbour, delaying navigation even though no compute was needed.
+      const firstSource = await loadPage(firstPage, controller.signal);
+      if (!stillCurrent()) return;
+      if (!firstSource) {
         setError('阅读页面加载失败');
         return;
       }
       const pageSources = Array<string>(manifest.value.pages.length).fill('');
-      for (const [index, source] of loaded) if (source) pageSources[index] = source;
+      pageSources[firstPage] = firstSource;
       setPages(pageSources);
     })();
 

@@ -19,7 +19,27 @@ export interface ImageCacheRepository {
 export interface ImageHandle {
   key: string;
   url: string;
+  /** Encoded payload/Blob length, retained for the existing cache quota. */
   bytes: number;
+  /** Known decoded RGBA residency for host-leased images (width * height * 4). */
+  estimatedDecodedBytes?: number;
+}
+
+export function imageResidentBytes(handle: ImageHandle): number {
+  return Math.max(handle.bytes, handle.estimatedDecodedBytes ?? 0);
+}
+
+/** 认领来的图：URL 由别处持有，丢掉它的时候要按**它的**规矩还，而不是撤一个本进程的
+ * blob URL。
+ *
+ * 当前唯一的来源是宿主的 compute 租借（`yomika-image://`）：那个 URL 后面有一份文件和
+ * 一个 pin（§7.4），该还的是那个 pin。缓存不需要分辨租借还是 blob——把「怎么还」封进
+ * `release`，这一层就只需要在**唯一那个出口**（`forget`）上调用它。 */
+export interface AdoptedImage {
+  url: string;
+  bytes: number;
+  estimatedDecodedBytes?: number;
+  release(): void;
 }
 
 export interface ImageLoadOptions {
@@ -31,6 +51,11 @@ export interface ImageLoadOptions {
    * 而它每次重挂载都要重新走一遍异步取图，就是切换页面时那一下闪烁——先渲染占位块，
    * 等图落地才换成 `<img>`。默认**不**保留：阅读器的整页图一放手就该撤（一页 1.5MB，
    * 会话派生图更多），而且「重绘到 0 引用即撤销」是调用方唯一确定的回收边界。 */
+  retain?: boolean;
+}
+
+export interface ImageAdoptOptions {
+  /** 同 `ImageLoadOptions.retain`：最后一个消费者放手之后仍留在表里。 */
   retain?: boolean;
 }
 
@@ -47,6 +72,8 @@ interface MemoryEntry extends ImageHandle {
   refs: number;
   /** 释放到 0 引用之后是否继续留着（见 `ImageLoadOptions.retain`）。 */
   retain: boolean;
+  /** 认领进来的图怎么还（见 `adopt`）。本缓存自己造的 blob 没有这一项。 */
+  release?: () => void;
 }
 
 interface PendingEntry {
@@ -89,7 +116,11 @@ export class UnifiedImageCache {
   private forget(entry: MemoryEntry): void {
     this.memory.delete(entry.key);
     this.memoryBytes -= entry.bytes;
-    this.options.revokeObjectURL(entry.url);
+    // 认领来的条目不是本进程 `createObjectURL` 出来的：该还的是它的 `release`（当前是
+    // 宿主那条租借 pin）。对那个 URL 调 `revokeObjectURL` 既是错的，也漏掉了真正要还的
+    // 东西——一条还不回去的 pin 会让那份产物在本进程退出前一直不能被回收。
+    if (entry.release) entry.release();
+    else this.options.revokeObjectURL(entry.url);
   }
 
   async load(identity: ImageCacheIdentity, options: ImageLoadOptions = {}): Promise<ImageHandle> {
@@ -102,7 +133,7 @@ export class UnifiedImageCache {
     if (existing) {
       if (options.retain) existing.retain = true;
       this.touch(existing);
-      return { key, url: existing.url, bytes: existing.bytes };
+      return { key, url: existing.url, bytes: existing.bytes, ...(existing.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: existing.estimatedDecodedBytes }) };
     }
 
     let pending = this.pending.get(key);
@@ -128,7 +159,7 @@ export class UnifiedImageCache {
     if (cached) {
       if (options.retain) cached.retain = true;
       this.touch(cached);
-      return { key, url: cached.url, bytes: cached.bytes };
+      return { key, url: cached.url, bytes: cached.bytes, ...(cached.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: cached.estimatedDecodedBytes }) };
     }
     // 直接把字节交给 Blob：`Uint8Array.from(...).buffer` 在多一份完整拷贝——一页
     // 1.5MB 的 JPEG 就是主线程上白拷 1.5MB，而预览窗口一次来三页。Blob 自己会拷进
@@ -140,6 +171,42 @@ export class UnifiedImageCache {
     this.memoryBytes += entry.bytes;
     this.evictMemory();
     return { key, url, bytes: entry.bytes };
+  }
+
+  /** 收下一张**不是本缓存造的**图，并记一次引用。
+   *
+   * 与 `load` 只差一件事：这张图的 URL 不是这里 `createObjectURL` 出来的，所以丢它的时候
+   * 不能撤 URL，得调用 `image.release()` 把东西还给它的主人。
+   *
+   * 存在的理由：阅读器那张账（`retainDerived` 的字节预算、翻页/卸载时的 `release`、
+   * `peek`/`peekUrl`）认的都是 `ImageHandle{key,url,bytes}`。宿主的租借只要能变成同一形状
+   * 的句柄，那些账一行都不用改，而「还 pin」就落在 `forget` 上——那也正是「这张图真的不在
+   * 内存里了」唯一的那个时刻。
+   *
+   * 同一身份已经有条目时**不替换**：把刚拿到的这张当场还掉（否则第二次认领就等于多留一个
+   * 宿主的 pin），再按命中处理（引用 +1，返回已有条目）。 */
+  adopt(identity: ImageCacheIdentity, image: AdoptedImage, options: ImageAdoptOptions = {}): ImageHandle {
+    const key = createImageCacheKey(identity);
+    const existing = this.memory.get(key);
+    if (existing) {
+      image.release();
+      if (options.retain) existing.retain = true;
+      this.touch(existing);
+      return { key, url: existing.url, bytes: existing.bytes, ...(existing.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: existing.estimatedDecodedBytes }) };
+    }
+    const entry: MemoryEntry = {
+      key,
+      url: image.url,
+      bytes: image.bytes,
+      ...(image.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: image.estimatedDecodedBytes }),
+      refs: 1,
+      retain: Boolean(options.retain),
+      release: image.release,
+    };
+    this.memory.set(key, entry);
+    this.memoryBytes += entry.bytes;
+    this.evictMemory();
+    return { key, url: entry.url, bytes: entry.bytes, ...(entry.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: entry.estimatedDecodedBytes }) };
   }
 
   release(handle: ImageHandle): void {
@@ -165,7 +232,7 @@ export class UnifiedImageCache {
     const entry = this.memory.get(createImageCacheKey(identity));
     if (!entry) return undefined;
     this.touch(entry);
-    return { key: entry.key, url: entry.url, bytes: entry.bytes };
+    return { key: entry.key, url: entry.url, bytes: entry.bytes, ...(entry.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: entry.estimatedDecodedBytes }) };
   }
 
   /** 渲染期用的纯读版本：只报 URL，**不动引用计数**。

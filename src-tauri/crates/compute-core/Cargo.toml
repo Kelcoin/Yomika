@@ -1,0 +1,79 @@
+[package]
+name = "yomika-compute-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "yomika_compute_core"
+path = "src/lib.rs"
+
+# 纯计算核心：算法、引擎选择、取消令牌。**不许**依赖 tauri / rusqlite / reqwest /
+# keyring（docs/71 §5.2），否则「宿主进程搬走重算」这件事就永远做不到。
+[dependencies]
+# 只借用协议里的词汇（EnginePolicy / EngineReport / Precision），协议本身没有
+# 任何算法依赖（docs/71 §5.2），所以这不会把 ORT/NGX 拖进核心。
+yomika-compute-protocol = { path = "../compute-protocol" }
+# 复核宿主授权的那份输入（长度 + 内容 hash）要用同一套 hash，否则「宿主算的」
+# 与「worker 算的」是两个东西（docs/71 §7.1）。
+blake3 = "1"
+# `fit`：把模型输出缩到交出去的尺寸（Lanczos3）。这不是新引入的第三方代码——
+# 宿主本来就依赖同一个版本同一个 crate（`src-tauri/Cargo.toml`），这里只是让
+# worker 与宿主跑**同一份**实现，而不是各自抄一遍缩放规则。
+# 关掉默认 feature：核心只要 `imageops` 与 `RgbaImage`，一种格式的编解码都不需要，
+# 也不会因此把 PNG/JPEG 解码器拖进 Android 目标。
+image = { version = "0.25", default-features = false }
+# DLSSNR 的设置项（`settings::DlssnrSettings`）是序列化后进命令载荷、进探针指纹的，
+# 所以那一半也搬过来时它一起过来；`probe_key` 用 `serde_json` 把设置拼成指纹的一部分
+# ——同一份设置在搬前搬后必须是同一串字符。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 「装的哪一种 DLL」靠 SHA-256 认（`file_sha256`）。宿主本来就用同一个 crate 同一个
+# 版本认这串十六进制，换实现等于换身份，所以这里是搬过来而不是重写。**不可选**：认身份
+# 是元数据那一半的事，宿主摘掉 `dlssnr` feature 之后照样要认（8-g④-b1）——挂在 feature
+# 上的话，摘 feature 就等于把「这份 DLL 是不是原来那份」一起摘掉了。
+sha2 = { version = "0.10" }
+# 动图逐帧过一遍之后要**编回** APNG：`image` 只解不编，它自己的 WebP 编码器只能写静态
+# lossless——能把「多帧 + 每帧延迟 + 循环次数」一次写全的只有 `png` 的 `set_animated`
+# 加逐帧 fcTL，认动画 WebP 的帧数则要 `image-webp`。版本与宿主一致（这两份本来就在
+# `image` 的依赖树里），写出来只是为了能用它们的 API。可选：只有 DLSSNR 那条路要用。
+png = { version = "0.18", optional = true }
+image-webp = { version = "0.2", optional = true }
+# 真把一次计算跑起来才需要的运行库。**可选**是硬要求：核心的算法层（分块、引擎选择、
+# 输入复核、协议帧）在没有它的情况下必须照样能编译——`cargo test -p yomika-compute-core`
+# 不带 feature 走的正是这条路，Android 目标也走它（docs/71 §5.2）。
+ort = { version = "2.0.0-rc.13", features = ["download-binaries"], optional = true }
+
+[dev-dependencies]
+blake3 = "1"
+tempfile = "3"
+
+# 只有真在编 NGX 垫片时才用得上（Windows + `dlssnr`），所以按目标门着——Android 的
+# 构建不编这个 crate。
+[target."cfg(windows)".build-dependencies]
+cc = "1"
+
+# NGX/D3D12 那一套（`dlssnr` 模块）只在 Windows 上有意义，而且是宿主与 worker 共用
+# 的同一份实现，所以按目标门着。不用 optional：它是目标门控的依赖，`dep:` 语法在
+# 「仅某目标」这一层会连带要求 feature 与目标同时成立，读起来比目标门本身更绕。
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[features]
+default = []
+# ORT + CPU 执行提供器：没有显卡的机器、以及探针的参照实现都走它。
+ort = ["dep:ort"]
+cpu = ["ort"]
+# 显卡执行提供器。宿主与 worker 在 Windows 上都开这个；探针（`onnx::validate_runtime`）
+# 就是「这条运行库算得对不对」的唯一证据来源。
+directml = ["cpu", "ort/directml"]
+# CUDA / Vulkan 还没接（docs/71 §11 Task 7-b）：留着名字，但**不许**假装可用
+# ——`runtime::available_runtimes()` 只报构建里真的注册得上的那几条。
+cuda = ["cpu"]
+ncnn-vulkan = []
+# DLSSNR 的**引擎**：`docs/71` Task 8 的出口是「宿主无 ORT/NGX 资源」，而 NGX 只能在计算
+# 进程里初始化、worker 又不许依赖 Tauri（§5.2），所以引擎住在核心这一层，谁编了这份
+# feature，NGX 垫片就在谁的二进制里。动图那条路要逐帧解 GIF/APNG/WebP，三个解码器
+# 跟着这个 feature 走——**不开它构建出来的核心一个解码器都不带**（Android 走那条路）。
+# 元数据那一半（设置、变体身份、导入、探针记账）不在这里：它不依赖这份 feature。
+dlssnr = ["dep:png", "dep:image-webp", "image/gif", "image/png", "image/webp"]

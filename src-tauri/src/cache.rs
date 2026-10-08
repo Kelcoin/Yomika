@@ -16,6 +16,31 @@ const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;
 const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;
 
+/// 数据库锁拿不到时对外的说法。取不到锁是「这一下没拿到」，重试有意义。
+///
+/// 公开给调用点：它要靠这个字符串把「这一下没抢到锁」与「磁盘/权限真的不行」分开，
+/// 前者重试有意义、后者没有。
+pub const LOCK_FAILED: &str = "数据库正被占用";
+
+/// 缓存代：**清空缓存**会把它加一。
+///
+/// 它管住的是「清空」与「正在写的那些任务」之间的竞速。写缓存分成两步——先在锁外
+/// 把文件落盘（这一步可能很长），再在锁内写一行——如果这中间用户点了清空，那一步
+/// 落盘的产物就属于**上一代**：它不该再把自己的行塞回来，否则用户看到的「已清空」
+/// 会被一件早就开始的任务悄悄推翻。条目是内容寻址的，所以晚到的产物**不删**（同一
+/// 份内容可能还有别的行在引用它），只是不再挂新行；没有行引用的文件由孤儿清扫收走。
+static CACHE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 当前缓存代。读它不需要锁：它只用来做「我动手前是这一代吗」的比较。
+pub fn cache_epoch() -> u64 {
+    CACHE_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 作废这一代（清空缓存时调用），返回新的代。
+fn bump_cache_epoch() -> u64 {
+    CACHE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheImageIdentity {
@@ -81,6 +106,157 @@ pub fn image_cache_key(identity: &CacheImageIdentity) -> String {
     format!("image:v2:{}", hasher.finalize().to_hex())
 }
 
+/// 一行缓存条目的元数据。**只有 DB 里的东西**，不含任何文件 IO。
+struct CacheEntryRow {
+    relative: String,
+    size: i64,
+    content_hash: String,
+    mime: Option<String>,
+}
+
+/// 取那一行（锁内：一次主键查询）。
+fn read_entry_row(
+    connection: &rusqlite::Connection,
+    key: &str,
+    identity: &CacheImageIdentity,
+) -> Result<Option<CacheEntryRow>, String> {
+    connection
+        .query_row(
+            "SELECT path,size,content_hash,mime FROM cache_entries WHERE key=?1 AND source_scope=?2 AND kind=?3",
+            rusqlite::params![key, identity.scope_id, identity.rendition],
+            |row| {
+                Ok(CacheEntryRow {
+                    relative: row.get(0)?,
+                    size: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    mime: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+/// 内容寻址的路径：摘要说了算。摘要不像样就没有「它该在哪儿」这一说。
+fn relative_for_hash(hash: &str) -> Option<String> {
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| format!("cache/images/{}/{hash}.bin", &hash[..2]))
+}
+
+/// 读文件并核对「它确实是那一行说的那一份」。**锁外**：这是整条路径上最慢的一步。
+fn read_verified_blob(app_data: &std::path::Path, row: &CacheEntryRow) -> Option<Vec<u8>> {
+    if relative_for_hash(&row.content_hash).as_deref() != Some(row.relative.as_str()) {
+        return None;
+    }
+    let path = controlled_cache_path(app_data, &row.relative)?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as i64 != row.size {
+        return None;
+    }
+    if blake3::hash(&bytes).to_hex().as_str() != row.content_hash {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn touch_entry(connection: &rusqlite::Connection, key: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE cache_entries SET last_accessed_at=CURRENT_TIMESTAMP WHERE key=?1",
+            [key],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn forget_entry(connection: &rusqlite::Connection, relative: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM cache_entries WHERE path=?1", [relative])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn default_mime() -> String {
+    "application/octet-stream".into()
+}
+
+/// 一次读的开始：只把那一行取出来（锁内，一次主键查询），并把当前的缓存代记下。
+struct PendingRead {
+    key: String,
+    row: CacheEntryRow,
+    epoch: u64,
+}
+
+/// 等锁的最小查询：`SELECT 1`。产品里没有它的调用点，探针用它量锁的占用。
+#[cfg(test)]
+const LOCK_PROBE_QUERY: &str = "SELECT 1";
+
+fn begin_read(
+    database: &Database,
+    identity: &CacheImageIdentity,
+) -> Result<Option<PendingRead>, String> {
+    let key = image_cache_key(identity);
+    let connection = database.connection.lock().map_err(|_| LOCK_FAILED.to_string())?;
+    let row = read_entry_row(&connection, &key, identity)?;
+    let epoch = cache_epoch();
+    Ok(row.map(|row| PendingRead { key, row, epoch }))
+}
+
+/// 一次读的收尾：**锁外**把文件读回来并核验，锁内只更新那一行的时间戳。
+fn finish_read(
+    database: &Database,
+    app_data: &std::path::Path,
+    pending: PendingRead,
+) -> Result<Option<CachedImage>, String> {
+    let PendingRead { key, row, epoch } = pending;
+    if let Some(bytes) = read_verified_blob(app_data, &row) {
+        let connection = database.connection.lock().map_err(|_| LOCK_FAILED.to_string())?;
+        // 行要是刚被清掉，这条 UPDATE 影响 0 行：不会被它复活。
+        touch_entry(&connection, &key)?;
+        return Ok(Some(CachedImage {
+            bytes,
+            mime: row.mime.unwrap_or_else(default_mime),
+        }));
+    }
+    if cache_epoch() != epoch {
+        // 代变了：这一行是上一代的账。行是按**路径**删的，而路径是内容寻址的——
+        // 清了缓存之后新一代完全可能把同一份内容贴回同一个文件上，照着旧账删行
+        // 就会删掉新一代那一行；删文件同理。所以这里什么都不做：没有行引用的
+        // 文件由孤儿清扫收走。
+        return Ok(None);
+    }
+    {
+        let connection = database.connection.lock().map_err(|_| LOCK_FAILED.to_string())?;
+        forget_entry(&connection, &row.relative)?;
+    }
+    if let Some(path) = controlled_cache_path(app_data, &row.relative) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(None)
+}
+
+/// 取一份缓存：**锁只覆盖取行与更新时间戳**，读文件与算哈希都在锁外。
+///
+/// 为什么要这样拆：全局 DB 锁是偏好、书架、搜索这些轻查询的必经之路，而这条路径
+/// 搬的是一整页图（1.5MB 起，超分产物更大）并且要算一次 blake3。之前这两件事都在
+/// 锁内，等于每翻一页都把「读偏好」堵几十到几百毫秒。
+pub fn read_cached_image(
+    database: &Database,
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+) -> Result<Option<CachedImage>, String> {
+    identity.validate()?;
+    let Some(pending) = begin_read(database, identity)? else {
+        return Ok(None);
+    };
+    finish_read(database, app_data, pending)
+}
+
+/// 调用方自己拿着锁的那一版：语义与 `read_cached_image` 完全一致，只是整段都在
+/// 调用方的锁里（测试与「锁已经拿在手上」的调用点用这一版）。
+///
+/// 这一版不需要比缓存代：清空缓存必须在持锁时发生（`clear_image_cache` 收的就是
+/// `&Connection`），所以从取行到删行之间代不可能变。
 pub fn load_image_cache(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
@@ -88,47 +264,67 @@ pub fn load_image_cache(
 ) -> Result<Option<CachedImage>, String> {
     identity.validate()?;
     let key = image_cache_key(identity);
-    let entry: Option<(String, i64, String, Option<String>)> = connection.query_row(
-        "SELECT path,size,content_hash,mime FROM cache_entries WHERE key=?1 AND source_scope=?2 AND kind=?3",
-        rusqlite::params![key, identity.scope_id, identity.rendition],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).optional().map_err(|error| error.to_string())?;
-    let Some((relative, expected_size, expected_hash, mime)) = entry else {
+    let Some(row) = read_entry_row(connection, &key, identity)? else {
         return Ok(None);
     };
-    let expected_relative = if expected_hash.len() == 64
-        && expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        format!("cache/images/{}/{}.bin", &expected_hash[..2], expected_hash)
-    } else {
-        String::new()
-    };
-    let path = controlled_cache_path(app_data, &relative);
-    let bytes = path.as_ref().and_then(|path| std::fs::read(path).ok());
-    let valid = relative == expected_relative
-        && bytes.as_ref().is_some_and(|bytes| {
-            bytes.len() as i64 == expected_size
-                && blake3::hash(bytes).to_hex().as_str() == expected_hash
-        });
-    if valid {
-        connection
-            .execute(
-                "UPDATE cache_entries SET last_accessed_at=CURRENT_TIMESTAMP WHERE key=?1",
-                [&key],
-            )
-            .map_err(|error| error.to_string())?;
+    if let Some(bytes) = read_verified_blob(app_data, &row) {
+        touch_entry(connection, &key)?;
         return Ok(Some(CachedImage {
-            bytes: bytes.unwrap_or_default(),
-            mime: mime.unwrap_or_else(|| "application/octet-stream".into()),
+            bytes,
+            mime: row.mime.unwrap_or_else(default_mime),
         }));
     }
-    connection
-        .execute("DELETE FROM cache_entries WHERE path=?1", [&relative])
-        .map_err(|error| error.to_string())?;
-    if let Some(path) = path {
+    forget_entry(connection, &row.relative)?;
+    if let Some(path) = controlled_cache_path(app_data, &row.relative) {
         let _ = std::fs::remove_file(path);
     }
     Ok(None)
+}
+
+/// 一份缓存**在磁盘上的位置**：位置 + 索引里说的那一份（哈希与长度）。
+///
+/// 它不读文件、不算哈希——这正是与 [`read_cached_image`] 的区别。调用方
+/// （`compute::commands` 把一页解析成提交的源图）要的是「把这一页交给派发前准备那一侧」，
+/// 而算哈希、硬链接/复制几十 MB 那件事必须在 supervisor 线程上做（`manager::prepare_run`），
+/// 不能挂在 WebView2 的消息循环上（docs/71 §8.1）。这里只查一次主键索引。
+///
+/// 因此它**不保证**文件里的字节就是哈希说的那一份：它只保证「这一行与这个位置」自洽。
+/// 字节对不对由 `prepare_run` 拿 `content_hash` 再算一次来判——它本来就要算。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedBlobLocation {
+    pub path: std::path::PathBuf,
+    pub content_hash: String,
+    pub byte_length: u64,
+}
+
+/// 取一份缓存的位置，**不读它**。找不到、或者这一行与内容寻址的路径不自洽，都回 `None`。
+pub fn cached_blob_location(
+    database: &Database,
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+) -> Result<Option<CachedBlobLocation>, String> {
+    identity.validate()?;
+    let key = image_cache_key(identity);
+    let row = {
+        let connection = database.connection.lock().map_err(|_| LOCK_FAILED.to_string())?;
+        read_entry_row(&connection, &key, identity)?
+    };
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // 与 `read_verified_blob` 同一条不变式：内容寻址的位置必须由这一行的哈希推出来。
+    // 推不出来说明这一行不是我们写下的那种（旧格式、被人改过），宁可不认，也不去猜。
+    if relative_for_hash(&row.content_hash).as_deref() != Some(row.relative.as_str()) {
+        return Ok(None);
+    }
+    let Some(path) = controlled_cache_path(app_data, &row.relative) else {
+        return Ok(None);
+    };
+    Ok(Some(CachedBlobLocation {
+        path,
+        content_hash: row.content_hash,
+        byte_length: row.size.max(0) as u64,
+    }))
 }
 
 /// LANraragi does not always label thumbnails as `image/*` (some builds answer
@@ -155,152 +351,22 @@ pub fn sniff_image_mime(mime: &str, bytes: &[u8]) -> Option<String> {
     Some(detected.to_string())
 }
 
-/// 动图判定：只看容器头，不解码像素。
+/// 动图判定：只看容器头，不解码像素。实现搬到了 `yomika-compute-core` 的
+/// [`image_kind`](yomika_compute_core::image_kind)。
 ///
-/// 动图一旦进了超分 / 去码 / DLSSNR，出来的就只有第一帧——用户会看到「这张图的
-/// 动画没了」，而且当前实现找不到「以动图为输入」的合法产物，所以判定必须发生在
-/// 任何解码与模型解析之前，代价也必须只是读头几个字节。
-///
-/// 只认结构说得清的三类（GIF / APNG / 动画 WebP）。读不懂的一律当静态：把静态页
-/// 误判成动图会让它彻底拿不到超分，比漏掉一张动图更糟。
-pub fn is_animated_image(bytes: &[u8]) -> bool {
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return matches!(gif_frame_count(bytes), Some(frames) if frames >= 2);
-    }
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        return png_is_animated(bytes);
-    }
-    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return webp_is_animated(bytes);
-    }
-    false
-}
+/// 为什么不在宿主自己留一份：worker 也必须在这一步**之前**认出「这一页会动」，而它拿不到
+/// 宿主这份代码（docs/71 §5.2 的边界）。两边各写一份的话，同一张图会在宿主被当成动图、
+/// 在 worker 被当成静态首帧——症状正是「超分之后动画没了」，也就是这条判定存在的理由。
+pub use yomika_compute_core::image_kind::is_animated_image;
 
-/// 走 GIF 容器结构数「图像描述符」（`0x2C`）的个数。读不下去（截断、越界、碰上不
-/// 认识的块）时给 `None`——那样的字节不值得猜。
+/// 数 GIF 帧数的实现同样在核心（原因见 [`is_animated_image`]）。
 ///
 /// `pub(crate)`：动图 DLSSNR 要在动手之前拿帧数判预算（见
 /// `src-tauri/src/dlssnr/animation.rs`），而 `gif` crate 没有帧数 API。
-pub(crate) fn gif_frame_count(bytes: &[u8]) -> Option<usize> {
-    // 头部 6 字节 + 逻辑屏幕描述符 7 字节。
-    let mut cursor = 13usize;
-    if bytes.len() < cursor {
-        return None;
-    }
-    // packed 字节 bit7 是全局色表标志，表长 3 * 2^(n+1)。
-    let packed = bytes[10];
-    if packed & 0x80 != 0 {
-        cursor = cursor.checked_add(3usize << ((packed & 0x07) + 1))?;
-        if cursor > bytes.len() {
-            return None;
-        }
-    }
-    let mut frames = 0usize;
-    loop {
-        match *bytes.get(cursor)? {
-            0x3B => return Some(frames),
-            0x2C => {
-                // 先跨过块起始符，下面一律以描述符首字节为基准（否则色表标志会读成
-                // 高度的低位字节，子块链从 LZW 最小码长那一位错开）。
-                cursor += 1;
-                if cursor + 9 > bytes.len() {
-                    return None;
-                }
-                // 图像描述符最后一字节的 bit7 是局部色表标志，与全局色表同构。
-                let local = bytes[cursor + 8];
-                cursor += 9;
-                if local & 0x80 != 0 {
-                    cursor = cursor.checked_add(3usize << ((local & 0x07) + 1))?;
-                    if cursor > bytes.len() {
-                        return None;
-                    }
-                }
-                // 图像数据以 LZW 最小码长一个字节开头，后面才是子块链。
-                cursor = skip_gif_sub_blocks(bytes, cursor + 1)?;
-                frames += 1;
-            }
-            // 扩展块：一个标签字节 + 子块链。图形控制块与注释都算在这里，
-            // 它们不代表新的一帧。
-            0x21 => cursor = skip_gif_sub_blocks(bytes, cursor + 2)?,
-            _ => return None,
-        }
-    }
-}
+pub(crate) use yomika_compute_core::image_kind::gif_frame_count;
 
-/// 跳过 GIF 子块链：长度字节 + 数据，遇到 0 长度字节结束。
-fn skip_gif_sub_blocks(bytes: &[u8], mut cursor: usize) -> Option<usize> {
-    loop {
-        let size = *bytes.get(cursor)? as usize;
-        cursor += 1;
-        if size == 0 {
-            return Some(cursor);
-        }
-        cursor = cursor.checked_add(size)?;
-        if cursor > bytes.len() {
-            return None;
-        }
-    }
-}
-
-/// PNG 块链：`acTL` 出现在第一个 `IDAT` 之前就是 APNG（chunk 长度不校验 CRC）。
-fn png_is_animated(bytes: &[u8]) -> bool {
-    let mut cursor = 8usize;
-    while cursor + 8 <= bytes.len() {
-        let length = u32::from_be_bytes([
-            bytes[cursor],
-            bytes[cursor + 1],
-            bytes[cursor + 2],
-            bytes[cursor + 3],
-        ]) as usize;
-        let kind = &bytes[cursor + 4..cursor + 8];
-        if kind == b"acTL" {
-            return true;
-        }
-        if kind == b"IDAT" {
-            return false;
-        }
-        // 4 字节长度 + 4 字节类型 + 数据 + 4 字节 CRC；读不到块的边界就当静态。
-        match (cursor + 12).checked_add(length) {
-            Some(next) if next <= bytes.len() => cursor = next,
-            _ => return false,
-        }
-    }
-    false
-}
-
-/// 动画 WebP：`VP8X` 的 ANIM 位置位，或者 chunk 列表里出现 `ANIM`。
-fn webp_is_animated(bytes: &[u8]) -> bool {
-    let mut cursor = 12usize;
-    let mut first = true;
-    while cursor + 8 <= bytes.len() {
-        let kind = &bytes[cursor..cursor + 4];
-        let length = u32::from_le_bytes([
-            bytes[cursor + 4],
-            bytes[cursor + 5],
-            bytes[cursor + 6],
-            bytes[cursor + 7],
-        ]) as usize;
-        if first && kind == b"VP8X" {
-            if matches!(bytes.get(cursor + 8), Some(flags) if flags & 0x02 != 0) {
-                return true;
-            }
-        }
-        first = false;
-        if kind == b"ANIM" {
-            return true;
-        }
-        // RIFF chunk 按偶数字节对齐，块之间可能有一个填充字节。
-        let next = (cursor + 8).saturating_add(length + (length & 1));
-        if next <= cursor || next > bytes.len() {
-            return false;
-        }
-        cursor = next;
-    }
-    false
-}
-
-/// PNG 的 8 字节签名。
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+/// PNG 的 8 字节签名。核心那一份是唯一的定义，这里只再导出一次，省得两处各留一个常量。
+use yomika_compute_core::image_kind::PNG_SIGNATURE;
 
 /// 动图的循环次数统一成「一直播」（0），返回可以照原样送出去的字节。
 ///
@@ -448,22 +514,38 @@ fn png_crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-pub fn store_image_cache(
-    connection: &rusqlite::Connection,
+/// 一份**已经落好盘、但还没挂行**的内容。
+///
+/// 写缓存被拆成「锁外落盘」（`prepare_blob`）与「锁内挂行」（`commit_blob`）两步，
+/// 中间这一步就是握在手里的凭据。它自己记着动手那一刻的缓存代，用来判断这中间
+/// 有没有人清空过。
+struct PendingBlob {
+    key: String,
+    relative: String,
+    content_hash: String,
+    mime: String,
+    byte_length: i64,
+    epoch: u64,
+    identity: CacheImageIdentity,
+}
+
+/// **锁外**：嗅 mime、算摘要、建目录、落盘。这一整段可能很长（一页 1.5MB 起，
+/// 超分产物更大），所以它绝不能拿着全局 DB 锁做。
+fn prepare_blob(
     app_data: &std::path::Path,
     identity: &CacheImageIdentity,
     mime: &str,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> Result<PendingBlob, String> {
     identity.validate()?;
     if bytes.is_empty() {
         return Err("Invalid image cache payload".into());
     }
     let mime = sniff_image_mime(mime, bytes)
         .ok_or_else(|| format!("Refusing to cache a non-image payload (content-type: {mime})"))?;
-    let mime = mime.as_str();
     let content_hash = blake3::hash(bytes).to_hex().to_string();
-    let relative = format!("cache/images/{}/{}.bin", &content_hash[..2], content_hash);
+    let relative =
+        relative_for_hash(&content_hash).ok_or_else(|| "Invalid image cache path".to_string())?;
     let target = controlled_cache_path(app_data, &relative)
         .ok_or_else(|| "Invalid image cache path".to_string())?;
     let parent = target
@@ -491,9 +573,8 @@ pub fn store_image_cache(
             .create_new(true)
             .open(&temporary)
             .map_err(|error| error.to_string())?;
-        // 不 fsync：这是可再生的缓存，掉电丢一页的代价远小于每次写都
-        // 强制刷盘（Windows 上 10-100ms，且此刻持有全局 DB 锁）。
-        // rename 仍保证读者看到的是完整文件。
+        // 不 fsync：这是可再生的缓存，掉电丢一页的代价远小于每次写都强制刷盘
+        // （Windows 上 10-100ms）。rename 仍保证读者看到的是完整文件。
         if let Err(error) = output.write_all(bytes) {
             drop(output);
             let _ = std::fs::remove_file(&temporary);
@@ -507,11 +588,243 @@ pub fn store_image_cache(
             }
         }
     }
+    Ok(PendingBlob {
+        key: image_cache_key(identity),
+        relative,
+        content_hash,
+        mime,
+        byte_length: bytes.len() as i64,
+        epoch: cache_epoch(),
+        identity: identity.clone(),
+    })
+}
+
+/// **锁内**：把那一行挂上去。调用方负责拿锁。
+fn insert_entry(
+    connection: &rusqlite::Connection,
+    blob: &PendingBlob,
+) -> Result<(), String> {
     connection.execute(
         "INSERT INTO cache_entries (key,kind,path,size,mime,source_scope,source_archive,content_hash,model_id,resource_revision) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,?9) ON CONFLICT(key) DO UPDATE SET kind=excluded.kind,path=excluded.path,size=excluded.size,mime=excluded.mime,last_accessed_at=CURRENT_TIMESTAMP,source_scope=excluded.source_scope,source_archive=excluded.source_archive,content_hash=excluded.content_hash,model_id=NULL,resource_revision=excluded.resource_revision",
-        rusqlite::params![image_cache_key(identity), identity.rendition, relative, bytes.len() as i64, mime, identity.scope_id, identity.archive_id, content_hash, identity.revision],
+        rusqlite::params![blob.key, blob.identity.rendition, blob.relative, blob.byte_length, blob.mime, blob.identity.scope_id, blob.identity.archive_id, blob.content_hash, blob.identity.revision],
     ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 收尾：锁内挂行。文件已经落好了，所以这里的锁只覆盖两次轻查询。
+fn commit_blob(
+    database: &Database,
+    app_data: &std::path::Path,
+    blob: PendingBlob,
+) -> Result<(), String> {
+    let connection = database
+        .connection
+        .lock()
+        .map_err(|_| LOCK_FAILED.to_string())?;
+    if cache_epoch() != blob.epoch {
+        // 这一份写入开始之后用户清空过缓存：它属于上一代，不挂行。
+        // 文件留着（内容寻址，可能还有别的行引用它），没行引用的由孤儿清扫收。
+        return Ok(());
+    }
+    insert_entry(&connection, &blob)?;
+    maintain_image_cache_quota(&connection, app_data)
+}
+
+/// 写一份缓存：**锁只覆盖挂行与配额检查**，建目录、写文件、算摘要都在锁外。
+pub fn write_cached_image(
+    database: &Database,
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let blob = prepare_blob(app_data, identity, mime, bytes)?;
+    commit_blob(database, app_data, blob)
+}
+
+/// **已经发布好的**内容（compute 那一侧落的盘）→ 索引里的一行。
+///
+/// 与 [`write_cached_image`] 的差别只有一件事：**它不搬字节**。产物已经在
+/// `cache/images/xx/<hash>.bin` 上（`compute::artifacts::publish_blob` 用的布局与
+/// [`relative_for_hash`] 逐字同形），这里补的只是索引那一行——没有行，按修订号取起点的那几条
+/// 路（DLSSNR、旧超分、远端代理）就永远查不到这一版。
+///
+/// 它**不重算摘要**：发布侧已经在自己的线程里流式核过长度与 blake3，而这条调用挂在界面取产物
+/// 那条路上（WebView2 的消息循环里不许等几百毫秒）。这里只做便宜校验——身份合法、路径由摘要
+/// 推得出来、文件在、长度与记录相符——对不上就拒绝**而不是**记一行假账。
+pub fn adopt_published_blob(
+    database: &Database,
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+    mime: &str,
+    relative: &str,
+    content_hash: &str,
+    byte_length: u64,
+) -> Result<(), String> {
+    let blob = pending_from_published(app_data, identity, mime, relative, content_hash, byte_length)?;
+    commit_blob(database, app_data, blob)
+}
+
+/// 把一份「已经发布好的」声明凑成挂行要的那份凭据。校验全在这里，且全是便宜项。
+fn pending_from_published(
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+    mime: &str,
+    relative: &str,
+    content_hash: &str,
+    byte_length: u64,
+) -> Result<PendingBlob, String> {
+    identity.validate()?;
+    if mime.trim().is_empty() {
+        return Err("Invalid published artifact mime".into());
+    }
+    let byte_length =
+        i64::try_from(byte_length).map_err(|_| "Invalid published artifact length".to_string())?;
+    if byte_length <= 0 {
+        return Err("Invalid published artifact length".into());
+    }
+    // 位置必须**由摘要推出来**：登记一行「路径与哈希各自为政」的账，就等于把「读哪儿」
+    // 交给了一个随便谁都能写的字段（与 `a_row_whose_path_does_not_match_its_hash_is_not_a_location`
+    // 钉的是同一条规矩）。
+    let expected =
+        relative_for_hash(content_hash).ok_or_else(|| "Invalid published artifact hash".to_string())?;
+    if expected != relative {
+        return Err(format!(
+            "Published artifact path does not match its hash: {relative}"
+        ));
+    }
+    let path = controlled_cache_path(app_data, relative)
+        .ok_or_else(|| "Invalid image cache path".to_string())?;
+    let actual = std::fs::metadata(&path)
+        .map_err(|error| error.to_string())?
+        .len();
+    if actual != byte_length as u64 {
+        return Err(format!(
+            "Published artifact length mismatch: expected {byte_length}, found {actual}"
+        ));
+    }
+    Ok(PendingBlob {
+        key: image_cache_key(identity),
+        relative: relative.to_string(),
+        content_hash: content_hash.to_string(),
+        mime: mime.to_string(),
+        byte_length,
+        epoch: cache_epoch(),
+        identity: identity.clone(),
+    })
+}
+
+/// 调用方自己拿着锁的那一版：语义与 `write_cached_image` 完全一致，只是整段都在
+/// 调用方的锁里。这里不做缓存代比较——锁在手上时别人清不了，代不可能中途变。
+//
+// 本轮之后宿主的生产写入点都改走 `write_cached_image`（不再为一次写单独拿锁），所以
+// 这个入口目前只有测试在用。留着它是因为「锁本来就在手上」的调用方仍然需要同一套语义
+// （去重那条路今天仍这样读），而 `#[allow(dead_code)]` 只是承认「暂时没有生产调用点」，
+// 不是承认它可以坏——`store_image_cache` 与 `write_cached_image` 的行为由测试钉成一致。
+#[allow(dead_code)]
+pub fn store_image_cache(
+    connection: &rusqlite::Connection,
+    app_data: &std::path::Path,
+    identity: &CacheImageIdentity,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let blob = prepare_blob(app_data, identity, mime, bytes)?;
+    insert_entry(connection, &blob)?;
     maintain_image_cache_quota(connection, app_data)
+}
+
+/// 孤儿清扫的结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanSweep {
+    pub removed_files: usize,
+    pub bytes_freed: u64,
+    pub kept_files: usize,
+}
+
+/// 清掉没人引用的图片缓存文件（以及早就死掉的临时文件）。
+///
+/// 为什么需要它：内容是内容寻址的，而写入又被拆成「先落盘、再挂行」两步，于是有两条
+/// 路径会留下没人引用的文件——一是清了缓存之后才收尾的那份写入（它属于上一代，不挂行），
+/// 二是写到一半就断电/被杀的临时文件。它们不占 DB 行，可配额是按 DB 行算的，光靠
+/// `evict_cache_batch` 永远收不到它们：那是缓存泄漏，不是缓存回收。
+///
+/// 只扫 `cache/images/<两位>/` 这一层的普通文件，**不跟随** reparse point（那是另一棵树，
+/// 不是我们的缓存）。`temp_grace`：一条**没有行引用**的文件也可能是别的写者刚落盘、
+/// 还没挂行的那一份（写入是分两步的），所以「没引用」不足以判死——只有比宽限期更老的
+/// 才动。这个宽限期是参数而不是常量，因为「确定没有写者正在飞」只有调用点知道
+/// （启动时传一小时就够，测试传 `ZERO` 才有确定性）。
+pub fn sweep_orphan_cache_files(
+    connection: &rusqlite::Connection,
+    app_data: &std::path::Path,
+    temp_grace: std::time::Duration,
+) -> Result<OrphanSweep, String> {
+    if !app_data.is_absolute() {
+        return Err("Invalid cache root".into());
+    }
+    let referenced: std::collections::HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT path FROM cache_entries")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::HashSet<String>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let mut sweep = OrphanSweep {
+        removed_files: 0,
+        bytes_freed: 0,
+        kept_files: 0,
+    };
+    let Ok(buckets) = std::fs::read_dir(app_data.join("cache").join("images")) else {
+        // 从来没有写过缓存：没有东西可扫，这不是错误。
+        return Ok(sweep);
+    };
+    let now = std::time::SystemTime::now();
+    for bucket in buckets.flatten() {
+        let bucket_path = bucket.path();
+        let Ok(bucket_meta) = std::fs::symlink_metadata(&bucket_path) else {
+            continue;
+        };
+        if !bucket_meta.is_dir() || bucket_meta.file_type().is_symlink() {
+            continue;
+        }
+        let Some(bucket_name) = bucket_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Ok(files) = std::fs::read_dir(&bucket_path) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                continue;
+            }
+            let relative = format!("cache/images/{bucket_name}/{name}");
+            let old_enough = meta
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= temp_grace);
+            if old_enough && !referenced.contains(&relative) {
+                if std::fs::remove_file(&path).is_ok() {
+                    sweep.removed_files += 1;
+                    sweep.bytes_freed = sweep.bytes_freed.saturating_add(meta.len());
+                }
+            } else {
+                sweep.kept_files += 1;
+            }
+        }
+    }
+    Ok(sweep)
 }
 
 /// async：命令体是整文件读 + hash + SQL，原先是同步命令、跑在主线程上，
@@ -542,15 +855,9 @@ pub fn cache_read_image(
             ))
         }
     };
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(crate::domain::result::into_binary_response(
-                CommandResult::failure("UNKNOWN", "Database lock failed", true),
-            ))
-        }
-    };
-    match load_image_cache(&connection, &app_data, &identity) {
+    // 读盘与算摘要都在锁外：这条命令被阅读器一次开三页地调，而全局 DB 锁是偏好、
+    // 书架、搜索的必经之路——锁着它读几兆的图，别人就得排队。
+    match read_cached_image(&database, &app_data, &identity) {
         Ok(Some(image)) => Ok(crate::domain::result::into_binary_response(
             CommandResult::success(image.bytes),
         )),
@@ -784,6 +1091,48 @@ fn finish_isolated_file(
     Ok(true)
 }
 
+/// 钉住一份缓存字节：正在读它的那个重活结束之前，配额回收与清空都不许动它。
+///
+/// `pinned` 这一列一直在迁移里，`evict_cache_batch` / `clear_image_cache` 也一直按它
+/// 筛选（`HAVING MAX(pinned)=0`、`pinned=0`），只是**生产代码里从来没有写过它**——
+/// 于是「正在被读的字节」与「随手可回收的字节」在数据库看来是同一堆。这里补上写入侧。
+///
+/// 为什么是布尔而不是计数：迁移里这条列带 `CHECK (pinned IN (0, 1))`，而且宿主侧同一
+/// 时刻只允许一个重任务（调度器的单许可不变量），所以「有人钉着」这一个比特就够表达
+/// 「这一份现在是别人的输入」。真需要多个持有者各记一笔时，该另开一张 pins 表，而不是
+/// 把这个比特当计数器用——那是 Task 6 的 `compute_artifact_acquire/release` 一起做的事。
+/// 返回受影响的行数：0 表示这条路径上没有条目（还没落盘，或者已经被回收了）。
+//
+// 生产侧还没有调用点：真正「宿主把这一份交给 worker 之前钉住、拿到产物之后放掉」的时序
+// 要与 Task 6 的 `compute_artifact_acquire/release` 一起落地（那时输入才真的离开宿主）。
+// 本轮先把这一对与 `evict`/`clear` 的配合测到，`#[allow(dead_code)]` 只是承认这一点。
+#[allow(dead_code)]
+pub fn pin_cache_path(
+    connection: &rusqlite::Connection,
+    relative: &str,
+) -> Result<usize, String> {
+    connection
+        .execute(
+            "UPDATE cache_entries SET pinned = 1 WHERE path = ?1",
+            [relative],
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// 放掉一次钉住。见 [`pin_cache_path`]：一个比特，置回 0 即可。
+#[allow(dead_code)]
+pub fn unpin_cache_path(
+    connection: &rusqlite::Connection,
+    relative: &str,
+) -> Result<usize, String> {
+    connection
+        .execute(
+            "UPDATE cache_entries SET pinned = 0 WHERE path = ?1",
+            [relative],
+        )
+        .map_err(|error| error.to_string())
+}
+
 pub fn clear_image_cache(
     connection: &rusqlite::Connection,
     app_data: &std::path::Path,
@@ -791,6 +1140,8 @@ pub fn clear_image_cache(
     if !app_data.is_absolute() {
         return Err("Invalid cache root".into());
     }
+    // 作废这一代：这一下之后才收尾的那份写入不许再挂行（见 CACHE_EPOCH 的注释）。
+    bump_cache_epoch();
     let candidates = {
         let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0 GROUP BY path")
             .map_err(|error| error.to_string())?;
@@ -836,8 +1187,10 @@ pub fn clear_image_cache(
             bytes_freed = bytes_freed.saturating_add(u64::try_from(size).unwrap_or(0));
         }
     }
+    // `pinned > 0` 而不是 `pinned = 1`：这一列今天被迁移的 CHECK 限成 0/1，两者等价；
+    // 写成「有主」的谓词，将来真上了多持有者的表也不会悄悄漏掉。
     let protected: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=1 GROUP BY path)",
+        "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned>0 GROUP BY path)",
         [], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
     Ok(CacheClearResult {
@@ -858,6 +1211,8 @@ pub fn invalidate_archive_cache(
     if !app_data.is_absolute() || scope_id.trim().is_empty() || archive_id.trim().is_empty() {
         return Err("Invalid archive cache identity".into());
     }
+    // 同 clear_image_cache：作废这一代，晚到的写入不再挂行。
+    bump_cache_epoch();
     let candidates = {
         let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') GROUP BY path")
             .map_err(|error| error.to_string())?;
@@ -935,8 +1290,31 @@ pub fn cache_clear_images(
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
     match clear_image_cache(&connection, &app_data) {
-        Ok(value) => CommandResult::success(value),
+        Ok(value) => {
+            sweep_orphans_quietly(&connection, &app_data);
+            CommandResult::success(value)
+        }
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// 生产用的清扫宽限期：写入是「先落盘、再挂行」两步，一份刚落盘、还没挂行的文件
+/// 也「没有行引用」，宽限期就是留给它的（真正的写路径几毫秒内就挂上行）。
+pub const ORPHAN_SWEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// 用户主动清缓存之后顺手收一遍没人引用的文件。这里最可能攒下孤儿：上一代那些
+/// 「盘已经落了、代却在清空时翻过去了」的收尾写入（`commit_blob` 会拒绝挂行）。
+/// 清扫失败不算清缓存失败——盘上的字节可以留着下次再收，用户要的那件事已经做完了。
+fn sweep_orphans_quietly(connection: &rusqlite::Connection, app_data: &std::path::Path) {
+    match sweep_orphan_cache_files(connection, app_data, ORPHAN_SWEEP_GRACE) {
+        Ok(sweep) if sweep.removed_files > 0 => {
+            eprintln!(
+                "yomika: 清掉 {} 个没人引用的缓存文件（{} 字节）",
+                sweep.removed_files, sweep.bytes_freed
+            );
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("yomika: 孤儿缓存清扫失败：{error}"),
     }
 }
 
@@ -963,7 +1341,10 @@ pub fn cache_invalidate_archive(
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
     match invalidate_archive_cache(&connection, &app_data, &scope_id, &archive_id) {
-        Ok(value) => CommandResult::success(value),
+        Ok(value) => {
+            sweep_orphans_quietly(&connection, &app_data);
+            CommandResult::success(value)
+        }
         Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
     }
 }
@@ -1170,6 +1551,257 @@ mod tests {
         std::env::temp_dir().join(format!("yomika-{name}-{}-{nonce}", std::process::id()))
     }
 
+    fn online_db() -> Database {
+        Database {
+            connection: std::sync::Mutex::new(cache_db()),
+        }
+    }
+
+    /// 在 `work` 跑着的时候，另一个线程一直去拿同一把锁：返回（拿到几次，最长等了多久）。
+    ///
+    /// 这是「锁有没有覆盖大 IO」的**直接**量法：锁要是被整段 IO 占着，探针在整段
+    /// IO 期间一次都拿不到，最长等待就是那段 IO 的长度。
+    fn listen_during<F: FnOnce()>(database: &Database, work: F) -> (usize, std::time::Duration) {
+        let running = std::sync::atomic::AtomicBool::new(true);
+        // 用作用域线程而不是 `spawn` + `move`：探针借的是外面这一把锁所在的
+        // `Database`，不是它的副本——副本会是一把**新**锁，那这个量法就没意义了。
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let mut acquisitions = 0usize;
+                let mut longest = std::time::Duration::ZERO;
+                while running.load(std::sync::atomic::Ordering::SeqCst) {
+                    let started = std::time::Instant::now();
+                    if let Ok(connection) = database.connection.lock() {
+                        let _: i64 = connection
+                            .query_row("SELECT 1", [], |row| row.get(0))
+                            .unwrap_or(0);
+                        let waited = started.elapsed();
+                        acquisitions += 1;
+                        longest = longest.max(waited);
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+                (acquisitions, longest)
+            });
+            work();
+            running.store(false, std::sync::atomic::Ordering::SeqCst);
+            handle.join().expect("探针线程")
+        })
+    }
+
+    fn big_payload(fill: u8) -> Vec<u8> {
+        // 32 MiB：足够让「写一次」量得出来，又不是大到拖慢测试。
+        let mut bytes = Vec::with_capacity(32 * 1024 * 1024);
+        bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        bytes.resize(32 * 1024 * 1024, fill);
+        bytes
+    }
+
+    /// 旧形状：调用方**拿着锁**把一整页写下去。
+    ///
+    /// 留着它只为量一个数：这么写的时候全局锁被整段 IO 占着。它是前提，不是目标。
+    fn store_holding_the_lock(
+        database: &Database,
+        app_data: &std::path::Path,
+        identity: &CacheImageIdentity,
+        mime: &str,
+        bytes: &[u8],
+    ) {
+        let connection = database.connection.lock().expect("拿锁");
+        store_image_cache(&connection, app_data, identity, mime, bytes).expect("写缓存");
+    }
+
+    /// 读/写一页缓存的时候，全局 DB 锁不该被文件 IO 占住。
+    ///
+    /// 全局锁是偏好、书架、搜索这些轻查询的必经之路，而这里搬的是整整一页图 +
+    /// 一次 blake3。锁覆盖了它，就等于每翻一页都把「读偏好」堵一次。
+    ///
+    /// 旧形状在这里只做**前提记录**（不设断言，与 `worker/tests/pipe_probe.rs` 的
+    /// A/B 同一手法：平台或实现变了不该让测试崩），断言的只有目标形状。
+    #[test]
+    fn the_database_lock_is_free_while_a_blob_is_written() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-lock-write");
+        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
+
+        let old_identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let old_payload = big_payload(0x5a);
+        let (_old_acquisitions, old_longest) = listen_during(&database, || {
+            store_holding_the_lock(&database, &app_data, &old_identity, "image/png", &old_payload);
+        });
+        eprintln!("[cache-lock] 锁内落盘（旧形状）：探针最长等了 {old_longest:?}");
+
+        // 换个 identity 与填充字节：内容是内容寻址的，同一份内容会落在同一个文件上，
+        // 那样第二次写只会「目标已存在」直接跳过，量不到真正的落盘。
+        let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 1);
+        let payload = big_payload(0x5b);
+        let (acquisitions, longest) = listen_during(&database, || {
+            write_cached_image(&database, &app_data, &identity, "image/png", &payload)
+                .expect("写缓存");
+        });
+        eprintln!(
+            "[cache-lock] 锁外落盘：探针拿到 {acquisitions} 次，最长等了 {longest:?}"
+        );
+
+        assert!(
+            acquisitions >= 20,
+            "写一整页图期间锁几乎没松过手：探针只拿到 {acquisitions} 次，最长等了 {longest:?}"
+        );
+        assert!(
+            longest < std::time::Duration::from_millis(200),
+            "探针最长等了 {longest:?}：锁被整段 IO 占住了"
+        );
+    }
+
+    /// 读一页同样不该占着全局锁：锁外读文件 + 算 blake3。
+    #[test]
+    fn the_database_lock_is_free_while_a_blob_is_read() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-lock-read");
+        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
+        let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let payload = big_payload(0x5c);
+        write_cached_image(&database, &app_data, &identity, "image/png", &payload).expect("写缓存");
+
+        let (acquisitions, longest) = listen_during(&database, || {
+            let hit = read_cached_image(&database, &app_data, &identity)
+                .expect("读缓存")
+                .expect("命中");
+            assert_eq!(hit.bytes.len(), payload.len());
+        });
+        eprintln!("[cache-lock] 锁外读盘：探针拿到 {acquisitions} 次，最长等了 {longest:?}");
+
+        assert!(acquisitions >= 5, "读一整页图期间锁几乎没松过手：探针只拿到 {acquisitions} 次");
+        assert!(
+            longest < std::time::Duration::from_millis(300),
+            "探针最长等了 {longest:?}：锁被整段 IO 占住了"
+        );
+    }
+
+    /// 一份写入如果在清空**之后**才收尾，不许把自己的行挂回来。
+    ///
+    /// 这是「清空缓存」与「正在算的那些任务」之间的竞速：落盘（可能几十毫秒到几秒）
+    /// 发生在锁外，落完再挂行。中间用户点了清空，这一份就属于上一代。
+    #[test]
+    fn a_write_that_finishes_after_a_clear_does_not_hang_a_row() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-epoch-write");
+        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
+        let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let payload = big_payload(0x5d);
+
+        // 落盘属于这一代，挂行之前用户清空了缓存。
+        let blob = prepare_blob(&app_data, &identity, "image/png", &payload).expect("落盘");
+        let file = controlled_cache_path(&app_data, &blob.relative).expect("缓存路径");
+        {
+            let connection = database.connection.lock().expect("拿锁");
+            clear_image_cache(&connection, &app_data).expect("清空缓存");
+        }
+        commit_blob(&database, &app_data, blob).expect("挂行");
+
+        let connection = database.connection.lock().expect("拿锁");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))
+            .expect("数行");
+        assert_eq!(rows, 0, "上一代的写入把行挂回来了");
+        assert!(file.is_file(), "内容寻址的文件不该被删：同一份内容可能还有别的行引用它");
+    }
+
+    /// 一份**陈旧**的读不能按路径去删行或删文件。
+    ///
+    /// 行是按 `path` 删的，而路径是内容寻址的：清空之后新一代完全可能把**同一份内容**
+    /// 重新贴回同一个文件上。这时一张上一代的旧账（它记录的还是那个路径）如果照着
+    /// 自己的账本去删，删掉的就是新一代那一行的家。
+    #[test]
+    fn a_stale_read_does_not_delete_the_next_generations_entry() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-epoch-read");
+        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
+        let first = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let payload = big_payload(0x5e);
+        write_cached_image(&database, &app_data, &first, "image/png", &payload).expect("写缓存");
+
+        // 读开了个头（拿到行 + 记下代），还没收尾。
+        let pending = begin_read(&database, &first).expect("开始读").expect("有行");
+
+        // 中间清空了一代，然后新一代用**同一份内容**把它贴了回来。
+        {
+            let connection = database.connection.lock().expect("拿锁");
+            clear_image_cache(&connection, &app_data).expect("清空缓存");
+        }
+        let second = CacheImageIdentity::new("scope", "archive", "reader-page", 1);
+        write_cached_image(&database, &app_data, &second, "image/png", &payload).expect("写缓存");
+
+        // 新一代那个文件坏掉了（同长度、不同内容）：陈旧读的核验会失败。
+        let relative = relative_for_hash(&blake3::hash(&payload).to_hex().to_string()).expect("路径");
+        let file = controlled_cache_path(&app_data, &relative).expect("缓存路径");
+        let mut corrupt = payload.clone();
+        corrupt[0] = 0x7f;
+        std::fs::write(&file, &corrupt).expect("弄坏文件");
+
+        let stale = finish_read(&database, &app_data, pending).expect("收尾");
+        assert!(stale.is_none(), "文件核不过就不该报命中");
+
+        let connection = database.connection.lock().expect("拿锁");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))
+            .expect("数行");
+        assert_eq!(rows, 1, "陈旧读按路径把新一代那一行删掉了");
+        assert!(file.is_file(), "陈旧读把新一代的文件删掉了");
+    }
+
+    /// 没人引用的缓存文件与死在半路的临时文件要被扫掉；有行引用的、还新鲜的都不动。
+    #[test]
+    fn orphan_cache_files_are_swept_and_referenced_ones_are_kept() {
+        let connection = cache_db();
+        let app_data = temp_app_data("cache-orphan-sweep");
+        std::fs::create_dir_all(app_data.join("cache/images/aa")).expect("建目录");
+        let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
+        let kept_payload: Vec<u8> = {
+            let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            bytes.resize(64, 0x11);
+            bytes
+        };
+        store_image_cache(&connection, &app_data, &identity, "image/png", &kept_payload)
+            .expect("写缓存");
+        let referenced = relative_for_hash(&blake3::hash(&kept_payload).to_hex().to_string())
+            .expect("路径");
+        let orphan = app_data
+            .join("cache/images/aa")
+            .join(format!("{}.bin", "b".repeat(64)));
+        std::fs::write(&orphan, b"orphaned").expect("写孤儿文件");
+        let temporary = app_data
+            .join("cache/images/aa")
+            .join(format!(".{}.tmp-1-2", "c".repeat(64)));
+        std::fs::write(&temporary, b"half").expect("写临时文件");
+
+        // 宽限期一小时：刚写下的东西都还新鲜——「没有行引用」也可能是别人刚落盘、
+        // 还没挂行的那一份，宽限期就是为它留的。
+        let sweep = sweep_orphan_cache_files(
+            &connection,
+            &app_data,
+            std::time::Duration::from_secs(3600),
+        )
+        .expect("清扫");
+        assert_eq!(sweep.removed_files, 0, "还新鲜的文件一个都不该动");
+        assert_eq!(sweep.kept_files, 3);
+        assert!(orphan.is_file() && temporary.is_file());
+
+        // 宽限期为零：没人引用的与死在半路的都算够老了。
+        let sweep =
+            sweep_orphan_cache_files(&connection, &app_data, std::time::Duration::ZERO)
+                .expect("清扫");
+        assert_eq!(sweep.removed_files, 2);
+        assert_eq!(sweep.bytes_freed, 8 + 4);
+        assert!(!orphan.exists() && !temporary.exists());
+        assert!(
+            controlled_cache_path(&app_data, &referenced)
+                .expect("路径")
+                .is_file(),
+            "有行引用的一个字节都不该动"
+        );
+    }
+
     #[test]
     fn quota_eviction_counts_shared_files_once_and_preserves_pinned_lru() {
         let connection = cache_db();
@@ -1290,6 +1922,45 @@ mod tests {
         assert!(!cache.join("enhanced.bin").exists());
         assert!(!cache.join("decensored.bin").exists());
         assert!(cache.join("pinned.bin").exists());
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn a_pinned_path_survives_clearing_until_it_is_released() {
+        let connection = cache_db();
+        let app_data = temp_app_data("cache-pin");
+        let identity = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 3);
+        store_image_cache(&connection, &app_data, &identity, "image/png", b"pinned-page").unwrap();
+        let relative: String = connection
+            .query_row("SELECT path FROM cache_entries", [], |row| row.get(0))
+            .unwrap();
+        let file = app_data.join(&relative);
+        assert!(file.exists());
+
+        // 钉一个不存在的路径不算错，只是没动到任何行。
+        assert_eq!(pin_cache_path(&connection, &"cache/images/ff/missing.bin").unwrap(), 0);
+
+        assert_eq!(pin_cache_path(&connection, &relative).unwrap(), 1);
+        let pinned: i64 = connection
+            .query_row("SELECT pinned FROM cache_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pinned, 1);
+
+        // 清空：被钉住的那一份一个字节都不动，而且报出来的「护住了多少」要对得上。
+        let cleared = clear_image_cache(&connection, &app_data).unwrap();
+        assert_eq!(cleared.removed_entries, 0);
+        assert_eq!(cleared.protected_bytes, 11);
+        assert!(file.exists());
+
+        // 放掉：这一下才真的可以被回收。
+        assert_eq!(unpin_cache_path(&connection, &relative).unwrap(), 1);
+        assert_eq!(pin_cache_path(&connection, &"cache/images/ff/missing.bin").unwrap(), 0);
+        let cleared = clear_image_cache(&connection, &app_data).unwrap();
+        assert_eq!(cleared.removed_entries, 1);
+        assert_eq!(cleared.protected_bytes, 0);
+        assert_eq!(cleared.bytes_freed, 11);
+        assert!(!file.exists());
+
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
@@ -1503,6 +2174,223 @@ mod tests {
 
         assert_eq!(read_cache_stats(&connection).unwrap().bytes, 50);
         assert!(!cache.join("old.bin").exists());
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    /// 「这一页在哪儿」这件事必须能在**不读它**的前提下答出来：提交那一侧要把它交给
+    /// 派发前准备（算哈希、硬链接/复制）去做，读图的代价不能落在命令体上。
+    #[test]
+    fn a_cached_page_can_be_located_without_being_read() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-locate");
+        let identity = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 3);
+        let payload = b"a page that is already on disk".to_vec();
+        write_cached_image(&database, &app_data, &identity, "image/png", &payload).expect("写缓存");
+
+        let located = cached_blob_location(&database, &app_data, &identity)
+            .expect("查位置")
+            .expect("这一页在缓存里");
+        let expected = blake3::hash(&payload).to_hex().to_string();
+        assert_eq!(located.content_hash, expected, "索引里说的哈希");
+        assert_eq!(located.byte_length, payload.len() as u64, "索引里说的长度");
+        // 位置是内容寻址**推出来**的，不是行里那串字符串照抄的。
+        assert_eq!(
+            located.path,
+            app_data.join(format!(
+                "cache/images/{}/{}.bin",
+                &expected[..2],
+                expected
+            ))
+        );
+        assert_eq!(std::fs::read(&located.path).expect("文件该在"), payload);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn an_identity_that_was_never_cached_has_no_location() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-locate-missing");
+        let identity = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 9);
+
+        assert!(cached_blob_location(&database, &app_data, &identity)
+            .expect("查位置")
+            .is_none());
+        // 参数不合法是**另一件事**：调用点要能把「没这页」与「请求本身不对」分开。
+        let mut broken = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 9);
+        broken.page_index = -1;
+        assert!(cached_blob_location(&database, &app_data, &broken).is_err());
+    }
+
+    /// 内容寻址的行必须「路径由哈希推出来」。对不上时宁可不认：认了就等于照着一行
+    /// 来路不明的账去读一个任意位置。
+    #[test]
+    fn a_row_whose_path_does_not_match_its_hash_is_not_a_location() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-locate-mismatch");
+        // 这是唯一一条什么都不写的用例。`temp_app_data` 只给路径、不建目录，所以这里
+        // 手动建一个——不是给断言铺路（对不上的账根本不该去看文件系统），只是末尾好收摊。
+        std::fs::create_dir_all(&app_data).expect("建数据目录");
+        let identity = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 4);
+        let claimed = "a".repeat(64);
+        let elsewhere = format!("cache/images/bb/{}.bin", "b".repeat(64));
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash,last_accessed_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,CURRENT_TIMESTAMP)",
+                rusqlite::params![
+                    image_cache_key(&identity),
+                    identity.rendition,
+                    elsewhere,
+                    12_i64,
+                    identity.scope_id,
+                    claimed
+                ],
+            )
+            .unwrap();
+
+        assert!(cached_blob_location(&database, &app_data, &identity)
+            .expect("查位置")
+            .is_none());
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    /// 8-g①：产物已经在**内容寻址**的位置上了，这一版还必须能被按修订号查回来。
+    ///
+    /// 这是 compute 那条路与缓存索引之间唯一的那道缝：`compute::artifacts::publish_blob` 落的
+    /// 路径与 `relative_for_hash` 逐字同形，缺的只是**索引那一行**——没有行，按修订号取起点的
+    /// 那几条路（DLSSNR、旧超分、远端代理）就永远查不到这一版，用户那边表现为一直
+    /// 「这一页还没算好」（docs/94 欠账②）。
+    ///
+    /// 挂行**不搬字节**：同一份内容可能已经被别的行引用，复制一份既浪费又让「同一份内容只有
+    /// 一份落点」这句话不再成立。
+    #[test]
+    fn a_published_artifact_is_registered_without_copying_its_bytes() {
+        let database = online_db();
+        let app_data = temp_app_data("cache-adopt");
+        let payload = b"an artifact that is already published".to_vec();
+        let content_hash = blake3::hash(&payload).to_hex().to_string();
+        let relative = format!("cache/images/{}/{content_hash}.bin", &content_hash[..2]);
+        let published = app_data.join(&relative);
+        std::fs::create_dir_all(published.parent().expect("有父目录")).expect("建目录");
+        std::fs::write(&published, &payload).expect("产物已经在盘上了");
+        let identity = {
+            let mut identity = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 7);
+            identity.revision = Some("rev:decensored:abc".to_string());
+            identity
+        };
+        // 挂行之前：文件在、索引里没有。这正是 compute 产物今天的样子，也是这道缝的起点。
+        assert!(
+            cached_blob_location(&database, &app_data, &identity)
+                .expect("查位置")
+                .is_none(),
+            "还没挂行就不该查得到"
+        );
+
+        adopt_published_blob(
+            &database,
+            &app_data,
+            &identity,
+            "image/png",
+            &relative,
+            &content_hash,
+            payload.len() as u64,
+        )
+        .expect("把已经发布的产物登记成这一版");
+
+        let located = cached_blob_location(&database, &app_data, &identity)
+            .expect("查位置")
+            .expect("挂完行之后按修订号查得到这一版");
+        assert_eq!(located.path, published, "还是同一个文件，没有复制");
+        assert_eq!(located.content_hash, content_hash);
+        assert_eq!(located.byte_length, payload.len() as u64);
+        assert_eq!(std::fs::read(&located.path).expect("读回来"), payload);
+
+        // 再挂一次是幂等的：同一行、同一个位置（不是「多出一条」）。
+        adopt_published_blob(
+            &database,
+            &app_data,
+            &identity,
+            "image/png",
+            &relative,
+            &content_hash,
+            payload.len() as u64,
+        )
+        .expect("再挂一次");
+        let rows: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM cache_entries WHERE key = ?1",
+                rusqlite::params![image_cache_key(&identity)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "同一版只该有一条行");
+
+        // 账对不上就**拒绝登记**，宁可不认也不记一行假账。
+        for (what, relative, hash, byte_length) in [
+            (
+                "路径不是由摘要推出来的",
+                "cache/images/aa/aa.bin",
+                content_hash.as_str(),
+                payload.len() as u64,
+            ),
+            (
+                "长度与记录不符",
+                relative.as_str(),
+                content_hash.as_str(),
+                payload.len() as u64 + 1,
+            ),
+            (
+                "摘要不是十六进制",
+                relative.as_str(),
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                payload.len() as u64,
+            ),
+            (
+                "长度为零",
+                relative.as_str(),
+                content_hash.as_str(),
+                0,
+            ),
+        ] {
+            assert!(
+                adopt_published_blob(
+                    &database,
+                    &app_data,
+                    &identity,
+                    "image/png",
+                    relative,
+                    hash,
+                    byte_length
+                )
+                .is_err(),
+                "{what}的时候该拒绝登记"
+            );
+        }
+        let mut broken = identity.clone();
+        broken.page_index = -1;
+        assert!(
+            adopt_published_blob(
+                &database,
+                &app_data,
+                &broken,
+                "image/png",
+                &relative,
+                &content_hash,
+                payload.len() as u64
+            )
+            .is_err(),
+            "身份本身不合法时该拒绝登记"
+        );
+        // 被拒的那几次不该污染已经挂好的那一行。
+        assert!(cached_blob_location(&database, &app_data, &identity)
+            .expect("查位置")
+            .is_some());
         std::fs::remove_dir_all(app_data).unwrap();
     }
 

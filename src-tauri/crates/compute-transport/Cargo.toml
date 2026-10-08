@@ -1,0 +1,23 @@
+[package]
+name = "yomika-compute-transport"
+version = "0.1.0"
+edition = "2021"
+description = "宿主与计算 worker 之间的 Windows 命名管道传输（重叠 IO 的读写两端）"
+license = "MIT"
+
+[lib]
+name = "yomika_compute_transport"
+path = "src/lib.rs"
+
+[dependencies]
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

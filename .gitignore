@@ -43,6 +43,10 @@ CLAUDE.local.md
 /target/
 /src-tauri/target/
 /src-tauri/target-fixed/
+# 集成测试用相对的 CARGO_TARGET_DIR 编 worker 时，CWD 是 src-tauri，于是
+# cargo 在这里又开了一棵 1 GiB 上下的 target 树。它是构建产物，不进仓库。
+/src-tauri/debug_outputs/
+/src-tauri/crates/*/target/
 /node_modules/
 /.vite-cache/
 /.npm-cache/

@@ -19,11 +19,12 @@ impl Database {
     }
 
     pub(crate) fn open_path(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
         let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .map_err(|error| error.to_string())?;
-        run_migrations(&mut connection)?;
+        run_migrations(&mut connection, path)?;
         crate::commands::library::recover_interrupted_tasks(&connection)?;
         crate::commands::sync::recover_stuck_sync_journal(&connection)?;
         Ok(Self {
@@ -32,84 +33,110 @@ impl Database {
     }
 }
 
-fn run_migrations(connection: &mut Connection) -> Result<(), String> {
-    const MIGRATIONS: &[(i64, &str)] = &[
-        (1, include_str!("../../migrations/0001_initial.sql")),
-        (2, include_str!("../../migrations/0002_local_library.sql")),
-        (3, include_str!("../../migrations/0003_sync_journal.sql")),
-        (4, include_str!("../../migrations/0004_watchlist.sql")),
-        (5, include_str!("../../migrations/0005_reading_history.sql")),
-        (6, include_str!("../../migrations/0006_webdav_accounts.sql")),
-        (7, include_str!("../../migrations/0007_eh_accounts.sql")),
-        (8, include_str!("../../migrations/0008_dedup_features.sql")),
-        (9, include_str!("../../migrations/0009_inference_jobs.sql")),
-        (
-            10,
-            include_str!("../../migrations/0010_cache_path_sharing.sql"),
-        ),
-        (11, include_str!("../../migrations/0011_task_runtime.sql")),
-        (
-            12,
-            include_str!("../../migrations/0012_archive_categories.sql"),
-        ),
-        (
-            13,
-            include_str!("../../migrations/0013_unified_image_cache.sql"),
-        ),
-        (
-            14,
-            include_str!("../../migrations/0014_cache_archive_scope.sql"),
-        ),
-        (15, include_str!("../../migrations/0015_dedup_sessions.sql")),
-        (
-            16,
-            include_str!("../../migrations/0016_archive_added_at.sql"),
-        ),
-        (17, include_str!("../../migrations/0017_reading_list.sql")),
-        (18, include_str!("../../migrations/0018_search_presets.sql")),
-        (
-            19,
-            include_str!("../../migrations/0019_reading_progress_cover_alone.sql"),
-        ),
-        (
-            20,
-            include_str!("../../migrations/0020_eh_health_cache.sql"),
-        ),
-        (
-            21,
-            include_str!("../../migrations/0021_sync_pull_state.sql"),
-        ),
-        (22, include_str!("../../migrations/0022_eh_my_tags.sql")),
-        (23, include_str!("../../migrations/0023_servers_enabled.sql")),
-        (24, include_str!("../../migrations/0024_sync_scope.sql")),
-        (
-            25,
-            include_str!("../../migrations/0025_webdav_last_sync.sql"),
-        ),
-        (
-            26,
-            include_str!("../../migrations/0026_sync_accounts.sql"),
-        ),
-        (
-            27,
-            include_str!("../../migrations/0027_sync_account_active.sql"),
-        ),
-        (
-            28,
-            include_str!("../../migrations/0028_local_archives.sql"),
-        ),
-        (
-            29,
-            include_str!("../../migrations/0029_local_archive_metadata.sql"),
-        ),
-        (
-            30,
-            include_str!("../../migrations/0030_hot_path_indexes.sql"),
-        ),
-    ];
+/// 升级前那一份副本落在哪儿：`yomika.sqlite3` ⇒ `yomika.sqlite3.pre-v10.bak`。
+///
+/// 名字里带档位，是为了不打开它也知道它对应哪一版；同一档只留一份（`run_migrations` 见到
+/// 文件在就不再复制），否则每次启动都要把几百兆的库再拷一遍。
+fn backup_path_for(path: &Path, current: i64) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "yomika.sqlite3".to_string());
+    path.with_file_name(format!("{name}.pre-v{current}.bak"))
+}
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_initial.sql")),
+    (2, include_str!("../../migrations/0002_local_library.sql")),
+    (3, include_str!("../../migrations/0003_sync_journal.sql")),
+    (4, include_str!("../../migrations/0004_watchlist.sql")),
+    (5, include_str!("../../migrations/0005_reading_history.sql")),
+    (6, include_str!("../../migrations/0006_webdav_accounts.sql")),
+    (7, include_str!("../../migrations/0007_eh_accounts.sql")),
+    (8, include_str!("../../migrations/0008_dedup_features.sql")),
+    (9, include_str!("../../migrations/0009_inference_jobs.sql")),
+    (
+        10,
+        include_str!("../../migrations/0010_cache_path_sharing.sql"),
+    ),
+    (11, include_str!("../../migrations/0011_task_runtime.sql")),
+    (
+        12,
+        include_str!("../../migrations/0012_archive_categories.sql"),
+    ),
+    (
+        13,
+        include_str!("../../migrations/0013_unified_image_cache.sql"),
+    ),
+    (
+        14,
+        include_str!("../../migrations/0014_cache_archive_scope.sql"),
+    ),
+    (15, include_str!("../../migrations/0015_dedup_sessions.sql")),
+    (
+        16,
+        include_str!("../../migrations/0016_archive_added_at.sql"),
+    ),
+    (17, include_str!("../../migrations/0017_reading_list.sql")),
+    (18, include_str!("../../migrations/0018_search_presets.sql")),
+    (
+        19,
+        include_str!("../../migrations/0019_reading_progress_cover_alone.sql"),
+    ),
+    (
+        20,
+        include_str!("../../migrations/0020_eh_health_cache.sql"),
+    ),
+    (
+        21,
+        include_str!("../../migrations/0021_sync_pull_state.sql"),
+    ),
+    (22, include_str!("../../migrations/0022_eh_my_tags.sql")),
+    (
+        23,
+        include_str!("../../migrations/0023_servers_enabled.sql"),
+    ),
+    (24, include_str!("../../migrations/0024_sync_scope.sql")),
+    (
+        25,
+        include_str!("../../migrations/0025_webdav_last_sync.sql"),
+    ),
+    (26, include_str!("../../migrations/0026_sync_accounts.sql")),
+    (
+        27,
+        include_str!("../../migrations/0027_sync_account_active.sql"),
+    ),
+    (28, include_str!("../../migrations/0028_local_archives.sql")),
+    (
+        29,
+        include_str!("../../migrations/0029_local_archive_metadata.sql"),
+    ),
+    (
+        30,
+        include_str!("../../migrations/0030_hot_path_indexes.sql"),
+    ),
+];
+
+fn run_migrations(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
+
+    // 先把升级前那一份原样留在旁边，再动手。迁移脚本只往前写，升级本身不可逆，
+    // 而用户的数据目录里没有第二个副本 —— 所以备份失败就不升：宁可这一次起不来，
+    // 也不要悄悄升上去之后回不去。
+    let last = MIGRATIONS.last().map(|(version, _)| *version).unwrap_or(0);
+    if current > 0 && current < last {
+        let backup = backup_path_for(path, current);
+        if !backup.exists() {
+            vacuum_into(connection, &backup).map_err(|error| {
+                format!(
+                    "升级前没能把数据库备份到 {}：{error}；这一版没动这个库",
+                    backup.display()
+                )
+            })?;
+        }
+    }
 
     for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version > current) {
         let transaction = connection
@@ -126,9 +153,24 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 用 `VACUUM INTO` 复制一份：出来的是一份独立的库文件（不是 WAL 的一条尾巴），
+/// 不打开它也能按 SQLite 文件头读出 `user_version` —— 冷启动那一侧就是靠这一点，
+/// 在没有 SQLite 库的机器上核对「备下来的还是升级前那一版」。
+fn vacuum_into(connection: &Connection, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute("VACUUM INTO ?1", [target.to_string_lossy().into_owned()])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::OpenFlags;
 
     use super::*;
 
@@ -280,6 +322,130 @@ mod tests {
             .expect("recovered task");
         assert_eq!(recovered_status, "queued");
         drop(reopened);
+        std::fs::remove_file(path).expect("remove test database");
+    }
+
+    /// 造一个「旧机器上留下来的库」：只跑到 `up_to` 档，再塞一行设置。
+    ///
+    /// 逐档跑的是仓库自己的 `MIGRATIONS`，所以夹具跟着迁移脚本一起变 —— 手抄一份建表语句，
+    /// 迟早会和真正的老库长得不一样。
+    fn write_legacy_database(path: &Path, up_to: i64) -> String {
+        let connection = Connection::open(path).expect("legacy database");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("legacy foreign keys");
+        for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= up_to) {
+            connection
+                .execute_batch(sql)
+                .unwrap_or_else(|error| panic!("legacy migration {version}: {error}"));
+            connection
+                .pragma_update(None, "user_version", version)
+                .expect("legacy version");
+        }
+        let left_over = "{\"left_over\":\"这台机器上原来就有\"}".to_string();
+        connection
+            .execute(
+                "INSERT INTO settings (key, value_json) VALUES ('legacy-marker', ?1)",
+                [left_over.as_str()],
+            )
+            .expect("legacy row");
+        left_over
+    }
+
+    fn scratch_path(tag: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "yomika-{tag}-{}-{unique}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    fn version_and_marker(connection: &Connection) -> (i64, String) {
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("fixture version");
+        let marker: String = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='legacy-marker'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fixture marker");
+        (version, marker)
+    }
+
+    #[test]
+    fn an_older_database_is_copied_beside_the_new_one_before_it_is_migrated() {
+        let path = scratch_path("legacy-backup");
+        let left_over = write_legacy_database(&path, 10);
+        let backup = backup_path_for(&path, 10);
+        assert!(
+            !backup.exists(),
+            "夹具自己先备过一份就不算数了：{}",
+            backup.display()
+        );
+
+        let database = Database::open_path(&path).expect("upgrade the legacy database");
+        {
+            let connection = database.connection.lock().expect("database lock");
+            let (version, marker) = version_and_marker(&connection);
+            assert_eq!(version, 30, "升完该是这一版的档位");
+            assert_eq!(marker, left_over, "那台机器上的数据要跟着一起升上来");
+        }
+        drop(database);
+
+        // 备份要真的在，而且里面还是升级前那一版 —— 「回退」靠的就是它。
+        assert!(
+            backup.exists(),
+            "升级前该把库整个备一份到 {}",
+            backup.display()
+        );
+        let copy = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("backup database");
+        let (backup_version, backup_marker) = version_and_marker(&copy);
+        assert_eq!(backup_version, 10, "备份里该还是升级前那一档");
+        assert_eq!(backup_marker, left_over, "备份里该还有那台机器的数据");
+        drop(copy);
+
+        std::fs::remove_file(&path).expect("remove test database");
+        std::fs::remove_file(&backup).expect("remove test backup");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_left_alone() {
+        // 回退那一半：这一版遇到比自己新的档位时，一个迁移都不许 apply，更不能把
+        // `user_version` 改回去 —— 否则旧包会把新库「降级」成自己认识的样子。
+        let path = scratch_path("newer-database");
+        let database = Database::open_path(&path).expect("first database open");
+        {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO settings (key, value_json) VALUES ('legacy-marker', ?1)",
+                    ["{\"from\":\"a newer build\"}"],
+                )
+                .expect("newer row");
+            connection
+                .pragma_update(None, "user_version", 99)
+                .expect("pretend a newer build migrated this");
+        }
+        drop(database);
+
+        let reopened = Database::open_path(&path).expect("older build opens a newer database");
+        {
+            let connection = reopened.connection.lock().expect("database lock");
+            let (version, marker) = version_and_marker(&connection);
+            assert_eq!(version, 99, "别人写下的档位不许被改小");
+            assert_eq!(marker, "{\"from\":\"a newer build\"}");
+        }
+        drop(reopened);
+        assert!(
+            !backup_path_for(&path, 99).exists(),
+            "没有要升的档就不该凭空多一份备份"
+        );
         std::fs::remove_file(path).expect("remove test database");
     }
 }

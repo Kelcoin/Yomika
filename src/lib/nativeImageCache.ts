@@ -77,26 +77,15 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   private async load(identity: ImageCacheIdentity, signal?: AbortSignal): Promise<CachedImageData> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (!identity.serverId) throw new Error('Image request is missing a server ID');
-    if (identity.rendition === 'enhanced') {
-      // Upscaling reads a cached rendition, so that rendition has to be loaded
-      // first; a miss here simply leaves the reader on the page it already shows.
-      const source = identity.source === 'decensored' ? 'decensored' as const : 'reader-page' as const;
-      const upscaled = await this.inference.upscalePage({
-        scopeId: identity.scopeId,
-        archiveId: identity.archiveId,
-        pageIndex: identity.pageIndex,
-        ...(identity.modelId ? { modelId: identity.modelId } : {}),
-        // 起点是去码那一步的产物时，它按「哪一份去码包」存：id 一并给出，原生那侧
-        // 才算得出同一个 revision。
-        ...(source === 'decensored' && identity.decensorModelId
-          ? { source, decensorModel: identity.decensorModelId }
-          : {}),
-        ...(identity.taskId ? { taskId: identity.taskId } : {}),
-        ...(identity.priority ? { priority: identity.priority } : {}),
-      });
-      if (!upscaled.ok) throw new Error(upscaled.error.message);
-      const bytes = new Uint8Array(upscaled.value);
-      return { bytes, mime: detectImageMime(bytes) };
+    // `enhanced` 与 `decensored` 这两版**不从这里走**：它们现在整条都由 compute 那条链产出
+    // （`loadLocalRenditions` 提交宿主任务、把产物认领进这张账），从这里再往外开一道
+    // 「宿主在进程里跑模型」的旧门正是 8-g 要拆掉的东西。
+    //
+    // 这里点名拦一道不是因为不拦就危险（不拦会掉到下面那句 `Unsupported image request`），
+    // 而是因为那句话什么也没说：真出了这种事（谁又按这两版来读图），日志里要写清楚这两版
+    // 归谁管。
+    if (identity.rendition === 'enhanced' || identity.rendition === 'decensored') {
+      throw new Error(`${identity.rendition} is produced by compute, not by the image cache`);
     }
     if (identity.rendition === 'dlssnr') {
       // DLSSNR：起点由 `transform` 说明（本地去码/超分跑过就从它们的产物接着跑），
@@ -149,22 +138,6 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       });
       if (!processed.ok) throw new Error(processed.error.message);
       const bytes = new Uint8Array(processed.value);
-      return { bytes, mime: detectImageMime(bytes) };
-    }
-    if (identity.rendition === 'decensored') {
-      // Reads the cached reader page too, and needs a bundle: a missing one is an
-      // error rather than a silent pass-through, since the reader would otherwise
-      // show the censored page while the setting claims otherwise.
-      const filled = await this.inference.decensorPage({
-        scopeId: identity.scopeId,
-        archiveId: identity.archiveId,
-        pageIndex: identity.pageIndex,
-        modelId: identity.modelId ?? '',
-        ...(identity.taskId ? { taskId: identity.taskId } : {}),
-        ...(identity.priority ? { priority: identity.priority } : {}),
-      });
-      if (!filled.ok) throw new Error(filled.error.message);
-      const bytes = new Uint8Array(filled.value);
       return { bytes, mime: detectImageMime(bytes) };
     }
     const result = identity.rendition === 'cover'

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import type { DecensorPagePayload, ReaderPagePayload } from '../../src/domain/compute';
+import { NativeComputeCenterRepository } from '../../src/repositories/nativeComputeCenterRepository';
+import { NativeComputeRepository } from '../../src/repositories/nativeComputeRepository';
 import { NativeDlssnrRepository } from '../../src/repositories/nativeDlssnrRepository';
-import { NativeInferenceRepository } from '../../src/repositories/nativeInferenceRepository';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -16,26 +18,70 @@ function recordingAdapter() {
   return vi.fn(async (_command: string, _request?: unknown) => PNG);
 }
 
+/** 重计算那两道门的档位在 `payload` 里（请求的身份由宿主铸），dlssnr 与远端在 `input` 里。 */
+function priorityOf(request: unknown): unknown {
+  const args = request as { payload?: Record<string, unknown>; input?: Record<string, unknown> };
+  return (args.payload ?? args.input)?.priority;
+}
+
 describe('derived page priority bridge', () => {
-  it('sends the reader-window hint with upscale, decensor and dlssnr requests', async () => {
+  it('sends the reader-window hint with every derived-page request', async () => {
     const adapter = recordingAdapter();
     setInvokeAdapterForTests(adapter);
-    const inference = new NativeInferenceRepository();
-    await inference.upscalePage({ scopeId: 's', archiveId: 'a', pageIndex: 3, modelId: 'm', taskId: 't', priority: 'foreground' });
-    await inference.decensorPage({ scopeId: 's', archiveId: 'a', pageIndex: 3, modelId: 'm', taskId: 't', priority: 'foreground' });
+    const compute = new NativeComputeRepository();
+    const reader: ReaderPagePayload = {
+      scopeId: 's',
+      archiveId: 'a',
+      pageIndex: 3,
+      modelId: 'm',
+      generation: 1,
+      priority: 'foreground',
+      deadlineMs: 0,
+    };
+    const chained: DecensorPagePayload = { ...reader, upscaleModelId: 'up' };
+    await compute.submitReaderPage(reader);
+    await compute.submitDecensorPage(chained);
     await new NativeDlssnrRepository().applyPage({ scopeId: 's', archiveId: 'a', pageIndex: 3, settings: { passes: [] }, taskId: 't', priority: 'foreground' });
+    await new NativeComputeCenterRepository().remoteProcess({
+      url: 'https://host',
+      token: 'tok',
+      params: { op: 'upscale' },
+      scopeId: 's',
+      archiveId: 'a',
+      pageIndex: 3,
+      taskId: 't',
+      priority: 'foreground',
+    });
 
-    const inputs = adapter.mock.calls.map(([, request]) => (request as Payload).input);
-    expect(inputs.map((input) => input.priority)).toEqual(['foreground', 'foreground', 'foreground']);
+    expect(adapter.mock.calls.map(([command]) => command)).toEqual([
+      'compute_submit_reader_page',
+      'compute_submit_decensor_page',
+      'dlssnr_apply_page',
+      'remote_compute_process',
+    ]);
+    expect(adapter.mock.calls.map(([, request]) => priorityOf(request))).toEqual([
+      'foreground',
+      'foreground',
+      'foreground',
+      'foreground',
+    ]);
   });
 
   it('leaves the hint out when the caller has no window to report', async () => {
     // 后台整本预扫之外的调用（比如设置页的试跑）不该自带一个优先级：原生那侧的默认
-    // 是「后台，不抢占任何人」。
+    // 是「后台，不抢占任何人」。重计算那两道门的档位是**必填**的（两边一起来铸身份，
+    // 渲染进程必须说清这一页是前台还是后台），所以这里只有 dlssnr 与远端两道门。
     const adapter = recordingAdapter();
     setInvokeAdapterForTests(adapter);
-    await new NativeInferenceRepository().decensorPage({ scopeId: 's', archiveId: 'a', pageIndex: 0, modelId: 'm' });
     await new NativeDlssnrRepository().applyPage({ scopeId: 's', archiveId: 'a', pageIndex: 0, settings: { passes: [] } });
+    await new NativeComputeCenterRepository().remoteProcess({
+      url: 'https://host',
+      token: 'tok',
+      params: { op: 'upscale' },
+      scopeId: 's',
+      archiveId: 'a',
+      pageIndex: 0,
+    });
 
     for (const [, request] of adapter.mock.calls) {
       expect((request as Payload).input).not.toHaveProperty('priority');

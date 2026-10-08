@@ -1,20 +1,9 @@
-use tauri::Manager;
-
-/// 取消在 `Result<_, String>` 那一层的样子：`run_decensor_bytes` 这类函数把
-/// `InferenceError` 压成字符串交给上层，而取消要和「真的失败」分开——调用方据此
-/// 回 `INFERENCE_CANCELLED`，而不是记一条用户看不懂的错误。
-pub(crate) const CANCELLED_ERROR: &str = "cancelled";
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum InferenceError {
-    InvalidInput(String),
-    PixelBudgetExceeded { pixels: usize, max_pixels: usize },
-    InvalidManifest(String),
-    CacheBusy,
-    /// 任务被取消：切页、关开关、离开阅读器。不是失败，调用方不要记成错误，
-    /// 也不要把它写进任何缓存。
-    Cancelled,
-}
+/// 计算错误的宿主别名。
+///
+/// 定义搬去了 [`yomika_compute_core::error`]（docs/71 §11 Task 2）：算法层要能在
+/// 没有 Tauri、没有数据库的进程里独立报错，而宿主这边保留同一个名字，于是几百处
+/// `InferenceError::…` 的构造与 match 一行都不用改。
+pub use yomika_compute_core::error::ComputeError as InferenceError;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -343,9 +332,16 @@ pub fn install_model_archive(
 pub mod anime4k;
 pub mod cancel;
 pub mod decensor;
-pub mod detect;
+// 下面这两个模块（以及它们背后的核心层）只有测试用得上：`inpaint` 是几何那边点名
+// 要比对的类型，`onnx` 是真模型用例要开的引擎。产品构建里宿主一条 ONNX 会话都不开
+// （8-g③-iv），所以它们连编译都不该进来——`#[cfg(test)]` 就是这条边界，谁哪天在产品
+// 代码里用上它们，会以「找不到模块」当场红掉，而不是悄悄把运行库链回主进程。
+#[cfg(test)]
 pub mod inpaint;
+#[cfg(test)]
 pub mod onnx;
+pub mod session;
+mod scheduling;
 pub mod upscale;
 
 /// The pixel budget a model is handed when nothing on disk says otherwise.
@@ -381,19 +377,14 @@ impl BackendId {
 /// Preference order for the current platform. Windows gets DirectML, Apple
 /// platforms CoreML, Android NNAPI — the same split the mihon fork makes when it
 /// chooses a Vulkan/NNAPI device — and CPU is the universal fallback.
+///
+/// 顺序本体在 `yomika_compute_core::runtime::platform_preference`：宿主与 worker 必须
+/// 给出同一个顺序，留两份就会漂移。
 pub fn platform_backend_preference() -> Vec<BackendId> {
-    let mut order = Vec::new();
-    if cfg!(target_os = "windows") {
-        order.push(BackendId::DirectMl);
-    }
-    if cfg!(any(target_os = "macos", target_os = "ios")) {
-        order.push(BackendId::CoreMl);
-    }
-    if cfg!(target_os = "android") {
-        order.push(BackendId::Nnapi);
-    }
-    order.push(BackendId::Cpu);
-    order
+    yomika_compute_core::runtime::platform_preference()
+        .into_iter()
+        .map(session::backend_of)
+        .collect()
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -404,7 +395,14 @@ pub struct InferenceCapabilities {
     pub hardware_acceleration: bool,
 }
 
-#[tauri::command]
+/// 这份构建**声明**要用哪几条运行库（平台偏好顺序，末位永远是 CPU）。
+///
+/// 8-g③-iv 之前这里是**实测**：宿主自己开一次会话来问哪条能跑。现在宿主一条会话都
+/// 开不了（模型计算全在 worker 里），能实测的只剩 worker——它启动时拿
+/// `WORKER_RUNTIME_LABEL` 自证，每次交回的 `EngineReport` 里带着真的
+/// `device_id`/`fallback`。所以这条命令答的是「这份构建打算怎么走」，不是「这台机器
+/// 能不能走」；要后者请看产物里那份报告，别把这一条当保证用。
+#[tauri::command(async)]
 pub fn inference_probe() -> crate::domain::result::CommandResult<InferenceCapabilities> {
     let backends = platform_backend_preference();
     crate::domain::result::CommandResult::success(InferenceCapabilities {
@@ -573,11 +571,12 @@ pub const ENHANCED_OUTPUT_SCALE: u32 = 2;
 /// Resamples a model's output down to `ENHANCED_OUTPUT_SCALE` times the source.
 /// Anything already at or below that is returned untouched.
 ///
-/// Takes the buffer **by value** on purpose. Used to take `&[u8]` and build the
-/// image with `rgba.to_vec()`, which duplicated the whole upscaled page — a 25 MP
-/// model output is 256 MB — for the duration of the resample, with the original
-/// still alive. The `Vec` is moved into the image instead; nothing else in the
-/// enhancement path needs the model's output afterwards.
+/// 缩放本身在 `yomika_compute_core::fit` 里：worker 也要在编码之前做同一件事，
+/// 抄一份「交出去多大」的规则迟早会两边不一致（MEMORY 三十二）。这里留下的是**产品
+/// 常数与名字**——「阅读器要几倍」是策略，不是算法。
+///
+/// 取 `Vec` 而不是 `&[u8]` 是有意的，理由在核心那边：`to_vec()` 会让 25 MP 的模型
+/// 输出在内存里躺两份（256 MB），而这条路径上没人还需要模型的原样输出。
 pub fn fit_enhanced_output(
     rgba: Vec<u8>,
     width: u32,
@@ -585,74 +584,25 @@ pub fn fit_enhanced_output(
     source_width: u32,
     source_height: u32,
 ) -> (Vec<u8>, u32, u32) {
-    let target_width = source_width.saturating_mul(ENHANCED_OUTPUT_SCALE);
-    let target_height = source_height.saturating_mul(ENHANCED_OUTPUT_SCALE);
-    if width <= target_width || height <= target_height || target_width == 0 || target_height == 0 {
-        return (rgba, width, height);
-    }
-    // `RgbaImage::from_raw` refuses a buffer smaller than `width * height * 4` (and
-    // a size whose product overflows `usize`), which is the same check as this one —
-    // so a buffer that gets past it is always accepted, and one that does not is
-    // handed back untouched exactly as the borrowed version did.
-    let fits = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .is_some_and(|min_len| min_len <= rgba.len());
-    if !fits {
-        return (rgba, width, height);
-    }
-    let image = image::RgbaImage::from_raw(width, height, rgba)
-        .expect("the buffer was just checked against width * height * 4");
-    // Lanczos3 on the way down: the model spent its time recovering edges, and a
-    // box filter would give them straight back.
-    let resized = image::imageops::resize(
-        &image,
-        target_width,
-        target_height,
-        image::imageops::FilterType::Lanczos3,
-    );
-    (resized.into_raw(), target_width, target_height)
+    yomika_compute_core::fit::fit_rgba_scale(
+        rgba,
+        width,
+        height,
+        source_width,
+        source_height,
+        ENHANCED_OUTPUT_SCALE,
+    )
 }
 
-/// The de-censoring sessions, kept for the life of the process and keyed by the
-/// bundle they were opened from.
+/// 空操作：宿主一条 ONNX 会话都没有了。
 ///
-/// The detector is a 240 MB graph. It was opened per page, so every page turn paid
-/// to load and initialise it again — the model's size is the reason that mattered,
-/// and nothing about the graph is per-page. Keyed by the detector's path so
-/// switching bundles opens the new one instead of serving the old.
-static DECENSOR_ENGINES: std::sync::OnceLock<
-    std::sync::Mutex<Option<(String, std::sync::Arc<decensor::DecensorEngines>)>>,
-> = std::sync::OnceLock::new();
-
-pub(crate) fn decensor_engines_for(
-    bundle: &decensor::DecensorBundle,
-) -> Result<std::sync::Arc<decensor::DecensorEngines>, InferenceError> {
-    let cell = DECENSOR_ENGINES.get_or_init(|| std::sync::Mutex::new(None));
-    let root = bundle
-        .detector
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| InferenceError::InvalidInput("Invalid model path".into()))?;
-    let key = format!(
-        "{}:{}",
-        root.display(),
-        model_fingerprint(root).map_err(|e| InferenceError::InvalidInput(e.to_string()))?
-    );
-    let mut held = cell
-        .lock()
-        .map_err(|_| InferenceError::InvalidInput("de-censoring session lock poisoned".into()))?;
-    if let Some((path, engines)) = held.as_ref() {
-        if path == &key {
-            return Ok(std::sync::Arc::clone(engines));
-        }
-    }
-    // Drop the previous bundle's sessions before opening the next: two 240 MB
-    // detectors resident at once is not a cost worth paying to switch models.
-    *held = None;
-    let engines = std::sync::Arc::new(decensor::DecensorEngines::open(bundle)?);
-    *held = Some((key, std::sync::Arc::clone(&engines)));
-    Ok(engines)
+/// 从前它清的是宿主的进程级会话缓存，那台缓存随「模型计算全在 worker」一起消失
+/// （8-g③-iv，最后一个占用者是页面那条来路）。命令**留着**是因为渲染层在离开阅读器
+/// 时还在叫它——让一个常用的调用变成「没有这个命令」是前端要单独处理的错误，而这里
+/// 该表达的只是「本来就没事可做」。返回值从此恒为 0。
+#[tauri::command]
+pub async fn inference_release_sessions() -> crate::domain::result::CommandResult<u32> {
+    crate::domain::result::CommandResult::success(0)
 }
 
 pub const MODEL_KIND_UPSCALE: &str = "upscale";
@@ -858,7 +808,10 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
 
 /// Newest installed version of `model_id` that is actually runnable: it has a
 /// manifest (so a scale) and exactly one ONNX file.
-fn resolve_installed_model(
+///
+/// `pub(crate)`：计算编排层（`compute::models`）要在派发前把这份模型摆进只读输入根，
+/// 交给 worker 去算。解析规则只该有一份，命令层与编排层不许各自实现一遍。
+pub(crate) fn resolve_installed_model(
     app_data_dir: &std::path::Path,
     model_id: &str,
 ) -> Option<(std::path::PathBuf, ModelManifest)> {
@@ -894,14 +847,31 @@ pub fn builtin_upscale_models() -> Vec<InstalledModel> {
         .collect()
 }
 
+/// Whether `model_id` names an upscaler that only exists inside this process.
+///
+/// Anime4K is a shader chain compiled into the host binary, not an ONNX file: the
+/// compute worker's build has no copy of it, so a pipeline stage naming one can
+/// never run there. The distinction matters to the caller because "not
+/// downloaded" is fixed by downloading and this is not.
+pub(crate) fn is_host_only_upscaler(model_id: &str) -> bool {
+    anime4k::preset_by_id(model_id).is_some()
+}
+
 /// What a `upscaleModel` id names: a built-in chain, a model on disk, or nothing
 /// at all, which leaves the pipeline on the nearest-neighbour scaler.
-enum ResolvedUpscaler {
+///
+/// `pub(crate)`：`compute::reader`（阅读器那道门）要按同一把尺子判「这个 id 到底是
+/// 什么」——是能在 worker 里跑的模型，还是只活在宿主里的 shader 链。两边各判一遍就会
+/// 出现「一边当它是模型、另一边当它是预设」。
+pub(crate) enum ResolvedUpscaler {
     Onnx(std::path::PathBuf, ModelManifest),
     Anime4k(&'static anime4k::Anime4kPreset),
 }
 
-fn resolve_upscaler(app_data_dir: &std::path::Path, model_id: &str) -> Option<ResolvedUpscaler> {
+pub(crate) fn resolve_upscaler(
+    app_data_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<ResolvedUpscaler> {
     if let Some(preset) = anime4k::preset_by_id(model_id) {
         return Some(ResolvedUpscaler::Anime4k(preset));
     }
@@ -1381,60 +1351,10 @@ pub fn select_backend(supported: &[String], blacklist: &[String]) -> BackendId {
         .unwrap_or(BackendId::Cpu)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct CpuRgbaOutput {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Upscales one cached reader page and stores the result as the `enhanced`
-/// rendition, keyed by the model version so a model change does not serve a
-/// stale image.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpscalePageInput {
-    pub scope_id: String,
-    pub archive_id: String,
-    pub page_index: i64,
-    #[serde(default)]
-    pub scale: Option<u32>,
-    /// Installed model to run, by id. Absent (or not installed) falls back to the
-    /// nearest-neighbour scaler, which is honest about being model-free rather
-    /// than failing the page.
-    #[serde(default)]
-    pub model_id: Option<String>,
-    #[serde(default)]
-    pub tile_size: Option<u32>,
-    #[serde(default)]
-    pub tile_sleep_ms: Option<u64>,
-    /// Which rendition this call reads: `reader-page` (the plain page, the
-    /// default) or `decensored` (the de-censoring step's output).
-    ///
-    /// The two enhancements are **consecutive steps, not one call**: the reader
-    /// asks for the de-censored page first, shows it when it lands, and then asks
-    /// for the enlarged version of it. That is what makes each step's result
-    /// visible on its own — a page whose upscale failed still shows its
-    /// de-censored version, and one whose de-censoring failed is still enlarged.
-    /// Chaining them inside one call (the previous shape, through
-    /// `decensor_model`) threw the first step's result away whenever the second
-    /// one failed.
-    #[serde(default)]
-    pub source: Option<String>,
-    /// When `source` is `decensored`: the bundle that produced it. Only its
-    /// identity is needed here — it is what the de-censored rendition is keyed
-    /// by, so the upscaler reads the page *this* bundle wrote and not one left by
-    /// a different version.
-    #[serde(default)]
-    pub decensor_model: Option<String>,
-    /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
-    #[serde(default)]
-    pub task_id: Option<String>,
-    /// 这次请求是前台（用户正看着的那一页）还是后台（提前预扫）。前端不给就是
-    /// 后台——见 `HeavyPriority::parse`。
-    #[serde(default)]
-    pub priority: Option<String>,
-}
+/// 最近邻缩放的输出，定义在 [`yomika_compute_core::cpu_scale`]。宿主现在不点
+/// 这个名字（`cpu_scale_rgba` 的调用方直接读字段），保留是为了路径不变。
+#[allow(unused_imports)]
+pub use yomika_compute_core::cpu_scale::CpuRgbaOutput;
 
 /// 派生版本（去码 / 超分产物）的缓存 revision。
 ///
@@ -1457,26 +1377,125 @@ fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
 }
 
 /// `enhanced` 的 revision：超分模型指纹，加上它读的是哪一版起点（原图 / 某一版
-/// 去码产物）。同一页在同一起点上跑同一个模型是同一张图，所以命中可以直接给。
-fn enhanced_revision(resolved: &Option<ResolvedUpscaler>, decensor: Option<&str>) -> String {
-    match decensor {
-        Some(fingerprint) => format!("{}|from:decensored:{fingerprint}", upscaler_fingerprint(resolved)),
-        None => format!("{}|from:reader-page", upscaler_fingerprint(resolved)),
-    }
+/// 去码产物）。
+///
+/// 从 docs/71 §11 Task 5 第 6 条起，这个串不再只是「模型 + 起点」：它还要说出
+/// **谁算的**（后端、运行库版本、精度）与**哪条流水线**算的，否则「同一份模型、
+/// 同一份起点」在两个后端之间会被当成同一件事，或者流水线改了口径却继续吃旧产物。
+/// 这些字段由 [`derived_cache_revision`] 统一拼（`cache_revision` 带长度前缀，
+/// 免得 `("ab","c")` 与 `("a","bc")` 折成一个串）。
+///
+/// `pub(crate)`：`compute::reader` 铸任务身份时用的就是这一个函数——阅读器走 URL 那条路
+/// 与旧命令那条路必须算出**同一个** `settings_id`，否则同一页、同一份设置会被当成两件
+/// 任务各算一遍，缓存也永远命中不了。
+pub(crate) fn enhanced_revision(
+    resolved: &Option<ResolvedUpscaler>,
+    decensor: Option<&str>,
+) -> String {
+    let source_revision = match decensor {
+        Some(revision) => format!("decensored:{revision}"),
+        None => "reader-page".to_string(),
+    };
+    derived_cache_revision(
+        &upscaler_fingerprint(resolved),
+        &source_revision,
+        UPSCALE_PIPELINE_REVISION,
+        declared_backend_label(),
+    )
+}
+
+/// 缓存修订里的「运行库」那一栏。
+///
+/// 它**不再问宿主自己链着什么**：`ort` 一升级，底下的内核与算子实现就换了，同一份模型
+/// 可能给出不同的数（ORT 并不承诺跨版本的位级一致），旧产物因此必须作废——所以这一栏
+/// 必须是真的算它的那条运行库的版本号，不能是手写常量。
+///
+/// 但宿主正在把 ONNX Runtime 摘出去（docs/71 §11 Task 8），摘完它这一侧
+/// `runtime::runtime_label()` 只会答 `"no-runtime"`——那个答案一旦被写进缓存身份，
+/// 就成了「一切照常、只是账上的号不再跟着运行库走」。所以答案只有一个来源：协议里的
+/// `WORKER_RUNTIME_LABEL`，由 worker 在启动时用自己链着的运行库**证明**过
+/// （`runtime::runtime_label_mismatch`，对不上就拒跑）。名字里的 `ort` 说的是这一栏的
+/// **内容**（`ort-api27`），不是宿主链着谁。
+fn ort_runtime_label() -> &'static str {
+    yomika_compute_protocol::WORKER_RUNTIME_LABEL
+}
+
+/// 缓存修订里的「后端」那一栏：这份构建**声明**的首选执行提供者。
+///
+/// 为什么声明而不是实测：命中路径根本不会开模型（那正是缓存的意义），所以「这一次
+/// 实际跑在谁身上」在命中时不可知；而真正会误命中的那种情况（模型换了）由
+/// `model_spec_id` 里的 sha256 管住。这一栏管的是别的：同一台机器上后端策略变了
+/// （驱动升级后 DML 没了、探针拒了这个模型）时，旧产物不会被当成新策略的产物接着用。
+///
+/// 8-g③-iv 之后连「问一句」都做不到了：宿主没有会话可开，`runtime::available_runtimes`
+/// 不在产品依赖里。这一栏于是与 [`inference_probe`] 同一个来源（平台偏好），差别只在
+/// 于它进的是缓存身份——两者必须同源，否则「探测说 directml、身份写 cpu」这种错位会
+/// 让产物按一套策略算、按另一套策略命中。
+fn declared_backend_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| {
+        platform_backend_preference()
+            .first()
+            .copied()
+            .unwrap_or(BackendId::Cpu)
+            .as_str()
+            .to_string()
+    })
+}
+
+/// 流水线口径的版本。修订号里没有别的字段能表达「同一份模型、同一份起点，但中间
+/// 多了一道处理」——阶段顺序、参数、后处理改了就把对应的这个 +1，旧产物当场作废。
+const DECENSOR_PIPELINE_REVISION: &str = "decensor:1";
+const UPSCALE_PIPELINE_REVISION: &str = "upscale:1";
+
+/// 派生图（去码 / 超分产物）的缓存修订号。
+///
+/// `backend` 是一格**参数**，不在这里读 [`declared_backend_label`]：这一栏必须随声明的
+/// 后端变，而「它真的在变」只有从外面喂两个不同的值才断得出来（见
+/// `a_derived_revision_names_its_source_and_its_engine`；产品调用点传的都是
+/// [`declared_backend_label`]，也就是这台机器声明要用的那一条）。
+fn derived_cache_revision(
+    model_spec_id: &str,
+    source_revision: &str,
+    pipeline_revision: &str,
+    backend: &str,
+) -> String {
+    crate::compute::artifacts::cache_revision(&crate::compute::artifacts::CacheRevisionParts {
+        model_spec_id,
+        source_revision,
+        backend,
+        runtime_id: ort_runtime_label(),
+        // 两条链都只跑 fp32：ONNX 图里的权重是 fp32，没人替我们降到 fp16。
+        precision: "fp32",
+        pipeline_revision,
+    })
+}
+
+/// `decensored` 那一版的 revision。写的那一步（`compute::proxy::decensor` 与阅读器
+/// 那条去码链）与读的那两步（`source_revision` 给起点取值、超分链拿它当 source）必须
+/// 算出同一个串，所以只留这一个入口。
+pub(crate) fn decensored_revision(fingerprint: &str) -> String {
+    derived_cache_revision(
+        fingerprint,
+        "reader-page",
+        DECENSOR_PIPELINE_REVISION,
+        declared_backend_label(),
+    )
 }
 
 /// 起点那一版的身份。`decensored` 要带上产出它的那一份去码模型的指纹。
-fn source_identity(
-    input: &UpscalePageInput,
+///
+/// 传三个标量而不是整份命令输入：`compute::reader` 也要按同一把尺子算出「这一页的起点
+/// 是哪一行」。两边共用一个函数，才不会一边按别的 rendition 去查、另一边按这一版去写。
+pub(crate) fn source_identity(
+    scope_id: &str,
+    archive_id: &str,
+    page_index: i64,
     source_rendition: &str,
     decensor_revision: Option<&str>,
 ) -> crate::cache::CacheImageIdentity {
-    let mut identity = crate::cache::CacheImageIdentity::new(
-        &input.scope_id,
-        &input.archive_id,
-        source_rendition,
-        input.page_index,
-    );
+    let mut identity =
+        crate::cache::CacheImageIdentity::new(scope_id, archive_id, source_rendition, page_index);
     identity.revision = decensor_revision.map(|value| value.to_string());
     identity
 }
@@ -1513,7 +1532,7 @@ pub(crate) fn source_revision(
     match rendition {
         "reader-page" => Ok(None),
         "decensored" => match decensor_fingerprint_of(decensor_model)? {
-            Some(fingerprint) => Ok(Some(fingerprint)),
+            Some(fingerprint) => Ok(Some(decensored_revision(&fingerprint))),
             None => Err(SourceRevisionError {
                 code: "INVALID_RESPONSE",
                 message: "读去码产物要说明是哪一份去码模型包产出的".to_string(),
@@ -1523,7 +1542,8 @@ pub(crate) fn source_revision(
             let upscale = upscale_model
                 .filter(|value| !value.is_empty())
                 .and_then(|id| resolve_upscaler(models_data, id));
-            let decensor = decensor_fingerprint_of(decensor_model)?;
+            let decensor =
+                decensor_fingerprint_of(decensor_model)?.map(|fingerprint| decensored_revision(&fingerprint));
             Ok(Some(enhanced_revision(&upscale, decensor.as_deref())))
         }
         other => Err(SourceRevisionError {
@@ -1534,13 +1554,15 @@ pub(crate) fn source_revision(
 }
 
 /// 从缓存里取一版派生结果；没有就是 `None`（不是错误——第一次跑本来就没有）。
+///
+/// 走 `read_cached_image`：一页图 1.5MB 起，超分产物更大，读文件与算 blake3 都在
+/// DB 锁外做（全局锁是偏好、书架、搜索的必经之路，不能让它等一次整页读）。
 pub(crate) fn cached_derived(
     database: &crate::db::Database,
     app_data: &std::path::Path,
     identity: &crate::cache::CacheImageIdentity,
 ) -> Option<Vec<u8>> {
-    let connection = database.connection.lock().ok()?;
-    crate::cache::load_image_cache(&connection, app_data, identity)
+    crate::cache::read_cached_image(database, app_data, identity)
         .ok()
         .flatten()
         .map(|image| image.bytes)
@@ -1581,18 +1603,18 @@ pub(crate) fn store_derived(
     mime: &str,
     bytes: &[u8],
 ) -> Result<(), CacheWriteError> {
-    let Ok(connection) = database.connection.lock() else {
-        return Err(CacheWriteError {
-            code: CACHE_WRITE_FAILED,
-            message: "数据库正被占用，这一页的产物没能落盘".to_string(),
-            retryable: true,
-        });
-    };
-    crate::cache::store_image_cache(&connection, app_data, identity, mime, bytes).map_err(|error| {
+    // 走 `write_cached_image`：落盘（建目录 + 写临时文件 + rename）在 DB 锁外，
+    // 锁只覆盖挂行与配额检查。
+    crate::cache::write_cached_image(database, app_data, identity, mime, bytes).map_err(|error| {
+        let retryable = error == crate::cache::LOCK_FAILED;
         CacheWriteError {
             code: CACHE_WRITE_FAILED,
-            message: format!("这一页的产物没能落盘：{error}"),
-            retryable: false,
+            message: if retryable {
+                "数据库正被占用，这一页的产物没能落盘".to_string()
+            } else {
+                format!("这一页的产物没能落盘：{error}")
+            },
+            retryable,
         }
     })
 }
@@ -1656,6 +1678,12 @@ pub(crate) fn finish_derived(
 
 /// 重活的优先级。前台＝用户正在看的那一页（超分/去码/DLSSNR 都算重活），后台＝
 /// 阅读器为了「翻到就能看」而提前预扫的那一批。
+///
+/// 计算编排那一侧另有一个 `compute::scheduler::Priority`，两处说的是**同一个
+/// 判断**（用户正看着的那一页就是前台），却故意不合并成一个类型：宿主的重活闸与
+/// worker 的任务队是两层不同的东西——前者管「本机只准一件」，后者管「那一件在
+/// worker 里的先后」。原先那座把两者对译过来的桥（`HeavyPriority::compute_priority`）
+/// 随着「宿主自己开模型算这一页」的那两条命令一起没了（第 24 轮，8-g③-ii）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeavyPriority {
     Foreground,
@@ -1678,6 +1706,17 @@ impl HeavyPriority {
             Self::Background => 0,
         }
     }
+}
+
+/// 两条碰**全局**重活队列的测试要互相排队：它是进程级的，并行跑会看到对方的许可。
+///
+/// 放在模块作用域（而不是某一个测试模块里），是因为**别的模块**的测试也会走这条队列。
+/// 第 19 轮（8-e）之后去码那条门的第一步活不再跑在这条队列上（检测搬进了 worker），
+/// 但**这条锁还要留着**：本模块自己的五条重活队列测试之间就要串起来。
+#[cfg(test)]
+pub(crate) fn heavy_queue_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 现在拿着许可的那一件。
@@ -1893,309 +1932,18 @@ async fn run_on<T: Send + 'static>(
     let permit = queue.acquire(priority, task_id).await;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
+        let _priority = scheduling::WorkerPriority::enter();
         work()
     })
     .await
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn inference_upscale_page(
-    input: UpscalePageInput,
-    app: tauri::AppHandle,
-) -> Result<tauri::ipc::Response, String> {
-    let app_data = match model_data_dir(&app) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(crate::domain::result::into_binary_response(
-                crate::domain::result::CommandResult::failure(
-                    "PLATFORM_UNAVAILABLE",
-                    error.to_string(),
-                    true,
-                ),
-            ))
-        }
-    };
-    let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
-    let priority = HeavyPriority::parse(input.priority.as_deref());
-    let task_id = input.task_id.clone();
-    let result = run_heavy(priority, task_id, move || {
-        let database = app.state::<crate::db::Database>();
-        upscale_cached_page_with_models(&database, &cache_data, &app_data, &input)
-    })
-    .await?;
-    Ok(crate::domain::result::into_binary_response(result))
-}
-
-#[cfg(test)]
-fn upscale_cached_page(
-    database: &crate::db::Database,
-    app_data: &std::path::Path,
-    input: &UpscalePageInput,
-) -> crate::domain::result::CommandResult<Vec<u8>> {
-    upscale_cached_page_with_models(database, app_data, app_data, input)
-}
-
-fn upscale_cached_page_with_models(
-    database: &crate::db::Database,
-    app_data: &std::path::Path,
-    models_data: &std::path::Path,
-    input: &UpscalePageInput,
-) -> crate::domain::result::CommandResult<Vec<u8>> {
-    use crate::domain::result::CommandResult;
-
-    if input.page_index < 0 {
-        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
-    }
-    // 取消牌先登记：任务可能是在等全局闸的时候被取消的（用户已经翻页），那时候
-    // 连模型都不该打开。
-    let guard = cancel::begin(input.task_id.as_deref());
-    if guard.cancelled() {
-        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
-    }
-    // 这一步读哪一版：原图，或者上一步（去码）的产物。别的都不认——链上每一
-    // 步的输入都必须是说得出名字的一版。
-    let source_rendition = match input.source.as_deref() {
-        None | Some("") | Some("reader-page") => "reader-page",
-        Some("decensored") => "decensored",
-        Some(other) => {
-            return CommandResult::failure(
-                "INVALID_RESPONSE",
-                format!("Unsupported source rendition: {other}"),
-                false,
-            )
-        }
-    };
-    // A model's scale is fixed by the model, so it wins over the requested one.
-    // Only the model-free path is free to honour the request.
-    let resolved = input
-        .model_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .and_then(|id| resolve_upscaler(models_data, id));
-    // An explicit model selection is a contract: silently switching to nearest
-    // neighbour makes a missing or removed model look like a poor model result.
-    if let Some(model_id) = input.model_id.as_deref().filter(|id| !id.is_empty()) {
-        if resolved.is_none() {
-            return CommandResult::failure(
-                "INFERENCE_UNAVAILABLE",
-                format!("没有装这个超分模型：{model_id}"),
-                false,
-            );
-        }
-    }
-    let scale = match &resolved {
-        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.scale.clamp(1, 4),
-        Some(ResolvedUpscaler::Anime4k(preset)) => preset.scale,
-        None => input.scale.unwrap_or(2).clamp(1, 4),
-    };
-    // 去码那一步的产物是按「哪一份模型包的指纹」存的：读它的时候要算出同一个串，
-    // 不然会读到另一份模型包写下的图（或者读不到）。
-    let decensor_revision = match source_revision(
-        models_data,
-        source_rendition,
-        input.decensor_model.as_deref(),
-        input.model_id.as_deref(),
-    ) {
-        Ok(revision) => revision,
-        Err(error) => return CommandResult::failure(error.code, error.message, false),
-    };
-    let revision = enhanced_revision(&resolved, decensor_revision.as_deref());
-
-    // 同一页 + 同一起点 + 同一个模型 = 同一张图。第一次跑完之后再问（重挂阅读器、
-    // 内存缓存被挤掉）就直接给缓存里那一份，不再让模型跑一遍。
-    let enhanced_identity = {
-        let mut identity = crate::cache::CacheImageIdentity::new(
-            &input.scope_id,
-            &input.archive_id,
-            "enhanced",
-            input.page_index,
-        );
-        identity.revision = Some(revision.clone());
-        identity
-    };
-    // 动图判定排在产物缓存命中**之前**：修复之前跑过的产物是「第一帧超分后」的静帧，
-    // 让缓存先命中就等于这次修复对用户已经读过的那一页没生效。源页因此只读一次，判定
-    // 命中就当成功原样交出去——前端把派生失败当成可重试失败（会删掉 attempted 记号并
-    // 弹「超分失败」），报错会让这一页被反复重跑，而它本来就不该被处理。
-    let source = source_identity(input, source_rendition, decensor_revision.as_deref());
-    let page = cached_derived(database, app_data, &source);
-    if let Some(bytes) = page.as_deref() {
-        if crate::cache::is_animated_image(bytes) {
-            // 复制一份交出去：`page` 后面那条正常路径还要用（这里只是极少数的一页）。
-            return CommandResult::success(bytes.to_vec());
-        }
-    }
-    if let Some(hit) = cached_derived(database, app_data, &enhanced_identity) {
-        return CommandResult::success(hit);
-    }
-
-    let page = match page {
-        Some(bytes) => bytes,
-        // Retryable on purpose: when chaining, the de-censored page may still be
-        // being produced, and the caller asks again once it lands.
-        None => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
-    };
-
-    let decoded = match image::load_from_memory(&page) {
-        Ok(value) => value.to_rgba8(),
-        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false),
-    };
-    let (width, height) = (decoded.width(), decoded.height());
-    let max_pixels = match &resolved {
-        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.max_pixels,
-        Some(ResolvedUpscaler::Anime4k(_)) => anime4k::ANIME4K_MAX_PIXELS,
-        None => 64_000_000,
-    };
-    // A chosen engine that will not load is reported, not silently swapped for
-    // the nearest-neighbour scaler: the user asked for a model and would
-    // otherwise see a blurry page with no explanation.
-    let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match &resolved {
-        Some(ResolvedUpscaler::Onnx(path, manifest)) => {
-            match onnx::OnnxEngine::open(
-                path,
-                manifest.scale,
-                max_pixels,
-                manifest.min_input_edge,
-            ) {
-                Ok(engine) => Some(Box::new(engine)),
-                Err(error) => {
-                    return CommandResult::failure(
-                        "INFERENCE_UNAVAILABLE",
-                        format!("{error:?}"),
-                        false,
-                    )
-                }
-            }
-        }
-        Some(ResolvedUpscaler::Anime4k(preset)) => match anime4k::Anime4kEngine::open(preset) {
-            Ok(engine) => Some(Box::new(engine)),
-            Err(error) => {
-                return CommandResult::failure("INFERENCE_UNAVAILABLE", format!("{error:?}"), false)
-            }
-        },
-        None => None,
-    };
-    let fallback = upscale::NearestNeighbourEngine { scale, max_pixels };
-    let engine: &dyn upscale::UpscaleEngine = match &chosen {
-        Some(engine) => engine.as_ref(),
-        None => &fallback,
-    };
-    let options = upscale::UpscaleOptions {
-        tile_size: input
-            .tile_size
-            .unwrap_or(upscale::DEFAULT_TILE_SIZE)
-            .max(16),
-        tile_sleep_ms: input.tile_sleep_ms.unwrap_or(0),
-        max_pixels,
-        cancel: Some(guard.flag()),
-        ..upscale::UpscaleOptions::default()
-    };
-    let upscaled = match upscale::upscale_rgba(engine, decoded.as_raw(), width, height, options) {
-        Ok(value) => value,
-        Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels }) => {
-            return CommandResult::failure(
-                "INFERENCE_UNAVAILABLE",
-                format!("Image pixel budget exceeded: {pixels} > {max_pixels}"),
-                false,
-            )
-        }
-        Err(InferenceError::Cancelled) => {
-            return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
-        }
-        Err(error) => {
-            return CommandResult::failure("INVALID_RESPONSE", format!("{error:?}"), false)
-        }
-    };
-
-    // Served at twice the page, whatever the model's own factor is. A x4 model
-    // produces sixteen times the pixels of the page — a 1400x2000 scan becomes
-    // 5600x8000, which is 45 MB of RGBA to encode, cache, decode and then draw
-    // into a slot a fraction of that size. Two is the point where the detail is
-    // visible and the cost is not.
-    let (final_rgba, final_width, final_height) = fit_enhanced_output(
-        upscaled.rgba,
-        upscaled.width,
-        upscaled.height,
-        width,
-        height,
-    );
-
-    let mut encoded = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
-    {
-        use image::ImageEncoder;
-        if let Err(error) = encoder.write_image(
-            &final_rgba,
-            final_width,
-            final_height,
-            image::ExtendedColorType::Rgba8,
-        ) {
-            return CommandResult::failure("UNKNOWN", error.to_string(), true);
-        }
-    }
-    // 产物落盘：DLSSNR / 远端那一步以 `enhanced` 为起点时要读它，重新挂载阅读器
-    // 时也不必再跑一遍模型。取消掉的任务不写（见上面的提前返回）。写不进去也照样把
-    // 这一页交出去，只是记一条 `CACHE_WRITE_FAILED`（见 `finish_derived`）。
-    let encoded = finish_derived(
-        database,
-        app_data,
-        UPSCALE_CACHE_SOURCE,
-        &enhanced_identity,
-        "image/png",
-        encoded,
-    );
-    CommandResult::success(encoded)
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DecensorPageInput {
-    pub scope_id: String,
-    pub archive_id: String,
-    pub page_index: i64,
-    /// The installed de-censoring bundle to run.
-    pub model_id: String,
-    /// 前端给这次任务起的号：切页 / 关开关 / 离开阅读器时用它取消。
-    #[serde(default)]
-    pub task_id: Option<String>,
-    /// 这次请求是前台（用户正看着的那一页）还是后台（提前预扫）。前端不给就是
-    /// 后台——见 `HeavyPriority::parse`。
-    #[serde(default)]
-    pub priority: Option<String>,
-}
-
-#[tauri::command]
-pub async fn inference_decensor_page(
-    input: DecensorPageInput,
-    app: tauri::AppHandle,
-) -> Result<tauri::ipc::Response, String> {
-    let app_data = match model_data_dir(&app) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(crate::domain::result::into_binary_response(
-                crate::domain::result::CommandResult::failure(
-                    "PLATFORM_UNAVAILABLE",
-                    error.to_string(),
-                    true,
-                ),
-            ))
-        }
-    };
-    let cache_data = crate::data_paths::data_dir(&app).map_err(|e| e.to_string())?;
-    let priority = HeavyPriority::parse(input.priority.as_deref());
-    let task_id = input.task_id.clone();
-    let result = run_heavy(priority, task_id, move || {
-        let database = app.state::<crate::db::Database>();
-        decensor_cached_page(&database, &cache_data, &app_data, &input)
-    })
-    .await?;
-    Ok(crate::domain::result::into_binary_response(result))
-}
-
 /// The newest installed version of `model_id` that is a complete de-censoring
 /// bundle, with its manifest for the cache revision.
-fn resolve_installed_bundle(
+/// `pub(crate)`：去码那条计算来路（`compute::decensor::plan_decensor_page`）要拿同一个包
+/// 指纹去铸 `decensored_revision`。身份只有一份算法，所以解析包的这一步也只有一份。
+pub(crate) fn resolve_installed_bundle(
     app_data_dir: &std::path::Path,
     model_id: &str,
 ) -> Option<(decensor::DecensorBundle, ModelManifest)> {
@@ -2273,49 +2021,44 @@ pub struct RunnableModel {
     pub scale: Option<u32>,
 }
 
-/// 一段图片字节跑一遍超分，回 PNG 字节（不碰本地缓存页面）。
+/// 宿主自己算的那一档：一段图片字节跑一遍超分，回 PNG 字节（不碰本地缓存页面）。
 ///
-/// 算力中心收到移动端发来的图就走这里：那边没有本机的归档与页码，只有字节。
-/// `model_id` 为空时用最近邻放大——「诚实但没模型」的那条路，与阅读器一致。
-pub(crate) fn run_upscale_bytes(
+/// **只有两档走这里**：宿主内置的 shader 链（Anime4K）与「没有模型」的最近邻。
+/// ONNX 那一档不在其中——它由算力中心分流给计算进程（worker），因为 Task 8 的出口是
+/// 「宿主进程里没有 ONNX Runtime」。真走到这里说明分流断了：明说，别拿别的引擎顶替。
+pub(crate) fn run_host_upscale_bytes(
     models_data: &std::path::Path,
     model_id: &str,
     source: &[u8],
     requested_scale: Option<u32>,
 ) -> Result<Vec<u8>, String> {
-    // 动图判定放在最前面，早于解析模型：这一页要不要被处理与装没装模型无关，出来的
-    // 超分结果只会是第一帧的动态图残骸。命中就当成功原样交回去。
-    if crate::cache::is_animated_image(source) {
-        return Ok(source.to_vec());
-    }
     let resolved = (!model_id.is_empty())
         .then(|| resolve_upscaler(models_data, model_id))
         .flatten();
-    // 点了名却找不到，说明调用方以为在跑模型——这时候悄悄换成最近邻会让人以为
-    // 「模型效果就这样」。与阅读器那条路一样：报错。
-    if !model_id.is_empty() && resolved.is_none() {
-        return Err(format!("没有装这个超分模型：{model_id}"));
-    }
-    let scale = match &resolved {
-        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.scale.clamp(1, 4),
-        Some(ResolvedUpscaler::Anime4k(preset)) => preset.scale,
+    let preset = match &resolved {
+        Some(ResolvedUpscaler::Anime4k(preset)) => Some(preset),
+        Some(ResolvedUpscaler::Onnx(_, _)) => {
+            return Err(format!("{model_id} 这一档要交给计算进程算，宿主这里没有它"));
+        }
+        // 点了名却找不到，说明调用方以为在跑模型——这时候悄悄换成最近邻会让人以为
+        // 「模型效果就这样」。与阅读器那条路一样：报错。
+        None if !model_id.is_empty() => return Err(format!("没有装这个超分模型：{model_id}")),
+        None => None,
+    };
+    let scale = match preset {
+        Some(preset) => preset.scale,
         None => requested_scale.unwrap_or(2).clamp(1, 4),
+    };
+    let max_pixels = match preset {
+        Some(_) => anime4k::ANIME4K_MAX_PIXELS,
+        None => 64_000_000,
     };
     let decoded = image::load_from_memory(source)
         .map_err(|error| error.to_string())?
         .to_rgba8();
     let (width, height) = (decoded.width(), decoded.height());
-    let max_pixels = match &resolved {
-        Some(ResolvedUpscaler::Onnx(_, manifest)) => manifest.max_pixels,
-        Some(ResolvedUpscaler::Anime4k(_)) => anime4k::ANIME4K_MAX_PIXELS,
-        None => 64_000_000,
-    };
-    let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match &resolved {
-        Some(ResolvedUpscaler::Onnx(path, manifest)) => Some(Box::new(
-            onnx::OnnxEngine::open(path, manifest.scale, max_pixels, manifest.min_input_edge)
-                .map_err(|error| format!("{error:?}"))?,
-        )),
-        Some(ResolvedUpscaler::Anime4k(preset)) => Some(Box::new(
+    let chosen: Option<Box<dyn upscale::UpscaleEngine>> = match preset {
+        Some(preset) => Some(Box::new(
             anime4k::Anime4kEngine::open(preset).map_err(|error| format!("{error:?}"))?,
         )),
         None => None,
@@ -2341,129 +2084,10 @@ pub(crate) fn run_upscale_bytes(
     Ok(encoded)
 }
 
-pub(crate) fn run_decensor_bytes(
-    models_data: &std::path::Path,
-    model_id: &str,
-    source: &[u8],
-) -> Result<Vec<u8>, String> {
-    run_decensor_bytes_cancellable(models_data, model_id, source, &cancel::CancelToken::none())
-}
-
-pub(crate) fn run_decensor_bytes_cancellable(
-    models_data: &std::path::Path,
-    model_id: &str,
-    source: &[u8],
-    cancel: &cancel::CancelToken,
-) -> Result<Vec<u8>, String> {
-    // 与超分同理，而且必须早于 `resolve_installed_bundle`：去不去码不取决于装没装
-    // 模型包，动图去码之后也只剩第一帧。
-    if crate::cache::is_animated_image(source) {
-        return Ok(source.to_vec());
-    }
-    let Some((bundle, _manifest)) = resolve_installed_bundle(models_data, model_id) else {
-        return Err("No complete de-censoring bundle is installed under that id".into());
-    };
-    let decoded = image::load_from_memory(source)
-        .map_err(|error| error.to_string())?
-        .to_rgba8();
-    let (width, height) = (decoded.width(), decoded.height());
-    let mut rgba = decoded.into_raw();
-    let engines = decensor_engines_for(&bundle).map_err(|error| format!("{error:?}"))?;
-    decensor::decensor_page(&engines, &mut rgba, width, height, cancel).map_err(|error| match error
-    {
-        InferenceError::Cancelled => CANCELLED_ERROR.to_string(),
-        other => format!("{other:?}"),
-    })?;
-    let mut encoded = Vec::new();
-    use image::ImageEncoder;
-    image::codecs::png::PngEncoder::new(&mut encoded)
-        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
-        .map_err(|error| error.to_string())?;
-    Ok(encoded)
-}
-
-fn decensor_cached_page(
-    database: &crate::db::Database,
-    app_data: &std::path::Path,
-    models_data: &std::path::Path,
-    input: &DecensorPageInput,
-) -> crate::domain::result::CommandResult<Vec<u8>> {
-    use crate::domain::result::CommandResult;
-
-    if input.page_index < 0 {
-        return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
-    }
-    // 同超分那一步：取消牌先登记，等闸期间被取消的任务连模型都不打开。
-    let guard = cancel::begin(input.task_id.as_deref());
-    if guard.cancelled() {
-        return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
-    }
-    // 产物按模型包的指纹存：换了一份模型包之后不能再拿旧那一份的图（前端的缓存键
-    // 里有模型 id，原生这边用指纹，两条链各自算出同一个串）。
-    let Some(fingerprint) = decensor_fingerprint(models_data, &input.model_id) else {
-        return CommandResult::failure(
-            "INFERENCE_UNAVAILABLE",
-            format!("没有装这个去码模型包：{}", input.model_id),
-            false,
-        );
-    };
-    let mut identity = crate::cache::CacheImageIdentity::new(
-        &input.scope_id,
-        &input.archive_id,
-        "decensored",
-        input.page_index,
-    );
-    identity.revision = Some(fingerprint);
-    // 动图判定同样要早于产物缓存命中：修复之前留下的产物是「第一帧去码后」的静帧，
-    // 缓存先命中的话这次修复对已经读过的那一页就等于没生效。
-    let source = crate::cache::CacheImageIdentity::new(
-        &input.scope_id,
-        &input.archive_id,
-        "reader-page",
-        input.page_index,
-    );
-    let page = cached_derived(database, app_data, &source);
-    if let Some(bytes) = page.as_deref() {
-        if crate::cache::is_animated_image(bytes) {
-            // 复制一份交出去：`page` 后面那条正常路径还要用。
-            return CommandResult::success(bytes.to_vec());
-        }
-    }
-    // 已经跑过就直接给：同一页 + 同一份模型包是同一张图。
-    if let Some(hit) = cached_derived(database, app_data, &identity) {
-        return CommandResult::success(hit);
-    }
-
-    let page = match page {
-        Some(bytes) => bytes,
-        None => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
-    };
-    let encoded = match run_decensor_bytes_cancellable(
-        models_data,
-        &input.model_id,
-        &page,
-        &guard.token(),
-    ) {
-        Ok(encoded) => encoded,
-        Err(error) if error == CANCELLED_ERROR => {
-            return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
-        }
-        Err(error) => return CommandResult::failure("INFERENCE_UNAVAILABLE", error, false),
-    };
-    drop(guard);
-    // 去码产物是链路的**中间结果**：超分那一步读它，DLSSNR / 远端也以它为起点。
-    // 只在这里落盘，取消掉的任务不写。写不进去也照样把这一页交出去，只是记一条
-    // `CACHE_WRITE_FAILED`（见 `finish_derived`）。
-    let encoded = finish_derived(
-        database,
-        app_data,
-        DECENSOR_CACHE_SOURCE,
-        &identity,
-        "image/png",
-        encoded,
-    );
-    CommandResult::success(encoded)
-}
+// 去码那条字节来路（`run_decensor_bytes` / `run_decensor_bytes_cancellable`）整条搬进了
+// `compute::proxy::decensor`：检测与修补都在 worker（docs/94），宿主只剩「用哪个包」
+// 这一步（`resolve_installed_bundle`）。搬运的理由与超分相同，而且更硬——去码要开的
+// 是宿主进程里最后一台 ONNX 会话（240 MB 的检测器），它留在这儿，宿主就永远摘不掉 ORT。
 
 /// 取消一个阅读器推理任务（切页、关开关、离开阅读器）。
 ///
@@ -2750,132 +2374,15 @@ pub fn inference_cancel(
     }
 }
 
-pub fn cpu_scale_rgba(
-    source: &[u8],
-    width: u32,
-    height: u32,
-    scale: u32,
-    max_pixels: usize,
-) -> Result<CpuRgbaOutput, InferenceError> {
-    if width == 0
-        || height == 0
-        || scale == 0
-        || source.len() != width as usize * height as usize * 4
-    {
-        return Err(InferenceError::InvalidInput(
-            "RGBA buffer dimensions do not match".to_string(),
-        ));
-    }
-    let output_width =
-        width
-            .checked_mul(scale)
-            .ok_or_else(|| InferenceError::PixelBudgetExceeded {
-                pixels: usize::MAX,
-                max_pixels,
-            })?;
-    let output_height =
-        height
-            .checked_mul(scale)
-            .ok_or_else(|| InferenceError::PixelBudgetExceeded {
-                pixels: usize::MAX,
-                max_pixels,
-            })?;
-    let pixels = output_width as usize * output_height as usize;
-    if pixels > max_pixels {
-        return Err(InferenceError::PixelBudgetExceeded { pixels, max_pixels });
-    }
-    let mut rgba = vec![0_u8; pixels * 4];
-    for y in 0..output_height {
-        for x in 0..output_width {
-            let source_index = ((y / scale) as usize * width as usize + (x / scale) as usize) * 4;
-            let target_index = (y as usize * output_width as usize + x as usize) * 4;
-            rgba[target_index..target_index + 4]
-                .copy_from_slice(&source[source_index..source_index + 4]);
-        }
-    }
-    Ok(CpuRgbaOutput {
-        rgba,
-        width: output_width,
-        height: output_height,
-    })
-}
+/// 最近邻放大，实现在 [`yomika_compute_core::cpu_scale`]；模型缺失时的兜底，
+/// 也是分块管道测试里的参照实现。
+// 只有测试用得上（`onnx.rs`、`anime4k.rs` 那几条拿真图量的曲线）：产品路径上「模型给
+// 不出结果时退到最近邻」这一步已经不在宿主了。
+#[cfg(test)]
+pub use yomika_compute_core::cpu_scale::cpu_scale_rgba;
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn tiled_inference_releases_database_for_reader_requests() {
-        use crate::cache::{store_image_cache, CacheImageIdentity};
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        for migration in [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_local_library.sql"),
-            include_str!("../migrations/0010_cache_path_sharing.sql"),
-            include_str!("../migrations/0013_unified_image_cache.sql"),
-            include_str!("../migrations/0014_cache_archive_scope.sql"),
-        ] {
-            connection.execute_batch(migration).unwrap();
-        }
-        let root = std::env::temp_dir().join(format!(
-            "yomika-responsive-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut page = Vec::new();
-        image::ImageEncoder::write_image(
-            image::codecs::png::PngEncoder::new(&mut page),
-            &vec![255; 128 * 128 * 4],
-            128,
-            128,
-            image::ExtendedColorType::Rgba8,
-        )
-        .unwrap();
-        store_image_cache(
-            &connection,
-            &root,
-            &CacheImageIdentity::new("scope", "archive", "reader-page", 0),
-            "image/png",
-            &page,
-        )
-        .unwrap();
-        let database = crate::db::Database {
-            connection: std::sync::Mutex::new(connection),
-        };
-        let input = UpscalePageInput {
-            scope_id: "scope".into(),
-            archive_id: "archive".into(),
-            page_index: 0,
-            scale: Some(2),
-            model_id: None,
-            tile_size: Some(32),
-            tile_sleep_ms: Some(30),
-            decensor_model: None,
-            source: None,
-            task_id: None,
-            priority: None,
-        };
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(|| upscale_cached_page(&database, &root, &input));
-            let mut responsive = 0;
-            while !worker.is_finished() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                if let Ok(connection) = database.connection.try_lock() {
-                    connection.execute_batch("SELECT 1").unwrap();
-                    responsive += 1;
-                }
-            }
-            assert!(matches!(
-                worker.join().unwrap(),
-                crate::domain::result::CommandResult::Success { .. }
-            ));
-            assert!(
-                responsive >= 5,
-                "database stayed locked throughout inference"
-            );
-        });
-        std::fs::remove_dir_all(root).unwrap();
-    }
     #[tokio::test(flavor = "current_thread")]
     async fn reader_inference_does_not_block_the_async_executor() {
         // 这条会真的走一遍全局 `HEAVY_QUEUE`（`run_heavy`）：与那几条直接摆弄队列的
@@ -3076,13 +2583,19 @@ mod tests {
             _ => panic!("probe must succeed"),
         };
         assert!(capabilities.backends.contains(&"cpu".to_string()));
+        // 报的就是平台偏好那一份：8-g③-iv 之后宿主没有会话可开，能实测的只剩 worker
+        // 交回的 `EngineReport`。这条同时挡住「探针说一套、缓存身份写另一套」。
         assert_eq!(
             capabilities.hardware_acceleration,
             platform_backend_preference()
                 .iter()
                 .any(|backend| backend.is_hardware_accelerated()),
         );
-        if cfg!(target_os = "windows") {
+        assert_eq!(
+            capabilities.backends.first().map(String::as_str),
+            Some(declared_backend_label()),
+        );
+        if capabilities.hardware_acceleration {
             assert_eq!(
                 capabilities.backends.first().map(String::as_str),
                 Some("directml")
@@ -3091,225 +2604,115 @@ mod tests {
     }
 
     #[test]
-    fn upscaling_takes_its_input_from_the_de_censored_step_and_nothing_else() {
-        // The two enhancements are consecutive steps: the reader asks for the
-        // de-censored page first, and then for the enlarged version **of that
-        // page**. This proves the second step reads the first one's output by
-        // leaving the plain rendition out of the cache entirely — an upscaler that
-        // fell back to `reader-page` could not produce anything at all.
-        use crate::cache::{store_image_cache, CacheImageIdentity};
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        for migration in [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_local_library.sql"),
-            include_str!("../migrations/0010_cache_path_sharing.sql"),
-            include_str!("../migrations/0013_unified_image_cache.sql"),
-            include_str!("../migrations/0014_cache_archive_scope.sql"),
-        ] {
-            connection.execute_batch(migration).unwrap();
-        }
-        let app_data = std::env::temp_dir().join(format!(
-            "yomika-chain-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&app_data);
-        // An installed bundle: the four files are what makes a directory a bundle,
-        // and none of them is opened on this path.
-        let install = app_data.join("models").join("aletheia").join("1");
-        for (directory, file) in [
-            ("mrcnn", "weights.onnx"),
-            ("deepcreampy", "bar.onnx"),
-            ("deepcreampy", "mosaic.onnx"),
-            ("esrgan", "4x-Fatal-Pixels.onnx"),
-        ] {
-            std::fs::create_dir_all(install.join(directory)).unwrap();
-            std::fs::write(install.join(directory).join(file), b"stub").unwrap();
-        }
-        let manifest = ModelManifest {
-            id: "aletheia".into(),
-            version: "1".into(),
-            ..model_manifest(b"x")
-        };
-        std::fs::write(
-            install.join(MODEL_MANIFEST_FILE),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        let mut page = Vec::new();
-        {
-            use image::ImageEncoder;
-            let rgba = vec![9_u8, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255];
-            image::codecs::png::PngEncoder::new(&mut page)
-                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
-                .unwrap();
-        }
-        // Only the de-censored rendition exists, under the revision the
-        // de-censoring command writes for this bundle.
-        let mut decensored = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 0);
-        decensored.revision = decensor_fingerprint(&app_data, "aletheia");
-        assert!(
-            decensored.revision.is_some(),
-            "an installed bundle has a fingerprint"
-        );
-        store_image_cache(&connection, &app_data, &decensored, "image/png", &page).unwrap();
+    fn a_derived_revision_names_its_source_and_its_engine() {
+        // 这一条钉的是两条链的**接缝**：去码那一步写下的 revision，与超分链把去码产物
+        // 当起点时算出来的 source 必须是同一个串，否则「去码 + 超分」这条链永远读不中
+        // 自己刚写下的那一版（不是错误，只是白算，所以它只会以「怎么每次都重跑」的样子
+        // 出现——正是这种静默的失配最该有测试看着）。
+        let fingerprint = "a".repeat(64);
+        let decensored = decensored_revision(&fingerprint);
+        assert!(decensored.starts_with("rev:v1:"), "形状：{decensored}");
 
-        let database = crate::db::Database {
-            connection: std::sync::Mutex::new(connection),
-        };
-        // Page 1 has no de-censored rendition: that step has not run yet, which is a
-        // retryable miss rather than a failure.
-        let not_yet = upscale_cached_page(
-            &database,
-            &app_data,
-            &UpscalePageInput {
-                scope_id: "scope-a".into(),
-                archive_id: "archive-a".into(),
-                page_index: 1,
-                scale: Some(2),
-                model_id: None,
-                tile_size: None,
-                tile_sleep_ms: None,
-                decensor_model: Some("aletheia".into()),
-                source: Some("decensored".into()),
-                task_id: None,
-                priority: None,
-            },
+        // 起点换一版，衍生物的修订号就得换一个。
+        let from_decensored = enhanced_revision(&None, Some(&decensored));
+        let from_reader_page = enhanced_revision(&None, None);
+        let from_another_decensor = enhanced_revision(&None, Some(&decensored_revision("b")));
+        assert_ne!(from_decensored, from_reader_page);
+        assert_ne!(from_decensored, from_another_decensor);
+
+        // 同一份东西算两次必须一样：命中路径与写入路径各自算一次。
+        assert_eq!(from_decensored, enhanced_revision(&None, Some(&decensored)));
+
+        // 运行库那一栏现在是协议里的常量（宿主摘掉 ORT 之后就问不了自己的运行库了：
+        // 那件事只有 worker 说得清，所以由它启动时证明），但内容仍必须是那条运行库的
+        // 号；后端那一栏仍来自环境，且不能是空串。
+        assert!(ort_runtime_label().starts_with("ort-api"));
+        assert!(!declared_backend_label().is_empty());
+
+        // 后端那一栏得是真的在起作用，而不只是「印了个非空串」：同一份模型、同一份起点、
+        // 同一条流水线，只换「谁算的」，修订号就必须换一个——否则同一台机器上后端策略
+        // 变了（驱动升级后 DML 没了、探针拒了这个模型），旧产物会被当成新策略的产物接着用。
+        let model = upscaler_fingerprint(&None);
+        assert_ne!(
+            derived_cache_revision(&model, "reader-page", UPSCALE_PIPELINE_REVISION, "cpu"),
+            derived_cache_revision(&model, "reader-page", UPSCALE_PIPELINE_REVISION, "directml"),
+            "后端那一栏没有参与折算，换后端就等于换了个写法"
         );
-        match not_yet {
-            crate::domain::result::CommandResult::Failure { error, .. } => {
-                assert_eq!(error.code, "LRR_NOT_FOUND");
-                assert!(error.retryable, "上一步可能还在跑，要能再问一次");
-            }
-            crate::domain::result::CommandResult::Success { .. } => {
-                panic!("a page with no de-censored rendition cannot be chained")
-            }
+        // 产品调用点真的传的是「这台机器声明的那一条」而不是某个常量：本机声明的是
+        // directml（Windows 上有硬件候选），所以产品身份必须与「cpu 写死」的那一版不同。
+        // 只在声明的后端不是 cpu 时才断——CPU-only 的机器上这两个值本来就该相同。
+        let declared = declared_backend_label();
+        eprintln!("这台机器声明的后端 = {declared}（首选运行库，末位永远是 CPU）");
+        if declared != "cpu" {
+            assert_ne!(
+                from_reader_page,
+                derived_cache_revision(&model, "reader-page", UPSCALE_PIPELINE_REVISION, "cpu"),
+                "产品算出来的身份与 CPU 那一版相同：产品调用点把后端写成了常量，\
+                 而这台机器声明的是「{declared}」"
+            );
+            assert_ne!(
+                decensored,
+                derived_cache_revision(&fingerprint, "reader-page", DECENSOR_PIPELINE_REVISION, "cpu"),
+                "去码那一版的产品身份也没跟着声明的后端走（声明的是「{declared}」）"
+            );
         }
-        // Page 0 has one, and only one: the enlargement succeeds without the plain
-        // rendition ever being written.
-        let chained = upscale_cached_page(
-            &database,
-            &app_data,
-            &UpscalePageInput {
-                scope_id: "scope-a".into(),
-                archive_id: "archive-a".into(),
-                page_index: 0,
-                scale: Some(2),
-                model_id: None,
-                tile_size: None,
-                tile_sleep_ms: None,
-                decensor_model: Some("aletheia".into()),
-                source: Some("decensored".into()),
-                task_id: None,
-                priority: None,
-            },
-        );
-        let bytes = match chained {
-            crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("upscaling did not read the de-censored page: {other:?}"),
-        };
-        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 4);
-        std::fs::remove_dir_all(app_data).unwrap();
     }
 
-    #[test]
-    fn an_enhanced_page_is_cached_under_its_model_revision() {
-        // Each step's output is addressable: DLSSNR and remote processing read the
-        // `enhanced` rendition as their own input, and a reader that comes back to
-        // the page does not pay for the model twice. The key carries the model, so
-        // switching models cannot serve the previous one's output.
-        use crate::cache::{load_image_cache, store_image_cache, CacheImageIdentity};
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        for migration in [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_local_library.sql"),
-            include_str!("../migrations/0010_cache_path_sharing.sql"),
-            include_str!("../migrations/0013_unified_image_cache.sql"),
-            include_str!("../migrations/0014_cache_archive_scope.sql"),
-        ] {
-            connection.execute_batch(migration).unwrap();
+    /// 本机没有真模型素材时**明说跳过**——跳过不等于通过。
+    ///
+    /// 为什么不放进 `tests/`：产品函数 `upscale_cached_page_with_models` 是私有的
+    /// （`inference` 不对外），集成测试够不着；为了让测试能调它而把它 `pub` 出去，等于
+    /// 让测试的需要决定生产 API 的形状。真进程那一半（`compute::proxy` 本身）已经在
+    /// `tests/legacy_upscale_proxy.rs` 里用回声引擎真跑过了。
+    fn local_upscaler(name: &str) -> Option<Vec<u8>> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/models")
+            .join(format!("{name}.onnx"));
+        match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                eprintln!("跳过：本机没有 {}（{error}）", path.display());
+                None
+            }
         }
-        let app_data = std::env::temp_dir().join(format!(
-            "yomika-upscale-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&app_data);
-        std::fs::create_dir_all(&app_data).unwrap();
+    }
 
-        // A tiny red PNG stands in for a cached reader page.
-        let mut page = Vec::new();
-        {
-            use image::ImageEncoder;
-            let rgba = vec![
-                255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
-            ];
-            image::codecs::png::PngEncoder::new(&mut page)
-                .write_image(&rgba, 2, 2, image::ExtendedColorType::Rgba8)
-                .unwrap();
+    /// 集成测试不会自动编译同 workspace 里另一个包的 bin，所以这里自己编一次。
+    /// 与 `tests/compute_model_chain.rs` 里那份同源：`#[cfg(test)]` 的东西集成测试看不见，
+    /// 为此共用一个测试专用 crate 比多这十几行更贵。
+    #[cfg(windows)]
+    fn worker_under_test() -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("测试自己的路径");
+        let profile_dir = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("target/<profile>")
+            .to_path_buf();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let mut command = std::process::Command::new(env!("CARGO"));
+        command
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("-p")
+            .arg("yomika-compute-worker");
+        if profile_dir.file_name().is_some_and(|name| name == "release") {
+            command.arg("--release");
         }
-        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
-        store_image_cache(&connection, &app_data, &source, "image/png", &page).unwrap();
-
-        let database = crate::db::Database {
-            connection: std::sync::Mutex::new(connection),
-        };
-        let input = UpscalePageInput {
-            scope_id: "scope-a".into(),
-            archive_id: "archive-a".into(),
-            page_index: 0,
-            scale: Some(2),
-            model_id: None,
-            tile_size: None,
-            tile_sleep_ms: None,
-            decensor_model: None,
-            source: None,
-            task_id: None,
-            priority: None,
-        };
-
-        let first = match upscale_cached_page(&database, &app_data, &input) {
-            crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("expected success, got {other:?}"),
-        };
-        let decoded = image::load_from_memory(&first).unwrap();
-        assert_eq!(
-            (decoded.width(), decoded.height()),
-            (4, 4),
-            "a 2x model doubles both axes"
-        );
-
-        // The result is on disk under the revision this command computes for the
-        // model it ran — and another model's key does not answer for it.
-        let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
-        enhanced.revision = Some(enhanced_revision(&None, None));
-        let connection = database.connection.lock().unwrap();
+        let output = command.output().expect("跑 cargo build 起 worker");
         assert!(
-            load_image_cache(&connection, &app_data, &enhanced)
-                .unwrap()
-                .is_some(),
-            "the step's own output has to be addressable"
+            output.status.success(),
+            "编 worker 失败：\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
-        let mut other_model = enhanced.clone();
-        other_model.revision = Some("onnx:someone-else:1:deadbeef|from:reader-page".into());
+        let worker = profile_dir.join("yomika-compute-worker.exe");
         assert!(
-            load_image_cache(&connection, &app_data, &other_model)
-                .unwrap()
-                .is_none(),
-            "another model's revision must not answer for this one"
+            worker.exists(),
+            "编完之后还是找不到 worker：{}",
+            worker.display()
         );
-        // Drop the source: only a cache hit can still answer.
-        connection
-            .execute("DELETE FROM cache_entries WHERE kind='reader-page'", [])
-            .unwrap();
-        drop(connection);
-
-        let second = match upscale_cached_page(&database, &app_data, &input) {
-            crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("expected a cache hit, got {other:?}"),
-        };
-        assert_eq!(first, second, "the cached page must be the same image");
-        std::fs::remove_dir_all(app_data).unwrap();
+        worker
     }
 
     /// The whole chain the reader takes, on the real model when it is present:
@@ -3459,32 +2862,6 @@ mod tests {
         let base =
             std::env::temp_dir().join(format!("yomika-{name}-{}-{nonce}", std::process::id()));
         (base.join(".staging"), base.join("model"), base)
-    }
-
-    #[test]
-    fn cpu_fallback_scales_rgba_pixels_and_preserves_corners() {
-        let source = vec![
-            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-        ];
-        let output = cpu_scale_rgba(&source, 2, 2, 2, 64).expect("scaled image");
-        assert_eq!(output.width, 4);
-        assert_eq!(output.height, 4);
-        assert_eq!(&output.rgba[..4], &[255, 0, 0, 255]);
-        assert_eq!(&output.rgba[12..16], &[0, 255, 0, 255]);
-        assert_eq!(&output.rgba[48..52], &[0, 0, 255, 255]);
-        assert_eq!(&output.rgba[60..64], &[255, 255, 255, 255]);
-    }
-
-    #[test]
-    fn cpu_fallback_rejects_bad_buffer_and_pixel_budget() {
-        assert!(matches!(
-            cpu_scale_rgba(&[0; 3], 1, 1, 1, 4),
-            Err(InferenceError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            cpu_scale_rgba(&[0; 4], 1, 1, 3, 4),
-            Err(InferenceError::PixelBudgetExceeded { .. })
-        ));
     }
 
     #[test]
@@ -4090,13 +3467,6 @@ mod tests {
         assert!(state.can_start(HeavyPriority::Foreground));
     }
 
-    /// 两个碰**全局** `HEAVY_QUEUE` 的测试要互相排队：它是进程级的，并行跑会看到
-    /// 对方的许可（和 GPU 测试同一个理由）。
-    fn heavy_queue_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// 排上队了没有。`acquire` 是「先拿锁、再 await」，所以要等那个任务真的走到
     /// await 上，不然测的就成了 release 时没人在等。
     async fn wait_for_waiters(count: usize) {
@@ -4342,143 +3712,6 @@ mod tests {
         );
     }
 
-    /// 两帧 GIF（每帧 1×1 + 2 色全局色表，LZW 只有 clear/0/EOI 三个码）。
-    /// 手写而不是引 fixture：判定只看容器头，测试也该把容器头摆明白。
-    fn animated_gif() -> Vec<u8> {
-        let mut bytes = Vec::from(*b"GIF89a");
-        // 逻辑屏幕描述符：1×1 + packed 0x80（有全局色表，2 项）。
-        bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
-        bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0x00, 0x00, 0x00]);
-        for _ in 0..2 {
-            bytes.push(0x2C);
-            bytes.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0, 0]);
-            // LZW 最小码长 2，一个 2 字节子块，子块链以 0 结尾。
-            bytes.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
-        }
-        bytes.push(0x3B);
-        bytes
-    }
-
-    fn animated_test_app_data(name: &str) -> std::path::PathBuf {
-        let app_data = std::env::temp_dir().join(format!(
-            "yomika-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&app_data);
-        std::fs::create_dir_all(&app_data).unwrap();
-        app_data
-    }
-
-    fn animated_test_database() -> crate::db::Database {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        for migration in [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_local_library.sql"),
-            include_str!("../migrations/0010_cache_path_sharing.sql"),
-            include_str!("../migrations/0013_unified_image_cache.sql"),
-            include_str!("../migrations/0014_cache_archive_scope.sql"),
-        ] {
-            connection.execute_batch(migration).unwrap();
-        }
-        crate::db::Database {
-            connection: std::sync::Mutex::new(connection),
-        }
-    }
-
-    fn animated_upscale_input() -> UpscalePageInput {
-        UpscalePageInput {
-            scope_id: "scope-a".into(),
-            archive_id: "archive-a".into(),
-            page_index: 0,
-            scale: Some(2),
-            model_id: None,
-            tile_size: None,
-            tile_sleep_ms: None,
-            decensor_model: None,
-            source: None,
-            task_id: None,
-            priority: None,
-        }
-    }
-
-    #[test]
-    fn animated_bytes_are_handed_back_untouched_by_the_upscaler() {
-        // 算力中心那条路只有字节，没有归档与页码：命中动图必须原样交出去。报错会让
-        // 前端把这一页当成可重试的失败反复重跑（阅读器把派生失败当成「过会儿再问」）。
-        let dir = animated_test_app_data("animated-upscale-bytes");
-        let gif = animated_gif();
-        let bytes = run_upscale_bytes(&dir, "", &gif, Some(2)).expect("动图要当成功处理");
-        assert_eq!(bytes, gif, "原样回来，不是第一帧的 PNG");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn animated_bytes_are_handed_back_untouched_by_the_decensor() {
-        let dir = animated_test_app_data("animated-decensor-bytes");
-        let gif = animated_gif();
-        // 这一页跑不跑去码不取决于装没装模型包，所以判定必须早于解析模型包：
-        // 这里连模型都没有，仍然要原样交回。
-        let bytes = run_decensor_bytes(&dir, "no-such-model", &gif).expect("动图要当成功处理");
-        assert_eq!(bytes, gif);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_reader_page_that_is_animated_is_not_upscaled() {
-        use crate::cache::{store_image_cache, CacheImageIdentity};
-        let database = animated_test_database();
-        let app_data = animated_test_app_data("animated-reader-page");
-        let gif = animated_gif();
-        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
-        store_image_cache(
-            &database.connection.lock().unwrap(),
-            &app_data,
-            &source,
-            "image/gif",
-            &gif,
-        )
-        .unwrap();
-
-        let bytes = match upscale_cached_page(&database, &app_data, &animated_upscale_input()) {
-            crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("动图要当成功处理，不是失败：{other:?}"),
-        };
-        assert_eq!(bytes, gif, "阅读器这一页是动图：原样给它，不要放大后的静帧");
-        std::fs::remove_dir_all(app_data).unwrap();
-    }
-
-    #[test]
-    fn an_animated_page_beats_a_stale_enhanced_output_in_the_cache() {
-        // 修复之前跑过的页在缓存里留着一张「第一帧放大后」的静帧。判定要是排在产物
-        // 缓存后面，这次修复对已经读过那些页的用户就等于没生效。
-        use crate::cache::{store_image_cache, CacheImageIdentity};
-        let database = animated_test_database();
-        let app_data = animated_test_app_data("animated-stale-enhanced");
-        let gif = animated_gif();
-        let mut stale = Vec::new();
-        {
-            use image::ImageEncoder;
-            image::codecs::png::PngEncoder::new(&mut stale)
-                .write_image(&[0_u8; 16], 2, 2, image::ExtendedColorType::Rgba8)
-                .unwrap();
-        }
-        let mut enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 0);
-        enhanced.revision = Some(enhanced_revision(&None, None));
-        let source = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 0);
-        {
-            let connection = database.connection.lock().unwrap();
-            store_image_cache(&connection, &app_data, &enhanced, "image/png", &stale).unwrap();
-            store_image_cache(&connection, &app_data, &source, "image/gif", &gif).unwrap();
-        }
-
-        let bytes = match upscale_cached_page(&database, &app_data, &animated_upscale_input()) {
-            crate::domain::result::CommandResult::Success { value, .. } => value,
-            other => panic!("动图要当成功处理，不是失败：{other:?}"),
-        };
-        assert_eq!(bytes, gif, "旧的静帧产物不该顶掉动图");
-        std::fs::remove_dir_all(app_data).unwrap();
-    }
 }
 
 #[cfg(test)]

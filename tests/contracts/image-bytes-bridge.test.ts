@@ -32,7 +32,10 @@ describe('image bytes never travel as JSON', () => {
 
   it('sends every command that carries image bytes as a binary body', () => {
     // 命令名 → 它必须出现在 invokeBinaryCommand 里。少一个就说明那条路的字节又走了 JSON。
-    const byteCommands = ['cache_read_image', 'load_reader_page', 'load_archive_thumbnail', 'load_archive_page_thumbnail', 'inference_upscale_page', 'inference_decensor_page'];
+    // 超分与去码这两个名字在 8-g② 从这里消失了：那两版现在整条由 compute 产出，字节走的是
+    // 产物的租借（`compute_artifact_acquire` 回的是本地 URL），不再有「宿主编码后回一张图」
+    // 的命令。剩下的这几道门还是老样子——载体是字节，就必须是二进制体。
+    const byteCommands = ['cache_read_image', 'load_reader_page', 'load_archive_thumbnail', 'load_archive_page_thumbnail', 'dlssnr_apply_page', 'remote_compute_process'];
     const all = sources.map((name) => readFileSync(resolve(repositories, name), 'utf8')).join('\n');
     for (const command of byteCommands) {
       expect(all, command).toContain(`invokeBinaryCommand('${command}'`);

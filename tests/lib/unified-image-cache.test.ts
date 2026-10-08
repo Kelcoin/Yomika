@@ -284,4 +284,112 @@ describe('UnifiedImageCache covers that outlive a remount', () => {
   });
 });
 
+describe('UnifiedImageCache accounts for images it did not create', () => {
+  const identity = { scopeId: 'scope-a', archiveId: 'archive-a', rendition: 'enhanced' as const, pageIndex: 7 };
+
+  it('returns an adopted image to its owner instead of revoking a URL it did not make', async () => {
+    // 阅读器那条新路（`loadReaderComputedPage`）拿回来的是宿主的租借：URL 由宿主发，撤它
+    // 撤不掉那份产物，真正欠着的是一条 pin。还 pin 的唯一时刻就是这张图真的离开内存。
+    const urls = blobUrlFactory();
+    const cache = new UnifiedImageCache(repository(), {
+      createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024,
+    });
+    const released = vi.fn();
+
+    const handle = cache.adopt(identity, { url: 'yomika-image://assets/lease-1', bytes: 40, release: released });
+
+    expect(handle.url).toBe('yomika-image://assets/lease-1');
+    expect(handle.bytes).toBe(40);
+    expect(peekCachedImageUrl(cache, identity)).toBe(handle.url);
+
+    cache.release(handle);
+
+    expect(released).toHaveBeenCalledTimes(1);
+    expect(urls.revoke).not.toHaveBeenCalled();
+    expect(peekCachedImageUrl(cache, identity)).toBeUndefined();
+  });
+
+  it('refuses to hold two leases for one page, giving the newer one straight back', async () => {
+    // 同一页排到两次（翻回来、设置又变一次）时，第二次算出来的那张不能悄悄留在表里：
+    // 认领只认一条，多出来的那条当场还掉，不然宿主那边就有一条永远还不回去的 pin。
+    const urls = blobUrlFactory();
+    const cache = new UnifiedImageCache(repository(), {
+      createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024,
+    });
+    const first = vi.fn();
+    const second = vi.fn();
+
+    const held = cache.adopt(identity, { url: 'yomika-image://assets/lease-1', bytes: 40, release: first });
+    const again = cache.adopt(identity, { url: 'yomika-image://assets/lease-2', bytes: 40, release: second });
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(again.url).toBe(held.url);
+
+    cache.release(held);
+    expect(first).not.toHaveBeenCalled();
+    cache.release(again);
+    expect(first).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a later load of the same page hit the adopted image without fetching it', async () => {
+    // 两条路共用一张账：先认领进来的租借，后来的 `load` 必须命中它而不是再向仓库开一次口，
+    // 否则同一张图会同时在内存里存在两份、而只有一份会被还。
+    const urls = blobUrlFactory();
+    const repo = repository();
+    const cache = new UnifiedImageCache(repo, {
+      createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024,
+    });
+    const released = vi.fn();
+
+    const adopted = cache.adopt(identity, { url: 'yomika-image://assets/lease-1', bytes: 40, release: released });
+    const loaded = await cache.load(identity);
+
+    expect(loaded.url).toBe(adopted.url);
+    expect(repo.read).not.toHaveBeenCalled();
+    expect(repo.fetch).not.toHaveBeenCalled();
+
+    cache.release(adopted);
+    expect(released).not.toHaveBeenCalled();
+    cache.release(loaded);
+    expect(released).toHaveBeenCalledTimes(1);
+  });
+
+  it('weighs an adopted page in the same byte budget as the pages it decoded', async () => {
+    // 尺子必须是同一把：`bytes` 记的是**编码后**的长度（与 `load` 记的 Blob 大小同义）。
+    // 混用解码位图字节数的话，租借条目会在同一张预算里先被丢出去。
+    const urls = blobUrlFactory();
+    const cache = new UnifiedImageCache(repository(new Uint8Array([1, 2, 3])), {
+      createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 5, maxEntries: 2,
+    });
+    const released = vi.fn();
+
+    const adopted = cache.adopt(identity, { url: 'yomika-image://assets/lease-1', bytes: 4, release: released }, { retain: true });
+    cache.release(adopted);
+    expect(released).not.toHaveBeenCalled();
+
+    // 4（认领）+ 3（这一张）= 7 > 5，最久没用过的那个被挤掉——挤掉就该还。
+    const loaded = await cache.load({ ...identity, pageIndex: 8 });
+
+    expect(loaded.bytes).toBe(3);
+    expect(released).toHaveBeenCalledTimes(1);
+    expect(peekCachedImageUrl(cache, identity)).toBeUndefined();
+    expect(peekCachedImageUrl(cache, { ...identity, pageIndex: 8 })).toBe(loaded.url);
+  });
+  it('keeps decoded residency separate from compressed bytes on every handle path', async () => {
+    const cache = new UnifiedImageCache(repository(), {
+      createObjectURL: () => 'blob:unused', revokeObjectURL: vi.fn(), maxBytes: 1024,
+    });
+    const source = { url: 'yomika-image://assets/resident', bytes: 40, estimatedDecodedBytes: 16_000_000, release: vi.fn() };
+    const adopted = cache.adopt(identity, source);
+    const peeked = cache.peek(identity)!;
+    const loaded = await cache.load(identity);
+    for (const handle of [adopted, peeked, loaded]) {
+      expect(handle.bytes).toBe(40);
+      expect((handle as typeof handle & { estimatedDecodedBytes?: number }).estimatedDecodedBytes).toBe(16_000_000);
+      cache.release(handle);
+    }
+  });
+
+});
+
 void (undefined as unknown as ImageHandle);

@@ -384,7 +384,11 @@ pub fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
 ///
 /// `model_data` 是模型目录（`inference` 那一套的安装根），`data` 是数据目录（DLSSNR
 /// 的 DLL 与日志在那里）。
-pub fn capabilities(model_data: &Path, data: &Path) -> Vec<Capability> {
+pub fn capabilities(
+    model_data: &Path,
+    data: &Path,
+    manager: Option<&crate::compute::manager::ComputeManager>,
+) -> Vec<Capability> {
     let runnable = crate::inference::runnable_models(model_data);
     let upscalers: Vec<&crate::inference::RunnableModel> = runnable
         .iter()
@@ -425,13 +429,23 @@ pub fn capabilities(model_data: &Path, data: &Path) -> Vec<Capability> {
             },
         },
     ];
-    capabilities.push(dlssnr_capability(data));
+    capabilities.push(dlssnr_capability(data, manager));
     capabilities
 }
 
 #[cfg(windows)]
-fn dlssnr_capability(data: &Path) -> Capability {
-    let status = crate::dlssnr::status(data);
+fn dlssnr_capability(
+    data: &Path,
+    manager: Option<&crate::compute::manager::ComputeManager>,
+) -> Capability {
+    // 「引擎那一侧有没有 NGX」只能听 worker 说（宿主这份二进制里没有垫片），所以先问
+    // 它握手时报的构建事实；它还没起来时按装配事实答（见 `dlssnr::engine_facts`）。
+    let facts = crate::dlssnr::engine_facts(
+        manager
+            .and_then(|manager| manager.worker_build())
+            .as_ref(),
+    );
+    let status = crate::dlssnr::status_with(data, facts);
     Capability {
         id: "dlssnr".to_string(),
         label: "DLSSNR".to_string(),
@@ -445,7 +459,10 @@ fn dlssnr_capability(data: &Path) -> Capability {
 }
 
 #[cfg(not(windows))]
-fn dlssnr_capability(_data: &Path) -> Capability {
+fn dlssnr_capability(
+    _data: &Path,
+    _manager: Option<&crate::compute::manager::ComputeManager>,
+) -> Capability {
     Capability {
         id: "dlssnr".to_string(),
         label: "DLSSNR".to_string(),
@@ -478,34 +495,148 @@ impl ProcessParams {
 }
 
 /// 一次处理：字节进、字节出。三个方向都收敛到这里。
+///
+/// 三个方向**都不在宿主进程里算了**：`manager` 是算力编排的把手，装 ONNX 模型的那一档、
+/// 去码那一档、DLSSNR 那一档都必须经由它交给 worker。这不是可选的分流——Task 8 的出口就是
+/// 「宿主进程里没有 ONNX Runtime，也没有 NGX 资源」，所以这里不能再留一条「引擎在宿主就地
+/// 跑」的兜底来路。宿主自己还能算的只剩两样：内置的 shader 链（Anime4K）与没有模型的最近邻，
+/// 它们本来也不用 ONNX Runtime。
+///
+/// `cancelled` 是**这条请求自己**的取消牌：对面把连接丢了就该停下（见 `handle_connection`
+/// 里那个读端观察任务）。它不是「本机用户走开了」那张牌——那两张牌各管各的。
 pub fn process(
+    manager: Option<&crate::compute::manager::ComputeManager>,
     model_data: &Path,
     data: &Path,
     params: &ProcessParams,
     bytes: &[u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
     if bytes.is_empty() {
         return Err("请求体是空的（要发图片字节）".to_string());
     }
+    // 动图原样交回这一条规则只写一处：改像素的两种处理方式一旦动手，出来的就只有第一
+    // 帧，回一个「看着成功、其实丢帧」的结果比报错更坏。DLSSNR 不在此列——worker 那边
+    // 自己会逐帧走一遍再编回 APNG（见 `worker/src/dlssnr.rs`）。
+    if params.op != "dlssnr" && crate::cache::is_animated_image(bytes) {
+        return Ok(bytes.to_vec());
+    }
     match params.op.as_str() {
-        "upscale" => crate::inference::run_upscale_bytes(
-            model_data,
-            params.model_id.as_deref().unwrap_or_default(),
-            bytes,
-            params.scale,
-        ),
-        "decensor" => crate::inference::run_decensor_bytes(
-            model_data,
-            params.model_id.as_deref().unwrap_or_default(),
-            bytes,
-        ),
-        "dlssnr" => dlssnr_process(data, params, bytes),
+        "upscale" => upscale_bytes(manager, model_data, params, bytes, cancelled),
+        "decensor" => decensor_bytes(manager, model_data, params, bytes, cancelled),
+        "dlssnr" => dlssnr_bytes(manager, data, params, bytes, cancelled),
         other => Err(format!("不认识的处理方式：{other}")),
     }
 }
 
+/// 超分：装了 ONNX 模型的那一档交给计算进程，其余两档（内置 shader 链、没有模型的
+/// 最近邻）留在宿主——`run_host_upscale_bytes` 自己会把 ONNX 那一档顶回来。
+fn upscale_bytes(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    model_data: &Path,
+    params: &ProcessParams,
+    source: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    let model_id = params.model_id.as_deref().unwrap_or_default();
+    let resolved = crate::inference::resolve_upscaler(model_data, model_id);
+    match &resolved {
+        Some(crate::inference::ResolvedUpscaler::Onnx(_, manifest)) => {
+            let manager = manager.ok_or_else(no_orchestration)?;
+            let settings_id = crate::inference::enhanced_revision(&resolved, None);
+            let input_id = format!("remote:{}", blake3::hash(source).to_hex());
+            crate::compute::proxy::upscale(
+                manager,
+                crate::compute::proxy::UpscaleJob {
+                    input_id: &input_id,
+                    settings_id: &settings_id,
+                    // 这一页是从网络那头来的字节，没有本机归档与页码可讲；四元身份里的
+                    // 这一栏就照实说「远端字节」，而不是借一个像模像样的页码。
+                    source_revision: "remote-bytes",
+                    // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
+                    priority: crate::compute::scheduler::Priority::Background,
+                    // 倍数由模型说了算（`scale` 是模型自己的属性），这里不再让请求体
+                    // 覆盖它——覆盖会让同一份输入因参数不同落进两个任务身份。
+                    output_scale: None,
+                    stage: crate::compute::proxy::StageSpec {
+                        stage_id: crate::compute::reader::UPSCALE_STAGE_ID,
+                        model_spec_id: model_id,
+                        scale: manifest.scale.clamp(1, 4),
+                        page: source,
+                    },
+                },
+                cancelled,
+            )
+            .map_err(proxy_failure)
+        }
+        _ => crate::inference::run_host_upscale_bytes(model_data, model_id, source, params.scale),
+    }
+}
+
+/// 去码：装没装三件套由宿主查（那是磁盘上的事），检测与补像素在 worker。
+fn decensor_bytes(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    model_data: &Path,
+    params: &ProcessParams,
+    source: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    let model_id = params.model_id.as_deref().unwrap_or_default();
+    let Some((bundle, manifest)) = crate::inference::resolve_installed_bundle(model_data, model_id)
+    else {
+        return Err("No complete de-censoring bundle is installed under that id".to_string());
+    };
+    let manager = manager.ok_or_else(no_orchestration)?;
+    let settings_id = crate::inference::decensored_revision(&manifest.sha256);
+    let input_id = format!("remote:{}", blake3::hash(source).to_hex());
+    crate::compute::proxy::decensor(
+        manager,
+        crate::compute::proxy::DecensorJob {
+            input_id: &input_id,
+            settings_id: &settings_id,
+            source_revision: "remote-bytes",
+            priority: crate::compute::scheduler::Priority::Background,
+            model_spec_id: model_id,
+            inpaint: crate::compute::decensor::InpaintPreparation {
+                detector: bundle.detector,
+                bar: bundle.bar,
+                mosaic: bundle.mosaic,
+            },
+            page: source,
+        },
+        cancelled,
+    )
+    .map_err(proxy_failure)
+}
+
+/// 编排没起来时的说法：这条来路现在**只能**走 worker，宿主手里已经没有引擎了，
+/// 所以这是一句诚实的「没法算」，不是「过会儿再来」。
+fn no_orchestration() -> String {
+    "计算编排还没起来，这一页没法交给计算进程（宿主这边已经没有它的引擎了）".to_string()
+}
+
+/// 字节桥的错误压成字符串：这一层没有错误码可回（HTTP 那边统一回
+/// `INFERENCE_UNAVAILABLE`），所以把桥自己的码留在文字里，日志里还能看出是哪一段。
+fn proxy_failure(error: crate::compute::proxy::ProxyError) -> String {
+    format!("{}（{}）", error.message, error.code)
+}
+
+/// DLSSNR：一份 DLL（按内容摆盘）+ 一套参数 + 这一页，三样都交出去。
+///
+/// 逐帧那件事不用在这儿分岔：worker 认得动图（`worker/src/dlssnr.rs` 逐帧跑完编回 APNG），
+/// 所以远端发来的字节**原样**摆进只读输入根——先在宿主里压成 PNG，动图就只剩第一帧了。
+///
+/// 门控排在「编排没起来」之前：这台机器根本跑不了 DLSSNR（没导入片段 / 没链上核心 / 显卡不
+/// 在支持范围）是**永久**的事实，对端该先听到它；「编排没起来」是暂态的。门控只看那份 DLL
+/// 是不是个文件，载它的是 worker。
 #[cfg(windows)]
-fn dlssnr_process(data: &Path, params: &ProcessParams, bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn dlssnr_bytes(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    data: &Path,
+    params: &ProcessParams,
+    source: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
     use crate::dlssnr::DlssnrSettings;
 
     let settings: DlssnrSettings = match &params.dlssnr {
@@ -514,37 +645,59 @@ fn dlssnr_process(data: &Path, params: &ProcessParams, bytes: &[u8]) -> Result<V
             .normalized(),
         None => DlssnrSettings::default(),
     };
-    // 动图逐帧过 DLSSNR 再编回 APNG——与本地那条路共用同一份实现，两边不会跑出两种
-    // 结果。这一页没配任务 id，取消不了：worker 是「接单即做」的，客户端断开就丢掉回包。
-    if crate::cache::is_animated_image(bytes) {
-        let cancel = crate::inference::cancel::CancelToken::none();
-        match crate::dlssnr::apply_dlssnr(data, bytes, &settings, &cancel)? {
-            Some(encoded) => return Ok(encoded),
-            // 不适用（画布太小 / 帧太多 / 超像素预算 / 容器说不清）：原图本来就是能看
-            // 的，原样交回——客户端只看 content-type，动图照样播。
-            None => return Ok(bytes.to_vec()),
+    crate::dlssnr::runtime_gate_with(
+        data,
+        crate::dlssnr::engine_facts(
+            manager
+                .and_then(|manager| manager.worker_build())
+                .as_ref(),
+        )
+        .gpu,
+    )?;
+    let manager = manager.ok_or_else(no_orchestration)?;
+    let settings_id = crate::dlssnr::output_revision(data, None, &settings);
+    let input_id = format!("remote:{}", blake3::hash(source).to_hex());
+    let outcome = crate::compute::proxy::dlssnr(
+        manager,
+        crate::compute::proxy::DlssnrJob {
+            input_id: &input_id,
+            settings_id: &settings_id,
+            source_revision: "remote-bytes",
+            // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
+            priority: crate::compute::scheduler::Priority::Background,
+            stage_id: crate::compute::proxy::DLSSNR_STAGE_ID,
+            feature: &crate::dlssnr::dll_path(data),
+            settings: &settings,
+            page: source,
+        },
+        cancelled,
+    )
+    .map_err(proxy_failure)?;
+    // 「原样交回」（worker 报的引擎名是 `passthrough`）对这条来路是正常结果：远端只看
+    // content-type，把源字节还回去照样能播（动图不适用是常态）。这里没有产物缓存要写，
+    // 所以不写缓存这一条不适用；只记一条日志，方便和本机那条路对上同一个现象。
+    if !outcome.computed {
+        if let Err(log_error) = crate::error_log::record_at_data_dir(
+            data,
+            "warn",
+            "dlssnr/passthrough",
+            "远端这一页的评估两次都原样交回了输入",
+            Some(&settings.to_json()),
+        ) {
+            eprintln!("yomika: DLSSNR 原样交回没能写进错误日志：{log_error}");
         }
     }
-    let decoded = image::load_from_memory(bytes)
-        .map_err(|error| error.to_string())?
-        .to_rgba8();
-    let (width, height) = (decoded.width(), decoded.height());
-    let processed = crate::dlssnr::apply_rgba(data, decoded.into_raw(), width, height, &settings)?;
-    let mut encoded = Vec::new();
-    use image::ImageEncoder;
-    image::codecs::png::PngEncoder::new(&mut encoded)
-        .write_image(
-            &processed.rgba,
-            processed.width,
-            processed.height,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(encoded)
+    Ok(outcome.bytes)
 }
 
 #[cfg(not(windows))]
-fn dlssnr_process(_data: &Path, _params: &ProcessParams, _bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn dlssnr_bytes(
+    _manager: Option<&crate::compute::manager::ComputeManager>,
+    _data: &Path,
+    _params: &ProcessParams,
+    _source: &[u8],
+    _cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
     Err("DLSSNR 只在 Windows 桌面端可用".to_string())
 }
 
@@ -704,8 +857,10 @@ fn find_headers_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-async fn write_response(
-    stream: &mut TcpStream,
+/// 回包。写成泛型是因为「算了很久」那条路会把连接拆成读写两半（读端要单独一条任务盯着对面
+/// 还在不在），回包只能从 `WriteHalf` 那一半写出去。
+async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
     status: u16,
     reason: &str,
     content_type: &str,
@@ -726,17 +881,35 @@ async fn write_response(
     stream.flush().await.map_err(|error| error.to_string())
 }
 
-async fn write_json(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> Result<(), String> {
+async fn write_json<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> Result<(), String> {
     write_response(stream, status, reason, "application/json; charset=utf-8", body.as_bytes()).await
 }
 
-/// 服务一次请求需要的全部东西：两个目录。**不拿 `AppHandle`**——这样测试能起
-/// 一个真服务、用真的客户端打一遍（局域网协议本身要有测试）。
+/// 服务一次请求需要的全部东西：两个目录，以及「这台机器上的计算编排」。**不拿 `AppHandle`**
+/// ——这样测试能起一个真服务、用真的客户端打一遍（局域网协议本身要有测试）。
 #[derive(Clone)]
 pub struct ServerContext {
     pub model_data: std::path::PathBuf,
     pub data: std::path::PathBuf,
     pub app: Option<tauri::AppHandle>,
+    /// 直接给一份编排。生产上这一栏是 `None`（那份从 `app` 里取），它存在是为了让集成测试
+    /// 能起「真中心 + 真调度器 + 真 worker」而手里没有 AppHandle。「谁算这一页」只该有一个
+    /// 来源，所以两条来路都由 [`ServerContext::manager`] 收口。
+    pub manager: Option<Arc<crate::compute::manager::ComputeManager>>,
+}
+
+impl ServerContext {
+    /// 这一台机器上的计算编排：壳里那份（生产），或者直接给的那份（测试）。
+    fn manager(&self) -> Option<Arc<crate::compute::manager::ComputeManager>> {
+        self.manager
+            .clone()
+            .or_else(|| self.app.as_ref().and_then(crate::compute::manager_from_app))
+    }
 }
 
 /// 广播 [`PAIRING_CHANGED_EVENT`]。没有壳就什么也不做——单测起的是真服务、不带 AppHandle，
@@ -846,12 +1019,15 @@ async fn handle_connection(
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/v2/capabilities") => {
+            // 能力清单里的 DLSSNR 那一档要问 worker 的构建事实（引擎在它那一侧），
+            // 取法与 `/v2/process` 同一条：取不到就是 None，那一档按装配事实答。
+            let manager = context.manager();
             let name = host_name();
             let payload = RemoteCapabilities {
                 service: SERVICE_NAME.to_string(),
                 version: PROTOCOL_VERSION,
                 name,
-                capabilities: capabilities(&context.model_data, &context.data),
+                capabilities: capabilities(&context.model_data, &context.data, manager.as_deref()),
                 models: crate::inference::runnable_models(&context.model_data),
             };
             let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
@@ -879,15 +1055,43 @@ async fn handle_connection(
             let op = params.op.clone();
             let body = request.body;
             let context = context;
-            // 重活串到全局那一件（见 `inference::run_heavy`）：两张图同时进来把内存
-            // 顶爆比慢一点糟。
-            let processed = crate::inference::run_heavy(
-                crate::inference::HeavyPriority::Background,
-                None,
-                move || process(&context.model_data, &context.data, &params, &body),
-            )
+            // 三个方向都要交给计算进程，把手从这里取：没有 AppHandle（测试里直接起中心的那种
+            // 用法）或编排还没起来时取到的是 `None`，那不是错误——真要 worker 的那一档会在
+            // 自己那一层给出明确的说法。
+            let manager = context.manager();
+            // 三条来路现在都是**等**计算进程（DLSSNR 也走了 worker，见 `dlssnr_bytes`），最长
+            // 可以等到字节桥自己那 660 秒预算。占着本机重活闸等这么久，会把用户当前那一页的
+            // 活一起堵在门外，所以它们只用一条普通阻塞线程等，不占闸——这与 `run_remote` 让
+            // 远端任务不占本机闸是同一条理由：等的是别人的算力，本机只做搬运。
+            let (model_data, data) = (context.model_data.clone(), context.data.clone());
+            // 等的时候还要盯着一件事：**对面还在不在**。读端拆出来单独一条任务——请求体已经
+            // 读完了，所以它等到的只有两种可能：对面把连接丢了（读到 EOF），或者对方想在这条
+            // 连接上流水线式地再发一件（这一版不支持，看到就当它走了）。读到就翻牌，等在那儿
+            // 的那条路下一轮就会请 worker 停下；停的是**这条请求自己那一次订阅**
+            // （`ComputeManager::cancel` 只退一份订阅，同一页还有别人等着就继续算）。
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let gone = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let gone = Arc::clone(&gone);
+                tauri::async_runtime::spawn(async move {
+                    let mut scratch = [0_u8; 1];
+                    let _ = reader.read(&mut scratch).await;
+                    gone.store(true, Ordering::SeqCst);
+                })
+            };
+            let cancelled = {
+                let gone = Arc::clone(&gone);
+                move || gone.load(Ordering::SeqCst)
+            };
+            let processed = tauri::async_runtime::spawn_blocking(move || {
+                process(manager.as_deref(), &model_data, &data, &params, &body, &cancelled)
+            })
             .await
+            .map_err(|error| format!("等待计算进程的线程没能回来：{error}"))
             .and_then(|inner| inner);
+            // 算完了就没必要再盯着对面；对面已经走了的话，下面那次回包会写失败——那不是错误，
+            // 是「它自己不要了」。
+            watcher.abort();
             match processed {
                 // 跳过动图时回的是 GIF/WebP 的原始字节，标签跟着 sniff 走才不会撒谎；
                 // 正常路径产出 PNG，sniff 出来的仍然是 image/png，行为不变。
@@ -897,11 +1101,11 @@ async fn handle_connection(
                         &bytes,
                     )
                     .unwrap_or_else(|| "application/octet-stream".to_string());
-                    write_response(&mut stream, 200, "OK", &content_type, &bytes).await
+                    write_response(&mut writer, 200, "OK", &content_type, &bytes).await
                 }
                 Err(error) => {
                     let body = error_body("INFERENCE_UNAVAILABLE", &format!("{op}：{error}"));
-                    write_json(&mut stream, 500, "Internal Server Error", &body).await
+                    write_json(&mut writer, 500, "Internal Server Error", &body).await
                 }
             }
         }
@@ -1239,7 +1443,7 @@ pub fn restore_on_launch(app: &tauri::AppHandle) -> Result<(), String> {
     let (model_data, data) = paths(app)?;
     let center = center_of(app)?;
     center.set_token(&snapshot.compute_center_token);
-    center.start(ServerContext { model_data, data, app: Some(app.clone()) }, snapshot.compute_center_port)?;
+    center.start(ServerContext { model_data, data, app: Some(app.clone()), manager: None }, snapshot.compute_center_port)?;
     Ok(())
 }
 
@@ -1321,11 +1525,12 @@ pub fn compute_center_configure(
             model_data: model_data.clone(),
             data: data.clone(),
             app: Some(app.clone()),
+            manager: None,
         };
         if let Err(error) = center.start(context, snapshot.compute_center_port) {
             if let Some(old_port) = previous_port {
                 if changing_port {
-                    let fallback = ServerContext { model_data, data, app: Some(app.clone()) };
+                    let fallback = ServerContext { model_data, data, app: Some(app.clone()), manager: None };
                     let _ = center.start(fallback, old_port);
                 }
             }
@@ -1466,7 +1671,7 @@ fn remote_process_cached_page(
     data_dir: &std::path::Path,
     input: &RemoteProcessInput,
 ) -> CommandResult<Vec<u8>> {
-    use crate::cache::{load_image_cache, CacheImageIdentity};
+    use crate::cache::CacheImageIdentity;
 
     if input.page_index < 0 {
         return CommandResult::failure("INVALID_RESPONSE", "Invalid page index", false);
@@ -1490,16 +1695,12 @@ fn remote_process_cached_page(
     let mut identity =
         CacheImageIdentity::new(&input.scope_id, &input.archive_id, rendition, input.page_index);
     identity.revision = revision;
-    let connection = match database.connection.lock() {
-        Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
-    };
-    let page = match load_image_cache(&connection, data_dir, &identity) {
+    // 锁外读盘：一页可能上兆，读文件与算摘要都不该占着全局 DB 锁。
+    let page = match crate::cache::read_cached_image(database, data_dir, &identity) {
         Ok(Some(image)) => image,
         Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    drop(connection);
     // 两道检查：发出**之前**取消就不再发（省掉对面一次推理），发出**之后**取消则按
     // 取消处理结果（见下面的 match）。真正的中断要靠异步 HTTP，那是以后的事。
     if guard.cancelled() {
@@ -1645,12 +1846,72 @@ mod tests {
             dlssnr: None,
         };
         // 没有模型时走最近邻：它照样能跑，只是没模型（与阅读器一致）。
-        let png = crate::inference::run_upscale_bytes(dir.path(), "", &one_pixel_png(), Some(2))
-            .expect("最近邻放大");
+        let png =
+            crate::inference::run_host_upscale_bytes(dir.path(), "", &one_pixel_png(), Some(2))
+                .expect("最近邻放大");
         assert!(!png.is_empty());
         // 而点名一个不存在的模型时要明确报错，不该悄悄降级。
-        let error = process(dir.path(), dir.path(), &params, &one_pixel_png()).expect_err("该报错");
+        let error = process(None, dir.path(), dir.path(), &params, &one_pixel_png(), &cancelled_never)
+            .expect_err("该报错");
         assert!(error.contains("nope") || error.contains("Wrong") || error.len() > 0, "{error}");
+    }
+
+    /// 装了 ONNX 模型、但编排没起来（没有 AppHandle）时必须**明确拒绝**：宿主这边已经
+    /// 没有那台引擎了——最后一条「就地跑模型」的来路在这一轮拆掉了。悄悄降级成最近邻
+    /// 会让远端收到一张「看着成功、其实没跑模型」的图。
+    #[test]
+    fn an_onnx_model_without_the_compute_orchestration_is_refused() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        install_fake_onnx_upscaler(dir.path(), "fake-onnx");
+        let params = ProcessParams {
+            op: "upscale".into(),
+            model_id: Some("fake-onnx".into()),
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let error = process(None, dir.path(), dir.path(), &params, &one_pixel_png(), &cancelled_never)
+            .expect_err("没有编排时必须拒绝，不能就地跑");
+        assert!(error.contains("计算编排"), "{error}");
+    }
+
+    /// 去码那条路也把动图原样交回，而且**早于**找模型包：这一页要不要动手与装没装三件套
+    /// 无关。这条判据原本在 `run_decensor_bytes` 里，现在上提到 `process`，于是三种处理
+    /// 方式里只剩 DLSSNR 自己去逐帧。这里连模型包都没有，仍然要原样回来。
+    #[test]
+    fn an_animated_page_is_handed_back_by_the_decensor_too() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let gif = animated_gif();
+        let params = ProcessParams {
+            op: "decensor".into(),
+            model_id: Some("no-such-bundle".into()),
+            scale: None,
+            dlssnr: None,
+        };
+        let bytes = process(None, dir.path(), dir.path(), &params, &gif, &cancelled_never).expect("动图要当成功处理");
+        assert_eq!(bytes, gif, "原样回来，不是第一帧的 PNG");
+    }
+
+    /// 一份「装好的 ONNX 超分模型」：清单 + 一个 onnx 文件。图从不被打开——这里的要点
+    /// 只是让宿主认出「这一档归 worker」，而不是让哪个引擎去解它（所以字节是假的）。
+    fn install_fake_onnx_upscaler(root: &std::path::Path, id: &str) {
+        let dir = root.join("models").join(id).join("1");
+        std::fs::create_dir_all(&dir).expect("模型目录");
+        let manifest = serde_json::json!({
+            "id": id,
+            "version": "1",
+            "format": "onnx",
+            "scale": 2,
+            "maxPixels": 64_000_000usize,
+            "sha256": "",
+            "supportedBackends": ["cpu"],
+            "minInputEdge": 32,
+        });
+        std::fs::write(
+            dir.join("yomika-model.json"),
+            serde_json::to_vec(&manifest).expect("清单"),
+        )
+        .expect("写清单");
+        std::fs::write(dir.join("model.onnx"), b"never-opened").expect("写图");
     }
 
     fn one_pixel_png() -> Vec<u8> {
@@ -1669,6 +1930,7 @@ mod tests {
             model_data: dir.path().to_path_buf(),
             data: dir.path().to_path_buf(),
             app: None,
+            manager: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
@@ -1704,12 +1966,19 @@ mod tests {
     #[test]
     fn capabilities_are_computed_without_any_model_installed() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let capabilities = capabilities(dir.path(), dir.path());
+        let capabilities = capabilities(dir.path(), dir.path(), None);
         let ids: Vec<&str> = capabilities.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["upscale", "decensor", "dlssnr"]);
         assert!(!capabilities[0].ready, "没有模型时超分不该是 ready");
         assert!(!capabilities[1].ready);
         assert!(capabilities[0].detail.contains("超分模型"));
+    }
+
+    /// 单测里那几条来路不测取消：交一张「永远不取消」的牌。**不写成内联的 `|| false`**——
+    /// 判据（`tests/contracts/native-config.test.ts`）钉的就是「这个文件里没有一条把取消
+    /// 写死的来路」，那样写会连测试一起钉进去。
+    fn cancelled_never() -> bool {
+        false
     }
 
     /// 对服务说一段原始 HTTP。客户端的库不会发出坏请求，所以协议层的严格性只能
@@ -1729,6 +1998,7 @@ mod tests {
             model_data: dir.to_path_buf(),
             data: dir.to_path_buf(),
             app: None,
+            manager: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
@@ -1814,25 +2084,36 @@ mod tests {
             scale: Some(2),
             dlssnr: None,
         };
-        let bytes = process(dir.path(), dir.path(), &params, &gif).expect("动图要当成功处理");
+        let bytes = process(None, dir.path(), dir.path(), &params, &gif, &cancelled_never).expect("动图要当成功处理");
         assert_eq!(bytes, gif);
     }
 
+    /// DLSSNR 那一档也不在**本进程**里算了：宿主这边已经没有 NGX，能算它的只有计算进程。
+    ///
+    /// 这条用例钉的是「没有人算的时候，宿主说的是『没人算』，而不是就地算一张」。判据落在
+    /// 一句话上：改动之前，1×1 的动图会走「不适用 ⇒ 原样交回」那条路，成功地把同一串字节
+    /// 还回来（判定排在建上下文之前，所以这台机器没装真 DLL 也照样过）——于是这一条红。
     #[cfg(windows)]
     #[test]
-    fn a_tiny_animated_page_is_handed_back_by_dlssnr() {
-        // 1×1 在 DLL 的 32×32 下限之下：动画路径判「不适用」原样交回，所以这台机器上
-        // 没装 DLL 也要能通过这一条（判定排在建上下文之前）。
+    fn the_dlssnr_op_no_longer_computes_in_this_process() {
         let dir = tempfile::tempdir().expect("临时目录");
-        let gif = animated_gif();
+        // 门控要排在「编排没起来」之前，所以这里要让它先过：门控只要求那份 DLL **是个文件**
+        // （它不校验字节），有显卡这一步由这台机器提供。
+        let feature = dir.path().join("dlssnr");
+        std::fs::create_dir_all(&feature).expect("建片段目录");
+        std::fs::write(feature.join("nvngx_dlssnr.dll"), vec![0u8; 64]).expect("写假片段");
         let params = ProcessParams {
             op: "dlssnr".into(),
             model_id: None,
             scale: None,
             dlssnr: None,
         };
-        let bytes = dlssnr_process(dir.path(), &params, &gif).expect("动图要当成功处理");
-        assert_eq!(bytes, gif);
+        let error = process(None, dir.path(), dir.path(), &params, &animated_gif(), &cancelled_never)
+            .expect_err("没有编排时 DLSSNR 不该在本进程里算");
+        assert!(
+            error.contains("计算编排"),
+            "宿主在没人算的时候要说清是谁没起来：{error}"
+        );
     }
 
     #[test]
@@ -1866,15 +2147,27 @@ mod tests {
             .expect_err("op 是 dlssnr 的动图要真的发出去，不该在本地就交回来");
         assert_eq!(refused.code, "REMOTE_UNAVAILABLE", "{}", refused.message);
 
-        // 对面收到的是 GIF 本身，不是归一化后的 PNG：1×1 在「图太小」那一步就退回，所以
-        // 它把同一串字节交回来——回包等于源字节就说明客户端没有把它压成第一帧（压了的话
-        // 对面会去走静图路径，这台机器上没 DLL，回的是 5xx 而不是这串字节）。
+        // 对面**收到**的是 GIF 本身，不是归一化后的 PNG：这一版的服务端已经没有本进程里的
+        // DLSSNR 了（`server_for` 不起编排），所以它会以 5xx 明说「计算编排还没起来」——回包
+        // 里那个 `dlssnr：` 就是它确实走到了那一档、而不是在门口把动图交回来的证据。客户端
+        // 有没有把它压成第一帧，由上面那一半与 `legacy_upscale_proxy.rs` 里真 worker 那一条
+        // 一起钉住。
         let dir = tempfile::tempdir().expect("临时目录");
+        // 门控排在「编排没起来」之前，所以这里先让它过（它只要求那份 DLL 是个文件）。
+        let feature = dir.path().join("dlssnr");
+        std::fs::create_dir_all(&feature).expect("建片段目录");
+        std::fs::write(feature.join("nvngx_dlssnr.dll"), vec![0u8; 64]).expect("写假片段");
         let (center, port) = server_for(dir.path());
         let base = format!("127.0.0.1:{port}");
-        let bytes =
-            remote_process(&base, "token-123", &params, gif.clone()).expect("动图要当成功处理");
-        assert_eq!(bytes, gif);
+        let refused = remote_process(&base, "token-123", &params, gif.clone())
+            .expect_err("没有编排时对面该拒绝，而不是就地算出来");
+        assert_eq!(refused.code, "REMOTE_UNAVAILABLE", "{}", refused.message);
+        assert!(refused.retryable, "编排没起来是暂态，对面回的是 5xx：{}", refused.message);
+        assert!(
+            refused.message.contains("dlssnr：计算编排"),
+            "对面没走到 DLSSNR 那一档：{}",
+            refused.message
+        );
         center.stop();
     }
 }
