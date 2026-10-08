@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 
-import { ErrorLogPanel, useErrorLog } from '../../src/components/ErrorLogPanel';
+import { ERROR_LOG_REFRESH_MS, ErrorLogPanel, useErrorLog } from '../../src/components/ErrorLogPanel';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 
@@ -113,14 +113,49 @@ describe('error log panel', () => {
     expect(screen.getByText('x86_64')).toBeInTheDocument();
   });
 
+  it('lays the four actions along the bottom instead of behind a ⋮', async () => {
+    serve([panicEntry]);
+    renderPanel();
+
+    await screen.findByText('state() called before manage()');
+    // 用户要的：刷新按钮与 ⋮ 都去掉，四个动作铺在面板底部、各带一枚图标。
+    expect(screen.queryByRole('button', { name: '刷新日志' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '日志操作' })).not.toBeInTheDocument();
+
+    const group = screen.getByRole('group', { name: '日志操作' });
+    const buttons = within(group).getAllByRole('button');
+    expect(buttons.map((button) => button.textContent)).toEqual(['复制日志', '导出日志', '错误反馈', '清空日志']);
+    for (const button of buttons) {
+      expect(button.querySelector('svg[aria-hidden="true"]'), `${button.textContent} 要有 SVG 图标`).not.toBeNull();
+    }
+  });
+
+  it('refreshes itself while it is open, so a new failure shows up with nothing to press', async () => {
+    vi.useFakeTimers();
+    try {
+      const entries: unknown[] = [panicEntry];
+      serve(entries);
+      renderPanel();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('state() called before manage()')).toBeInTheDocument();
+
+      entries.unshift({ at: '2026-09-28T11:00:00.000Z', level: 'error', source: 'bridge/list_archives', message: '晚一点才发生的那一次失败' });
+      expect(screen.queryByText('晚一点才发生的那一次失败')).not.toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(ERROR_LOG_REFRESH_MS); });
+      expect(screen.getByText('晚一点才发生的那一次失败')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clears both rounds only after the confirmation, and says how many went', async () => {
     const user = userEvent.setup();
     const adapter = serve([panicEntry], { error_log_clear: { ok: true, value: 1 } });
     renderPanel();
 
     await screen.findByText('state() called before manage()');
-    await user.click(screen.getByRole('button', { name: '日志操作' }));
-    await user.click(await screen.findByRole('menuitem', { name: '清空日志' }));
+    await user.click(screen.getByRole('button', { name: '清空日志' }));
 
     // 破坏性动作先问一句，问之前不写。
     expect(adapter).not.toHaveBeenCalledWith('error_log_clear', {});
@@ -139,8 +174,7 @@ describe('error log panel', () => {
     renderPanel();
 
     await screen.findByText('state() called before manage()');
-    await user.click(screen.getByRole('button', { name: '日志操作' }));
-    await user.click(await screen.findByRole('menuitem', { name: '复制日志' }));
+    await user.click(screen.getByRole('button', { name: '复制日志' }));
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('write_clipboard_text', {
       text: expect.stringContaining('# Yomika 错误日志'),

@@ -90,6 +90,17 @@ fn main() {
     println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_TIME");
 
+    // 上面那两条**不够**：`YOMIKA_BUILD_COMMIT` 是**打包脚本**才设的变量，日常 `cargo test`
+    // 里是空的，提交号此时是这一份 build script 自己 `git rev-parse` 出来的——提交之后
+    // 它一行输入都没变，cargo 不会重跑，产物于是带着**上一个**提交号。宿主与 worker 各拿
+    // 一个旧戳时，握手那一步会把它们判成「不是同一次构建」而拒绝配对（2026-10-08 实测：
+    // worker 停在 `04ddc5f…`、宿主已经是 `6ecea1b…`，`proxy-it` 整档红）。所以盯 `.git`
+    // 里真正会变的那三处；**不能**盯整个 `.git`：objects 每提交都在动，那等于每次编译都要
+    // 重跑 build script。
+    for watched in ["../.git/HEAD", "../.git/refs/heads", "../.git/packed-refs"] {
+        println!("cargo:rerun-if-changed={watched}");
+    }
+
     embed_windows_manifest();
     stamp_build_info();
 

@@ -149,7 +149,15 @@ fn publish_part(
     relative: String,
 ) -> Result<String, InputError> {
     match fs::rename(part, destination) {
-        Ok(()) => Ok(relative),
+        Ok(()) => {
+            // 落点的时间必须是**现在**：`stage` 走的是硬链接，链接出来的这一份带着**源文件**
+            // 的修改时间（一份上个月下载、此后没动过的模型或 NGX 片段就带着上个月的 mtime），
+            // 而清扫按「多久没人碰过」判过期——不刷新的话，刚摆好的输入会在下一次握手被当成
+            // 过期输入收走，而这一件任务正要读它（2026-10-08 实测，见用例
+            // `a_just_staged_input_is_not_stale_just_because_its_source_is_old`）。
+            touch(destination);
+            Ok(relative)
+        }
         Err(error) => {
             if verify_file(destination, hash, length).is_ok() {
                 let _ = fs::remove_file(part);
@@ -498,6 +506,38 @@ mod tests {
     fn sweeping_an_input_root_that_does_not_exist_yet_is_not_an_error() {
         let root = sandbox("nodir");
         assert_eq!(sweep_inputs(&root.join("inputs"), Duration::ZERO), 0);
+    }
+
+    /// 硬链接会把**源文件**的修改时间一并带过来：一份「上个月下载、此后再没动过」的大文件
+    /// （模型、NGX 片段那种）刚被摆进输入根，落点就带着一个月前的 mtime——而清扫是按
+    /// 「多久没人碰过」判过期的，于是下一轮握手会把它当过期输入收走，可这一件任务正要读它。
+    /// 2026-10-08 实测撞到：`debug_outputs/fix3-20261008/red-2-ngx.log` 里先打了
+    /// `清掉 1 份过期输入`，紧接着 worker 报 `授权根里没有这份输入：…/inputs/7a`。
+    /// 摆进去这个动作本身就是「有人在用」，所以落点的时间必须是现在。
+    #[test]
+    fn a_just_staged_input_is_not_stale_just_because_its_source_is_old() {
+        let root = sandbox("stage-old-mtime");
+        let inputs = root.join("inputs");
+        let source = root.join("downloaded-last-month.dll");
+        fs::write(&source, PNG).expect("写源文件");
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .expect("打开源文件")
+            .set_modified(SystemTime::now() - Duration::from_secs(30 * 24 * 3600))
+            .expect("把源文件改成一个月前");
+
+        let relative = stage(&inputs, &source, &hash(PNG)).expect("放一份旧源文件");
+        assert_eq!(
+            sweep_inputs(&inputs, Duration::from_secs(3600)),
+            0,
+            "刚摆进去的输入不该被当成过期的收走"
+        );
+        assert!(
+            inputs.join(&relative).exists(),
+            "这一件任务还要读它：{}",
+            inputs.join(&relative).display()
+        );
     }
 
     #[test]

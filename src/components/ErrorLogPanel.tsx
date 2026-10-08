@@ -1,6 +1,5 @@
-import { ChevronDown, ClipboardCopy, Copy, Download, Info, MoreVertical, MessageSquareWarning, RefreshCw, Trash2 } from 'lucide-react';
+import { ChevronDown, ClipboardCopy, Copy, Download, Info, MessageSquareWarning, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 
 import { writeClipboardText } from '../bridge/clipboard';
 import { openExternalUrl } from '../bridge/externalUrl';
@@ -126,10 +125,26 @@ export interface ErrorLogState {
   platform: string | undefined;
   busy: boolean;
   exporting: boolean;
-  reload: () => Promise<void>;
+  /** `quiet` 是给轮询用的：后台自己刷新时不要把「正在读取…」那半拍闪出来，也不必
+   * 每次读失败都弹一次 toast（面板还开着，用户什么都没做）。 */
+  reload: (options?: { quiet?: boolean }) => Promise<void>;
   exportLog: () => Promise<void>;
   copyLog: () => Promise<void>;
   clearLog: () => Promise<boolean>;
+}
+
+/** 面板开着的时候多久自己去问一次原生侧。
+ *
+ * 为什么是轮询而不是订阅事件：这份日志有好几个写入口——前端的 bridge（`error_log_append`）、
+ * 原生命令自己、panic 钩子、以及只有数据目录没有 `AppHandle` 的 `record_at_data_dir`。
+ * 事件只能覆盖其中带 `AppHandle` 的那几个，剩下一半照样要刷新才知道。轮询问的是「现在
+ * 磁盘上是什么」，四条路都算数。 */
+export const ERROR_LOG_REFRESH_MS = 2_000;
+
+/** 一条记录的稳定身份。展开的那一条按它记，不按序号：轮询会把整个列表换一份新的，
+ * 按序号记就会串到隔壁那条上。`at`/`level`/`source`/`message` 是这条日志自带的全部身份。 */
+function entryKey(entry: ErrorLogEntry): string {
+  return [entry.at, entry.level, entry.source, entry.message].join('\u0000');
 }
 
 /** 错误日志的数据与动作：本次与上次两轮运行里，应用自己记下的失败。
@@ -145,14 +160,15 @@ export function useErrorLog(): ErrorLogState {
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
 
-  const reload = useCallback(async () => {
-    setBusy(true);
+  const reload = useCallback(async (options?: { quiet?: boolean }) => {
+    const quiet = options?.quiet === true;
+    if (!quiet) setBusy(true);
     // 刚刚发生的失败可能还在缓冲区里：读之前先落盘，列表才是完整的。
     await flushErrorLog();
     const response = await repository.list();
-    setBusy(false);
+    if (!quiet) setBusy(false);
     if (response.ok) setEntries(response.value);
-    else showToast(response.error.message, 'error');
+    else if (!quiet) showToast(response.error.message, 'error');
   }, [showToast]);
 
   useEffect(() => { void reload(); }, [reload]);
@@ -204,22 +220,30 @@ export function useErrorLog(): ErrorLogState {
   return { entries, build, platform, busy, exporting, reload, exportLog, copyLog, clearLog };
 }
 
-/** 二级菜单里的错误日志：一行状态 + 一个动作菜单，下面是「相关信息」与按时间倒序的记录。
+/** 二级菜单里的错误日志：「相关信息」与按时间倒序的记录，四个动作铺在底部。
  *
  * 外层是设置菜单自己的面板（`.settings-choice-panel`）——它就是这块的框，所以
  * 这里不再套第二层。记录按「标题 + 时间」折起来：一屏看得见很多条，展开才是一个现场
- * （错误详情、堆栈跟踪）。 */
+ * （错误详情、堆栈跟踪）。面板开着的时候每 `ERROR_LOG_REFRESH_MS` 自己去问一次原生侧
+ * （顶上没有刷新按钮），关掉菜单就停。 */
 export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
-  const { entries, build, platform, busy, exporting, reload, exportLog, copyLog, clearLog } = state;
+  const { entries, build, platform, exporting, reload, exportLog, copyLog, clearLog } = state;
   const { showToast } = useToast();
   const [factsOpen, setFactsOpen] = useState(false);
-  const [openEntry, setOpenEntry] = useState<number>();
+  const [openEntry, setOpenEntry] = useState<string>();
   const [confirmClear, setConfirmClear] = useState(false);
   const facts = useMemo(() => appInfoLines(build, platform), [build, platform]);
   const factsText = useMemo(
     () => facts.sections.flatMap((section) => [`${section.title}`, ...section.rows.map((row) => `  ${row.label}: ${row.value}`)]).join('\n'),
     [facts],
   );
+
+  /** 面板自己去看新日志（用户要的「实时更新」）。面板只在菜单开着的时候挂载，所以关掉
+   * 菜单就停了；`quiet` 让这半拍不闪状态行、也不因为读失败弹 toast。 */
+  useEffect(() => {
+    const timer = window.setInterval(() => { void reload({ quiet: true }); }, ERROR_LOG_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [reload]);
 
   /** 一条记录的复制：连着时间、来源与明细一起，粘到哪儿都是完整的一条。 */
   const copyEntry = async (entry: ErrorLogEntry) => {
@@ -241,38 +265,9 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
   };
 
   return <div className="error-log-panel">
-    <div className="error-log-head">
-      {/* 标题底下不再挂那行「本次运行 N 条，上次运行 M 条。」（用户要的）：它把两个动作
-          挤到中间，而且每次都要读一遍。上一次运行的记录自己带着「上次运行 · 」的来源前缀。 */}
-      {entries === undefined && <StatusLine busy>正在读取…</StatusLine>}
-      <button className="secondary-action is-icon" type="button" disabled={busy} aria-busy={busy} aria-label="刷新日志" title="刷新" onClick={() => void reload()}>
-        <RefreshCw aria-hidden="true" />
-      </button>
-      {/* 动作收进 ⋮：刷新是「看一眼」，这四个是「拿它做点什么」，混在一排按钮里
-          会让菜单底部变成一条按钮带。 */}
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button className="secondary-action is-icon" type="button" aria-label="日志操作" title="日志操作" aria-haspopup="menu"><MoreVertical aria-hidden="true" /></button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="log-menu" align="end" sideOffset={4}>
-            <DropdownMenu.Item className="log-menu-item" disabled={!entries?.length} onSelect={() => void copyLog()}>
-              <ClipboardCopy aria-hidden="true" />复制日志
-            </DropdownMenu.Item>
-            <DropdownMenu.Item className="log-menu-item" disabled={exporting || !entries?.length} onSelect={() => void exportLog()}>
-              <Download aria-hidden="true" />导出日志
-            </DropdownMenu.Item>
-            <DropdownMenu.Item className="log-menu-item" onSelect={openFeedback}>
-              <MessageSquareWarning aria-hidden="true" />错误反馈
-            </DropdownMenu.Item>
-            <DropdownMenu.Separator className="log-menu-separator" />
-            <DropdownMenu.Item className="log-menu-item is-danger" disabled={!entries?.length} onSelect={() => setConfirmClear(true)}>
-              <Trash2 aria-hidden="true" />清空日志
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-    </div>
+    {/* 顶上不再有刷新与 ⋮（用户要的）：刷新由面板自己轮询（见上面的 effect），
+        四个动作像其它设置面板那样铺在底部。这里只剩头一次读取的那半拍。 */}
+    {entries === undefined && <StatusLine busy>正在读取…</StatusLine>}
 
     {/* 相关信息：能抄给别人的那一份现场。折起来是它默认的样子——它是给「要报问题」的
         时候用的，不是每次看日志都要读一遍。 */}
@@ -307,13 +302,15 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
     </section>
 
     {entries && entries.length > 0 && <ul className="error-log-list" aria-label="错误记录">
-      {/* 原生侧给的就是从新到旧的顺序（本次在前、上次在后，各自新的在上），这里原样铺开。 */}
-      {entries.map((entry, index) => {
-        const open = openEntry === index;
+      {/* 原生侧给的就是从新到旧的顺序（本次在前、上次在后，各自新的在上），这里原样铺开。
+          展开按 `entryKey` 记而不是序号：轮询每两秒把列表换一份，序号会串到隔壁那条上。 */}
+      {entries.map((entry) => {
+        const key = entryKey(entry);
+        const open = openEntry === key;
         const { detail, stack } = splitDetail(entry);
-        return <li key={`${entry.at}-${index}`} className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
+        return <li key={key} className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
           <div className="error-log-entry-head">
-            <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={() => setOpenEntry(open ? undefined : index)}>
+            <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={() => setOpenEntry(open ? undefined : key)}>
               <span className="error-log-entry-title" title={entry.message}>{entry.message}</span>
               <span className="error-log-entry-meta">
                 <span className="error-log-time">{formatEntryTime(entry.at)}</span>
@@ -338,6 +335,23 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
         </li>;
       })}
     </ul>}
+
+    {/* 四个动作铺在底部、各占一份宽（`.settings-menu-actions` 的既有规则就是「一行动作平分
+        宽度」）：清空是破坏性的那一个，用 `is-danger` 说清楚。 */}
+    <div className="settings-menu-actions" role="group" aria-label="日志操作">
+      <button className="secondary-action" type="button" disabled={!entries?.length} onClick={() => void copyLog()}>
+        <ClipboardCopy aria-hidden="true" />复制日志
+      </button>
+      <button className="secondary-action" type="button" disabled={exporting || !entries?.length} onClick={() => void exportLog()}>
+        <Download aria-hidden="true" />导出日志
+      </button>
+      <button className="secondary-action" type="button" onClick={openFeedback}>
+        <MessageSquareWarning aria-hidden="true" />错误反馈
+      </button>
+      <button className="secondary-action is-danger" type="button" disabled={!entries?.length} onClick={() => setConfirmClear(true)}>
+        <Trash2 aria-hidden="true" />清空日志
+      </button>
+    </div>
 
     {confirmClear && <ConfirmDialog
       title="清空日志"

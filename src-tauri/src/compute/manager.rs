@@ -1829,10 +1829,10 @@ impl Supervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // 只给系统变量：worker 不该顺手读走用户环境里的任何东西。
-            .env_clear()
-            .env("SystemRoot", std::env::var("SystemRoot").unwrap_or_default())
-            .env("TEMP", std::env::var("TEMP").unwrap_or_default());
+            // 只给系统变量：worker 不该顺手读走用户环境里的任何东西。清单与理由见
+            // `WORKER_ENV_KEYS`。
+            .env_clear();
+        worker_environment(&mut command);
         for (key, value) in &config.extra_env {
             command.env(key, value);
         }
@@ -2496,6 +2496,25 @@ fn mint_nonce() -> u64 {
     (ticks ^ (seq.wrapping_mul(0x9e37_79b9_7f4a_7c15))) ^ ((std::process::id() as u64) << 32)
 }
 
+/// worker 能从宿主这里继承的**全部**环境变量。
+///
+/// 为什么要有这么一份显式清单：worker 是唯一碰显卡与厂商运行库的进程，而那些库会按系统
+/// 变量拼路径。`SystemDrive` 少一个都不行——NGX 核心初始化在这种环境下必定返回
+/// `0xBAD00002`（平台错误），而报出来的话术只是「驱动、系统库或 NvAPI」，看上去像显卡坏
+/// 了。2026-10-08 实测：真片段、真显卡、worker 二进制都没问题，清空环境只补
+/// `SystemDrive` 一个变量就过（四档实测见 `docs/136`）。判据落在「宿主自己 spawn 出来的
+/// 那个进程」上：`src-tauri/tests/legacy_upscale_proxy.rs` 的
+/// `the_worker_this_host_spawns_can_initialise_ngx_and_compute_a_page`。
+const WORKER_ENV_KEYS: [&str; 3] = ["SystemRoot", "SystemDrive", "TEMP"];
+
+/// 把这些变量搬给 worker。当前进程里没有的也照样**设成空串**：worker 那边看得到变量名，
+/// 值是不是空的由它自己判——「没设这个变量」与「设成空串」在两个进程之间是两件事。
+fn worker_environment(command: &mut ProcessCommand) {
+    for key in WORKER_ENV_KEYS {
+        command.env(key, std::env::var(key).unwrap_or_default());
+    }
+}
+
 #[cfg(windows)]
 fn hide_console(command: &mut ProcessCommand) {
     use std::os::windows::process::CommandExt;
@@ -2602,6 +2621,35 @@ fn private_commit_of(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use yomika_compute_protocol::{EngineFallback, EnginePolicy, EngineReport, Precision};
+
+    /// worker 的环境白名单要真的落到命令行上，而且 `SystemDrive` 一个都不能少。
+    ///
+    /// 没有显卡、没有片段、跑不起那条真 NGX 用例的机器上，这一条就是地板：它咬住的是
+    /// 「这份清单里有没有 `SystemDrive`」与「它有没有真的被设进子进程环境」，而
+    /// 2026-10-08 那个 `0xBAD00002` 正是前者缺了。
+    #[test]
+    fn the_worker_environment_hands_over_the_drive_variable_ngx_needs() {
+        assert!(
+            WORKER_ENV_KEYS.contains(&"SystemDrive"),
+            "缺了 SystemDrive，NVIDIA 的运行库拼不出路径，NGX 初始化必定 0xBAD00002：{WORKER_ENV_KEYS:?}"
+        );
+        let mut command = ProcessCommand::new("yomika-compute-worker.exe");
+        command.env_clear();
+        worker_environment(&mut command);
+        let set: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect();
+        for key in WORKER_ENV_KEYS {
+            assert!(set.iter().any(|name| name == key), "{key} 没设进去：{set:?}");
+        }
+        assert_eq!(
+            set.len(),
+            WORKER_ENV_KEYS.len(),
+            "白名单之外的多给了别的变量：{set:?}"
+        );
+    }
 
     /// worker 的原话要留得住、要封顶、空话不占位置。
     ///

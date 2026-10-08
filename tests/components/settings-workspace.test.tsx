@@ -107,7 +107,7 @@ describe('settings workspace', () => {
     renderSettings('about');
 
     // 错误日志不再是一个设置分类，它长成关于页里普通的一行：行上是条数，
-    // 点开才是菜单——菜单里才读取列表并给出刷新、导出。
+    // 点开才是菜单——菜单里才读取列表，四个动作铺在底部（顶上没有刷新按钮）。
     const about = await screen.findByRole('region', { name: '关于' });
     const row = within(about).getByRole('button', { name: '错误日志' });
     expect(row).toHaveTextContent('1 条');
@@ -122,9 +122,8 @@ describe('settings workspace', () => {
     // 顶上那两句说明文字已经去掉：留着的都是眼下的事实。
     expect(menu.textContent).not.toContain('每次启动重新记录');
 
-    // 动作都在 ⋮ 菜单里：复制、导出、错误反馈、清空。
-    await user.click(within(menu).getByRole('button', { name: '日志操作' }));
-    await user.click(await screen.findByRole('menuitem', { name: '导出日志' }));
+    // 四个动作铺在面板底部（顶上没有 ⋮ 了）：复制、导出、错误反馈、清空。
+    await user.click(within(menu).getByRole('button', { name: '导出日志' }));
     // 导出的是界面这一份（同一次拼装）：内容由前端给，原生侧只管写。
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_export', {
       path: 'C:/tmp/yomika-error.log',

@@ -2131,29 +2131,44 @@ describe('design system contract', () => {
     expect(workspace).toMatch(/freshArchiveIds=\{freshArchiveIds\}/);
   });
 
-  it('opens a menu that lives inside a settings panel above that panel', () => {
-    // 图②（用户报的「更多操作点了没反应，过一会儿再点就变成了复制日志」）：Radix 把菜单
-    // portal 到 body，设置面板也挂在 body 上（OverlayLayer），两者是兄弟——菜单的 z 序
-    // 只要比面板小就被整层盖住：先看不见，而 Radix 又把文档其余部分设成
-    // pointer-events: none、只给自己 auto，于是后面落在那片位置的点击正好打在**看不见的
-    // 那一项**上。这一档只能靠 token 的数值关系钉住：肉眼在 jsdom 里看不见。
-    const tokens = read('src/styles/tokens.css');
-    const layer = (token: string): number => {
-      const match = new RegExp(`${token}:\\s*(\\d+);`).exec(tokens);
-      if (!match) throw new Error(`z 层 token 不见了：${token}`);
-      return Number(match[1]);
-    };
-    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
-    const usedToken = (selector: string): string => {
-      const match = /z-index:\s*var\((--z-[\w-]+)\)/.exec(ruleBody(shell, selector));
-      if (!match) throw new Error(`${selector} 没有声明 z-index`);
-      return match[1]!;
-    };
+  it('keeps the error log refreshing itself, with its four actions along the bottom', () => {
+    // 用户这一轮要的两件事：①「去掉刷新按钮，让错误日志界面实时更新新日志」——面板自己轮询；
+    // ②「去掉更多按钮，像其它设置面板那样，把内部四个按钮放到底部共享宽度显示，SVG 图标+文字」。
+    // 另外那档 `--z-menu-over-modal` 是给被删掉的 ⋮ 菜单加的，它得跟着一起走——留着就是
+    // 一条只服务于死代码的 z 序。
+    const panel = read('src/components/ErrorLogPanel.tsx');
+    expect(panel, '刷新按钮已删：面板自己更新').not.toContain('刷新日志');
+    expect(panel, '⋮ 菜单已删').not.toContain('DropdownMenu');
+    expect(panel, '动作从菜单搬到了底部').not.toContain('log-menu');
 
-    const menu = layer(usedToken('.log-menu'));
-    expect(menu, '设置面板里的菜单要排在面板上面，不然它整层都在面板后面').toBeGreaterThan(layer(usedToken('.settings-choice-overlay')));
-    expect(menu, '面板那一层就是 --z-modal：菜单得在它之上').toBeGreaterThan(layer('--z-modal'));
-    expect(menu, '但仍在 toast 与跳转链接之下').toBeLessThan(layer('--z-skip-link'));
+    const actions = /<div className="settings-menu-actions" role="group" aria-label="日志操作">([\s\S]*?)<\/div>/.exec(panel);
+    expect(actions, '四个动作要在面板底部的一个动作行里').not.toBeNull();
+    for (const label of ['复制日志', '导出日志', '错误反馈', '清空日志']) {
+      expect(actions![1], `${label} 要带图标（SVG + 文字）`).toContain(`aria-hidden="true" />${label}`);
+    }
+    expect(actions![1], '清空是破坏性的那一个').toContain('className="secondary-action is-danger"');
+
+    // 实时更新：面板自己开一个定时器去问原生侧，并且是「安静」的那一条路（不闪状态行、
+    // 不因为读失败弹 toast），否则每两秒闪一下「正在读取…」比手动刷新还烦。
+    expect(panel).toMatch(/export const ERROR_LOG_REFRESH_MS = 2_000;/);
+    expect(panel).toMatch(/window\.setInterval\(\(\) => \{ void reload\(\{ quiet: true \}\); \}, ERROR_LOG_REFRESH_MS\)/);
+    expect(panel, '面板卸载（菜单关掉）就得停').toMatch(/return \(\) => window\.clearInterval\(timer\);/);
+    expect(panel).toMatch(/if \(!quiet\) setBusy\(true\);/);
+    expect(panel).toMatch(/else if \(!quiet\) showToast\(response\.error\.message, 'error'\);/);
+
+    // 轮询每两秒换一份列表：展开的那一条按身份记，不按序号，否则会串到隔壁那条上。
+    expect(panel).toMatch(/function entryKey\(entry: ErrorLogEntry\): string \{/);
+    expect(panel).toMatch(/const \[openEntry, setOpenEntry\] = useState<string>\(\);/);
+    expect(panel).toMatch(/const key = entryKey\(entry\);/);
+
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(shell, '顶部那一行没有东西可放了').not.toContain('.error-log-head');
+    expect(
+      ruleBody(shell, '.error-log-panel > .settings-menu-actions'),
+      '四个「图标+四个汉字」的按钮塞不进 388px 的一行，排成两等列才不裁字',
+    ).toMatch(/display:\s*grid;\s*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+    expect(shell, '菜单没了，它那套样式也走').not.toContain('.log-menu');
+    expect(read('src/styles/tokens.css'), '只服务于那个菜单的 z 序也该走').not.toContain('--z-menu-over-modal');
   });
 
   it('lets the error log inherit the project font, and keeps literal families out of the sheets', () => {
@@ -2182,8 +2197,20 @@ describe('design system contract', () => {
 
     const errorLogFamilies = [...read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*\.error-log-[\w-]*[^{}]*)\{([^{}]*)\}/g)]
       .filter(([, , body]) => body!.includes('font-family'))
-      .map(([, selector]) => selector!.trim().split('\n').pop());
-    expect(errorLogFamilies, '错误日志里的字要跟着项目正文走，展开的详情也是').toEqual([]);
+      .map(([, selector, body]) => [selector!.trim().split('\n').pop()!, /font-family:\s*([^;}]+)/.exec(body!)?.[1]?.trim() ?? '']);
+    expect(
+      errorLogFamilies.filter(([, value]) => value !== 'var(--font-body)'),
+      '错误日志里的字只许是项目正文那一族',
+    ).toEqual([]);
+    // 上一轮把这里的 `font-family` 删掉、指望「继承面板」——`<pre>` 有自己的 UA 规则
+    // （`font-family: monospace`），继承不到 `html` 那一族，于是详情又变回系统等宽。
+    // 这条判据咬的就是那件事：展开的那一段必须自己声明项目字体。
+    const panel = read('src/components/ErrorLogPanel.tsx');
+    expect(panel, '判据要跟着真实标记走：详情那一段用的是 .error-log-code').toContain('<pre className="error-log-code">');
+    expect(
+      ruleBody(read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, ''), '.error-log-code'),
+      '展开的详情是 <pre>：不自己声明字体就会落到 UA 的等宽上',
+    ).toMatch(/font-family:\s*var\(--font-body\)/);
   });
 
   it('keeps the severity band of an error log row out of the hover paint', () => {

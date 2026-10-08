@@ -48,6 +48,13 @@ fn main() {
     // 而那正好是最容易骗过「两半戳一致」检查的一种现场。
     println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=YOMIKA_BUILD_TIME");
+    // 与宿主那一份同样的理由（见 `src-tauri/build.rs` 里那段注释）：没有打包脚本设
+    // `YOMIKA_BUILD_COMMIT` 时，提交号是这里 `git rev-parse` 出来的，而「提交」这件事本身
+    // 不改这一份脚本的任何输入——不盯 `.git` 里那三处，worker 就会带着上一个提交号的戳，
+    // 与宿主判不成「同一次构建」（2026-10-08 实测撞到）。
+    for watched in ["../../.git/HEAD", "../../.git/refs/heads", "../../.git/packed-refs"] {
+        println!("cargo:rerun-if-changed={watched}");
+    }
     // 戳变了要跟着重编的是 `lib.rs` 里那一条 `env!`（`main.rs` 只是引那个常量），
     // 不需要把整个 worker 拖下水。
     println!("cargo:rerun-if-changed=build.rs");

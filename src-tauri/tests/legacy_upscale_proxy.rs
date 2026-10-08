@@ -641,3 +641,101 @@ fn a_page_the_worker_handed_back_is_not_counted_as_computed() {
         "worker 说这一页没算过，宿主却当它算过了（会被写进产物缓存）：{line}"
     );
 }
+
+/// 随包那一份片段在哪（与 `worker/src/dlssnr.rs` 的 `shipped_dll()` 同一套候选）。
+fn shipped_feature() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("YOMIKA_DLSSNR_DLL") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let mut at = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while at.pop() {
+        let base = at.join("docs").join("DLSSNR-DLL-Options-310.8.0.0");
+        if base.is_dir() {
+            for variant in ["NVIDIA-Original", "Community-RTX40-RTX50", "SF-v2"] {
+                let candidate = base.join(variant).join("nvngx_dlssnr.dll");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// 一张确定性的高频噪声 PNG（LCG，不依赖随机源）。
+///
+/// 为什么不用棋盘格：NGX 在平坦或强规律的图上会把原图原样交回（`filter::PASSTHROUGH`），
+/// 那时 `DlssnrOutput::computed` 是假，用例就测不到「NGX 真跑过」这件事。
+fn noise_page(width: u32, height: u32) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for _ in 0..(width as usize) * (height as usize) {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let byte = (state >> 33) as u8;
+        rgba.extend_from_slice(&[byte, byte.wrapping_add(85), byte.wrapping_add(170), 255]);
+    }
+    let mut page = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut page)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .expect("编一张噪声 PNG");
+    page
+}
+
+/// 真显卡这一条：从**宿主 spawn 出去的 worker** 里初始化 NGX，再让 NGX 算一页。
+///
+/// 为什么非得走宿主这一条路：2026-10-08 用户报「DLSSNR 依然错误」，日志原文是
+/// `NGX 核心初始化失败：平台错误（驱动、系统库或 NvAPI）（0xBAD00002）`。查下来既不是
+/// 片段变体（用户那份与仓库 `NVIDIA-Original` 逐字节相同），也不是显卡跑不动（进程内那条
+/// 真片段用例一直绿），而是**宿主给 worker 的环境白名单**：NVIDIA 的运行库会拿
+/// `SystemDrive` 拼路径，白名单里只给 `SystemRoot` + `TEMP` 就必然是 0xBAD00002
+/// （清空环境只补这一个变量就过，四档实测见 `docs/136`）。进程内的用例带着完整环境，
+/// 这一条它永远看不见——所以判据必须落在「宿主自己 spawn 出来的那个进程」上。
+///
+/// 机器上没有片段时跳过：与 `worker/src/dlssnr.rs` 那条真片段用例同一口径。
+#[test]
+fn the_worker_this_host_spawns_can_initialise_ngx_and_compute_a_page() {
+    let Some(source) = shipped_feature() else {
+        eprintln!("跳过：读不到 nvngx_dlssnr.dll（YOMIKA_DLSSNR_DLL 或 docs/DLSSNR-DLL-Options-310.8.0.0）");
+        return;
+    };
+    let sandbox = Sandbox::new("dlssnr-gpu");
+    let feature = sandbox.root.join("dlssnr").join("nvngx_dlssnr.dll");
+    std::fs::create_dir_all(feature.parent().expect("片段目录")).expect("建片段目录");
+    std::fs::copy(&source, &feature).expect("拷一份真片段");
+    let mut config = config(&sandbox);
+    // 真引擎：DLSSNR 只在 worker 那边初始化 NGX（宿主产品码里没有一条进重引擎的路）。
+    config.worker_engine = WorkerEngine::Onnx;
+    let manager = ComputeManager::start(config, no_events()).expect("起计算编排");
+
+    let page = noise_page(256, 256);
+    let settings = DlssnrSettings::default();
+    let outcome = proxy::dlssnr(&manager, dlssnr_job(&feature, &settings, &page), &|| false);
+    let jobs = manager.all_jobs();
+    let status = manager.worker_status();
+    let note = jobs.first().and_then(|job| manager.failure_note(&job.job_id));
+    manager.shutdown();
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => panic!("这一页没算成：{error:?}\n计算进程状态：{status:?}\nworker 原话：{note:?}\n任务：{jobs:?}"),
+    };
+    assert_eq!(jobs.len(), 1, "该只有一件任务：{jobs:?}");
+    assert_eq!(jobs[0].state, JobState::Completed, "任务没算完就算出了结果");
+    assert!(
+        outcome.computed,
+        "NGX 把原图原样交回了 —— 那说明这一页根本没进 NGX"
+    );
+    let decoded = image::load_from_memory(&outcome.bytes).expect("产物该是一张图");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (256, 256),
+        "产物尺寸变了"
+    );
+}

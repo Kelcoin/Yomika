@@ -735,10 +735,15 @@ body::-webkit-scrollbar,
    菜单面板（.settings-choice-panel）已经是这一块的框，所以这里只排内容。
    参照的是 PiliPlus 的日志页：一条记录一行标题 + 一行时间，展开才是一个现场。 */
 .error-log-panel { display: grid; gap: var(--space-3); min-width: 0; }
-/* 标题下面是空的：那行「本次运行 N 条，上次运行 M 条。」去掉了（用户要的），所以两个
-   动作靠右站；只在读取中那半拍，左边才有那行字。 */
-.error-log-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; justify-content: flex-end; }
-.error-log-head > .status-line { margin-inline-end: auto; }
+/* 底部的四个动作（复制/导出/反馈/清空）。间距与「一行动作平分宽度」沿用
+   `.settings-menu-actions` 的既有规矩，只是这里排成**两列**：面板宽 420、左右各 16px
+   内边距，剩下的 388px 装不下四个「图标 + 四个汉字」的按钮（一个约 108px，四个加间隙
+   约 456px），硬塞会把字裁掉（`.secondary-action` 是 `overflow: hidden`、文字不换行）。
+   两列各 190px：每个字都留得住，宽度照样是平分的。 */
+.error-log-panel > .settings-menu-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */
 .error-log-list {
   display: grid;
@@ -795,10 +800,10 @@ body::-webkit-scrollbar,
 .error-log-caret.is-open { transform: rotate(180deg); }
 @media (prefers-reduced-motion: reduce) { .error-log-caret { transition: none; } }
 
-/* 展开的那一段：错误详情 + 堆栈跟踪，各一个框。字体跟着面板继承**正文**那一族：
-   这里原本写死 `--font-utility`（等宽），而 WebView2 不认 `ui-monospace`，实际落到
-   系统默认等宽上，看上去就不像这个应用里的字（用户报的「错误日志里的字体没用项目
-   统一字体」）。框、底色、字号都留着，它照旧读得出是一段现场。 */
+/* 展开的那一段：错误详情 + 堆栈跟踪，各一个框。**这里必须自己声明字体**：`<pre>` 在
+   UA 样式表里有 `font-family: monospace`，继承不到 `html` 上那一族——上一轮把写死的
+   `--font-utility` 删掉、指望「跟着面板继承」，结果落到的正是 UA 的等宽（用户又报了一次
+   「日志内容的文字字体依然是默认字体」）。项目自己那一族是 `--font-body`，写死它。 */
 .error-log-entry-body { display: grid; gap: var(--space-1); padding: 0 var(--space-3) var(--space-3) var(--space-3); }
 .error-log-entry-body h4 { margin: var(--space-2) 0 0; color: var(--state-warning); font-size: var(--text-xs); font-weight: var(--weight-bold); }
 .error-log-code {
@@ -808,6 +813,7 @@ body::-webkit-scrollbar,
   border-radius: var(--radius-control);
   background: var(--control-background, var(--surface-container-low));
   color: var(--on-surface);
+  font-family: var(--font-body);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
   white-space: pre-wrap;
@@ -864,35 +870,10 @@ body::-webkit-scrollbar,
 .error-log-facts-section dt { color: var(--ink-secondary); font-size: var(--text-xs); }
 .error-log-facts-section dd { margin: 0; color: var(--on-surface); font-size: var(--text-xs); overflow-wrap: anywhere; }
 
-/* 日志动作菜单：与档案右键菜单同一套浮层长相（同一份 surface/阴影/圆角 token）。
-   z 序用 `--z-menu-over-modal`：这个菜单开在设置面板**里面**，而面板与菜单都挂在
-   body 上，菜单排在面板后面就会整层被盖住（用户报的「更多操作点了没反应」）。 */
-.log-menu {
-  z-index: var(--z-menu-over-modal);
-  min-width: 168px;
-  padding: 6px;
-  border: 1px solid var(--outline-variant);
-  border-radius: var(--radius-control);
-  background: var(--surface-elevated);
-  box-shadow: var(--shadow-menu);
-}
-.log-menu-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-control);
-  color: var(--on-surface);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  outline: none;
-}
-.log-menu-item svg { flex: none; width: 16px; height: 16px; color: var(--ink-secondary); }
-.log-menu-item[data-highlighted] { background: var(--surface-muted); }
-.log-menu-item[data-disabled] { color: var(--ink-faint); pointer-events: none; }
-.log-menu-item.is-danger { color: var(--state-danger); }
-.log-menu-item.is-danger svg { color: currentColor; }
-.log-menu-separator { height: 1px; margin: 4px 0; background: var(--hairline); }
+/* 这一块原本还有一个 ⋮「日志操作」的 Radix 菜单（`.log-menu*` 与 `--z-menu-over-modal`
+   就是为它加的：菜单从面板里 portal 到 body，排在面板后面时整层被盖住）。用户要求把四个
+   动作铺到面板底部，菜单没了，那套样式与那一档 z 序也一起删掉——要是以后又在面板里开
+   菜单，得把它加回来，理由还是那一条：body 上的兄弟节点按 z 序排，面板是 51。 */
 
 
 .settings-page {
