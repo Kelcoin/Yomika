@@ -14,10 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use yomika_compute_core::dlssnr::{
-    dll_identity, dll_path, forget_probe, install_dll, last_probe_for, mean_absolute_difference,
-    output_revision, probe_cached_with, probe_is_valid, runtime_gate_with, status_with,
-    synthetic_image, variant_of, DlssnrSettings, EngineFacts, GpuInfo, PassSettings, ProbeReport,
-    Variant, DEFAULT_PASS_COUNT, MAX_PASS_COUNT,
+    dll_identity, dll_path, forget_probe, install_dll, install_dll_with, last_probe_for,
+    mean_absolute_difference, output_revision, probe_cached_with, probe_is_valid, runtime_gate_with,
+    status_with, synthetic_image, variant_of, DlssnrSettings, EngineFacts, GpuInfo, PassSettings,
+    ProbeReport, SnippetTrust, Variant, DEFAULT_PASS_COUNT, MAX_PASS_COUNT,
 };
 
 fn sandbox() -> tempfile::TempDir {
@@ -25,6 +25,10 @@ fn sandbox() -> tempfile::TempDir {
 }
 
 /// 一张够大、`MZ` 头与 PE 偏移都自洽的假片段：只过元数据那一半的检查（不加载它）。
+///
+/// **它没有签名**，所以凡是要「装进去」的用例都得显式传 [`SnippetTrust::Skipped`]——产品
+/// 路径要签名（`docs/144`：驱动只加载 NVIDIA 签过名的片段），而这个文件问的是元数据那一半
+/// （认不认得出变体、身份怎么算），两件事不该混在一起。
 fn fake_dll_file(dir: &Path, bytes: usize) -> PathBuf {
     let path = dir.join("nvngx_dlssnr.dll");
     let mut content = vec![0u8; bytes];
@@ -101,7 +105,8 @@ fn a_page_identity_follows_the_dll_that_would_run_it() {
     // 装上一份认不出变体的假片段：身份里要出现它的哈希与字节数，而不是还写着 missing。
     let source_dir = sandbox();
     let source = fake_dll_file(source_dir.path(), 1_000_001);
-    let installed = install_dll(&source, dir.path()).expect("PE 自洽、够大，就该装进去");
+    let installed =
+        install_dll_with(&source, dir.path(), SnippetTrust::Skipped).expect("PE 自洽、够大，就该装进去");
     assert_eq!(installed.bytes, 1_000_001);
     assert!(installed.variant.is_none(), "README 之外的那几种认不出不算错");
     assert!(dll_path(dir.path()).is_file());
@@ -258,7 +263,7 @@ fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
     // 片段装进去了，但这台机器没有可用的 N 卡。
     let source_dir = sandbox();
     let source = fake_dll_file(source_dir.path(), 1_000_001);
-    install_dll(&source, dir.path()).expect("装进去");
+    install_dll_with(&source, dir.path(), SnippetTrust::Skipped).expect("装进去");
     let error = runtime_gate_with(dir.path(), None).expect_err("没卡时不该放行");
     assert!(error.contains("NVIDIA 显卡"), "{error}");
 
@@ -319,7 +324,7 @@ fn a_status_can_be_assembled_from_facts_the_engine_told_us() {
     // 装上片段之后同一张报告就变成「现在就能跑」，而且认不出变体也不挡路。
     let source_dir = sandbox();
     let source = fake_dll_file(source_dir.path(), 1_000_001);
-    install_dll(&source, dir.path()).expect("装进去");
+    install_dll_with(&source, dir.path(), SnippetTrust::Skipped).expect("装进去");
     let boring = DlssnrSettings::default();
     let _ = output_revision(dir.path(), None, &boring);
     let live = status_with(
@@ -331,6 +336,14 @@ fn a_status_can_be_assembled_from_facts_the_engine_told_us() {
     );
     assert!(live.dll_present);
     assert_eq!(live.dll_bytes, Some(1_000_001));
+    // 盘上那一份的**指纹**也要如实报：设置页拿它跟目录里那条资产比，才有「有没有更新」
+    // 可言。这一份是 `fake_dll_file` 那 1_000_001 个字节的真实 SHA-256（小写十六进制）。
+    assert_eq!(
+        live.dll_sha256.as_deref(),
+        Some("6d2cffcc3aac60c4cb57e73d444842a645b354c30d4c654279e217c9c51f04ec"),
+        "指纹是这份文件自己的哈希"
+    );
+    assert_eq!(bare.dll_sha256, None, "没有片段就没有指纹");
     assert!(!live.installable, "没卡就还是开不了（卡是引擎报上来的那条事实）");
 }
 

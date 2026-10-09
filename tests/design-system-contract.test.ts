@@ -350,7 +350,8 @@ describe('design system contract', () => {
     // 监听还在工作区里；进度条那截标记后来搬进了共享控件文件（DLSSNR 的变体行也要用它，
     // 留在这里会绕出 工作区 ↔ DLSSNR 的 import 环），所以两处各断一句。
     expect(settings).toContain('model-download-progress');
-    expect(read('src/components/ModelDownloadControls.tsx')).toContain('model-download-status');
+    // 进度条画的是共享组件（同一套类名与量法），不是这里再手写一条。
+    expect(read('src/components/ModelDownloadControls.tsx')).toContain('<CardProgressBar');
   });
 
   it('keeps the archive count in the product font on the status bar', () => {
@@ -1311,9 +1312,18 @@ describe('design system contract', () => {
     expect(bar).not.toMatch(/padding-inline/);
     expect(shell).not.toMatch(/\.archive-list\.is-wide \.archive-row > \.archive-card-progress\.is-complete\s*\{/);
     const card = read('src/components/ArchiveThumbnailCard.tsx');
+    // 档案卡与设置行里的模型下载条是**同一个组件**：量法（`cardProgressWidth`）与
+    // 类名都只有一份，两处不可能各画各的。
+    expect(card).toMatch(/import \{ CardProgressBar \} from '\.\/CardProgressBar';/);
+    expect(card).toMatch(/<CardProgressBar percent=\{percent\} label="阅读进度" cornerAware=\{cornerAware\} \/>/);
+    const shared = read('src/components/CardProgressBar.tsx');
+    expect(shared).toMatch(/export function cardProgressWidth\(percent: number, trackWidth: number, cornerAware: boolean\): string \{/);
     // 长度只在宽行这一支上排除圆角：预览/网格卡那条压在封面接缝上，没有圆角可让。
-    expect(card).toMatch(/cornerAware = false/);
-    expect(card).toMatch(/calc\(var\(--radius-card\) \+ \(100% - 2 \* var\(--radius-card\)\) \* \$\{percent \/ 100\}\)/);
+    expect(shared).toMatch(/cornerAware = false/);
+    expect(shared).toMatch(/calc\(var\(--radius-card\) \+ \(100% - 2 \* var\(--radius-card\)\) \* \$\{percent \/ 100\}\)/);
+    // 轨道宽度由组件自己量，且观察的就是轨道本身：容器一变就重新量一次，
+    // 不会留下「槽宽更新了、内容还是旧值」的陈旧读数（用户报的标签换行失效是那个毛病）。
+    expect(shared).toMatch(/const observer = new ResizeObserver\(measure\);/);
     // 覆盖层必须画在横条之上，几何与卡片 outline 完全重合（inset: 0 + 同一个半径）。
     // 曾经写成 inset: 1px + 半径 - 1px，那是「往里缩一格」而不是「同一条环」：在
     // DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条、上/右中间空出一个设备
@@ -1341,30 +1351,41 @@ describe('design system contract', () => {
   it('draws the model download bar on the option’s own edge instead of growing the row', () => {
     const base = read('src/styles/base.css');
     const shell = read('src/styles/shell.css');
-    // 进度槽是这一项的定位后代、贴它自己的底边：它不参与行布局，所以「一下载那一栏
-    // 就变高」不会发生（用户报的正是这个）。设置项那一层不是它的定位上下文——进度
-    // 必须画在点「下载」的那一层里，否则它在菜单遮罩后面。
-    expect(ruleBody(shell, '.settings-choice-option')).toMatch(/position:\s*relative/);
+    // 进度槽是这一项的定位后代、铺满这一行：它不参与行布局，所以「一下载那一栏就变高」
+    // 不会发生（用户报的正是这个）。设置项那一层不是它的定位上下文——进度必须画在点
+    // 「下载」的那一层里，否则它在菜单遮罩后面。
+    const option = ruleBody(shell, '.settings-choice-option');
+    expect(option).toMatch(/position:\s*relative/);
+    // 行自己把横条两端削成它的圆角——宽行列表卡就是这么做的（`.archive-row` 同一对
+    // `overflow: hidden` + `border-radius: var(--radius-card)`）。缺这一句时横条两端
+    // 是自由端，圆头直接杵在行的圆角外面，看上去是一条「游离在那一行之外」的独立横条。
+    expect(option).toMatch(/overflow:\s*hidden/);
+    expect(option).toMatch(/border-radius:\s*var\(--radius-card\)/);
     const slot = ruleBody(base, '.model-download-slot');
     expect(slot).toMatch(/position:\s*absolute/);
-    expect(slot).toMatch(/inset:\s*auto 0 1px/);
-    expect(slot).toMatch(/height:\s*4px/);
+    expect(slot).toMatch(/inset:\s*0/);
     expect(slot).toMatch(/opacity:\s*0/);
     // 收起/展开只剩一次 opacity：`fr` 轨道那套（grid-template-rows、子元素的
     // min-height/overflow、槽上的 padding-block）正是把行撑高的东西，不能留着。
     expect(slot).not.toMatch(/grid-template-rows/);
     expect(slot).not.toMatch(/padding/);
     expect(ruleBody(base, '.model-download-slot.is-open')).toMatch(/opacity:\s*1/);
-    expect(ruleBody(base, '.model-download-slot > .model-download-status')).toMatch(/height:\s*100%/);
-    // 轨道与填充取档案卡那一条的数值（轨道 `--surface-container-highest`、填充
-    // `--primary`、圆头），只有高度按这一行的量级收成 4px。
-    const track = ruleBody(base, '.model-download-track');
-    expect(track).toMatch(/height:\s*100%/);
-    expect(track).toMatch(/background:\s*var\(--surface-container-highest\)/);
-    expect(track).toMatch(/border-radius:\s*var\(--radius-pill\)/);
-    const fill = ruleBody(base, '.model-download-fill');
-    expect(fill).toMatch(/background:\s*var\(--primary\)/);
-    expect(fill).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    // 横条本身是同一条 `.archive-card-progress`：贴这一行的底边（留 1px 让行的描边
+    // 露出来）、高度按行收成 4px、并且**不留卡片那条投影**（它垫的是封面下沿，行里
+    // 没有封面）。原来这里另有一套 `.model-download-track/-fill`：轨道自己带
+    // `--radius-pill` 圆头、填充写百分比，于是它既不跟行的圆角走、也不共用档案卡的
+    // 量法——用户报的「没有完整复用」。
+    const bar = ruleBody(base, '.model-download-slot > .archive-card-progress');
+    expect(bar).toMatch(/inset:\s*auto 0 1px/);
+    expect(bar).toMatch(/height:\s*4px/);
+    expect(bar).toMatch(/box-shadow:\s*none/);
+    expect(base).not.toMatch(/\.model-download-(track|fill|status)\s*\{/);
+    // 不定量条挂在同一条填充上。
+    expect(ruleBody(base, '.archive-card-progress.is-indeterminate .archive-card-progress-fill')).toMatch(/width:\s*40%/);
+    const control = read('src/components/ModelDownloadControls.tsx');
+    expect(control).toContain('<CardProgressBar');
+    expect(control).toContain('indeterminate={percent === undefined}');
+    expect(control).toContain('cornerAware');
     // 行里不再有「换行下来的第二行」：那条 `flex: 1 0 100%` 只会在流里再占一行的高度。
     expect(shell).not.toMatch(/\.settings-choice-option > \.model-download-slot\s*\{/);
   });
@@ -1382,6 +1403,12 @@ describe('design system contract', () => {
     expect(choice).toMatch(/mark\?: ReactNode \| undefined;/);
     const settings = read('src/components/SettingsWorkspace.tsx');
     expect(settings).toMatch(/mark=\{outdatedUpscaleIds\.size > 0 \? '有更新' : undefined\}/);
+    // 第二个挂点（DLSSNR 组件那一行）走的是 `SettingsRow`：同一枚 pill、同一个画法，
+    // 名字后面跟着它，可访问名仍然只算名字（标记是装饰，不参与命名）。
+    const row = read('src/components/SettingsRow.tsx');
+    expect(row).toMatch(/mark\?: ReactNode \| undefined;/);
+    expect(row, '标记画的还是那一枚 pill：行上的挂点要和另一处一模一样的画法，不许另起一套').toMatch(/<span className="settings-row-mark">\{mark\}<\/span>/);
+    expect(row).toMatch(/ariaLabel \?\? \(typeof label === 'string' \? label : undefined\)/);
   });
 
   it('keeps the reader chrome on a layer of its own instead of moving the page it covers', () => {

@@ -1003,29 +1003,35 @@ describe('settings workspace', () => {
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
 
     // 设置项那边不再画第二条：两条进度同时出现时，看的人不知道该信哪一条。
-    expect(document.querySelector('.settings-group > .model-download-status')).toBeNull();
+    expect(document.querySelector('.settings-group > .archive-card-progress')).toBeNull();
 
     // 进度挂在菜单里它自己那一项下面——也就是点「下载」的地方。以前进度画在设置项上，
     // 正好在菜单那层遮罩后面，点完下载根本看不到。
     const menu = screen.getByRole('dialog', { name: '超分模型' });
-    const status = menu.querySelector('.model-download-status');
+    const status = menu.querySelector('.archive-card-progress');
     expect(status).not.toBeNull();
     expect(status?.closest('.settings-choice-option')?.textContent).toContain('Real-CUGAN 2x 漫画（强降噪）');
     // 槽是常驻的，出现/消失靠 is-open：卸载的节点没有过渡可放。
     expect(status?.closest('.model-download-slot')).toHaveClass('is-open');
+    // 画的条就是档案卡那一条：同一个组件、同一套类名，不是另写一条像它的。
+    expect(status?.classList.contains('archive-card-progress')).toBe(true);
     // 右边不写百分比：条的长短已经把话说完了。
     expect(status?.textContent ?? '').not.toContain('%');
     expect(status).toHaveAttribute('role', 'progressbar');
+    expect(status).toHaveAttribute('aria-label', 'Real-CUGAN 2x 漫画（强降噪）下载进度');
     // 后端还没报总数时是不定量条：没有 aria-valuenow，走扫光。
     expect(status).not.toHaveAttribute('aria-valuenow');
-    expect(menu.querySelector('.model-download-track')).toHaveClass('is-indeterminate');
+    expect(status).toHaveClass('is-indeterminate');
 
     // 报了总数就是定量条：填充宽度跟着走，仍然不写数字。
     await act(async () => emitTauriEvent('model-download-progress', { path: 'realcugan-2x-denoise3x', completed: 50, total: 200 }));
     expect(status).toHaveAttribute('aria-valuenow', '25');
-    const fill = menu.querySelector<HTMLElement>('.model-download-fill');
-    expect(fill?.style.width).toBe('25%');
-    expect(menu.querySelector('.model-download-track')).not.toHaveClass('is-indeterminate');
+    // jsdom 里没有排版引擎（轨道宽度量出来是 0），所以宽度落在「半径 + 直边」的 calc
+    // 形式上；真宽度由工装页去量（debug_outputs/progress-bar/），真渲染引擎里的读数
+    // 见 tests/design-system-contract.test.ts 那一条的形状判据。
+    const fill = menu.querySelector<HTMLElement>('.archive-card-progress-fill');
+    expect(fill?.style.width).toBe('calc(var(--radius-card) + (100% - 2 * var(--radius-card)) * 0.25)');
+    expect(status).not.toHaveClass('is-indeterminate');
 
     // 下载收尾：槽收回去（内容还在，动画由 is-open 驱动）。
     await act(async () => finishDownload?.());

@@ -15,7 +15,7 @@ use crate::model_release::{
     MODEL_RELEASE_REPO,
 };
 
-use super::{dll_path, file_sha256, installed_variant, InstalledDll};
+use super::{dll_path, file_sha256, installed_variant, require_trusted_snippet, InstalledDll, SnippetTrust};
 
 /// 仓库正文里这份清单的文件名（与 `manifest.json` / `upscale-manifest.json` 同规矩）。
 pub const CATALOG_FILE: &str = "dlssnr-manifest.json";
@@ -192,7 +192,24 @@ fn put_in_place(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<
 }
 
 /// 把已经校验过的暂存文件装进数据目录，并报出装的是哪一种。
+///
+/// 「校验过」说的是字节数与 SHA-256 对得上清单；**签名**是另一件事，而且更靠前：清单里
+/// 那两条社区变体是签过名再被改过的，驱动拒它们（`docs/144`），所以这里还要再问一次
+/// ——装下去的唯一后果是用户开开合合却什么也没变。
 fn install_staged(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<InstalledDll, String> {
+    install_staged_with(staged, data_dir, SnippetTrust::Required)
+}
+
+/// 带策略的那一支：产品的下载路径走 [`SnippetTrust::Required`]，下面那几个拿合成字节
+/// 当夹具的用例显式跳过（它们问的是「就位与认变体」那条路径，不问签名）。
+fn install_staged_with(
+    staged: &std::path::Path,
+    data_dir: &std::path::Path,
+    trust: SnippetTrust,
+) -> Result<InstalledDll, String> {
+    if trust == SnippetTrust::Required {
+        require_trusted_snippet(staged)?;
+    }
     put_in_place(staged, data_dir)?;
     // 文件名没变、内容变了：进程内记住的那份指纹（产物身份与探针结论都看它）要作废。
     super::forget_fingerprint();
@@ -203,6 +220,7 @@ fn install_staged(staged: &std::path::Path, data_dir: &std::path::Path) -> Resul
         bytes,
         variant: variant.map(|value| value.id().to_string()),
         variant_label: variant.map(|value| value.label().to_string()),
+        version: super::dll_version(&target),
     })
 }
 
@@ -341,7 +359,8 @@ mod tests {
         let target = dll_path(directory.path());
         std::fs::create_dir_all(target.parent().expect("父目录")).expect("建目录");
         std::fs::write(&target, b"the previous snippet").expect("写旧的");
-        let installed = install_staged(&staged, directory.path()).expect("就位");
+        let installed = install_staged_with(&staged, directory.path(), SnippetTrust::Skipped)
+            .expect("就位");
         assert_eq!(installed.bytes, bytes.len() as u64);
         assert_eq!(std::fs::read(&target).expect("读回来"), bytes);
         assert!(!staged.exists(), "暂存文件该换成数据目录里那一份");
@@ -393,6 +412,29 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let staged = dir.path().join("dlssnr").join("nvngx_dlssnr--official.dll");
         assert!(install_staged(&staged, dir.path()).is_err());
+    }
+
+    /// 装之前拦一道：签名不过的片段不许就位（`docs/144`）。
+    ///
+    /// 这条用**真片段**：签名这种事问的是文件自己，合成字节答不了。社区包是本地夹具
+    /// （`docs/` 不进仓库），没有就跳过。
+    #[test]
+    fn a_snippet_whose_signature_does_not_check_out_is_not_put_in_place() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/DLSSNR-DLL-Options-310.8.0.0");
+        let community = root.join("Community-RTX40-RTX50").join("nvngx_dlssnr.dll");
+        if !community.is_file() {
+            println!("跳过：本地没有那份社区包（{}）", community.display());
+            return;
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        let staged = dir.path().join("dlssnr").join("nvngx_dlssnr--community.dll");
+        std::fs::create_dir_all(staged.parent().expect("父目录")).expect("建目录");
+        std::fs::copy(&community, &staged).expect("摆一份社区片段当暂存");
+
+        let refused = install_staged(&staged, dir.path()).expect_err("改过的片段不该就位");
+        assert!(refused.contains("签名"), "{refused}");
+        assert!(!dll_path(dir.path()).is_file(), "拒了就不许落下东西");
     }
 
     #[test]
@@ -455,7 +497,14 @@ mod tests {
         };
         assert_eq!(reported, total, "下载完该正好是清单上的字节数");
         verify_file(&staged, variant.size, &variant.sha256).expect("哈希对得上");
-        let installed = install_staged(&staged, data.path()).expect("就位");
+        // 这一条是清单里那两条社区变体的真实处境：字节数与哈希都对得上清单，**签名对不上**
+        // 文件自己的内容，所以驱动拒它（`docs/144`）。产品路径（不跳签名的那一支）得当场拒。
+        let refused = install_staged(&staged, data.path()).expect_err("改过的片段不该装进去");
+        assert!(refused.contains("签名"), "{refused}");
+        assert!(!dll_path(data.path()).is_file(), "拒了就不许落下东西");
+        // 跳过签名那一支照样要走通：它证的是「就位 + 认得出是哪一条」这条路本身。
+        let installed =
+            install_staged_with(&staged, data.path(), SnippetTrust::Skipped).expect("就位");
         assert_eq!(installed.variant.as_deref(), Some("sf-v2"));
         assert_eq!(installed_id(data.path()).as_deref(), Some("sf-v2"));
     }

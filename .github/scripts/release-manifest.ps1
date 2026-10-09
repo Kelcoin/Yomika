@@ -53,7 +53,7 @@ function Get-FileEntry([string] $base, [string] $relative) {
     }
 }
 
-$required = @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')
+$required = @('yomika.exe', 'DirectML.dll')
 $missing = @()
 foreach ($name in $required) { if (-not (Test-Path -LiteralPath (Join-Path $content $name))) { $missing += $name } }
 if ($missing.Count -gt 0) {
@@ -91,18 +91,39 @@ foreach ($descriptor in @(Get-ChildItem -LiteralPath (Join-Path $content 'data\m
     }
 }
 
-# 两份可执行文件的构建戳：不自己扫字节猜，直接问那个已经写好判据的脚本。
+# 构建戳：不自己扫字节猜，直接问那个已经写好判据的脚本。worker 现在**在主 exe 里**
+# （交付只有一个文件），所以要先把载荷解出来写成临时文件，再拿同一个脚本去验它——
+# 解出来的那一份必须与主 exe 同源，否则 10-a 的握手会拒跑。
 $commit = ''
 try { $commit = (& git -C $repo rev-parse --short=12 HEAD).Trim() } catch { }
 $stampScript = Join-Path $PSScriptRoot 'verify-build-stamp.ps1'
+. (Join-Path $PSScriptRoot 'worker-payload.ps1')
 $stamps = [ordered]@{ commit = $commit; main = $false; worker = $false }
-foreach ($pair in @(@('main', 'yomika.exe'), @('worker', 'yomika-compute-worker.exe'))) {
-    # 那个脚本对不上就 throw，所以「有没有抛」才是判据；`$LASTEXITCODE` 是上一条
-    # 本机命令留下的数，拿它当结论会把两种现场读成一样。
+try {
+    $null = & $stampScript -Path (Join-Path $content 'yomika.exe') -Commit $commit 2>&1
+    $stamps['main'] = $true
+} catch { $stamps['main'] = $false }
+$payloadInfo = $null
+$reading = Read-WorkerPayload -HostExe (Join-Path $content 'yomika.exe')
+if ($reading.Ok) {
+    $scratch = Join-Path $env:TEMP ("yomika-manifest-worker-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.exe')
     try {
-        $null = & $stampScript -Path (Join-Path $content $pair[1]) -Commit $commit 2>&1
-        $stamps[$pair[0]] = $true
-    } catch { $stamps[$pair[0]] = $false }
+        [System.IO.File]::WriteAllBytes($scratch, $reading.Bytes)
+        # 那个脚本对不上就 throw，所以「有没有抛」才是判据；`$LASTEXITCODE` 是上一条
+        # 本机命令留下的数，拿它当结论会把两种现场读成一样。
+        try {
+            $null = & $stampScript -Path $scratch -Commit $commit 2>&1
+            $stamps['worker'] = $true
+        } catch { $stamps['worker'] = $false }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Force -ErrorAction SilentlyContinue
+    }
+    $payloadInfo = [ordered]@{
+        where  = 'embedded in yomika.exe'
+        bytes  = $reading.Bytes.Length
+        sha256 = $reading.Digest
+        stamp  = $stamps['worker']
+    }
 }
 
 $version = '1.0.0'
@@ -153,6 +174,7 @@ $manifest = [ordered]@{
     }
     required      = $required
     files         = $files
+    workerPayload = $payloadInfo
     models        = $models
     licenses      = $licensed
     knownLimits   = $KnownLimits
@@ -167,6 +189,11 @@ $lines = New-Object System.Collections.ArrayList
 [void]$lines.Add('')
 [void]$lines.Add("- 构建：commit ``$commit``；构建戳 主 exe $(if ($stamps.main) { '对' } else { '**不对**' })、worker $(if ($stamps.worker) { '对' } else { '**不对**' })")
 [void]$lines.Add("- 协议大版本：$protocolMajor")
+if ($payloadInfo) {
+    [void]$lines.Add("- 计算进程：**嵌在主 exe 里**（$($payloadInfo.bytes) 字节，解出来 sha256 ``$($payloadInfo.sha256)``；跑起来仍是独立进程）")
+} else {
+    [void]$lines.Add("- 计算进程：**主 exe 里没找到 worker 载荷**")
+}
 $zipNote = ''
 if ($manifest.package.zip) { $zipNote = "；zip 的 sha256 " + (Quote $manifest.package.zip) }
 if ($manifest.package.archive) {

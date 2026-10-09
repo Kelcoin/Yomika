@@ -7,6 +7,11 @@
 # 2026-10-08 就是这么红的：主窗起来了、导航走得动，算力那一栏写着
 # 「找不到 worker 可执行文件：…\app\yomika-compute-worker.exe」。
 #
+# **2026-10-09 起交付只剩一个文件**：worker 的字节被压进主 exe（`docs/71` §11 Task 10
+# 第①条，解码在 `src/compute/worker_binary.rs`），跑起来仍是两个进程。所以
+# ① 这里**不许**再拷第二份可执行文件，② 自检反过来查「包面没有第二份 worker」，
+# ③ 那份载荷解得开、解出来的字节带着这一次的构建戳。
+#
 # 移到这里还有第二个好处：CI 与本地跑的是**同一条命令**，冷启动自检与清单都能
 # 在交付前自己跑一遍，不必等 push 之后看 CI。
 #
@@ -37,11 +42,14 @@ $stage = Resolve-InRepo $Stage
 $output = Resolve-InRepo $Output
 $manifestPath = Resolve-InRepo $Manifest
 
-# 包里该有的四样，**一件都不能少**。少一件就当场说清楚是少哪一件——这正是
-# 这一轮修的那个洞：原来只查了三样，worker 不在也没人问。
+# 包里该有的三样，**一件都不能少**。少一件就当场说清楚是少哪一件——这正是这一轮修的
+# 那个洞的教训：原来只查了三样，worker 不在也没人问。
+#
+# worker 不再单列：它现在在主 exe 的载荷里，由自检那三条（`no-separate-worker` /
+# `worker-payload` / `worker-payload-stamp`）把关。多列一项「worker-exe」等于要求包里
+# 出现第二个文件，与「交付只有一个文件」正好相反。
 $required = [ordered]@{
     'main-exe'    = Join-Path $targetDir 'yomika.exe'
-    'worker-exe'  = Join-Path $targetDir 'yomika-compute-worker.exe'
     'directml'    = Join-Path $targetDir 'DirectML.dll'
     'bundled-model' = Join-Path $targetDir 'data\models\waifu2x-upconv7'
 }
@@ -53,13 +61,13 @@ foreach ($key in $required.Keys) {
 if ($missing.Count -gt 0) {
     Write-Host '[BAD] 交付包里缺了该有的东西：'
     foreach ($item in $missing) { Write-Host "      - $item" }
-    Write-Host '      先跑 build-windows.ps1 -Release 把两份可执行文件编出来（计算进程是它的一部分）。'
+    Write-Host '      先跑 build-windows.ps1 -Release 把主 exe 编出来（worker 的字节由它嵌进去）。'
     exit 1
 }
 
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')) {
+foreach ($name in @('yomika.exe', 'DirectML.dll')) {
     Copy-Item -LiteralPath (Join-Path $targetDir $name) -Destination (Join-Path $stage $name) -Force
     Write-Host "拷进包：$name（$((Get-Item -LiteralPath (Join-Path $stage $name)).Length) 字节）"
 }
@@ -74,12 +82,12 @@ Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $output -Force
 $zip = Get-Item -LiteralPath $output
 Write-Host "打包：$output（$([Math]::Round($zip.Length / 1MB, 1)) MiB）"
 
-# 捧到「用户见到它的样子」上自检一遍：16 项里既查包里的字节，也查两份构建戳。
-# **单起一个 pwsh**：那个脚本用 exit 1 报不过，同进程 `&` 调会把整个会话结束掉。
+# 捧到「用户见到它的样子」上自检一遍。**单起一个 pwsh**：那个脚本用 exit 1 报不过，
+# 同进程 `&` 调会把整个会话结束掉。
 #
 # 这里给的是 **`-Path $stage`**，不是 `-Stage $stage`：那个脚本带着 `-Stage` 时会先按白名单
-# 从源目录**往这个目录里补文件**，于是「stage 里少了 worker」这种洞会被它自己补上、自检
-# 照样报 16 项全过——而 zip 是在自检**之前**压好的。这不是设想：变异 A 把拷贝清单里的
+# 从源目录**往这个目录里补文件**，于是「stage 里少了什么」这种洞会被它自己补上、自检
+# 照样报全过——而 zip 是在自检**之前**压好的。这不是设想：变异 A 把拷贝清单里的
 # worker 删掉之后，zip 里没有 worker，自检却全绿（2026-10-08 实测，日志
 # `debug_outputs/task10d/mut-a-copy-list.log`），那份 zip 拿去冷启动就是
 # 「找不到 worker 可执行文件」。自检要读的是**即将发布的那一份**本身。

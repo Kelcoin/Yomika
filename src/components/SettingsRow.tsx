@@ -17,13 +17,16 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 /** One setting row. A plain value row when there is nothing to open; a button
  * that opens a floating menu otherwise. Nothing in the row is shaped like a
  * field — choosing happens in the menu. */
-export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onClick, to, ariaLabel, expanded, busy, disabled, control }: {
+export function SettingsRow({ icon, label, hint, value, trailing = 'menu', mark, onClick, to, ariaLabel, expanded, busy, disabled, control }: {
   icon?: ReactNode;
   /** A node, not just a string: the server row trails a 「当前」 mark behind the
    * name, and that mark belongs to the label rather than the control slot. */
   label: ReactNode;
   hint?: string | undefined;
   value?: string | undefined;
+  /** A short mark behind the name (「有更新」). It rides with the label instead of
+   * taking the control slot, which is where the value lives. */
+  mark?: ReactNode | undefined;
   trailing?: 'menu' | 'nav' | 'none';
   /** A control of the row's own, sitting where the value would. The one-button
    * settings (模型导入) need their action right here instead of a second level. */
@@ -37,9 +40,11 @@ export function SettingsRow({ icon, label, hint, value, trailing = 'menu', onCli
   disabled?: boolean | undefined;
 }) {
   // A node label has no text to fall back on, so callers passing one must name
-  // the row themselves — which is what the server row already did.
+  // the row themselves — which is what the server row already did. The mark is
+  // decoration, so it does not count as a name either.
   const accessibleName = ariaLabel ?? (typeof label === 'string' ? label : undefined);
-  const body = <SettingsRowBody icon={icon} label={label} hint={hint} value={value} trailing={trailing} control={control} />;
+  const decorated = mark === undefined ? label : <>{label}<span className="settings-row-mark">{mark}</span></>;
+  const body = <SettingsRowBody icon={icon} label={decorated} hint={hint} value={value} trailing={trailing} control={control} />;
   const row = to ? (
     <Link className="settings-row settings-row-button" to={to} aria-label={accessibleName}>
       {body}

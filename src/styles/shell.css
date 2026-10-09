@@ -1319,6 +1319,11 @@ body::-webkit-scrollbar,
      内层同心值是 28 − 16 = 12（`--radius-card`）。套 `--radius-control`(8px) 时
      高亮块四角与面板四角不同心，看着就是用户报的「内外圆角不统一」。 */
   border-radius: var(--radius-card);
+  /* 下载进度那条横条铺满这一行的整宽，两端要由**这一行自己**削成同一个圆角——
+     宽行列表卡就是这么做的（`.archive-row` 同一对 `overflow: hidden` +
+     `border-radius: var(--radius-card)`）。缺这一句时横条两端是自由端，圆头/直角
+     直接杵在行的圆角外面，看上去是一条「游离在那一行之外」的独立横条。 */
+  overflow: hidden;
 }
 
 /* 行尾有下载/更新按钮时，左边补出同样宽度的一段留白，文字才回到这一行的中心。

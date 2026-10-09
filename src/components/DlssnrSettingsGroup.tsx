@@ -11,6 +11,8 @@ import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import { DLSSNR_PRESETS, presetOf } from '../domain/dlssnrPresets';
+import { installedDllLabel } from '../domain/dlssnrVersion';
+import { availableVariantUpdates, installedVariantId } from '../lib/dlssnrUpdates';
 import {
   DEFAULT_DLSSNR_PASS,
   MAX_DLSSNR_PASSES,
@@ -309,7 +311,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     }
     // 换成另一种变体之后旧结论作废，状态也得重新读一遍（装的是哪一条由它回答）。
     await refresh();
-    showToast(`已装好并启用：${result.value.variantLabel ?? variantId}${RESTART_NOTE}`, 'success');
+    showToast(`已装好并启用：${installedDllLabel(result.value.variantLabel, variantId, result.value.version)}${RESTART_NOTE}`, 'success');
   }
 
   if (!visible) return null;
@@ -329,6 +331,17 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   // 收窄成 null，`probe.error` 就读不出来了。
   const probed = status.available;
   const layerCount = passes.length;
+  // 盘上这一份是清单里的哪一条（清单没到就退回后端内置表），以及清单里有哪几条换了资产。
+  // 值里的兜底分两种：文件根本不在是「未安装」，在却不认识是「认不出的片段」——后者原先
+  // 也落进「未安装」，那是句谎话（165 MB 就在那儿）。
+  const installedVariant = installedVariantId(status, catalog);
+  const variantUpdates = availableVariantUpdates(status, catalog);
+  const outdatedVariants = new Set(variantUpdates.map((update) => update.id));
+  // 说给用户听的名字也优先取清单那一条：社区把同一条变体重发之后，后端那张内置表认不出
+  // 它、`status.variantLabel` 是空的，而清单还知道它叫什么。
+  const installedLabel = installedVariant === undefined
+    ? undefined
+    : catalog?.variants.find((entry) => entry.id === installedVariant)?.label ?? status.variantLabel ?? undefined;
 
   return (
     <div className="settings-group" role="region" aria-label="DLSSNR">
@@ -337,7 +350,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         label="启用 DLSSNR"
         hint={
             probed
-             ? `${status.variantLabel ?? 'nvngx_dlssnr'} · ${status.gpuName}`
+             ? `${installedDllLabel(installedLabel, 'nvngx_dlssnr', status.dllVersion)} · ${status.gpuName}`
              : '还没有片段：先在下面选择或导入组件'
         }
         disabled={!probed || !verified}
@@ -356,7 +369,18 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       {/* 片段本身：官方原版与社区版在模型仓库里各一条资产，分开维护，用哪一条用户自己挑。
           装的是哪一条由后端认哈希回答（`status.variant`）。子组标题只写中文：这一行的
           样式会把拉丁字母转成大写，文件名的大小写就丢了（导入那一行里写着原名）。 */}
-      <SettingsRow icon={<Download />} label="DLSSNR 组件" value={status.variantLabel ?? '未安装'} onClick={() => setVariantMenu(true)} />
+      {/* 值里带版本号：变体名只说「哪一条」，用户问「我装的是哪一版」要看文件自己报的
+          那一串（官方原版与社区版同一个变体名、版本号可能不同）。 */}
+      {/* 「有更新」看的是**哈希**：清单里那一条的 SHA-256 与盘上这份不同才算换过资产。
+          不能比字节数——官方原版与社区兼容版都是 165,840,496 字节，比字节数会把
+          「换了另一种变体」也算进来，还会在盘上那份读不出哈希时凭猜报更新。 */}
+      <SettingsRow
+        icon={<Download />}
+        label="DLSSNR 组件"
+        mark={variantUpdates.length > 0 ? '有更新' : undefined}
+        value={installedDllLabel(installedLabel, status.dllPresent ? '认不出的片段' : '未安装', status.dllVersion)}
+        onClick={() => setVariantMenu(true)}
+      />
       {variantMenu && <SettingsMenu title="DLSSNR 组件" icon={<DlssnrIcon />} onClose={() => setVariantMenu(false)}>
       <div className="settings-choice-list" role="group" aria-label="DLSSNR 组件">
         {catalog === undefined && (
@@ -370,11 +394,16 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           />
         )}
         {catalog?.variants.map((variant) => {
-          const installed = status.variant === variant.id;
+          // 装的是哪一条按**哈希**认（清单是活的权威）：同一条社区版被重发之后，后端那张
+          // 内置表认不出来了，可它仍然是用户装着的这一条。
+          const installed = installedVariant === variant.id;
+          const outdated = outdatedVariants.has(variant.id);
+          // 有更新的那一条不再算「当前就用这一份」：选中态还亮着的话，用户看不出该点更新。
+          const active = installed && !outdated;
           const recommended = status.recommendedVariant === variant.id;
           const busy = downloading === variant.id;
           const label = `${variant.label}${recommended ? '（推荐）' : ''}`;
-          return <div className={`settings-choice-option${installed ? ' is-active' : ''}`} key={variant.id}>
+          return <div className={`settings-choice-option${active ? ' is-active' : ''}`} key={variant.id}>
             {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
                 鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
             {/* 「已装上」= 「当前就用这一份」，不是不可用：它和档案库/设置里那些选择菜单的
@@ -387,19 +416,22 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
               className="settings-choice-option-main"
               type="button"
               disabled={downloading !== undefined}
-              aria-pressed={installed}
+              aria-pressed={active}
               title={variant.note || '下载后会被校验再装上'}
-              // 已经是这一份就没有要下的东西：直接什么都不做，别把同一条再下一遍。
-              onClick={() => { if (installed) return; void downloadVariant(variant.id); }}
+              // 已经是这一份、而且没换过资产，就没有要下的东西：直接什么都不做，别把同一条
+              // 再下一遍。换了资产的那一条要能点——点它就是更新。
+              onClick={() => { if (active) return; void downloadVariant(variant.id); }}
             >
               <span>{label}</span>
             </button>
             {/* 行尾走模型菜单那一套动作槽：还没装上的那条挂下载按钮，已装上的那条
                 （按钮自己不画）右侧就是空的。装的是哪一条由 is-active 与 aria-pressed
-                说，「使用中」与 DLL 体积不再写成行尾那行字。 */}
+                说，「使用中」与 DLL 体积不再写成行尾那行字。换过资产的那条按钮改叫更新
+                （`outdated`），和超分模型那一行是同一个控件、同一套说法。 */}
             <ModelDownloadButton
               option={{ value: variant.id, label }}
               installed={installed}
+              outdated={outdated}
               pending={downloading !== undefined}
               className="select-option-download"
               onDownload={() => void downloadVariant(variant.id)}

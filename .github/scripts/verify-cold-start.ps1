@@ -23,16 +23,16 @@
 #
 # 用法：
 #   pwsh -NoProfile -File .github/scripts/verify-cold-start.ps1 -Package <zip|目录> `
-#        [-Expect ready|broken|any] [-Needle <理由里该有的话>] [-SwapWorker <别处的 worker>]
-#        [-DropWorker] [-SeedLegacy] [-Runs 2] [-Out <目录>] [-Keep]
+#        [-Expect ready|broken|any] [-Needle <理由里该有的话>] [-SwapHost <别处的 yomika.exe>]
+#        [-BreakPayload] [-SeedLegacy] [-Runs 2] [-Out <目录>] [-Keep]
 # 退出码：0 = 每一条都成立；1 = 任何一条不成立。
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $Package,
     [ValidateSet('any', 'ready', 'broken')][string] $Expect = 'ready',
     [string] $Needle = '',
-    [string] $SwapWorker = '',
-    [switch] $DropWorker,
+    [string] $SwapHost = '',
+    [switch] $BreakPayload,
     [switch] $SeedLegacy,
     [int] $Runs = 1,
     [int] $Port = 0,
@@ -72,7 +72,10 @@ $packagePath = (Resolve-Path $Package).Path
 if (Test-Path -LiteralPath $packagePath -PathType Container) {
     # 目录：按 workflow 那份白名单搬（整棵 target\release 有几十 GB 的构建中间物，
     # 搬过来只会把「干净」两个字弄脏）。
-    $wanted = @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')
+    # 2026-10-09 起交付只有**一个可执行文件**：worker 的字节压在主 exe 的载荷里，所以
+    # 白名单里没有 `yomika-compute-worker.exe`。第二份文件出现在包里反而是缺陷
+    # （`verify-compute-package.ps1` 的 `no-separate-worker` 正是这么判的）。
+    $wanted = @('yomika.exe', 'DirectML.dll')
     foreach ($name in $wanted) {
         $source = Join-Path $packagePath $name
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $app $name) -Force }
@@ -97,14 +100,37 @@ if (-not (Test-Path -LiteralPath $exe)) {
     Say "冷启动自检不通过：包不完整。"
     exit 1
 }
-$workerPath = Join-Path $app 'yomika-compute-worker.exe'
-if ($DropWorker -and (Test-Path -LiteralPath $workerPath)) { Remove-Item -LiteralPath $workerPath -Force }if ($SwapWorker) {
-    if (-not (Test-Path -LiteralPath $SwapWorker)) { throw "要换进去的 worker 不在：$SwapWorker" }
-    Copy-Item -LiteralPath $SwapWorker -Destination $workerPath -Force
+# 「计算进程起不来」这一族现场在新形状下有两个等价物，都改在**主 exe** 上动手：
+#   `-BreakPayload` 把宿主里那份载荷正文翻一个字节（等价于旧形状里「worker 文件不在」）；
+#   `-SwapHost` 换一份别处的 `yomika.exe`（它带着**自己的**载荷与构建戳，等价于旧形状里
+#   「另一代的 worker」——握手那一步该照旧拒跑，而主窗不许被挡住）。
+$payloadReading = $null
+if ($BreakPayload) {
+    $bytes = [System.IO.File]::ReadAllBytes($exe)
+    $at = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes).IndexOf('YOMIKA-WORKER-PAYLOAD' + [char]0x01, [System.StringComparison]::Ordinal)
+    if ($at -lt 0) { throw "这一份主 exe 里本来就没有 worker 载荷，没法弄坏：$exe" }
+    # 头 = 记号(22：`YOMIKA-WORKER-PAYLOAD` 21 个字母 + 0x01) + 压缩长度(4) + 原始长度(4)
+    # + 摘要(32)，正文从这之后开始。翻**正文的最后一个字节**（不是文件的最后一个字节：
+    # 载荷躺在文件中间，文件尾巴与它没关系），这样解压本身就会失败，把「载荷读不出来」
+    # 那条路走到。
+    $head = $at + 22
+    $compressed = [System.BitConverter]::ToUInt32($bytes, $head)
+    $last = $head + 8 + 32 + $compressed - 1
+    if ($last -ge $bytes.Length) { throw "载荷头说正文有 $compressed 字节，文件里放不下：$exe" }
+    $bytes[$last] = $bytes[$last] -bxor 0xFF
+    [System.IO.File]::WriteAllBytes($exe, $bytes)
+}
+if ($SwapHost) {
+    if (-not (Test-Path -LiteralPath $SwapHost)) { throw "要换进去的主 exe 不在：$SwapHost" }
+    Copy-Item -LiteralPath $SwapHost -Destination $exe -Force
+}
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'worker-payload.ps1')) {
+    . (Join-Path $PSScriptRoot 'worker-payload.ps1')
+    $payloadReading = Read-WorkerPayload -HostExe $exe
 }
 
 $inventory = @()
-foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')) {
+foreach ($name in @('yomika.exe', 'DirectML.dll')) {
     $path = Join-Path $app $name
     if (Test-Path -LiteralPath $path) {
         $item = Get-Item -LiteralPath $path
@@ -114,11 +140,24 @@ foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')) 
     }
 }
 $modelFiles = @(Get-ChildItem -LiteralPath (Join-Path $app 'data\models') -Recurse -File -ErrorAction SilentlyContinue)
-Note 'package-inventory' $true ("主 exe {0:N0} B；worker {1}；DirectML.dll {2}；随包模型 {3} 个文件" -f `
+Note 'package-inventory' $true ("主 exe {0:N0} B；包面第二份 worker {1}；DirectML.dll {2}；随包模型 {3} 个文件" -f `
     ($inventory | Where-Object { $_.name -eq 'yomika.exe' }).bytes,
-    $(if ($inventory | Where-Object { $_.name -eq 'yomika-compute-worker.exe' -and -not $_.missing }) { '在' } else { '不在' }),
+    $(if (Test-Path -LiteralPath (Join-Path $app 'yomika-compute-worker.exe')) { '在（说好只有一个文件，这是缺陷）' } else { '不在（就该不在）' }),
     $(if ($inventory | Where-Object { $_.name -eq 'DirectML.dll' -and -not $_.missing }) { '在' } else { '不在' }),
     $modelFiles.Count)
+# 载荷这一条是**单文件**这条交付承诺的直接判据：宿主里解得开、摘得到，才谈得上
+# 「主 exe 自己把 worker 摆出来再拉起来」。`-BreakPayload`/`-SwapHost` 这两族负现场
+# 就是冲着它来的。
+if ($payloadReading) {
+    if ($BreakPayload) {
+        # 这一跑故意把载荷弄坏了：要量的是「坏了之后界面还能不能用」，所以这一条在这里
+        # 不是判据，而是一句**说明**——写成 [BAD] 会让「期望的行为」与「故意造的现场」
+        # 混成一件事，读报告的人再也分不清哪一条是真的缺陷。
+        Note 'worker-payload' $true "故意弄坏（这一跑量的是它坏掉之后会怎样）：$($payloadReading.Reason)"
+    } else {
+        Note 'worker-payload' $payloadReading.Ok ("宿主里的 worker 载荷：" + $(if ($payloadReading.Ok) { "{0:N0} 字节，sha256 $($payloadReading.Digest)" -f $payloadReading.Bytes.Length } else { $payloadReading.Reason }))
+    }
+}
 
 # ---- 旧机器上留下来的数据（-SeedLegacy） -------------------------------------
 # 「升级/回退可恢复、用户数据无破坏」（docs/71:668）在一台干净机器上就只有这一种量法：
@@ -314,8 +353,8 @@ $report = [ordered]@{
     package         = $packagePath
     expect          = $Expect
     needle          = $Needle
-    dropWorker      = [bool] $DropWorker
-    swapWorker      = $SwapWorker
+    breakPayload    = [bool] $BreakPayload
+    swapHost        = $SwapHost
     seedLegacy      = [bool] $SeedLegacy
     runs            = [Math]::Max(1, $Runs)
     port            = $Port

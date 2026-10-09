@@ -125,6 +125,29 @@ describe('DLSS5 settings group', () => {
     expect(adapter.mock.calls.some(([command]) => command === 'dlssnr_status')).toBe(false);
   });
 
+  it('reports which version of the snippet is installed, not just which variant', async () => {
+    // 「装的是哪一条」与「装的是哪一版」是两件事：变体按我们认得的三种哈希回答，版本号
+    // 只有文件自己的版本资源说得出来（导入一份社区新发的 DLL 时变体认不出，版本照样有）。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ dllVersion: '310.8.0.0' }) }),
+    }));
+    renderDlssnr();
+    // 组件那一行的值：变体名后面跟版本号。
+    expect(await screen.findByText('社区兼容版（RTX 40 / 50 系） · 310.8.0.0')).toBeInTheDocument();
+    // 开关那一行的说明也跟着带上，用户不用打开菜单就知道装的是哪一版。
+    expect(screen.getByText('社区兼容版（RTX 40 / 50 系） · 310.8.0.0 · NVIDIA GeForce RTX 4070')).toBeInTheDocument();
+  });
+
+  it('says nothing about a version it cannot read', async () => {
+    // 读不出来就是不说：留个「未知」会与「没有片段」混在一起，比不写更糟。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ dllVersion: null }) }),
+    }));
+    renderDlssnr();
+    expect(await screen.findByText('社区兼容版（RTX 40 / 50 系）')).toBeInTheDocument();
+    expect(screen.queryByText(/未知/)).toBeNull();
+  });
+
   it('allows the switch when a DLL is present without a mandatory probe', async () => {
     const user = userEvent.setup();
     let probed = false;
@@ -218,6 +241,81 @@ describe('DLSS5 settings group', () => {
     await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
     await waitFor(() => expect(screen.getByText(/已装好并启用/)).toBeTruthy());
+  });
+
+  it('marks the component row when the catalog carries other bytes than the one on disk', async () => {
+    const user = userEvent.setup();
+    // 官方原版与社区兼容版**字节数完全相同**（165,840,496）：换过资产只能看哈希。盘上那份
+    // 是老哈希（内置表还认得出这是 community），清单里那条已经是别的字节 —— 该说「有更新」。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ variant: 'community', dllSha256: 'ff'.repeat(32) }) }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
+    expect(within(row).getByText('有更新')).toBeTruthy();
+
+    await user.click(row);
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    // 换过资产那一条不再算「当前这一份」：选中态让出来，用户才看得出该点更新。
+    expect(rows.every((item) => !item.classList.contains('is-active'))).toBe(true);
+    // 行尾动作改叫更新（和超分模型那一行同一个控件），另外两条照旧是下载。
+    expect(within(snippets).getByRole('button', { name: /^更新/ })).toBeTruthy();
+    expect(within(snippets).getAllByRole('button', { name: /^下载/ })).toHaveLength(2);
+  });
+
+  it('leaves a variant alone when the disk copy is the catalog’s own bytes', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ variant: 'community', dllSha256: '98'.repeat(32) }) }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
+    expect(within(row).queryByText('有更新')).toBeNull();
+
+    await user.click(row);
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    const active = rows.find((item) => item.classList.contains('is-active'))!;
+    expect(active.textContent).toContain('社区兼容版');
+    expect(active.querySelector('button.select-option-download')).toBeNull();
+    expect(within(snippets).queryByRole('button', { name: /^更新/ })).toBeNull();
+  });
+
+  it('recognises a community build the built-in table no longer knows', async () => {
+    const user = userEvent.setup();
+    // 社区把同一条变体重发之后，后端那张硬编码的内置表认不出它（`variant` 为 null），
+    // 而清单按哈希认得出「这还是 community」——名字也就该照清单说。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ variant: null, variantLabel: null, dllSha256: '98'.repeat(32) }) }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
+    expect(row.textContent).toContain('社区兼容版');
+    expect(row.textContent).not.toContain('认不出的片段');
+
+    await user.click(row);
+    const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    expect(rows.find((item) => item.classList.contains('is-active'))!.textContent).toContain('社区兼容版');
+  });
+
+  it('says the snippet is unrecognised instead of claiming nothing is installed', async () => {
+    // 文件在、哈希谁都不认识：说「未安装」是句谎话（165 MB 就在那儿），说它是哪一条也是猜。
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ variant: null, variantLabel: null, dllSha256: 'aa'.repeat(32) }) }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
+    expect(row.textContent).toContain('认不出的片段');
   });
 
   it('keeps the installed variant as a selectable row instead of a disabled one', async () => {

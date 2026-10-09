@@ -1,5 +1,6 @@
 import { CardTagRows, ArchiveCardTags } from './CardTagRows';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { CardProgressBar } from './CardProgressBar';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
@@ -22,43 +23,12 @@ const imageCache = getNativeImageCache();
 export function ArchiveProgressBar({ page, pageCount, visibility, cornerAware = false }: { page?: number | null | undefined; pageCount: number; visibility?: 'none' | 'history' | 'all' | undefined; cornerAware?: boolean }) {
   const preferredVisibility = useProgressBarVisibility();
   const mode = visibility ?? preferredVisibility ?? 'history';
-  /** 钩子不能排在早退之后：mode 或 page 一变，钩子数量就跟着变。 */
+  /** 钩子不能排在早退之后：mode 或 page 一变，钩子数量就跟着变。测量那一半在
+   * `CardProgressBar` 里（它自己是个组件，没渲染就没有钩子），这里只剩这一个。 */
   const visible = mode !== 'none' && !(mode === 'history' && page == null);
-  /** 轨道的实测宽度。填充必须写成绝对长度，`transition: width` 才有得插值：
-   * 百分比的计算值就是百分比本身，列宽变化（打开详情页会把档案库挤窄）时新旧
-   * 计算值一模一样，CSS 过渡直接跳过——用户报的就是这个变化没有动画。
-   * 还没量到就先按百分比画，首帧不会空着。 */
-  const trackRef = useRef<HTMLSpanElement>(null);
-  const [trackWidth, setTrackWidth] = useState(0);
-  useEffect(() => {
-    const element = trackRef.current;
-    if (!element || typeof ResizeObserver === 'undefined') return undefined;
-    const measure = () => setTrackWidth(element.clientWidth);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [visible]);
   if (!visible) return null;
   const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round(((page ?? 0) / pageCount) * 100))) : 0;
-  /** 画到 100% 时前端已经顶到卡片边缘，圆头会在这里留下一小块轨道底色——看着像
-   * 没读完。所以只有「还在读」的那一段带前缘圆角（见 shell.css 里那两条规则）。 */
-  const complete = percent >= 100;
-  /** 宽行卡片的横条横跨整张卡片本体（两端压在卡片自己的圆角上，见 shell.css 那条），
-   * 但长度只算两段圆角之间的直边：填充从 x = 0 写起，宽度是「一个半径 + 直边的一段」，
-   * 于是 1% 也从圆角的另一侧起算、是一段完整的量，而不是先在弧里糊一小块。
-   * 轨道没有内缩，所以这是从卡片左边缘起算的绝对宽度。 */
-  const straight = cornerAware && !complete && percent > 0;
-  const width = trackWidth > 0
-    ? straight
-      ? `calc(var(--radius-card) + (${trackWidth}px - 2 * var(--radius-card)) * ${percent / 100})`
-      : `${(percent / 100) * trackWidth}px`
-    : straight
-      ? `calc(var(--radius-card) + (100% - 2 * var(--radius-card)) * ${percent / 100})`
-      : `${percent}%`;
-  return <span ref={trackRef} className={`archive-card-progress${complete ? ' is-complete' : ''}`} role="progressbar" aria-label="阅读进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
-    <span className="archive-card-progress-fill" style={{ width }} />
-  </span>;
+  return <CardProgressBar percent={percent} label="阅读进度" cornerAware={cornerAware} />;
 }
 
 export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined }) {

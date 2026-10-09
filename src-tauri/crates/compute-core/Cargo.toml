@@ -56,8 +56,14 @@ cc = "1"
 # NGX/D3D12 那一套（`dlssnr` 模块）只在 Windows 上有意义，而且是宿主与 worker 共用
 # 的同一份实现，所以按目标门着。不用 optional：它是目标门控的依赖，`dep:` 语法在
 # 「仅某目标」这一层会连带要求 feature 与目标同时成立，读起来比目标门本身更绕。
+# `Win32_Storage_FileSystem` 是 `GetFileVersionInfo*` / `VerQueryValueW` 所在的那一节：
+# 设置页要报「装的片段是哪一版」，去问文件自己的版本资源（`dll_version`）。
+# `Win32_Security_WinTrust` 是 `WinVerifyTrust` 那一节：装片段之前要先问一次「驱动认不认
+# 它」（`signature_verdict`）——`docs/144` 量到改过一个字节的片段驱动就拒，报出来的却是
+# 「初始化功能失败」，用户完全看不出是签名的事。`WINTRUST_DATA` / `WINTRUST_FILE_INFO`
+# 这两个结构在 windows 0.62 里门在 `Win32_Security_Cryptography` 后面，所以那一节也要开。
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_WinTrust", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [features]
 default = []

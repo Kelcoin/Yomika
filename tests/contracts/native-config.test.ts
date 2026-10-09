@@ -255,6 +255,51 @@ describe('native shell configuration', () => {
     expect(tomlSection(manifest, '[features]')).not.toContain('dep:sha2');
   });
 
+  it('reads the installed snippet’s version off the file itself, and shows it where the snippet is named', () => {
+    // 「装的是哪一条」与「装的是哪一版」是两件事：变体按我们认得的三种哈希回答，版本号
+    // 只有文件自己的版本资源说得出来（用户导入一份社区新发的 DLL 时变体认不出，版本照样
+    // 报得出来）。所以这里钉三件事：读的是 PE 的版本资源而不是我们自己编的表、读不出来
+    // 就什么都不说、以及两个显示点用的是同一句话。
+    const module = read('../../src-tauri/crates/compute-core/src/dlssnr/mod.rs');
+    expect(module).toMatch(/pub fn dll_version\(path: &std::path::Path\) -> Option<String> \{/);
+    // 问系统的版本资源：翻译表 → 那一种语言的 `FileVersion` 字符串（SF-v2 的
+    // `310.8.SF.0` 只在这里），固定版本号那一支只当退路。
+    expect(module).toContain('GetFileVersionInfoSizeW');
+    expect(module).toContain('VerQueryValueW');
+    expect(module).toContain('\\\\VarFileInfo\\\\Translation');
+    expect(module).toContain('\\\\StringFileInfo\\\\{:04x}{:04x}\\\\FileVersion');
+    expect(module).toContain('VS_FIXEDFILEINFO');
+    expect(module).toContain('0xFEEF04BD');
+    // 两份真片段的资源写法不同（官方原版 `310,8,0,0`、SF-v2 `310.8.SF.0`），摆在一列里
+    // 得像同一个东西：只把分隔符统一成点分，数字一个不动。
+    expect(module).toContain("text.replace(',', \".\")");
+    // 这一条测试要真片段当夹具，缺了它必须红而不是静默跳过——否则干净检出会把它读成绿的。
+    expect(module).toContain('fn the_shipped_dlls_report_the_version_windows_shows()');
+    // 状态与回执各带一份：设置页读状态，导入/下载的回执拿它回一句话。
+    expect(module).toMatch(/pub dll_version: Option<String>,/);
+    expect(module).toMatch(/pub version: Option<String>,/);
+    // 让 `dll_version` 编得起来的那个 feature：`GetFileVersionInfo*` 在
+    // `Win32_Storage_FileSystem` 那一节里。
+    expect(read('../../src-tauri/crates/compute-core/Cargo.toml')).toContain('"Win32_Storage_FileSystem"');
+    // 前端：schema 收得下这个字段（老后端没有它，所以可选），两处显示共用同一句话。
+    const repository = read('../../src/repositories/nativeDlssnrRepository.ts');
+    expect(repository).toContain('dllVersion: z.string().nullable().optional(),');
+    expect(repository).toContain('version: z.string().nullable().optional(),');
+    const domain = read('../../src/domain/dlssnrVersion.ts');
+    expect(domain).toContain('export function installedDllLabel(');
+    expect(domain).toMatch(/return version \? ` · \$\{version\}` : '';/);
+    const group = read('../../src/components/DlssnrSettingsGroup.tsx');
+    // 两个显示点都用**认出来的那一条**的名字：社区把同一条重发之后内置表认不出它，
+    // 名字得由清单按哈希说（`installedLabel`），不能退回 `status.variantLabel` 的空。
+    expect(group).toContain(
+      "installedDllLabel(installedLabel, status.dllPresent ? '认不出的片段' : '未安装', status.dllVersion)",
+    );
+    expect(group).toContain("installedDllLabel(installedLabel, 'nvngx_dlssnr', status.dllVersion)");
+    expect(read('../../src/components/SettingsWorkspace.tsx')).toContain(
+      "installedDllLabel(result.value.variantLabel, '自定义 DLL', result.value.version)",
+    );
+  });
+
   it('asks the worker which engines exist instead of this build asking itself', () => {
     // 宿主没有 NGX 垫片、也不该有：「这一份二进制有没有链上核心」对宿主永远是否定的，
     // 那不是这台机器的事实，是宿主这份二进制的样子。所以宿主不再自查核心；引擎那一侧
@@ -1392,8 +1437,9 @@ describe('native shell configuration', () => {
       'const fn build_commit_bytes() -> [u8; BUILD_COMMIT.len()] {',
     );
 
-    // ④ 打包：编出来、验戳、摆到主 exe 旁边。原来没有人编 worker——少这一步，交付的
-    // 便携目录里就没有这一份 exe。
+    // ④ 打包：先把 worker 编出来，再把它的字节**嵌进主 exe**——交付只有一个可执行
+    // 文件，跑起来仍是两个进程（2026-10-09，`docs/141`）。原来没有人编 worker；
+    // 后来编了但只是摆在旁边（第二个文件）；现在是嵌进去。
     expect(workerScript, 'worker 的构建脚本要自己验一遍戳').toContain(
       '& (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $final',
     );
@@ -1406,8 +1452,59 @@ describe('native shell configuration', () => {
     expect(workerScript, '参数不能叫 -Debug：CmdletBinding 自带那个通用参数，重名则一行都跑不到').not.toContain(
       '[switch]$Debug,',
     );
-    expect(windowsScript, 'Windows 打包必须顺手编出 worker 并摆到主 exe 旁边').toContain(
+    expect(windowsScript, 'Windows 打包必须顺手编出 worker 并…').toContain(
       '& (Join-Path $PSScriptRoot "build-compute-worker.ps1") @workerArgs',
+    );
+    // 嵌哪一份、嵌不嵌，都是**显式输入**：`build.rs` 照这两个变量去读字节，读不到就
+    // 当场让构建失败（悄悄用上一次那一份，等于把两半的戳错开）。
+    expect(windowsScript, '嵌进去的那一份要显式指给 build.rs').toContain("$env:YOMIKA_WORKER_BINARY = $workerBinary");
+    expect(windowsScript, '嵌的开关也要显式打开').toContain("$env:YOMIKA_EMBED_WORKER = '1'");
+    const workerBuildAt = windowsScript.indexOf('build-compute-worker.ps1');
+    const hostBuildAt = windowsScript.indexOf('"run", "tauri", "build"');
+    expect(
+      workerBuildAt >= 0 && hostBuildAt >= 0 && workerBuildAt < hostBuildAt,
+      'worker 必须先编：顺序反了，嵌进去的就是上一次那一份（worker ' +
+        workerBuildAt +
+        ' / 宿主 ' +
+        hostBuildAt +
+        '）',
+    ).toBe(true);
+    expect(windowsScript, '编完的宿主自己要能被读出载荷，读不出就不是单文件产物').toContain(
+      '主 exe 里那份 worker 载荷读不出来',
+    );
+
+    // ⑤ 字节形态：载荷躺在文件中间，所以读写两侧对「记号」的长度必须一个字节不差。
+    const buildScript = read('../../src-tauri/build.rs');
+    const payloadModule = read('../../src-tauri/src/compute/worker_binary.rs');
+    expect(buildScript, '不嵌的时候写一份空载荷：日常 cargo test 不该把 24 MB 塞进每个测试二进制').toContain(
+      'const GENERATED_WITHOUT_WORKER',
+    );
+    expect(buildScript, '开着开关却找不到 worker 就当场失败，不许悄悄编出一个没有 worker 的宿主').toContain(
+      'YOMIKA_EMBED_WORKER 开着，却找不到 worker 可执行文件',
+    );
+    expect(buildScript, '宿主里那份载荷是压过的：否则 `no-host-ort` 那两条字节判据会红在自己的产物上').toContain(
+      'fn pack_worker_payload(',
+    );
+    expect(payloadModule, '记号是 21 个字母加一个 0x01，长度取常量而不是另抄一个数').toContain(
+      "const MAGIC: &[u8] = b\"YOMIKA-WORKER-PAYLOAD\\x01\";",
+    );
+    expect(payloadModule, '主程序旁边写得进去就写旁边，写不进去退到数据目录').toContain(
+      'pub fn ensure(beside: &Path, fallback_dir: &Path, payload: Option<&[u8]>) -> PathBuf',
+    );
+    expect(payloadModule, '上一代那一份要收走：24 MB 一份，升级几次就是几百兆').toContain('fn forget_older(');
+    expect(payloadModule, '写旁边失败就退到数据目录，两处都得试').toContain(
+      'if !fallback_dir.as_os_str().is_empty() && fallback_dir != beside.parent().unwrap_or(Path::new("")) {',
+    );
+    expect(payloadModule, '落点名字就是摘要：一份坏了也不会与上一代串味').toContain(
+      'let name = format!("{stem}-{}{extension}", short_hex(&digest));',
+    );
+    // 三份拷贝里，PowerShell 这一份是自检与清单、冷启动共用的那个读端。它的头偏移必须
+    // 由记号长度推出来：抄一个 21 进去就会把正文读成垃圾（2026-10-09 实测
+    // `packedLength=2,080,094,465`，而 `+22` 才对）。
+    const payloadReader = read('../../.github/scripts/worker-payload.ps1');
+    expect(payloadReader, '记号的长度取常量，不另抄一个数').toContain('$head = $at + $script:PayloadMagic.Length');
+    expect(payloadReader, '解出来的字节要与载荷头里的摘要逐字节比').toContain(
+      '解出来的字节与载荷头里的摘要对不上',
     );
   });
 
@@ -1419,7 +1516,22 @@ describe('native shell configuration', () => {
       '$stageFull = (Resolve-Path -LiteralPath $Stage).Path',
     );
     expect(pkg, '进包的是枚举白名单，不是「整个目录去掉几个」').toContain(
-      "foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')) {",
+      "foreach ($name in @('yomika.exe', 'DirectML.dll')) {",
+    );
+    // 交付只有一个可执行文件：包面再冒出一份 worker，是「单文件」这句话被破了，
+    // 不是「多一份保险」（2026-10-09，`docs/141`）。
+    expect(pkg, '包面不许有第二份 worker 可执行文件').toContain("Note 'no-separate-worker'");
+    expect(pkg, 'worker 的字节要从主 exe 里解出来才算数').toContain(
+      '$reading = Read-WorkerPayload -HostExe $hostExe',
+    );
+    expect(pkg, '解出来之后还要单独验它带的构建戳').toContain("Note 'worker-payload-stamp'");
+    // 8-h⑤ 的教训：守卫软跳过时「绿」什么都不算——载荷缺失时那两条查 worker 字节的
+    // 判据必须留下名字并记假，报告里少两行比多两行红更容易被读成「这一项过了」。
+    expect(pkg, 'worker 的字节没解出来时，那两条字节判据也要记假而不是消失').toContain(
+      "Note 'worker-has-ngx' $false 'worker 的字节没解出来，查不了'",
+    );
+    expect(pkg, '包面无缘无故少一条判据是查不到的：主 exe 不在时载荷那两条也记假').toContain(
+      "Note 'worker-payload' $false '包里没有主 exe，无从谈载荷'",
     );
 
     // ② 查的是包面事实：这个包最终要去一台没装 CUDA、没装 Vulkan、甚至没有 N 卡的机器
@@ -1610,9 +1722,16 @@ describe('native shell configuration', () => {
     // 用户数据不许被弄坏、两半不是同一次构建时主窗不许被挡住。这些不是「CI 里看一眼」，
     // 是交付前在**这份拷贝上**跑得出来的入口。
     const packager = read('../../.github/scripts/package-windows.ps1');
-    // 四样缺一件就红——这一轮修的洞就是原来少算了 worker 那一份。
-    expect(packager, '包里该有四样，worker 那一份不许再漏').toContain(
-      "'worker-exe'  = Join-Path $targetDir 'yomika-compute-worker.exe'",
+    // 三样缺一件就红。worker 不在这一列里：它在主 exe 的载荷里，包面出现第二份反而是
+    // 缺陷（`no-separate-worker` 那一条查的就是它）。
+    expect(packager, '包里该有的三样：主 exe、运行库、随包模型').toContain(
+      "'main-exe'    = Join-Path $targetDir 'yomika.exe'",
+    );
+    expect(packager, 'worker 不再单列：多列一项等于要求包里出现第二份').toContain(
+      'worker 不再单列：它现在在主 exe 的载荷里',
+    );
+    expect(packager, '摆进包里的就两个可执行/库文件，worker 不许跟着拷').toContain(
+      "foreach ($name in @('yomika.exe', 'DirectML.dll')) {",
     );
     expect(packager, '缺件要当场说清楚缺的是哪一件').toContain('[BAD] 交付包里缺了该有的东西：');
     expect(packager, '自检要单起一个 pwsh（那个脚本用 exit 1）').toContain(
@@ -1640,7 +1759,20 @@ describe('native shell configuration', () => {
 
     const coldStart = read('../../.github/scripts/verify-cold-start.ps1');
     expect(coldStart, '便携包按白名单摆，不搬开发机那一整棵 data/').toContain(
-      "foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll'))",
+      "foreach ($name in @('yomika.exe', 'DirectML.dll')) {",
+    );
+    // 冷启动是「单文件」这句话最终的判据：把主 exe 单独摆进一个空目录，它得自己把
+    // 载荷落出来、再拉起来（日志里那句「把随包的 worker 落到 …」）。
+    expect(coldStart, '这一跑也要说得出拷贝里有没有第二份 worker').toContain('包面第二份 worker');
+    expect(coldStart, '主 exe 里那份载荷要解得开').toContain('Read-WorkerPayload -HostExe');
+    expect(coldStart, '载荷坏掉那一幕不能靠删文件来演：删的是文件，坏的是字节').toContain(
+      "[switch] $BreakPayload",
+    );
+    expect(coldStart, '拿另一份宿主来演「不是同一次构建」，而不是换一份 worker 文件').toContain(
+      "[string] $SwapHost = ''",
+    );
+    expect(coldStart, '故意造的现场不许记成 [BAD]，否则读报告的人分不清哪条是真缺陷').toContain(
+      '故意弄坏（这一跑量的是它坏掉之后会怎样）',
     );
     // 两扇窗刚起来时都是 about:blank：只看「不是托盘菜单」会把托盘那一页当主窗接上
     // （2026-10-08 实测：探针挂上去等满 60 秒，日志还写着「主窗起来了」）。
@@ -1666,7 +1798,25 @@ describe('native shell configuration', () => {
       "function Quote([string] $text) { return '``' + $text + '``' }",
     );
     expect(manifest, '协议大版本要从协议 crate 里读出来，不许手抄').toContain('PROTOCOL_MAJOR:\\s*u32\\s*=\\s*(\\d+)');
-    expect(manifest, '构建戳那条判据是「有没有抛」，不是 `$LASTEXITCODE`').toContain('$stamps[$pair[0]] = $true');
+    expect(manifest, '构建戳那条判据是「有没有抛」，不是 `$LASTEXITCODE`').toContain(
+      "} catch { $stamps['main'] = $false }",
+    );
+    expect(manifest, 'worker 那一半同样：解出来的字节对不上戳就如实记假').toContain(
+      "} catch { $stamps['worker'] = $false }",
+    );
+    // 判据自己也要被钉住：把「有没有抛」换成 `$LASTEXITCODE`，两种现场就读成一样了
+    // （那个变量的值是上一条本机命令留下的）。
+    expect(manifest, '为什么不能拿 $LASTEXITCODE 当结论，理由要留在原地').toContain('有没有抛');
+
+    // 交付的是一个文件：清单与自检都要从主 exe 里把 worker 的字节解出来，再问它带的是
+    // 不是这一次的戳（10-a 的握手就是拿这两半比）。
+    expect(manifest, '清单不自己扫字节猜：载荷用同一个读端解').toContain(
+      '$reading = Read-WorkerPayload -HostExe (Join-Path $content \'yomika.exe\')',
+    );
+    expect(manifest, '载荷那一栏要写清它在哪、多大、摘要、戳对不对').toContain(
+      "where  = 'embedded in yomika.exe'",
+    );
+    expect(manifest, '给人的那一份也要说得出「跑起来仍是独立进程」').toContain('跑起来仍是独立进程');
 
     const operators = read('../../docs/14-release-and-operations.md');
     expect(operators, '运行命令要写在文档里，不是只活在 CI 里').toContain('.github/scripts/package-windows.ps1');
@@ -1906,5 +2056,97 @@ describe('native shell configuration', () => {
     expect(proxy, '前端的码仍然只认翻译后的那一个').toContain(
       'let note = manager.failure_note(&submitted.job_id);',
     );
+  });
+
+  it('tells two community snippets apart by hash, and never by their size', () => {
+    const core = read('../../src-tauri/crates/compute-core/src/dlssnr/mod.rs');
+    const metadata = read('../../src-tauri/crates/compute-core/tests/dlssnr_metadata.rs');
+    const updates = read('../../src/lib/dlssnrUpdates.ts');
+    const repository = read('../../src/repositories/nativeDlssnrRepository.ts');
+    const group = read('../../src/components/DlssnrSettingsGroup.tsx');
+    const row = read('../../src/components/SettingsRow.tsx');
+
+    // 官方原版与社区兼容版都是 165,840,496 字节——**只有哈希分得开**。所以「装的是哪一版」
+    // 这件事，后端得把哈希说出来，前端只能拿哈希去比。
+    expect(core, '盘上那份的哈希要有一栏说得出').toContain('pub dll_sha256: Option<String>,');
+    expect(core, '认变体与报哈希共用同一遍读，别把那 165 MB 读两遍').toContain(
+      'let fingerprint = dll_bytes.is_some().then(|| cached_fingerprint(&dll)).flatten();',
+    );
+    expect(core, '报出去的就是指纹本身').toContain('dll_sha256: fingerprint.map(|(_, digest)| digest),');
+    expect(metadata, '量的是文件自己的哈希，不是长度').toContain('"指纹是这份文件自己的哈希"');
+
+    expect(repository, '状态里那一栏跟着协议走，老后端没有也收').toContain(
+      'dllSha256: z.string().nullable().optional(),',
+    );
+
+    expect(updates, '两份哈希按同一口径比（大小写与空白不算数）').toContain(
+      'function sameDigest(left: string | null | undefined, right: string | null | undefined): boolean {',
+    );
+    expect(updates, '装的是哪一条：先按清单的哈希认，认不出才退回内置表').toContain(
+      'const hit = catalog?.variants.find((variant) => sameDigest(variant.sha256, digest));',
+    );
+    expect(updates, '哈希读不出来时什么都不报——退回字节数就是凭猜').toContain(
+      'if (!id || !installed?.trim() || !catalog) return [];',
+    );
+    expect(updates, '同一份字节不算更新').toContain('if (!variant || sameDigest(variant.sha256, installed)) return [];');
+
+    expect(group, '行上那一枚标记看的是更新表，不是「目录在不在」').toContain(
+      "mark={variantUpdates.length > 0 ? '有更新' : undefined}",
+    );
+    expect(group, '哪一条装了：按哈希认，不再比 id 字面量').toContain('const installedVariant = installedVariantId(status, catalog);');
+    expect(group, '换过资产的那一条是「有更新」的那一条').toContain('const outdated = outdatedVariants.has(variant.id);');
+    expect(group, '行尾动作跟着改叫更新').toContain('outdated={outdated}');
+    expect(group, '文件在却不认识时不许说「未安装」').toContain("status.dllPresent ? '认不出的片段' : '未安装'");
+
+    expect(row, '标记跟着名字走，不占控件那一格').toContain('mark?: ReactNode | undefined;');
+    expect(row, '画的还是那一枚 pill（一处定义）').toContain('<span className="settings-row-mark">{mark}</span>');
+  });
+
+  it('asks the driver’s question before a snippet replaces the one that works', () => {
+    const core = read('../../src-tauri/crates/compute-core/src/dlssnr/mod.rs');
+    const cargo = read('../../src-tauri/crates/compute-core/Cargo.toml');
+    const metadata = read('../../src-tauri/crates/compute-core/tests/dlssnr_metadata.rs');
+    const release = read('../../src-tauri/src/dlssnr/release.rs');
+    const commands = read('../../src-tauri/src/dlssnr/commands.rs');
+
+    // 三个答案要分开：签过名且内容对得上、签过名但被改过、压根没签名。混成一个 bool 就
+    // 说不出「为什么我下的这一份装不上」——而那句话正是用户唯一能看到的东西。
+    expect(core, '三个答案各有名字').toContain('pub enum SignatureVerdict {');
+    expect(core, '量的是 Windows 的验签，不是我们自己编的规则').toContain('        WinVerifyTrust(');
+    expect(core, '「签过名再改过」要单独认出来').toContain('        TRUST_E_BAD_DIGEST => SignatureVerdict::Modified,');
+    expect(core, '那一个 HRESULT 写成字面量，对照的就是它').toContain('const TRUST_E_BAD_DIGEST: i32 = 0x8009_6010u32 as i32;');
+    expect(cargo, 'WinTrust 那一节要开').toContain('"Win32_Security_WinTrust"');
+    expect(cargo, 'WINTRUST_DATA / _FILE_INFO 在 Cryptography 那一节').toContain('"Win32_Security_Cryptography"');
+
+    // 「装之前拦一道」：带策略的入口 + 产品路径要签名 + 两句话各说各的拒绝理由。
+    expect(core, '策略是个有名字的参数，不是一个秘密开关').toContain('pub enum SnippetTrust {');
+    expect(core, '产品的导入路径就是「要签名」那一支').toContain(
+      '    install_dll_with(source, data_dir, SnippetTrust::Required)',
+    );
+    expect(core, '拦的位置在尺寸与 PE 之后、落盘之前').toContain('    if trust == SnippetTrust::Required {');
+    expect(core, '拒绝的那句话要说得出是哪一种不过').toContain(
+      'pub fn require_trusted_snippet(path: &std::path::Path) -> Result<(), String> {',
+    );
+    expect(core, '改过的那种：驱动只加载签名对得上的').toContain('驱动只加载签名对得上的片段');
+    expect(core, '没签名的那种：驱动只加载签过名的').toContain('驱动只加载签过名的片段');
+
+    // 两个真片段各自的答案不一样（本机量到的）：兼容版是「签过名再改过」，SF-v2 是没签名。
+    expect(core, '一个字节的改动也是改过').toContain('"翻一个填充字节就不再是同一份文件：签名说的就是这件事"');
+    expect(core, '社区那两版的拒法在测试里分开钉着').toContain(
+      '            ("SF-v2", super::SignatureVerdict::Untrusted),',
+    );
+
+    // 宿主那一条下载路径同样要问；而仓库里拿假 PE 当夹具的用例必须**显式**跳过。
+    expect(release, '下载路径也走「要签名」那一支').toContain(
+      '    install_staged_with(staged, data_dir, SnippetTrust::Required)',
+    );
+    expect(release, '就位之前先问').toContain('        require_trusted_snippet(staged)?;');
+    expect(release, '这一条用真片段，因为签名问的是文件自己').toContain(
+      'fn a_snippet_whose_signature_does_not_check_out_is_not_put_in_place()',
+    );
+    expect(metadata, '假 PE 没有签名，所以那三个用例显式跳过').toContain(
+      'install_dll_with(&source, dir.path(), SnippetTrust::Skipped)',
+    );
+    expect(commands, '宿主的假夹具也一样显式跳过').toContain('crate::dlssnr::SnippetTrust::Skipped,');
   });
 });

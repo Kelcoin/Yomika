@@ -1,6 +1,7 @@
 import { Download, RefreshCw } from 'lucide-react';
+import { CardProgressBar } from './CardProgressBar';
 
-/** 模型下载那一对控件：行尾的下载按钮与它下面独占一行的进度槽。
+/** 模型下载那一对控件：行尾的下载按钮与它下面贴边的那条进度条。
  *
  * 抽成独立模块是因为两个菜单都要用它们：模型菜单（超分/去码）与 DLSSNR 的组件菜单。
  * 它们原先长在 `SettingsWorkspace.tsx` 里，而 `SettingsWorkspace` 又要 import
@@ -11,25 +12,24 @@ import { Download, RefreshCw } from 'lucide-react';
  * back to an indeterminate bar when the source does not announce a length.
  *
  * 槽是**常驻挂载**的，用 `is-open` 开关，而不是条件渲染：卸载的节点没有过渡可放，
- * 「消失」就只能是啪一下不见。行高从 0fr 走到 1fr 的过渡同时把菜单一起撑开/收回——
- * 菜单的高度本来就是内容撑出来的，所以高度变化的动画不需要另量一次高度。
+ * 「消失」就只能是啪一下不见。
+ *
+ * 画的条就是档案卡那一条：同一个 `CardProgressBar`（同一次量法、同一套 CSS）。
+ * 这一层只负责定位与开/关——`position: absolute` 让它不参与行布局，行高由按钮自己
+ * （`min-height: 44px`）决定，开不开下载都一样。
  *
  * 只画一条轨道，右边不写百分比：数字每隔几帧跳一次，比条本身还吵，而条的长短已经把
  * 话说完了。后端没报 total 时走不定量扫光条。 */
 export function ModelDownloadSlot({ open, label, progress }: { open: boolean; label: string; progress?: { completed: number; total?: number | undefined } | undefined }) {
-  const percent = progress?.total ? Math.round((progress.completed / progress.total) * 100) : undefined;
+  const percent = progress?.total ? Math.min(100, Math.round((progress.completed / progress.total) * 100)) : undefined;
   return (
     <div className={`model-download-slot${open ? ' is-open' : ''}`} aria-hidden={!open}>
-      <div
-        className="model-download-status"
-        role="progressbar"
-        aria-label={`${label}下载进度`}
-        {...(percent === undefined ? {} : { 'aria-valuenow': percent, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
-      >
-        <div className={`model-download-track${percent === undefined ? ' is-indeterminate' : ''}`}>
-          <div className="model-download-fill" style={percent === undefined ? undefined : { width: `${percent}%` }} />
-        </div>
-      </div>
+      <CardProgressBar
+        percent={percent ?? 0}
+        indeterminate={percent === undefined}
+        cornerAware
+        label={`${label}下载进度`}
+      />
     </div>
   );
 }

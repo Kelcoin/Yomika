@@ -24,6 +24,7 @@ pub mod reader;
 pub mod renditions;
 pub mod resource_policy;
 pub mod scheduler;
+pub mod worker_binary;
 
 use leases::LeaseStore;
 use manager::{ComputeManager, SupervisorConfig};
@@ -90,7 +91,19 @@ pub fn start(app: &tauri::AppHandle) -> Result<ComputeHandle, String> {
     let inputs_root = inputs::inputs_root_for(&staging_root);
     std::fs::create_dir_all(&inputs_root)
         .map_err(|error| format!("建计算输入目录 {} 失败：{error}", inputs_root.display()))?;
-    let mut config = SupervisorConfig::new(worker_binary_path(), &staging_root);
+    // 交付只有**一个文件**：worker 的字节压在主 exe 里（`docs/71:660` 第①条原本要求
+    // 便携目录里并排放着它），运行时再落到主 exe 旁边那份带摘要的文件名上，然后照旧
+    // 当独立进程拉起来。同级目录里已经有一份（开发机构建、绿色目录、用户手工换过）
+    // 就照旧用它——见 [worker_binary::ensure]。
+    //
+    // 第二个落点是数据目录：主程序旁边可能根本写不进去（装在 `Program Files` 下之类），
+    // 而数据目录按定义是可写的，否则这个应用本来也起不来。
+    let worker_path = worker_binary::ensure(
+        &worker_binary_path(),
+        &data_root.join("compute"),
+        worker_binary::payload(),
+    );
+    let mut config = SupervisorConfig::new(worker_path, &staging_root);
     // 模型和页面走**同一条**只读输入根（`models` 的模块注释）：worker 因此只保留一条
     // 能被允许读用户数据的路，而不是「页面一条、模型一条」。
     config.models = Some(models::ModelCatalog::new(&data_root));

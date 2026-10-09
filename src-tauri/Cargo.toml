@@ -25,6 +25,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 把 worker 压进主 exe 的那一步（`build.rs` 的 `embed_worker_binary`）。压缩不只是为了
+# 小：宿主字节里于是不会出现 `DirectML.dll` / `onnxruntime` / `yomika_ngx_init`，
+# 打包自检里那两条**字节级**判据（宿主有没有把引擎链进去）仍然咬得住。
+flate2 = "1"
+sha2 = "0.10"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +42,9 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.10"
 blake3 = "1"
+# 解主 exe 里那份 worker 载荷（`src/compute/worker_binary.rs`）：交付一个文件，跑起来
+# 还是两个进程。用的是纯 Rust 后端（miniz_oxide），与构建脚本那一侧同一份实现。
+flate2 = "1"
 ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "blocking"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

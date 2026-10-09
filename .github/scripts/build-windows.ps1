@@ -72,15 +72,34 @@ try {
         }
     }
     if (-not $env:YOMIKA_BUILD_COMMIT) { Write-Warning "拿不到 git 提交号：这一份产物不会带构建戳。" }
+
+    $configuration = if ($Release) { "release" } else { "debug" }
+    $targetDir = Join-Path $repoRoot "src-tauri\target\$configuration"
+    $output = Join-Path $targetDir "yomika.exe"
+
+    # 计算 worker 先编，因为它的字节要被**压进主 exe**：交付只剩一个文件，跑起来仍是两个
+    # 进程（`docs/71` §11 Task 10 第①条；解码在 `src/compute/worker_binary.rs`）。顺序反过来
+    # 的话，主 exe 里嵌进去的就是上一次那一份字节。
+    $workerArgs = @{ Destination = $targetDir }
+    if (-not $Release) { $workerArgs["DebugBuild"] = $true }
+    if ($UseHostTools) { $workerArgs["UseHostTools"] = $true }
+    if ($ToolchainRoot) { $workerArgs["ToolchainRoot"] = $ToolchainRoot }
+    & (Join-Path $PSScriptRoot "build-compute-worker.ps1") @workerArgs
+    if ($LASTEXITCODE -ne 0) { throw "Building the compute worker failed with exit code $LASTEXITCODE." }
+    $workerBinary = Join-Path $targetDir "yomika-compute-worker.exe"
+    if (-not (Test-Path -LiteralPath $workerBinary -PathType Leaf)) { throw "Built worker missing: $workerBinary" }
+    # 显式指出要嵌哪一份。`build.rs` 自己在 `<target-dir>/<profile>` 下猜也能猜到，但显式
+    # 给出来之后，自定义 `CARGO_TARGET_DIR` 或交叉编译时都不会猜错；找不到它就会构建失败
+    # （「说好是单文件、里面其实什么都没有」那种产物比一次构建失败糟得多）。
+    $env:YOMIKA_EMBED_WORKER = '1'
+    $env:YOMIKA_WORKER_BINARY = $workerBinary
+
     $tauriArgs = @("run", "tauri", "build", "--", "--ci")
     if (-not $Release) {
         $tauriArgs += "--debug"
     }
     & $npm @tauriArgs
     if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE." }
-    $configuration = if ($Release) { "release" } else { "debug" }
-    $targetDir = Join-Path $repoRoot "src-tauri\target\$configuration"
-    $output = Join-Path $targetDir "yomika.exe"
 
     # Windows package keeps only Windows runtime libraries.
     Get-ChildItem -LiteralPath $targetDir -File -Recurse -ErrorAction SilentlyContinue |
@@ -109,16 +128,14 @@ try {
     # 「构建成功」与产物真的换了是两件事。
     & (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $output
 
-    # 计算 worker 是**另一份 exe**，`cargo build -p yomika` 不会顺手编它（Task 10 第①条）。
-    # 宿主按 exe 同级目录找它，所以交付目录 = 主 exe 所在目录；两半读同一个
-    # `YOMIKA_BUILD_COMMIT`（上面已经放进环境），握手时对得上才肯用。
-    $workerArgs = @{
-        Destination = $targetDir
+    # 交付只有一个文件：worker 的字节在主 exe 里（上面已经嵌过），所以**不再**把
+    # `yomika-compute-worker.exe` 留在交付目录里当第二份。它还在 `targetDir` 里没删——
+    # 开发机上它是热替换用的那一份（同级目录里有就用它），打包脚本不拷它、自检反过来查
+    # 「包面没有第二份」。
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot "worker-payload.ps1") -HostExePath $output
+    if ($LASTEXITCODE -ne 0) {
+        throw "主 exe 里那份 worker 载荷读不出来（exit=$LASTEXITCODE）：这一份产物不是单文件的。"
     }
-    if (-not $Release) { $workerArgs["DebugBuild"] = $true }
-    if ($UseHostTools) { $workerArgs["UseHostTools"] = $true }
-    if ($ToolchainRoot) { $workerArgs["ToolchainRoot"] = $ToolchainRoot }
-    & (Join-Path $PSScriptRoot "build-compute-worker.ps1") @workerArgs
     # Ship the bundled model beside the portable executable so a fresh package
     # works immediately and uses the same fixed data/models path as the app.
     $bundledModel = Join-Path $repoRoot "src-tauri\resources\models\waifu2x-upconv7"

@@ -18,9 +18,13 @@ param(
     [string] $Apk = ''
 )
 
-# 交付包的自检（`docs/71:662`/`:664`）：主 exe 与 worker 都在、都是**这一次**构建编的、
-# 运行库是真文件而不是开发机上的符号链接、包里没有 ORT/CUDA/Vulkan 这些「装了才能跑」
-# 的东西，也没有随包的 NGX 垫片与片段。
+# 交付包的自检（`docs/71:662`/`:664`）：主 exe 在、是**这一次**构建编的、**里面那份 worker
+# 载荷解得开且同源**、运行库是真文件而不是开发机上的符号链接、包里没有 ORT/CUDA/Vulkan 这些
+# 「装了才能跑」的东西，也没有随包的 NGX 垫片与片段。
+#
+# 「一个文件」这件事是 2026-10-09 定的（`docs/71` §11 Task 10 第①条）：worker 的字节被压进
+# 主 exe，跑起来仍是两个进程。所以包面**不许**再有第二份 `yomika-compute-worker.exe`——
+# 有它就说明打包脚本还在拷第二个文件。
 #
 # 为什么不是「跑一遍看看」：这个包最终要去一台没装 CUDA、没装 Vulkan、甚至没有 N 卡的
 # 机器上跑，本机跑得动证明不了那件事。这里的每一条都是**包面事实**——文件在不在、是不是
@@ -103,6 +107,11 @@ function Write-Report([bool] $Ok, [int] $Bad, [string] $Subject) {
 # `& $stampScript` 时它是 `$null`，换来的是一句 `管道元素中 '&' 后面的表达式生成了无效对象`
 # ——第一版正是这么红的：6 项绿、1 项红，红在自检自己身上。
 $stampScript = Join-Path $PSScriptRoot "verify-build-stamp.ps1"
+
+# 交付只有一个文件之后，「第二份 worker 在不在」这件事变成了「主 exe 里那份载荷解不解得开」。
+# 解码器与打包自检、清单共用一份（点源进来；它自己的参数叫 `-HostExePath`，刻意避开这个
+# 文件里的 `-Path`）。
+. (Join-Path $PSScriptRoot "worker-payload.ps1")
 
 # ---- Android 那一份（`docs/71:665`）-------------------------------------------------
 #
@@ -230,7 +239,10 @@ if ($Stage) {
     $stageFull = (Resolve-Path -LiteralPath $Stage).Path
     # 白名单。源目录旁边可能是用户 219 MB 的档案库与 3.4 GB 的缓存，多拷一个字节都算
     # 破坏，所以这里是枚举而不是「整个目录去掉几个」。
-    foreach ($name in @('yomika.exe', 'yomika-compute-worker.exe', 'DirectML.dll')) {
+    #
+    # **worker 不在这一行里**：交付只有一个文件，worker 的字节在主 exe 的载荷里
+    # （`docs/71` §11 Task 10 第①条；见 `.github/scripts/worker-payload.ps1`）。
+    foreach ($name in @('yomika.exe', 'DirectML.dll')) {
         $from = Join-Path $source $name
         if (Test-Path -LiteralPath $from -PathType Leaf) {
             Copy-Item -LiteralPath $from -Destination (Join-Path $stageFull $name) -Force
@@ -252,7 +264,7 @@ if ($Stage) {
 }
 Write-Host "== 包：$target"
 
-# ---- 两半 exe 都在，而且都是这一次构建编的 ----------------------------------------
+# ---- 主 exe 在，而且是这一次构建编的 ----------------------------------------------
 $hostExe = Join-Path $target 'yomika.exe'
 $hostExists = Test-Path -LiteralPath $hostExe -PathType Leaf
 if (-not $hostExists) {
@@ -272,22 +284,51 @@ if (-not $hostExists) {
     Note 'main-exe-stamp' $stampOk $stampText
 }
 
-$workerExe = Join-Path $target 'yomika-compute-worker.exe'
-$workerBytes = $null
-$workerExists = Test-Path -LiteralPath $workerExe -PathType Leaf
-if (-not $workerExists) {
-    Note 'worker-exe' $false "包里没有 yomika-compute-worker.exe（主 exe 按同级目录找它，缺了就只能看见「计算进程不可用」）"
+# ---- 交付只有一个文件：worker 的字节在主 exe 的载荷里，包面不该再有第二份 ------------
+#
+# 这三条是一组：① 包面不许有 canonical 名字的那份 worker（有就说明打包脚本还在拷第二个
+# 文件，「单文件」只是嘴上说说）；② 宿主里那份载荷解得开、摘要对得上、大小像话；
+# ③ 解出来的字节带着**这一次**的构建戳——与主 exe 同源，10-a 的握手才有得比。
+$separateWorker = Join-Path $target 'yomika-compute-worker.exe'
+if (Test-Path -LiteralPath $separateWorker -PathType Leaf) {
+    Note 'no-separate-worker' $false "包里另有一份 $separateWorker（说好是一个文件，worker 的字节该在主 exe 里）"
 } else {
-    $workerBytes = [System.IO.File]::ReadAllBytes($workerExe)
-    $detail = "{0}，{1:N0} 字节" -f $workerExe, $workerBytes.Length
-    Note 'worker-exe' ($workerBytes.Length -gt 5MB) $detail
-    $stampOk = $true
-    $stampText = ''
-    try { $stampText = (& $stampScript -Path $workerExe *>&1 | Out-String).Trim() } catch {
-        $stampOk = $false
-        $stampText = $_.Exception.Message
+    Note 'no-separate-worker' $true '包里没有第二份 worker，它的字节在主 exe 里'
+}
+
+$workerBytes = $null
+if ($hostExists) {
+    $reading = Read-WorkerPayload -HostExe $hostExe
+    $payloadOk = $reading.Ok -and $reading.Bytes.Length -gt 5MB
+    $detail = $reading.Reason
+    if ($reading.Ok -and -not $payloadOk) {
+        $detail = "载荷只有 {0:N0} 字节（worker 本体是二十几 MB，这么小就说明嵌错了东西）" -f $reading.Bytes.Length
     }
-    Note 'worker-exe-stamp' $stampOk $stampText
+    Note 'worker-payload' $payloadOk $detail
+    if ($reading.Ok) {
+        $workerBytes = $reading.Bytes
+        # 把解出来的那一份写到临时文件上再交给戳脚本：它只会读文件。
+        $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("yomika-payload-stamp-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".exe")
+        try {
+            [System.IO.File]::WriteAllBytes($scratch, $workerBytes)
+            $stampOk = $true
+            $stampText = ''
+            try { $stampText = (& $stampScript -Path $scratch *>&1 | Out-String).Trim() } catch {
+                $stampOk = $false
+                $stampText = $_.Exception.Message
+            }
+            Note 'worker-payload-stamp' $stampOk $stampText
+        } finally {
+            Remove-Item -LiteralPath $scratch -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Note 'worker-payload-stamp' $false '载荷没解出来，没法验它带的是不是这一次的戳'
+    }
+} else {
+    # 主 exe 都不在时这两条也得留下名字：**空转的守卫什么都不算**（8-h⑤ 的教训），报告
+    # 里少两行比多两行红更容易被当成「这一项过了」。
+    Note 'worker-payload' $false '包里没有主 exe，无从谈载荷'
+    Note 'worker-payload-stamp' $false '包里没有主 exe，无从谈载荷'
 }
 
 # ---- 宿主不再持有 NGX / ONNX Runtime 资源（Task 8 的出口，也是这一条的「版本一致」） ----
@@ -334,6 +375,11 @@ if ($workerBytes) {
         if (-not $ok) { $detail = "worker 里没有协议写的运行库标签 $label" }
         Note 'worker-runtime-label' $ok $detail
     }
+} else {
+    # 同上：载荷解不出来时这两条不是「不适用」，是「没得查」——报告里必须照样出现，
+    # 否则红的份数会随包的形状变，读的人分不清「过了」与「没跑」。
+    Note 'worker-has-ngx' $false 'worker 的字节没解出来，查不了'
+    Note 'worker-runtime-label' $false 'worker 的字节没解出来，查不了'
 }
 
 # ---- DirectML.dll 必须是真文件（`ort` 的 copy-dylibs 会留一个指向开发机缓存的链接）---

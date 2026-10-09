@@ -42,6 +42,7 @@ import {
   type DataExportReport,
 } from '../domain/dataExport';
 import { DATA_EXPORT_KIND } from '../domain/dataExport';
+import { installedDllLabel } from '../domain/dlssnrVersion';
 
 import type { ServerRecord } from '../domain/library';
 import type { ServerIdentity } from '../domain/server';
@@ -520,7 +521,7 @@ export function SettingsWorkspace() {
         const result = await new NativeDlssnrRepository().importDll(path);
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         window.dispatchEvent(new Event('yomika:dlssnr-imported'));
-        showToast(`DLSSNR 组件已导入：${result.value.variantLabel ?? '自定义 DLL'}`, 'success');
+        showToast(`DLSSNR 组件已导入：${installedDllLabel(result.value.variantLabel, '自定义 DLL', result.value.version)}`, 'success');
         return;
       }
       const result = await inferenceRepository.importModelPath(path);

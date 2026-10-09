@@ -798,7 +798,13 @@ mod tests {
 
         let source = dir.path().join("imported.dll");
         std::fs::write(&source, pe_stub(BYTES)).expect("写待导入的片段");
-        crate::dlssnr::install_dll(&source, dir.path()).expect("导入");
+        // 假 PE，没有签名：显式跳过验签（这一条问的是「导入之后身份跟不跟得上新内容」）。
+        crate::dlssnr::install_dll_with(
+            &source,
+            dir.path(),
+            crate::dlssnr::SnippetTrust::Skipped,
+        )
+        .expect("导入");
 
         assert_ne!(
             before,

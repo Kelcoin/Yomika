@@ -198,6 +198,18 @@ pub struct DlssnrStatus {
     pub variant: Option<String>,
     pub variant_label: Option<String>,
     pub dll_bytes: Option<u64>,
+    /// 这份 DLL 自己报的版本号（`310.8.0.0`；读不出来就是 `None`）。
+    ///
+    /// 与 `variant` 分开：变体是**我们认得出**的那三种，版本号是**文件自己说**的——
+    /// 用户导入一份社区新发的 DLL 时，变体可能认不出，版本号照样报得出来。
+    pub dll_version: Option<String>,
+    /// 盘上那份 DLL 的 SHA-256（小写十六进制；认不出变体也照样报）。
+    ///
+    /// 这是给「有没有更新」用的：目录里那条同名资产带着自己的 `sha256`/`size`，
+    /// 两边一比才知道这一条社区版是不是换过一版。三种变体里有两条**字节数完全相同**
+    /// （官方原版与社区兼容版都是 165,840,496 字节），只有哈希分得开——所以这里报的
+    /// 必须是真哈希，不能退成字节数。
+    pub dll_sha256: Option<String>,
     /// 显卡（第一块 NVIDIA 卡；没有就是 `None`，此时 `gpu_name` 会是别的厂商的卡）。
     pub gpu: Option<GpuInfo>,
     pub gpu_name: String,
@@ -256,13 +268,23 @@ pub fn status_with(data_dir: &std::path::Path, engine: EngineFacts) -> DlssnrSta
     } = engine;
     let dll = dll_path(data_dir);
     let dll_bytes = std::fs::metadata(&dll).ok().map(|metadata| metadata.len());
-    let variant = cached_variant(&dll);
+    // 只在文件真在的时候读版本：一条 165 MB 的 PE，读不出来（被截断、不是 PE）就是
+    // 「不知道」，不猜。
+    let version = dll_bytes.is_some().then(|| dll_version(&dll)).flatten();
+    // 认变体与报指纹走的是**同一遍**读：`cached_fingerprint` 已经把那份 165 MB 读完了，
+    // 一次运行里最多付一次（见 `cached_fingerprint` 的注释）。
+    let fingerprint = dll_bytes.is_some().then(|| cached_fingerprint(&dll)).flatten();
+    let variant = fingerprint
+        .as_ref()
+        .and_then(|(bytes, digest)| variant_of(*bytes as usize, digest));
     let recommended = gpu.as_ref().and_then(|value| value.recommended_variant());
     let mut report = DlssnrStatus {
         dll_present: dll_bytes.is_some(),
         variant: variant.map(|value| value.id().to_string()),
         variant_label: variant.map(|value| value.label().to_string()),
         dll_bytes,
+        dll_version: version,
+        dll_sha256: fingerprint.map(|(_, digest)| digest),
         gpu_name: gpu.as_ref().map(|value| value.name.clone()).unwrap_or_default(),
         recommended_variant: recommended.map(|value| value.id().to_string()),
         recommended_label: recommended.map(|value| value.label().to_string()),
@@ -411,6 +433,106 @@ pub fn dll_identity(data_dir: &std::path::Path) -> String {
     }
 }
 
+/// 片段自报的版本号：Windows 属性页里显示的那一串（本机三份是 `310.8.0.0` /
+/// `310.8.SF.0`）。
+///
+/// 为什么去问系统的版本资源而不是从文件名或清单里编一个：名字叫 `nvngx_dlssnr.dll`
+/// 的字节有几十种来源（官方原版、社区兼容版、用户自己导入的），清单顶多知道**下载**
+/// 那一份是谁；用户问「我装的是哪一版」时唯一可信的答案是文件自己身上的版本资源。
+/// 这也是一句纯元数据（读 PE 资源、不建设备、不碰 NGX），所以设置页打开就能读。
+///
+/// 返回值统一成点分（`310.8.0.0`）：资源里两种写法都有（见下面替换那一处的实测），
+/// 数字一个不动，只把分隔符统一。
+#[cfg(windows)]
+pub fn dll_version(path: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+
+    if !path.is_file() {
+        return None;
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // 先问要多大（这一步只读文件头与资源目录，不把 165 MB 读进来）。
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None) };
+    if size == 0 {
+        return None;
+    }
+    let mut block = vec![0u8; size as usize];
+    unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            size,
+            block.as_mut_ptr().cast(),
+        )
+        .ok()?;
+    }
+
+    // 资源块的每一问都是同一个形状：给一条子块路径，拿回指针与长度。
+    let query = |key: &str| -> Option<(*mut core::ffi::c_void, u32)> {
+        let key: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut buffer: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut length: u32 = 0;
+        let found =
+            unsafe { VerQueryValueW(block.as_ptr().cast(), PCWSTR(key.as_ptr()), &mut buffer, &mut length) };
+        (found.as_bool() && !buffer.is_null()).then_some((buffer, length))
+    };
+
+    // 首选属性页里显示的那一句：翻译表告诉我们资源用的是哪套语言/代码页，再去取
+    // `FileVersion` 字符串。SF-v2 那份的 `310.8.SF.0` 只在这里，固定版本号里没有。
+    if let Some((codes, length)) = query("\\VarFileInfo\\Translation") {
+        if length >= 4 {
+            let codes = unsafe { std::slice::from_raw_parts(codes as *const u16, 2) };
+            let key = format!(
+                "\\StringFileInfo\\{:04x}{:04x}\\FileVersion",
+                codes[0], codes[1]
+            );
+            if let Some((text, length)) = query(&key) {
+                if length > 1 {
+                    let utf16 = unsafe { std::slice::from_raw_parts(text as *const u16, length as usize) };
+                    let text = String::from_utf16_lossy(utf16);
+                    let text = text.trim_end_matches('\0').trim();
+                    if !text.is_empty() {
+                        // NVIDIA 那份官方原版的资源里写的是 `310,8,0,0`（逗号是它构建脚本
+                        // 的脾性，属性页也照抄），社区版的 `310.8.SF.0` 是点分。同一个东西
+                        // 两种写法摆在一列里像两个格式，所以这里统一成点分——只换分隔符，
+                        // 不改任何数字（实测：官方原版 `310,8,0,0`、SF-v2 `310.8.SF.0`）。
+                        return Some(text.replace(',', "."));
+                    }
+                }
+            }
+        }
+    }
+
+    // 退一步用固定版本号（没有字符串表时 Windows 也这么答）。
+    let (buffer, length) = query("\\")?;
+    if (length as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>() {
+        return None;
+    }
+    let fixed = unsafe { &*(buffer as *const VS_FIXEDFILEINFO) };
+    if fixed.dwSignature != 0xFEEF04BD {
+        return None;
+    }
+    Some(format_fixed_version(
+        fixed.dwFileVersionMS,
+        fixed.dwFileVersionLS,
+    ))
+}
+
+/// `VS_FIXEDFILEINFO` 里那四个 16 位字段的拼法：Windows 自己也这么拼
+/// （`major.minor.build.revision`）。
+#[cfg(windows)]
+fn format_fixed_version(ms: u32, ls: u32) -> String {
+    format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff)
+}
+
 /// 社区包里的三种变体（docs/DLSSNR-DLL-Options-310.8.0.0/README.txt）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
@@ -529,12 +651,141 @@ fn cached_variant(path: &std::path::Path) -> Option<Variant> {
     variant_of(bytes as usize, &digest)
 }
 
-/// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、拷到数据目录、认清是哪一种变体。
+/// 「驱动认不认这份片段」的三个答案。
+///
+/// NGX 核心在 `CreateFeature` 之前会调 `nvLoadSignedLibraryW()` 验签，**改过一个字节的
+/// 片段一律加载不起来**；它报出来的码是 `0xBAD0000B`（描述表里写作「初始化功能失败，
+/// 很可能找不到它需要的库」），看上去跟签名毫无关系，社区那几版就是这样（`docs/144`）。
+/// 所以「装之前先拦一道」得自己问一次，不能等驱动在用户面前拒。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureVerdict {
+    /// 签名有效（`WinVerifyTrust` 返回 0）：驱动会认它。
+    Trusted,
+    /// 签过名，但内容与签名对不上（Authenticode 的 HashMismatch）：社区兼容版在这里。
+    Modified,
+    /// 没签名、读不到、或者根本不是 PE：都不该进产品目录。
+    ///
+    /// 社区那版 SF-v2 也在这一格里——它不是「签过名再改」，是**根本没签名**（本机实测
+    /// 两种拒法各不相同，所以这句话给用户看的时侯也说得出差别）。
+    Untrusted,
+}
+
+/// 「装片段之前要不要先问一次签名」。
+///
+/// 产品路径（用户导入、目录里下载）一律 [`SnippetTrust::Required`]：装进去的那一份必须是
+/// 驱动肯加载的，否则用户看到的是「DLSSNR 开了，画面什么都没变」。仓库里的用例拿 1 MB
+/// 的假 PE 当夹具，它们问的是**元数据那一半**（认不认得出变体、身份怎么算），不是签名，
+/// 所以显式传 [`SnippetTrust::Skipped`]——名字里带着这件事，免得哪天产品路径顺手抄过去。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnippetTrust {
+    Required,
+    Skipped,
+}
+
+/// `WinVerifyTrust` 说「内容与签名对不上」时返回的那个 `HRESULT`（`TRUST_E_BAD_DIGEST`）。
+///
+/// 用字面量而不是引 `windows` crate 的常量：`WinVerifyTrust` 返回的是裸 `LONG`，对照的
+/// 也是这个数，引一个 `HRESULT` 再 `.0 as i32` 只是多一层包装。
+#[cfg(windows)]
+const TRUST_E_BAD_DIGEST: i32 = 0x8009_6010u32 as i32;
+
+/// 问 Windows 一次「这份文件的 Authenticode 签名站不站得住」。
+///
+/// 只看文件和本地缓存（`WTD_REVOKE_NONE` + `WTD_CACHE_ONLY_URL_RETRIEVAL`）：这条路径可能
+/// 在离线机器上跑（用户导入一份自己带的 DLL），而「吊销名单查不到」不该被读成「这份文件
+/// 有问题」，更不该让装片段这件事等一次网络往返。
+#[cfg(windows)]
+pub fn signature_verdict(path: &std::path::Path) -> SignatureVerdict {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Security::WinTrust::{
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    };
+
+    if !path.is_file() {
+        return SignatureVerdict::Untrusted;
+    }
+    let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(path.as_os_str())
+        .chain(std::iter::once(0))
+        .collect();
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: PCWSTR(wide.as_ptr()),
+        ..Default::default()
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    data.Anonymous.pFile = &mut file_info;
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let status = unsafe {
+        WinVerifyTrust(
+            HWND(std::ptr::null_mut()),
+            &mut action,
+            &mut data as *mut _ as *mut std::ffi::c_void,
+        )
+    };
+    // Close 是**必须**的：不关的话 `WinVerifyTrust` 攥着这份文件的句柄与一份状态，
+    // 后面换片段时改名会因此失败（Windows 上正被映射的镜像删得掉、改不了名）。
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe {
+        let _ = WinVerifyTrust(
+            HWND(std::ptr::null_mut()),
+            &mut action,
+            &mut data as *mut _ as *mut std::ffi::c_void,
+        );
+    }
+    match status {
+        0 => SignatureVerdict::Trusted,
+        TRUST_E_BAD_DIGEST => SignatureVerdict::Modified,
+        // 剩下的（`TRUST_E_NOSIGNATURE`、不是 PE、读不到……）是同一句人话：这份不算数。
+        _ => SignatureVerdict::Untrusted,
+    }
+}
+
+/// 「装之前拦一道」的那一道：签名不过的片段不进产品目录，而且要说清楚是哪一种不过
+/// ——用户拿到的那句话得能解释「为什么我下的这一份装不上」。
+#[cfg(windows)]
+pub fn require_trusted_snippet(path: &std::path::Path) -> Result<(), String> {
+    match signature_verdict(path) {
+        SignatureVerdict::Trusted => Ok(()),
+        SignatureVerdict::Modified => Err(format!(
+            "{} 被 NVIDIA 签过名，但内容与签名对不上（社区改过的版本就是这样）。\
+             驱动只加载签名对得上的片段，装进去也用不了，所以这里不换。",
+            path.display()
+        )),
+        SignatureVerdict::Untrusted => Err(format!(
+            "{} 没有 NVIDIA 的签名。驱动只加载签过名的片段，装进去也用不了，所以这里不换。",
+            path.display()
+        )),
+    }
+}
+
+/// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、查签名、拷到数据目录、认清是哪一种变体。
 ///
 /// 认不出变体不算错——README 里那三种之外还能有别的（社区还在放新的），只是设置
 /// 页说不出它是哪一代卡用的。
 #[cfg(windows)]
 pub fn install_dll(source: &std::path::Path, data_dir: &std::path::Path) -> Result<InstalledDll, String> {
+    install_dll_with(source, data_dir, SnippetTrust::Required)
+}
+
+/// 带策略的那一支：产品的两处入口都用 [`SnippetTrust::Required`]，只有仓库里那些
+/// 「假 PE 当夹具」的用例显式跳过（见 [`SnippetTrust`]）。
+#[cfg(windows)]
+pub fn install_dll_with(
+    source: &std::path::Path,
+    data_dir: &std::path::Path,
+    trust: SnippetTrust,
+) -> Result<InstalledDll, String> {
     let metadata = std::fs::metadata(source)
         .map_err(|error| format!("读不到这个文件：{error}"))?;
     if !metadata.is_file() {
@@ -559,6 +810,12 @@ pub fn install_dll(source: &std::path::Path, data_dir: &std::path::Path) -> Resu
         }
     }
 
+    // 尺寸与 PE 都像了，还要问一次签名。这一句排在前面那几句**之后**：用户最容易犯的
+    // 错是选错文件（说明文档、压缩包），那两句才是对那种错的回答。
+    if trust == SnippetTrust::Required {
+        require_trusted_snippet(source)?;
+    }
+
     let target = dll_path(data_dir);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
@@ -579,6 +836,7 @@ pub fn install_dll(source: &std::path::Path, data_dir: &std::path::Path) -> Resu
         bytes,
         variant: variant.map(|value| value.id().to_string()),
         variant_label: variant.map(|value| value.label().to_string()),
+        version: dll_version(&target),
     })
 }
 
@@ -590,6 +848,8 @@ pub struct InstalledDll {
     pub bytes: u64,
     pub variant: Option<String>,
     pub variant_label: Option<String>,
+    /// 这份文件自己身上的版本号（读不出来就是 `None`，不编）。
+    pub version: Option<String>,
 }
 
 /// 一段 RGBA 走一遍 DLSSNR（阅读器与算力中心都从这里进）。
@@ -809,6 +1069,199 @@ mod tests {
     pub(crate) fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 仓库里那三份社区 DLL 的目录（`docs/` 里，不进仓库）。
+    #[cfg(windows)]
+    fn docs_dir() -> Option<std::path::PathBuf> {
+        let mut directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = directory.join("docs").join("DLSSNR-DLL-Options-310.8.0.0");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !directory.pop() {
+                return None;
+            }
+        }
+    }
+
+    /// 片段报的版本号得是 Windows 属性页里那一串：这三份真片段的版本资源各不相同
+    /// （官方原版 `310,8,0,0`、SF-v2 `310.8.SF.0`），所以它同时钉住了「读的是文件
+    /// 自己的版本资源」而不是某条我们自己编的规则。
+    ///
+    /// 一份都没找到时**不是通过**：打印跳过之后 assert 掉，免得干净检出把这条读成绿的。
+    #[cfg(windows)]
+    #[test]
+    fn the_shipped_dlls_report_the_version_windows_shows() {
+        let Some(root) = docs_dir() else {
+            panic!("跳过：docs/DLSSNR-DLL-Options-310.8.0.0 不在（这条测试要真片段当夹具）");
+        };
+        let mut checked = 0;
+        for (folder, expected) in [("NVIDIA-Original", "310.8.0.0"), ("SF-v2", "310.8.SF.0")] {
+            let path = root.join(folder).join("nvngx_dlssnr.dll");
+            if !path.is_file() {
+                println!("跳过 {folder}：那份 DLL 不在");
+                continue;
+            }
+            checked += 1;
+            assert_eq!(
+                super::dll_version(&path).as_deref(),
+                Some(expected),
+                "{folder} 的版本号该是 Windows 说的那一串"
+            );
+        }
+        assert!(checked > 0, "一份片段都没量到，这条测试什么也没证明");
+    }
+
+    /// 读不出来就是「不知道」，不许编：文件不在、或者根本不是 PE，都返回 `None`。
+    #[cfg(windows)]
+    #[test]
+    fn a_file_without_a_version_resource_has_no_version() {
+        assert_eq!(super::dll_version(std::path::Path::new("这个文件不存在.dll")), None);
+        let temp = std::env::temp_dir().join(format!("yomika-version-{}.bin", std::process::id()));
+        std::fs::write(&temp, b"not a portable executable at all").expect("写临时文件");
+        assert_eq!(super::dll_version(&temp), None, "不是 PE 的文件不该报出版本号");
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    /// 固定版本号那一支（翻译表缺失时 Windows 也这么答）的拼法。
+    #[cfg(windows)]
+    #[test]
+    fn the_fixed_version_is_spelled_like_windows_spells_it() {
+        assert_eq!(super::format_fixed_version(0x0136_0008, 0), "310.8.0.0");
+        assert_eq!(super::format_fixed_version(0x0001_0002, 0x0003_0004), "1.2.3.4");
+    }
+
+    /// 一份够大、`MZ` 头自洽的假 PE：**没有签名**。产品路径要签名，这个文件是给
+    /// 「只问元数据那一半」的用例当夹具的（`tests/dlssnr_metadata.rs` 里那张同名的表）。
+    #[cfg(windows)]
+    fn unsigned_pe(path: &std::path::Path, bytes: usize) {
+        let mut content = vec![0u8; bytes];
+        content[0..2].copy_from_slice(b"MZ");
+        content[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        std::fs::write(path, &content).expect("写假 PE");
+    }
+
+    /// 驱动认不认这份片段：官方原版有效；社区那两版签过名但被改过；随手写的假 PE 与
+    /// 不存在的路径一律不算数——**一个字节的改动也算改过**（`docs/144` 量到的就是这一条）。
+    #[cfg(windows)]
+    #[test]
+    fn a_snippet_the_driver_would_refuse_is_not_trusted() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let unsigned = dir.path().join("unsigned.dll");
+        unsigned_pe(&unsigned, 1_000_001);
+        assert_eq!(
+            super::signature_verdict(&unsigned),
+            super::SignatureVerdict::Untrusted,
+            "没签名的假 PE 不算数"
+        );
+        assert_eq!(
+            super::signature_verdict(std::path::Path::new("这个文件不存在.dll")),
+            super::SignatureVerdict::Untrusted,
+            "读不到就是不算数，不是「没问题」"
+        );
+
+        let Some(root) = docs_dir() else {
+            panic!("跳过：docs/DLSSNR-DLL-Options-310.8.0.0 不在（这条测试要真片段当夹具）");
+        };
+        let official = root.join("NVIDIA-Original").join("nvngx_dlssnr.dll");
+        if !official.is_file() {
+            panic!("跳过：{} 不在", official.display());
+        }
+        assert_eq!(
+            super::signature_verdict(&official),
+            super::SignatureVerdict::Trusted,
+            "官方原版是签名有效的那一份：驱动会认它"
+        );
+
+        // 一个字节的对照：拷一份官方原版，把 DOS stub 里那个填充字节翻掉（不动任何区段）。
+        let flipped = dir.path().join("flipped.dll");
+        std::fs::copy(&official, &flipped).expect("拷一份");
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&flipped)
+                .expect("打开副本");
+            file.seek(SeekFrom::Start(0x80)).expect("定位");
+            file.write_all(&[0xFD]).expect("翻一个字节");
+        }
+        assert_eq!(
+            super::signature_verdict(&flipped),
+            super::SignatureVerdict::Modified,
+            "翻一个填充字节就不再是同一份文件：签名说的就是这件事"
+        );
+
+        // 社区那两版：**两种不同的过不了**——兼容版是 NVIDIA 签过名再被改过（内容与签名
+        // 对不上），SF-v2 连签名都没有。这正是「自己问一次」比「按名单猜」强的地方：
+        // 拒的理由不一样，说给用户的话也就不一样。
+        let mut measured = 0;
+        for (folder, expected) in [
+            ("Community-RTX40-RTX50", super::SignatureVerdict::Modified),
+            ("SF-v2", super::SignatureVerdict::Untrusted),
+        ] {
+            let path = root.join(folder).join("nvngx_dlssnr.dll");
+            if !path.is_file() {
+                println!("跳过 {folder}：那份 DLL 不在");
+                continue;
+            }
+            measured += 1;
+            assert_eq!(
+                super::signature_verdict(&path),
+                expected,
+                "{folder} 过不了驱动那一关，理由与量到的不一样"
+            );
+        }
+        assert!(measured > 0, "一份社区片段都没量到，这条测试只证了一半");
+    }
+
+    /// 装之前拦一道：签名不过的片段**不许顶掉**盘上那份能用的，而且要说清楚为什么。
+    #[cfg(windows)]
+    #[test]
+    fn a_snippet_the_driver_would_refuse_never_replaces_the_one_on_disk() {
+        let Some(root) = docs_dir() else {
+            panic!("跳过：docs/DLSSNR-DLL-Options-310.8.0.0 不在（这条测试要真片段当夹具）");
+        };
+        let official = root.join("NVIDIA-Original").join("nvngx_dlssnr.dll");
+        let community = root.join("Community-RTX40-RTX50").join("nvngx_dlssnr.dll");
+        if !official.is_file() || !community.is_file() {
+            panic!("跳过：官方原版或社区兼容版不在（这条路要两份真片段）");
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        let installed = super::install_dll(&official, dir.path()).expect("官方原版该装得进去");
+        assert_eq!(installed.variant.as_deref(), Some("official"));
+        let before = super::file_sha256(&dll_path(dir.path())).expect("哈希");
+
+        // 签了名再被改过的那一份：驱动拒它，所以这里也不许换。
+        let refused = super::install_dll(&community, dir.path()).expect_err("改过的片段不该装进去");
+        assert!(refused.contains("签名"), "{refused}");
+        assert_eq!(
+            super::file_sha256(&dll_path(dir.path())).as_deref(),
+            Some(before.as_str()),
+            "拒了之后盘上还是原来那份能用的"
+        );
+
+        // 没签名的假 PE：同样拒，同样不许留下东西。
+        let fake_dir = tempfile::tempdir().expect("临时目录");
+        let fake = fake_dir.path().join("unsigned.dll");
+        unsigned_pe(&fake, 1_000_001);
+        let refused = super::install_dll(&fake, dir.path()).expect_err("没签名的片段不该装进去");
+        assert!(refused.contains("签名"), "{refused}");
+        assert_eq!(
+            super::file_sha256(&dll_path(dir.path())).as_deref(),
+            Some(before.as_str()),
+            "两次拒绝都没换掉能用的那一份"
+        );
+
+        // 显式跳过验签的那一支照样装得进去：元数据那一半的用例走的就是它。
+        super::install_dll_with(&fake, dir.path(), super::SnippetTrust::Skipped)
+            .expect("显式跳过时该装得进去");
+        assert_ne!(
+            super::file_sha256(&dll_path(dir.path())).as_deref(),
+            Some(before.as_str()),
+            "跳过时就真的换掉了"
+        );
     }
 
     #[test]
@@ -1436,6 +1889,95 @@ mod tests {
         eprintln!("DLSSNR private commit: passes={passes} warm={} MiB, after32={} MiB, released={} MiB", before/1048576, after/1048576, released/1048576);
         assert!(after.saturating_sub(before) < 32 * 1048576, "private commit kept growing per page");
         assert_eq!(device::cached_workspace_count(), 0);
+    }
+
+    /// 同一张图、同一套参数，**一次只量一份片段**：它要多久、交出来的东西是不是同一份。
+    ///
+    /// 一个进程里只认第一份片段（上下文按指纹记着），所以对照不能在一条用例里做完：
+    /// `debug_outputs/lecram/ab-dlssnr.ps1` 用 `YOMIKA_DLSSNR_DLL` 各指一次，再把两行
+    /// `DLSSNR_AB_JSON` 拼起来比。计时只包住 NR 本身——解码/编码不在这条路上，否则
+    /// 2% 量级的差异会被首尾两头（一张 3 MP 的 PNG 编解码就几百毫秒）淹掉。
+    ///
+    /// 每轮的产出一并报出来：两份片段的输出**逐字节相同**才是「纯内核优化」的证据，
+    /// 不相同就说明它动的不只是内核。
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    #[ignore = "real GPU A/B; run once per fragment via debug_outputs/lecram/ab-dlssnr.ps1"]
+    fn a_fragment_reports_what_its_kernels_cost_and_what_they_hand_back() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("A/B requires the real DLL");
+        fn number(name: &str, fallback: u32) -> u32 {
+            match std::env::var(name) {
+                Ok(value) => value
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{name} 不是个数：{value}")),
+                Err(_) => fallback,
+            }
+        }
+        let width = number("YOMIKA_DLSSNR_AB_WIDTH", 2048);
+        let height = number("YOMIKA_DLSSNR_AB_HEIGHT", 3072);
+        let rounds = number("YOMIKA_DLSSNR_AB_ROUNDS", 40) as usize;
+        let passes = dlssnr_passes();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data-ab");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = std::fs::metadata(&dll).map(|meta| meta.len()).unwrap_or(0);
+        let sha = file_sha256(&dll).unwrap_or_default();
+        let version = dll_version(&dll).unwrap_or_default();
+        let variant = variant_of(bytes as usize, &sha)
+            .map(|value| value.id())
+            .unwrap_or("unknown");
+        let mut page = synthetic_image(width, height);
+        let settings = DlssnrSettings {
+            passes: vec![PassSettings { intensity: 1.25, ..Default::default() }; passes],
+        };
+        assert_eq!(
+            settings.passes.len(),
+            passes,
+            "层数被 normalized() 改过就不是这一跑问的那个数了"
+        );
+        let cancel = crate::cancel::CancelToken::none();
+        // 前三跑含建上下文与编译管线，那一笔不算。
+        for index in 0..3 {
+            page.rgba[0] = index as u8;
+            drop(
+                filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &cancel, None)
+                    .expect("预热"),
+            );
+        }
+        let mut micros: Vec<u128> = Vec::with_capacity(rounds);
+        let mut digests: Vec<String> = Vec::with_capacity(rounds);
+        for index in 0..rounds {
+            page.rgba[0] = index as u8;
+            let started = std::time::Instant::now();
+            let output = filter::apply_with_dll_bucket(&dir, &dll, &page, &settings, &cancel, None)
+                .expect("这一页要能跑");
+            micros.push(started.elapsed().as_micros());
+            digests.push(blake3::hash(&output.rgba).to_hex().to_string());
+        }
+        let mut sorted = micros.clone();
+        sorted.sort_unstable();
+        let ms = |value: u128| value as f64 / 1000.0;
+        let digest = digests.first().cloned().unwrap_or_default();
+        let stable = digests.iter().all(|value| *value == digest);
+        let report = serde_json::json!({
+            "variant": variant,
+            "version": version,
+            "bytes": bytes,
+            "sha256": sha,
+            "width": width,
+            "height": height,
+            "passes": passes,
+            "rounds": rounds,
+            "warmup": 3,
+            "ms": micros.iter().map(|value| ms(*value)).collect::<Vec<f64>>(),
+            "meanMs": ms(micros.iter().sum::<u128>() / micros.len() as u128),
+            "medianMs": ms(sorted[sorted.len() / 2]),
+            "p95Ms": ms(sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]),
+            "minMs": ms(*sorted.first().unwrap_or(&0)),
+            "digest": digest,
+            "digestStable": stable,
+        });
+        eprintln!("DLSSNR_AB_JSON {report}");
     }
 
     /// 这一跑要几层（§12.4 ②/③ 的「3 层 / 1/3/5 层」）。
