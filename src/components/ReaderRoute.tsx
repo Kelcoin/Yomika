@@ -8,6 +8,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { getNativeComputeRepository } from '../repositories/nativeComputeRepository';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ReaderScreen, useReaderChrome } from './ReaderScreen';
+import { useWindowDrag } from './WindowControls';
 import { LoadingIndicator } from './LoadingIndicator';
 import { RETRYABLE_COMPUTE_ERROR_CODES } from '../domain/compute';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
@@ -123,6 +124,9 @@ function ReaderRouteChromeShell({ className, title, goBack, children }: { classN
     onToggle: () => setChromeVisible((value) => !value),
     onHide: () => setChromeVisible(false),
   });
+  // 这一屏同样整屏盖住了自绘标题栏，所以这条栏也自己会拖（用户报的那一条：加载慢
+  // 或卡住时它是屏幕上唯一一条栏，而没有它就没法移动窗口）。
+  const windowDrag = useWindowDrag();
   return (
     <main
       className={`reader-screen ${className}`}
@@ -133,7 +137,7 @@ function ReaderRouteChromeShell({ className, title, goBack, children }: { classN
       onMouseLeave={clearHover}
     >
       {topPresence.mounted && (
-        <header className={`reader-error-bar${topPresence.leaving ? ' is-leaving' : ''}`} onClick={keepAlive}>
+        <header className={`reader-error-bar${topPresence.leaving ? ' is-leaving' : ''}`} onClick={keepAlive} {...windowDrag}>
           <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
           <strong>{title}</strong>
         </header>
@@ -1189,12 +1193,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [error, showToast]);
 
   if (error) {
-    // The canvas holds the message and a retry icon, and leaving
+    // The canvas holds the fact and a retry icon, and leaving
     // is the top bar's job rather than a second competing button.
+    //
+    // 画布上只说「加载失败」：宿主原话通常是传输层的句子，自带服务器地址、端口与
+    // 请求路径（`连不上 http://192.168.x.x:3000/api/archives/a1/files`），整屏铺开
+    // 也读不出该做什么（用户报的那一条）。原话照旧走共享 toast 与 error.log——
+    // 现场留在日志里，界面只说结论。
     return (
       <ReaderRouteChromeShell className="reader-screen-error" title={title} goBack={goBack}>
         <section className="reader-error">
-          <p role="alert">{error}</p>
+          <p role="alert">加载失败</p>
           <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={() => setRetryToken((value) => value + 1)}>
             <RotateCcw aria-hidden="true" />
           </button>

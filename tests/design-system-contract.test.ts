@@ -172,6 +172,27 @@ describe('design system contract', () => {
     expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
   });
 
+  // 用户报的：阅读模式整屏盖住了自绘标题栏，那一屏里没有任何地方能拖动窗口。
+  // 手势只有一处实现，三个地方铺开（外壳标题栏与阅读器两条栏）；失败页说「加载
+  // 失败」这一件事实，不把宿主原话（自带服务器地址与请求路径）贴上画布。
+  it('moves the window from whichever bar is on screen, and states a failure without echoing it', () => {
+    const controls = read('src/components/WindowControls.tsx');
+    expect(controls).toContain('export function useWindowDrag(');
+    // 一次按下才是一次拖动（`detail !== 1` 就是双击的第一下），栏上的控件自己吃掉。
+    expect(controls).toContain('event.button !== 0 || event.detail !== 1');
+    expect(controls).toContain("closest('button, a, input, select, textarea')");
+    expect(controls).toContain('void api?.startDragging()');
+    expect(controls).toContain('void api?.toggleMaximize()');
+
+    // 外壳标题栏改用手势件，不再自己抄一遍；阅读器两条栏都铺上它。
+    expect(read('src/components/TitleBar.tsx')).toContain('<header className="titlebar" {...drag}>');
+    expect(read('src/components/ReaderScreen.tsx')).toContain('{...windowDrag}');
+    const route = read('src/components/ReaderRoute.tsx');
+    expect(route).toContain('{...windowDrag}');
+    expect(route).toContain('<p role="alert">加载失败</p>');
+    expect(route).not.toContain('<p role="alert">{error}</p>');
+  });
+
   it('pins the page scale and keeps text controls off the focus-zoom threshold', () => {
     // 这是个应用，不是一篇文档：整个界面不能被双指捏着缩放。少了这两项，手机上
     // 一捏界面就浮起来、工具栏跑出屏幕，一眼看得出来是网页套了个壳。
@@ -732,6 +753,23 @@ describe('design system contract', () => {
     expect(route).not.toMatch(/function DetailFactGlyph/);
     // 本地档案那一页的自有样式已经退役。
     expect(read('src/styles/shell.css')).not.toMatch(/\.local-detail/);
+  });
+
+  it('re-measures the chips when the tag slot changes size instead of trusting a stale zero', () => {
+    // 卡片先在看不见的容器里挂载（`display: none`、或还没滚到眼前的
+    // `content-visibility: auto` 卡片）时，胶囊量与槽宽都是 0。要是把这一份记下来，
+    // 之后容器显示出来时通知里只有新槽宽 —— 「填满」分支会把 0 当成 5px，每条标签
+    // 都算得下，于是全部挤进第一行、被 overflow 裁掉（缩略图卡片的换行就是这么没的）。
+    // 所以：没排版就不许记，槽宽变了必须连胶囊一起重量。
+    const tagRows = read('src/components/CardTagRows.tsx');
+    expect(tagRows).toContain('if (widths.length === 0 || !widths.some((width) => width > 0)) return;');
+    expect(tagRows).toContain('if (fill && containerWidth <= 0) return;');
+    expect(tagRows).toMatch(/new ResizeObserver\(\(\) => \{[\s\S]*?measureTags\(\);[\s\S]*?\}\)/);
+    expect(tagRows).not.toContain('previous.containerWidth !== containerWidth');
+    // 这条路上量不到真尺寸，所以判据只能落在真排版引擎里；jsdom 那份用工装把
+    // 「0 宽 → 真宽度」演出来，钉住它别再退回去。
+    expect(read('tests/components/card-tag-rows.test.tsx'))
+      .toContain('re-measures the chips when a card that mounted unseen is laid out at last');
   });
 
   it('keeps hover rules free of geometry so a hover never resizes a control', () => {

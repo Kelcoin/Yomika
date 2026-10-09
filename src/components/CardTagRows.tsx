@@ -66,6 +66,13 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
       // itself — and a resizeObserver on it would never fire when the CARD
       // changes size, because a shrink-wrapped span does not.
       const containerWidth = fill ? element.clientWidth : 0;
+      // 还没排版就什么都别记：`display: none` 的容器、还没滚到眼前的
+      // `content-visibility: auto` 卡片，量到的是一排 0 加一个 0 宽的槽。
+      // 把这一份记下来的话，容器显示出来时通知里只有新槽宽，0 宽的胶囊表会让
+      // 「填满」分支把每条标签都算成 5px —— 于是全部挤进第一行、被 overflow 裁掉。
+      // 落回上一次的读数（或下面的兜底瀑布），等下一次通知带真尺寸来。
+      if (widths.length === 0 || !widths.some((width) => width > 0)) return;
+      if (fill && containerWidth <= 0) return;
       setMeasured((previous) => previous?.tags === tags
         && previous.widths.every((width, index) => width === widths[index])
         && previous.containerWidth === containerWidth
@@ -75,9 +82,10 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     const observer = fill && typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(() => {
         if (!active) return;
-        const containerWidth = element.clientWidth;
-        setMeasured((previous) => previous && previous.containerWidth !== containerWidth
-          ? { ...previous, containerWidth } : previous);
+        // 槽宽变了要连胶囊一起重量：只把槽宽写回去，会把上一次那份（可能是 0 宽的）
+        // 胶囊表配上新槽宽。重新量一遍走的是同一个 `setMeasured`，逐项相等时它
+        // 返回原对象，所以这次观察不会自己把自己再触发一轮。
+        measureTags();
       }) : undefined;
     observer?.observe(element);
     void document.fonts?.ready.then(measureTags);

@@ -812,6 +812,44 @@ describe('reader screen', () => {
     expect(zoomed().style.transform).toContain('scale(1)');
   });
 
+  // 用户报的：阅读模式是整屏的，自绘标题栏（唯一能拖窗口的地方）被它盖住，于是
+  // 那一屏没法移动窗口。阅读态的顶栏现在铺外套那套手势：空处按下＝原生拖动，
+  // 双击＝最大化，并且**就地吃掉**这一下——根部还有一个「双击回到原始比例」的
+  // 处理器，点在栏上不该顺手把画布比例也翻一遍。
+  it('drags and maximizes the native window from the reader top bar', () => {
+    const invoke = vi.fn(() => Promise.resolve(false));
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const zoomed = () => view.container.querySelector('.reader-single, .reader-spread') as HTMLElement;
+      fireEvent.click(reader);
+      const bar = view.container.querySelector('.reader-chrome-top') as HTMLElement;
+      expect(bar).not.toBeNull();
+
+      // 先把比例从 1 挪开：这样「双击有没有漏到画布上」才看得出来。
+      fireEvent.wheel(reader, { deltaY: -200 });
+      expect(zoomed().style.transform).not.toContain('scale(1)');
+
+      const title = bar.querySelector('strong') as HTMLElement;
+      fireEvent.mouseDown(title, { button: 0, detail: 1 });
+      expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging', { label: 'main' });
+
+      invoke.mockClear();
+      fireEvent.doubleClick(title);
+      expect(invoke).toHaveBeenCalledWith('plugin:window|toggle_maximize', { label: 'main' });
+      expect(zoomed().style.transform).not.toContain('scale(1)');
+
+      // 栏上的按钮不吃这一下：按返回不该顺手把窗口拖走。
+      invoke.mockClear();
+      fireEvent.mouseDown(screen.getByRole('button', { name: '返回上一页' }), { button: 0, detail: 1 });
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
   it('shows only available enhancement controls', async () => {
     const user = userEvent.setup();
     const toggleUpscale = vi.fn();

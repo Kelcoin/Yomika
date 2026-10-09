@@ -1,23 +1,22 @@
 import { YomikaMark } from './YomikaMark';
-import { WindowGlyph, useWindowControls, useWindowMaximized } from './WindowControls';
+import { WindowGlyph, useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 
 /** The Windows title bar, drawn by the app: a themed strip with the brand
  * mark, a full-width drag surface, and the three window controls. The native
  * decorations are off on Windows (decorations(false) in lib.rs); macOS keeps
  * its own traffic lights and never mounts this bar.
  *
- * Dragging starts in the native window command on pointer down. The control
- * cluster stops propagation so only the empty title surface can start it. */
+ * The drag and maximize gestures live in `useWindowDrag` because the reader —
+ * a full-bleed screen that covers this bar — needs exactly the same two. The
+ * control cluster still stops propagation: a press on a button owns the press,
+ * so only the empty title surface starts a move. */
 export function TitleBar() {
   const api = useWindowControls();
   const maximized = useWindowMaximized(api);
+  const drag = useWindowDrag();
 
   return (
-    <header className="titlebar" onMouseDown={(event) => {
-      if (event.button === 0 && event.detail === 1) void api?.startDragging().catch(() => {});
-    }} onDoubleClick={(event) => {
-      if (event.button === 0) void api?.toggleMaximize().catch(() => {});
-    }}>
+    <header className="titlebar" {...drag}>
       <span className="titlebar-mark">
         <YomikaMark size={18} />
       </span>

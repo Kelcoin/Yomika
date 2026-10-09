@@ -1,0 +1,93 @@
+import { act, render } from '@testing-library/react';
+
+import { CardTagRows } from '../../src/components/CardTagRows';
+
+/** jsdom 不做布局：胶囊宽度与槽宽都得由测试自己报。
+ *
+ * 这里模拟的正是真窗口里那条路：卡片先在**看不见**的容器里挂载（`getBoundingClientRect`
+ * 与 `clientWidth` 都报 0），随后容器显示出来，`ResizeObserver` 报出真的槽宽。
+ * 这条路上组件手里的胶囊宽度表还停在「一排 0」，而「填满」分支会把 0 当成 5px ——
+ * 于是每一个标签都被算成装得下，全部挤进第一行。 */
+function installMeasureFake() {
+  const originalObserver = window.ResizeObserver;
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  const callbacks = new Map<Element, ResizeObserverCallback>();
+  const state = { laidOut: false, containerWidth: 134, chipWidth: 70 };
+
+  class FakeResizeObserver {
+    constructor(private readonly callback: ResizeObserverCallback) {}
+    observe(target: Element) { callbacks.set(target, this.callback); }
+    unobserve(target: Element) { callbacks.delete(target); }
+    disconnect() { callbacks.clear(); }
+  }
+
+  window.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+  HTMLElement.prototype.getBoundingClientRect = function measureStub(this: HTMLElement) {
+    if (this.classList?.contains('card-tag-measure')) {
+      const width = state.laidOut ? state.chipWidth : 0;
+      return { width, height: 20, top: 0, left: 0, right: width, bottom: 20, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    }
+    return originalRect.call(this);
+  };
+
+  return {
+    state,
+    /** 组件的槽宽是从元素自己身上读的：给这一条元素装上会变的那一个数。 */
+    track(root: HTMLElement) {
+      Object.defineProperty(root, 'clientWidth', {
+        configurable: true,
+        get: () => (state.laidOut ? state.containerWidth : 0),
+      });
+    },
+    fire(root: HTMLElement) {
+      const callback = callbacks.get(root);
+      if (!callback) throw new Error('组件没有观察这个标签槽');
+      callback([{ target: root } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+    },
+    restore() {
+      window.ResizeObserver = originalObserver;
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+    },
+  };
+}
+
+/** 每个物理行里挤了几个胶囊。 */
+function rowLengths(container: HTMLElement): number[] {
+  return [...container.querySelectorAll('.archive-row-tag-line')]
+    .map((line) => line.querySelectorAll('.metadata-chip').length);
+}
+
+const TAGS = [
+  'language:chinese',
+  'female:big breasts',
+  'artist:somebody',
+  'group:some circle',
+  'other:short',
+  'male:sole male',
+];
+
+describe('card tag rows', () => {
+  it('re-measures the chips when a card that mounted unseen is laid out at last', () => {
+    const fake = installMeasureFake();
+    try {
+      const { container } = render(
+        <CardTagRows tags={TAGS} rowCount={2} fill className="archive-thumb-card-tags" />,
+      );
+      const root = container.querySelector<HTMLElement>('.archive-thumb-card-tags');
+      if (!root) throw new Error('标签槽没渲染出来');
+      fake.track(root);
+
+      // 挂载那一拍还在看不见的容器里：量到一排 0 时该走「短行优先」的瀑布，
+      // 两行摊开 —— 0 宽只是没量到，不等于「一行装得下」。
+      expect(rowLengths(container)).toEqual([3, 3]);
+
+      // 容器显示出来：槽宽 134、每个胶囊 70 —— 134 装不下两个（70 + 4 + 70 > 134）。
+      fake.state.laidOut = true;
+      act(() => fake.fire(root));
+
+      expect(rowLengths(container)).toEqual([1, 1]);
+    } finally {
+      fake.restore();
+    }
+  });
+});

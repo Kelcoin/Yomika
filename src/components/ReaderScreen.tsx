@@ -9,7 +9,7 @@ import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domai
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
-import { useWindowControls, useWindowMaximized } from './WindowControls';
+import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { decodeImage } from '../lib/decodeImage';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
@@ -1107,6 +1107,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // （caption 那一排自己的尺寸不动：改了共享字形，那边一分一厘都跟着失衡）。
   const windowApi = useWindowControls();
   const windowMaximized = useWindowMaximized(windowApi);
+  // 阅读模式是整屏的：Windows 上系统边框关掉了，而自绘标题栏（唯一能拖窗口的
+  // 地方）被这一屏盖住，所以顶栏自己得会拖（用户报的那一条）。
+  const windowDrag = useWindowDrag();
   const renderWindowMaximize = () => windowApi ? (
     <button
       type="button"
@@ -1375,6 +1378,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           <header
             className={`reader-chrome-top${topPresence.leaving ? ' is-leaving' : ''}`}
             onClick={stopChromeToggle}
+            {...windowDrag}
           >
               <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
             {/* 标题是这条栏的**直接**子项，才落得进中间那条轨道（相对整条栏居中，

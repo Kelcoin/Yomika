@@ -920,18 +920,82 @@ describe('reader route', () => {
 
     // Scoped to the canvas: the same message also reaches the shared toast, which
     // carries its own alert role, so an unscoped query races the toast mounting.
+    // 整屏画布上只说「加载失败」这一件事实：宿主原话（传输层那一句自带服务器地址、
+    // 端口与请求路径）留给 toast 与 error.log——用户报的就是画布上那一片技术细节。
     const canvas = await screen.findByRole('main');
-    expect(await within(canvas).findByRole('alert')).toHaveTextContent('服务器暂时不可用');
+    expect(await within(canvas).findByRole('alert')).toHaveTextContent('加载失败');
+    expect(canvas.textContent ?? '').not.toContain('服务器暂时不可用');
     // The route is shell-free, so it has to offer its own exit; the message also
     // has to reach the shared toast. 顶栏本身默认隐藏（用户报的 ③），所以先按同一套
     // 手势把它唤出来，再问它给不给退路。
     expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
     fireEvent.click(canvas, { clientY: 40 });
     expect(await screen.findByRole('button', { name: '返回上一页' })).toBeInTheDocument();
-    expect(screen.getAllByText('服务器暂时不可用').length).toBeGreaterThan(1);
+    // 现场不丢：原话照旧到达共享 toast（还有 error.log，那一条由宿主那边钉）。
+    expect(await screen.findByText('服务器暂时不可用')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '重试加载' }));
     await waitFor(() => expect(attempts).toBe(2));
+  });
+
+  // 用户报的：失败页原来把宿主原话整句贴出来。传输层的原话自带服务器地址
+  // （`连不上 http://192.168.1.20:3000/api/archives/a1/files：连接被拒绝`），
+  // 整屏画布上只说「加载失败」——地址留给 toast 与 error.log。
+  it('never paints the transport error on the failure canvas, address and all', async () => {
+    const detail = '连不上 http://192.168.1.20:3000/api/archives/a1/files：连接被拒绝';
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'http://192.168.1.20:3000', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: detail, retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+    const canvas = await screen.findByRole('main');
+    expect(await within(canvas).findByRole('alert')).toHaveTextContent('加载失败');
+    const painted = canvas.textContent ?? '';
+    // 连主机名与协议头都不能出现：只贴一句「加载失败」，地址连片段都不留在画布上。
+    expect(painted).not.toContain('192.168.1.20');
+    expect(painted).not.toContain('http://');
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+  });
+
+  // 用户报的：阅读模式是整屏的，自绘标题栏被它盖住，于是那一屏里没有任何地方能
+  // 拖动窗口——加载慢或卡住时尤其难堪（那是用户唯一看得见的栏）。现在加载/失败态
+  // 这条栏与阅读态那条共用同一套原生拖动。
+  it('drags the native window from the bar it shows while the reader is loading', async () => {
+    const invoke = vi.fn(() => Promise.resolve(false));
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+    try {
+      setInvokeAdapterForTests(async (command: string) => {
+        if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+        if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+        // Never resolves: the reader stays in its loading state.
+        if (command === 'load_reader_manifest') return new Promise(() => undefined);
+        throw new Error(`Unexpected command: ${command}`);
+      });
+
+      render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+
+      const canvas = await screen.findByRole('main');
+      expect(await screen.findByRole('status', { name: '正在加载页面' })).toBeInTheDocument();
+      fireEvent.click(canvas, { clientY: 40 });
+      const back = await screen.findByRole('button', { name: '返回上一页' });
+      const bar = back.closest('header') as HTMLElement;
+      expect(bar).not.toBeNull();
+
+      // 栏上没长控件的地方按下＝开始原生拖动（和外壳标题栏同一处手势）。
+      fireEvent.mouseDown(bar.querySelector('strong') as HTMLElement, { button: 0, detail: 1 });
+      expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging', { label: 'main' });
+
+      // 落在栏上的按钮不吃这一下：按返回不该顺手把窗口拖走。
+      invoke.mockClear();
+      fireEvent.mouseDown(back, { button: 0, detail: 1 });
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
   });
 
   it('shows the drawn loading indicator rather than a bare line or an empty state', async () => {
