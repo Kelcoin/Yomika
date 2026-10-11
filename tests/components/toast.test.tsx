@@ -16,6 +16,21 @@ function Emitter() {
   >emit</button>;
 }
 
+function Repeater() {
+  const { showToast } = useToast();
+  return <>
+    <button type="button" onClick={() => {
+      showToast('已连上 DESKTOP-PC', 'success');
+      showToast('已连上 DESKTOP-PC', 'success');
+    }}>twice</button>
+    <button type="button" onClick={() => showToast('已连上 KELCOIN-PC', 'success')}>other</button>
+    <button type="button" onClick={() => {
+      showToast('已连上 DESKTOP-PC', 'success');
+      showToast('已连上 DESKTOP-PC', 'error');
+    }}>variants</button>
+  </>;
+}
+
 describe('toast marks', () => {
   it('draws one semantic mark per type, none of them a cross', async () => {
     const user = userEvent.setup();
@@ -40,5 +55,23 @@ describe('toast marks', () => {
     expect(document.querySelectorAll('.toast-icon svg path')).toHaveLength(5);
     expect(document.querySelectorAll('.toast-close')).toHaveLength(3);
     expect(document.querySelectorAll('.toast-close svg path')).toHaveLength(6);
+  });
+
+  /** 同一句话叠两张，看起来就是「它报了两次」：第二张折进还在的那一张，把它的计时重新起算。 */
+  it('folds a repeated message into the toast that is already up', async () => {
+    const user = userEvent.setup();
+    render(<ToastProvider><Repeater /></ToastProvider>);
+
+    await user.click(screen.getByRole('button', { name: 'twice' }));
+    expect(screen.getAllByText('已连上 DESKTOP-PC')).toHaveLength(1);
+
+    // 不同的话照样各占一张（去重只认「同一句 + 同一种颜色」）。
+    await user.click(screen.getByRole('button', { name: 'other' }));
+    expect(screen.getAllByText('已连上 KELCOIN-PC')).toHaveLength(1);
+    expect(screen.getAllByText('已连上 DESKTOP-PC')).toHaveLength(1);
+
+    // 同色不同文、同文不同色的都不算重复。
+    await user.click(screen.getByRole('button', { name: 'variants' }));
+    expect(screen.getAllByText('已连上 DESKTOP-PC')).toHaveLength(2);
   });
 });

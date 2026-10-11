@@ -42,6 +42,7 @@ mod secret_store;
 mod settings;
 #[cfg(target_os = "windows")]
 mod single_instance;
+mod tagcount;
 mod tray_menu;
 
 use cache::{
@@ -71,8 +72,8 @@ use commands::library::{
     use_metadata_plugin, verify_archives_exist,
 };
 use commands::platform::{
-    app_build_info, frontend_ready, open_external_url, platform_capabilities, read_text_file,
-    reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets,
+    app_build_info, frontend_ready, haptic_feedback, open_external_url, platform_capabilities,
+    read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets,
     write_clipboard_text,
 };
 #[cfg(target_os = "windows")]
@@ -167,6 +168,15 @@ pub fn run() {
             #[cfg(windows)]
             dlssnr::install_skip_logger();
             let database = Database::open(app.handle()).map_err(std::io::Error::other)?;
+            // 「关闭到托盘」的即时答案在启动时读一次（此刻没人抢库锁）；窗口的关闭按钮
+            // 之后只问这份缓存，不去等锁——详情见 `settings::close_to_tray`。
+            let close_to_tray = database
+                .connection
+                .lock()
+                .ok()
+                .and_then(|connection| settings::load_preferences_from(&connection).ok())
+                .is_some_and(|snapshot| snapshot.close_to_tray);
+            settings::remember_close_to_tray(close_to_tray);
             app.manage(database);
             app.manage(DedupScanRegistry::default());
             app.manage(InAppLoginState::default());
@@ -357,29 +367,27 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() != "main" { return; }
+                if !settings::close_to_tray() {
+                    // 不拦：默认那一下就是关窗（应用没有别的可见窗口，于是整个退出）。
+                    return;
+                }
                 api.prevent_close();
-                let window = window.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    let app = window.app_handle();
-                    let close_to_tray = app.try_state::<Database>()
-                        .and_then(|database| database.connection.lock().ok()
-                            .and_then(|connection| settings::load_preferences_from(&connection).ok()))
-                        .is_some_and(|snapshot| snapshot.close_to_tray);
-                    if close_to_tray {
-                        // 藏进托盘之后没有任何前端代码在跑：这一本可能还开着、阅读器的
-                        // 派生缓存与 DLSSNR 的工作区都还挂着（实测几个 GB 的提交内存）。
-                        // 这里正好是「用户不再看图」的时刻，把工作区交回（只放纹理，不动
-                        // 工作集：那份 165MB 的 DLL 与 240MB 的 ONNX 下次还要用）。
-                        // 工作区在 worker 进程里，所以是请它交回；这条路**不等**回信——
-                        // 用户要的是窗口马上消失，而且没有会话/正忙着时它就是白等。
-                        if let Some(manager) = crate::compute::manager_from_app(&app) {
-                            manager.release_idle_async();
-                        }
-                        let _ = window.hide();
-                    } else {
-                        let _ = window.destroy();
-                    }
-                });
+                // 这里**不能**去读库：`prevent_close()` 之后窗口还活着，等库锁或等阻塞
+                // 线程池的这段时间里用户还能去点最小化，随后迟到的 `hide()` 就会把已经
+                // 收进任务栏的窗口再收进托盘——用户看到的是「关闭按钮有时失效，接着点
+                // 最小化就直接进托盘」。所以同步问一句缓存好的偏好（见
+                // `settings::close_to_tray`），接着立刻藏窗，中间不留任何等待。
+                //
+                // 藏进托盘之后没有任何前端代码在跑：这一本可能还开着、阅读器的
+                // 派生缓存与 DLSSNR 的工作区都还挂着（实测几个 GB 的提交内存）。
+                // 这里正好是「用户不再看图」的时刻，把工作区交回（只放纹理，不动
+                // 工作集：那份 165MB 的 DLL 与 240MB 的 ONNX 下次还要用）。
+                // 工作区在 worker 进程里，所以是请它交回；这条路**不等**回信——
+                // 用户要的是窗口马上消失，而且没有会话/正忙着时它就是白等。
+                if let Some(manager) = crate::compute::manager_from_app(&window.app_handle()) {
+                    manager.release_idle_async();
+                }
+                let _ = window.hide();
             }
             #[cfg(not(target_os = "windows"))]
             let _ = (window, event);
@@ -394,6 +402,8 @@ pub fn run() {
             read_text_file,
             system_insets,
             set_system_bar_style,
+            // 长按的触感确认：手机上有马达才震，其余平台是空操作（见 `commands::platform`）。
+            haptic_feedback,
             load_preferences,
             save_preferences,
             import_legacy_preferences,
@@ -472,6 +482,7 @@ pub fn run() {
             import_scoped_data,
             export_data,
             import_data,
+            tagcount::fetch_tag_counts,
             inference_probe,
             inference_release_sessions,
             dlssnr_status,

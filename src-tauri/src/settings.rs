@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{db::Database, domain::result::CommandResult};
 
@@ -38,6 +39,24 @@ const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
 const START_WITH_WINDOWS_KEY: &str = "preferences.start_with_windows";
 const CLOSE_TO_TRAY_KEY: &str = "preferences.close_to_tray";
+
+/// 「关闭到托盘」的即时答案。窗口的关闭按钮只能在事件循环线程上**同步**问它一句。
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
+/// 关窗口这件事上数据库一个字都不等：`CloseRequested` 已经被 `prevent_close()` 拦下，
+/// 只要这里有一次等待（库锁被某个慢的持有者握着、或者阻塞线程池在排队），窗口就还活着
+/// ——用户会以为关闭按钮失效，转手去点最小化；随后迟到的 `hide()` 再把已经收进任务栏的
+/// 窗口收进托盘，就成了「点最小化直接进托盘」。所以读的是这份缓存：启动时读一次库
+/// （`lib.rs` 的 setup），之后每次写偏好（`write_preference_keys`）顺手更新。
+pub fn remember_close_to_tray(value: bool) {
+    CLOSE_TO_TRAY.store(value, Ordering::Relaxed);
+}
+
+/// 同步问一句当前偏好，不碰数据库。
+pub fn close_to_tray() -> bool {
+    CLOSE_TO_TRAY.load(Ordering::Relaxed)
+}
+
 const TAG_TRANSLATION_ENABLED_KEY: &str = "preferences.tag_translation_enabled";
 const TAG_COUNT_ORDER_ENABLED_KEY: &str = "preferences.tag_count_order_enabled";
 const DLSSNR_ENABLED_KEY: &str = "preferences.dlssnr_enabled";
@@ -549,6 +568,8 @@ pub(crate) fn write_preference_keys(
     connection: &Connection,
     value: &PreferenceSnapshot,
 ) -> Result<(), String> {
+    // 「关闭到托盘」被窗口的关闭按钮同步问一次（见 `close_to_tray`），这里顺手更新。
+    remember_close_to_tray(value.close_to_tray);
     for (key, encoded) in [
         (THEME_KEY, serde_json::to_string(&value.theme)),
         (LAYOUT_KEY, serde_json::to_string(&value.default_layout)),

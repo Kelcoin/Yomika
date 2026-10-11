@@ -540,10 +540,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       else setWatchlist(result.value as WatchlistRecord[]);
       // 收藏夹 reads the LANraragi 🔖 Favorites category; the local table only
       // stands in when the category does not exist (or the read failed).
+      // An **empty** category counts as "does not exist": `[]` is truthy, and
+      // taking it here would also replace the ids this page is about to fetch,
+      // so the whole shelf came up empty even though the local table had rows.
       let shelfIds = name === 'history'
         ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
         : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
-      if (name === 'watchlist' && favorites?.ok && favorites.value) {
+      if (name === 'watchlist' && favorites?.ok && favorites.value && favorites.value.archives.length > 0) {
         setFavoritesIds(favorites.value.archives);
         shelfIds = favorites.value.archives;
       }
@@ -563,7 +566,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   useEffect(() => {
     if (loading || error || !serverId || !scopeId) return;
     // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
-    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds ? { favoritesIds } : {}), ...(categories ? { categories } : {}) } satisfies ShelfSnapshot, { persist: true });
+    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds && favoritesIds.length > 0 ? { favoritesIds } : {}), ...(categories ? { categories } : {}) } satisfies ShelfSnapshot, { persist: true });
   }, [archives, cacheKey, categories, error, favoritesIds, history, loading, name, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
   // Saved searches work on every shelf, not just the library.
@@ -583,8 +586,12 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
     // 历史与首页「继续阅读」共用同一份口径（顺序、解析、已读完过滤）；这里全都要。
     if (name === 'history') return historyShelfArchives(history, archiveById);
     // 收藏夹 renders the server category's ids in the server's own order when
-    // they are known; otherwise it falls back to the local watchlist.
-    const ids = name === 'watchlist' && favoritesIds ? favoritesIds : sortedWatchlist.map((item) => item.archiveId);
+    // they are known; otherwise it falls back to the local watchlist. An **empty**
+    // server list is treated as "not known": `[]` is truthy, and with it the page
+    // drew zero cards while the local shelf had entries (and skipped the local
+    // fallback entirely). The persisted snapshot can carry such a value too, so
+    // the check belongs here rather than only at the setter.
+    const ids = name === 'watchlist' && favoritesIds && favoritesIds.length > 0 ? favoritesIds : sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
   }, [archiveById, favoritesIds, history, name, sortedWatchlist]);
   /** 书架自己的顺序按选择的排序方式重排。档案库那份排序是服务器做的（查询里带

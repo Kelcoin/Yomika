@@ -152,3 +152,11 @@ pub async fn set_system_bar_style(app: &AppHandle, dark: bool) -> Result<(), Str
         .await
         .map(|_| ())
 }
+
+/// 触感反馈：长按这类「按住了」的确认。档位（`light` / `medium` / `heavy` / `selection`）
+/// 由原生侧映射到系统预置的振动效果；设备没有马达时原生侧安静收场，这里照样成功。
+pub async fn vibrate(app: &AppHandle, kind: &str) -> Result<(), String> {
+    call::<serde_json::Value>(app, "vibrate", json!({ "kind": kind }))
+        .await
+        .map(|_| ())
+}

@@ -32,6 +32,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(0);
   const timers = useRef(new Map<number, number>());
+  /** 最新一帧的栈。`showToast` 要能看出「这句话是不是已经挂在上面」，而它读不到同一个
+   * tick 里刚排进去的那一张（`setItems` 的更新还没落到 state）——所以照 render 的现值记一份。 */
+  const itemsRef = useRef<ToastItem[]>([]);
+  itemsRef.current = items;
   const closeToast = useCallback((id: number) => {
     const timer = timers.current.get(id);
     if (timer) window.clearTimeout(timer);
@@ -46,8 +50,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600) => {
     const message = String(text ?? '').trim();
     if (!message) return;
+    // 同一句话、同一种颜色已经挂在屏幕上时不叠第二张：它们说的是同一件事（「已连上 X」
+    // 会在打开菜单、选中那一行、按「刷新服务」时各说一遍），叠起来像连了两次。重复的这
+    // 一次改成把原来那张的计时重新起算，等于「刚刚又确认了一遍」。
+    const duplicate = itemsRef.current.find((item) => !item.closing && item.text === message && item.type === type);
+    if (duplicate) {
+      const timer = timers.current.get(duplicate.id);
+      if (timer) window.clearTimeout(timer);
+      timers.current.set(duplicate.id, window.setTimeout(() => closeToast(duplicate.id), duration));
+      return;
+    }
     const id = ++nextId.current;
-    setItems((current) => [...current, { id, text: message, type, closing: false }].slice(-4));
+    const item: ToastItem = { id, text: message, type, closing: false };
+    // 同一个 tick 里连着来两句同文时也要看见前一句：ref 跟着一起挪，state 走函数式更新。
+    itemsRef.current = [...itemsRef.current, item].slice(-4);
+    setItems((current) => [...current, item].slice(-4));
     timers.current.set(id, window.setTimeout(() => closeToast(id), duration));
   }, [closeToast]);
   const clearToasts = useCallback((type?: ToastType) => {

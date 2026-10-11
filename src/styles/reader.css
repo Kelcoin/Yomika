@@ -457,6 +457,16 @@
    instead of overlapping the controls. It reads the bar's own height token, so
    changing the bar cannot leave the pill sitting on it. */.reader-page-indicator.is-raised { bottom: calc(var(--reader-toolbar-height) + var(--space-2) + var(--safe-bottom)); }
 
+/* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时不能从栏顶往屏幕底滑：它比栏高一层
+   （`--z-reader-chrome` 3 > 栏的 2），那一路正好横穿栏的表面，看起来就是「两层底栏」。
+   所以它跟着栏一起淡出，并且**在没人看得见的时候**落回屏幕上——`bottom` 的过渡延迟到
+   栏被摘掉那一刻（0s + `--duration-exit` 延迟）才走，栏摘掉（`is-leaving` 同时消失，
+   胶囊已在落点）之后再按基准那条 `--motion-standard` 淡入。 */
+.reader-page-indicator.is-leaving {
+  opacity: 0;
+  transition: opacity var(--duration-exit) var(--ease-exit), bottom 0s var(--duration-exit);
+}
+
 /* M3 subtitle role in an app bar: on-surface-variant. */
 .reader-incognito-badge {
   flex: none;
@@ -883,8 +893,14 @@
    占一行，行内居中），第二行放剩下的控件，整行居中。`order` 把页码提到最前，
    DOM 顺序（布局/页码/处理）不变，读屏顺序也就没变。 */
 @media (max-width: 610px) {
+  /* 高度这一档要落在**两条栏和页码胶囊共同的祖先**上，不能写在 `.reader-toolbar`
+     里：自定义属性是继承的，写在栏上就只有栏的后代看得见，而胶囊是
+     `.reader-screen` 的直接子节点——它读到的是 :root 的 80px。手机档上栏有
+     160px 高，胶囊的「让位」位置却只退到 88px，于是它落进栏**里面**，盖在栏自己
+     的页码上；栏一退场，胶囊从栏里滑到屏幕底，那一路横穿整条栏的表面 ⇒
+     user report「阅读模式底栏消失时看起来会有两层底栏」。 */
+  .reader-screen { --reader-toolbar-height: 112px; }
   .reader-toolbar {
-    --reader-toolbar-height: 112px;
     display: flex;
     flex-wrap: wrap;
     align-content: center;
@@ -899,8 +915,8 @@
 }
 
 @media (max-width: 420px) {
+  .reader-screen { --reader-toolbar-height: 160px; }
   .reader-toolbar {
-    --reader-toolbar-height: 160px;
     gap: 0 var(--space-1);
   }
   .reader-toolbar-group { min-height: 42px; }

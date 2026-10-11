@@ -160,48 +160,55 @@ html { scrollbar-color: var(--ink-faint) var(--surface-canvas); }
 ${rules}`;
 }
 
-/** 基础配色：一键套用的新配色方案。swatch 为菜单卡片的三色预览条。 */
+/** 基础配色：一键套用的新配色方案。swatch 为菜单卡片的三色预览条。
+ *
+ * 浅色模式的三档（canvas → panel → elevated）必须真的分得开：底色是纸，不是白纸。
+ * 用户报过「几个预设配色的浅色模式基本就是纯白」——根因就是 elevated 直接取了 #fbfdfa
+ * 这类近乎纯白的值，铺满对话框和卡片之后整屏发白。现在这一族的亮度台阶是
+ * 画布 ≤ .82、panel 高 .05 以上、elevated 再高 .04 以上且封顶 .95，
+ * 由 tests/design-system-contract.test.ts 里那条「浅色配色不该靠近纯白」钉住。
+ */
 export const COLOR_SCHEMES: readonly ColorScheme[] = [
   { id: 'default', label: '默认', description: '回到应用默认主题。', css: '', swatch: ['#a83b32', '#4b635d', '#f5f2ed'] },
   {
     id: 'celadon', label: '青瓷', description: '青瓷绿主色与灰青纸面，安静耐看。',
     css: colorSchemeCss(
-      { canvas: '#e7efe9', panel: '#f1f7f2', elevated: '#fbfdfa', muted: '#d6e4d9', ink: '#22312a', secondary: '#4e6d5d', faint: '#587263', accent: '#2c6b52', accentHover: '#245643', cyan: '#3b7a73' },
+      { canvas: '#dcebe0', panel: '#e9f3ec', elevated: '#f3f9f5', muted: '#cfe2d5', ink: '#22312a', secondary: '#4e6d5d', faint: '#587263', accent: '#2c6b52', accentHover: '#245643', cyan: '#3b7a73' },
       { canvas: '#131f1a', panel: '#1b2923', elevated: '#24342d', muted: '#2b3f35', ink: '#dfece4', secondary: '#b2c9bb', faint: '#96ac9f', accent: '#82c6a6', accentHover: '#9bd8ba', cyan: '#6fb5ae' },
     ),
-    swatch: ['#2c6b52', '#f1f7f2', '#82c6a6'],
+    swatch: ['#2c6b52', '#e9f3ec', '#82c6a6'],
   },
   {
     id: 'indigo-ink', label: '黛蓝', description: '墨蓝主色与冷调纸面，层级分明。',
     css: colorSchemeCss(
-      { canvas: '#e6eaf2', panel: '#f1f4fa', elevated: '#fbfcff', muted: '#d4deee', ink: '#1f2a3d', secondary: '#455878', faint: '#556784', accent: '#3a5aa4', accentHover: '#2f4986', cyan: '#3d7f8f' },
+      { canvas: '#dbe3f1', panel: '#e8eefa', elevated: '#f3f7ff', muted: '#cbd9ee', ink: '#1f2a3d', secondary: '#455878', faint: '#556784', accent: '#3a5aa4', accentHover: '#2f4986', cyan: '#3d7f8f' },
       { canvas: '#131a28', panel: '#1b2537', elevated: '#243147', muted: '#2b3a52', ink: '#e2e9f6', secondary: '#b7c3dc', faint: '#93a3c0', accent: '#93b2ec', accentHover: '#acc6f4', cyan: '#6cb7c6' },
     ),
-    swatch: ['#3a5aa4', '#f1f4fa', '#93b2ec'],
+    swatch: ['#3a5aa4', '#e8eefa', '#93b2ec'],
   },
   {
     id: 'rosewood', label: '紫檀', description: '紫檀褐紫与暖灰纸面，沉稳内敛。',
     css: colorSchemeCss(
-      { canvas: '#efe9f0', panel: '#f8f3f9', elevated: '#fdfbff', muted: '#e1d6e4', ink: '#2d2333', secondary: '#5b4967', faint: '#6a5976', accent: '#7a4a73', accentHover: '#63395d', cyan: '#7a6390' },
+      { canvas: '#e9e0ec', panel: '#f2ebf5', elevated: '#faf6fc', muted: '#dccde1', ink: '#2d2333', secondary: '#5b4967', faint: '#6a5976', accent: '#7a4a73', accentHover: '#63395d', cyan: '#7a6390' },
       { canvas: '#1e1822', panel: '#291f2e', elevated: '#34283b', muted: '#3c2f45', ink: '#ece2f0', secondary: '#c6b3cf', faint: '#a995b4', accent: '#d5a3cd', accentHover: '#e3badb', cyan: '#ab96c4' },
     ),
-    swatch: ['#7a4a73', '#f8f3f9', '#d5a3cd'],
+    swatch: ['#7a4a73', '#f2ebf5', '#d5a3cd'],
   },
   {
     id: 'sakura', label: '绯樱', description: '樱粉纸面与玫红点睛，柔和明亮。',
     css: colorSchemeCss(
-      { canvas: '#f2e9ea', panel: '#faf2f3', elevated: '#fffbfb', muted: '#e7d4d7', ink: '#33242a', secondary: '#6d4c56', faint: '#7d5b66', accent: '#a3495d', accentHover: '#88394c', cyan: '#8f6470' },
+      { canvas: '#eedcdf', panel: '#f7e9eb', elevated: '#fdf5f6', muted: '#e3cbcf', ink: '#33242a', secondary: '#6d4c56', faint: '#7d5b66', accent: '#a3495d', accentHover: '#88394c', cyan: '#8f6470' },
       { canvas: '#221a1d', panel: '#2d2226', elevated: '#382a2f', muted: '#403136', ink: '#f2e6e9', secondary: '#d1b6bd', faint: '#b39aa2', accent: '#e6a6b4', accentHover: '#f1bcc8', cyan: '#c298a4' },
     ),
-    swatch: ['#a3495d', '#faf2f3', '#e6a6b4'],
+    swatch: ['#a3495d', '#f7e9eb', '#e6a6b4'],
   },
   {
     id: 'amber', label: '琥珀', description: '琥珀金主色与米黄纸面，温暖厚重。',
     css: colorSchemeCss(
-      { canvas: '#f1ead9', panel: '#faf4e6', elevated: '#fffdf4', muted: '#e5dac1', ink: '#2f2818', secondary: '#6a5b3a', faint: '#796a49', accent: '#96691e', accentHover: '#7c5517', cyan: '#6f7d3f' },
+      { canvas: '#ece0c4', panel: '#f6eddb', elevated: '#fdf8ec', muted: '#e0d2b2', ink: '#2f2818', secondary: '#6a5b3a', faint: '#796a49', accent: '#96691e', accentHover: '#7c5517', cyan: '#6f7d3f' },
       { canvas: '#211d13', panel: '#2c2718', elevated: '#373120', muted: '#3f3926', ink: '#f0e8d2', secondary: '#d0c39e', faint: '#b3a67f', accent: '#e5bc6c', accentHover: '#f1d088', cyan: '#a9b96e' },
     ),
-    swatch: ['#96691e', '#faf4e6', '#e5bc6c'],
+    swatch: ['#96691e', '#f6eddb', '#e5bc6c'],
   },
 ];
 

@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { Profiler } from 'react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -714,6 +715,99 @@ describe('library workspace', () => {
     fireEvent.touchEnd(page);
     expect(onRefresh).not.toHaveBeenCalled();
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  });
+
+  it('leaves a drag that never really goes past the edge to the browser', () => {
+    // 手机上起手那几像素常常先往下抖一下，随后才是真正滚动页面的那一段。旧实现
+    // 在第一个带向下分量的 touchmove 上就 preventDefault，这一抖就把整段手势冒领
+    // 了——浏览器从此不再滚动页面，用户看到的是「只能触发过滚刷新、页面滚不动」。
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
+    const jitter = createEvent.touchMove(list, { touches: [{ clientY: 13 }] });
+    fireEvent(list, jitter);
+    expect(jitter.defaultPrevented).toBe(false);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    // 手指转向「滚页面」那一侧：整段手势都还给浏览器，之后再往下走也不再认领。
+    const back = createEvent.touchMove(list, { touches: [{ clientY: -50 }] });
+    fireEvent(list, back);
+    expect(back.defaultPrevented).toBe(false);
+    const scroll = createEvent.touchMove(list, { touches: [{ clientY: -150 }] });
+    fireEvent(list, scroll);
+    expect(scroll.defaultPrevented).toBe(false);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    // 浏览器已经拿着这次手势滚了一段，此时再往下走够远也不能被中途接管：那会让
+    // 内容从手指底下滑走（两套滚动同时生效）。
+    const late = createEvent.touchMove(list, { touches: [{ clientY: 200 }] });
+    fireEvent(list, late);
+    expect(late.defaultPrevented).toBe(false);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    fireEvent.touchEnd(list);
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('claims the gesture once the finger has really gone past the edge', () => {
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
+    // 11px：还没到认定距离，这一格仍是浏览器在滚。
+    const short = createEvent.touchMove(list, { touches: [{ clientY: 21 }] });
+    fireEvent(list, short);
+    expect(short.defaultPrevented).toBe(false);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    // 越过 12px：这一档归下拉，位置跟着手指走（阻尼一半）。
+    const claimed = createEvent.touchMove(list, { touches: [{ clientY: 170 }] });
+    fireEvent(list, claimed);
+    expect(claimed.defaultPrevented).toBe(true);
+    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+
+    // 认领之后手指往回走：列表送回原位，但手势不再还给浏览器。
+    const back = createEvent.touchMove(list, { touches: [{ clientY: 0 }] });
+    fireEvent(list, back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    fireEvent.touchEnd(list);
+  });
+
+  it('does not re-render the list for every touch point of a pull', () => {
+    // 「过滚刷新非常非常卡」的那一半：位置如果走 state，每个触点都要重渲染整棵
+    // 虚拟化列表（一份几千节点的树）。位置直接写 DOM，state 只在从静止跨进这一档
+    // 时变一次，所以一次五点的下拉最多两次提交。
+    const onRefresh = vi.fn();
+    const commits = { count: 0 };
+    render(
+      <MemoryRouter>
+        <Profiler id="library" onRender={() => { commits.count += 1; }}>
+          <LibraryWorkspace archives={archives} onRefresh={onRefresh} />
+        </Profiler>
+      </MemoryRouter>,
+    );
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+
+    const before = commits.count;
+    fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
+    for (const clientY of [40, 80, 120, 160, 200]) {
+      fireEvent(list, createEvent.touchMove(list, { touches: [{ clientY }] }));
+    }
+    expect(pull.style.transform).toBe('translateY(95px)');
+    expect(commits.count - before).toBeLessThanOrEqual(2);
+
+    fireEvent.touchEnd(list);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
   it('sorts by choosing a field, and flips the direction when it is chosen again', async () => {

@@ -10,6 +10,7 @@ import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
+import { getPlatformCapabilities } from '../bridge/platform';
 import { decodeImage } from '../lib/decodeImage';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
@@ -96,6 +97,9 @@ export interface ReaderChromeOptions {
   active: boolean;
   /** 临时挂起：指针判定与自动隐藏都让位（缩略面板压在上面时）。 */
   suspended?: boolean;
+  /** 唤出时只点亮落点那一侧（用户报的「点一侧触发两侧」）。只有两条栏都在的实现能
+   *  这么干：加载态那层只有顶栏一条，点哪儿都该把它叫出来，所以那边不传。 */
+  pinTappedBand?: boolean;
   /** 翻开 / 收起。 */
   onToggle: () => void;
   /** 自动隐藏的时间到了。 */
@@ -127,7 +131,7 @@ export interface ReaderChrome {
  * 这里**不持有**「有没有被唤出」：加载态根本没有 `ReaderState`。权威可见性由调用方给
  * （阅读态是状态机的 `chrome-visible`，加载态是一个本地 `useState`），hook 只让指针
  * 悬停临时压过它。 */
-export function useReaderChrome({ rootRef, visible, active, suspended = false, onToggle, onHide }: ReaderChromeOptions): ReaderChrome {
+export function useReaderChrome({ rootRef, visible, active, suspended = false, pinTappedBand = false, onToggle, onHide }: ReaderChromeOptions): ReaderChrome {
   // 盒子缓存到 resize 为止：指针事件里做 `getBoundingClientRect()` 会让阅读器每帧同步
   // 布局一次，而鼠标移动事件的密度正好够把它变成可感的卡顿。
   const boxRef = useRef<ReaderRootBox>({ left: 0, top: 0, width: 0, height: 0 });
@@ -178,20 +182,39 @@ export function useReaderChrome({ rootRef, visible, active, suspended = false, o
 
   useEffect(() => {
     if (!active || !visible || suspended) return undefined;
-    const timer = window.setTimeout(() => callbacksRef.current.onHide(), CHROME_AUTO_HIDE_MS);
+    const timer = window.setTimeout(() => {
+      // 钉住的那一侧比 `visible` 强势（见下面 topChromeVisible 的算法），自动收起时
+      // 不把意见清掉，被钉住的那条栏就再也摘不下来。
+      setHover(undefined);
+      callbacksRef.current.onHide();
+    }, CHROME_AUTO_HIDE_MS);
     return () => window.clearTimeout(timer);
-  }, [active, keepAliveToken, suspended, visible]);
+  }, [active, keepAliveToken, setHover, suspended, visible]);
 
   const handleCanvasClick = useCallback((event: ChromePointerEvent) => {
-    const rect = box();
-    const height = rect.height;
-    const offset = event.clientY - rect.top;
-    const band = Math.min(CHROME_BAND_HEIGHT, height / 3);
-    // 栏开着时点哪儿都收起；栏藏着时只有点在上下感应带里才算唤出，画面中部留给翻页。
-    if (!visible && offset > band && offset < height - band) return;
+    const side = hoverTarget(event);
+    if (!visible) {
+      // 栏藏着时只有点在上下感应带里才算唤出，画面中部留给翻页。
+      if (side === null) return;
+      // 唤出时把落点那一侧钉住：触屏没有悬停，`hoverChrome` 永远是 `undefined`，两条栏
+      // 就只能跟着同一个 `visible` 同亮同灭——手指点在顶栏感应带上，底栏也一起冒出来
+      // （用户报的「点一侧触发两侧」）。只有两条栏都在的实现这么干，加载态那层只有顶栏
+      // 一条，点哪儿都该把它叫出来。
+      setHover(pinTappedBand ? side : undefined);
+      setKeepAliveToken((value) => value + 1);
+      callbacksRef.current.onToggle();
+      return;
+    }
+    // 已经开着：点另一条感应带就把那条换上来（用户的「点一侧触发那一侧」在开着的时候
+    // 同样成立），落在中部、或落在当前这一条上，才是收起。
+    if (pinTappedBand && side !== null && side !== hoverChromeRef.current) {
+      setHover(side);
+      setKeepAliveToken((value) => value + 1);
+      return;
+    }
     setHover(undefined);
     callbacksRef.current.onToggle();
-  }, [box, setHover, visible]);
+  }, [hoverTarget, pinTappedBand, setHover, visible]);
 
   const clearHover = useCallback(() => setHover(null), [setHover]);
 
@@ -324,6 +347,8 @@ function readViewport() {
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
   const pageActive = usePageActive();
   const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
+  /** 手指点的设备：页码胶囊在手机上只走居中那一档（见下面量底缝的那一处）。 */
+  const coarsePointer = useMediaQuery('(hover: none)');
   const goBack = useReturnNavigation();
   const [viewport, setViewport] = useState(readViewport);
   // Built once. A different archive arrives as an unmount, not a prop change:
@@ -419,6 +444,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     visible: state.phase === 'chrome-visible',
     active: pageActive,
     suspended: thumbnailPanelOpen,
+    // 手指（`hover: none`）点哪条感应带就只亮哪条：触屏没有悬停，两条栏本来只能一起
+    // 亮一起灭。鼠标留着旧行为——桌面用悬停选边，点一下两条都出来也无所谓。
+    pinTappedBand: coarsePointer,
     onToggle: () => setState(toggleReaderChrome),
     onHide: () => setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current),
   });
@@ -638,20 +666,27 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
 
     if (releasePage) {
+      // 一次扫描收两件事：释放窗口外的页，以及「有东西真的被放掉」时那份新数组。
+      // 先前无论有没有要放掉的页都会 `current.slice()`（上千页的档案每翻一页复制
+      // 一次整本）——快速连续翻页的卡顿里有它一份。
+      const released: number[] = [];
       for (let index = 0; index < loadedPages.length; index += 1) {
-        if (!retainSet.has(index) && loadedPages[index]) releasePage(index);
+        if (!retainSet.has(index) && loadedPages[index]) released.push(index);
       }
-      setLoadedPages((current) => {
-        let changed = false;
-        const next = current.slice();
-        for (let index = 0; index < next.length; index += 1) {
-          if (!retainSet.has(index) && next[index]) {
-            next[index] = '';
-            changed = true;
+      if (released.length > 0) {
+        for (const index of released) releasePage(index);
+        setLoadedPages((current) => {
+          let changed = false;
+          const next = current.slice();
+          for (const index of released) {
+            if (next[index]) {
+              next[index] = '';
+              changed = true;
+            }
           }
-        }
-        return changed ? next : current;
-      });
+          return changed ? next : current;
+        });
+      }
     }
     if (!loadPage) return;
     const now = Date.now();
@@ -813,6 +848,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       event.preventDefault();
       move('previous');
     } else if (event.key === 'Escape' && state.phase === 'chrome-visible') {
+      // 收起时也要把「钉在哪一侧」清掉，否则被钉住的那条栏不认这次收起。
+      setHover(undefined);
       setState(toggleReaderChrome);
     }
   }
@@ -898,10 +935,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   const handleTouchStart = useCallback((event: TouchEvent) => {
-    // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开（含下面那次
-    // `setHover(undefined)`），指针只属于面板那一层。
+    // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
-    setHover(undefined);
     if (sliding.current) return;
     if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
     dragSample.current = undefined;
@@ -1110,7 +1145,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // 阅读模式是整屏的：Windows 上系统边框关掉了，而自绘标题栏（唯一能拖窗口的
   // 地方）被这一屏盖住，所以顶栏自己得会拖（用户报的那一条）。
   const windowDrag = useWindowDrag();
-  const renderWindowMaximize = () => windowApi ? (
+  // 「是不是桌面窗口」要正向问平台：Tauri 桥在 Android/iOS 上一样存在，只看桥
+  // 就会在手机上画出这颗按钮——而 `plugin:window|toggle_maximize` 在那边没有意义
+  // （点了没反应，错还被 `.catch` 吞掉），用户报的「移动端下阅读模式顶栏不应该有
+  // 最大化/最小化按钮」就是它。首帧先不画，等平台问回来；阅读态的顶栏本来就要
+  // 唤出，晚一拍看不见（外壳的标题栏用的是同一条判据）。
+  const [platform, setPlatform] = useState<string>();
+  useEffect(() => {
+    void getPlatformCapabilities().then((result) => {
+      if (result.ok) setPlatform(result.value.platform);
+    });
+  }, []);
+  const renderWindowMaximize = () => windowApi && platform === 'windows' ? (
     <button
       type="button"
       className="reader-icon-button reader-chrome-window"
@@ -1155,46 +1201,63 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const [indicatorPlacement, setIndicatorPlacement] = useState<'bottom' | 'corner'>('bottom');
   const [indicatorOverlaps, setIndicatorOverlaps] = useState(false);
   const [indicatorFlash, setIndicatorFlash] = useState(true);
+  /** 上一趟量到的结论（胶囊该在哪一档、当时的缩放）。第二趟只在它变了的时候才需要：
+   *  变了才意味着胶囊正在两档之间滑、图片正在回弹，第一帧读到的是过渡中的位置。 */
+  const measuredIndicator = useRef<{ placement: 'bottom' | 'corner'; scale: number }>({ placement: 'bottom', scale: 1 });
   useEffect(() => {
     if (effectiveLayout === 'webtoon' || zoom.scale > 1 || pages.length === 0) return;
     // Retained readers keep their panels mounted, so every query scopes to this
     // screen's own root — document-level selectors would measure another
     // reader's hidden pill and images.
     const root = rootRef.current;
-    const measure = () => {
-      const images = Array.from(root?.querySelectorAll<HTMLElement>('.reader-frame[aria-label="分页阅读"] img') ?? []);
+    /** `remember` 只由「下一帧那一趟」传：`ResizeObserver` 与它回调里那一趟不能改写
+     *  「上一次量到的结论」，否则图片 load 触发的那一趟会把结论提前记下，紧接着的下一帧
+     *  那一趟就误判成「什么都没变」，该来的第二趟就不来了。 */
+    const measure = (remember = false) => {
+      const images = Array.from(root?.querySelectorAll<HTMLImageElement>('.reader-frame[aria-label="分页阅读"] img') ?? []);
       let union: DOMRect | undefined;
       for (const image of images) {
+        // 还没解码完的那一页量到的是**盒子**（`min(100%, 100dvh)`），不是画出来的那一块：
+        // 拿它算底缝，得到的永远是 0，胶囊于是先跳去右下角，等图片 load 完再跳回来——用户
+        // 报的就是翻页那一下的闪动。跳过它，等于「还没量到就沿用上一次的结论」。
+        if (image.naturalWidth === 0) continue;
         const rect = image.getBoundingClientRect();
         if (rect.width <= 0) continue;
         union = union ? new DOMRect(Math.min(union.x, rect.x), Math.min(union.y, rect.y), Math.max(union.right, rect.right) - Math.min(union.x, rect.x), Math.max(union.bottom, rect.bottom) - Math.min(union.y, rect.y)) : rect;
       }
-      if (!union) return;
+      if (!union) return true;
       const bottomGap = window.innerHeight - union.bottom;
-      setIndicatorPlacement(bottomGap >= 44 ? 'bottom' : 'corner');
+      // 手机上不取右下角那一档：竖着把屏幕占满的页在桌面上会把胶囊推到右边缝里，可手指
+      // 也在右下角，而且手机上那半格本来就不宽——用户报「移动端应该居中而不是在右下角」。
+      const placement = bottomGap >= 44 || coarsePointer ? 'bottom' : 'corner';
+      const settled = measuredIndicator.current.placement === placement && measuredIndicator.current.scale === zoom.scale;
+      if (remember) measuredIndicator.current = { placement, scale: zoom.scale };
+      setIndicatorPlacement(placement);
       // Overlap is the pill's own rect (whatever placement it settled into —
       // the settle pass below runs after the placement transition) against the
       // drawn image union.
       const pill = root?.querySelector('.reader-page-indicator');
-      if (!pill) return;
+      if (!pill) return settled;
       const rect = pill.getBoundingClientRect();
       setIndicatorOverlaps(rect.left < union.right && rect.right > union.left && rect.top < union.bottom && rect.bottom > union.top);
+      return settled;
     };
-    // Two passes: the zoom reset eases the image back over 140ms, so a single
-    // frame after the state flip still reads the shrinking rect, and the pill
-    // itself slides between placements over ~200ms. A third watch: pages grow
-    // to their real size as their images finish loading, which fires this
-    // observer — without it the first pass measured an empty slot and the
-    // placement stayed stale until the next turn.
-    const frame = requestAnimationFrame(measure);
-    const settle = window.setTimeout(measure, 240);
+    // 第一趟在下一帧量。第二趟（240ms 后）只在结论会变或缩放还在缓动时才有意义——
+    // 那时胶囊正从一档滑向另一档、图片正被缩放缓动拉回去，第一帧读到的是过渡中的
+    // 位置。翻页本身常常不改结论，这一趟就是白读一次同步布局：用户报的「快速连续
+    // 翻页卡顿」里每轮都有它。图片解码晚到那一档不靠它兜底——页图尺寸一变，下面的
+    // observer 就会再量一次。
+    let settle: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      if (!measure(true)) settle = window.setTimeout(() => { measure(true); }, 240);
+    });
     // The img element is what actually resizes when a page finishes loading
     // (its box is the drawn object-fit rect; frames and the track stay
     // viewport-sized), so the observer watches the page images themselves.
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => { measure(); });
     if (observer && root) for (const img of root.querySelectorAll('.reader-frame img')) observer.observe(img);
-    return () => { cancelAnimationFrame(frame); window.clearTimeout(settle); observer?.disconnect(); };
-  }, [effectiveLayout, pages.length, viewport.width, viewport.height, visibleIndexes, zoom.scale]);
+    return () => { cancelAnimationFrame(frame); if (settle !== undefined) window.clearTimeout(settle); observer?.disconnect(); };
+  }, [coarsePointer, effectiveLayout, pages.length, viewport.width, viewport.height, visibleIndexes, zoom.scale]);
   // Every page turn re-shows the pill for a moment. Where it rests in a
   // letterbox this changes nothing (it is persistent anyway); over the artwork
   // it is exactly Readoshi's brief flash, after which the pill goes quiet.
@@ -1215,6 +1278,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     previousPage.current = state.pageIndex;
     setTurnCue((value) => value + 1);
   }, [state.pageIndex]);
+  // 光线只跟**翻页那一轮**走，不跟底栏的挂载走。底栏不是常驻的：chrome 收起 260ms
+  // 之后整棵子树被摘掉（`useDelayedUnmount`），下次出现时 `key` 没变也是新 DOM 节点，
+  // 一次性 CSS 动画于是跟着重播一遍——用户看到的就是「底栏出现时栏顶闪一条线」。
+  // `playedCue` 记住已经播过的那一次；写它的是 effect 而不是渲染期间的赋值，否则
+  // StrictMode 的双渲染会在第二次就把 ref 改掉，那一轮的光线永远不出现。
+  const playedCue = useRef(0);
+  const showTurnCue = turnCue > 0 && playedCue.current !== turnCue;
+  useEffect(() => {
+    playedCue.current = turnCue;
+  }, [turnCue]);
   // One transform for the slots on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. It sits
   // *inside* the current frame rather than on the track that carries all three —
@@ -1413,8 +1486,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             aria-label="阅读控制"
             onClick={stopChromeToggle}
           >
-              {/* Re-mounted on every page turn: that is what replays the cue. */}
-              {turnCue > 0 && <span key={turnCue} className="reader-toolbar-turn" aria-hidden="true" />}
+              {/* Re-mounted on every page turn: that is what replays the cue. Gated
+                  on `showTurnCue` rather than `turnCue > 0` so that a bar which
+                  mounts for a different reason (chrome coming back) carries no cue
+                  with it — see `playedCue`. */}
+              {showTurnCue && <span key={turnCue} className="reader-toolbar-turn" aria-hidden="true" />}
               {/* Three slots, left to right: how the pages are arranged, where the
                   reader is, what is done to the page. The counter is the middle
                   slot by grid position, not by luck — the sides are equal `1fr`
@@ -1502,7 +1578,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           : indicatorPlacement;
         return (
           <div
-            className={`reader-page-indicator${bottomChromeVisible ? ' is-raised' : ''}`}
+            className={`reader-page-indicator${bottomChromeVisible ? ' is-raised' : ''}${bottomPresence.leaving ? ' is-leaving' : ''}`}
             data-placement={placement}
             aria-hidden="true"
           >{pageIndicator}</div>

@@ -2,5 +2,9 @@
     <!-- Base application theme. -->
     <style name="Theme.yomika" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
+        <!-- 开屏画面（docs/30）：夜间这份从前一个 item 都没有，于是窗口背景回落到父主题
+             （Tauri 生成的浅色主题），深色机器上开屏先白一帧。窗口背景必须与 values/
+             那份一样指向开屏 drawable，只是画布色由 values-night/colors.xml 换成深色。 -->
+        <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 </resources>

@@ -330,4 +330,54 @@ mod tests {
             "同步命令在读系统凭据库（阻塞的系统调用）：{offenders:?}"
         );
     }
+
+    #[test]
+    fn the_close_button_answers_without_waiting_on_the_database() {
+        // 主窗的关闭按钮：`CloseRequested` 已经被 `prevent_close()` 拦下，所以事件处理体
+        // 里**不能**有任何等待（库锁，或把决定甩给阻塞线程池）——这中间窗口还活着，用户
+        // 会以为关闭按钮失效、转手去点最小化；随后迟到的 `hide()` 会把已经收进任务栏的
+        // 窗口收进托盘（用户报的「关闭按钮有时失效，接着点最小化就直接进托盘」）。
+        // 答案来自 `settings` 里那份同步可读的缓存；缓存必须在启动时读一次库、并在每次
+        // 写偏好时更新，否则它会悄悄过期——那两条一并钉在这里。
+        let source_of = |wanted: &str| {
+            SOURCES
+                .iter()
+                .find(|(file, _)| *file == wanted)
+                .map(|(_, source)| *source)
+                .unwrap_or_else(|| panic!("{wanted} 不在 SOURCES 里"))
+        };
+        let lib = strip_comments(source_of("lib.rs"));
+        let start = lib
+            .find("on_window_event(|window, event|")
+            .expect("认不出窗口事件处理体：扫描器坏了");
+        let end = lib[start..]
+            .find(".invoke_handler(")
+            .map(|offset| start + offset)
+            .expect("窗口事件处理体没有终点：扫描器坏了");
+        let handler = compact(&lib[start..end]);
+        assert!(
+            handler.contains("settings::close_to_tray()"),
+            "关闭按钮要同步问 settings::close_to_tray()"
+        );
+        assert!(
+            !handler.contains(".connection.lock()"),
+            "关闭按钮不能去锁库：等锁的这段时间窗口还活着，迟到的 hide() 会把最小化后的窗口收进托盘"
+        );
+        assert!(
+            !handler.contains("spawn_blocking"),
+            "关闭按钮不能把「藏还是关」这个决定甩到别的线程上"
+        );
+        assert!(
+            source_of("lib.rs").contains("settings::remember_close_to_tray(close_to_tray)"),
+            "启动时要读一次库、把「关闭到托盘」写进缓存"
+        );
+        let settings = source_of("settings.rs");
+        let writer = settings
+            .find("pub(crate) fn write_preference_keys(")
+            .expect("认不出 write_preference_keys：扫描器坏了");
+        assert!(
+            settings[writer..].contains("remember_close_to_tray(value.close_to_tray);"),
+            "写偏好的地方要顺手更新「关闭到托盘」的缓存"
+        );
+    }
 }

@@ -87,11 +87,16 @@ export function remoteServiceReady(capabilities: RemoteCapabilities | undefined,
  *  一套，只会出现「这边显示按 4 倍跑，对面其实照自己的设置跑 2 倍」这种对不上的情况。
  *  处理方式固定跟随对面那份设置，本机只决定「用不用远端」和「这一页做哪几档」。
  *
- *  `.strip()`：旧数据里多出来的那几个键读进来直接丢掉，用户升上来不会因为多几个键就回默认。 */
+ *  `.strip()`：旧数据里多出来的那几个键读进来直接丢掉，用户升上来不会因为多几个键就回默认。
+ *
+ *  `pairedDevices` 只留一台：这台机器是**它自己**的算力来源，配对确认时服务器那边整表替换，
+ *  本地清单跟着收成一格。这里不写成 `.max(1)`——旧版本可能存着好几台，`.max(1)` 会让整份
+ *  JSON 校验失败、`parseRemoteOps` 于是连 `enabled` 一起丢回默认；`.slice(-1)` 保留**最后
+ *  配对**的那一台（前面的令牌在服务器侧早就失效了），旧数据照样读得进来、只是被收敛掉。 */
 export const RemoteOpsSchema = z
   .object({
     enabled: z.boolean().default(false),
-    pairedDevices: z.array(z.object({ address: z.string().max(256), name: z.string().max(80), token: z.string().max(128) })).max(8).default([]),
+    pairedDevices: z.array(z.object({ address: z.string().max(256), name: z.string().max(80), token: z.string().max(128) })).max(8).transform((devices) => devices.slice(-1)).default([]),
   })
   .strip();
 

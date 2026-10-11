@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 开屏画面（docs/30）：深色（系统夜间）这一档取应用深色主题的 surface-canvas 令牌
+     （tokens.css:473）。应用主题默认跟随系统（`theme: 'system'`），所以夜间变体就是
+     默认路径上的另一档；没有它，Android 只认 values/ 里那份浅色，深色机器上开屏会
+     白一下。 -->
+<resources>
+    <color name="splash_canvas">#121412</color>
+</resources>

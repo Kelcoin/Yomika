@@ -401,7 +401,13 @@ body::-webkit-scrollbar,
   margin: 0 auto;
   min-height: 0;
   box-sizing: border-box;
-  padding: var(--space-8) clamp(var(--space-5), 4vw, var(--space-12));
+  /* 尾部不再补「美观留白」：滚动容器自己的 `padding-bottom` 与面板自己的
+     `padding-bottom` 都会进可滚范围，于是「内容只差一格就放满」的页面也能滚出那一格
+     空带——user report「部分页面能完全显示依然可以上下滚动一点点」。实测
+     （`debug_outputs/flow-tail/probe.mjs`，1280×900、内容 860px）：留白住在容器上 = 可滚
+     24px、搬进面板 = 还是 24px，只有从可滚范围里彻底拿掉才是 0。真正被**遮挡**的那一档
+     照旧保留（悬浮底栏那一格在窄屏规则里），因为那些内容确实看不见。 */
+  padding: var(--space-8) clamp(var(--space-5), 4vw, var(--space-12)) 0;
   background: var(--surface-panel);
   overflow-x: hidden;
   overflow-y: auto;
@@ -437,8 +443,8 @@ body::-webkit-scrollbar,
    `width` 放宽到 1680px，`.workspace` 的 `margin: 0 auto` 与 `clamp()` 左右内边距
    还在：1920px 的窗口里首页左右各留 168px，而档案库只有 16px——这就是「首页左右
    两侧的空隙与档案库等页面不一致」。上间距同样交还给外壳（书架/档案库也是这么来的，
-   再由 `.library-shell-list .first-run-page` 给引导页补回同一格）；下间距留着，
-   三排书架自己底部没有内边距。
+   再由 `.library-shell-list .first-run-page` 给引导页补回同一格）；下间距不留（见
+   `.workspace` 的规则：任何尾部留白都会让「刚好放满」的首页多滚一格）。
    `:not([hidden])` is load-bearing: every visited route stays mounted in its own
    `route-cache-panel`, so a plain `:has(.workspace-home)` also matched after
    leaving home — and clamped every other page to 1680px, left-aligned, with the
@@ -446,7 +452,7 @@ body::-webkit-scrollbar,
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0 0 var(--space-8);
+  padding: 0;
 }
 
 /* 详情一开，首页就不能再「随内容长高」了。
@@ -1103,7 +1109,11 @@ body::-webkit-scrollbar,
 
 /* ---- 应用首帧的品牌开屏（docs/30）-----------------------------------------
    React 自己渲染这一层，展示一拍后淡出：index.html 里的静态帧可能赶不上
-   合成器第一次呈现，这层保证用户看到的首帧一定是品牌帧而不是窗口底色。 */
+   合成器第一次呈现，这层保证用户看到的首帧一定是品牌帧而不是窗口底色。
+   **入场不重播动画**：这一层与静态帧是同一张画（同样的底色、同样的印记、同样的
+   wordmark），可静态帧先被 React 的首次 render 整体换掉——若这层再从 opacity 0 淡入，
+   替换那一瞬间屏幕上是没有印记的页面底色，紧接着同一张品牌帧又浮现一次，正是用户
+   报的「两个开屏页」。淡出保留：退出时确实要让它走掉。 */
 .app-splash {
   position: fixed;
   inset: 0;
@@ -1124,7 +1134,6 @@ body::-webkit-scrollbar,
   display: grid;
   justify-items: center;
   gap: var(--space-5);
-  animation: splash-arrive var(--motion-slow) both;
 }
 
 .app-splash-brand svg { width: 128px; height: 128px; display: block; }
@@ -1135,18 +1144,11 @@ body::-webkit-scrollbar,
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-splash);
   text-indent: var(--tracking-splash);
-  color: var(--splash-paper);
 }
 
 .app-splash-wordmark i { font-style: normal; color: var(--brand-vermilion); }
 
-@keyframes splash-arrive {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .app-splash-brand { animation: none; }
   .app-splash { transition: none; }
 }
 
@@ -1903,7 +1905,16 @@ body::-webkit-scrollbar,
    pins the panel to the scrollport and the overflow tail that passes through
    the overflow-visible panel never reaches the scroll container's scrollable
    area — the last rail stays ~44px below the last scroll position for good.
-   The library keeps the clamp: its panes scroll independently. */.route-cache-panel.is-flow { height: auto; }
+   The library keeps the clamp: its panes scroll independently.
+   这一档**不**补任何尾部留白。留白无论住在滚动容器上还是住在面板上，都会进可滚范围：
+   住在容器上 = 内容之外那一格，住在面板上 = 面板高度多一格，两者都让「内容只差一格就
+   放满」的页面滚出一格空带——user report「部分页面能完全显示依然可以上下滚动一点点」。
+   量过（`debug_outputs/flow-tail/probe.mjs`，1280×900、内容 860px、菜单/状态栏等真实
+   样式）：容器留白 → 可滚 24px，面板留白 + `min-height: 100%` → 可滚 24px，去掉留白
+   → 可滚 0px。真溢出的页面照旧能滚到底（`height: auto` 让溢出尾进得了可滚范围，最后
+   一行完整可见），只是滚到底时它贴着底边、没有多余的一格。 */.route-cache-panel.is-flow {
+  height: auto;
+}
 
 .route-cache-panel[hidden] { display: none; }
 
@@ -2078,7 +2089,9 @@ body::-webkit-scrollbar,
 .eh-comments-heading h2 { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); }
 .eh-comments-heading h2 svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
 .eh-comments-list { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
-.eh-comments-list li { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
+/* The last thing in a card is the timestamp row, and the body above it already
+   separates the rows — so the bottom inset is a half step, not a full one. */
+.eh-comments-list li { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-3) var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
 .eh-comments-list li.is-uploader { border-left: 3px solid var(--brand-vermilion); }
 .eh-comment-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .eh-comment-meta > span { display: inline-flex; align-items: center; min-width: 0; gap: var(--space-2); }
@@ -2090,10 +2103,19 @@ body::-webkit-scrollbar,
 .archive-context-menu-item.is-danger,
 .eh-comment-meta time, .eh-comment-votes time { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eh-comment-meta time svg, .eh-comment-votes time svg { width: 13px; height: 13px; }
-.eh-comment-meta strong { overflow: hidden; color: var(--ink-primary); text-overflow: ellipsis; white-space: nowrap; }
+/* The author name leads the card, so it reads a step **above** the comment body
+   (--text-base 15 against the body's --text-md 14). The meta row around it keeps
+   --text-xs, which is the right size for the score and the "上传者" chip. */
+.eh-comment-meta strong { font-size: var(--text-base); overflow: hidden; color: var(--ink-primary); text-overflow: ellipsis; white-space: nowrap; }
 .eh-comment-meta small { padding: 2px 5px; border-radius: var(--radius-control); background: var(--primary-container); color: var(--on-primary-container); }
-.eh-comments-list p { margin: 0; white-space: pre-wrap; line-height: var(--leading-relaxed); }
-/* Footer row: the timestamp on the left, the vote pair on the right. */.eh-comment-votes { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 32px; }
+/* Pinned to a token: with none declared the body fell back to the UA default
+   16px — off the scale, and larger than the name that is meant to lead the card. */
+.eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; line-height: var(--leading-relaxed); }
+/* Footer row: the timestamp on the left, the vote pair on the right. The row has
+   to hug its content: with `min-height: 32px` and centred items, an uploader card
+   (no buttons at all) still reserved 32px and left ~14px of dead space under its
+   own timestamp. Bottom-aligned, the 12px stamp sits on the buttons' baseline. */
+.eh-comment-votes { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-2); }
 .eh-comment-votes time { color: var(--ink-secondary); font-size: var(--text-xs); }
 .eh-comment-votes-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
 /* Both directions keep a persistent tonal circle and identical interactive
@@ -2112,7 +2134,9 @@ body::-webkit-scrollbar,
 /* The arrows stay one colour in every state — the circle's tint is what
    announces a cast vote, not the glyph changing hue under it. */.eh-comment-votes-actions svg { width: 15px; height: 15px; color: var(--on-secondary-container); }
 .eh-comment-votes-actions button[aria-pressed='true'] svg { color: var(--on-primary); }
-.eh-comment-composer { display: grid; justify-items: end; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--hairline); }
+/* The hairline already separates the composer from the last card, so the inset
+   under it is a half step — a full one read as a hole under the last timestamp. */
+.eh-comment-composer { display: grid; justify-items: end; gap: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--hairline); }
 .eh-comment-composer textarea { width: 100%; resize: vertical; }
 .eh-comment-composer button { min-width: 92px; }
 .eh-comment-composer button svg { width: 16px; height: 16px; }
@@ -2510,7 +2534,11 @@ body::-webkit-scrollbar,
   transition: opacity var(--motion-fast);
 }
 @media (hover: hover) {
-  .archive-quick-rail-tick:hover { width: 15px; background: color-mix(in srgb, var(--on-surface) 55%, transparent); }
+  /* 悬停只上色，不再从 9px 长到 15px：刻度是 `justify-self: end`，长出来的 6px
+     全在自己盒子外面（挤进标签与刻度之间那道 8px 的缝，压在旁边的档案卡上）。
+     命中区本来就不靠这条宽度——`::before` 的 `inset: -7px -8px` 早就把它撑到
+     25×17px；「这是当前那一段」仍由 `.is-active` 的 16px 与主题色来说。 */
+  .archive-quick-rail-tick:hover { background: color-mix(in srgb, var(--on-surface) 55%, transparent); }
   .archive-quick-rail-tick:hover > .archive-quick-rail-label { opacity: 1; }
 }
 .archive-quick-rail-tick:focus-visible > .archive-quick-rail-label,
@@ -2904,18 +2932,22 @@ body::-webkit-scrollbar,
    `is-open` class, so growing in and collapsing back are the same transition —
    the list below is pushed and released by one motion. While closed the slot is
    visibility-hidden, so nothing inside is tabbable or announced.
-   Collapsing rides the exit curve, not the entrance one: with a decelerate curve
-   two thirds of the travel is over within 60ms, which is why the collapse read as
-   a snap while the expand looked animated. */
+   Both directions ride `--motion-standard`: a round of field reports said the
+   collapse was a snap, and in reply it was moved onto the exit curve
+   (`--duration-exit var(--ease-exit)`, 260ms) — but measured on the harness in
+   debug_outputs/selection-bar that curve travels 2.8% in its first 60ms while the
+   entrance travels 66%, so the two ends read as different speeds and the exit as
+   "slow, then it jerks away". One token on both sides makes the two curves
+   mirror images of each other. */
 .archive-selection-slot {
   display: grid;
   grid-template-rows: 0fr;
   visibility: hidden;
   opacity: 0;
   transition:
-    grid-template-rows var(--motion-exit),
-    opacity var(--motion-exit),
-    visibility 0s linear var(--duration-exit);
+    grid-template-rows var(--motion-standard),
+    opacity var(--motion-standard),
+    visibility 0s linear var(--duration-standard);
 }
 
 .archive-selection-slot.is-open {
@@ -2929,20 +2961,20 @@ body::-webkit-scrollbar,
 }
 
 /* 收起态必须真正归零：border-box 压不住 padding，所以竖向 padding 和 margin
-   一并归进过渡、收起时归零——否则收起后还留一道空缝。 */
+   一并归进过渡、收起时归零——否则收起后还留一道空缝。两态共用同一条过渡
+   （同令牌、同一组属性），收起才不会比展开多几帧排版。 */
 .archive-selection-slot > .archive-selection-bar {
   min-height: 0;
   overflow: hidden;
   box-sizing: border-box;
   padding-block: 0;
   margin-bottom: 0;
-  transition: margin-bottom var(--motion-exit), padding var(--motion-exit);
+  transition: margin-bottom var(--motion-standard), padding var(--motion-standard);
 }
 
 .archive-selection-slot.is-open > .archive-selection-bar {
   padding-block: var(--space-2);
   margin-bottom: var(--space-2);
-  transition: margin-bottom var(--motion-standard), padding var(--motion-standard);
 }
 
 .archive-selection-bar {
@@ -3452,9 +3484,11 @@ body::-webkit-scrollbar,
   transform: scaleX(2);
 }
 @media (hover: hover) {
+  /* 悬停只上色：`transform: scaleX(2)` 把这条 2px 的缝撑成 4px，左右各 1px 是画在
+     两块面板的内容上的。撑宽的信号留给 `:focus-visible`——那时它自己就是目标，
+     需要一条看得见的焦点环。 */
   .panel-separator:hover {
     background: var(--brand-cyan);
-    transform: scaleX(2);
   }
 }
 
@@ -4066,18 +4100,24 @@ body::-webkit-scrollbar,
    「触点落在组件内/档案卡片内无法滚动」。写成 `pan-x pan-y` 之后浏览器按手势主
    方向自行择一：横向还是滑导轨，纵向交给页面滚动容器。 */
 .archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: pan-x pan-y; }
-.archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
+.archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
+/* 悬停只换颜色，不再把卡片提起来。这条 `translateY(-2px)` 换来的是一张合成层，
+   封面在设备像素取整上会贴着媒体下沿越出一线、正落在进度条下沿（用户报的「鼠标
+   移上去时进度条底部闪出一丝封面」），于是进度条只能靠「多压住接缝 1px + 抬
+   z-index」去挡——挡住了看得到的，挡不住它其实画到了自己的盒子外面。用户本轮
+   又报「部分 hover 效果会盖住下面的元素」，这一条就是其中之一：悬停不再改变任何
+   几何。 */
 @media (hover: hover) {
-  .archive-thumb-card:hover { border-color: var(--primary); background: var(--surface-container-high); transform: translateY(-2px); }
+  .archive-thumb-card:hover { border-color: var(--primary); background: var(--surface-container-high); }
 }
 
 .archive-thumb-card.is-skeleton { flex-basis: 150px; width: 150px; min-width: 150px; pointer-events: none; border-color: var(--outline-variant); }
 
-@media (hover: hover) {
-  .archive-thumb-card.is-skeleton:hover { transform: none; box-shadow: none; }
-}
+/* 这里原先还有一条 `.archive-thumb-card.is-skeleton:hover { transform: none;
+   box-shadow: none; }`：骨架卡本来就不是指针目标，它唯一的作用是撤销上面那条被
+   删掉的浮动，一并去掉。 */
 
 .archive-thumb-card.is-skeleton .archive-thumb-card-title .skeleton-line { height: 100%; }
 .archive-thumb-card.is-skeleton .archive-thumb-card-meta .skeleton-line { width: 60%; height: 100%; }
@@ -4104,14 +4144,16 @@ body::-webkit-scrollbar,
    放进 .archive-row-copy 时只到文案栏底边、两端是直角，右侧还差一个内边距。
 
    两个细节（都是用户报的问题）：
-   ① 底边留 1px：卡片的高亮就是它自己的 `outline`（outline-offset: -1px，所以画在
-      y ∈ [H-1,H]）。进度条原来 `inset: auto 0 0`，而且卡片 `border: 0` 让它没有任何
-      内缩、绝对定位又贴满整宽，于是它作为定位后代叠在元素自身的 outline 之上，把底部
-      描边和两个下角弧线整个盖掉——「有进度条的卡片底部高亮看不见」。抬高 1px 后描边
-      完整露出，`--shadow-progress` 也不会再被卡片的 overflow: hidden 裁掉。
-      抬高 1px 只救回最底那一条 1px：轨道是实心背景、横跨整宽，弧线在它那 4px 带里
-      的那一段仍被盖住，看上去下角「断掉」。所以选中态另加一层描边覆盖层（见下面那条），
-      高亮画在横条之上，四边和两个下角弧线才完整。
+   ① 底边贴到卡片自己的底边：卡片的高亮是它自己的 `outline`（outline-offset: -1px，
+      画在 y ∈ [H-1,H]），而进度条是卡片的定位后代、轨道又是实心背景且横跨整宽，
+      贴 0 时会把底部描边与两个下角弧线整个盖掉——曾经因此抬高 1px（「有进度条的
+      卡片底部高亮看不见」）。现在选中态的高亮已由下面那条 `::after` 环层画在横条之上
+      （四边与下角都完整），那 1px 就只剩副作用：填充色到不了卡片底边，底下留一条
+      1px 的卡片底色与描边——用户报的「进度条底部与卡片底部没有完全贴合，会露出来
+      一点」就是它。读数是 debug_outputs/row-progress/reading-before.json：抬高时
+      row.bottom - bar.bottom = 1px（填充同样差 1px），贴 0 后两者都是 0。代价是
+      带进度条的卡片自己的底边描边被横条盖住（选中态有环层、不受影响），
+      --shadow-progress 也会被卡片的 overflow: hidden 裁掉——都比那 1px 的缝轻。
    ② 长度排除卡片左右圆角：横条两端仍铺到卡片边缘（用户要的是「依然覆盖圆角」），
       但填充长度只算圆角之间的直边——宽度是 `半径 + (W - 2×半径) × 进度`，由
       `ArchiveProgressBar` 的 `cornerAware` 写成 calc()。原来从 x = 0 起算，1% 在
@@ -4119,7 +4161,7 @@ body::-webkit-scrollbar,
       下窄（0.6px）的楔形，最底那 0.5px 完全没有红，右侧圆头也缩成 2px——用户说的
       「1% 时看不出进度」。 */
 .archive-list.is-wide .archive-row > .archive-card-progress {
-  inset: auto 0 1px;
+  inset: auto 0 0;
   display: block;
   height: 4px;
 }
@@ -4527,7 +4569,7 @@ body::-webkit-scrollbar,
   .workspace {
     height: 100%;
     min-height: 0;
-    padding: var(--space-8) var(--space-4) var(--space-6);
+    padding: var(--space-8) var(--space-4) 0;
   }
 
   .workspace-heading {
@@ -6409,17 +6451,14 @@ body::-webkit-scrollbar,
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
-/* 远端能提供哪些处理服务（超分 / 去码 / DLSSNR）：三枚小标签一行放下，这就是「远端
-   可用服务」的全部面积——从前这一整块摆的是 op 选择、模型列表和放大倍数输入框，而那三
-   样都由对面那份设置决定，摆在本机只是让人以为选了有用。能用的标签亮着（`is-ready`），
-   不能用的压暗但仍显示：用户要知道对面有这一档、只是现在没装好。 */
-.settings-capability-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  padding: 0 var(--space-4) var(--space-3);
-}
-
+/* 远端能提供哪些处理服务（超分 / 去码 / DLSSNR）：三枚小标签，这就是「远端可用服务」
+    的全部面积——从前这一整块摆的是 op 选择、模型列表和放大倍数输入框，而那三样都由对面
+    那份设置决定，摆在本机只是让人以为选了有用。能用的标签亮着（`is-ready`），不能用的
+    压暗但仍显示：用户要知道对面有这一档、只是现在没装好。
+ *
+ * 这一排不再单独占设置组里的一行，而是挂到二级菜单里**当前那台设备**的行尾（见
+ * `.settings-device-capabilities`）：同一个清单在设置页与菜单里各摆一份，用户报「去掉
+ * 图 1 和图 2 里的远端处理能力，以胶囊形式放到图 2 的设备名右侧」。 */
 .settings-capability-chip {
   border: 1px solid var(--hairline);
   border-radius: 999px;
@@ -6435,14 +6474,29 @@ body::-webkit-scrollbar,
   color: var(--on-surface);
 }
 
-/* 设备行：左边一枚设备类型的图标（手机 / 平板 / 桌面），右边名字一行、地址一行。
-   长地址不会再把名字挤变形，地址也不会被折成两行。 */
+/* 设备行：左边一枚设备类型的图标（手机 / 平板 / 桌面），中间名字一行、地址一行，右边
+    （只有当前连上的那一台）挂一排能力胶囊。长地址不会再把名字挤变形，地址也不会被折成
+   两行；窄屏上胶囊折回名字下面（见文件末尾 `max-width: 640px` 那块）。 */
 .settings-device-option {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-3);
   justify-items: start;
+}
+
+.settings-device-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+/* 窄屏（手机）上这层菜单只有两三百像素宽：胶囊硬跟在名字右边会把名字挤成一条竖排。
+   折回名字下面一行——仍然是「这一台能做什么」，只是不再和名字争宽度。 */
+@media (max-width: 640px) {
+  .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
+  .settings-device-capabilities { grid-column: 2; justify-content: flex-start; }
 }
 
 .settings-device-icon {

@@ -1,15 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   RECOMMENDATION_LIMIT,
+  createRecommendationSeed,
+  createSeededShuffle,
   pickSeedTags,
   rankRecommendations,
   sameCreatorTags,
   scoreCandidate,
   normalizeSourceTags,
+  TASTE_NAMESPACE_WEIGHT,
+  tagJitter,
+  tagRarity,
   tagWeight,
   sortSameCreatorRecommendations,
 } from '../../src/lib/recommendation';
+import { installTagCounts } from '../../src/lib/tagCountService';
+
+afterEach(() => {
+  installTagCounts([]);
+});
 
 describe('recommendation rules', () => {
   it('weights taste tags above bookkeeping namespaces', () => {
@@ -76,5 +86,92 @@ describe('recommendation rules', () => {
       { archiveId: 'c', title: 'Alpha', tags: ['artist:a'], pageCount: 10, readPages: 2 },
     ]);
     expect(sorted.map((item) => item.archiveId)).toEqual(['a', 'c', 'b', 'z']);
+  });
+});
+
+describe('frequency-backed weights and per-search jitter', () => {
+  it('gives an unlisted taste tag a baseline instead of dropping the archive', () => {
+    // 手写表只列了六十来个标签；剩下的取向标签从前一律 0 分，等于「表没提过就
+    // 不参与相似度」。基准分让全站频次表来决定它们的相对轻重。
+    expect(tagWeight('female:unlisted')).toBe(TASTE_NAMESPACE_WEIGHT);
+    expect(tagWeight('language:chinese')).toBe(0);
+    expect(tagWeight('unknown')).toBe(0);
+    const source = normalizeSourceTags(['female:unlisted']);
+    expect(scoreCandidate(source, { archiveId: 'a', tags: ['female:unlisted'] })).toBe(TASTE_NAMESPACE_WEIGHT);
+  });
+
+  it('keeps the hand-written weights and scores untouched while the table is empty', () => {
+    const source = normalizeSourceTags(['female:glasses', 'female:futanari', 'language:chinese']);
+    expect(tagWeight('female:futanari')).toBe(5);
+    expect(tagRarity('female:futanari')).toBe(1);
+    expect(scoreCandidate(source, { archiveId: 'b', tags: ['female:glasses', 'female:futanari'] })).toBe(6.5);
+    expect(scoreCandidate(source, { archiveId: 'd', tags: ['female:futanari'], pageCount: 10, readPages: 10 })).toBe(2.5);
+  });
+
+  it('weighs a rare tag above a common one once the frequency table is installed', () => {
+    installTagCounts([['female:common', 900_000], ['female:rare', 5]]);
+    expect(tagRarity('female:rare')).toBeGreaterThan(tagRarity('female:common'));
+    expect(tagRarity('female:common')).toBeLessThan(1.01);
+
+    const source = ['female:common', 'female:rare'];
+    const candidates = [
+      { archiveId: 'common-only', tags: ['female:common'] },
+      { archiveId: 'rare-only', tags: ['female:rare'] },
+    ];
+    expect(rankRecommendations(source, candidates).map((item) => item.archiveId))
+      .toEqual(['rare-only', 'common-only']);
+
+    // 表被清空后两者同分，名次只剩 id 兜底——这张表确实是那一步的承重件。
+    installTagCounts([]);
+    expect(rankRecommendations(source, candidates).map((item) => item.archiveId))
+      .toEqual(['common-only', 'rare-only']);
+  });
+
+  it('shuffles seeds by seed, reproducibly', () => {
+    const items = ['a', 'b', 'c', 'd', 'e'];
+    const shuffle = createSeededShuffle(7);
+    expect(shuffle(items)).toEqual(shuffle(items));
+    const orders = new Set([1, 2, 3, 4, 5, 6, 7, 8].map((seed) => createSeededShuffle(seed)(items).join('')));
+    expect(orders.size).toBeGreaterThan(1);
+    expect(items).toEqual(['a', 'b', 'c', 'd', 'e']);
+
+    // 问哪几个标签也要随种子变，不然每次搜索的起点都一样。
+    const source = ['female:a', 'female:b', 'female:c', 'female:d', 'female:e'];
+    expect(pickSeedTags(source, 3, createSeededShuffle(7))).toEqual(pickSeedTags(source, 3, createSeededShuffle(7)));
+    const picks = new Set([1, 2, 3, 4].map((seed) => pickSeedTags(source, 3, createSeededShuffle(seed)).join(',')));
+    expect(picks.size).toBeGreaterThan(1);
+  });
+
+  it('nudges near-equal candidates apart while the same seed stays put', () => {
+    const source = ['female:a', 'female:b', 'female:c', 'female:d', 'female:e', 'female:f'];
+    const candidates = [
+      { archiveId: 'first', tags: ['female:a'] },
+      { archiveId: 'second', tags: ['female:f'] },
+    ];
+    const order = (seed: number) => rankRecommendations(source, candidates, RECOMMENDATION_LIMIT, { seed })
+      .map((item) => item.archiveId).join(',');
+    expect(order(3)).toBe(order(3));
+    expect(new Set(Array.from({ length: 16 }, (_, seed) => order(seed))).size).toBe(2);
+    expect(order(0)).toBe(order(0));
+  });
+
+  it('never lets the jitter outrank a strong match', () => {
+    const source = ['female:futanari', 'female:a', 'female:b', 'female:c', 'female:d', 'female:e', 'female:f', 'female:g'];
+    const candidates = [
+      { archiveId: 'weak', tags: ['female:a', 'female:b', 'female:c'] },
+      { archiveId: 'strong', tags: ['female:futanari'] },
+    ];
+    for (let seed = 0; seed < 128; seed += 1) {
+      expect(rankRecommendations(source, candidates, RECOMMENDATION_LIMIT, { seed })[0]?.archiveId).toBe('strong');
+    }
+  });
+
+  it('draws a fresh, reproducible seed for every visit', () => {
+    const seed = createRecommendationSeed();
+    expect(Number.isInteger(seed)).toBe(true);
+    expect(seed).toBeGreaterThanOrEqual(0);
+    expect(seed).toBeLessThan(0x7fffffff);
+    expect(tagJitter('female:a', 5)).toBe(tagJitter('female:a', 5));
+    expect(tagJitter('female:a', 5)).not.toBe(tagJitter('female:a', 6));
   });
 });

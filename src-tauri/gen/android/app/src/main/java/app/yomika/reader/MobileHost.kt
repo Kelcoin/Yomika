@@ -2,10 +2,15 @@ package app.yomika.reader
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -57,6 +62,12 @@ class SystemBarStyleArgs {
   var dark: Boolean = false
   /** 窗口底色（`#rrggbb`）：页面画上来之前露出来的就是它，跟主题一致才不会闪一下白。 */
   var background: String = "#0D0D0D"
+}
+
+@InvokeArg
+class VibrateArgs {
+  /** `light` / `medium` / `heavy` / `selection`，映射到系统预置的那几种效果。 */
+  var kind: String = "medium"
 }
 
 /** 最近一次量到的系统栏高度（CSS 像素）：`MainActivity` 写，`insets` 命令读。 */
@@ -266,6 +277,27 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
     }
   }
 
+  /**
+   * 触感：长按这类「按住了」的确认（页面的 `hapticFeedback` 走这里）。
+   *
+   * 只在这台设备真有马达时动手——模拟器与部分平板 `hasVibrator()` 就是 false，那时安静
+   * 收场：震动是可选的确认，不是功能本身。缺 `VIBRATE` 权限时系统会静默忽略，所以那条
+   * 权限是必需的（见 `AndroidManifest.xml`）。
+   */
+  @Command
+  fun vibrate(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(VibrateArgs::class.java)
+      val vibrator = vibratorOf()
+      if (vibrator?.hasVibrator() == true) {
+        vibrateOnce(vibrator, args.kind)
+      }
+      invoke.resolve()
+    } catch (error: Throwable) {
+      invoke.reject(error.message ?: "震动失败")
+    }
+  }
+
   @SuppressLint("SetJavaScriptEnabled")
   private fun showSheet(url: String, userAgent: String) {
     // 活动和内容视图从 PluginManager 拿：那是个 AppCompatActivity（`onBackPressedDispatcher`
@@ -405,4 +437,41 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
 
   private fun dp(value: Int): Int =
     (value * hostActivity.resources.displayMetrics.density).toInt()
+
+  /** API 31 起震动器归 `VibratorManager` 管（一台设备可能挂好几个），之前是系统服务里的
+   *  那一个。两者都拿不到就是没有马达。 */
+  private fun vibratorOf(): Vibrator? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      val manager = hostActivity.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+      manager?.defaultVibrator
+    } else {
+      @Suppress("DEPRECATION")
+      hostActivity.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
+
+  /** 档位 → 系统预置效果（`createPredefined` 从 API 29 起）。minSdk 是 24，低版本退成一段
+   *  一次性振动：手感粗一点，但「按住了」这件事照样感觉得到。 */
+  private fun vibrateOnce(vibrator: Vibrator, kind: String) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val effect = when (kind) {
+        "light" -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+        "heavy" -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+        "selection" -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+        else -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+      }
+      vibrator.vibrate(effect)
+      return
+    }
+    val milliseconds = when (kind) {
+      "light", "selection" -> 10L
+      "heavy" -> 40L
+      else -> 22L
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      vibrator.vibrate(VibrationEffect.createOneShot(milliseconds, VibrationEffect.DEFAULT_AMPLITUDE))
+      return
+    }
+    @Suppress("DEPRECATION")
+    vibrator.vibrate(milliseconds)
+  }
 }

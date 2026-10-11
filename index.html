@@ -28,10 +28,15 @@
         place-items: center;
         background: var(--surface-canvas, #0B0B0F);
         color: var(--ink-primary, #F3EEE4);
-        font-family: 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif;
+        /* 字体也走令牌：写死一族的话，React 那一帧（继承 --font-body）在替换的
+           那一刻会换字形，wordmark 跟着重排——两帧同构图包括这一项。 */
+        font-family: var(--font-body, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif);
         user-select: none;
       }
-      .app-splash-static .brand { display: grid; justify-items: center; gap: 20px; }
+      /* margin 必须自己写死：侧栏那条 `.brand`（shell.css:145，`margin: 0 8px 40px`）
+         一旦加载就会落到这个 div 上——两帧都居中，静态帧的居中盒却被这条下边距撑高
+         40px，于是替换那一刻整组印记**跳 20px**。 */
+      .app-splash-static .brand { display: grid; justify-items: center; gap: 20px; margin: 0; }
       .app-splash-static svg { width: 128px; height: 128px; display: block; }
       .app-splash-static .wordmark {
         margin: 0;

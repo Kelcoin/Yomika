@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { StrictMode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
 
@@ -33,6 +34,72 @@ function renderReader() {
       <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
     </MemoryRouter>,
   );
+}
+
+function pageIndicator() {
+  return document.querySelector('.reader-page-indicator');
+}
+
+/** 造一张「竖着把屏幕占满」的页：底下没有缝，桌面那条规则本来会把它推去右下角。
+ *  `naturalWidth` 分开传，好把「图片还没解码」这一态也造得出来。 */
+function fillHeight(image: HTMLElement, naturalWidth: number) {
+  Object.defineProperty(image, 'naturalWidth', { configurable: true, value: naturalWidth });
+  Object.defineProperty(image, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({ x: 10, y: 0, top: 0, left: 10, right: 380, bottom: 844, width: 370, height: 844 }),
+  });
+}
+
+/** 造一张「下面有缝」的页：底缝合 ≥44px 那一档，桌面规则会把它留在中间。 */
+function fillHeightLetterbox(image: HTMLElement, naturalWidth: number) {
+  Object.defineProperty(image, 'naturalWidth', { configurable: true, value: naturalWidth });
+  Object.defineProperty(image, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({ x: 10, y: 0, top: 0, left: 10, right: 380, bottom: 600, width: 370, height: 600 }),
+  });
+}
+
+/** 记下这一页被量了几次：还没解码的页不该被拿去量，`getBoundingClientRect` 一次都不该调。 */
+function trackRects(image: HTMLElement) {
+  let reads = 0;
+  const measure = image.getBoundingClientRect.bind(image);
+  Object.defineProperty(image, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => { reads += 1; return measure(); },
+  });
+  return { count: () => reads };
+}
+
+function stubHoverNone(initial = false) {
+  const original = window.matchMedia;
+  const listeners = new Map<string, Set<(event: { matches: boolean }) => void>>();
+  let hoverNone = initial;
+  window.matchMedia = ((query: string) => ({
+    get matches() { return query === '(hover: none)' ? hoverNone : false; },
+    media: query,
+    onchange: null,
+    addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+      const set = listeners.get(query) ?? new Set<(event: { matches: boolean }) => void>();
+      set.add(listener);
+      listeners.set(query, set);
+    },
+    removeEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+      listeners.get(query)?.delete(listener);
+    },
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+  return {
+    /** 换输入方式：改一下 `(hover: none)` 的答案再发一次 change，就是接上鼠标 / 拔掉鼠标。 */
+    setHoverNone(next: boolean) {
+      hoverNone = next;
+      for (const listener of listeners.get('(hover: none)') ?? []) listener({ matches: next });
+    },
+    restore() {
+      window.matchMedia = original;
+    },
+  };
 }
 
 describe('reader screen', () => {
@@ -161,6 +228,89 @@ describe('reader screen', () => {
     }
   });
 
+  // 用户报的 ⑧（2026-10-11）：「移动端下点击触发顶栏/底栏中的一侧时会导致同时触发两侧」。
+  // 触屏没有悬停，`hoverChrome` 永远是 `undefined`，两条栏就只能跟着同一个 `visible`
+  // 同亮同灭。手指点下去时因此按落点把那一侧钉住（收起仍然统一，鼠标那条路径也不动）。
+  it('summons only the bar whose band the tap landed in', async () => {
+    const media = stubHoverNone(true);
+    try {
+      renderReader();
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const topBar = () => screen.queryByRole('button', { name: '返回上一页' });
+      const bottomBar = () => screen.queryByRole('toolbar');
+
+      fireEvent.click(reader, { clientY: 110 });
+      expect(topBar()).toBeInTheDocument();
+      expect(bottomBar()).not.toBeInTheDocument();
+
+      // 开着的时候点另一条感应带：换过来，不是两条都亮、也不是全收。被换下去的那条
+      // 还要走 260ms 的退场（`useDelayedUnmount`），所以这里等它摘掉。
+      fireEvent.click(reader, { clientY: window.innerHeight - 110 });
+      expect(bottomBar()).toBeInTheDocument();
+      await vi.waitFor(() => expect(topBar()).not.toBeInTheDocument());
+
+      // 点当前这一条才是收起（不看落点、两条一起走）。
+      fireEvent.click(reader, { clientY: window.innerHeight - 110 });
+      await vi.waitFor(() => expect(bottomBar()).not.toBeInTheDocument());
+      expect(topBar()).not.toBeInTheDocument();
+    } finally {
+      media.restore();
+    }
+  });
+
+  // 鼠标那条路径不动：桌面靠悬停选边，点一下两条都出来（旧行为，有上面的既有用例钉着）。
+  it('still flips both bars together for a mouse click', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader, { clientY: 110 });
+    expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+    expect(screen.getByRole('toolbar')).toBeInTheDocument();
+  });
+
+  // 钉住的那一侧比 `visible` 强势（`topChromeVisible = hoverChrome === 'top'`），自动
+  // 隐藏时不清掉它就再也摘不下来。
+  it('hides the pinned bar on the auto-hide clock too', () => {
+    vi.useFakeTimers();
+    const media = stubHoverNone(true);
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.click(reader, { clientY: 110 });
+      expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(4_500));
+      act(() => vi.advanceTimersByTime(300));
+      expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      media.restore();
+      vi.useRealTimers();
+    }
+  });
+
+  // 反面：划页是手势，不是又一次「点」——翻页不该把另一条栏顺手带出来。
+  it('keeps the pinned bar pinned while a swipe turns the page', async () => {
+    const media = stubHoverNone(true);
+    try {
+      renderReader();
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.click(reader, { clientY: 110 });
+      expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+
+      fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 100 }] });
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 50, clientY: 100 }] });
+
+      // 等过退场那一档（260ms）再看：只靠「还在 DOM 里」会被 `useDelayedUnmount` 骗过——
+      // 意见被清掉的那棵树里，顶栏照样多留 260ms。
+      await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });
+      expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument();
+      expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+    } finally {
+      media.restore();
+    }
+  });
+
   // 用户报的 ④：两条顶栏的标题都是 `flex: 1`，吃的是前导按钮**之后**的剩余宽度，
   // 所以整条栏看起来是偏左的。这里量不出布局（jsdom 没有布局，也没开 `css: true`），
   // 所以按样式表本身断言。
@@ -233,7 +383,8 @@ describe('reader screen', () => {
   it('does not start a page swipe from a toolbar control', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
-    fireEvent.click(reader);
+    // 底栏那三颗在底端感应带里，鼠标挪过去就把底栏叫出来（点一下只会亮起点在的那一侧）。
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
     const button = screen.getByRole('button', { name: '上一页' });
     fireEvent.mouseDown(button, { button: 0, clientX: 500, clientY: 700 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
@@ -276,10 +427,137 @@ describe('reader screen', () => {
     expect(document.querySelector('.reader-page-indicator')?.textContent).toBe('2 / 3');
   });
 
-  it('does not mount window controls outside the tauri shell', () => {
+  it('parks the page indicator in the corner when a mouse has the room, and only then', async () => {
+    // 量底缝那一段的两次纠正（rAF + 240ms）在 jsdom 里不保证跑得到；换上指针类型会
+    // 让这个 effect 重跑，而 effect 里的 ResizeObserver 在 jsdom 里是**同步**回调的
+    // （见 tests/setup.ts），所以这一步量得确定。
+    const media = stubHoverNone(true);
+    try {
+      renderReader();
+      fillHeight(screen.getByRole('img', { name: '第 1 页' }), 700);
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+
+      await act(async () => { media.setHoverNone(false); });
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
+    } finally {
+      media.restore();
+    }
+  });
+
+  it('keeps the page indicator centred once the pointer is a finger, whatever the page measures', async () => {
+    // 竖着把屏幕占满的页在桌面上会把胶囊推进右边缝里；手机上那里正是手指待的地方，
+    // 而半格宽的画面本来就没有「缝」。用户报的就是这一条：移动端应该居中。
+    const media = stubHoverNone(true);
+    try {
+      renderReader();
+      fillHeight(screen.getByRole('img', { name: '第 1 页' }), 700);
+
+      // 鼠标在：底缝算出来是 0，这一档确实去了右下角——量是量得准的。
+      await act(async () => { media.setHoverNone(false); });
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
+
+      // 同一台设备换上手指：底缝还是 0，但这一格不再给右下角。
+      await act(async () => { media.setHoverNone(true); });
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+    } finally {
+      media.restore();
+    }
+  });
+
+  it('does not let a page that has not decoded yet push the page indicator into the corner', async () => {
+    // 还没解码完的那一页量到的是盒子（100% × 100dvh），不是画出来的那一块：底缝算出来
+    // 永远是 0，胶囊先跳右下角、等图片 load 完再跳回来——翻页时那一下闪动就是它。
+    // 两次纠正（rAF + 240ms）在 jsdom 里不保证哪一次跑得到，所以每一步都真等到它们过去；
+    // 指针类型是 effect 的依赖，换一次就是一次确定的重新量。
+    const settle = () => act(async () => { await new Promise((resolve) => { setTimeout(resolve, 300); }); });
+    const media = stubHoverNone(false);
+    try {
+      renderReader();
+      const page = screen.getByRole('img', { name: '第 1 页' });
+
+      // ① 占满屏幕的、已经解码的页：桌面上这一档确实去右下角——先证明量是准的。
+      fillHeight(page, 700);
+      await settle();
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
+
+      // ② 下面有缝的、已经解码的页：换指针类型这一次确实重新量过，量到的也是新尺寸。
+      //    下一条断言靠的就是这一点，不然它只是「什么都没量」的同义词。
+      fillHeightLetterbox(page, 700);
+      const decoded = trackRects(page);
+      await act(async () => { media.setHoverNone(true); });
+      await settle();
+      expect(decoded.count()).toBeGreaterThan(0);
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+      await act(async () => { media.setHoverNone(false); });
+      await settle();
+
+      // ③ 页面还没解码：空盒子不该被拿去量，也不该把胶囊推走。
+      fillHeight(page, 0);
+      const undecoded = trackRects(page);
+      await act(async () => { media.setHoverNone(true); });
+      await settle();
+      expect(undecoded.count()).toBe(0);
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+    } finally {
+      media.restore();
+    }
+  });
+
+  it('only measures the letterbox a second time when something is actually moving', async () => {
+    // 翻一页会重跑这段测量。第二趟（240ms 后）是给「胶囊正在两档之间滑、图片正在缩放
+    // 回弹」的第一帧过渡值擦屁股的；结论没变的那一轮再量一次只是白读一次同步布局——
+    // 用户报的「快速连续翻页卡顿」里每一轮都有它。判据就落在「这一轮量了几次」上。
+    const settle = () => act(async () => { await new Promise((resolve) => { setTimeout(resolve, 300); }); });
     renderReader();
-    expect(screen.queryByRole('button', { name: '最大化窗口' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '还原窗口' })).not.toBeInTheDocument();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    for (const image of document.querySelectorAll<HTMLElement>('.reader-frame img')) fillHeightLetterbox(image, 700);
+    await settle();
+    expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+
+    const reads = trackRects(pageIndicator() as HTMLElement);
+    const before = reads.count();
+    await act(async () => { fireEvent.keyDown(reader, { key: 'ArrowRight' }); });
+    const afterCommit = reads.count();
+    // 翻页后新露出来的那几页也得是「已经解码、底下有缝」的：不然这一轮量不到东西，
+    // 下面第二条断言就成了「什么都没测」的同义词。
+    for (const image of document.querySelectorAll<HTMLElement>('.reader-frame img')) fillHeightLetterbox(image, 700);
+    await settle();
+    const afterSettle = reads.count();
+
+    expect(afterCommit - before).toBeGreaterThan(0);
+    expect(afterSettle - afterCommit).toBe(1);
+  });
+
+  it('re-measures after the pill has slid into its new placement, not only in the first frame', async () => {
+    // 结论变了的那一轮（这里：从「手指在，居中」换成「鼠标在，去右下角」）第二趟测量是
+    // 承重的：第一帧读到的还是胶囊在滑动途中的矩形。这一条把「滑到位」交给测试自己控制，
+    // 不靠墙钟——同步那几趟与下一帧那一趟读的都是滑动中，之后才只有 240ms 那一趟读得到。
+    const wait = (ms: number) => act(async () => { await new Promise((resolve) => { setTimeout(resolve, ms); }); });
+    const media = stubHoverNone(true);
+    try {
+      renderReader();
+      fillHeight(screen.getByRole('img', { name: '第 1 页' }), 700);
+      await wait(1900); // 「翻页闪一下」的窗口过去，重叠那一档才显示得出来
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+
+      let slid = false;
+      const withOverlap = { x: 300, y: 10, top: 10, left: 300, right: 370, bottom: 40, width: 70, height: 30 };
+      const sliding = { x: 400, y: 10, top: 10, left: 400, right: 470, bottom: 40, width: 70, height: 30 };
+      Object.defineProperty(pageIndicator() as HTMLElement, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => (slid ? withOverlap : sliding),
+      });
+
+      await act(async () => { media.setHoverNone(false); });
+      await wait(120); // 同步那几趟与下一帧那一趟都过去了：现在胶囊还在路上
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
+
+      slid = true; // 胶囊滑到位了，压在画面上——只有第二趟测量才会看到这一幕
+      await wait(300);
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('hidden');
+    } finally {
+      media.restore();
+    }
   });
 
   it('supports keyboard paging without crossing bounds', () => {
@@ -1023,6 +1301,73 @@ describe('reader screen', () => {
     expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBe(second);
   });
 
+  it('does not replay the turn cue when the bottom bar comes back', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    await user.click(reader);
+    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
+    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
+
+    // 收起来：底栏是条件挂载，260ms 退场窗口过去之后整棵子树摘掉。
+    await user.click(reader);
+    await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });
+    expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+
+    // 再唤出来：这是一次「栏回来」，不是一次翻页。原来 `turnCue > 0` 让栏带着上一次的
+    // 光线一起回来，一次性动画重播 ⇒ 栏顶闪一条主题色的线（用户报的就是这一下）。
+    await user.click(reader);
+    const again = screen.getByRole('toolbar', { name: '阅读控制' });
+    expect(again.querySelector('.reader-toolbar-turn')).toBeNull();
+
+    // 真翻一页还是要回应。
+    await user.click(within(again).getByRole('button', { name: '下一页' }));
+    expect(again.querySelector('.reader-toolbar-turn')).not.toBeNull();
+  });
+
+  it('takes the page pill along with the bar instead of letting it slide across', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    await user.click(reader);
+    const pill = pageIndicator() as HTMLElement;
+    expect(pill).toHaveClass('is-raised');
+
+    // 收起。退场这 260ms 里栏还挂在树上淡出，胶囊比它高一层——它这时必须认领
+    // `is-leaving`（样式里跟着栏一起淡出、落位推迟到栏摘掉那一刻），否则它会从栏顶
+    // 滑到屏幕底，一路横穿整条栏（user report:「底栏消失时看起来会有两层底栏」）。
+    await user.click(reader);
+    const leavingPill = pageIndicator() as HTMLElement;
+    expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+    expect(leavingPill).toHaveClass('is-leaving');
+
+    // 窗口过去之后栏摘掉，胶囊也交还标记——它此时已经在落点上了，可以正常淡入。
+    await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });
+    expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+    const rested = pageIndicator() as HTMLElement;
+    expect(rested).not.toHaveClass('is-leaving');
+    expect(rested).not.toHaveClass('is-raised');
+  });
+
+  it('still shows the turn cue when React renders the screen twice', async () => {
+    // `main.tsx` 挂着 StrictMode，开发与测试都是双渲染。光线「这一轮该不该播」如果是在
+    // 渲染期间记账的（`playedCue.current = turnCue` 直接写在渲染体里），第二次渲染就已经
+    // 记成「播过」了，提交出去的那一棵里没有光线——所以那笔账必须由 effect 记。
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <MemoryRouter>
+          <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
+        </MemoryRouter>
+      </StrictMode>,
+    );
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
+    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
+  });
+
   it('moves the thumbnail panel from the toolbar up to the top bar', async () => {
     const user = userEvent.setup();
     renderReader();
@@ -1115,9 +1460,14 @@ describe('reader screen', () => {
   });
 
   it('draws the top bar maximize control at the same glyph size as the other chrome icons', async () => {
-    // 窗口按钮只在 Tauri 外壳里渲染（见上一条用例），这里把桥注入 window。
+    // 窗口按钮只在 Tauri 外壳里渲染，而且只在 Windows 上（见下下条用例），
+    // 所以这里把桥注入 window 之外，还要把平台答出来。
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
-      invoke: vi.fn(() => Promise.resolve(false)),
+      invoke: vi.fn((command: string) => Promise.resolve(
+        command === 'platform_capabilities'
+          ? { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } }
+          : false,
+      )),
     };
     const view = renderReader();
     try {
@@ -1132,6 +1482,41 @@ describe('reader screen', () => {
       // 顶栏只有邻居（LayoutGrid/Settings）一半大，那才是「最大化按钮尺寸太小」。
       const rect = svg.querySelector('rect') as SVGRectElement;
       expect(Number(rect.getAttribute('width'))).toBeGreaterThanOrEqual(16);
+    } finally {
+      view.unmount();
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  // 用户报的：手机上阅读模式的顶栏也长着「最大化/最小化」。只看 Tauri 桥是拦不住的
+  // ——Android/iOS 上那个桥一样在，而 `plugin:window|toggle_maximize` 在那边是空操作
+  // （点了没反应）。所以按钮要正向问平台，而且**首帧就不画**：这一条先点开顶栏、
+  // 平台还没答，按钮就得不在（缺陷版此刻已经画出来了），再把「android」答回去，
+  // 按钮仍然不在。
+  it('leaves the window controls off the top bar where there is no window to maximize', async () => {
+    let answerPlatform: ((value: unknown) => void) | undefined;
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: vi.fn((command: string) => {
+        if (command === 'platform_capabilities') {
+          return new Promise((resolve) => { answerPlatform = resolve; });
+        }
+        return Promise.resolve(false);
+      }),
+    };
+    const view = renderReader();
+    try {
+      await userEvent.setup().click(screen.getByRole('main', { name: '漫画阅读器' }));
+      await screen.findByRole('button', { name: '返回上一页' });
+      expect(screen.queryByRole('button', { name: '最大化窗口' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '还原窗口' })).not.toBeInTheDocument();
+
+      // 平台答回来了（而且是「手机」），顶栏依旧一颗窗口按钮都没有。
+      expect(answerPlatform, '平台没被问到：这条用例就没在测它').toBeTypeOf('function');
+      await act(async () => {
+        answerPlatform?.({ ok: true, value: { platform: 'android', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: false } });
+      });
+      expect(screen.queryByRole('button', { name: '最大化窗口' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '还原窗口' })).not.toBeInTheDocument();
     } finally {
       view.unmount();
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;

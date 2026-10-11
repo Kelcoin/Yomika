@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComputeCenterSettingsGroup } from '../../src/components/ComputeCenterSettingsGroup';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
+import { DEFAULT_PREFERENCES, type PreferenceSnapshot } from '../../src/repositories/nativeSettingsRepository';
+import { parseRemoteOps, serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
 import { deviceDisplayName, deviceKind } from '../../src/lib/deviceIdentity';
 
 /** 「管理已有配对」那一层要显示三件事：名字、地址、还有一枚**按设备类型挑出来**的
@@ -34,6 +35,10 @@ function computeStatus(overrides: Record<string, unknown> = {}) {
     pairedClients: [],
     ...overrides,
   };
+}
+
+function capability(id: string, ready: boolean, label = id) {
+  return { id, label, ready, detail: ready ? '可用' : '不可用' };
 }
 
 function adapterFor(handlers: Record<string, (args?: Record<string, unknown>) => unknown> = {}) {
@@ -205,5 +210,172 @@ describe('compute center settings menus', () => {
       name: 'SM-S918B',
       kind: 'phone',
     }));
+  });
+});
+
+describe('one paired device at a time', () => {
+  /** 配第二台时把这一台换掉：这台机器是它自己的算力来源，没有「轮流用几台」这回事。 */
+  it('replaces the paired device instead of appending a second one', async () => {
+    const written: Partial<PreferenceSnapshot>[] = [];
+    setInvokeAdapterForTests(adapterFor({
+      compute_pair_request: () => ({ ok: true, value: { requestId: 'req-2' } }),
+      compute_pair_confirm: () => ({ ok: true, value: { name: 'Galaxy Tab', token: 'token-b' } }),
+    }));
+    render(
+      <ToastProvider>
+        <ComputeCenterSettingsGroup
+          preferences={{
+            ...DEFAULT_PREFERENCES,
+            remoteComputeUrl: '192.168.1.9:47653',
+            remoteComputeToken: 'token-a',
+            remoteComputeOps: serializeRemoteOps({
+              enabled: true,
+              pairedDevices: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'token-a' }],
+            }),
+          }}
+          editPreferences={(patch) => { written.push(patch); }}
+        />
+      </ToastProvider>,
+    );
+
+    const group = await screen.findByRole('region', { name: '远程后处理服务' });
+    await user().click(within(group).getByRole('button', { name: '添加设备' }));
+    const dialog = await screen.findByRole('dialog', { name: '添加设备' });
+    // 已经配了一台，就要提前说清楚这是替换而不是追加（上一台会当场失效）。
+    expect(within(dialog).getByText(/替换掉现在这一台（DESKTOP-PC）/)).toBeTruthy();
+    await user().type(within(dialog).getByLabelText('设备地址'), '192.168.1.10:47653');
+    await user().click(within(dialog).getByRole('button', { name: /^配对$/ }));
+    await user().type(await screen.findByLabelText('配对码'), '001422');
+    await user().click(within(await screen.findByRole('dialog', { name: '添加设备' })).getByRole('button', { name: '完成配对' }));
+
+    await waitFor(() => expect(written.some((patch) => patch.remoteComputeOps)).toBe(true));
+    const last = written[written.length - 1];
+    const ops = parseRemoteOps(last?.remoteComputeOps ?? '');
+    expect(ops.pairedDevices).toEqual([{ address: '192.168.1.10:47653', name: 'Galaxy Tab', token: 'token-b' }]);
+    expect(last?.remoteComputeToken).toBe('token-b');
+  });
+
+  /** 旧版本可能存着好几台：读进来只留**最后配对**的那一台，而不是整份回默认。 */
+  it('keeps only the newest device out of an older list without dropping the settings', () => {
+    const ops = parseRemoteOps(serializeRemoteOps({
+      enabled: true,
+      pairedDevices: [
+        { address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'token-a' },
+        { address: '192.168.1.10:47653', name: 'Galaxy Tab', token: 'token-b' },
+      ],
+    }));
+
+    expect(ops.enabled).toBe(true);
+    expect(ops.pairedDevices).toEqual([{ address: '192.168.1.10:47653', name: 'Galaxy Tab', token: 'token-b' }]);
+    // 旧文件里的这块 JSON 是原样存下来的：直接读它也要收敛成一台。
+    expect(parseRemoteOps(JSON.stringify({
+      enabled: true,
+      pairedDevices: [
+        { address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'token-a' },
+        { address: '192.168.1.10:47653', name: 'Galaxy Tab', token: 'token-b' },
+      ],
+    })).pairedDevices).toHaveLength(1);
+  });
+});
+
+/** 「设备连上之后又断开、还得重新配对」的两条机制：一次探测失败被当成断开，以及点一次
+ *  本机开关就顺手换掉令牌（Rust 侧换令牌会 `pairing.clear()`）。 */
+describe('staying connected', () => {
+  const paired = {
+    ...DEFAULT_PREFERENCES,
+    remoteComputeUrl: '192.168.1.9:47653',
+    remoteComputeToken: 'token-a',
+    remoteComputeOps: serializeRemoteOps({
+      enabled: true,
+      pairedDevices: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'token-a' }],
+    }),
+  };
+
+  it('keeps the capability chips when a later probe fails', async () => {
+    let probes = 0;
+    setInvokeAdapterForTests(adapterFor({
+      remote_compute_capabilities: () => {
+        probes += 1;
+        if (probes === 1) {
+          return {
+            ok: true,
+            value: {
+              service: 'yomika-compute-center',
+              version: 2,
+              name: 'DESKTOP-PC',
+              capabilities: [capability('upscale', true, '超分')],
+              models: [],
+            },
+          };
+        }
+        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '对面没答上', retryable: true } };
+      },
+    }));
+    render(
+      <ToastProvider>
+        <ComputeCenterSettingsGroup preferences={paired} editPreferences={() => {}} />
+      </ToastProvider>,
+    );
+
+    const group = await screen.findByRole('region', { name: '远程后处理服务' });
+    await user().click(within(group).getByRole('button', { name: '已配对设备' }));
+    const dialog = await screen.findByRole('dialog', { name: '已配对设备' });
+    await waitFor(() => expect(within(dialog).getByText('超分')).toHaveClass('is-ready'));
+
+    // 再问一次，对面没答上：小标签说的是它**有什么**，抹掉就等于替它宣布断开。
+    await user().click(within(dialog).getByRole('button', { name: '刷新服务' }));
+    await waitFor(() => expect(probes).toBeGreaterThan(1));
+    expect(within(screen.getByRole('group', { name: '远端可用服务' })).getByText('超分')).toHaveClass('is-ready');
+    // 失败本身还是要说一声：留着旧清单不等于假装没事。
+    expect(await screen.findByText('对面没答上')).toBeTruthy();
+  });
+
+  /** 打开「已配对设备」这一行只是展开菜单：从前它顺手又连一次（不 quiet），于是「进这一组」
+   *  与「点开这一行」各弹一张一模一样的「已连上 X」。探针交给挂载时那次 quiet 探测。 */
+  it('opens the paired device panel without probing a second time', async () => {
+    const adapter = adapterFor({
+      remote_compute_capabilities: () => ({
+        ok: true,
+        value: {
+          service: 'yomika-compute-center',
+          version: 2,
+          name: 'DESKTOP-PC',
+          capabilities: [capability('upscale', true, '超分')],
+          models: [],
+        },
+      }),
+    });
+    setInvokeAdapterForTests(adapter);
+    render(
+      <ToastProvider>
+        <ComputeCenterSettingsGroup preferences={paired} editPreferences={() => {}} />
+      </ToastProvider>,
+    );
+
+    const group = await screen.findByRole('region', { name: '远程后处理服务' });
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('remote_compute_capabilities', expect.anything()));
+    await user().click(within(group).getByRole('button', { name: '已配对设备' }));
+    await screen.findByRole('dialog', { name: '已配对设备' });
+
+    const probes = adapter.mock.calls.filter(([command]) => command === 'remote_compute_capabilities');
+    expect(probes).toHaveLength(1);
+  });
+
+  it('toggles the local service without rotating the token', async () => {    const configure: Record<string, unknown>[] = [];
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_configure: (args) => {
+        configure.push(args ?? {});
+        return { ok: true, value: computeStatus({ running: true }) };
+      },
+    }));
+    renderComputeCenter();
+
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
+    await user().click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
+
+    await waitFor(() => expect(configure).toHaveLength(1));
+    // 换令牌会清空配对表：已配对设备会被全部踢掉，用户看到的就是「连上又断开」。
+    expect(configure[0]).not.toHaveProperty('rotateToken');
+    expect(configure[0]).toMatchObject({ enabled: true });
   });
 });

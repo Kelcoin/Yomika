@@ -6,7 +6,7 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
-import { resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
+import { readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -305,7 +305,7 @@ describe('archive detail route', () => {
       if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
-      if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -340,7 +340,7 @@ describe('archive detail route', () => {
         } };
       }
       if (command === 'list_watchlist') return { ok: true, value: [] };
-      if (command === 'list_archives_page') {
+      if (command === 'search_archives_page' || command === 'list_archives_page') {
         const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
         const rows = query.startsWith('artist:')
           ? [{ serverId: 'scope-a', archiveId: 'by-same-artist', title: 'By same artist', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['artist:someone'] }]
@@ -389,7 +389,7 @@ describe('archive detail route', () => {
         } };
       }
       if (command === 'list_watchlist') return { ok: true, value: [] };
-      if (command === 'list_archives_page') {
+      if (command === 'search_archives_page' || command === 'list_archives_page') {
         const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
         await new Promise<void>((resolve) => { releases.push(resolve); });
         const rows = query.startsWith('artist:')
@@ -473,7 +473,7 @@ describe('archive detail route', () => {
       if (command === 'get_eh_comments') return { ok: true, value: [] };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
-      if (command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
@@ -511,7 +511,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'list_archives_page') return { ok: true, value: { items: [
+      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [
         { serverId: server.id, archiveId: 'gone', title: 'Gone recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
         { serverId: server.id, archiveId: 'kept', title: 'Kept recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
       ], total: 2, hasMore: false } };
@@ -533,7 +533,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'list_archives_page') return { ok: true, value: { items: [
+      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [
         { serverId: server.id, archiveId: 'kept', title: 'Kept recommendation', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] },
       ], total: 1, hasMore: false } };
       if (command === 'verify_archives_exist') return { ok: true, value: [] };
@@ -553,7 +553,7 @@ describe('archive detail route', () => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'artist:someone, female:glasses' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
-      if (command === 'list_archives_page') {
+      if (command === 'search_archives_page' || command === 'list_archives_page') {
         const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
         return { ok: true, value: {
           items: [{ serverId: 'scope-a', archiveId: `for-${query}`, title: `命中 ${query}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: [query] }],
@@ -569,8 +569,9 @@ describe('archive detail route', () => {
 
     const first = renderDetail();
     await screen.findByRole('region', { name: '推荐' });
-    await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length).toBeGreaterThan(0));
-    const searches = adapter.mock.calls.filter(([command]) => command === 'list_archives_page').length;
+    const searchesSoFar = () => adapter.mock.calls.filter(([command]) => command === 'search_archives_page').length;
+    await vi.waitFor(() => expect(searchesSoFar()).toBeGreaterThan(0));
+    const searches = searchesSoFar();
     first.unmount();
 
     const second = renderDetail();
@@ -578,8 +579,152 @@ describe('archive detail route', () => {
     // A cached rail arrives with its cards already in it; one that had to search
     // again would still be a skeleton at this point.
     expect(within(rail).getByRole('link', { name: /命中/ })).toBeInTheDocument();
-    expect(adapter.mock.calls.filter(([command]) => command === 'list_archives_page')).toHaveLength(searches);
+    expect(searchesSoFar()).toBe(searches);
     second.unmount();
+  });
+
+  it('pages a seed on the server instead of trusting one page of the local mirror', async () => {
+    // 同作者栏从前问的是本地镜像的第一页，而镜像只有同步过的那部分：「有时获取同作者
+    // 档案不全」就是这两条叠出来的。现在一个种子在服务端按 `has_more` 往后翻，第二页
+    // 里的档案照样进候选池。
+    const pageOf = (start: number) => [
+      { serverId: server.id, archiveId: `page-${start}-a`, title: `次要 ${start}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'artist:someone'] },
+      { serverId: server.id, archiveId: `page-${start}-b`, title: `重点 ${start}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:futanari'] },
+    ];
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
+        return { ok: true, value: { items: pageOf(start), total: 6, hasMore: start === 0 } };
+      }
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderDetail('/home');
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    // 第二页那条只可能来自第二次请求：只读第一页的话它根本不在候选里。
+    expect(await within(rail).findByRole('link', { name: /重点 2/ })).toBeInTheDocument();
+    expect(within(rail).getByRole('link', { name: /次要 0/ })).toBeInTheDocument();
+    // 第二页是靠条目偏移翻出来的（第一页两条 → 下一页 start=2），不是把第一页又读一遍。
+    expect(adapter.mock.calls.filter(([command, callArgs]) => command === 'search_archives_page'
+      && (callArgs?.input as { start?: number }).start === 2)).toHaveLength(1);
+  });
+
+  it('searches again when the cached answer came back short', async () => {
+    // 取数被截断（页数用满、半途失败或整段走了镜像）时写下的缓存只是先把上一次的答案
+    // 画出来：它不能把短答案在这里钉一天，下一次进详情页要在后台补齐。
+    let round = 0;
+    const gates: Array<() => void> = [];
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
+        if (start === 0) round += 1;
+        // 把补齐那次搜索的第一页闸住：不闸的话它在同一串微任务里就换完答案了，
+        // 「缓存先画、后台再补」这一段根本观察不到。
+        if (round > 1 && start === 0) await new Promise<void>((resolve) => gates.push(resolve));
+        return { ok: true, value: {
+          items: [{ serverId: server.id, archiveId: `r${round}-${start}`, title: `第 ${round} 轮 ${start}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] }],
+          total: 60,
+          hasMore: true,
+        } };
+      }
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const first = renderDetail('/home');
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    expect(await within(rail).findByRole('link', { name: /第 1 轮 0/ })).toBeInTheDocument();
+    // 这一轮被页数上限截断了，写下的快照必须自己承认「这份答案可能是短的」。
+    expect(readRouteCache<{ complete?: boolean }>('recommendations:server-a:archive-a')?.complete).toBe(false);
+    first.unmount();
+
+    const second = renderDetail('/home');
+    const secondRail = await screen.findByRole('region', { name: '推荐' });
+    // 缓存先把上一轮那几张摆出来（补齐的搜索还卡在网线上）。
+    await waitFor(() => expect(round).toBe(2));
+    expect(within(secondRail).getByRole('link', { name: /第 1 轮 0/ })).toBeInTheDocument();
+    // ……松手之后，后台那次搜索换上补齐的答案。
+    await act(async () => { gates.splice(0).forEach((release) => release()); });
+    expect(await within(secondRail).findByRole('link', { name: /第 2 轮 0/ })).toBeInTheDocument();
+    second.unmount();
+  });
+
+  it('re-ranks the cached pool for this visit instead of replaying one frozen order', async () => {
+    // 池子留在快照里是为了省掉重复搜索；面板那十几张每次进详情页都按本次的种子重排。
+    // 少了这一层，24 小时快照会把推荐栏钉成同一份，用户看到的就是「每次进来都一样」。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') {
+        return { ok: true, value: { ...metadata, tags: 'female:glasses, female:tie-a, female:tie-b' } };
+      }
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') return { ok: true, value: { items: [
+        { serverId: server.id, archiveId: 'tie-a', title: '并列 A', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:tie-a'] },
+        { serverId: server.id, archiveId: 'tie-b', title: '并列 B', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:tie-b'] },
+      ], total: 2, hasMore: false } };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const orderIn = (rail: HTMLElement) => within(rail).getAllByRole('link')
+      .map((node) => /并列 [AB]/.exec(node.textContent ?? '')?.[0] ?? '')
+      .filter(Boolean)
+      .join(',');
+
+    vi.spyOn(Math, 'random').mockReturnValue(0.13);
+    const first = renderDetail('/home');
+    const firstRail = await screen.findByRole('region', { name: '推荐' });
+    await within(firstRail).findByRole('link', { name: /并列 A/ });
+    const firstOrder = orderIn(firstRail);
+    const searches = adapter.mock.calls.filter(([command]) => command === 'search_archives_page').length;
+    await act(async () => { first.unmount(); });
+
+    vi.spyOn(Math, 'random').mockReturnValue(0.79);
+    renderDetail('/home');
+    const secondRail = await screen.findByRole('region', { name: '推荐' });
+    await within(secondRail).findByRole('link', { name: /并列 A/ });
+    expect(orderIn(secondRail)).not.toEqual(firstOrder);
+    // 换的是面板次序，不是取数：快照完整时一次搜索都不该再打。
+    expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page').length).toBe(searches);
+  });
+
+  it('asks the local mirror with the search term when the server cannot answer', async () => {
+    // 服务端答不上时回退问镜像，但条件要跟着走：从前这条回退把 query 丢了，答的是「库里
+    // 最新的一百条」，调用方按精确标签一筛就什么都不剩——同作者栏会突然空掉。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'artist:someone, female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '对面没答上', retryable: true } };
+      if (command === 'list_archives_page') return { ok: true, value: { items: [
+        { serverId: server.id, archiveId: 'mirrored', title: '镜像里的同作者', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['artist:someone'] },
+      ], total: 1, hasMore: false } };
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    renderDetail('/home');
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    fireEvent.click(await screen.findByRole('tab', { name: '同作者' }));
+    expect(await within(rail).findByRole('link', { name: /镜像里的同作者/ })).toBeInTheDocument();
   });
 });
 

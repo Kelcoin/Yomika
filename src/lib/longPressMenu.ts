@@ -1,4 +1,5 @@
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { hapticFeedback } from './haptics';
 
 /** How long a finger has to stay put before the press counts as a hold. */
 const HOLD_MS = 450;
@@ -19,6 +20,9 @@ const SLOP_PX = 10;
  * The pending hold is keyed on the element rather than kept in a closure, so it
  * survives a re-render mid-press — a thumbnail finishing its load must not
  * orphan the timer that is about to open the menu.
+ *
+ * 450 毫秒之后手指下面什么都不会变，所以手机还欠一次「按住了」的确认：震动就发在这
+ * 一处（三个调用点共用它），见 `haptics.ts`。桌面上它自己会跳过。
  */
 const holds = new WeakMap<EventTarget, { timer: number | undefined; x: number; y: number; held: boolean }>();
 
@@ -52,6 +56,8 @@ export function longPressHandlers(open: (at: { x: number; y: number }) => void) 
       hold.timer = window.setTimeout(() => {
         hold.timer = undefined;
         hold.held = true;
+        // 菜单出现之前先让手指知道它被听见了（桌面/无马达的设备是空操作）。
+        hapticFeedback('medium');
         open({ x: hold.x, y: hold.y });
       }, HOLD_MS);
     },

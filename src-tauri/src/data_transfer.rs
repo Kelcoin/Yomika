@@ -241,6 +241,145 @@ mod tests {
         assert_eq!(landed, 1, "老类型写法的待看到了对面没落进 reading_list");
     }
 
+    /// 导入一份文件必须把阅读设置与每本档案的翻页方向都恢复过来——哪怕目标机已经用过
+    /// 一阵（本机的 journal 计数器比文件里的高、并且已经收过一次远端偏好）。
+    ///
+    /// 曾经的缺口：文件导入走的是与自动同步同一条时钟闸门，而两台设备的 `logical_clock`
+    /// 各数各的、从没见过面——本机存过几次设置就比文件里的高，于是整份偏好被挡在门外，
+    /// 用户看到的是「导入成功、什么都没变」（`applied: 0`）。翻页方向有两半：全局默认
+    /// （`preferences.defaultDirection`）与每本档案那一条（`reading_progress.direction`），
+    /// 两边都要跟着回来。
+    #[test]
+    fn importing_a_file_restores_the_reading_direction_of_each_archive() {
+        let items: Vec<String> = SYNC_SCOPE_CATEGORIES
+            .iter()
+            .map(|category| category.to_string())
+            .collect();
+        let categories = record_categories(&items);
+
+        let (value, objects) = {
+            let mut source =
+                crate::db::Database::open_path(":memory:").expect("in-memory database");
+            let mut connection = source.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a')",
+                    [],
+                )
+                .expect("insert server");
+            let mut preferences =
+                crate::settings::load_preferences_from(&connection).expect("load preferences");
+            preferences.default_direction = "rtl".to_string();
+            preferences.default_layout = "webtoon".to_string();
+            crate::settings::save_preferences_to(&mut connection, preferences).expect("save");
+            let payload = r#"{"archiveId":"archive-1","pageIndex":5,"pageCount":40,"layout":"continuous","direction":"rtl","coverAlone":null}"#;
+            let hash = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(payload.as_bytes()));
+            connection
+                .execute(
+                    "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision, updated_at)
+                     VALUES ('scope-a', 'archive-1', 5, 40, 'continuous', 'rtl', 'device-a', 1, '2026-10-01 08:00:00')",
+                    [],
+                )
+                .expect("insert progress");
+            connection
+                .execute(
+                    "INSERT INTO sync_journal (scope_id, object_id, object_type, operation, device_id, logical_clock, payload_hash, payload_json)
+                     VALUES ('scope-a', 'scope-a/archive-1', 'reading_progress', 'upsert', 'device-a', 1, ?1, ?2)",
+                    rusqlite::params![hash, payload],
+                )
+                .expect("insert journal");
+            let (value, objects) =
+                crate::commands::sync::export_scoped_document(&connection, &categories)
+                    .expect("export");
+            (value, objects)
+        };
+        assert_eq!(objects, 2, "文件里该有偏好与那本档案的进度两条：{value}");
+        assert!(
+            value.to_string().contains("rtl") && value.to_string().contains("webtoon"),
+            "导出里就没有阅读设置：{value}"
+        );
+
+        // 两种目标机形态各来一遍：从没收过远端偏好（库里还没有 `preferences` 那块 JSON），
+        // 与已经收过一次（那块 JSON 带着更晚的时刻）。以前只有前者能过。
+        for with_blob in [false, true] {
+            let mut target =
+                crate::db::Database::open_path(":memory:").expect("in-memory database");
+            let mut connection = target.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a')",
+                    [],
+                )
+                .expect("insert server");
+            // 目标机自己改过五次设置：它的本地时钟已经比文件里那一版高。
+            for _ in 0..5 {
+                let preferences =
+                    crate::settings::load_preferences_from(&connection).expect("load preferences");
+                crate::settings::save_preferences_to(&mut connection, preferences).expect("save");
+            }
+            if with_blob {
+                connection
+                    .execute(
+                        "INSERT INTO settings (key, value_json, updated_at) VALUES ('preferences', '{}', '2026-01-01 00:00:00')
+                         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                        [],
+                    )
+                    .expect("insert blob");
+            }
+            // 这本档案目标机读得更晚、方向相反：文件里那一版在时时刻上更旧。
+            connection
+                .execute(
+                    "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision, updated_at)
+                     VALUES ('scope-a', 'archive-1', 30, 40, 'paged', 'ltr', 'device-b', 9, '2099-01-01 00:00:00')",
+                    [],
+                )
+                .expect("insert local progress");
+            let report = crate::commands::sync::import_scoped_document(
+                &mut connection,
+                value.clone(),
+                &categories,
+            )
+            .expect("import");
+            assert_eq!(
+                (report.applied, report.skipped),
+                (2, 0),
+                "旁观过偏好的目标机（blob={with_blob}）也要把文件里那两条恢复过来：{report:?}"
+            );
+            let landed =
+                crate::settings::load_preferences_from(&connection).expect("load preferences");
+            assert_eq!(
+                (landed.default_direction.as_str(), landed.default_layout.as_str()),
+                ("rtl", "webtoon"),
+                "文件里的阅读设置没落地（blob={with_blob}）"
+            );
+            let progress: (String, String) = connection
+                .query_row(
+                    "SELECT layout, direction FROM reading_progress WHERE scope_id='scope-a' AND archive_id='archive-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read progress");
+            assert_eq!(
+                (progress.0.as_str(), progress.1.as_str()),
+                ("continuous", "rtl"),
+                "这本档案的翻页方向没恢复（blob={with_blob}）"
+            );
+
+            // 同一份文件再来一次：幂等，落地的还是这两条，跳过的还是 0。
+            let again = crate::commands::sync::import_scoped_document(
+                &mut connection,
+                value.clone(),
+                &categories,
+            )
+            .expect("import again");
+            assert_eq!(
+                (again.applied, again.skipped),
+                (2, 0),
+                "重复导入同一份文件要幂等：{again:?}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_items_are_dropped() {
         let items = normalize_items(&[

@@ -917,13 +917,23 @@ describe('compute center settings group', () => {
     const deviceDialog = await screen.findByRole('dialog', { name: '已配对设备' });
     await user.click(within(deviceDialog).getByRole('button', { name: '刷新服务' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('remote_compute_capabilities', { url: '192.168.1.9:47653', token: 'remote-token' }));
-    await waitFor(() => expect(within(deviceDialog).getByText(/DESKTOP-PC · 超分、DLSS5/)).toBeTruthy());
 
-    // 远端能做什么就亮什么：能力标签照它对上来的 `ready` 亮/暗，能用的在外面那一片
-    // 小标签上看得见。（模型、倍数、层数这些「这次怎么做」的控件全都删了。）
-    const services = within(group).getByRole('group', { name: '远端可用服务' });
+    // 远端能做什么就亮什么：能力标签照它对上来的 `ready` 亮/暗。（模型、倍数、层数这些
+    // 「这次怎么做」的控件全都删了。）
+    //
+    // 第 3 项的判据：这一排只在二级菜单里**当前那一台**设备的名字右边——设置组里不再铺
+    // 一行（图 1 里那一排要删掉），菜单底下那行「DESKTOP-PC · 超分、DLSS5」也一并删掉。
+    await waitFor(() => expect(within(deviceDialog).getByRole('group', { name: '远端可用服务' })).toBeTruthy());
+    expect(within(group).queryByRole('group', { name: '远端可用服务' })).toBeNull();
+    expect(within(deviceDialog).queryByText(/DESKTOP-PC · 超分/)).toBeNull();
+    const services = within(deviceDialog).getByRole('group', { name: '远端可用服务' });
     expect(within(services).getByText('超分')).toHaveClass('is-ready');
     expect(within(services).getByText('DLSS5')).toHaveClass('is-ready');
+    // 它长在设备行里（和名字同一个按钮），不是对话框里另外一行。
+    const deviceRow = within(deviceDialog).getByRole('button', { name: /DESKTOP-PC/ });
+    expect(deviceRow.contains(services)).toBe(true);
+    expect(deviceRow.getAttribute('aria-pressed')).toBe('true');
+    expect(within(deviceDialog).getByText('192.168.1.9:47653')).toBeTruthy();
 
     // 第 8 项的判据：存下去的 remoteComputeOps 只剩「开不开」和「配过哪几台」——
     // 这一次用哪个模型、放大几倍都不再由客户端记，写进去就等于把老毛病存回来。

@@ -25,6 +25,7 @@ import {
   zoomAtPoint,
   panZoom,
 } from '../../src/domain/reader';
+import type { PageShape, ReaderState } from '../../src/domain/reader';
 
 describe('reader domain', () => {
   it('keeps the image point under the zoom anchor stationary', () => {
@@ -392,5 +393,50 @@ describe('reader domain', () => {
 
       expect(zoomByWheel(start, 0)).toBe(start);
     });
+  });
+});
+
+describe('reader spread plan reuse', () => {
+  it('does not rebuild the spread plan for every question one page turn asks', () => {
+    // 双页模式下翻一页会问 5~6 次同一份排布：可见页、前一/后一相邻页（预取）、
+    // advanceReader 各问一次。每一次都要按页数分配一个数组、再走一遍 O(页数) 的
+    // 分组与 findIndex——上千页的档案里这就是「快速连续翻页会卡顿」中属于领域层
+    // 的那部分。排布表按「页数 + 形状表引用」缓存，翻页期间必须命中。
+    const pageCount = 3000;
+    const shapes: PageShape[] = Array.from({ length: pageCount }, () => 'normal');
+    let state: ReaderState = {
+      ...createReaderState({ archiveId: 'a', pageCount, pageIndex: 0, direction: 'ltr', layout: 'double' }),
+      shapes,
+    };
+
+    const started = performance.now();
+    for (let turn = 0; turn < 200; turn += 1) {
+      state = advanceReader(state, 'next');
+      getVisiblePageIndexes(state);
+      getVisiblePageIndexes({ ...state, pageIndex: state.pageIndex + 1 });
+      getVisiblePageIndexes({ ...state, pageIndex: state.pageIndex - 1 });
+      advanceReader(state, 'previous');
+    }
+    const elapsed = performance.now() - started;
+
+    // 阈值留在两档之间很空的地方：命中缓存时实测 ~1ms，去掉缓存（见
+    // debug_outputs/fix-round/mutations-item11.ps1 -Mutation 1）会跳到 ~110ms。
+    expect(elapsed, '翻一页只该排布一次：缓存命中是毫秒级，未命中是上百毫秒').toBeLessThan(30);
+  });
+
+  it('keys the spread plan on the page count and the shape table it came from', () => {
+    // 单槽缓存要认得「这是哪一份排布」：页数或形状表换了就是另一份。缓存键少一半的话
+    // 上面那条时间判据照样绿，错误只会以「配错页」的形式静默出现。
+    const plain: PageShape[] = ['normal', 'normal', 'normal', 'normal', 'normal', 'normal'];
+    const withWide: PageShape[] = ['normal', 'normal', 'wide', 'normal', 'normal', 'normal'];
+    const six = createReaderState({ archiveId: 'a', pageCount: 6, pageIndex: 1, direction: 'ltr', layout: 'double' });
+
+    expect(getVisiblePageIndexes({ ...six, shapes: plain })).toEqual([1, 2]);
+    expect(getVisiblePageIndexes({ ...six, shapes: withWide })).toEqual([1]);
+    expect(getVisiblePageIndexes({ ...six, shapes: plain })).toEqual([1, 2]);
+
+    // 同一份形状表、页数变了（连载新一页插进来）也要重新排：最后一页必须落在自己
+    // 那一槽上，而不是被当成「没找到」退回第一槽。
+    expect(getVisiblePageIndexes({ ...six, pageCount: 8, pageIndex: 7, shapes: plain })).toEqual([7]);
   });
 });

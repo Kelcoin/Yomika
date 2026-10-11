@@ -80,6 +80,20 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     expect(shell).toMatch(/\.shelf-workspace\s*>\s*\.form-error\s*\{[^}]*align-self:\s*start/);
   });
+  it('invalidates the shelf snapshots after a category mirror write', () => {
+    // 加进收藏夹那一下：本机那张收藏表先写、顺手广播一次 `state:` 作废，书架于是立刻重读，
+    // 而服务器镜像这时候还没发出去 —— 读回来的是「加之前」的名单，还会被写进 localStorage
+    // 快照自己续命。控诉点就落在 `.then(invalidateShelves)` 上：这条镜像写必须和它的孪生
+    // （移出收藏夹、改元数据）一样作废快照，否则症状单向——移出立刻对、加入不出现。
+    const repository = read('src/repositories/nativeLibraryRepository.ts');
+    const add = repository.slice(repository.indexOf('addArchiveToCategory('), repository.indexOf('removeArchiveFromCategory('));
+    expect(add, '这条镜像写要作废书架快照').toMatch(/then\(invalidateShelves\)/);
+    // `[]` 在 JS 里为真：空分类既会把本机那份待看顶掉、又拿着空名单去取档案，整页空白。
+    const routes = read('src/app/routes.tsx');
+    expect(routes, '空分类要落回本机那份待看').toMatch(/favorites\.value\.archives\.length > 0/);
+    expect(routes, '快照不落空名单').toMatch(/favoritesIds && favoritesIds\.length > 0 \? \{ favoritesIds \}/);
+    expect(routes, '渲染时也把空名单当不知道').toMatch(/favoritesIds && favoritesIds\.length > 0 \? favoritesIds/);
+  });
   it('binds the supplied logo assets to native builds', () => {
     const config = JSON.parse(read('src-tauri/tauri.conf.json')) as { bundle?: { icon?: string[] } };
     expect(config.bundle?.icon).toEqual(expect.arrayContaining([
@@ -199,6 +213,11 @@ describe('design system contract', () => {
     // 外壳标题栏改用手势件，不再自己抄一遍；阅读器两条栏都铺上它。
     expect(read('src/components/TitleBar.tsx')).toContain('<header className="titlebar" {...drag}>');
     expect(read('src/components/ReaderScreen.tsx')).toContain('{...windowDrag}');
+    // 窗口按钮只在**桌面**上画：Tauri 的桥在 Android/iOS 上一样存在，只看桥会把
+    // 「最大化」画到手机上（`plugin:window|toggle_maximize` 在那边是空操作，点了
+    // 没反应——用户报的「移动端下阅读模式顶栏不应该有最大化/最小化按钮」）。
+    expect(read('src/components/ReaderScreen.tsx')).toMatch(/windowApi && platform === 'windows' \? \(/);
+    expect(read('src/components/ReaderScreen.tsx')).toContain('getPlatformCapabilities().then((result) => {');
     const route = read('src/components/ReaderRoute.tsx');
     expect(route).toContain('{...windowDrag}');
     expect(route).toContain('<p role="alert">加载失败</p>');
@@ -229,6 +248,80 @@ describe('design system contract', () => {
     expect(coarse).toMatch(/input:not\(\[type='checkbox'\]\):not\(\[type='radio'\]\)/);
     expect(coarse).toMatch(/textarea/);
     expect(coarse).toMatch(/font-size:\s*max\(16px,\s*1em\)\s*!important/);
+  });
+
+  // 用户报的「移动端两个开屏页」：Android 上同一个品牌印记被画了四遍（12+ 系统开屏、
+  // 窗口背景、index.html 的静态帧、React 的 SplashFrame）。前两遍是原生资源，判据在
+  // tests/contracts/mobile-packaging.test.ts 的「every theme variant」；这里盯网页那
+  // 两帧——它们必须**同一张画**，否则 React 首次 render 把静态帧整体换掉的那一刻会跳
+  // 一下，用户看到的就是第二张开屏页。
+  it('paints the first frame once: the static frame and the React frame are one picture', () => {
+    const html = read('index.html');
+    const frame = read('src/components/SplashFrame.tsx');
+    const shell = read('src/styles/shell.css');
+
+    // 印记同源：几何、颜色、viewBox 两处都得有。逐属性的完全相等交给
+    // tests/components/splash-frame.test.tsx——它是把渲染出来的 DOM 与 index.html
+    // 的静态帧对逐个属性比，比对着源码文本比更接近用户看到的画。
+    const mark = (source: string) => {
+      expect(source.match(/<svg[\s\S]*?<\/svg>/), '这张开屏帧里要内联印记的 SVG').not.toBeNull();
+      return source;
+    };
+    for (const source of [mark(html), mark(frame)]) {
+      expect(source).toMatch(/viewBox="0 0 512 512"/);
+      expect(source).toMatch(/rx="112"/);
+      expect(source).toMatch(/fill="#0D0D0D"/);
+      expect(source).toMatch(/#F5F5F5/);
+      expect(source).toMatch(/cx="288" cy="296" r="22"/);
+    }
+    // React 那侧写驼峰属性名：`stroke-width`/`stroke-linecap` 会让 React 每次渲染都
+    // 报「Invalid DOM property」（浏览器里两个名字渲染出的属性名相同，组件用例比过）。
+    expect(frame).not.toMatch(/stroke-width|stroke-linecap/);
+    expect(html).toMatch(/stroke-width="18"/);
+
+    // wordmark 与印记的盒子也要同一份：字号、字重、字距、间距、图形尺寸。静态帧写死
+    // 20px/600/20px/128px，React 那侧走 --text-lg/--weight-semibold/--space-5，
+    // 令牌一改两边就错开，所以两边的数都要钉住。
+    const tokens = read('src/styles/tokens.css');
+    expect(tokens).toMatch(/--text-lg:\s*20px;/);
+    expect(tokens).toMatch(/--weight-semibold:\s*600;/);
+    expect(tokens).toMatch(/--space-5:\s*20px;/);
+    expect(tokens).toMatch(/--tracking-splash:\s*0\.34em;/);
+    // 静态帧的 .brand 必须自己写 margin：侧栏那条 `.brand`（shell.css 的 sidebar 段）带着
+    // `margin: 0 var(--space-2) var(--space-10)`，类名撞上就会落到静态帧头上，把它的居中盒
+    // 撑高 40px——两帧都居中，替换那一刻整组印记就跳 20px（工装实测：修前 273.5/293.5、
+    // 像素差 2.12%；修后两边都是 293.5、像素差 0）。
+    expect(html).toMatch(/\.app-splash-static \.brand \{ display: grid; justify-items: center; gap: 20px; margin: 0; \}/);
+    // 侧栏那条规则不许为了躲这个撞名被删掉：改它会把侧栏自己的排版一起改了。
+    expect(ruleBody(shell, '.brand')).toMatch(/margin:\s*0 var\(--space-2\) var\(--space-10\)/);
+    expect(html).toMatch(/\.app-splash-static svg \{ width: 128px; height: 128px; display: block; \}/);
+    expect(html).toMatch(/font-size: 20px;[\s\S]{0,120}?font-weight: 600;/);
+    const brand = ruleBody(shell, '.app-splash-brand');
+    expect(brand).toMatch(/gap:\s*var\(--space-5\)/);
+    expect(ruleBody(shell, '.app-splash-brand svg')).toMatch(/width:\s*128px/);
+    const wordmark = ruleBody(shell, '.app-splash-wordmark');
+    expect(wordmark).toMatch(/font-size:\s*var\(--text-lg\)/);
+    expect(wordmark).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
+    expect(wordmark).toMatch(/letter-spacing:\s*var\(--tracking-splash\)/);
+    // 字体也同一份：静态帧写死一族，React 那一帧（继承 --font-body）在替换那一刻就换
+    // 字形，wordmark 跟着重排——「两帧同构图」包括这一项。
+    expect(html).toMatch(/font-family: var\(--font-body,/);
+    expect(html).toMatch(/\.app-splash-static \.wordmark i \{ font-style: normal; color: var\(--brand-vermilion, #B63A2E\); \}/);
+    expect(ruleBody(shell, '.app-splash-wordmark i')).toMatch(/color:\s*var\(--brand-vermilion\)/);
+
+    // 颜色只认令牌：`--splash-paper` 全仓没有定义，写在这里就是个坏键——真被谁定义出来，
+    // 名字的颜色就与静态帧不一致了。wordmark 该跟 `.app-splash` 的 `--ink-primary`（docs/30）。
+    expect(shell).not.toMatch(/--splash-paper/);
+    expect(ruleBody(shell, '.app-splash')).toMatch(/color:\s*var\(--ink-primary\)/);
+    expect(ruleBody(shell, '.app-splash')).toMatch(/background:\s*var\(--surface-canvas\)/);
+    expect(html).toMatch(/background: var\(--surface-canvas, #0B0B0F\)/);
+
+    // 入场不许重播动画：这一层与静态帧同构图，从 opacity 0 淡入等于在替换那一刻把印记
+    // 擦掉一次。淡出保留——退出确实要让它走掉。
+    expect(brand).not.toMatch(/animation/);
+    expect(shell).not.toMatch(/splash-arrive/);
+    expect(ruleBody(shell, '.app-splash')).toMatch(/transition:\s*opacity var\(--motion-standard\)/);
+    expect(ruleBody(shell, '.app-splash.is-leaving')).toMatch(/opacity:\s*0/);
   });
 
   it('parks the compact bar only while it floats, and leaves the docked row empty', () => {
@@ -720,9 +813,11 @@ describe('design system contract', () => {
 
   it('preserves the home scroll tail when transferring scrolling into the split list', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
-    // 保留首页 32px 底部留白，避免换成左栏滚动时可滚范围缩短、位置被夹小。
-    expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)\s*\{[^}]*padding:\s*0 0 var\(--space-8\)/);
+    // 分栏态下滚动搬进了左栏列表，它自己那 32px 底部留白要留着：不留的话可滚范围会比
+    // 普通态短 32px，记住的位置一进来就被夹小（列表跳一下）。首页**整页滚动**那一档不再
+    // 补尾（见 item 19：任何尾留白都会让「刚好放满」的页面多滚一格，实测 24px）。
     expect(shell).toMatch(/\.library-shell\.is-home\.has-detail \.library-shell-list\s*\{[^}]*padding-bottom:\s*var\(--space-8\)/);
+    expect(shell).not.toMatch(/\.route-cache-panel\.is-flow \{[\s\S]{0,200}?padding-bottom/);
   });
 
   it('keeps the detail of each shell on the page that owns it', () => {
@@ -1185,6 +1280,52 @@ describe('design system contract', () => {
     // 页码胶囊压在底栏上，读的是底栏自己的高度令牌，改一边不会让两边错位。
     expect(ruleBody(reader, '.reader-page-indicator.is-raised')).toMatch(/bottom:\s*calc\(var\(--reader-toolbar-height\)/);
 
+    // 手机这一档高度必须落在**两条栏和胶囊共同的祖先**上。自定义属性是继承的：写进
+    // `.reader-toolbar` 就只有栏的后代看得见，而胶囊是 `.reader-screen` 的直接子节点、
+    // 与 `.reader-chrome` 同级，它会一直读 `:root` 的 80px。手机档栏实高 160px，胶囊的
+    // 「让位」位置却只退到 88px——它于是落在栏**里面**、盖住栏自己的页码；栏一退场又从
+    // 栏顶滑到屏幕底，一路横穿整条栏（user report:「底栏消失时看起来会有两层底栏」）。
+    // 真机读数：修前 `--reader-toolbar-height` 栏读到 160px、胶囊读到 80px，`shown` 那
+    // 一帧胶囊与栏重叠 25px；修后两边都读 160px，每一帧重叠都是 0。
+    expect(phone).toMatch(/\.reader-screen\s*\{[^}]*--reader-toolbar-height:\s*112px/);
+    expect(phone).not.toMatch(/\.reader-toolbar\s*\{[^}]*--reader-toolbar-height/);
+
+    // 栏退场的那 260ms 里它还在树上淡出：胶囊这时跟着一起淡出，落位（`bottom`）推迟到
+    // 栏被摘掉那一刻（0s 过渡 + `--duration-exit` 延迟）才发生，即在没人看得见的时候
+    // 落回屏幕上。入场不需要对称规则——栏用 `--motion-slow`(480ms) 升上来、胶囊只用
+    // 220ms，胶囊永远跑在栏前面。
+    const leavingPill = ruleBody(reader, '.reader-page-indicator.is-leaving');
+    expect(leavingPill).toMatch(/opacity:\s*0/);
+    expect(leavingPill).toMatch(/bottom\s+0s\s+var\(--duration-exit\)/);
+
+    // 胶囊的落点：桌面可以借右下角那半格，手机永远居中。竖着占满屏幕的页在桌面上会把
+    // 胶囊推进右边缝里，可手指也在那里，而且手机上那半格本来就没宽到能放一条「2 / 100」；
+    // 还有一档更隐蔽——刚换页时图片还没解码，量到的是盒子不是画出来的那一块，底缝算出
+    // 来永远是 0，胶囊于是先跳右下角、等图 load 完再跳回来（用户报的就是翻页那一下的闪）。
+    const centred = ruleBody(reader, ".reader-page-indicator[data-placement='bottom']");
+    expect(centred, '居中那一档必须真的居中').toMatch(/left:\s*50%/);
+    expect(centred).toMatch(/right:\s*auto/);
+    expect(centred).toMatch(/transform:\s*translateX\(-50%\)/);
+    const indicatorScreen = read('src/components/ReaderScreen.tsx');
+    expect(indicatorScreen, '手机上不取右下角那一档').toMatch(/const placement = bottomGap >= 44 \|\| coarsePointer \? 'bottom' : 'corner';/);
+    expect(indicatorScreen, '量出来的那一档要落到胶囊上').toMatch(/setIndicatorPlacement\(placement\);/);
+    expect(indicatorScreen, '只有结论变了（或缩放还在缓动）才排第二趟测量').toMatch(/if \(!measure\(true\)\) settle = window\.setTimeout\(\(\) => \{ measure\(true\); \}, 240\);/);
+    expect(indicatorScreen, '还没解码的页不能拿来量底缝').toMatch(/if \(image\.naturalWidth === 0\) continue;/);
+    expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout, pages\.length, viewport\.width, viewport\.height, visibleIndexes, zoom\.scale\]\);/);
+    expect(indicatorScreen, '退场窗口里胶囊要认领 is-leaving').toMatch(/bottomPresence\.leaving \? ' is-leaving' : ''/);
+
+    // 同一枚「是不是手指」的判据还管着两条栏怎么亮：触屏没有悬停，`hoverChrome` 永远是
+    // `undefined`，两条栏只能跟着同一个 `visible` 同亮同灭——手指点在顶栏感应带上，底栏
+    // 也一起冒出来（用户报的「点一侧触发两侧」）。所以手指点下去时按落点把那一侧钉住；
+    // 「钉住」只给粗指针，桌面照旧点一下两条都出来（靠悬停选边）。钉住的那一侧比
+    // `visible` 强势（`topChromeVisible = hoverChrome === 'top'`），三个收起入口都必须
+    // 把意见清掉，否则那条栏再也摘不下来。
+    expect(indicatorScreen, '手指才按落点钉一侧').toMatch(/pinTappedBand: coarsePointer,/);
+    expect(indicatorScreen, '唤出时按落点选边').toMatch(/setHover\(pinTappedBand \? side : undefined\)/);
+    expect(indicatorScreen, '开着时点另一条感应带要换过去，不是两条都亮').toMatch(/if \(pinTappedBand && side !== null && side !== hoverChromeRef\.current\)/);
+    expect(indicatorScreen, '自动收起要清掉钉住的那一侧').toMatch(/setHover\(undefined\);[\s\S]{0,60}callbacksRef\.current\.onHide\(\)/);
+    expect(indicatorScreen, 'Escape 收起也要清意见').toMatch(/setHover\(undefined\);[\s\S]{0,40}setState\(toggleReaderChrome\)/);
+
     // 底栏的「动」有三件事必须同时在场，少一件它就成了静止的一块：
     // ① 入场走自己的高度（8px 位移在 80dp 的栏上等于没动）；② 指针下按下要比悬停再实
     // 一档（只有悬停一层时，鼠标停在「下一页」上连点翻页看不出点到了）；③ 每翻一页栏顶
@@ -1208,7 +1349,15 @@ describe('design system contract', () => {
     // 两个值之间轮流，第二页一条动画都没跑——Blink 只在 `animation-name` 变或元素重挂
     // 时才重播。
     expect(read('src/components/ReaderScreen.tsx'), '光线要按翻页次数换一个新元素')
-      .toMatch(/\{turnCue > 0 && <span key=\{turnCue\} className="reader-toolbar-turn"/);
+      .toMatch(/\{showTurnCue && <span key=\{turnCue\} className="reader-toolbar-turn"/);
+    // 但「换元素」不能变成「栏一回来就闪一下」：底栏 chrome 收起 260ms 后整棵子树被摘掉，
+    // 再出现时是全新的 DOM，一次性动画会跟着重播（用户报的「出现时顶部闪一条线」）。光线
+    // 因此只认**这一次翻页**：`playedCue` 记住已播过的那一次，且由 effect 写（渲染期间写
+    // ref 会被 StrictMode 的双渲染吃掉）。
+    expect(read('src/components/ReaderScreen.tsx'), '光线只在翻页那一轮挂上去')
+      .toMatch(/const showTurnCue = turnCue > 0 && playedCue\.current !== turnCue;/);
+    expect(read('src/components/ReaderScreen.tsx'), '已播过的那一次由 effect 记下')
+      .toMatch(/playedCue\.current = turnCue;/);
   });
 
   it('keeps the on-canvas reader chrome on its own fixed dark scheme', () => {
@@ -1353,9 +1502,13 @@ describe('design system contract', () => {
     expect(source).not.toMatch(/<span className="archive-row-copy">\s*<ArchiveProgressBar/);
     expect(shell).not.toMatch(/\.archive-row-copy > \.archive-card-progress\s*\{/);
     const bar = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
-    // 底边留 1px：卡片的高亮是它自己的 outline（outline-offset: -1px → 画在
-    // y ∈ [H-1, H]），横条贴到 0 时会作为定位后代把这条描边连同两个下角弧线盖掉。
-    expect(bar).toMatch(/inset:\s*auto 0 1px/);
+    // 底边贴到 0：卡片的高亮是它自己的 outline（outline-offset: -1px → 画在
+    // y ∈ [H-1, H]），曾经为了把这 1px 描边让出来而抬高横条，代价是填充色到不了
+    // 卡片底边、底下留一条 1px 的卡片底色（用户：「进度条底部与卡片底部没有完全
+    // 贴合，会露出来一点」）。选中态的高亮现在由 `.archive-row…::after` 环层画在
+    // 横条之上，这 1px 不必再让。
+    expect(bar).toMatch(/inset:\s*auto 0 0/);
+    expect(bar, '横条不许再抬高：填充要一路铺到卡片底边').not.toMatch(/inset:\s*auto 0 1px/);
     expect(bar).toMatch(/height:\s*4px/);
     // `.archive-row > span` 的 display: grid 特异性更高，横条必须显式声明 display。
     expect(bar).toMatch(/display:\s*block/);
@@ -1390,13 +1543,76 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.archive-card-progress-fill')).toMatch(/transition:\s*width var\(--motion-standard\)/);
     // 缩略图卡那条仍压在封面与正文的接缝上，两种卡不共用同一个贴边位置。
     expect(ruleBody(shell, '.archive-card-progress')).toMatch(/inset:\s*-5px 0 auto/);
-    // hover 的浮动（`.archive-thumb-card:hover` 的 translateY）会把卡片提成合成层，
-    // 封面在设备像素取整上会贴着媒体下沿越出一线，正落在进度条下沿——用户报的
-    // 「缩略图卡鼠标移上去时进度条底部闪出一丝封面」。横条因此多压住接缝 1px，
-    // 并抬到卡片内容之上；同 z-index 时按文档顺序，宽行档的选中覆盖层仍在它上面。
+    // 曾经这里同时挡两件事：一条是 hover 浮动（`.archive-thumb-card:hover` 的
+    // translateY(-2px)）把卡片提成合成层后、封面在设备像素取整上越出一线落在进度条
+    // 下沿（用户报的「缩略图卡鼠标移上去时进度条底部闪出一丝封面」）。那条浮动已经
+    // 删除（见「悬停只换颜色」那条用例），现在多压住的这 1px 只负责封面与正文的接缝
+    // 取整，z-index 仍把横条抬到卡片内容之上；同 z-index 时按文档顺序，宽行档的选中
+    // 覆盖层仍在它上面。
     const gridBar = ruleBody(shell, '.archive-card-progress');
     expect(gridBar).toMatch(/height:\s*6px/);
     expect(gridBar).toMatch(/z-index:\s*1/);
+  });
+
+  it('keeps hover to colour, so a hovered element never paints over its neighbours', () => {
+    const shell = read('src/styles/shell.css');
+    // 悬停改几何 = 元素在指针下换了个盒子：要么长到自己盒子外面盖住邻居（导轨刻度
+    // 从 9px 长到 15px、两块面板之间那条 2px 的缝被 scaleX(2) 撑成 4px、各压进面板
+    // 1px），要么被提成合成层后取整越界（缩略图卡的 translateY(-2px) 让封面压到
+    // 进度条上）。用户报「部分 hover 效果异常，会盖住下面的元素」，这三条就是。
+    //
+    // 白名单只留两类真的需要几何变化的地方：浮在页面之上、谁也不和它共用一个盒子的
+    // 按钮，以及「揭示完整标签」那种在自己那一行里重新排版、不覆盖任何东西的展开。
+    const allowed = [
+      '.scroll-to-top:hover',
+      '.metadata-tag.is-measured:hover .metadata-tag-reveal',
+      // 填色动作按钮的 1px 抬起：仓库在「悬停要有按下孪生」那条用例里写明了这套规则
+      // （tests/design-system-contract.test.ts:874「悬停规则里那点位移按下去不该复刻，
+      // 布局一动就会跳」）。它是动作行里的独立控件，没有别的元素跟它共用一个盒子。
+      '.primary-action:hover:not(:disabled)',
+    ];
+    // 只算真的把几何改掉的声明：`transform: none` 这类还原（底栏当前项中和掉缩进、
+    // SFW 按下揭示时把模糊与放大一起撤掉）不是覆盖，反而正是「别动几何」那一侧。
+    const moved = (body: string) =>
+      [...body.matchAll(/(^|[\s;{])(transform|translate|scale|width|height|inset|top|right|bottom|left|margin|padding|position)\s*:\s*([^;]+)/g)].some(
+        (match) => !/^(none|0|0px|auto|unset|initial)\b/.test((match[3] ?? '').trim()),
+      );
+    const hoverRules = (css: string): Array<{ selector: string; body: string }> => {
+      const found: Array<{ selector: string; body: string }> = [];
+      const blocks = /@media \(hover: hover\)\s*\{/g;
+      let block = blocks.exec(css);
+      while (block) {
+        let depth = 0;
+        let end = block.index + block[0].length - 1;
+        for (let at = end; at < css.length; at += 1) {
+          if (css[at] === '{') depth += 1;
+          if (css[at] === '}') {
+            depth -= 1;
+            if (depth === 0) {
+              end = at;
+              break;
+            }
+          }
+        }
+        const body = css.slice(block.index + block[0].length, end);
+        const rules = /([^{}]+)\{([^{}]*)\}/g;
+        let rule = rules.exec(body);
+        while (rule) {
+          found.push({ selector: (rule[1] ?? '').replace(/\s+/g, ' ').trim(), body: rule[2] ?? '' });
+          rule = rules.exec(body);
+        }
+        blocks.lastIndex = end;
+        block = blocks.exec(css);
+      }
+      return found;
+    };
+    const geometric = moved;
+    // 注释先剥掉：扫描器按花括号取规则体，块里的注释会被算进「选择器」里，于是
+    // 白名单比对失败、报出来的选择器也带着一整段说明文字。
+    const rules = hoverRules(shell.replace(/\/\*[\s\S]*?\*\//g, ''));
+    expect(rules.length, '悬停块扫描器没读到东西').toBeGreaterThan(15);
+    const offenders = rules.filter((rule) => geometric(rule.body) && !allowed.includes(rule.selector)).map((rule) => rule.selector);
+    expect(offenders, '悬停只能换颜色；真需要几何变化的要在白名单里，并写清楚为什么').toEqual([]);
   });
 
   it('draws the model download bar on the option’s own edge instead of growing the row', () => {
@@ -1537,15 +1753,49 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/\.archive-row-timeline::after\s*\{[\s\S]{0,400}?left:\s*var\(--timeline-rail-center\)/);
   });
 
-  it('lets the flow routes grow their cached panel so the tail can scroll out', () => {
+  it('lets the flow routes grow their cached panel, without a tail gap in the scroll extent', () => {
     const shell = read('src/styles/shell.css');
     const routes = read('src/app/routes.tsx');
     // route-cache-panel 的 height:100% 钳制会把溢出尾困在面板外：首页与书架
     // 面板必须随内容生长（is-flow），≤900 则所有路由（含档案库页面滚动）放开。
     expect(routes).toContain("flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}");
     expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
-    expect(shell).toMatch(/\.route-cache-panel\.is-flow \{ height: auto; \}/);
+    expect(shell).toMatch(/\.route-cache-panel\.is-flow \{[\s\S]{0,400}?height:\s*auto/);
     expect(shell).toMatch(/@media \(max-width: 900px\)/);
+
+    // 「美观尾留白」不能住在可滚范围里的任何地方：住在滚动容器上是内容之外那一格，
+    // 住在面板上是面板高度多一格，两者都会让「内容只差一格就放满」的页面滚出空带
+    // （user report「部分页面能完全显示依然可以上下滚动一点点」）。实测两档都是
+    // 24px、去掉后是 0，见 debug_outputs/flow-tail/probe.mjs 与轮次文档。
+    expect(shell, '滚动容器不留尾部留白').toMatch(/\.workspace \{[\s\S]{0,900}?padding: var\(--space-8\) clamp\(var\(--space-5\), 4vw, var\(--space-12\)\) 0;/);
+    expect(shell, '窄屏同样不留').toMatch(/padding: var\(--space-8\) var\(--space-4\) 0;/);
+    const flowPanel = ruleBody(shell, '.route-cache-panel.is-flow');
+    expect(flowPanel).toMatch(/height:\s*auto/);
+    expect(flowPanel, '长高的面板自己不补尾').not.toMatch(/padding/);
+    expect(flowPanel, '也不靠 min-height 伪装成留白').not.toMatch(/min-height/);
+    // 首页自己那条也不补尾（否则「刚好放满」的首页照样多滚一格）。
+    expect(shell).toMatch(/\.workspace-home\) \{[\s\S]{0,200}?padding: 0;/);
+    // 被**遮挡**的那一格是例外：悬浮底栏浮在内容之上，滚到底必须能把最后一屏从栏底下
+    // 拉出来，所以这一格照旧留在滚动容器上（`is-floating-nav` 那一对选择器）。
+    expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\);\s*\}/);
+  });
+
+  it('reads the comment author above the body, with the timestamp footing the card', () => {
+    const shell = read('src/styles/shell.css');
+    // user report（图4）：用户 ID 应该比正文大一点；时间下方的空白区域太大。
+    // 两处根因都在字号与行高上：正文 `<p>` 一直没写字号，吃的是浏览器默认 16px，
+    // 而作者名继承 meta 行的 --text-xs(12px) ⇒ 层级刚好是反的（实测 12/16）；
+    // 时间戳那行用 `min-height: 32px` + 居中，上传者评论没有投票按钮也照样占满
+    // 32px，把时间下方白留一片（实测 21px）。修法：字号都落到令牌上（15 / 14），
+    // 投票行贴着内容底、卡片与输入框的底部内边距各收半步。读数见
+    // debug_outputs/eh-comments/probe.mjs 与轮次文档（空带 21 → 9px）。
+    expect(ruleBody(shell, '.eh-comment-meta strong'), '作者名比正文大一档').toMatch(/font-size: var\(--text-base\)/);
+    expect(ruleBody(shell, '.eh-comments-list p'), '正文自己写清字号').toMatch(/font-size: var\(--text-md\)/);
+    const votes = ruleBody(shell, '.eh-comment-votes');
+    expect(votes, '投票行贴内容底').toMatch(/align-items: flex-end/);
+    expect(votes, '不再靠 min-height 撑出空带').not.toMatch(/min-height/);
+    expect(ruleBody(shell, '.eh-comments-list li'), '卡片底部只留半步').toMatch(/padding: var\(--space-3\) var\(--space-3\) var\(--space-2\)/);
+    expect(ruleBody(shell, '.eh-comment-composer'), '输入框上方只留半步').toMatch(/padding-top: var\(--space-2\)/);
   });
 
   it('gives the shelves the library workspace so their list can scroll to the end', () => {
@@ -1729,6 +1979,27 @@ describe('design system contract', () => {
     expect(workspace).toMatch(/modifiers.shiftKey && anchor >= 0/);
   });
 
+  it('animates the multi-select bar in and out with one motion', () => {
+    // 用户报过「多选操作栏的出现和消失速度不一致，消失会很慢很卡」：收起曾经骑
+    // --motion-exit（260ms、缓入），工装 debug_outputs/selection-bar 量出来它前 60ms
+    // 只走 2.8%，而出现走 66% —— 两个方向读起来就是两回事。
+    const shell = read('src/styles/shell.css');
+    const tokens = read('src/styles/tokens.css');
+    const closed = ruleBody(shell, '.archive-selection-slot');
+    const open = ruleBody(shell, '.archive-selection-slot.is-open');
+    const barClosed = ruleBody(shell, '.archive-selection-slot > .archive-selection-bar');
+    const barOpen = ruleBody(shell, '.archive-selection-slot.is-open > .archive-selection-bar');
+    expect(closed, '收起也要走出场那条令牌，否则两个方向的速度不一样').toMatch(/grid-template-rows var\(--motion-standard\)/);
+    expect(closed, '收起不许骑出场曲线：它前 60ms 只走 2.8%，读起来就是「慢」').not.toMatch(/--motion-exit|--ease-exit/);
+    expect(open, '出现那条要一直留在入场令牌上').toMatch(/grid-template-rows var\(--motion-standard\)/);
+    expect(closed, '隐藏要等动画走完，延迟用的是同一个长度').toMatch(/visibility 0s linear var\(--duration-standard\)/);
+    expect(barClosed, '收起归零那一份也要骑同一条令牌').toMatch(/margin-bottom var\(--motion-standard\), padding var\(--motion-standard\)/);
+    expect(barOpen, '两态共用同一条过渡，展开那一份不该再写一遍').not.toMatch(/transition:/);
+    // 长度本身只有一个来源。
+    expect(tokens).toMatch(/--duration-standard:\s*220ms;/);
+    expect(tokens).toMatch(/--motion-standard:\s*var\(--duration-standard\) var\(--ease-standard\);/);
+  });
+
   it('blurs covers and thumbnails in SFW mode and reveals only the image surface', () => {
     const shell = read('src/styles/shell.css');
     const preferences = read('src/app/preferences.tsx');
@@ -1830,6 +2101,16 @@ describe('design system contract', () => {
     // Never build a class name by appending a possibly-undefined value: the
     // string "undefined" matches no rule, so the element renders raw.
     expect(workspace).not.toMatch(/\$\{[^}]*\?[^}]*:\s*undefined\s*\}/);
+    // 一个 touchmove 就 preventDefault 等于把整段手势从浏览器手里抢走：手机上起手
+    // 那几像素常常先往下抖一下，这一抖冒领之后页面再也滚不动，只剩过滚刷新能用。
+    // 认定距离之前一个字都不说，手指转向滚动那一侧就把这次手势整个还回去。
+    expect(workspace).toMatch(/const PULL_CLAIM_PX = 12;/);
+    expect(workspace).toMatch(/if \(travel < PULL_CLAIM_PX\) return;/);
+    expect(workspace).toMatch(/overscrollClaimed\.current = true;[\s\S]{0,400}event\.preventDefault\(\);/);
+    // 位置直接写 DOM：每一像素走一次 setState 会让整棵虚拟化列表每帧重渲染一遍，
+    // 真机上就是「过滚刷新非常非常卡」。state 只在从静止跨进这一档时变一次。
+    expect(workspace).toMatch(/pull\.style\.transform = `translateY\(\$\{offset\}px\)`;/);
+    expect(workspace).toMatch(/setOverscroll\(\(current\) => current === 0 && offset !== 0 \? offset : current\);/);
   });
 
   it('keeps toast text at WCAG AA contrast in light and dark themes', () => {
@@ -1851,6 +2132,44 @@ describe('design system contract', () => {
       const background = rgb(theme.get(backgroundToken) ?? '', canvas);
       const foreground = rgb(theme.get(foregroundToken) ?? '', background);
       expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('keeps every light colour scheme off pure white', () => {
+    // 用户报过「几个预设配色的浅色模式基本就是纯白」：elevated 那一档直接取了 #fbfdfa
+    // 这类近乎纯白的值，铺满对话框与卡片之后整屏发白。这条钉三件事：底色够深、
+    // 三档之间分得开（画布 < panel < elevated）、最上面那一档仍然不是纯白。
+    const source = read('src/lib/cssThemePresets.ts');
+    const schemes = source.slice(
+      source.indexOf('export const COLOR_SCHEMES'),
+      source.indexOf('export const CSS_THEME_PRESETS'),
+    );
+    const palettes = [...schemes.matchAll(
+      /\{ canvas: '(#[0-9a-f]{6})', panel: '(#[0-9a-f]{6})', elevated: '(#[0-9a-f]{6})', muted: '(#[0-9a-f]{6})'/gi,
+    )].map(([, canvas, panel, elevated, muted]) => ({
+      canvas: canvas ?? '', panel: panel ?? '', elevated: elevated ?? '', muted: muted ?? '',
+    }));
+    const luminanceOf = (hex: string) => {
+      const [red, green, blue] = rgb(hex);
+      return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue);
+    };
+    // 每个配色给浅深两份调色板，浅色在前：只看每对的头一份。
+    expect(palettes.length % 2, '每个配色都该给出浅深两份调色板').toBe(0);
+    const lights = palettes
+      .filter((_, index) => index % 2 === 0)
+      .map((palette) => ({
+        canvas: luminanceOf(palette.canvas),
+        panel: luminanceOf(palette.panel),
+        elevated: luminanceOf(palette.elevated),
+        muted: luminanceOf(palette.muted),
+      }));
+    expect(lights.length, '一份浅色配色都没读到').toBeGreaterThanOrEqual(4);
+    for (const light of lights) {
+      expect(light.canvas, '浅色模式的画布已经很白了').toBeLessThanOrEqual(0.82);
+      expect(light.panel - light.canvas, 'panel 与画布分不开').toBeGreaterThanOrEqual(0.05);
+      expect(light.elevated - light.panel, 'elevated 与 panel 分不开').toBeGreaterThanOrEqual(0.04);
+      expect(light.elevated, '最上面那一档又变成纯白了').toBeLessThanOrEqual(0.95);
+      expect(light.muted, 'muted 该比画布深').toBeLessThan(light.canvas);
     }
   });
 
@@ -2208,6 +2527,24 @@ describe('design system contract', () => {
     expect(source).not.toContain('settings-row-note');
   });
 
+  it('hangs the capability chips on the device row itself, never on a row of their own', () => {
+    // 用户报的：「去掉图 1 和图 2 里的远端处理能力，以胶囊形式放到图 2 的设备名右侧」。
+    // 同一个清单从前在设置组里铺一行、二级菜单底下再念一遍，现在只出现在二级菜单里
+    // **当前连上的那一台**的行尾。几何那一半由无头 Edge 量过：菜单在 390px 宽时两列
+    // 会让胶囊压在地址上 67.25px，三列 + 640px 折行后是 0。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const source = read('src/components/ComputeCenterSettingsGroup.tsx');
+    expect(shell).not.toMatch(/\.settings-capability-row\s*\{/);
+    expect(source).not.toContain('settings-capability-row');
+    expect(shell).toMatch(/\.settings-device-option\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)\s*auto/);
+    expect(shell).toMatch(/\.settings-device-capabilities\s*\{[^}]*justify-content:\s*flex-end/);
+    expect(shell).toMatch(/@media \(max-width: 640px\)\s*\{\s*\.settings-device-option\s*\{\s*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/);
+    expect(shell).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.settings-device-capabilities\s*\{\s*grid-column:\s*2/);
+    expect(source).toMatch(/className="settings-device-capabilities" role="group" aria-label="远端可用服务"/);
+    // 菜单底下那行「DESKTOP-PC · 超分、DLSS5」整行去掉，别再有人捡回来。
+    expect(source).not.toMatch(/<p className="settings-menu-desc">\{remote\.name\}/);
+  });
+
   it('keeps a filled row concentric with its 28px shell and mirrors the row-end button', () => {
     // 图①：二级菜单的外壳是 28px，里面的高亮行是 8px——两个圆角各转各的圆心，看上去
     // 就是「内外圆角不统一」。同心规则写进了 tokens 的形状尺度注释：内层 = 外层 − 外壳
@@ -2392,5 +2729,41 @@ describe('design system contract', () => {
     expect(entry, '严重度色带要占住自己那一格，不能是 inset 阴影').toMatch(/border-left:\s*3px solid var\(--state-danger\)/);
     expect(entry, 'inset 阴影会被悬停底色盖住').not.toMatch(/box-shadow/);
     expect(ruleBody(shell, '.error-log-entry.is-warn')).toMatch(/border-left-color:\s*var\(--state-warning\)/);
+  });
+});
+
+/** 已配对设备的连接要「稳」：一次探测失败不等于断开、点一次本机开关不该换令牌、阅读器
+ *  不要被一次失败打回灰。这三条都不是画出来能看出来的（要对面恰好不答才行），所以钉在
+ *  源码上——它们对应的都是「设备连上之后又断开、还得重新配对」那条反馈。
+ *
+ *  `slice` 取一个函数体：从函数头到下一个同级 `async function` 为止。 */
+describe('the paired-device link holds still', () => {
+  const body = (source: string, from: string) => source.slice(source.indexOf(from)).split('\n  async function ')[0] ?? '';
+  /** 注释里会**解释**被删掉的那一行（比如「不要在这里带 rotateToken」），判据得看代码。 */
+  const code = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('keeps the last good capability list when a probe comes back empty', () => {
+    const group = read('src/components/ComputeCenterSettingsGroup.tsx');
+    const connect = body(group, 'async function connectRemote(');
+    // 「哪一台」才是过期与否的判据：同一台重探时旧清单要留着。
+    expect(connect, '换一台设备才让位，同一台重探时旧清单要留着').toMatch(
+      /if \(address !== remoteAddress\) \{ setRemote\(undefined\); setRemoteAddress\(address\); \}/,
+    );
+    expect(connect, '探失败不许抹掉上一次的答案（那就是「刚连上又断开」）').not.toMatch(/result\.ok\) \{\s*setRemote\(undefined\)/);
+  });
+
+  it('never rotates the pairing token from the serving switch', () => {
+    // Rust 侧的 `rotate_token` 会 `pairing.clear()`：一出现，所有已配对设备当场失效。
+    // 开关那里从前判的是「本机偏好里的令牌空不空」——那只是没同步上，不是「请换令牌」。
+    const group = read('src/components/ComputeCenterSettingsGroup.tsx');
+    expect(body(code(group), 'async function toggleServing('), '开关一次不该踢掉已配对设备').not.toMatch(/rotateToken/);
+  });
+
+  it('rides out a capability probe that fails once in the reader', () => {
+    const route = read('src/components/ReaderRoute.tsx');
+    expect(route, '一次问不到就重试，别把三枚开关打回灰').toMatch(/for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
+    expect(route, '只有这一台的清单算数：换设备的瞬间旧答案要过期').toMatch(
+      /remoteCapabilities\?\.address === remoteAddress \? remoteCapabilities\.value : undefined/,
+    );
   });
 });

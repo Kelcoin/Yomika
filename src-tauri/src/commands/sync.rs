@@ -383,6 +383,7 @@ fn apply_remote_app_setting(
     transaction: &rusqlite::Transaction<'_>,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let stored: Option<(String, String)> = transaction
         .query_row(
@@ -405,7 +406,7 @@ fn apply_remote_app_setting(
         ),
         None => true,
     };
-    if !gate {
+    if !gate && !restore {
         return Ok(false);
     }
     let local: serde_json::Value = stored
@@ -458,6 +459,7 @@ fn apply_remote_legacy_non_duplicate(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let path = payload_text(payload, "path")?;
     let exact_hash = payload_text(payload, "hash")?;
@@ -473,7 +475,7 @@ fn apply_remote_legacy_non_duplicate(
         .optional()
         .map_err(|error| error.to_string())?;
     if let Some(updated) = updated {
-        if compare_instants(&object.wall_clock, &updated) != std::cmp::Ordering::Greater {
+        if !restore && compare_instants(&object.wall_clock, &updated) != std::cmp::Ordering::Greater {
             return Ok(false);
         }
     }
@@ -1280,7 +1282,8 @@ fn apply_remote_objects(
         .map_err(|error| error.to_string())?;
     let mut applied = 0;
     for object in objects {
-        if apply_remote_object(&transaction, &object.scope_id, object)? {
+        // 同步不是用户点的那一份文件，照样按时钟比。
+        if apply_remote_object(&transaction, &object.scope_id, object, false)? {
             applied += 1;
         }
     }
@@ -1290,34 +1293,44 @@ fn apply_remote_objects(
 
 /// Merges one remote object by its type. Returns false when the object was
 /// skipped (unknown type, or a remote clock that lost to the local row).
+///
+/// `restore` 是**文件导入**这条路的标记：用户明确点了一份文件，里面每个对象的版本号
+/// 来自另一台设备自己的 journal 计数——那两个计数器从没见过面，比大小没有意义。让它
+/// 们在比较里输掉，用户看到的就是「导入成功、什么都没变」（阅读设置、翻页方向正是这
+/// 么丢的：本机存过几次偏好，本机时钟就比文件里的高）。所以导入时把文件里的对象当成
+/// 本机该对象的**最新一版**：版本号取本机与文件里较大的那个，事后再照旧写一条时钟更高
+/// 的日志，让这一版继续往外同步。自动同步（`apply_remote_objects`）照旧按时钟比较。
 fn apply_remote_object(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
     object: &SyncStateObject,
+    restore: bool,
 ) -> Result<bool, String> {
     match object.object_type.as_str() {
         "reading_progress" => {
-            apply_remote_progress(transaction, scope_id, object, &object.payload)
+            apply_remote_progress(transaction, scope_id, object, &object.payload, restore)
         }
-        "history" => apply_remote_history(transaction, scope_id, object, &object.payload),
+        "history" => {
+            apply_remote_history(transaction, scope_id, object, &object.payload, restore)
+        }
         // 同步词汇里的 watchlist 是「待看」，落在本地的 reading_list 表。收藏夹是
         // 服务器收藏分类的镜像，没有对象类型，也不会出现在文档里。
         "watchlist" => {
-            apply_remote_list_entry(transaction, scope_id, object, &object.payload)
+            apply_remote_list_entry(transaction, scope_id, object, &object.payload, restore)
         }
         // 老版本导出的文档里，待看带着的是表名（见 object_type_category）。
         "reading_list" => {
-            apply_remote_list_entry(transaction, scope_id, object, &object.payload)
+            apply_remote_list_entry(transaction, scope_id, object, &object.payload, restore)
         }
         "search_preset" => {
-            apply_remote_search_preset(transaction, scope_id, object, &object.payload)
+            apply_remote_search_preset(transaction, scope_id, object, &object.payload, restore)
         }
-        "app_setting" => apply_remote_app_setting(transaction, object, &object.payload),
+        "app_setting" => apply_remote_app_setting(transaction, object, &object.payload, restore),
         "legacy_non_duplicate" => {
-            apply_remote_legacy_non_duplicate(transaction, scope_id, object, &object.payload)
+            apply_remote_legacy_non_duplicate(transaction, scope_id, object, &object.payload, restore)
         }
         "dedup_non_duplicate" => {
-            apply_remote_dedup_relation(transaction, scope_id, object, &object.payload)
+            apply_remote_dedup_relation(transaction, scope_id, object, &object.payload, restore)
         }
         // Unknown types are forward-compatible noise: skip, don't fail.
         _ => Ok(false),
@@ -1365,6 +1378,7 @@ fn apply_remote_progress(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let archive_id = payload_text(payload, "archiveId")?;
     let page_index = payload
@@ -1388,7 +1402,7 @@ fn apply_remote_progress(
         .map_err(|error| error.to_string())?
         .and_then(|value| serde_json::from_str::<bool>(&value).ok())
         .unwrap_or(true);
-    let gate = transaction
+    let local_progress: Option<(i64, String, String, i64)> = transaction
         .query_row(
             "SELECT revision, updated_at, COALESCE(device_id, ''), page_index
              FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
@@ -1403,14 +1417,16 @@ fn apply_remote_progress(
             },
         )
         .optional()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let gate = local_progress
+        .as_ref()
         .map(|(clock, updated, device, page)| {
             remote_progress_wins(
                 allow_regression,
-                clock,
-                &updated,
-                &device,
-                page,
+                *clock,
+                updated,
+                device,
+                *page,
                 object.logical_clock,
                 &object.wall_clock,
                 &object.device_id,
@@ -1418,9 +1434,14 @@ fn apply_remote_progress(
             )
         })
         .unwrap_or(true);
-    if !gate {
+    if !gate && !restore {
         return Ok(false);
     }
+    // 导入时行里的版本号不能倒着走：文件里的计数来自另一台设备，可能比本机的小。
+    let revision = local_progress
+        .as_ref()
+        .map(|(clock, _, _, _)| (*clock).max(object.logical_clock))
+        .unwrap_or(object.logical_clock);
     transaction
         .execute(
             "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, device_id, revision, updated_at)
@@ -1440,7 +1461,7 @@ fn apply_remote_progress(
                 direction,
                 cover_alone,
                 object.device_id,
-                object.logical_clock,
+                revision,
                 object.wall_clock,
             ],
         )
@@ -1457,6 +1478,7 @@ fn apply_remote_history(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let archive_id = payload_text(payload, "archiveId")?;
     // 历史清理写下的墓碑：远端已经把这条记录清掉了，本地跟着删，否则下一次同步
@@ -1484,7 +1506,7 @@ fn apply_remote_history(
                 )
             })
             .unwrap_or(false);
-        if !gate {
+        if !gate && !restore {
             return Ok(false);
         }
         return transaction
@@ -1565,25 +1587,33 @@ fn apply_remote_list_entry(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let table = "reading_list";
     let archive_id = payload_text(payload, "archiveId")?;
     let deleted = payload_bool(payload, "deleted")?;
-    let gate = local_row_state(transaction, table, scope_id, &archive_id)?
+    let local = local_row_state(transaction, table, scope_id, &archive_id)?;
+    let gate = local
+        .as_ref()
         .map(|(clock, updated, device)| {
             remote_change_wins(
-                clock,
-                &updated,
-                &device,
+                *clock,
+                updated,
+                device,
                 object.logical_clock,
                 &object.wall_clock,
                 &object.device_id,
             )
         })
         .unwrap_or(true);
-    if !gate {
+    if !gate && !restore {
         return Ok(false);
     }
+    // 导入时行里的版本号不能倒着走：文件里的计数来自另一台设备，可能比本机的小。
+    let revision = local
+        .as_ref()
+        .map(|(clock, _, _)| (*clock).max(object.logical_clock))
+        .unwrap_or(object.logical_clock);
     transaction
         .execute(
             &format!(
@@ -1600,7 +1630,7 @@ fn apply_remote_list_entry(
                 object.wall_clock,
                 object.device_id,
                 deleted,
-                object.logical_clock
+                revision
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -1612,6 +1642,7 @@ fn apply_remote_search_preset(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let preset_id = payload_text(payload, "presetId")?;
     let name = payload_text(payload, "name")?;
@@ -1620,28 +1651,35 @@ fn apply_remote_search_preset(
     let sort_order = payload_text(payload, "sortOrder").unwrap_or_else(|_| "desc".to_string());
     let category_id = payload.get("categoryId").and_then(|value| value.as_str());
     let deleted = payload_bool(payload, "deleted").unwrap_or(false);
-    let gate = transaction
+    let local = transaction
         .query_row(
             "SELECT revision, updated_at, COALESCE(device_id, '') FROM search_presets WHERE scope_id = ?1 AND preset_id = ?2",
             params![scope_id, preset_id],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         )
         .optional()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let gate = local
+        .as_ref()
         .map(|(clock, updated, device)| {
             remote_change_wins(
-                clock,
-                &updated,
-                &device,
+                *clock,
+                updated,
+                device,
                 object.logical_clock,
                 &object.wall_clock,
                 &object.device_id,
             )
         })
         .unwrap_or(true);
-    if !gate {
+    if !gate && !restore {
         return Ok(false);
     }
+    // 导入时行里的版本号不能倒着走：文件里的计数来自另一台设备，可能比本机的小。
+    let revision = local
+        .as_ref()
+        .map(|(clock, _, _)| (*clock).max(object.logical_clock))
+        .unwrap_or(object.logical_clock);
     transaction
         .execute(
             "INSERT INTO search_presets (scope_id, preset_id, name, query, sort_by, sort_order, category_id, device_id, deleted_at, revision, updated_at)
@@ -1662,7 +1700,7 @@ fn apply_remote_search_preset(
                 category_id,
                 object.device_id,
                 deleted,
-                object.logical_clock,
+                revision,
                 object.wall_clock,
             ],
         )
@@ -1675,6 +1713,7 @@ fn apply_remote_dedup_relation(
     scope_id: &str,
     object: &SyncStateObject,
     payload: &serde_json::Value,
+    restore: bool,
 ) -> Result<bool, String> {
     let pair_key = payload_text(payload, "pairKey")?;
     let left_archive_id = payload_text(payload, "leftArchiveId")?;
@@ -1690,12 +1729,13 @@ fn apply_remote_dedup_relation(
         .optional()
         .map_err(|error| error.to_string())?;
     let wins = gate
+        .as_ref()
         .map(|(clock, updated)| {
             // The dedup table has no device column, so the tiebreak keeps the
             // local row — deterministic, and unchanged from before.
             remote_change_wins(
-                clock,
-                &updated,
+                *clock,
+                updated,
                 "",
                 object.logical_clock,
                 &object.wall_clock,
@@ -1703,9 +1743,14 @@ fn apply_remote_dedup_relation(
             )
         })
         .unwrap_or(true);
-    if !wins {
+    if !wins && !restore {
         return Ok(false);
     }
+    // 导入时行里的计数不能倒着走：文件里的计数来自另一台设备。
+    let logical_clock = gate
+        .as_ref()
+        .map(|(clock, _)| (*clock).max(object.logical_clock))
+        .unwrap_or(object.logical_clock);
     transaction
         .execute(
             "INSERT INTO dedup_non_duplicates (scope_id, pair_key, left_archive_id, right_archive_id, tombstoned, updated_at, logical_clock)
@@ -1720,7 +1765,7 @@ fn apply_remote_dedup_relation(
                 right_archive_id,
                 i64::from(tombstoned),
                 object.wall_clock,
-                object.logical_clock,
+                logical_clock,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -1940,12 +1985,21 @@ pub struct ScopedImportReport {
     pub categories: Vec<String>,
 }
 
-/// 导入：把文件里的对象按同步的合并规则并进本地，再为落地的那几条写日志。
+/// 导入：把文件里的对象恢复进本地，再为落地的那几条写日志。
 ///
-/// 合并而不是覆盖：文件可能来自另一台设备，也可能比本机旧——时钟大者胜这条规则在
-/// 这里同样成立，所以重复导入同一份文件是幂等的，旧文件也不会把新数据顶掉。
+/// 自动同步按时钟合并（时钟大者胜），**文件导入不这么比**：两台设备各自维护自己的
+/// 计数器，`sync_journal` 的 `logical_clock` 从没见过面，比大小只会得出「本机这一版
+/// 更新」这种没有意义的结论——最常见的情形（把另一台设备的设置导进一台用过的机器）
+/// 于是整份被挡在门外，用户看到的是「导入成功、什么都没变」。所以导入一律以文件为
+/// 准：文件里的对象就是本机该对象的最新一版（内部实现见 `apply_remote_object` 的
+/// `restore`）。
 ///
-/// 文件**内部**的重复项同样按「留最新」折叠：解析在文本上做（`parse_scoped_document`
+/// 重复导入同一份文件仍然幂等：第二次导入写下的还是同一份内容与同一份日志（版本号
+/// 取「本机与文件较大者」，不会把已经落地的版本号往下拽）；更旧的一份文件也不会把
+/// 更新的数据顶掉，因为两者内容本来就都是它自己那一版。旧文件里没有的对象不受影响：
+/// 导入只处理文件里有的那些。
+///
+/// 文件**内部**的重复项按「留最新」折叠：解析在文本上做（`parse_scoped_document`
 /// → `deserialize_state_objects`），同一个档案同一种记录最后只留最新的一版。
 ///
 /// 写日志是必须的：不写，导入的数据就只活在这台机器上，下次同步推出去的文档里没有
@@ -2017,7 +2071,8 @@ pub(crate) fn import_scoped_document(
     import_scoped_documents(connection, document, enabled)
 }
 
-/// 导入的核心：把一份已经折叠好的文档并进本地。
+/// 导入的核心：把一份已经折叠好的文档恢复进本地。时钟比较那一层交给
+/// `apply_remote_object` 的 `restore = true`（见上面 `import_scoped_data` 的说明）。
 pub(crate) fn import_scoped_documents(
     connection: &mut Connection,
     document: SyncStateDocument,
@@ -2035,7 +2090,10 @@ pub(crate) fn import_scoped_documents(
                 skipped += 1;
                 continue;
             }
-            if !apply_remote_object(&transaction, &object.scope_id, object)? {
+            // 导入是**恢复**：文件里的对象就是本机该对象的最新一版（`restore = true`），
+            // 不按时钟跟本机比大小——两台设备的计数器各数各的，比大小没有意义，而
+            // 「导入自己另一台设备的设置」恰恰是本功能最常见的用法。
+            if !apply_remote_object(&transaction, &object.scope_id, object, true)? {
                 // 没落地就明说：闸门按时钟挡下了它，或者本机已经是这一版。以前这里两边都
                 // 不计数，报告只说「已导入 0 项」，用户看着文件里明明有那几条却查不出原因。
                 skipped += 1;
@@ -2998,19 +3056,19 @@ mod tests {
         };
 
         // 时钟更小的墓碑（例如从一台落后的设备拉回来的）不动本地这一行。
-        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(3)).expect("stale tombstone"));
+        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(3), false).expect("stale tombstone"));
         let still_there: i64 = transaction
             .query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get(0))
             .expect("row count");
         assert_eq!(still_there, 1);
 
         // 时钟更大的一版赢：行被删掉，重复应用也不会把它插回来。
-        assert!(apply_remote_object(&transaction, "scope-a", &tombstone(5)).expect("tombstone"));
+        assert!(apply_remote_object(&transaction, "scope-a", &tombstone(5), false).expect("tombstone"));
         let removed: i64 = transaction
             .query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get(0))
             .expect("row count");
         assert_eq!(removed, 0);
-        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(5)).expect("repeat tombstone"));
+        assert!(!apply_remote_object(&transaction, "scope-a", &tombstone(5), false).expect("repeat tombstone"));
     }
 
     #[test]
@@ -4595,9 +4653,12 @@ mod tests {
     }
 
     #[test]
-    fn every_record_category_keeps_the_newest_version_of_the_same_archive() {
+    fn an_import_restores_the_version_in_the_file_over_every_record_category() {
         // 六类记录各一条，同一个档案 ID 的同一种记录：先导入更新的那一份，再导入
-        // 更旧的那一份，六类都必须原地不动；换一份真正更新的，六类又都要落地。
+        // 更旧的那一份。**文件导入是恢复**——文件里那一版就是本机该对象的最新一版
+        // （理由见 `import_scoped_data` 的说明：两台设备的 journal 计数器从没见过面，
+        // 按时钟比大小只会把整份文件挡在门外），所以更旧的那一份也要落地，把本机那
+        // 六行改回文件里的样子（历史除外：它是并集，不参与赛跑）。
         let enabled = SYNC_SCOPE_CATEGORIES.map(String::from).to_vec();
         let mut connection = migrated_connection();
         let newer = document_from_objects(six_record_objects(
@@ -4646,8 +4707,8 @@ mod tests {
         .expect("import older");
         assert_eq!(
             (second.applied, second.skipped),
-            (1, 5),
-            "只有历史那条会重写自己那一行（它是并集，不是时钟赛跑），其余五类都被闸门挡住——被挡住的那五条要如实算进「跳过」"
+            (6, 0),
+            "导入以文件为准：更旧的那一份也要落地（自动同步才按时钟合并）"
         );
         let (page, revision): (i64, i64) = connection
             .query_row(
@@ -4657,7 +4718,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("progress");
-        assert_eq!((page, revision), (9, 5), "旧的进度不能盖掉新的");
+        assert_eq!(
+            (page, revision),
+            (3, 5),
+            "进度回到文件里那一版；版本号取本机与文件较大者，不能倒退"
+        );
         let (history_page, visited): (i64, String) = connection
             .query_row(
                 "SELECT page_index, visited_at FROM reading_history
@@ -4678,7 +4743,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("waitlist");
-        assert_eq!(list_revision, 5, "旧的待看不能盖掉新的");
+        assert_eq!(list_revision, 5, "待看的版本号同样不能倒退");
         let (preset_name, preset_revision): (String, i64) = connection
             .query_row(
                 "SELECT name, revision FROM search_presets
@@ -4689,8 +4754,8 @@ mod tests {
             .expect("preset");
         assert_eq!(
             (preset_name.as_str(), preset_revision),
-            ("新名字", 5),
-            "旧的搜索预设不能盖掉新的"
+            ("旧名字", 5),
+            "搜索预设回到文件里那一版"
         );
         let relation: (i64, i64) = connection
             .query_row(
@@ -4700,7 +4765,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("relation");
-        assert_eq!(relation, (5, 0), "旧的去重关系不能盖掉新的");
+        assert_eq!(relation, (5, 0), "去重关系的计数同样不能倒退");
         let preferences: String = connection
             .query_row(
                 "SELECT value_json FROM settings WHERE key='preferences'",
@@ -4710,12 +4775,12 @@ mod tests {
             .expect("preferences");
         let preferences: serde_json::Value =
             serde_json::from_str(&preferences).expect("preferences json");
-        assert_eq!(preferences["theme"], "dark", "旧的偏好不能盖掉新的");
+        assert_eq!(preferences["theme"], "light", "偏好回到文件里那一版");
         // 逐字段那一份（读设置时读的就是它）也要跟上：只写上面那整块 JSON 等于没搬。
         let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
         assert_eq!(
-            landed.theme, "dark",
-            "旧的偏好不能盖掉新的——read 的那一半读的是逐字段的行"
+            landed.theme, "light",
+            "导入的偏好必须落到 read 的那一半读的逐字段行上"
         );
 
         // 反过来：真正更新的那一份，六类都要落地。
@@ -4770,6 +4835,75 @@ mod tests {
     }
 
     #[test]
+    fn syncing_keeps_the_newest_version_of_the_same_archive() {
+        // 自动同步是合并，不是恢复：先推更新的那一版，再推更旧的那一版，只有并集
+        // 语义的历史会重写自己那一行，其余五类都要原地不动。这条与上面那条导入用例
+        // 是一对——导入以文件为准、同步按时钟比，两种语义都要有人钉住。
+        let mut connection = migrated_connection();
+        // 本机自己改过五次设置：本地时钟也到了第 5 版，这才有「时钟撞车、比时刻」的局面。
+        for _ in 0..5 {
+            let preferences =
+                crate::settings::load_preferences_from(&connection).expect("load preferences");
+            crate::settings::save_preferences_to(&mut connection, preferences).expect("save");
+        }
+        let newer = remote_objects(
+            "scope-a",
+            six_record_objects(
+                "device-b",
+                5,
+                "2026-09-20 08:00:00",
+                9,
+                "新名字",
+                "dark",
+            ),
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &newer).expect("apply newer"),
+            6,
+            "六类记录都该落地"
+        );
+
+        let older = remote_objects(
+            "scope-a",
+            six_record_objects(
+                "device-c",
+                2,
+                "2026-09-01 08:00:00",
+                3,
+                "旧名字",
+                "light",
+            ),
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &older).expect("apply older"),
+            1,
+            "只有历史那条会重写自己那一行（它是并集，不是时钟赛跑），其余五类都被闸门挡住"
+        );
+        let (page, revision): (i64, i64) = connection
+            .query_row(
+                "SELECT page_index, revision FROM reading_progress
+                 WHERE scope_id='scope-a' AND archive_id='archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("progress");
+        assert_eq!((page, revision), (9, 5), "旧的进度不能盖掉新的");
+        let preset_name: String = connection
+            .query_row(
+                "SELECT name FROM search_presets WHERE scope_id='scope-a' AND preset_id='preset-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preset");
+        assert_eq!(preset_name, "新名字", "旧的搜索预设不能盖掉新的");
+        let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
+        assert_eq!(
+            landed.theme, "dark",
+            "旧的偏好不能盖掉新的——read 的那一半读的是逐字段的行"
+        );
+    }
+
+    #[test]
     fn merging_an_older_visit_keeps_the_device_that_made_the_kept_visit() {
         // 留下的访问是本机那一次，行里的 device_id 就该是本机的：写远端设备会把
         // 「谁访问的」抹掉，下一次比对（比如墓碑闸门）就按错的设备算。
@@ -4812,43 +4946,48 @@ mod tests {
     #[test]
     fn an_older_preferences_snapshot_with_the_same_clock_does_not_win() {
         // 时钟撞车（两台设备各自离线改过、都到了第 5 版）时该看时刻：闸门以前拿空串
-        // 当本地时刻，空串输给任何时刻，于是一份更旧的偏好文件照样盖上来。
-        let enabled = vec!["app_settings".to_string()];
+        // 当本地时刻，空串输给任何时刻，于是一份更旧的快照照样盖上来。
+        //
+        // 这条走的是**自动同步**那条路（`apply_remote_objects`）：文件导入是恢复，以文件
+        // 为准，不在这里比时刻（见 `an_import_restores_the_version_in_the_file_over_every_record_category`）。
         let mut connection = migrated_connection();
-        let newer = document_from_objects(vec![record_object(
+        // 本机自己改过五次设置：本地时钟也到了第 5 版，这才有「时钟撞车、比时刻」的局面。
+        for _ in 0..5 {
+            let preferences =
+                crate::settings::load_preferences_from(&connection).expect("load preferences");
+            crate::settings::save_preferences_to(&mut connection, preferences).expect("save");
+        }
+        let newer = remote_objects(
             GLOBAL_SCOPE,
-            "app_setting",
-            "preferences",
-            "device-b",
-            5,
-            "2026-09-20 08:00:00",
-            serde_json::json!({"theme": "dark"}),
-        )]);
-        let first = import_scoped_document(
-            &mut connection,
-            serde_json::to_value(&newer).expect("json"),
-            &enabled,
-        )
-        .expect("import newer");
-        assert_eq!(first.applied, 1, "本机还没有偏好，第一份要落地");
-
-        let older = document_from_objects(vec![record_object(
-            GLOBAL_SCOPE,
-            "app_setting",
-            "preferences",
-            "device-c",
-            5,
-            "2026-09-01 08:00:00",
-            serde_json::json!({"theme": "light"}),
-        )]);
-        let second = import_scoped_document(
-            &mut connection,
-            serde_json::to_value(&older).expect("json"),
-            &enabled,
-        )
-        .expect("import older");
+            vec![remote_object(
+                "app_setting",
+                "preferences",
+                5,
+                "2026-09-20 08:00:00",
+                serde_json::json!({"theme": "dark"}),
+            )],
+        );
         assert_eq!(
-            second.applied, 0,
+            apply_remote_objects(&mut connection, &newer).expect("apply newer"),
+            1,
+            "本机还没有偏好，第一份要落地"
+        );
+        let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
+        assert_eq!(landed.theme, "dark");
+
+        let older = remote_objects(
+            GLOBAL_SCOPE,
+            vec![remote_object(
+                "app_setting",
+                "preferences",
+                5,
+                "2026-09-01 08:00:00",
+                serde_json::json!({"theme": "light"}),
+            )],
+        );
+        assert_eq!(
+            apply_remote_objects(&mut connection, &older).expect("apply older"),
+            0,
             "时钟相同而时刻更旧的那一份不能盖掉刚落地的新偏好"
         );
         let preferences: String = connection
@@ -4861,6 +5000,11 @@ mod tests {
         let preferences: serde_json::Value =
             serde_json::from_str(&preferences).expect("preferences json");
         assert_eq!(preferences["theme"], "dark");
+        let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
+        assert_eq!(
+            landed.theme, "dark",
+            "被挡下的那一份不能改动读设置读的逐字段行"
+        );
     }
 
     #[tokio::test]

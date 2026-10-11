@@ -1,8 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 function read(path: string): string {
   return readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
+}
+
+// 路径先落进变量再交给 `new URL`：直接写字面量时 Vite 会把它当成静态资源改写成一个
+// 非 file 的方案，`fileURLToPath` 于是抛 `The URL must be of scheme file`。
+function pathOf(path: string): string {
+  return fileURLToPath(new URL(path, import.meta.url));
 }
 
 function readJson(path: string): Record<string, unknown> {
@@ -75,5 +82,80 @@ describe('mobile packaging', () => {
       '<background android:drawable="@color/ic_launcher_background"/>',
     );
     expect(read(`${res}/values/ic_launcher_background.xml`)).toContain('#0D0D0D');
+  });
+
+  it('keeps the Android splash on the app canvas in every theme variant', () => {
+    const res = '../../src-tauri/gen/android/app/src/main/res';
+
+    // 画布色＝应用主题的 --surface-canvas（tokens.css 的浅色 :88 / 深色 :473），
+    // 不是品牌 Canvas #0B0B0F：应用主题默认跟随系统，钉死品牌色时浅色机器上窗口背景
+    // 是近黑、网页帧是近白，用户看到的就是两张开屏页（doc 30）。
+    expect(read(`${res}/values/colors.xml`)).toMatch(/<color name="splash_canvas">#fbf8f3<\/color>/);
+    expect(read(`${res}/values-night/colors.xml`)).toMatch(/<color name="splash_canvas">#121412<\/color>/);
+    // 注释里可以提品牌 Canvas，画布色本身不行。
+    expect(read(`${res}/values/colors.xml`)).not.toMatch(/<color name="splash_canvas">#0B0B0F<\/color>/);
+
+    // 每个主题变体都要有窗口背景：夜间那份从前一个 item 都没有，于是回落父主题，
+    // 深色机器冷启动先白一帧，再接 webview 的深色帧。
+    for (const variant of ['values', 'values-night']) {
+      expect(read(`${res}/${variant}/themes.xml`)).toMatch(
+        /<item name="android:windowBackground">@drawable\/splash_background<\/item>/,
+      );
+    }
+
+    // Android 12+ 的系统开屏：version 变体与 night+version 变体都要齐。资源限定符里
+    // night 优先于 version，只留 values-v31 时夜间机器会把这三条整份丢掉。
+    for (const variant of ['values-v31', 'values-night-v31']) {
+      const theme = read(`${res}/${variant}/themes.xml`);
+      expect(theme).toContain('<item name="android:windowSplashScreenBackground">@color/splash_canvas</item>');
+      // 图标要带印板（自适应图标＝`#0D0D0D` 印板 + 白线条）：画布现在是浅色，
+      // 只画前景那几根白线在浅底上等于没画。
+      expect(theme).toContain('<item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>');
+    }
+
+    // 窗口背景里那张印记要与网页帧同尺寸：网页帧的印板是 128px，自适应图标 108dp 画布
+    // 里裁出来的印板是 2/3，所以 item 给 192dp（192 × 2/3 = 128）。从前是 96dp 且不带
+    // 印板，印记既小一截又看不见。
+    const drawable = read(`${res}/drawable/splash_background.xml`);
+    expect(drawable).toContain('android:width="192dp"');
+    expect(drawable).toContain('android:height="192dp"');
+    expect(drawable).toContain('android:drawable="@mipmap/ic_launcher"');
+    expect(drawable).not.toContain('ic_launcher_foreground');
+
+    // WebView 一挂上就用自己的背景色盖住窗口背景，而它到页面画出首帧之间有一段空档：
+    // 不透明时印记在那段里整个消失（用户看到的就是「闪一下又出来」）。alpha 0 会被
+    // Tauri 采纳成透明的 webview 层，窗口背景（画布 + 印记）继续透出来。
+    const config = JSON.parse(read('../../src-tauri/tauri.conf.json')) as {
+      app: { windows: { backgroundColor?: string }[] };
+    };
+    expect(config.app.windows[0]?.backgroundColor).toBe('#0B0B0F00');
+  });
+
+  it('keeps double hyphens out of the Android resource comments', () => {
+    // aapt 的资源合并直接拒绝这种注释（`注释中不允许出现字符串 "--"`），而且它只在真的
+    // 跑 gradle 时才咬人：`npx vitest` 读的是文本，一路绿，Android 构建却在这里红
+    // （2026-10-12 那一轮就栽在 values/colors.xml 的注释里写着 `--surface-canvas`）。
+    // XML 注释里写 CSS 自定义属性名要省掉那两个连字符。
+    const root = pathOf('../../src-tauri/gen/android/app/src/main/res');
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.xml')) files.push(full);
+      }
+    };
+    walk(root);
+    expect(files.length).toBeGreaterThan(10);
+
+    const offenders: string[] = [];
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8');
+      for (const comment of text.matchAll(/<!--([\s\S]*?)-->/g)) {
+        const body = comment[1] ?? '';
+        if (body.includes('--')) offenders.push(`${file.slice(root.length + 1)}: ${body.trim().slice(0, 48)}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

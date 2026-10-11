@@ -108,6 +108,27 @@ pub async fn set_system_bar_style(app: tauri::AppHandle, dark: bool) -> CommandR
     }
 }
 
+/// 触感反馈：手机的**长按**用它确认「按住了」（`src/lib/haptics.ts` 是唯一的调用点）。
+///
+/// 桌面上是**空操作**而不是失败：前端只有一条路径，不必在每个长按处再判一次平台，而
+/// 「这台机器没有马达」本来就不是错误。设备有马达但不给震（权限被拒、系统关了触感）时
+/// 原生侧也照样成功——震动是可选的确认，不该把长按弄成失败。
+#[tauri::command]
+pub async fn haptic_feedback(app: tauri::AppHandle, kind: String) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        match crate::mobile_host::vibrate(&app, &kind).await {
+            Ok(()) => CommandResult::success(()),
+            Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, &kind);
+        CommandResult::success(())
+    }
+}
+
 /// 只放 http/https 出去：别的 scheme 交给系统，等于把任意 Intent 交给页面。
 fn parse_web_url(url: &str) -> Result<url::Url, CommandResult<()>> {
     match url::Url::parse(url) {

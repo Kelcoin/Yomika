@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Android 12+ 的系统开屏：启动器图标落在同一块 Canvas 上，
-         系统开屏退场后接的就是同一色的窗口背景，没有跳变（docs/30）。 -->
+         系统开屏退场后接的就是同一色的窗口背景，没有跳变（docs/30）。
+         图标用**带印板的** `@mipmap/ic_launcher`（自适应图标＝印板 #0D0D0D + 白线条）：
+         画布现在是浅色，只画前景那几根白线在浅底上等于没画——印记自带墨色印板，
+         浅色主题下也看得见，这才是 docs/30 里「浅色主题下依然可辨」那句话的落点。
+         夜间那一档见 `values-night-v31/`（night 优先于 version，缺了它夜间机器会整份丢掉
+         这里的三条 item）。 -->
     <style name="Theme.yomika" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:windowSplashScreenBackground">@color/splash_canvas</item>
-        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
     </style>
 </resources>

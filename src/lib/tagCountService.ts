@@ -4,16 +4,35 @@
  * `tagname_count.csv.gz`（行格式 `namespace:key,count`）。启用「标签补全排序规则」后
  * 后台拉取，补全建议在同分内按使用频次排序。
  *
- * 数据只驻内存；跨会话持久化的是版本号——下次启动先查版本，同版本才不重复下载，
- * 不同版本重新拉取（拉取在后台，补全在数据就绪前用默认排序，不阻塞任何交互）。
+ * **下载在 Rust 侧**（`src-tauri/src/tagcount.rs` 的 `fetch_tag_counts`），不在这里
+ * fetch：那份资产的终点 `release-assets.githubusercontent.com` 不发
+ * `Access-Control-Allow-Origin`，WebView 里 `fetch` 拿到的是 `TypeError: Failed to
+ * fetch`，改 CSP 也救不了（真浏览器读数见 `debug_outputs/tagcount/cors-probe.mjs`）。
+ * 这里只负责「装上表、记住版本、通知订阅者」。
+ *
+ * 数据只驻内存；跨会话持久化的是版本号与整张表——下次启动先用存下来的表，再问
+ * Rust 版本有没有变（没变就不下载正文）。
  */
 
-export const TAG_COUNT_RELEASES_LATEST_URL = 'https://api.github.com/repos/mokurin000/e-hentai-tag-count/releases/latest';
-export const TAG_COUNT_DOWNLOAD_BASE_URL = 'https://github.com/mokurin000/e-hentai-tag-count/releases/download';
+import { z } from 'zod';
+
+import { invokeCommand } from '../bridge/invoke';
+
+/** Rust 命令名，与 `src-tauri/src/lib.rs` 的 `generate_handler!` 一致。 */
+export const TAG_COUNT_TABLE_COMMAND = 'fetch_tag_counts';
 export const TAG_COUNT_VERSION_KEY = 'yomika.tagcount.version';
 export const TAG_COUNT_DATA_KEY = 'yomika.tagcount.data';
 /** 频次低于这个数的标签不参与排序：长尾里没有想要的补全候选。与 JHenTai 同口径。 */
 export const TAG_COUNT_MIN_COUNT = 5;
+
+export interface TagCountTable {
+  /** 数据版本：资产最后的修改时间（每天一个 release）。 */
+  version: string;
+  /** 版本没变时为真，此时 `data` 不带上，表照旧的用。 */
+  unchanged: boolean;
+  /** `key<TAB>count` 按行拼成的整表。数据没变时为空。 */
+  data?: string | undefined;
+}
 
 export interface TagCountService {
   getCount(namespaceWithKey: string): number | undefined;
@@ -23,14 +42,33 @@ export interface TagCountService {
   subscribe(listener: () => void): () => void;
 }
 
-type UnknownRecord = Record<string, unknown>;
+const TagCountTableSchema = z.object({
+  version: z.string(),
+  unchanged: z.boolean(),
+  data: z.string().nullish(),
+});
+
+type TableFetcher = (since: string | undefined) => Promise<TagCountTable>;
+
+async function fetchTagCountTable(since: string | undefined): Promise<TagCountTable> {
+  const result = await invokeCommand(
+    TAG_COUNT_TABLE_COMMAND,
+    { since: since ?? null },
+    TagCountTableSchema,
+  );
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  const table = result.value;
+  if (!table.unchanged && !table.data) {
+    throw new Error('Tag count table came back without its rows');
+  }
+  return { version: table.version, unchanged: table.unchanged, data: table.data ?? undefined };
+}
 
 export function createTagCountService(options: TagCountServiceOptions = {}): TagCountService {
   const storage = options.storage ?? (() => {
     try { return window.localStorage; } catch { return undefined; }
   })();
-  const fetcher = options.fetcher ?? window.fetch.bind(window);
-  const now = options.now ?? Date.now;
+  const fetchTable = options.fetchTable ?? fetchTagCountTable;
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of [...listeners]) listener(); };
 
@@ -38,29 +76,10 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
   let version: string | undefined = (() => {
     try { return storage?.getItem(TAG_COUNT_VERSION_KEY) ?? undefined; } catch { return undefined; }
   })();
-  // 数据随会话持久化在 localStorage（尽力而为，超配额则跳过）：启动时恢复，
-  // 避免每次启动都为版本检查通过的数据重新下载十几 MB。
-  try {
-    const persisted = storage?.getItem(TAG_COUNT_DATA_KEY);
-    if (persisted && version) {
-      for (const line of persisted.split('\n')) {
-        const tab = line.lastIndexOf('\t');
-        if (tab <= 0) continue;
-        const count = Number(line.slice(tab + 1));
-        if (Number.isFinite(count)) counts.set(line.slice(0, tab), count);
-      }
-    }
-  } catch { /* storage unavailable */ }
-  let inFlight: Promise<void> | undefined;
-
-  const notifyAndStore = (tag: string) => {
-    try { storage?.setItem(TAG_COUNT_VERSION_KEY, tag); } catch { /* quota */ }
-    version = tag;
-    notify();
-  };
 
   // 频次表的唯一入口：低于 TAG_COUNT_MIN_COUNT 的条目在这里就被丢掉，所以
-  // 「哪些条目参与排序」只有一个地方说了算——下载解析与离线导入共用同一条规则。
+  // 「哪些条目参与排序」只有一个地方说了算——Rust 传来的整表、启动时恢复的
+  // localStorage 表、离线导入共用的都是这一条规则。
   const install = (entries: Iterable<[string, number]>) => {
     counts.clear();
     for (const [key, count] of entries) {
@@ -69,24 +88,41 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
     }
   };
 
-  const parseCsv = async (bytes: ArrayBuffer): Promise<void> => {
-    if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream unavailable');
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-    const text = await new Response(stream).text();
+  const readStoredRows = (rowText: string): Iterable<[string, number]> => {
     const entries: Array<[string, number]> = [];
-    for (const line of text.split('\n')) {
-      const comma = line.lastIndexOf(',');
-      if (comma <= 0) continue;
-      const key = line.slice(0, comma).replaceAll('"', '').trim();
-      entries.push([key, Number(line.slice(comma + 1))]);
+    for (const line of rowText.split('\n')) {
+      const tab = line.lastIndexOf('\t');
+      if (tab <= 0) continue;
+      entries.push([line.slice(0, tab), Number(line.slice(tab + 1))]);
     }
-    install(entries);
-    if (counts.size === 0) throw new Error('Tag count data is empty');
-    // 尽力持久化：放不下（配额）就只留版本号，下次启动走重新下载。
+    // Rust 送来的是同一套 `key<TAB>count` 行；这里先落成数组再交给 install，
+    // 与启动恢复走同一条路，免得两处各自过滤。
+    return entries;
+  };
+
+  // 数据随会话持久化在 localStorage（尽力而为，超配额则跳过）：启动时恢复，
+  // 避免每次启动都为没变的版本重新下载整表。
+  try {
+    const persisted = storage?.getItem(TAG_COUNT_DATA_KEY);
+    if (persisted && version) install(readStoredRows(persisted));
+  } catch { /* storage unavailable */ }
+
+  let inFlight: Promise<void> | undefined;
+
+  const notifyAndStore = (newVersion: string) => {
+    try { storage?.setItem(TAG_COUNT_VERSION_KEY, newVersion); } catch { /* quota */ }
+    version = newVersion;
+    notify();
+  };
+
+  const persistRows = () => {
     const TAB = String.fromCharCode(9);
     const NEWLINE = String.fromCharCode(10);
     try {
-      storage?.setItem(TAG_COUNT_DATA_KEY, [...counts].map(([key, count]) => `${key}${TAB}${count}`).join(NEWLINE));
+      storage?.setItem(
+        TAG_COUNT_DATA_KEY,
+        [...counts].map(([key, count]) => `${key}${TAB}${count}`).join(NEWLINE),
+      );
     } catch { /* quota */ }
   };
 
@@ -101,19 +137,21 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
     async refresh() {
       if (inFlight) return inFlight;
       const operation = (async () => {
-        // 版本检查：GitHub API 带 CORS 头；同版本直接跳过下载。
-        const release = await fetcher(`${TAG_COUNT_RELEASES_LATEST_URL}?_=${now()}`, { cache: 'no-store' });
-        if (!release.ok) throw new Error(`Tag count release check failed with HTTP ${release.status}`);
-        const releaseTag = ((await release.json() as UnknownRecord).tag_name as string | undefined)?.trim();
-        if (!releaseTag) throw new Error('Tag count release has no tag name');
-        if (releaseTag === version && counts.size > 0) { notifyAndStore(releaseTag); return; }
-        const asset = await fetcher(`${TAG_COUNT_DOWNLOAD_BASE_URL}/${releaseTag}/tagname_count.csv.gz`, { cache: 'no-store' });
-        if (!asset.ok) throw new Error(`Tag count download failed with HTTP ${asset.status}`);
-        await parseCsv(await asset.arrayBuffer());
-        notifyAndStore(releaseTag);
+        // 手里已经有表才敢说「这个版本我已经有了」：只有版本号而没有表（比如清过
+        // localStorage）时必须让 Rust 把正文带回来，否则排序会静悄悄地空掉。
+        const table = await fetchTable(counts.size > 0 ? version : undefined);
+        if (table.unchanged) { notifyAndStore(table.version); return; }
+        install(readStoredRows(table.data ?? ''));
+        if (counts.size === 0) throw new Error('Tag count data is empty');
+        persistRows();
+        notifyAndStore(table.version);
       })();
-      inFlight = operation.finally(() => { if (inFlight === operation) inFlight = undefined; });
-      return inFlight;
+      // inFlight 存的是**这一趟本身**，把它交给调用方的那个 `.finally` 去清：
+      // 写成 `inFlight = operation.finally(...)` 的话，回调里比较的是包装后的新
+      // promise 与 `operation`，永远不相等——inFlight 从此不清，第二次刷新直接
+      // 返回上一次的结果：成功后按刷新没反应，失败后每次都拿同一份旧错误。
+      inFlight = operation;
+      return operation.finally(() => { if (inFlight === operation) inFlight = undefined; });
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -124,8 +162,8 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
 
 interface TagCountServiceOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem'>;
-  fetcher?: typeof fetch;
-  now?: () => number;
+  /** 测试与离线场景的注入点：默认走 `fetch_tag_counts` 命令。 */
+  fetchTable?: TableFetcher;
 }
 
 const tagCountService = createTagCountService();
@@ -140,6 +178,12 @@ export function isTagCountOrderEnabled(): boolean {
 export function getTagCountForSort(namespaceWithKey: string): number {
   if (!countOrderEnabled) return 0;
   return tagCountService.getCount(namespaceWithKey) ?? 0;
+}
+/** 这张表本身的读数，不带「标签补全排序规则」那个开关：推荐加权要用的是全站频次
+ *  这件事本身，和补全建议排不排序没关系——那个开关只决定建议列表的次序。
+ *  表还没装上时返回 undefined，调用方据此退回到原来的手写权重。 */
+export function getTagFrequency(namespaceWithKey: string): number | undefined {
+  return tagCountService.getCount(namespaceWithKey);
 }
 export function getTagCountVersion(): string | undefined {
   return tagCountService.getVersion();

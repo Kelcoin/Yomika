@@ -2149,4 +2149,61 @@ describe('native shell configuration', () => {
     );
     expect(commands, '宿主的假夹具也一样显式跳过').toContain('crate::dlssnr::SnippetTrust::Skipped,');
   });
+
+  it('buzzes on a hold through one path, and only where a motor exists', () => {
+    const manifest = read('../../src-tauri/gen/android/app/src/main/AndroidManifest.xml');
+    const host = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/MobileHost.kt');
+    const bridge = read('../../src-tauri/src/mobile_host.rs');
+    const platform = read('../../src-tauri/src/commands/platform.rs');
+    const lib = read('../../src-tauri/src/lib.rs');
+    const menu = read('../../src/lib/longPressMenu.ts');
+    const haptics = read('../../src/lib/haptics.ts');
+
+    // 少了这条权限，`Vibrator.vibrate` 会被系统**静默忽略**：手机上什么都没发生，日志里
+    // 也没有一行。长按的确认本来就只是「手感」，坏了最容易被当成没事。
+    expect(manifest, '震动要权限：缺了不报错，只是不震').toContain(
+      '<uses-permission android:name="android.permission.VIBRATE" />',
+    );
+
+    // 有马达才动手；旧到没有 `createPredefined` 的机器也要震得出来（minSdk 24）。
+    expect(host, '原生侧一条命令').toContain('  fun vibrate(invoke: Invoke) {');
+    expect(host, '没有马达就安静收场').toContain('if (vibrator?.hasVibrator() == true) {');
+    expect(host, 'API 31 起震动器归 VibratorManager 管').toContain('VIBRATOR_MANAGER_SERVICE');
+    expect(host, '档位映射到系统预置效果').toContain(
+      'VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)',
+    );
+    expect(host, '低版本退成一次性振动，而不是没有反馈').toContain('vibrator.vibrate(milliseconds)');
+
+    expect(bridge, 'Rust 侧转一手').toContain('pub async fn vibrate(app: &AppHandle, kind: &str) -> Result<(), String> {');
+    expect(bridge, '命令名与原生侧那一支对得上').toContain(
+      'call::<serde_json::Value>(app, "vibrate", json!({ "kind": kind }))',
+    );
+    expect(platform, '宿主命令：桌面上是空操作而不是失败').toContain(
+      'pub async fn haptic_feedback(app: tauri::AppHandle, kind: String) -> CommandResult<()> {',
+    );
+    expect(platform, 'Android 那一支真的转过去').toContain('crate::mobile_host::vibrate(&app, &kind).await');
+    expect(lib, '注册进宿主名单：这一行是名单里的（12 个空格缩进），不是 use 那一行').toContain(
+      '            haptic_feedback,',
+    );
+
+    expect(menu, '长按才发这一下，而且是三个调用点共用的那一处').toContain("        hapticFeedback('medium');");
+    expect(menu, '和打开菜单同一个定时器里：按住了就一定有反馈').toContain(
+      "        hapticFeedback('medium');\n        open({ x: hold.x, y: hold.y });",
+    );
+    expect(haptics, '只有手机有马达，判据就是 UA').toContain('/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)');
+    expect(haptics, '发射即忘：反馈拿不到不该把长按弄失败').toContain('.catch(() => {});');
+
+    // 这条命令只该有一个出口。多一个人去叫它，桌面上就多一趟白跑的 IPC，手机上则会连震
+    // 两下——而「只在长按那一处发」正是这三个调用点共用同一个处理器换来的。
+    const root = resolve(__dirname, '../..', 'src');
+    const files = readdirSync(root, { recursive: true, encoding: 'utf8' }).filter(
+      (entry) => entry.endsWith('.ts') || entry.endsWith('.tsx'),
+    );
+    const offenders: string[] = [];
+    for (const entry of files) {
+      if (/(^|[\\/])lib[\\/]haptics\.ts$/.test(entry)) continue;
+      if (readFileSync(resolve(root, entry), 'utf8').includes('haptic_feedback')) offenders.push(entry);
+    }
+    expect(offenders).toEqual([]);
+  });
 });

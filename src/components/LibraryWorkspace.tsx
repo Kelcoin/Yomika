@@ -70,6 +70,10 @@ export function withWideCoverMark(
    bottom it bounces; both are damped, so the numbers are on-screen pixels and
    the gesture has to travel twice as far. */
 const PULL_THRESHOLD = 64;
+/** 手指要往端点外走这么远才认领这次手势（阻尼后是 6px）。在那之前一个
+ * preventDefault 都不发：手机上起手那几像素常常先往下抖一下，一抖就被冒领的话
+ * 接下来整段手势都滚不动页面——用户看到的就是「只能触发过滚刷新」。 */
+const PULL_CLAIM_PX = 12;
 const PULL_MAX = 104;
 const BOUNCE_MAX = 72;
 const PULL_DAMPING = 0.5;
@@ -365,7 +369,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [searchDraft, setSearchDraft] = useState(controlledSearchQuery ?? '');
   const [gridWidth, setGridWidth] = useState(0);
   /** How far the list is dragged past its ends, in on-screen pixels: positive
-   * below the top, negative past the bottom. */
+   * below the top, negative past the bottom.
+   *
+   * 这个值只在本档过滚从静止跨进来时记一次、抬手时归零：手势期间每一像素的位置
+   * 由 applyOverscroll 直接写进 DOM。以前每个触点都走一次 setState，整棵虚拟化
+   * 列表每帧重渲染一遍，真机上就是「过滚刷新非常非常卡」。 */
   const [overscroll, setOverscroll] = useState(0);
   /** Which gesture is driving it: touch follows the finger exactly, a wheel
    * eases between notches, and null is the spring back after a release. */
@@ -378,17 +386,37 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   /** The end a touch started on, so the finger may not pull the other way. */
   const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
   const overscrollStartY = useRef<number | undefined>(undefined);
+  /** 这一次触摸有没有越过认定距离。没越过之前一个 preventDefault 都不发，手势还
+   * 是浏览器的（见 touchMove）。 */
+  const overscrollClaimed = useRef(false);
   const overscrollSettleTimer = useRef<number | undefined>(undefined);
+  /** 被手指拖着走的那层列表，与它里面那枚箭头：手势期间直接写它们。 */
+  const pullRef = useRef<HTMLDivElement | null>(null);
+  const pullArrowRef = useRef<HTMLSpanElement | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const refreshingRef = useRef(refreshing);
+
+  /** 把位置画到 DOM 上。React 只管 state 里那一份静止值，所以手势里被直接改掉的
+   * 属性要自己收回：否则抬手之后 React 认为「还是 0，不用动」，屏上留着拖到一半
+   * 的那一帧。 */
+  const paintPull = useCallback((offset: number) => {
+    const pull = pullRef.current;
+    if (pull) pull.style.transform = `translateY(${offset}px)`;
+    const arrow = pullArrowRef.current;
+    if (arrow) {
+      arrow.style.transform = `rotate(${Math.round(Math.min(1, Math.max(0, offset) / PULL_THRESHOLD) * 180)}deg)`;
+    }
+  }, []);
 
   const resetOverscroll = useCallback(() => {
     overscrollTravel.current = 0;
     overscrollRef.current = 0;
     overscrollDirection.current = undefined;
+    overscrollClaimed.current = false;
+    paintPull(0);
     setOverscroll(0);
     setOverscrollGesture(null);
-  }, []);
+  }, [paintPull]);
 
   const cancelOverscroll = useCallback(() => {
     if (overscrollSettleTimer.current !== undefined) {
@@ -399,13 +427,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   }, [resetOverscroll]);
 
   /** Damped so the list cannot run away from the gesture: 100px of travel moves
-   * it 50px, and it stops at the cap however much more arrives. */
+   * it 50px, and it stops at the cap however much more arrives.
+   *
+   * 位置写 DOM，state 只在「从静止跨进这一档」时变一次——下拉指示器靠它露出来。 */
   const applyOverscroll = useCallback((travel: number) => {
     overscrollTravel.current = travel;
     const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
     overscrollRef.current = offset;
-    setOverscroll(offset);
-  }, []);
+    paintPull(offset);
+    setOverscroll((current) => current === 0 && offset !== 0 ? offset : current);
+  }, [paintPull]);
 
   /** The gesture is over: the list springs back either way, and a release past
    * the top's threshold asks for the refresh the disc is waiting to show. */
@@ -419,6 +450,12 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
 
   useEffect(() => { onRefreshRef.current = onRefresh; }, [onRefresh]);
   useEffect(() => { refreshingRef.current = refreshing; }, [refreshing]);
+
+  /** 刷新中箭头翻到 180°（并靠 disc 上的 is-spinning 转起来）；结束后收回 0°。 */
+  useEffect(() => {
+    const arrow = pullArrowRef.current;
+    if (arrow) arrow.style.transform = refreshing ? 'rotate(180deg)' : 'rotate(0deg)';
+  }, [refreshing]);
 
   useEffect(() => () => {
     if (overscrollSettleTimer.current !== undefined) window.clearTimeout(overscrollSettleTimer.current);
@@ -498,14 +535,26 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       if (!edge || start === undefined) return;
       const y = event.touches[0]?.clientY ?? start;
       const direction = edge === 'top' ? 1 : -1;
-      // Down past the top and up past the bottom are the two overscrolls; the
-      // way back is ordinary scrolling, which the scroller keeps.
-      if ((y - start) * direction <= 0) {
-        overscrollEdge.current = undefined;
-        overscrollStartY.current = undefined;
-        if (overscrollRef.current !== 0) cancelOverscroll();
+      const travel = (y - start) * direction;
+      if (overscrollClaimed.current) {
+        // 已经认领过：手指往回走就把列表送回原位，但这一档仍归下拉——浏览器那次
+        // 手势已经在 preventDefault 里交出来了，中途还回去只会两套滚动打架。
+        event.preventDefault();
+        applyOverscroll(Math.max(0, travel));
         return;
       }
+      if (travel < 0) {
+        // 手指先走的是「滚动页面」那一侧（向上推离顶部）。这一次手势就交给浏览器，
+        // 之后不再认领：先前的实现在这里只是清了端点，而下一次带向下分量的 move
+        // 又会 preventDefault，浏览器早已开始滚，于是内容从手指底下滑走。
+        overscrollEdge.current = undefined;
+        overscrollStartY.current = undefined;
+        return;
+      }
+      // 还没到认定距离：什么都不做，也不 preventDefault。这一次手势仍然是浏览器
+      // 的，页面照滚；等手指真的往外走够 12px 再认领，那时它还没开始自己的滚动。
+      if (travel < PULL_CLAIM_PX) return;
+      overscrollClaimed.current = true;
       // The pull owns the gesture from here, and it has to say so on the move
       // that starts it: once a touch browser has begun its own scroll it stops
       // honouring preventDefault for the rest of the gesture, and the content
@@ -513,12 +562,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       event.preventDefault();
       overscrollDirection.current = direction;
       setOverscrollGesture('touch');
-      applyOverscroll(direction * Math.abs(y - start));
+      applyOverscroll(travel);
     };
 
     const touchEnd = () => {
       overscrollEdge.current = undefined;
       overscrollStartY.current = undefined;
+      overscrollClaimed.current = false;
       if (overscrollRef.current !== 0) releaseOverscroll();
     };
 
@@ -1076,10 +1126,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     undefined` inside a template is the string "undefined", which
                     matches nothing and left the icon drawn raw in the corner. */}
                 <span className={refreshing ? 'library-pull-disc is-spinning' : 'library-pull-disc'}>
-                  <span
-                    className="library-pull-arrow"
-                    style={{ transform: `rotate(${refreshing ? 180 : Math.round(Math.min(1, Math.max(0, overscroll) / PULL_THRESHOLD) * 180)}deg)` }}
-                  >
+                  {/* 角度由 paintPull 直接写：它要跟着手指走，而每一像素走一次
+                      setState 正是这一档卡住的来源。刷新中的 180° 由下面那个
+                      effect 写。 */}
+                  <span className="library-pull-arrow" ref={pullArrowRef}>
                     <RefreshCw />
                   </span>
                 </span>
@@ -1087,6 +1137,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             )}
             <div
               className="archive-list-pull"
+              ref={pullRef}
               data-overscroll={overscrollGesture ?? undefined}
               style={{ transform: `translateY(${overscroll}px)` }}
             >

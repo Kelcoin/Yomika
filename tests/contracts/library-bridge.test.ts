@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../../src/lib/errorLog';
+import { readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
 
-afterEach(resetInvokeAdapterForTests);
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  // 这些用例会写路由快照：残留会让后面的用例按「有快照就不重读」跳过装载。
+  resetRouteCacheForTests();
+});
 
 describe('native library repository bridge', () => {
   it('replaces archives from a validated LANraragi search response', async () => {
@@ -216,12 +221,19 @@ describe('native library repository bridge', () => {
     const adapter = vi.fn(async () => ({ ok: true, value }));
     setInvokeAdapterForTests(adapter);
 
+    // 这条镜像写要连着作废书架快照：本机收藏那一下触发的重读发生在 PUT 之前，会把
+    // 「加收藏之前」的服务器名单写进快照（见 shelf-cache 那条行为用例）。
+    writeRouteCache('home:shelves', { watchlist: [] });
+    writeRouteCache('state:watchlist:default', { watchlist: [] });
+
     const result = await new NativeLibraryRepository().addArchiveToCategory('scope-a', 'SET_1613080290', 'a1');
 
     expect(adapter).toHaveBeenCalledWith('add_archive_to_category', {
       serverId: 'scope-a', categoryId: 'SET_1613080290', archiveId: 'a1',
     });
     expect(result).toEqual({ ok: true, value });
+    expect(readRouteCache('home:shelves')).toBeUndefined();
+    expect(readRouteCache('state:watchlist:default')).toBeUndefined();
   });
 
   it('updates archive metadata through the native command', async () => {
@@ -318,6 +330,28 @@ describe('native library repository bridge', () => {
       input: { serverId: 's1', query: '', sortBy: 'added', order: 'desc', categoryId: null, untaggedOnly: false, offset: 100, limit: 100 },
     });
     expect(result).toEqual({ ok: true, value });
+  });
+
+  it('keeps the search term when an older host answers with the whole library', async () => {
+    // 老主机只有整份列表，回退时把 query 丢了就等于拿「库里最新的一百条」去答「这个
+    // 标签下的档案」，调用方按精确标签一筛就什么都不剩。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_archives_page') return { ok: false, error: { code: 'INVALID_RESPONSE', message: 'unknown command', retryable: false } };
+      if (command === 'list_archives') return { ok: true, value: [
+        { serverId: 's1', archiveId: 'farmer', title: 'Something else', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z', tags: ['female:glasses'] },
+        { serverId: 's1', archiveId: 'prefix', title: 'Same prefix', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z', tags: ['artist:someoneelse'] },
+        { serverId: 's1', archiveId: 'wanted', title: 'Wanted', pageCount: 8, updatedAt: '2026-08-26T00:00:00Z', tags: ['artist:someone'] },
+      ] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const result = await new NativeLibraryRepository().listArchivesPage('s1', 0, 100, { query: 'artist:someone' });
+
+    // 镜像那条 SQL 是子串匹配，所以 `artist:someoneelse` 也答——精确到标签那一步是
+    // 调用方的事。这里要证的是「不相关的行不再混进来」，顺序照旧。
+    expect(result).toMatchObject({ ok: true, value: { total: 2, hasMore: false } });
+    expect(result.ok && result.value.items.map((archive) => archive.archiveId)).toEqual(['prefix', 'wanted']);
   });
 
   it('reads the library list from the server by item offset', async () => {

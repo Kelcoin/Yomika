@@ -20,7 +20,7 @@ import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-do
 
 import { parseArchiveTagString } from '../lib/tags';
 import { mirrorFavorites } from '../lib/favoritesMirror';
-import { pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
+import { createRecommendationSeed, createSeededShuffle, pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -417,8 +417,15 @@ detailBasePath?: string | undefined }) {
 }
 
 interface RecommendationSnapshot {
-  similar: ArchiveRecord[];
+  /** 池子而不是面板：面板那 15 张每次进来要重新按新种子排一遍，池子保持不变就能既
+   *  省掉重复搜索、又不让推荐栏每天都是同一份。 */
+  similarPool: ArchiveRecord[];
   sameCreator: ArchiveRecord[];
+  /** 上一次取数有没有被自己的上限截断（页数用满、中途出错或整段走了镜像回退）。
+   *
+   * 缓存只是先把上一次的答案画出来；`false` 的意思是「这份答案可能是短的」，
+   * 命中缓存后要再搜一次补齐，而不是让一个短答案在这里钉一天。 */
+  complete: boolean;
 }
 
 type RecommendationTab = 'similar' | 'creator';
@@ -428,17 +435,38 @@ type RecommendationTab = 'similar' | 'creator';
  * should not pay for them again. */
 const RECOMMENDATION_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1000;
 
+/** 一条轨最多摆几张卡。取数不再受它限制：搜到的候选先全进池子（排序后只切给面板）。 */
+const RECOMMENDATION_VISIBLE_LIMIT = 15;
+
+/** 池子的上限：够大，能让抖动每次挑出不同的一批；又小到可以整份进快照。 */
+const RECOMMENDATION_POOL_LIMIT = 60;
+
+/** 一个种子在服务端翻几页。服务端自己决定一页多大，所以这是往返次数的上限，
+ * 不是「这个种子最多贡献多少条」。 */
+const RECOMMENDATION_SEED_PAGES = 3;
+
+/** 服务端联系不上时改问镜像，这是给一个种子在镜像上留的额度。 */
+const RECOMMENDATION_SEED_LIMIT = 100;
+
 function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBasePath }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[]; detailBasePath: string }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
   const snapshot = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
-  const [similar, setSimilar] = useState<ArchiveRecord[]>(snapshot?.similar ?? []);
+  // 这次进来用哪个种子：抖动靠它决定，同一次挂载内部（含后台补搜后的重排）保持稳定。
+  const [seed] = useState(createRecommendationSeed);
+  const [similarPool, setSimilarPool] = useState<ArchiveRecord[]>(snapshot?.similarPool ?? []);
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
+  // 面板上摆的是池子按本次种子重排后的前几张：池子里的分数带抖动，顺序因此每次不
+  // 一样；池子本身不受影响，所以「每次都看到的还是这一批」不会变成看不到新东西。
+  const similar = useMemo(
+    () => rankRecommendations(tags, similarPool, RECOMMENDATION_VISIBLE_LIMIT, { seed }),
+    [seed, similarPool, tags],
+  );
   const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
   const [tab, setTab] = useState<RecommendationTab>('similar');
   const [reloadToken, setReloadToken] = useState(0);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
-      setSimilar((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      setSimilarPool((current) => current.filter((archive) => archive.archiveId !== archiveId));
       setSameCreator((current) => current.filter((archive) => archive.archiveId !== archiveId));
     },
   });
@@ -456,72 +484,67 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       ...archive,
       readPages: progress.get(archive.archiveId) ?? 0,
     }));
-    const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
-    if (cached) {
-      setLoading(false);
-      void loadProgress().then((progress) => {
-        if (!active) return;
-        const cachedSimilar = addProgress(cached.similar, progress);
-        const cachedCreator = sortSameCreatorRecommendations(addProgress(cached.sameCreator, progress));
-        setSimilar(cachedSimilar);
-        setSameCreator(cachedCreator);
-        // A cached recommendation can outlive the remote archive. Revalidate the
-        // ids before the next visit writes the stale card back to the DOM.
-        return Promise.all([
-          findMissingArchives(serverId, cachedSimilar.map((archive) => archive.archiveId)),
-          findMissingArchives(serverId, cachedCreator.map((archive) => archive.archiveId)),
-        ]).then(([missingSimilar, missingCreator]) => {
-        if (!active || (missingSimilar.size === 0 && missingCreator.size === 0)) return;
-        const nextSimilar = cachedSimilar.filter((archive) => !missingSimilar.has(archive.archiveId));
-        const nextCreator = cachedCreator.filter((archive) => !missingCreator.has(archive.archiveId));
-        setSimilar(nextSimilar);
-        setSameCreator(nextCreator);
-        writeRouteCache(snapshotKey, { similar: nextSimilar, sameCreator: nextCreator } satisfies RecommendationSnapshot);
-      });
-      });
-      return () => { active = false; };
-    }
-    setLoading(true);
+    /** 服务端联系不上时改问镜像：它只有同步过的那部分，但总比空白强。一问镜像就等于
+     * 承认这次答案是短的，`complete` 因此恒为 false。 */
+    const mirrorSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
+      const mirrored = await repository.listArchivesPage(serverId, 0, RECOMMENDATION_SEED_LIMIT, { query: seed });
+      return { items: mirrored.ok ? mirrored.value.items : [], complete: false };
+    };
+    /** 服务端才是标签的权威：镜像只有同步过的那一部分，把它当全集时答案就会短一截
+     * （同作者栏从前正是这样，而且搜到的条数还被当成 24 小时的定论）。
+     *
+     * 一个种子按 `has_more` 往后翻，翻不动或到上限为止；半途失败也把已经拿到的那几条
+     * 交出来，只有一条都没拿到才回去问镜像。`complete` 记的是这次取数有没有被我们
+     * 自己的上限截断——它决定这份答案配不配被缓存锁住。 */
+    const searchSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
+      const items: ArchiveRecord[] = [];
+      let start = 0;
+      for (let page = 0; page < RECOMMENDATION_SEED_PAGES; page += 1) {
+        const result = await repository.searchArchivesPage(serverId, start, { query: seed });
+        if (!result.ok) {
+          return items.length > 0 ? { items, complete: false } : mirrorSeed(seed);
+        }
+        items.push(...result.value.items);
+        if (!result.value.hasMore || result.value.items.length === 0) return { items, complete: true };
+        start += result.value.items.length;
+      }
+      return { items, complete: false };
+    };
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
-      if (seeds.length === 0) return found;
+      let complete = true;
+      if (seeds.length === 0) return { found, complete };
       // 四路并发：一打种子串行要付一打 RTT，推荐栏才出得来。
-      const searchOne = async (seed: string) => ({
-        seed,
-        result: await repository.listArchivesPage(serverId, 0, 100, { query: seed }),
-      });
+      const searchOne = async (seed: string) => ({ seed, ...(await searchSeed(seed)) });
       for (let index = 0; index < seeds.length; index += 4) {
-        if (!active) return found;
+        if (!active) return { found, complete: false };
         const responses = await Promise.all(seeds.slice(index, index + 4).map(searchOne));
-        if (!active) return found;
-        for (const { seed, result } of responses) {
-          if (!result.ok) continue;
+        if (!active) return { found, complete: false };
+        for (const { seed, items, complete: seedComplete } of responses) {
+          if (!seedComplete) complete = false;
           const normalizedSeed = seed.trim().toLowerCase();
-          for (const archive of result.value.items) {
-            // LANraragi's text search is a substring match; a `$` suffix in
-            // the seed means an exact tag, so enforce that part here after the
-            // broad server query to prevent `artist:foo` matching
-            // `artist:foobar` (and the same issue for taste tags).
+          for (const archive of items) {
+            // LANraragi's text search is a prefix match, not an equality test:
+            // `artist:foo` also answers with `artist:foobar`. The seed is a tag
+            // copied off this archive, so only the exact tag may come back.
             const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
             if (archive.archiveId !== currentArchiveId && hasExactTag) found.set(archive.archiveId, archive);
           }
         }
       }
-      return found;
+      return { found, complete };
     };
-
-    void (async () => {
-      const progress = await loadProgress();
-      if (!active) return;
-      const seeds = pickSeedTags(tags);
+    const runSearch = async (progress: ReadonlyMap<string, number>) => {
+      // 问哪几个标签也由种子决定：从前的种子集是固定的，同一份标签每次都问同样几个。
+      const seeds = pickSeedTags(tags, undefined, createSeededShuffle(seed));
       // 相似与同作者两条搜索互不依赖，并行。
       const [candidates, creatorMatches] = await Promise.all([
         searchByTags(seeds),
         searchByTags(creator.tags),
       ]);
-      if (!active) return;
-      const ranked = rankRecommendations(tags, addProgress([...candidates.values()], progress), Number.MAX_SAFE_INTEGER);
-      const byCreator = sortSameCreatorRecommendations(addProgress([...creatorMatches.values()], progress));
+      if (!active) return undefined;
+      const ranked = rankRecommendations(tags, addProgress([...candidates.found.values()], progress), Number.MAX_SAFE_INTEGER, { seed });
+      const byCreator = sortSameCreatorRecommendations(addProgress([...creatorMatches.found.values()], progress));
       // Verify each rail independently. The native verifier intentionally caps
       // one pass, so a large similarity result must not consume the budget and
       // leave the creator rail's first cards unchecked.
@@ -529,19 +552,64 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         findMissingArchives(serverId, ranked.map((archive) => archive.archiveId)),
         findMissingArchives(serverId, byCreator.map((archive) => archive.archiveId)),
       ]);
+      if (!active) return undefined;
+      return {
+        similarPool: ranked.filter((archive) => !missingSimilar.has(archive.archiveId)).slice(0, RECOMMENDATION_POOL_LIMIT),
+        sameCreator: byCreator.filter((archive) => !missingCreator.has(archive.archiveId)).slice(0, RECOMMENDATION_VISIBLE_LIMIT),
+        complete: candidates.complete && creatorMatches.complete,
+      };
+    };
+
+    const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+    if (cached) {
+      setLoading(false);
+      void (async () => {
+        const progress = await loadProgress();
+        if (!active) return;
+        const cachedSimilar = addProgress(cached.similarPool, progress);
+        const cachedCreator = sortSameCreatorRecommendations(addProgress(cached.sameCreator, progress));
+        setSimilarPool(cachedSimilar);
+        setSameCreator(cachedCreator);
+        // A cached recommendation can outlive the remote archive. Revalidate the
+        // ids before the next visit writes the stale card back to the DOM.
+        const [missingSimilar, missingCreator] = await Promise.all([
+          findMissingArchives(serverId, cachedSimilar.map((archive) => archive.archiveId)),
+          findMissingArchives(serverId, cachedCreator.map((archive) => archive.archiveId)),
+        ]);
+        if (!active) return;
+        const nextSimilar = cachedSimilar.filter((archive) => !missingSimilar.has(archive.archiveId));
+        const nextCreator = cachedCreator.filter((archive) => !missingCreator.has(archive.archiveId));
+        setSimilarPool(nextSimilar);
+        setSameCreator(nextCreator);
+        writeRouteCache(snapshotKey, { similarPool: nextSimilar, sameCreator: nextCreator, complete: cached.complete === true } satisfies RecommendationSnapshot);
+        // 上面那份答案可能是短的（页数用满、半途失败、或整段走了镜像），也可能是修复
+        // 之前写下的老缓存：卡片先在屏幕上，补齐的那次搜索在后台跑。
+        if (cached.complete === true) return;
+        const fresh = await runSearch(progress);
+        if (!active || !fresh) return;
+        setSimilarPool(fresh.similarPool);
+        setSameCreator(fresh.sameCreator);
+        writeRouteCache(snapshotKey, { similarPool: fresh.similarPool, sameCreator: fresh.sameCreator, complete: fresh.complete } satisfies RecommendationSnapshot);
+      })();
+      return () => { active = false; };
+    }
+    setLoading(true);
+    void (async () => {
+      const progress = await loadProgress();
       if (!active) return;
-      const nextSimilar = ranked.filter((archive) => !missingSimilar.has(archive.archiveId)).slice(0, 15);
-      const nextCreator = byCreator.filter((archive) => !missingCreator.has(archive.archiveId)).slice(0, 15);
-      setSimilar(nextSimilar);
-      setSameCreator(nextCreator);
+      const fresh = await runSearch(progress);
+      if (!active || !fresh) return;
+      setSimilarPool(fresh.similarPool);
+      setSameCreator(fresh.sameCreator);
       setLoading(false);
       writeRouteCache(snapshotKey, {
-        similar: nextSimilar,
-        sameCreator: nextCreator,
+        similarPool: fresh.similarPool,
+        sameCreator: fresh.sameCreator,
+        complete: fresh.complete,
       } satisfies RecommendationSnapshot);
     })();
     return () => { active = false; };
-  }, [creator, currentArchiveId, scopeId, serverId, snapshotKey, tags, reloadToken]);
+  }, [creator, currentArchiveId, scopeId, serverId, seed, snapshotKey, tags, reloadToken]);
 
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.

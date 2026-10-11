@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Android 12+ 且系统夜间：资源限定符里 night 优先于 version，所以这份文件是
+         必需的——只有 `values-v31/` 时，夜间机器会整份落到 `values-night/`，把系统开屏的
+         三条 item 全丢掉，开屏就退回父主题那套（图标尺寸、底色都不对）。内容与
+         `values-v31/themes.xml` 一致，画布色由 `values-night/colors.xml` 提供（docs/30）。 -->
+    <style name="Theme.yomika" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_canvas</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+    </style>
+</resources>

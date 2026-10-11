@@ -184,20 +184,36 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    *
    * 拉清单失败（对面没开着）就是「一档都没有」，不弹错：阅读器不该在打开一本漫画的
    * 时候先报一句网络错。 */
-  const [remoteCapabilities, setRemoteCapabilities] = useState<RemoteCapabilities>();
+  const [remoteCapabilities, setRemoteCapabilities] = useState<{ address: string; value: RemoteCapabilities }>();
+  const remoteAddress = preferences.remoteComputeUrl.trim();
   useEffect(() => {
     if (!remoteConfigured) {
       setRemoteCapabilities(undefined);
       return;
     }
     let cancelled = false;
-    void centerRepository.remoteCapabilities(preferences.remoteComputeUrl, preferences.remoteComputeToken).then((result) => {
-      if (cancelled) return;
-      setRemoteCapabilities(result.ok ? result.value : undefined);
-    });
+    // 探一次就把三枚开关打回灰的，在用户眼里就是「又断了一次」：对面刚起、网络抖一下都会
+    // 让第一次问不到。所以①**不**先抹掉上一次的答案（留着的那份正是「它原来有什么」，
+    // 只在地址变了时才算过期，见下面的 `remoteServiceUp`）；②失败短退避重试两次。
+    void (async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const result = await centerRepository.remoteCapabilities(remoteAddress, preferences.remoteComputeToken);
+        if (cancelled) return;
+        if (result.ok) {
+          setRemoteCapabilities({ address: remoteAddress, value: result.value });
+          return;
+        }
+        if (attempt < 2) await new Promise((resolve) => { window.setTimeout(resolve, 400 * (attempt + 1)); });
+        if (cancelled) return;
+      }
+    })();
     return () => { cancelled = true; };
-  }, [centerRepository, remoteConfigured, preferences.remoteComputeUrl, preferences.remoteComputeToken]);
-  const remoteServiceUp = (service: RemoteService) => remoteServiceReady(remoteCapabilities, service);
+  }, [centerRepository, remoteConfigured, remoteAddress, preferences.remoteComputeToken]);
+  /** 只有「这一台」的清单算数：换设备的瞬间旧答案（另一个地址）一律过期。 */
+  const remoteServiceUp = (service: RemoteService) => remoteServiceReady(
+    remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value : undefined,
+    service,
+  );
   /** DLSSNR 与远端处理要先检查本机能力或配对信息。
    *
    * 但「设置里开了」只是一句**持久化**的意图：它可能来自另一台机器、或者那个 DLL

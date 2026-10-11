@@ -142,6 +142,27 @@ export interface SearchPresetInput {
   categoryId: string | null;
 }
 
+/** `query_archive_page` 切词的那一套：逗号分隔、去掉首尾空白、末尾的 `$` 只对服务端
+ * 的精确搜索有意义、比较时按小写。空词丢掉。 */
+function archiveSearchTokens(query: string): string[] {
+  return query
+    .split(',')
+    .map((token) => token.trim().replace(/\$+$/, '').toLowerCase())
+    .filter((token) => token.length > 0);
+}
+
+/** 镜像那条 SQL 的匹配规则搬到 JS 里：带命名空间的词只看标签，裸词看标题或标签。
+ *
+ * 老主机没有分页搜索，回退只能拿整份列表，所以查询条件必须在这里自己补上——从前
+ * 它直接 `slice(0, limit)` 交出去，等于把「这个标签下的档案」答成了「库里最新的一百
+ * 条」，再被调用方的精确标签过滤一筛就什么都不剩。 */
+function archiveMatchesSearch(archive: ArchiveRecord, tokens: readonly string[]): boolean {
+  if (tokens.length === 0) return true;
+  const title = archive.title.toLowerCase();
+  const tags = (archive.tags ?? []).join(',').toLowerCase();
+  return tokens.every((token) => (token.includes(':') ? tags.includes(token) : title.includes(token) || tags.includes(token)));
+}
+
 export class NativeLibraryRepository {
   /** 收藏/待看写的是**绝对值**（`added`），不是「切换」：连点两次就是先写 true 再写
    * false，谁最后落库谁说了算。这两条命令也在 tokio 线程池上跑，所以要按同一个键排好
@@ -287,8 +308,14 @@ export class NativeLibraryRepository {
   listCategories(serverId: string, force = false): Promise<CommandResult<Category[]>> {
     return invokeCommand('list_categories', { serverId, force }, z.array(CategorySchema));
   }
+  /** 镜像写：本机那张收藏表由 `setWatchlist` 先写，服务器上这条静态分类随后才落地。
+   *
+   * 这里必须和 `removeArchiveFromCategory` 一样作废书架快照。本机写那一下会广播一次
+   * `state:` 作废，书架于是**立刻重读一次**——而那一刻 PUT 还没发出去，Rust 那边的
+   * 分类快照还在，读回来的是**加收藏之前**的名单，并且被写进 localStorage 快照自己
+   * 续命下去。所以症状是单向的：移出收藏夹立刻正确（那条有作废），加进去却不出现。 */
   addArchiveToCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema);
+    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateShelves);
   }
   removeArchiveFromCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateShelves);
@@ -480,9 +507,16 @@ export class NativeLibraryRepository {
     }, ArchivePageSchema);
     if (result.ok || !['INVALID_RESPONSE', 'UNKNOWN'].includes(result.error.code) || offset !== 0) return result;
     const legacy = await this.listArchives(serverId);
-    return legacy.ok
-      ? { ok: true, value: { items: legacy.value.slice(0, limit), total: legacy.value.length, hasMore: legacy.value.length > limit } }
-      : legacy;
+    if (!legacy.ok) return legacy;
+    const matched = legacy.value.filter((archive) => archiveMatchesSearch(archive, archiveSearchTokens(query.query ?? '')));
+    return {
+      ok: true,
+      value: {
+        items: matched.slice(offset, offset + limit),
+        total: matched.length,
+        hasMore: matched.length > offset + limit,
+      },
+    };
   }
 
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {

@@ -7,6 +7,9 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-    <!-- 开屏画面（docs/30）：Canvas 底色，窗口背景与 12+ 系统开屏共用。 -->
-    <color name="splash_canvas">#0B0B0F</color>
+    <!-- 开屏画面（docs/30）：画布底色取应用浅色主题的 surface-canvas 令牌（tokens.css:88），
+         窗口背景与 12+ 系统开屏共用；深色那一档在 values-night/colors.xml。
+         从前这里钉死品牌 Canvas #0B0B0F，浅色主题下就成了「近黑一层 → 近白一层」，
+         用户看到的正是两张开屏页。 -->
+    <color name="splash_canvas">#fbf8f3</color>
 </resources>

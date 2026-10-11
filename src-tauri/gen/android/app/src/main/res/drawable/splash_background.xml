@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 开屏画面（docs/30）：进程起到 webview 首帧之间，屏幕画的就是这个窗口背景。 -->
+<!-- 开屏画面（docs/30）：进程起到 webview 首帧之间，屏幕画的就是这个窗口背景。
+     里面这张印记要与网页那两帧（`index.html` 的静态帧、`SplashFrame`）**同构图**：
+     网页帧的印板是 128px，自适应图标 108dp 画布里被裁出来的印板是 2/3（72dp），
+     所以这里给 192dp——192 × 2/3 = 128dp，印记大小与网页帧对得上，没有「跳一下」。
+     图标用带印板的 `@mipmap/ic_launcher`：画布是浅色，光前景那几根白线在浅底上看不见。 -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/splash_canvas" />
     <item
         android:gravity="center"
-        android:width="96dp"
-        android:height="96dp"
-        android:drawable="@mipmap/ic_launcher_foreground" />
+        android:width="192dp"
+        android:height="192dp"
+        android:drawable="@mipmap/ic_launcher" />
 </layer-list>

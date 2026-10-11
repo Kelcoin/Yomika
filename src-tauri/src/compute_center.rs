@@ -185,8 +185,10 @@ impl PairingState {
         *pending = None;
         let token = fresh_token();
         let mut clients = self.clients.lock().map_err(|_| "配对列表不可用")?;
-        let mut next = clients.clone();
-        next.push(PairedClient { id: fresh_token(), name, address: peer.to_string(), kind, token: token.clone() });
+        // 只留这一台：这台机器是**它自己**的算力来源，第二台设备配对成功就把上一台整表换掉
+        // （旧令牌当场失效，`authorized` 也只会命中这一台）。从前这里是 `push`——列表越排越长，
+        // 每台旧设备的令牌都还能用，界面还会把它们列出来当「可切换的设备」。
+        let next = vec![PairedClient { id: fresh_token(), name, address: peer.to_string(), kind, token: token.clone() }];
         self.persist(&next)?;
         *clients = next;
         Ok(token)
@@ -1826,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_clients_keep_distinct_tokens_and_one_can_be_revoked() {
+    fn pairing_a_second_device_replaces_the_first() {
         let dir = tempfile::tempdir().expect("temp directory");
         let pairing = PairingState::default();
         pairing.set_storage(dir.path());
@@ -1835,16 +1837,22 @@ mod tests {
         let (second_request, second_code) = pairing.begin("127.0.0.2", "Tablet", None).unwrap();
         let second = pairing.confirm("127.0.0.2", &second_request, &second_code).unwrap();
         assert_ne!(first, second);
+        // 这台机器是它自己的算力来源：配对第二台就把第一台换掉，不给「轮流用几台」留位置。
         let listed = pairing.listed();
-        assert_eq!(listed.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), vec!["Phone", "Tablet"]);
-        pairing.revoke(&listed[0].id).unwrap();
-        assert!(!pairing.authorized(&first));
+        assert_eq!(listed.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), vec!["Tablet"]);
+        assert!(!pairing.authorized(&first), "上一台的令牌要当场失效");
         assert!(pairing.authorized(&second));
 
         let restarted = PairingState::default();
         restarted.set_storage(dir.path());
+        let reloaded = restarted.listed();
+        assert_eq!(reloaded.len(), 1, "落盘的也只能剩下这一台");
         assert!(!restarted.authorized(&first));
         assert!(restarted.authorized(&second));
+        // 撤销这条路还在：换成一整表之后它照样要能把这唯一一台摘掉。
+        restarted.revoke(&reloaded[0].id).unwrap();
+        assert!(!restarted.authorized(&second));
+        assert!(restarted.listed().is_empty());
     }
 
     #[test]
@@ -1887,18 +1895,29 @@ mod tests {
 
         let (request, code) = pairing.begin("192.168.1.9", "Pixel 7 Pro", Some("phone".to_string())).unwrap();
         pairing.confirm("192.168.1.9", &request, &code).unwrap();
+
+        let listed = pairing.listed();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].kind.as_deref(), Some("phone"), "列表里要带着类型给界面挑图标");
+
+        let restarted = PairingState::default();
+        restarted.set_storage(dir.path());
+        assert_eq!(restarted.listed()[0].kind.as_deref(), Some("phone"));
+
+        // 再配一台没报类型的：换掉上一台，而「不知道」还是「不知道」（界面退到通用图标）。
         let (plain_request, plain_code) = pairing.begin("192.168.1.10", "DESKTOP-PC", None).unwrap();
         pairing.confirm("192.168.1.10", &plain_request, &plain_code).unwrap();
 
-        let listed = pairing.listed();
-        assert_eq!(listed[0].kind.as_deref(), Some("phone"), "列表里要带着类型给界面挑图标");
-        assert_eq!(listed[1].kind, None, "对面没说类型就老实留空，让界面自己退到通用图标");
+        let replaced = pairing.listed();
+        assert_eq!(replaced.len(), 1, "第二台配对成功就把第一台换掉");
+        assert_eq!(replaced[0].name, "DESKTOP-PC");
+        assert_eq!(replaced[0].kind, None, "对面没说类型就老实留空，让界面自己退到通用图标");
 
         let restarted = PairingState::default();
         restarted.set_storage(dir.path());
         let reloaded = restarted.listed();
-        assert_eq!(reloaded[0].kind.as_deref(), Some("phone"));
-        assert_eq!(reloaded[1].kind, None);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].kind, None);
     }
 
     #[test]

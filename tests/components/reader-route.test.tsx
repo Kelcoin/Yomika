@@ -825,12 +825,14 @@ describe('reader route', () => {
     //
     // `compute_worker_status` 也是外壳的：计算进程那一条状态（§12.3）挂在 App 上，
     // 所以任何一页都会看到它问一次——它在这里出现不代表阅读器自己要用计算。
+    // `fetch_tag_counts` 同理：补全排序开关默认开着，外壳启动时就让原生侧去看一眼
+    // 频次表的版本（docs/30 那份表从前是前端自己 fetch GitHub，测试里看不见）。
     expect(new Set(calls)).toEqual(new Set([
       'list_servers', 'load_preferences', 'load_reader_manifest', 'load_archive_metadata',
       'load_reading_progress', 'load_archive_thumbnail', 'cache_read_image', 'load_reader_page',
       'save_reading_progress',
       'app_release_latest', 'inference_list_models', 'model_release_list_upscalers',
-      'compute_worker_status',
+      'compute_worker_status', 'fetch_tag_counts',
     ]));
     expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
     expect(calls.at(-1)).toBe('save_reading_progress');
@@ -1778,8 +1780,11 @@ describe('reader route', () => {
   function remoteReader(options: {
     ready: { upscale: boolean; decensor: boolean; dlssnr: boolean };
     process?: (args: Record<string, unknown> | undefined) => unknown;
+    /** 前几次问能力清单先答不上（对面刚起、网络抖一下）：默认 0。 */
+    probeFailures?: number;
   }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    let probes = 0;
     setInvokeAdapterForTests(async (command, args) => {
       calls.push([command, args as Record<string, unknown> | undefined]);
       if (command === 'load_preferences') {
@@ -1800,6 +1805,10 @@ describe('reader route', () => {
         };
       }
       if (command === 'remote_compute_capabilities') {
+        probes += 1;
+        if (probes <= (options.probeFailures ?? 0)) {
+          return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '对面没答上', retryable: true } };
+        }
         return {
           ok: true,
           value: {
@@ -1848,6 +1857,19 @@ describe('reader route', () => {
     expect(calls.some(([command]) => command === 'remote_compute_process')).toBe(false);
     // 也不去问本机那份 DLL 状态（走远端时它说的不是这一件事，手机上必然失败）。
     expect(calls.some(([command]) => command === 'dlssnr_status')).toBe(false);
+  });
+
+  it('rides out a capability probe that failed once instead of greying the switches', async () => {
+    // 「设备连上之后频繁断开又重连」：一次探测失败（对面刚起、网络抖一下）就被当成断开，
+    // 三枚开关全打回灰、用户刚打开的那一档还会被自动关掉。所以失败要重试，且**不**先把
+    // 上一次的答案抹掉。
+    const { calls } = remoteReader({ ready: { upscale: true, decensor: true, dlssnr: true }, probeFailures: 1 });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    expect(await screen.findByRole('button', { name: '开启超分' })).toBeInTheDocument();
+    // 第一遍答不上、第二遍答上了：这就是「重试」这件事本身。
+    expect(calls.filter(([command]) => command === 'remote_compute_capabilities')).toHaveLength(2);
   });
 
   it('hands the remote machine only the services that are on, in the order they must run', async () => {

@@ -210,10 +210,23 @@ export function effectiveReaderLayout(state: Pick<ReaderState, 'layout' | 'resol
 
 type SpreadInput = Pick<ReaderState, 'pageCount' | 'shapes'>;
 
+/** 排布表的单槽缓存（按「页数 + 形状表引用」认）。
+ *
+ * 翻一页会问 5~6 次同一份排布：可见页、相邻页（前一/后一）、`advanceReader` 各问
+ * 一次，而每一次都要按页数分配一个数组、再走一遍 O(页数) 的分组与 `findIndex`。
+ * 双页模式下页数上千的档案里，这就是「快速连续翻页会卡顿」里属于这一层的那部分：
+ * 形状表只在量到新页高时才换引用（ReaderScreen 每次测量都新造一份），翻页本身不
+ * 动它，所以翻页期间必然命中。 */
+let cachedSpreads: { pageCount: number; shapes: readonly PageShape[] | undefined; slots: number[][] } | undefined;
+
 function spreadsFor(state: SpreadInput): number[][] {
+  const cached = cachedSpreads;
+  if (cached && cached.pageCount === state.pageCount && cached.shapes === state.shapes) return cached.slots;
   const shapes = state.shapes ?? [];
   const filled: PageShape[] = Array.from({ length: state.pageCount }, (_, index) => shapes[index] ?? 'normal');
-  return planPageSpreads(filled);
+  const slots = planPageSpreads(filled);
+  cachedSpreads = { pageCount: state.pageCount, shapes: state.shapes, slots };
+  return slots;
 }
 
 /** Returns the page indexes rendered for the current spread: a wide page alone,

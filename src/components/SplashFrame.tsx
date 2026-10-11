@@ -43,11 +43,11 @@ export function SplashFrame() {
       <div className="app-splash-brand">
         <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <rect width="512" height="512" rx="112" fill="#0D0D0D" />
-          <rect x="112" y="112" width="288" height="288" rx="20" stroke="#F5F5F5" stroke-width="18" fill="none" />
-          <line x1="184" y1="184" x2="184" y2="328" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round" />
-          <line x1="184" y1="184" x2="264" y2="184" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round" />
-          <line x1="224" y1="184" x2="224" y2="264" stroke="#F5F5F5" stroke-width="18" stroke-linecap="round" />
-          <line x1="264" y1="224" x2="328" y2="224" stroke="#E8E8E8" stroke-width="18" stroke-linecap="round" />
+          <rect x="112" y="112" width="288" height="288" rx="20" stroke="#F5F5F5" strokeWidth={18} fill="none" />
+          <line x1="184" y1="184" x2="184" y2="328" stroke="#F5F5F5" strokeWidth={18} strokeLinecap="round" />
+          <line x1="184" y1="184" x2="264" y2="184" stroke="#F5F5F5" strokeWidth={18} strokeLinecap="round" />
+          <line x1="224" y1="184" x2="224" y2="264" stroke="#F5F5F5" strokeWidth={18} strokeLinecap="round" />
+          <line x1="264" y1="224" x2="328" y2="224" stroke="#E8E8E8" strokeWidth={18} strokeLinecap="round" />
           <circle cx="288" cy="296" r="22" fill="#E8E8E8" />
         </svg>
         <p className="app-splash-wordmark">Yomika<i>.</i></p>
