@@ -123,6 +123,11 @@ pub(crate) fn object_type_category(object_type: &str) -> Option<&'static str> {
         "search_preset" => Some("search_presets"),
         "dedup_non_duplicate" | "legacy_non_duplicate" => Some("dedup"),
         "app_setting" => Some("app_settings"),
+        // `reading_list` 是表名，不是对象类型。老的 worker 导入把它当类型写进了日志，
+        // 于是那批待看既进不了文档、到了对面也被当未知对象跳过。词表继续认它，已经在
+        // 库里躺着的老日志才搬得走；新写入一律用规范名字（legacy.rs 已改）。放在最后
+        // 一行是因为契约钉着「待看紧接着就是搜索预设」，别名不能插在它们中间。
+        "reading_list" => Some("watchlist"),
         // 服务器条目、E-H 账户与凭据都没有对象类型：地址、账号名与凭据只在本机。
         _ => None,
     }
@@ -416,6 +421,25 @@ fn apply_remote_app_setting(
             }
             merged.insert(key.clone(), value.clone());
         }
+    }
+    // 合并结果还要逐字段写回 `settings` 里那些 `preferences.*` 的行：读的那一半
+    // （`load_preferences_from`）读的就是它们。只写下面那份名叫 `preferences` 的整块
+    // JSON 的话，同步来的与导进来的偏好（阅读设置、SFW 模式……）就全落在一个没人读
+    // 的地方——「设置搬不过去」正是这么来的。
+    let base = crate::settings::load_preferences_from(transaction)?;
+    match serde_json::to_value(&base)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .map(|mut next| {
+            for (key, value) in &merged {
+                next.insert(key.clone(), value.clone());
+            }
+            serde_json::from_value::<crate::settings::PreferenceSnapshot>(serde_json::Value::Object(next))
+        }) {
+        // 远端那一份读得出就落地。读不出（陌生 schema 的字段类型对不上）时不写逐字段的
+        // 行，但仍照旧写下面那份整块 JSON：一条坏偏好不该让整次同步或整份文件导入失败。
+        Some(Ok(snapshot)) => crate::settings::write_preference_keys(transaction, &snapshot)?,
+        _ => {}
     }
     transaction
         .execute(
@@ -1281,6 +1305,10 @@ fn apply_remote_object(
         "watchlist" => {
             apply_remote_list_entry(transaction, scope_id, object, &object.payload)
         }
+        // 老版本导出的文档里，待看带着的是表名（见 object_type_category）。
+        "reading_list" => {
+            apply_remote_list_entry(transaction, scope_id, object, &object.payload)
+        }
         "search_preset" => {
             apply_remote_search_preset(transaction, scope_id, object, &object.payload)
         }
@@ -2008,6 +2036,9 @@ pub(crate) fn import_scoped_documents(
                 continue;
             }
             if !apply_remote_object(&transaction, &object.scope_id, object)? {
+                // 没落地就明说：闸门按时钟挡下了它，或者本机已经是这一版。以前这里两边都
+                // 不计数，报告只说「已导入 0 项」，用户看着文件里明明有那几条却查不出原因。
+                skipped += 1;
                 continue;
             }
             applied += 1;
@@ -4614,8 +4645,9 @@ mod tests {
         )
         .expect("import older");
         assert_eq!(
-            second.applied, 1,
-            "只有历史那条会重写自己那一行（它是并集，不是时钟赛跑），其余五类都被闸门挡住"
+            (second.applied, second.skipped),
+            (1, 5),
+            "只有历史那条会重写自己那一行（它是并集，不是时钟赛跑），其余五类都被闸门挡住——被挡住的那五条要如实算进「跳过」"
         );
         let (page, revision): (i64, i64) = connection
             .query_row(
@@ -4679,6 +4711,12 @@ mod tests {
         let preferences: serde_json::Value =
             serde_json::from_str(&preferences).expect("preferences json");
         assert_eq!(preferences["theme"], "dark", "旧的偏好不能盖掉新的");
+        // 逐字段那一份（读设置时读的就是它）也要跟上：只写上面那整块 JSON 等于没搬。
+        let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
+        assert_eq!(
+            landed.theme, "dark",
+            "旧的偏好不能盖掉新的——read 的那一半读的是逐字段的行"
+        );
 
         // 反过来：真正更新的那一份，六类都要落地。
         let newest = document_from_objects(six_record_objects(
@@ -4723,6 +4761,12 @@ mod tests {
         let preferences: serde_json::Value =
             serde_json::from_str(&preferences).expect("preferences json");
         assert_eq!(preferences["theme"], "system");
+        let landed = crate::settings::load_preferences_from(&connection).expect("load preferences");
+        assert_eq!(
+            (landed.theme.as_str(), landed.sfw_mode),
+            ("system", false),
+            "更新的那一份要落到读设置读的那张表上"
+        );
     }
 
     #[test]

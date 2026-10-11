@@ -236,8 +236,10 @@
 
 /* 三列网格，两侧各一条**至少一个图标宽**的 1fr 轨道：两条 1fr 等宽时中间那条轨道的
    中心就是整条栏的中心，所以标题相对整条栏居中，而不是相对「返回按钮之后的剩余
-   空间」（`flex: 1` 那版就是后者，看着偏左）。两侧的 44px 下限保证标题再长也压不到
-   两头按钮上——标题自己带省略号，收窄的是中间那条。 */
+   空间」（`flex: 1` 那版就是后者，看着偏左）。★ 这条只在**尾部没有控件**时成立：
+   1fr 轨道不会为了内容变宽（§12.6.3 先把剩余空间分给 `auto` 轨道，`fr` 要等 §12.6.4），
+   右边一旦挂上第二颗按钮就会向左溢出压住标题——阅读态那条栏正是这么坏掉的，修法见
+   `.reader-chrome-top`。这条错误态栏只挂一颗返回，所以先照原样留着。 */
 .reader-error-bar {
   display: grid;
   grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);
@@ -324,8 +326,20 @@
    「减少动效」由 base.css 那条通杀规则收掉，这里不必再写一份。 */
 @keyframes reader-chrome-top-in { from { opacity: 0; transform: translateY(-8px); } }
 @keyframes reader-chrome-top-out { to { opacity: 0; transform: translateY(-8px); } }
-@keyframes reader-chrome-bottom-in { from { opacity: 0; transform: translateY(8px); } }
+/* 底栏是屏幕底边那一整块 80dp 表面：它入场的位移要走**自己的高度**（100%），原来那
+   8px 在这么高的栏上等于没动。出来的那一半仍只走 8px——退场是加速曲线、只有 260ms，
+   走满一整条栏会像被抽走。 */
+@keyframes reader-chrome-bottom-in { from { opacity: 0; transform: translateY(100%); } }
 @keyframes reader-chrome-bottom-out { to { opacity: 0; transform: translateY(8px); } }
+/* 每一页翻过去，栏顶那条分隔线上铺开一道主题色短线（从中间向两侧）。它是另挂的**新
+   元素**（见下面 `.reader-toolbar-turn`）：栏自己的 `animation` 位置是入场的，一个元素
+   上两条 animation 会互相顶掉；而重播一条 CSS 动画只有 `animation-name` 换一个或元素
+   重新挂载两条路，所以 ReaderScreen 每翻一页换一个 `key`。 */
+@keyframes reader-toolbar-turn {
+  from { opacity: 0; transform: scaleX(0.15); }
+  35% { opacity: 0.85; }
+  to { opacity: 0; transform: scaleX(1); }
+}
 
 /* M3 small top app bar: a 64dp container (plus the safe area), 4dp of inline
    padding (TopAppBarHorizontalPadding), a 4dp inset before the title, and 24dp
@@ -344,7 +358,14 @@
   right: 0;
   left: 0;
   display: grid;
-  grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);
+  /* 两侧各按**内容**定宽（左边一颗返回，右边那一排有几颗就是几颗），标题占掉剩下的
+     全部、自己收省略号。旧写法是「两侧 minmax(一颗图标, 1fr) + 标题 minmax(0, auto)」：
+     Grid 在 §12.6.3 先把剩余空间分给 `auto` 轨道，`fr` 轨道要到 §12.6.4 才轮到，
+     于是标题把中间那条吃满、右侧轨道停在一颗图标的 44px 上，尾部那排按钮（手机上
+     两颗＝92px）从自己那一格里**向左溢出**、压在标题上——真机上的「顶栏标题与右侧
+     按钮重叠」就是这样来的。实测（debug_outputs/reader-topbar）：390px 宽、标题文字
+     669px 时压住 44px，尾部四颗控件时压住 156px；改成下面这条以后两组都是 0。 */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1);
   height: calc(64px + var(--safe-top));
@@ -482,14 +503,25 @@
   .reader-toolbar button:hover {
     background: var(--surface-container-high);
   }
+
+  /* 按下再实一档，外加一点点收缩。桌面从前只有悬停这一层：鼠标停在「下一页」上连点
+     翻页，按钮始终是同一个悬停色，看不出点到了——翻页的动感只剩画面自己在换。M3 也
+     是两层（悬停 8%、按下 10%）。这一条刻意不带 `:hover`：上面那条契约把「悬停色必须
+     与触屏孪生逐字一致」钉死，按下这层只服务指针，不参与孪生核对。 */
+  .reader-icon-button:active:not(:disabled),
+  .reader-toolbar button:active:not(:disabled) {
+    background: var(--surface-container-highest);
+    transform: translateY(1px) scale(0.94);
+  }
 }
 
 /* 触屏按下去的颜色（机制见 src/lib/pressFeedback.ts）：和悬停同一层，只是按住才有、
-   抬手就没。 */
+   抬手就没。收缩与指针那一层一样——两条路径的手感只能有一份。 */
 @media (hover: none) {
   .reader-icon-button:is(.is-pressed, :active),
   .reader-toolbar button:is(.is-pressed, :active) {
     background: var(--surface-container-high);
+    transform: translateY(1px) scale(0.94);
   }
 
   /* 重试那颗落在黑画布上（出错视图），用阅读器自己那层。 */
@@ -538,8 +570,28 @@
   border-top: 1px solid var(--hairline);
   background: var(--surface-container);
   color: var(--on-surface);
-  animation: reader-chrome-bottom-in var(--motion-standard) backwards;
+  animation: reader-chrome-bottom-in var(--motion-slow) backwards;
   pointer-events: auto;
+}
+
+/* 翻页那一瞬的回应：栏顶那条分隔线上铺开一道主题色短线（从中间向两侧，和阅读方向
+   无关）。它是 ReaderScreen 按翻页次数挂上来的**新元素**（`key` 一变 React 就换一个），
+   不是栏自己的伪元素：栏的 `animation` 位置是入场的，而重播一条 CSS 动画只有两条路——
+   `animation-name` 换一个，或者元素重新挂载。实测（debug_outputs/reader-motion）里
+   只改属性值 Blink 不会重播。只管光线，不接指针。 */
+.reader-toolbar-turn {
+  position: absolute;
+  top: 0;
+  right: var(--space-1);
+  left: var(--space-1);
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  animation: reader-toolbar-turn var(--motion-slow);
+  /* 基础值是灭的：动画没有 `forwards`，播完就落回这一档（否则一条主题色的实线会一直
+     留在栏顶）。 */
+  opacity: 0;
+  pointer-events: none;
 }
 
 .reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; }
@@ -726,6 +778,16 @@
 @media (hover: hover) {
   :root[data-sfw='true'] .reader-overview-cover:hover,
   :root[data-sfw='true'] .reader-overview-thumbnails button:hover img {
+    filter: none;
+    transform: none;
+  }
+}
+/* 触屏上的同一件事：按住概览里的封面就看清，抬手回到模糊。页缩略图的钩子挂在按钮
+   上；封面外那层 `span` 自己不是可点元素，pressFeedback 靠它身上的 `data-press-surface`
+   才认得它（见 src/lib/pressFeedback.ts）。 */
+@media (hover: none) {
+  :root[data-sfw='true'] .reader-overview-cover-frame:is(.is-pressed, :active) > .reader-overview-cover,
+  :root[data-sfw='true'] .reader-overview-thumbnails button:is(.is-pressed, :active) img {
     filter: none;
     transform: none;
   }

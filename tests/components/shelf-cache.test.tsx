@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter } from 'react-router-dom';
 import { WorkspaceRoutes } from '../../src/app/routes';
@@ -6,9 +6,12 @@ import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
-import { readRouteCache, writeRouteCache } from '../../src/lib/routeCache';
+import { invalidateRouteCache, readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
-afterEach(resetInvokeAdapterForTests);
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  resetRouteCacheForTests();
+});
 
 describe('shelf snapshots', () => {
   it('restores separate shelves without reload and invalidates after reading-list mutation', async () => {
@@ -33,6 +36,31 @@ describe('shelf snapshots', () => {
     expect(mutation.ok).toBe(true);
     fireEvent.click(screen.getByText('to-read-nav'));
     await waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'list_reading_list')).toHaveLength(2));
+  });
+
+  it('picks up a server that showed up after the shelf had already said there was none', async () => {
+    // 用户报的那一条：导入服务器凭据之后，历史/收藏夹还挂着「添加你的 LANraragi」。
+    // 书架把「有服务器吗」记成一个布尔量，但它原先只会往 false 走：装载重跑读到
+    // 服务器也不撤销结论，于是提示一直挂在已经读回来的书架上面。导入自己会发一次
+    // 全量作废（`invalidateRouteCache()`），所以这里照那条路重演。
+    let servers: { id: string; scopeId: string; name: string; baseUrl: string }[] = [];
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: servers };
+      if (['list_reading_history', 'list_watchlist', 'list_reading_list', 'list_archives_by_ids'].includes(command)) return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: false, error: { code: 'UNKNOWN', message: `unused ${command}`, retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/history']}><PreferencesProvider><ToastProvider>
+      <WorkspaceRoutes />
+    </ToastProvider></PreferencesProvider></MemoryRouter>);
+    await screen.findByRole('heading', { name: '添加你的 LANraragi' });
+
+    servers = [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }];
+    await act(async () => { invalidateRouteCache(); });
+
+    await waitFor(() => expect(screen.queryByRole('heading', { name: '添加你的 LANraragi' }), '服务器已经在列表里了，这道提示必须撤掉').toBeNull());
+    expect(await screen.findByText('暂无历史')).toBeInTheDocument();
   });
 
   it('drops the home and shelf snapshots when history records are removed', async () => {

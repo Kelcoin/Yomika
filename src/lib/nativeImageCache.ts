@@ -1,6 +1,6 @@
 import type { ImageCacheIdentity } from '../domain/cache';
 import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
-import { NativeComputeCenterRepository, parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
+import { NativeComputeCenterRepository } from '../repositories/nativeComputeCenterRepository';
 import { NativeDlssnrRepository, parseDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import { NativeInferenceRepository } from '../repositories/nativeInferenceRepository';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -113,18 +113,12 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       const remote = parseRemoteOpsTransform(identity.transform);
       const loaded = await this.settings.load();
       if (!loaded.ok) throw new Error(loaded.error.message);
-      const ops = parseRemoteOps(loaded.value.remoteComputeOps);
       const processed = await this.compute.remoteProcess({
         url: loaded.value.remoteComputeUrl,
         token: loaded.value.remoteComputeToken,
-        params: {
-          op: remote.op,
-          ...(remote.modelId ? { modelId: remote.modelId } : {}),
-          ...(remote.scale ? { scale: remote.scale } : {}),
-          ...(remote.op === 'dlssnr' && remote.passes.length > 0
-            ? { dlssnr: { passes: parseDlssnrPasses(remote.passes) } }
-            : {}),
-        },
+        // `op` 是 Rust 侧那个必填字段，拿串首顶上去；真正决定做哪几档的是 `chain`。
+        // 模型、放大倍数、DLSSNR 层参数一律不发：对面按自己的设置跑。
+        params: { op: remote.chain[0] ?? 'upscale', chain: remote.chain },
         scopeId: identity.scopeId,
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
@@ -192,14 +186,15 @@ function parseDlssnrTransform(transform: string | undefined): { source: DlssnrSo
 
 export type DlssnrSource = 'reader-page' | 'decensored' | 'enhanced';
 
-/** `remote` 那一版的全部处理参数（同样进缓存键）。 */
+/** `remote` 那一版的全部处理参数（同样进缓存键）。
+ *
+ *  `chain` 是这一页要做的**哪几档**（按顺序），由阅读器里开着的服务决定；**模型与参数不
+ *  在这里**——那两样跟着对面那份设置走，本机只说「做什么」。所以同一台设备、同一起点、
+ *  同一串服务算出来的版本就是同一份，缓存键里少的是所有会漂移的东西。 */
 export function remoteTransform(input: {
   device: string;
   source: DlssnrSource;
-  op: string;
-  modelId: string;
-  scale: number;
-  passes: string;
+  chain: readonly string[];
 }): string {
   return JSON.stringify(input);
 }
@@ -207,22 +202,16 @@ export function remoteTransform(input: {
 function parseRemoteOpsTransform(transform: string | undefined): {
   device: string;
   source: DlssnrSource;
-  op: string;
-  modelId: string;
-  scale: number;
-  passes: string;
+  chain: string[];
 } {
-  const fallback = { device: '', source: 'reader-page' as DlssnrSource, op: 'upscale', modelId: '', scale: 2, passes: '' };
+  const fallback = { device: '', source: 'reader-page' as DlssnrSource, chain: ['upscale'] };
   if (!transform) return fallback;
   try {
-    const parsed = JSON.parse(transform) as Partial<typeof fallback>;
+    const parsed = JSON.parse(transform) as { device?: unknown; source?: unknown; chain?: unknown };
     return {
       device: typeof parsed.device === 'string' ? parsed.device : '',
       source: parsed.source === 'enhanced' || parsed.source === 'decensored' ? parsed.source : 'reader-page',
-      op: typeof parsed.op === 'string' ? parsed.op : 'upscale',
-      modelId: typeof parsed.modelId === 'string' ? parsed.modelId : '',
-      scale: typeof parsed.scale === 'number' ? parsed.scale : 2,
-      passes: typeof parsed.passes === 'string' ? parsed.passes : '',
+      chain: Array.isArray(parsed.chain) ? parsed.chain.filter((step): step is string => typeof step === 'string') : fallback.chain,
     };
   } catch {
     return fallback;

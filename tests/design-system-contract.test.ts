@@ -170,6 +170,18 @@ describe('design system contract', () => {
     expect(read('src-tauri/src/lib.rs')).toMatch(/builder\.decorations\(cfg!\(not\(target_os = "windows"\)\)\)/);
     expect(ruleBody(read('src/styles/shell.css'), '.app-main')).toMatch(/background:\s*var\(--surface-panel\)/);
     expect(read('src/components/AppShell.tsx')).toMatch(/\{showTitleBar && <TitleBar \/>\}/);
+    // Android 侧量到的是**物理像素**（androidx 的 `getInsets` 就是物理像素），而页面
+    // 拿到的是 CSS 像素（WebView 里 1 CSS px = 1 dp，`src/lib/safeArea.ts` 直接拼
+    // `${top}px`）。少这一次除法就是「移动端上下避让过大」：3x 机上 24dp 的状态栏
+    // 变成 72px，页面顶部往下多让 48px、底栏上方也多出一条空白。
+    const mainActivity = read('src-tauri/gen/android/app/src/main/java/app/yomika/reader/MainActivity.kt');
+    expect(mainActivity).toMatch(/val density = resources\.displayMetrics\.density/);
+    expect(mainActivity, '状态栏高度要换算成 CSS 像素再交给页面').toMatch(/val top = Math\.round\(bars\.top \/ density\)/);
+    expect(mainActivity, '手势条高度要换算成 CSS 像素再交给页面').toMatch(/val bottom = Math\.round\(bars\.bottom \/ density\)/);
+    // 换算后的那两个值才是给页面与 `insets` 命令的那一份，`bars` 原文不再外流。
+    expect(mainActivity).toMatch(/pushInsetsToPage\(appWebView\(view\), top, bottom\)/);
+    expect(mainActivity).toMatch(/SystemBars\.top = top/);
+    expect(mainActivity).toMatch(/SystemBars\.bottom = bottom/);
   });
 
   // 用户报的：阅读模式整屏盖住了自绘标题栏，那一屏里没有任何地方能拖动窗口。
@@ -853,7 +865,9 @@ describe('design system contract', () => {
     };
 
     // 有意不补的：桌面专属（自绘标题栏）；触屏另有一套交互（标签的悬停是揭示机制、
-    // SFW 的悬停是揭图）；骨架屏不是可点元素；分隔线纯装饰；`:disabled:hover` 是禁用态
+    // SFW 的悬停是揭图——它的按下态不是换成 `:is(.is-pressed, :active)` 的逐字孪生，而是
+    // 挂在按钮/卡片这些载体上，由下面 'blurs covers and thumbnails in SFW mode' 那条钉住）；
+    // 骨架屏不是可点元素；分隔线纯装饰；`:disabled:hover` 是禁用态
     // 的中和规则；输入框在触屏上点一下就直接聚焦，聚焦环就是反馈；下拉的选项行外层是
     // `div[role=option]`，被标记的是行里那个真正的按钮，所以按下态写在 .select-option-main 上。
     const exempt = (selector: string) => /titlebar|metadata-tag|data-sfw|is-skeleton|panel-separator|:disabled:hover|^input:hover|^select:hover|^textarea:hover|^\.select-option:hover$/.test(selector);
@@ -1070,6 +1084,18 @@ describe('design system contract', () => {
     expect(title).toMatch(/font-weight:\s*var\(--weight-bold\)/);
     expect(title).toMatch(/line-height:\s*var\(--reader-title-leading\)/);
 
+    // 顶栏三列：**两侧按内容定宽，标题吃掉剩下的全部**。这一条曾经是
+    // `minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr)`：
+    // Grid 在 §12.6.3 先把剩余空间分给 `auto` 轨道，`fr` 轨道要等 §12.6.4 才轮到，于是
+    // 标题把中间那条吃满、右侧轨道永远停在一颗图标的 44px 上，尾部那排按钮（手机上
+    // 两颗＝92px）从自己那一格里向左溢出、压在标题上（user report:「阅读模式顶栏的
+    // 标题会和右侧按钮重叠」；真机 390px 实测压住 44px，尾部四颗控件时 156px）。判据钉在
+    // 「只有一条 fr 轨道」上：两侧再挂第二条 `minmax(…, 1fr)`，那个先后次序就会把
+    // 重叠带回来。标题那条轨道必须带 0 下限，否则长标题会反过来把尾部顶出去。
+    const columns = top.match(/grid-template-columns:\s*([^;]+);/)?.[1]?.trim() ?? '';
+    expect(columns, '顶栏只能有一条 1fr 轨道，就是标题那条').toMatch(/minmax\(0,\s*1fr\)/);
+    expect((columns.match(/\b1fr\b/g) ?? []).length, '两侧都不许再挂 1fr 轨道').toBe(1);
+
     // 出错那条横幅上的标题是同一个标题的另一种状态，字重不能各写各的。
     expect(ruleBody(reader, '.reader-error-bar strong')).toMatch(/font-weight:\s*var\(--weight-bold\)/);
 
@@ -1158,6 +1184,31 @@ describe('design system contract', () => {
 
     // 页码胶囊压在底栏上，读的是底栏自己的高度令牌，改一边不会让两边错位。
     expect(ruleBody(reader, '.reader-page-indicator.is-raised')).toMatch(/bottom:\s*calc\(var\(--reader-toolbar-height\)/);
+
+    // 底栏的「动」有三件事必须同时在场，少一件它就成了静止的一块：
+    // ① 入场走自己的高度（8px 位移在 80dp 的栏上等于没动）；② 指针下按下要比悬停再实
+    // 一档（只有悬停一层时，鼠标停在「下一页」上连点翻页看不出点到了）；③ 每翻一页栏顶
+    // 铺开一道主题色短线。
+    expect(reader, '入场要走栏自己的高度').toMatch(/@keyframes reader-chrome-bottom-in \{\s*from \{\s*opacity:\s*0;\s*transform:\s*translateY\(100%\);?\s*\}\s*\}/);
+    expect(ruleBody(reader, '.reader-toolbar')).toMatch(/animation:\s*reader-chrome-bottom-in var\(--motion-slow\) backwards/);
+    expect(ruleBody(reader, '.reader-toolbar button:hover')).toMatch(/background:\s*var\(--surface-container-high\)/);
+    const pressLayer = ruleBody(reader, '.reader-toolbar button:active:not(:disabled)');
+    expect(pressLayer, '按下要比悬停再实一档').toMatch(/background:\s*var\(--surface-container-highest\)/);
+    expect(pressLayer).toMatch(/transform:\s*translateY\(1px\) scale\(/);
+    // 触屏那一档的收缩与指针那一档是同一份（配色分成两档，手感不能分）。
+    expect(ruleBody(reader, '.reader-toolbar button:is(.is-pressed, :active)')).toMatch(/transform:\s*translateY\(1px\) scale\(/);
+    expect(reader, '翻页的回应要有一条动画').toMatch(/@keyframes reader-toolbar-turn \{\s*from \{/);
+    const cue = ruleBody(reader, '.reader-toolbar-turn');
+    expect(cue).toMatch(/animation:\s*reader-toolbar-turn var\(--motion-slow\)/);
+    expect(cue).toMatch(/background:\s*var\(--primary\)/);
+    // 动画没有 `forwards`，播完就落回基础值：基础值必须是灭的，否则一条主题色的实线会
+    // 永久留在栏顶（工装实测过这个形态）。
+    expect(cue, '光线的底色必须是灭的').toMatch(/opacity:\s*0/);
+    // 重播靠**重新挂载**，不是改属性值：实测（debug_outputs/reader-motion）里把属性在
+    // 两个值之间轮流，第二页一条动画都没跑——Blink 只在 `animation-name` 变或元素重挂
+    // 时才重播。
+    expect(read('src/components/ReaderScreen.tsx'), '光线要按翻页次数换一个新元素')
+      .toMatch(/\{turnCue > 0 && <span key=\{turnCue\} className="reader-toolbar-turn"/);
   });
 
   it('keeps the on-canvas reader chrome on its own fixed dark scheme', () => {
@@ -1693,6 +1744,22 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-page-thumbnail img/);
     expect(shell).not.toMatch(/\.archive-row:(hover|focus-visible|active) img/);
     expect(shell).toMatch(/\.archive-detail-cover-trigger:focus-visible img/);
+    // 触屏没有悬停，按住就是桌面上的悬停：钩子是 pressFeedback 打的 `.is-pressed`，
+    // 而且必须挂在按钮/卡片这些**载体**上——pressFeedback 只标记 `closest(PRESSABLE)`
+    // 命中的元素，封面自己接不住（触屏的 `:active` 也不可用，实测按住期间一直是 false，
+    // 所以这里量的两档读数里 `:active` 一次都没命中）。
+    const touchReveal = shell.match(/@media \(hover: none\) \{\n  :root\[data-sfw='true'\] \.archive-row:is\(\.is-pressed, :active\)[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(touchReveal, '触屏要能按住看封面').toMatch(/\.archive-row:is\(\.is-pressed, :active\) \.archive-row-thumb img/);
+    expect(touchReveal).toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media img/);
+    expect(touchReveal).toMatch(/\.archive-detail-cover-trigger:is\(\.is-pressed, :active\) img/);
+    expect(touchReveal).toMatch(/\.archive-page-thumbnail:is\(\.is-pressed, :active\) img/);
+    // 阅读器概览里那面封面与页缩略图是同一件事；封面外那层框自己不是可点元素，
+    // 靠 `data-press-surface` 认领这次按压，否则触屏上它永远糊着。
+    const reader = read('src/styles/reader.css');
+    expect(reader).toMatch(/\.reader-overview-cover-frame:is\(\.is-pressed, :active\) > \.reader-overview-cover/);
+    expect(reader).toMatch(/\.reader-overview-thumbnails button:is\(\.is-pressed, :active\) img/);
+    expect(read('src/components/ArchiveOverviewPanel.tsx')).toMatch(/className="reader-overview-cover-frame" data-press-surface/);
+    expect(read('src/lib/pressFeedback.ts')).toMatch(/'\[data-press-surface\]'/);
   });
 
   it('draws the E-Hentai mark as a tonal M3 tile from theme tokens', () => {
@@ -1836,6 +1903,27 @@ describe('design system contract', () => {
     // The shell is a fixed frame, so nothing should chain a gesture back to it.
     expect(ruleBody(base, 'html')).toMatch(/overscroll-behavior:\s*none/);
     expect(ruleBody(base, 'body')).toMatch(/overscroll-behavior:\s*none/);
+    // 横向导轨只属于自己的那一轴。导轨是 `overflow-x: auto`，另一轴的 computed
+    // 值会随之变成 `auto`，于是 touch-action 只写 `pan-x` 时整条命中链的交集把纵向
+    // 平移摘掉了：手指落在导轨里（卡片上、卡片之间的缝隙里都算）纵向拖拽根本滚不
+    // 动页面。这条断言钉住「横排导轨仍然把纵向留给页面」——删掉 pan-y 就转红。
+    const railGrid = ruleBody(read('src/styles/shell.css'), '.archive-rail-grid');
+    expect(railGrid).toMatch(/overflow-x:\s*auto/);
+    const railTouch = railGrid.match(/touch-action:\s*([^;]+);/)?.[1]?.trim() ?? '';
+    expect(railTouch, '导轨必须把纵向平移让给页面滚动容器').toMatch(/\bpan-y\b/);
+    expect(railTouch, '导轨不能整块吃掉手势').not.toMatch(/\bnone\b/);
+    // 浏览器自带的另一件「拖」：按住不放（手机上就是长按）再移动，会把 `<a href>` 拖成
+    // 一条链接、把图片拖成一张图。挡掉图片之后 Blink 会退到最近的可拖祖先——外面那个
+    // `<a>`，所以三类元素都要在同一条「不给拖」的规则里。debug_outputs/drag-out 工装用
+    // 真鼠标事件量过：修好前 `<A>` 的 dragstart 带着 text/uri-list（就是那条超链接），
+    // 修好后整页 dragstart 为 0。
+    const undraggable = [...base.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => /-webkit-user-drag:\s*none/.test(body ?? ''))
+      .map(([, selector]) => selector ?? '')
+      .join(',');
+    for (const selector of ['img', 'svg', 'a']) {
+      expect(undraggable, `${selector} 要写进「不给拖」的那条规则`).toMatch(new RegExp(`(^|[\\s,])${selector}([\\s,]|$)`));
+    }
     // The soft keyboard resizes the viewport instead of covering the controls.
     expect(read('index.html')).toMatch(/interactive-widget=resizes-content/);
     // Machine values dominate, so the defaults are off at the root and the two
@@ -1856,6 +1944,23 @@ describe('design system contract', () => {
     expect(coarse).toMatch(/\.metadata-tag-delete::before,/);
     expect(coarse).toMatch(/width:\s*max\(100%,\s*var\(--tap-min\)\)/);
     expect(coarse).toMatch(/height:\s*max\(100%,\s*var\(--tap-min\)\)/);
+    // 带边框的小盒子（推荐/同作者）不能靠长身高解决：盒子长高，1px 描边跟着长高，
+    // 手机上一个 16px 的字被 50px 的描边盒围住。它走 ::before 那条路 —— 盒子保持
+    // 28px 的画出高度，命中区透明地长到 44px。
+    const tapHeightRule = coarse.match(/([^{}]*)\{\s*min-height:\s*var\(--tap-min\);/)?.[1] ?? '';
+    expect(tapHeightRule, '推荐栏的描边盒不能进「行直接长身高」那张表')
+      .not.toMatch(/archive-recommendations-tabs/);
+    const tabOverlay = coarse.match(/\.archive-recommendations-tabs button::before[^{}]*\{([^{}]*)\}/)?.[1] ?? '';
+    expect(tabOverlay, '推荐栏两段的命中区必须长在 ::before 上').toMatch(/height:\s*max\(100%,\s*var\(--tap-min\)\)/);
+    expect(tabOverlay, '推荐栏两段的命中区必须长在 ::before 上').toMatch(/width:\s*max\(100%,\s*var\(--tap-min\)\)/);
+    const tabRelative = coarse.match(/([^{}]*)\{\s*position:\s*relative;/)?.[1] ?? '';
+    expect(tabRelative, '推荐栏两段的 ::before 要有定位上下文').toMatch(/\.archive-recommendations-tabs button/);
+    // 展开态的 `overflow: hidden`（收起成 0 宽时要的）会把命中区一起裁掉，所以
+    // 触屏那条路径上要放它出来；桌面那条仍留着。
+    const creatorCoarse = coarse.match(/\.archive-recommendations-tabs \.archive-recommendations-tab-creator\s*\{([^{}]*)\}/)?.[1] ?? '';
+    expect(creatorCoarse, '展开态的 overflow: hidden 会把 44px 命中区裁掉').toMatch(/overflow:\s*visible/);
+    expect(ruleBody(shell, '.archive-recommendations-tabs .archive-recommendations-tab-creator'))
+      .toMatch(/overflow:\s*hidden/);
     // 44px is the floor, and it is a token so the three sizes cannot drift.
     expect(cssVariables(ruleBody(read('src/styles/tokens.css'), ':root')).get('--tap-min')).toBe('44px');
     // The toast stack clears the bottom nav instead of hiding under it.

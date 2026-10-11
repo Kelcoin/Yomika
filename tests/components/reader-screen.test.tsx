@@ -163,9 +163,18 @@ describe('reader screen', () => {
 
   // 用户报的 ④：两条顶栏的标题都是 `flex: 1`，吃的是前导按钮**之后**的剩余宽度，
   // 所以整条栏看起来是偏左的。这里量不出布局（jsdom 没有布局，也没开 `css: true`），
-  // 所以按样式表本身断言：整条栏是三列网格，两侧各一条「至少一个图标宽」的 1fr 轨道，
-  // 标题独占中间那条。两条 1fr 等宽时中间轨道的中心就是整条栏的中心。
-  it('centres the bar titles across the whole bar, keeping both ends reachable', () => {
+  // 所以按样式表本身断言。
+  //
+  // 2026-10-11（user report：「阅读模式顶栏的标题会和右侧按钮重叠」）：原来两条栏都写成
+  // 「两侧 minmax(一颗图标, 1fr) + 标题 minmax(0, auto)」，想靠两条等宽的 1fr 让标题
+  // 相对整条栏居中。Grid 的次序不是这样：§12.6.3 先把剩余空间喂给 `auto` 轨道，`fr`
+  // 轨道要等 §12.6.4 才轮到，于是标题把中间那条吃满、右侧轨道永远停在一颗图标的 44px
+  // 上，尾部那排按钮（手机上两颗＝92px）就从自己那一格里向左溢出、压在标题上——真机
+  // 390px 实测压住 44px，尾部四颗控件时 156px（工装与读数在 debug_outputs/reader-topbar）。
+  // 阅读态那条栏因此改成「两侧按内容定宽、标题吃掉剩下的全部」：尾部挂几颗按钮都不会
+  // 再压到标题，代价是两侧不等宽时标题在**剩余空间**里居中，不再相对整条栏居中。
+  // 错误态那条栏两侧各只有一颗（返回 / 空），等宽，所以照旧——整条栏居中在那里仍成立。
+  it('keeps both ends of the reader bar reachable and gives the title what is left', () => {
     const css = readFileSync(resolve(__dirname, '../..', 'src/styles/reader.css'), 'utf8').replace(/\r\n/g, '\n');
     const body = (selector: string) => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -173,16 +182,16 @@ describe('reader screen', () => {
       if (!match) throw new Error(`reader.css 里找不到规则 ${selector}`);
       return match[1];
     };
-    // 两侧轨道的最小值就是一个图标按钮的宽度，所以标题再长也压不到两端按钮上。
-    const columns = 'grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);';
-    for (const bar of ['.reader-chrome-top', '.reader-error-bar']) {
-      expect(body(bar)).toContain('display: grid');
-      expect(body(bar)).toContain(columns);
-    }
+    expect(body('.reader-chrome-top')).toContain('display: grid');
+    // 只有标题那一条轨道是 1fr，两侧按内容定宽（再挂第二条 1fr 就会把上面那个
+    // 先后次序请回来，重叠跟着回来）。
+    expect(body('.reader-chrome-top')).toContain('grid-template-columns: auto minmax(0, 1fr) auto;');
+    expect(body('.reader-error-bar')).toContain('display: grid');
+    expect(body('.reader-error-bar')).toContain('grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);');
     for (const title of ['.reader-chrome-top strong', '.reader-error-bar strong']) {
       expect(body(title)).toContain('grid-column: 2');
       expect(body(title)).toContain('text-align: center');
-      // 窄屏：中间那条轨道可以被压到 0（minmax(0, auto)），标题自己也得能收成省略号。
+      // 窄屏：中间那条轨道可以被压到 0，标题自己也得能收成省略号。
       expect(body(title)).toContain('min-width: 0');
       expect(body(title)).toContain('max-width: 100%');
       expect(body(title)).toContain('text-overflow: ellipsis');
@@ -419,6 +428,8 @@ describe('reader screen', () => {
   it('closes the thumbnail panel on the system back gesture before leaving the reader', async () => {
     const user = userEvent.setup();
     resetOverlayBackGuardForTests();
+    // jsdom 的历史接着上一批用例往下长：把当前这一格的层号抹干净，退回来才是「页面」那一格。
+    window.history.replaceState({}, '');
     renderReader();
 
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
@@ -426,10 +437,14 @@ describe('reader screen', () => {
     expect(screen.getByRole('button', { name: '跳转到第 3 页' })).toBeInTheDocument();
 
     // 手机返回手势落到这里就是一次 popstate（Tauri 把返回交给 webview 的历史）。
-    // 面板自己关掉时会先吃掉自己压的那条历史，那一拍是异步的，等它过去。
+    // 守卫条目是 `pushState` 压的，设备上按返回就是浏览器退一格：这里也真退一格——退几层
+    // 看的是**落地那一格的层号**，同一次手势还可能被补发成两个事件。
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+    act(() => { window.history.back(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
     expect(screen.queryByRole('button', { name: '跳转到第 3 页' })).not.toBeInTheDocument();
     expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
@@ -983,6 +998,29 @@ describe('reader screen', () => {
     expect(within(toolbar).queryByRole('button', { name: '全屏' })).not.toBeInTheDocument();
     expect(within(toolbar).queryByRole('button', { name: '退出全屏' })).not.toBeInTheDocument();
     expect(within(toolbar).getByText('1 / 3')).toBeInTheDocument();
+  });
+
+  it('answers every turn of the page with a fresh cue on the bottom bar', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
+    // 还没翻过页：光线那个元素不该在（栏自己的进场动画与它不是一件事）。
+    expect(toolbar.querySelector('.reader-toolbar-turn')).toBeNull();
+
+    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    const first = toolbar.querySelector('.reader-toolbar-turn');
+    expect(first).not.toBeNull();
+
+    // 每翻一页得是一个**新元素**：重挂载才是重播一条 CSS 动画，改属性值不是——实测
+    // （debug_outputs/reader-motion）里只把属性在两个值之间轮流，第二页一条动画都没跑。
+    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    const second = toolbar.querySelector('.reader-toolbar-turn');
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+
+    await user.click(within(toolbar).getByRole('button', { name: '上一页' }));
+    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBe(second);
   });
 
   it('moves the thumbnail panel from the toolbar up to the top bar', async () => {

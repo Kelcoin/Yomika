@@ -72,6 +72,7 @@ import { historyShelfArchives } from '../lib/historyShelf';
 import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID } from '../lib/tags';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
+import { readKnownServerPresence } from '../lib/serverPresence';
 import { isArchiveFinished } from '../lib/archiveCardPresentation';
 import { useCardStyle, usePreferences } from './preferences';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -128,7 +129,11 @@ interface HomeSnapshot {
 function HomeWorkspace() {
   const { preferences } = usePreferences();
   const snapshot = readRouteCache<HomeSnapshot>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS);
-  const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>> | undefined>(snapshot?.servers);
+  const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>> | undefined>(
+    // 快照之外还认会话里读到过的那个答案：这次运行已经问过「有没有服务器」的话，
+    // 第一帧就能直接给引导，而不是先空一帧（见 src/lib/serverPresence.ts）。
+    snapshot?.servers ?? (readKnownServerPresence() === false ? { ok: true, value: [] } : undefined),
+  );
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [readingList, setReadingList] = useState<WatchlistRecord[]>(snapshot?.readingList ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
@@ -138,6 +143,10 @@ function HomeWorkspace() {
   const [randomLoading, setRandomLoading] = useState(!snapshot);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
   const restoredFromSnapshot = useRef(Boolean(snapshot));
+  /** 现在这一排随机漫游画的是哪台服务器抽出来的那一批。换服务器要重抽；同一台
+   * 服务器只是书架数据变了（翻一页就写一次阅读进度、加收藏、删档案都会广播失效）
+   * 就不重抽——随机漫游「自己刷新」正是从那儿来的。 */
+  const randomServerRef = useRef<string | undefined>(undefined);
   /** Re-reads the shelves. Bumping the attempt re-runs the load effect, which is
    * also how the snapshot gets refreshed on demand. */
   const reloadShelves = useCallback(() => setServerLoadAttempt((attempt) => attempt + 1), []);
@@ -151,6 +160,8 @@ function HomeWorkspace() {
     context: { showFinished: boolean; progress: ReadonlyMap<string, number> },
   ) => {
     setRandomLoading(true);
+    // 记在这台服务器名下：下一次刷新（失效广播、换服务器）据此判断要不要重抽。
+    randomServerRef.current = serverId;
     // Rail step: a 150px card plus its 12px gap — the same measure the rail's
     // skeleton uses. Counting the whole window and letting the rail scroll the
     // spare overcosts nothing and never leaves a visible gap.
@@ -230,10 +241,15 @@ function HomeWorkspace() {
       // 书架 id 解析与随机漫游互不依赖，重叠拉取：原先是先等完书架、
       // 再等随机、最后等缺失确认，三条链串行只让首屏更晚齐。
       const archivePromise = repository.listArchivesByIds(server.id, shelfIds);
-      const randomPromise = loadRandom(server.id, {
-        showFinished: preferencesRef.current.randomRoamShowFinished,
-        progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
-      });
+      // 已经为这台服务器抽过的那一批就留着：书架里绝大多数失效广播都来自书架自身的
+      // 写入（阅读进度每翻一页写一次），重抽会让随机漫游在用户没碰它的时候换一批。
+      // 换服务器时 `randomServerRef` 是另一台的名字，照旧重抽。
+      const randomPromise = randomServerRef.current === server.id
+        ? Promise.resolve()
+        : loadRandom(server.id, {
+          showFinished: preferencesRef.current.randomRoamShowFinished,
+          progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
+        });
       const archiveResult = await archivePromise;
       if (!active) return;
       if (!archiveResult.ok) setRecentError(archiveResult.error.message);
@@ -262,8 +278,9 @@ function HomeWorkspace() {
         // In-place re-read, same contract as the shelf pull: the rails on
         // screen refresh under the user instead of swapping for skeletons.
         // 启用服务器切换会广播全量失效，书架必须改读新启用的那台。
+        // 随机漫游不跟着亮加载态：只有换服务器才会重抽（见载入 effect 里那条判断），
+        // 让它先闪一下再换回同一批卡片没有意义。
         setRecentLoading(true);
-        setRandomLoading(true);
         restoredFromSnapshot.current = false;
         setServerLoadAttempt((attempt) => attempt + 1);
       }
@@ -417,7 +434,9 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const [scopeId, setScopeId] = useState<string | undefined>(snapshot?.scopeId);
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(!snapshot);
-  const [hasServer, setHasServer] = useState(true);
+  /** 初值不再无条件写 `true`：会话里已经读到过「一台服务器都没有」时，第一帧就该
+   * 是引导（下面的渲染门因此也不再等 `loading`）。没读到过仍是 `true`——先给骨架。 */
+  const [hasServer, setHasServer] = useState(readKnownServerPresence() ?? true);
   /** A pull re-reads the shelf in place: `loading` stays false so the list on
    * screen is not swapped for skeletons, and this only drives the spinner. */
   const [pulling, setPulling] = useState(false);
@@ -492,6 +511,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
       const server = pickServer(servers.value, serverParam);
       if (!server) { setHasServer(false); setLoading(false); return; }
+      // 这台服务器是这一趟刚读出来的：以前这里只往 false 走，于是导入凭据（或任何
+      // 之后才出现的服务器）之后，这一页的提示会一直挂着——装载重跑了、书架也读回
+      // 来了，结论却没人撤销。
+      setHasServer(true);
       setServerId(server.id);
       setScopeId(server.scopeId);
       // 书架列表与收藏分类相互独立，并行拉；只有收藏夹需要那条分类——而且只要
@@ -673,7 +696,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           above an empty state was most of what the page showed. 收藏与待看现在有
           档案库那条顶栏（分类筛选、排序方式、多选、显示模式）；历史没有，它的顺序
           就是那列时间线，重排会把它读的东西弄丢。 */}
-      {loading && (
+      {loading && hasServer !== false && (
         /* 这一页已经是 ShelfShell 的列表栏（`.library-shell-list`，16px 侧内边距就在
            那儿）。从前书架是独立页面，页面里自己套了一层 `.library-shell` +
            `.library-shell-list` 来供那 16px——现在两侧都供，卡片会被推进去 32px，
@@ -695,7 +718,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
         />
       )}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {!loading && !error && !hasServer && <ServerRequiredPrompt />}
+      {/* 已知没有服务器时不等 loading：这次拉取的结果只会再确认一遍这个事实，
+          而它落地之前用户看到的就是这一页该给的引导（`!loading` 那版会让骨架
+          先转一帧）。 */}
+      {!error && hasServer === false && <ServerRequiredPrompt />}
       {!loading && !error && hasServer && shelfArchives.length === 0 && (
         <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
       )}
@@ -820,7 +846,10 @@ export function WorkspaceRoutes() {
   visited.current.set(routeKey, current);
   useEffect(() => {
     previousKey.current = routeKey;
-    if (resume) navigate(`${resume.pathname}${resume.search}`, { replace: true, state: resume.state });
+    // 恢复必须**压在**列表那一条上面，不能顶掉它：`replace` 会让历史里那条
+    // `/library` 消失，详情页的「返回上一页」于是弹到更早的一页（从首页进来的
+    // 人看到的就是「返回固定回首页」），系统返回键也一样少一站。
+    if (resume) navigate(`${resume.pathname}${resume.search}`, { state: resume.state });
   }, [navigate, resume, routeKey]);
   return <>{[...visited.current].map(([key, saved]) => (
     <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>

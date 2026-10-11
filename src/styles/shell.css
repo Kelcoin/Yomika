@@ -800,6 +800,28 @@ body::-webkit-scrollbar,
 .error-log-caret.is-open { transform: rotate(180deg); }
 @media (prefers-reduced-motion: reduce) { .error-log-caret { transition: none; } }
 
+/* 新长出来的那一段（一条记录的详情、相关信息、第一次读回来的列表）自己走一段
+   0fr → 1fr 的网格行进场：面板的高度变化是「长出来」，不是硬跳一截。
+   **只做进场**：收起要动画就得把内容一直挂在 DOM 里（测试与读屏都按「收起即不在
+   文档里」判），而这一段内容只在展开时才该存在。 */
+.error-log-reveal {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: error-log-reveal var(--motion-standard) backwards;
+}
+
+/* 列表自己就是滚动容器（`overflow: auto`）：别让这条通配把它的滚动压没。 */
+.error-log-reveal > :not(.error-log-list) {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@keyframes error-log-reveal {
+  from { grid-template-rows: 0fr; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) { .error-log-reveal { animation: none; } }
+
 /* 展开的那一段：错误详情 + 堆栈跟踪，各一个框。**这里必须自己声明字体**：`<pre>` 在
    UA 样式表里有 `font-family: monospace`，继承不到 `html` 上那一族——上一轮把写死的
    `--font-utility` 删掉、指望「跟着面板继承」，结果落到的正是 UA 的等宽（用户又报了一次
@@ -1297,6 +1319,9 @@ body::-webkit-scrollbar,
 
 /* A plain switch keeps to its row: the drawn switch is the trailing control
    and the only hit target, so nothing here opens a second level. */.settings-switch-row .switch-control { flex: none; }
+/* 开关左边再多一样东西的那一行（标签数据：版本号 + 刷新按钮 + 开关）：按钮贴开关，
+   中间留一个控件间距，整块不吃左边文案的宽度。 */
+.settings-row-action { display: flex; flex: none; align-items: center; gap: var(--space-2); }
 .settings-switch-row.is-disabled .settings-row-label,
 .settings-switch-row.is-disabled .settings-row-hint { color: var(--ink-faint); }
 
@@ -2721,6 +2746,20 @@ body::-webkit-scrollbar,
     transform: none;
   }
 }
+/* 触屏上的"按住看封面"：和桌面上的悬停是同一件事，只是钩子换成 pressFeedback 打的
+   `.is-pressed`（触屏的 `:active` 实测在按住的 900ms 里一直是 false）。钩子挂在**载体**
+   ——按钮/卡片上，不挂在封面自己身上：pressFeedback 只标记 `closest(PRESSABLE)` 命中的
+   那个元素，封面接不住。桌面那几条 `:hover` 一个字不动，所以查重、本地档案里复用
+   `.archive-thumb-card-media` 的地方照旧按悬停揭示。 */
+@media (hover: none) {
+  :root[data-sfw='true'] .archive-row:is(.is-pressed, :active) .archive-row-thumb img,
+  :root[data-sfw='true'] .archive-thumb-card:is(.is-pressed, :active) .archive-thumb-card-media img,
+  :root[data-sfw='true'] .archive-detail-cover-trigger:is(.is-pressed, :active) img,
+  :root[data-sfw='true'] .archive-page-thumbnail:is(.is-pressed, :active) img {
+    filter: none;
+    transform: none;
+  }
+}
 
 .archive-page-thumbnail { overflow: hidden; }
 
@@ -4020,7 +4059,13 @@ body::-webkit-scrollbar,
    的比别的组件宽一点的状态了，依然打开详情页时会变成一致的」。让 snapport 也内缩
    6px 后，第一张卡的吸附位置回到 0，吸附再也藏不掉内边距，左空隙与轨道宽度、滚动
    状态无关。代价是吸附点与自然位置重合（吸附基本变成 no-op），无害。 */
-.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: pan-x; }
+/* 横向导轨只**自己**吃横向手势，纵向手势必须留给页面。曾经这里是 `pan-x`：导轨
+   是 `overflow-x: auto`，另一轴的 computed 值随之变成 `auto`，于是命中链上所有
+   祖先的 touch-action 取交集之后只剩 `pan-x`——手指落在导轨里（卡片上、卡片间的
+   缝隙里都算）时纵向拖拽既不被浏览器当滚动，也不会交给 `.workspace`，读起来就是
+   「触点落在组件内/档案卡片内无法滚动」。写成 `pan-x pan-y` 之后浏览器按手势主
+   方向自行择一：横向还是滑导轨，纵向交给页面滚动容器。 */
+.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: pan-x pan-y; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: transform var(--motion-fast), border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -5403,6 +5448,28 @@ body::-webkit-scrollbar,
 
 .text-input-dialog-field input { width: 100%; }
 
+/* 配对码弹窗：这串数字要念给**另一台设备**听，所以字号给足、字距拉开，并且分两组显示
+   （六位连成一串时，人眼要数两遍才知道自己念到第几位）。数字用等宽数字排，
+   换秒数时不会左右跳。 */
+.pairing-code-dialog > .pairing-code-value {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-3);
+  margin-block: var(--space-5) var(--space-1);
+  color: var(--ink-primary);
+  font-size: clamp(30px, 8vw, 42px);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-wider);
+}
+
+.pairing-code-dialog > .pairing-code-expiry {
+  margin-block-end: var(--space-5);
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
 /* 凭据口令：输入框与「显示」按钮同一行。口令是凭据文件唯一的防线，输错了文件就再也
    打不开，所以核对与掩藏同等重要——按钮把两个需求摆在一起。 */
 /* 口令对话框：标题居中（与二级菜单同一个家族），眼睛在输入框**里面**的右端。
@@ -5906,12 +5973,16 @@ body::-webkit-scrollbar,
 
    Chips in a tag row are the deliberate exception. Their neighbours sit one line
    away, so an overlay would steal the tap that belonged to the chip above or
-   below; those keep their drawn size and rely on the row's own gap. */
+   below; those keep their drawn size and rely on the row's own gap.
+
+   A control whose drawing *is* a bordered box is the other one. The 推荐/同作者
+   segments are a 28px button inside a 1px-bordered 2px-padded track, so growing
+   the button grew the border with it: on a phone the track drew 50px tall around
+   a 16px word. The segment keeps its drawn height and takes the overlay. */
 @media (pointer: coarse) {
   /* The row is the target: give it a finger's height. */
   .archive-context-menu-item,
   .archive-detail-panel-tabs button,
-  .archive-recommendations-tabs button,
   .date-picker-grid button,
   .date-picker-days button,
   .search-preset-apply,
@@ -5937,13 +6008,15 @@ body::-webkit-scrollbar,
      its centre. */
   .metadata-tag-delete,
   .eh-name-edit,
-  .metadata-tag-reveal {
+  .metadata-tag-reveal,
+  .archive-recommendations-tabs button {
     position: relative;
   }
 
   .metadata-tag-delete::before,
   .eh-name-edit::before,
-  .metadata-tag-reveal::before {
+  .metadata-tag-reveal::before,
+  .archive-recommendations-tabs button::before {
     position: absolute;
     top: 50%;
     left: 50%;
@@ -5951,6 +6024,13 @@ body::-webkit-scrollbar,
     height: max(100%, var(--tap-min));
     content: '';
     transform: translate(-50%, -50%);
+  }
+
+  /* The overlay is clipped by an ancestor's overflow, so the creator segment
+     gives up the `overflow: hidden` its collapsed state needed — collapsed it is
+     0 wide, transparent and untappable anyway. */
+  .archive-recommendations-tabs .archive-recommendations-tab-creator {
+    overflow: visible;
   }
 }
 
@@ -6316,11 +6396,44 @@ body::-webkit-scrollbar,
   text-align: center;
 }
 
+/* 设备地址（`192.168.1.5:47653`）：整串都是数字和点，居中后与端口、配对码同一套读法，
+   而且这一段是照着对面屏幕上那句「移动端填：…」逐位抄的，居中对得更容易。 */
+.settings-address-input {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 /* 端口这类纯数字输入：数字居中、等宽，和配对码同一套读法（左对齐的 47653 看着像
    没写完的一行字）。 */
 .settings-port-input { display: block; box-sizing: border-box; width: 100%; appearance: textfield; font-variant-numeric: tabular-nums; text-align: center; }
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
+
+/* 远端能提供哪些处理服务（超分 / 去码 / DLSSNR）：三枚小标签一行放下，这就是「远端
+   可用服务」的全部面积——从前这一整块摆的是 op 选择、模型列表和放大倍数输入框，而那三
+   样都由对面那份设置决定，摆在本机只是让人以为选了有用。能用的标签亮着（`is-ready`），
+   不能用的压暗但仍显示：用户要知道对面有这一档、只是现在没装好。 */
+.settings-capability-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.settings-capability-chip {
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 2px var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.settings-capability-chip.is-ready {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--on-surface);
+}
 
 /* 设备行：左边一枚设备类型的图标（手机 / 平板 / 桌面），右边名字一行、地址一行。
    长地址不会再把名字挤变形，地址也不会被折成两行。 */

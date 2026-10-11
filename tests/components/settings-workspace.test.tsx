@@ -1326,7 +1326,10 @@ describe('settings workspace', () => {
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
       items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings', 'eh_account'],
     }));
-    expect(await screen.findByText(/含 API Key、Cookie 等敏感信息，请妥善保管/)).toBeInTheDocument();
+    // 带凭据的导出仍然是**成功**：说清「这份文件敏感」靠文案，不靠红态——
+    // 红态是留给「导出失败了」的。
+    expect((await screen.findByText(/含 API Key、Cookie 等敏感信息，请妥善保管/)).closest('.toast-card'))
+      .toHaveClass('is-success');
   });
 
   it('imports a data file through dynamically generated checkboxes', async () => {
@@ -1615,12 +1618,17 @@ describe('settings workspace', () => {
 
       // 系统返回手势（Tauri 把返回键/滑动交给 webview 的 goBack）走的是同一层：
       // 先退回分类列表，而不是把整个设置页带回上一页。守卫条目是 pushState 压的，
-      // 设备上按返回，最后到达页面的就是它——这里直接发那一下。
+      // 设备上按返回就是浏览器退一格——这里也真退一格。只手动发 `popstate` 已经不行：
+      // 退几层看的是**落地那一格的层号**（同一次手势会被补发成两个事件）。
+      await settle();
       resetOverlayBackGuardForTests();
+      window.history.replaceState({}, '');
       await user.click(screen.getByRole('button', { name: /通用/ }));
       expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
       await settle();
-      act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+      act(() => { window.history.back(); });
+      await settle();
+      await settle();
       expect(await screen.findByRole('button', { name: /关于/ })).toBeInTheDocument();
       expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
     } finally {

@@ -280,6 +280,15 @@ svg {
   user-select: none;
 }
 
+/* 长按（手机上）或按住鼠标不放再移动，浏览器默认会把 `<a href>` 拖成一条链接、把图片
+   拖成一张图。`img`/`svg` 早就挡住了，可挡掉图片之后 Blink 会退到最近的可拖祖先——也
+   就是外面那个 `<a>`，于是导航项、设置项、导轨卡片照样「拖出一条超链接」
+   （debug_outputs/drag-out 工装量的就是这件事：`<A>` 的 dragstart 带着 text/uri-list）。
+   仓库里没有任何真正的拖放（唯一那处「拖」是导轨自己的鼠标滚动），所以统一不给拖。 */
+a {
+  -webkit-user-drag: none;
+}
+
 button {
   display: inline-flex;
   align-items: center;

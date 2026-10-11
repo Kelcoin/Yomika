@@ -1,11 +1,19 @@
 import { act, render, screen } from '@testing-library/react';
 import { useState } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useOverlayBackGuard } from '../../src/lib/overlayBackGuard';
 
-/* jsdom 的历史只是近似：`back()` 偶尔补 `popstate`、有时不补（它不把 `pushState` 的条目
- * 当可往返的站）。所以这里直接发那个事件——设备上按返回，最终到达页面的就是它。 */
+/* jsdom 的历史能真的在 `pushState` 压出来的站之间往返，但**落地是异步的**：`back()` 之后
+ * 立刻读 `window.history.state` 还是旧的，隔一拍才换成上一格，`popstate` 也是那时才发。
+ * 所以这里按设备上的样子走：`back()` 真遍历，再把那两拍空转掉。
+ * （只手动发 `popstate` 而不移动历史是不行的：守卫现在按**落地那一格的层号**算该退几层。） */
+
+beforeEach(() => {
+  // jsdom 的历史在同一个文件里接着上一批用例往下长：先停到一格干净的页面格上，免得下面
+  // 那格残留的层号被当成守卫。
+  window.history.pushState({}, '');
+});
 
 /** 一层会自己关掉的浮层：关掉之后就从文档里消失，和菜单里那句 `setOpen(false)` 一样。 */
 function Layer({ name, onClose }: { name: string; onClose?: (() => void) | undefined }) {
@@ -25,16 +33,20 @@ async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
+/** 把一次历史遍历走完：`back()` 要过两拍才落到下一格，落地的定时器（拒绝关闭的浮层补守卫）
+ * 还排在它后面——所以是三拍，少一拍就会看到「还在原来那一格」的假象。 */
+async function flushHistory() {
+  for (let index = 0; index < 3; index += 1) await settle();
+}
+
 /** 按一次返回。
  *
- * 先空转两拍：浮层自己关掉时会调 `history.back()` 把自己的守卫吃掉，jsdom 为它发的那个
- * `popstate` 也是异步的——要是抢在它前面发这一下，两次返回会撞在一起。等它落地之后，
- * 再发用户真正按的那一下。 */
+ * 先空转：浮层自己关掉时会调 `history.back()` 把自己的守卫吃掉，那一次遍历也是异步的——要是
+ * 抢在它前面按这一下，两次遍历会撞在一起。等它落地之后，再退用户真正按的那一格。 */
 async function pressBack() {
-  await settle();
-  await settle();
-  act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
-  await settle();
+  await flushHistory();
+  act(() => { window.history.back(); });
+  await flushHistory();
 }
 
 describe('overlay back guard', () => {
@@ -44,8 +56,7 @@ describe('overlay back guard', () => {
     expect((window.history.state as { yomikaOverlay?: number } | null)?.yomikaOverlay).toBe(1);
     unmount();
     // 卸载时守卫得自己吃掉（`history.back()`），否则下一次返回会先弹掉这条没人认领的记录。
-    await settle();
-    await settle();
+    await flushHistory();
     expect((window.history.state as { yomikaOverlay?: number } | null)?.yomikaOverlay).toBeUndefined();
   });
 
@@ -74,6 +85,26 @@ describe('overlay back guard', () => {
     expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
   });
 
+  it('closes only one layer when the same gesture arrives twice', async () => {
+    // 设备上同一次手势会被补发成两个 `popstate`（一个是延迟送达的）。退几层得看落地那一格的
+    // 层号：按事件个数退就会一次关掉两层——用户报的「当前这一层和整个页面一起返回了」。
+    const first = vi.fn();
+    const second = vi.fn();
+    render(<Layer name="menu" onClose={first} />);
+    render(<Layer name="dialog" onClose={second} />);
+
+    await flushHistory();
+    act(() => { window.history.back(); });
+    await flushHistory();
+    // 补发的那一个：历史没有再动，落地层号还是 1，所以一层都不该再关。
+    act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+    await settle();
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+    expect(screen.getByTestId('menu')).toBeInTheDocument();
+  });
+
   it('does not close the layer below when one is closed by its own button', async () => {
     const first = vi.fn();
     const second = vi.fn();
@@ -84,13 +115,16 @@ describe('overlay back guard', () => {
     const closeButtons = screen.getAllByRole('button', { name: '自己关' });
     expect(closeButtons).toHaveLength(2);
     await act(async () => { closeButtons[1]!.click(); });
-    await settle();
+    await flushHistory();
     expect(second).toHaveBeenCalledTimes(1);
     expect(first).not.toHaveBeenCalled();
     expect(screen.getByTestId('menu')).toBeInTheDocument();
-    // 自己关掉那一层还会 `history.back()` 把自己的守卫吃掉；jsdom 的历史不保证真的回退
-    // （实测：连着几次 pushState 之后 back() 可能什么都不发），所以那一步没有断言——
-    // 设备上它是浏览器自己的同文档遍历，一定会发。
+    // 自己关掉那一层会 `history.back()` 把自己的守卫吃掉，这会儿人应该站在下面那层的守卫
+    // 上——层号跟着对齐，下一次返回仍然只关掉「menu」这一层。
+    expect((window.history.state as { yomikaOverlay?: number } | null)?.yomikaOverlay).toBe(1);
+    await pressBack();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
   });
 
   it('leaves a layer that a real jump closed alone instead of rewinding the jump', async () => {

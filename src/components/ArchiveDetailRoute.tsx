@@ -116,10 +116,11 @@ detailBasePath?: string | undefined }) {
   useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
 
   /** 详情可能开在档案库，也可能开在某个书架上（`/history/…`、`/watchlist/…`、
-   *  `/to-read/…`）：返回与「档案没了」都要回到它来的那一边——一律送回档案库，
-   *  从书架点进来的人就换了一个页面。 */
+   *  `/to-read/…`）或首页自己的详情（`/home/…`）：返回与「档案没了」都要回到它来的
+   *  那一边——一律送回档案库，从书架或首页点进来的人就换了一个页面。 */
   const shelfBase = useMemo(() => {
     const head = location.pathname.split('/')[1] ?? '';
+    if (head === 'home') return '/';
     return ['library', 'history', 'watchlist', 'to-read'].includes(head) ? `/${head}` : '/library';
   }, [location.pathname]);
 
@@ -351,7 +352,7 @@ detailBasePath?: string | undefined }) {
           setDownloading(true);
           void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error')).finally(() => setDownloading(false));
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
-        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `/library/${archiveId}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
+        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>

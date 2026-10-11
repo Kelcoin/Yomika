@@ -18,6 +18,7 @@ export const TAG_COUNT_MIN_COUNT = 5;
 export interface TagCountService {
   getCount(namespaceWithKey: string): number | undefined;
   getVersion(): string | undefined;
+  install(entries: Iterable<[string, number]>): void;
   refresh(): Promise<void>;
   subscribe(listener: () => void): () => void;
 }
@@ -58,19 +59,28 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
     notify();
   };
 
+  // 频次表的唯一入口：低于 TAG_COUNT_MIN_COUNT 的条目在这里就被丢掉，所以
+  // 「哪些条目参与排序」只有一个地方说了算——下载解析与离线导入共用同一条规则。
+  const install = (entries: Iterable<[string, number]>) => {
+    counts.clear();
+    for (const [key, count] of entries) {
+      if (!key || !Number.isFinite(count) || count < TAG_COUNT_MIN_COUNT) continue;
+      counts.set(key, count);
+    }
+  };
+
   const parseCsv = async (bytes: ArrayBuffer): Promise<void> => {
     if (typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream unavailable');
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
     const text = await new Response(stream).text();
-    counts.clear();
+    const entries: Array<[string, number]> = [];
     for (const line of text.split('\n')) {
       const comma = line.lastIndexOf(',');
       if (comma <= 0) continue;
       const key = line.slice(0, comma).replaceAll('"', '').trim();
-      const count = Number(line.slice(comma + 1));
-      if (!key || !Number.isFinite(count) || count < TAG_COUNT_MIN_COUNT) continue;
-      counts.set(key, count);
+      entries.push([key, Number(line.slice(comma + 1))]);
     }
+    install(entries);
     if (counts.size === 0) throw new Error('Tag count data is empty');
     // 尽力持久化：放不下（配额）就只留版本号，下次启动走重新下载。
     const TAB = String.fromCharCode(9);
@@ -87,6 +97,7 @@ export function createTagCountService(options: TagCountServiceOptions = {}): Tag
     getVersion() {
       return version;
     },
+    install,
     async refresh() {
       if (inFlight) return inFlight;
       const operation = (async () => {
@@ -132,6 +143,11 @@ export function getTagCountForSort(namespaceWithKey: string): number {
 }
 export function getTagCountVersion(): string | undefined {
   return tagCountService.getVersion();
+}
+/** 直接装一份频次表（`namespace:key` → 次数），与 `installTagTranslations` 对称：
+ *  既是测试入口，也是离线导入的正式入口。低于 `TAG_COUNT_MIN_COUNT` 的条目会被丢弃。 */
+export function installTagCounts(entries: Iterable<[string, number]>): void {
+  tagCountService.install(entries);
 }
 export function refreshTagCounts(): Promise<void> {
   return tagCountService.refresh().then(() => undefined);

@@ -488,7 +488,11 @@ pub fn import_worker_sections(
         history_imported += 1;
     }
     // Readoshi's watchlist is its 待看 view (see the doc comment), so the
-    // worker's watchlist section lands in the reading_list table.
+    // worker's watchlist section lands in the reading_list table. The journal
+    // type is the sync vocabulary's `watchlist` — the table name is not an
+    // object type: writing `reading_list` here left a name no exporter knows,
+    // so everything imported this way was invisible to sync and to the
+    // data export/import (the shelves showed it, nothing carried it).
     for record in &input.watchlist.entries {
         let added_at = record.added_at.trim();
         transaction.execute(
@@ -511,7 +515,7 @@ pub fn import_worker_sections(
             &transaction,
             &input.scope_id,
             &format!("{}/{}", input.scope_id, record.archive_id),
-            "reading_list",
+            "watchlist",
             "upsert",
             &device_id,
             revision,
@@ -542,7 +546,7 @@ pub fn import_worker_sections(
             &transaction,
             &input.scope_id,
             &format!("{}/{}", input.scope_id, record.archive_id),
-            "reading_list",
+            "watchlist",
             "delete",
             &device_id,
             revision,
@@ -833,17 +837,18 @@ mod tests {
         .unwrap();
         assert_eq!(tombstone.as_str(), "2026-09-02 08:00:00.000");
         // Journal entries follow the shared payload/hash rules so WebDAV sync
-        // propagates the import like any local mutation. 这份样例里只有历史是
-        // 可同步对象：它的 watchlist 段是收藏夹（服务器分类的镜像，不进日志），
-        // 待看段才是 watchlist 词汇。
+        // propagates the import like any local mutation. 这份样例里两条都可同步：
+        // 历史照旧，待看（worker 的 watchlist 段）删掉的那条要留墓碑。类型必须是
+        // 同步词汇里的 watchlist——写成表名 reading_list 时，下面这条计数会变成
+        // 0：日志躺在那儿，导出与同步却都看不见它。
         assert_eq!(
             c.query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND object_type='history' AND operation='upsert'", [], |row| row.get::<_, i64>(0)).unwrap(),
             1
         );
         assert_eq!(
             c.query_row("SELECT COUNT(*) FROM sync_journal WHERE scope_id='scope-a' AND object_type='watchlist' AND operation='delete'", [], |row| row.get::<_, i64>(0)).unwrap(),
-            0,
-            "收藏夹的导入不写同步日志"
+            1,
+            "待看的墓碑要用 watchlist 这个类型"
         );
     }
 

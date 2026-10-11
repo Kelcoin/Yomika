@@ -41,15 +41,22 @@ export function SwitchControl({ label, checked, disabled, tabIndex, onToggle }: 
 
 /** A yes/no setting. A switch has no second level to open: the drawn switch
  * sits in the row itself, on the right where every other value lives, and
- * flipping it is the whole interaction. */
-export function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle }: {
+ * flipping it is the whole interaction.
+ *
+ * `action` is for the settings that have one more thing to do **besides** yes
+ * or no — 标签数据那一行：开关决定用不用，旁边那颗按钮决定什么时候去拿新数据。
+ * It shares the trailing slot with the switch instead of opening a second level,
+ * because it is one click, not a value to pick. */
+export function SettingsSwitch({ icon, label, hint, checked, disabled, action, onToggle }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
   checked: boolean;
   disabled?: boolean | undefined;
+  action?: ReactNode;
   onToggle: () => void;
 }) {
+  const control = <SwitchControl label={label} checked={checked} disabled={disabled} onToggle={onToggle} />;
   return (
     <div className={`settings-row settings-switch-row${disabled ? ' is-disabled' : ''}`}>
       {icon && <span className="settings-row-icon" aria-hidden="true">{icon}</span>}
@@ -57,7 +64,9 @@ export function SettingsSwitch({ icon, label, hint, checked, disabled, onToggle 
         <span className="settings-row-label">{label}</span>
         {hint && <span className="settings-row-hint">{hint}</span>}
       </span>
-      <SwitchControl label={label} checked={checked} disabled={disabled} onToggle={onToggle} />
+      {/* 行是 `auto minmax(0,1fr) auto` 三列：按钮和开关必须同住第三格，
+          多出一个元素就会被挤到下一行去。 */}
+      {action ? <span className="settings-row-action">{action}{control}</span> : control}
     </div>
   );
 }

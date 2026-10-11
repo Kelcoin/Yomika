@@ -7,6 +7,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { getNativeImageCache } from '../../src/lib/nativeImageCache';
+import { serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
 import type { ImageHandle } from '../../src/lib/unifiedImageCache';
 
 /** 这一页算出来的成品（会话预算按 `bytes` 算，`url` 就是上屏那一个）。 */
@@ -1771,6 +1772,114 @@ describe('reader route', () => {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
     expect(screen.queryAllByText('阅读页面加载失败')).toHaveLength(0);
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeTruthy();
+  });
+
+  /** 远端那台机器在这次用例里的应答：三档能力各自 `ready` 与否由用例说了算。 */
+  function remoteReader(options: {
+    ready: { upscale: boolean; decensor: boolean; dlssnr: boolean };
+    process?: (args: Record<string, unknown> | undefined) => unknown;
+  }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    setInvokeAdapterForTests(async (command, args) => {
+      calls.push([command, args as Record<string, unknown> | undefined]);
+      if (command === 'load_preferences') {
+        return {
+          ok: true,
+          value: {
+            theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648,
+            prefetchPages: 0, coverConcurrency: 4,
+            // 本机一个模型都没有：这三枚按钮能亮，只可能是因为对面报了可用。
+            upscaleBackend: 'off', upscaleModel: '', decensorModel: '',
+            remoteComputeUrl: '192.168.1.9:47653',
+            remoteComputeToken: 'remote-token',
+            remoteComputeOps: serializeRemoteOps({
+              enabled: true,
+              pairedDevices: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'remote-token' }],
+            }),
+          },
+        };
+      }
+      if (command === 'remote_compute_capabilities') {
+        return {
+          ok: true,
+          value: {
+            service: 'yomika-compute-center',
+            version: 2,
+            name: 'DESKTOP-PC',
+            models: [],
+            capabilities: (['upscale', 'decensor', 'dlssnr'] as const).map((id) => ({
+              id,
+              label: { upscale: '超分', decensor: '去码', dlssnr: 'DLSS5' }[id],
+              ready: options.ready[id],
+              detail: options.ready[id] ? '' : '对面没装',
+            })),
+          },
+        };
+      }
+      if (command === 'remote_compute_process') {
+        return options.process ? options.process(args) : [0x89, 0x50, 0x4e, 0x47];
+      }
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'remote-reader', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
+      if (command === 'save_preferences') return { ok: true, value: (args?.input ?? {}) };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/remote-reader']}><App /></MemoryRouter>);
+    return { calls };
+  }
+
+  it('takes the reader controls from the list the remote machine reports', async () => {
+    // 第 17 项：连上远端之后，阅读器那三枚开关「能不能按」由**对面**那份清单决定。
+    // 从前它们看的是本机装没装模型，于是手机连上桌面端之后三枚全是灰的。
+    const { calls } = remoteReader({ ready: { upscale: true, decensor: false, dlssnr: true } });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+
+    expect(await screen.findByRole('button', { name: '开启超分' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '开启 DLSSNR' })).toBeInTheDocument();
+    // 对面没装的这一档不出现（本机也没装模型，两边都不给）。
+    expect(screen.queryByRole('button', { name: '开启去码' })).toBeNull();
+
+    // 而且「连上远端」本身不等于「开始处理」：一档都没开的时候，一页都不许交给对面。
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(calls.some(([command]) => command === 'remote_compute_capabilities')).toBe(true);
+    expect(calls.some(([command]) => command === 'remote_compute_process')).toBe(false);
+    // 也不去问本机那份 DLL 状态（走远端时它说的不是这一件事，手机上必然失败）。
+    expect(calls.some(([command]) => command === 'dlssnr_status')).toBe(false);
+  });
+
+  it('hands the remote machine only the services that are on, in the order they must run', async () => {
+    // 第 17 项：一次处理做哪几档，由阅读器里开着的开关决定；顺序固定「去码 → 超分 →
+    // DLSSNR」，模型/倍数/层参数一概不发（对面按自己的设置跑）。
+    const { calls } = remoteReader({ ready: { upscale: true, decensor: true, dlssnr: true } });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await screen.findByRole('button', { name: '开启超分' });
+
+    const chains = () => calls
+      .filter(([command]) => command === 'remote_compute_process')
+      .map(([, args]) => (args?.input as { params: { chain: string[] } }).params.chain);
+
+    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    await waitFor(() => expect(chains().length).toBeGreaterThan(0));
+    // 只开了一档就只做这一档——不是「远端一律跑全套」。
+    expect(chains()).toEqual(chains().map(() => ['decensor']));
+
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(chains()).toContainEqual(['decensor', 'upscale']));
+
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    await waitFor(() => expect(chains()).toContainEqual(['decensor', 'upscale', 'dlssnr']));
+
+    // 每一串都是这三档按同一个顺序取出的子序列——倒过来（先超分再去码）等于把干净像素
+    // 这一步白扔，重复一档则是白跑一遍。
+    const order = ['decensor', 'upscale', 'dlssnr'];
+    for (const chain of chains()) {
+      expect(chain.length).toBeGreaterThan(0);
+      expect(chain).toEqual(order.filter((service) => chain.includes(service)));
+    }
   });
 });
 

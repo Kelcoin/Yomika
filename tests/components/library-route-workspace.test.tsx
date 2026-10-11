@@ -208,6 +208,41 @@ describe('library route workspace', () => {
     expect(screen.getByRole('link', { name: /从云端同步/ })).toHaveAttribute('href', '/settings?section=sync');
   });
 
+  it('switches to a page that already knows there is no server without showing its skeletons first', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_tasks') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<MemoryRouter initialEntries={['/history']}><App /></MemoryRouter>);
+    // 这一页读到的是「一台服务器都没有」，答案留在会话里给后面的页面用。
+    await screen.findByRole('heading', { name: '添加你的 LANraragi' });
+
+    fireEvent.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('link', { name: '档案库' }));
+
+    // 切过去的第一帧就得是引导。骨架的意思是「还不知道」，而这一次已经知道了——
+    // 从前这里会先把档案库的骨架转一帧，等这次 IPC 落地才换成引导。保留页里那几页
+    // 都还在 DOM 里（只是 hidden），所以能查到的那个引导一定是刚切过去的这一页的。
+    expect(screen.getByRole('heading', { name: '添加你的 LANraragi' }).closest('.library-shell-list')).not.toBeNull();
+    expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton-layer')).toBeNull();
+
+    // 书架（收藏夹）同理：它的 hasServer 初值从前无条件写 true，于是也是先骨架后引导。
+    fireEvent.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('link', { name: '收藏夹' }));
+    expect(screen.getByRole('heading', { name: '添加你的 LANraragi' }).closest('.library-shell-list')).not.toBeNull();
+    expect(screen.queryByRole('status', { name: '正在读取档案' })).not.toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton-layer')).toBeNull();
+
+    // 首页从前是一帧空屏：快照过期时 servers 还是 undefined，门两边都不成立。
+    fireEvent.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('link', { name: '首页' }));
+    expect(screen.getByRole('heading', { name: '添加你的 LANraragi' })).toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton-layer')).toBeNull();
+
+    // 收尾：这几次 list_servers 的落地也放进 act 里，不留悬挂的更新告警。
+    await act(async () => {});
+  });
+
   it('resolves history records to archive titles and server context', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };

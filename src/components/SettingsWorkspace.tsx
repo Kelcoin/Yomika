@@ -158,6 +158,13 @@ const APP_LICENSE = __APP_LICENSE__;
 const APP_REPOSITORY = __APP_REPOSITORY__;
 const APP_REPOSITORY_DISPLAY = APP_REPOSITORY.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
+/** 标签数据的版本读法：翻译库报的是提交时间（ISO 串），频次库报的是 release 的 tag。
+ *  ISO 串只留日期——时分秒写在这行提示里没人读得出信息，还占宽。 */
+function formatTagDataVersion(version: string | undefined): string | undefined {
+  if (!version) return undefined;
+  return /^(\d{4}-\d{2}-\d{2})T/.exec(version)?.[1] ?? version;
+}
+
 function formatCacheBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -286,14 +293,16 @@ export function SettingsWorkspace() {
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
   const [tagTranslationVersion, setTagTranslationVersion] = useState(getTagTranslationSourceVersion());
   const [tagCountVersion, setTagCountVersion] = useState(getTagCountVersion());
-  const [tagDataPending, setTagDataPending] = useState(false);
+  /** 哪一份数据正在刷新（不是「有没有在刷新」）：两颗按钮各管各的，一颗转的时候
+   *  另一颗不该跟着禁用。 */
+  const [tagDataPending, setTagDataPending] = useState<'translation' | 'count'>();
   useEffect(() => {
     const detachTranslation = subscribeTagTranslationService(() => setTagTranslationVersion(getTagTranslationSourceVersion()));
     const detachCount = subscribeTagCountChanges(() => setTagCountVersion(getTagCountVersion()));
     return () => { detachTranslation(); detachCount(); };
   }, []);
   const refreshTagData = async (kind: 'translation' | 'count') => {
-    setTagDataPending(true);
+    setTagDataPending(kind);
     try {
       if (kind === 'translation') await refreshTagTranslations();
       else await refreshTagCounts();
@@ -301,8 +310,17 @@ export function SettingsWorkspace() {
     } catch {
       showToast('标签数据刷新失败，稍后会自动重试', 'error');
     } finally {
-      setTagDataPending(false);
+      setTagDataPending((current) => (current === kind ? undefined : current));
     }
+  };
+  /** 打开开关时如果本机还没有这份数据，就地取一次（JHenTai 同款做法）：开关表达的是
+   *  「我要用」，等到下次启动才下载就等于「打开了却没有数据」，而且排在补全里的效果
+   *  要过一天才看得见。 */
+  const setTagDataEnabled = (kind: 'translation' | 'count', enabled: boolean) => {
+    editPreferences(kind === 'translation' ? { tagTranslationEnabled: enabled } : { tagCountOrderEnabled: enabled });
+    const known = kind === 'translation' ? tagTranslationVersion : tagCountVersion;
+    if (!enabled || known) return;
+    void (kind === 'translation' ? refreshTagTranslations() : refreshTagCounts()).catch(() => undefined);
   };
   /** 自动同步的进行状态：账户行据此显示「同步中」与上次同步时刻。 */
   const [autoSync, setAutoSync] = useState(autoSyncStatus());
@@ -811,7 +829,9 @@ export function SettingsWorkspace() {
     const summary = exportSummary(report);
     const where = `已导出到 ${result.value}`;
     if (exportItems.some(isCredentialItem)) {
-      showToast(`${where}：含 API Key、Cookie 等敏感信息，请妥善保管`, 'error');
+      // 导出是成功的：提示语里说清「这份文件敏感」，但别用红态的警告——
+      // 那是在说「出事了」，而这里只是要人多留个心（docs/30 的知情确认在弹层里已经做过一次）。
+      showToast(`${where}：含 API Key、Cookie 等敏感信息，请妥善保管`, 'success');
       return;
     }
     showToast(summary ? `${where}（${summary}）` : `${where}（没有可带走的条目）`, 'success');
@@ -1089,6 +1109,50 @@ export function SettingsWorkspace() {
                     <p className="settings-menu-desc">正在统计缓存占用…</p>
                   )}
                 </SettingsPanel>
+              </div>
+            )}
+            {selectedSettingsSection === 'settings-general' && (
+              /* 标签数据（对齐 JHenTai 偏好设置里那两行）：开关决定「用不用」，数据版本
+                 写在副标题里，旁边那颗刷新按钮决定「什么时候去拿」——三件事分开，所以
+                 关掉中文翻译不会顺手把频次数据也停掉。此前只有数据层与服务开关，设置页
+                 里一个字都没有，等于开没开、数据到没到都没人知道。 */
+              <div className="settings-group">
+                <SettingsSwitch
+                  icon={<Languages />}
+                  label="标签中文翻译"
+                  hint={tagTranslationVersion
+                    ? `数据版本 ${formatTagDataVersion(tagTranslationVersion)}`
+                    : '标签与补全建议显示中文译名，打开后自动下载数据'}
+                  checked={preferenceDraft.tagTranslationEnabled}
+                  action={<button
+                    className="icon-button"
+                    type="button"
+                    disabled={tagDataPending !== undefined}
+                    aria-busy={tagDataPending === 'translation'}
+                    aria-label="更新标签翻译数据"
+                    title="更新标签翻译数据"
+                    onClick={() => void refreshTagData('translation')}
+                  ><RefreshCw aria-hidden="true" /></button>}
+                  onToggle={() => setTagDataEnabled('translation', !preferenceDraft.tagTranslationEnabled)}
+                />
+                <SettingsSwitch
+                  icon={<ArrowDownWideNarrow />}
+                  label="标签补全排序规则"
+                  hint={tagCountVersion
+                    ? `数据版本 ${formatTagDataVersion(tagCountVersion)} · 同分内按全站使用频次排序`
+                    : '默认智能排序，打开后同分内按全站使用频次排序'}
+                  checked={preferenceDraft.tagCountOrderEnabled}
+                  action={<button
+                    className="icon-button"
+                    type="button"
+                    disabled={tagDataPending !== undefined}
+                    aria-busy={tagDataPending === 'count'}
+                    aria-label="更新标签补全排序数据"
+                    title="更新标签补全排序数据"
+                    onClick={() => void refreshTagData('count')}
+                  ><RefreshCw aria-hidden="true" /></button>}
+                  onToggle={() => setTagDataEnabled('count', !preferenceDraft.tagCountOrderEnabled)}
+                />
               </div>
             )}
             {selectedSettingsSection !== 'settings-general' && (
@@ -1532,7 +1596,11 @@ export function SettingsWorkspace() {
             {/* 算力中心两组：本机对外提供算力 + 把一页交给远端算。两边的设置互不
                 影响；「作为算力中心」那一组在能力齐全前是关着的（后端也会拦一次）。 */}
             {selectedSettingsSection === 'settings-advanced' && (
-              <ComputeCenterSettingsGroup preferences={preferenceDraft} editPreferences={editPreferences} />
+              <ComputeCenterSettingsGroup
+                preferences={preferenceDraft}
+                editPreferences={editPreferences}
+                mobile={platformName === 'android' || platformName === 'ios'}
+              />
             )}
             {/* DLSSNR：只在 Windows 桌面、支持系列的 N 卡且这个构建有 NGX 核心时
                 才画出来（组件自己按 status 判断；还没装片段的机器正是来挑一种下载的）。 */}

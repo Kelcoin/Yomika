@@ -59,6 +59,10 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   const tagTranslationOn = preferences.tagTranslationEnabled;
   setTagTranslationServiceEnabled(tagTranslationOn);
   setTagCountOrderEnabled(preferences.tagCountOrderEnabled);
+  // 频次数据只在它自己的开关打开时拉：那是十几 MB 的一份表（mokurin000/e-hentai-tag-count），
+  // 与翻译库不是一件事。从前它挂在翻译那个条件里——关了翻译仍然下载它，开着排序开关
+  // 但关掉翻译时反而不下载。`refresh()` 自带版本检查与并发去重，重复调用是空转。
+  if (preferences.tagCountOrderEnabled) void refreshTagCounts().catch(() => undefined);
   try { window.localStorage.setItem('yomika.last-tag-translation', String(tagTranslationOn)); } catch { /* storage unavailable */ }
   writeNavMirror(preferences);
 }
@@ -141,7 +145,6 @@ try {
   if (window.localStorage.getItem('yomika.last-tag-translation') !== 'false') {
     setTagTranslationServiceEnabled(true);
     void initializeTagTranslations();
-    void refreshTagCounts().catch(() => undefined);
   }
 } catch { /* storage can be unavailable */ }
 

@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
-import { MAX_DLSSNR_PASSES } from './nativeDlssnrRepository';
 
 /** 一项能力：移动端据此显示「对面有什么、能不能用」。 */
 export const ComputeCapabilitySchema = z.object({
@@ -37,6 +36,24 @@ export type ComputeCenterStatus = z.output<typeof ComputeCenterStatusSchema>;
  * 本机前端发起的，除了这条事件它没有任何别的办法知道列表变了。 */
 export const COMPUTE_CENTER_PAIRING_CHANGED_EVENT = 'compute-center-pairing-changed';
 
+/** 有人请求配对，本机要显示六位码：本机 HTTP 服务的 `/v2/pair/request` 广播这条事件
+ *  （Rust 侧同名常量 `PAIRING_CODE_EVENT`，见 `src-tauri/src/compute_center.rs`）。
+ *
+ *  码只给人看，所以它不走命令的返回值：发起配对的是**另一台设备**，本机前端什么都没调用，
+ *  除了这条广播没有别的来路。 */
+export const COMPUTE_CENTER_PAIRING_CODE_EVENT = 'compute-center-pairing-code';
+
+/** 配对码通告：`code` 是要在对面输入的六位数字，`name` / `address` 是那台设备的自称与 IP
+ *  （给它一个「这是谁在请求」的交代），`expiresInSeconds` 供前端做倒计时。 */
+export const PairingCodeNoticeSchema = z.object({
+  code: z.string().min(1),
+  name: z.string().default(''),
+  address: z.string().default(''),
+  expiresInSeconds: z.number().int().positive().default(90),
+});
+
+export type PairingCodeNotice = z.output<typeof PairingCodeNoticeSchema>;
+
 export const RemoteCapabilitiesSchema = z.object({
   service: z.string(),
   version: z.number().int(),
@@ -52,33 +69,28 @@ export type DiscoveredDevice = z.output<typeof DiscoveredDeviceSchema>;
 const PairRequestSchema = z.object({ requestId: z.string() });
 const PairResultSchema = z.object({ token: z.string(), name: z.string() });
 
-/** 远端处理参数：发什么、用什么模型。 */
-export const RemoteOpSchema = z
-  .object({
-    /** `upscale` / `decensor` / `dlssnr`。 */
-    op: z.enum(['upscale', 'decensor', 'dlssnr']).default('upscale'),
-    modelId: z.string().max(128).default(''),
-    scale: z.number().int().min(1).max(4).default(2),
-    /** DLSSNR 的层参数，形状与本地那份一致，上限也跟本地同源（`MAX_DLSSNR_PASSES`）——
-     *  层数上限在仓库里只应该有一份数字，这里再写一个 `3` 就会两头对不上。
-     *  而且这里不比本地那份更严：超上限的层**切掉**而不是让校验失败。`serializeRemoteOps`
-     *  用的是会抛的 `.parse()`（层数过多会让这次偏好整个写不进去），`parseRemoteOps` 用的是
-     *  `safeParse`（失败就整段回默认：`enabled:false`、op 回 `upscale`）。层列表只是参数，
-     *  少几层比「用户选的远端处理一声不响地消失」好。 */
-    dlssnrPasses: z.preprocess(
-      (value) => (Array.isArray(value) ? value.slice(0, MAX_DLSSNR_PASSES) : value),
-      z.array(z.record(z.string(), z.union([z.number(), z.boolean()]))).default([]),
-    ),
-  })
-  .strip();
+/** 远端能提供的那几档；`id` 与对面 `/v2/capabilities` 里 `Capability.id` 同一套。 */
+export const REMOTE_SERVICE_IDS = ['upscale', 'decensor', 'dlssnr'] as const;
 
-export type RemoteOp = z.output<typeof RemoteOpSchema>;
+export type RemoteService = (typeof REMOTE_SERVICE_IDS)[number];
 
-/** 远端处理的设置：只作用于远端那一次处理，不动两侧任何一方的本机设置。 */
+/** 对面这份清单里，某一档现在能不能用（没拿到清单就是不能用）。 */
+export function remoteServiceReady(capabilities: RemoteCapabilities | undefined, service: RemoteService): boolean {
+  return capabilities?.capabilities.some((item) => item.id === service && item.ready) === true;
+}
+
+/** 远端处理的设置：只剩「用不用」与「配过哪些设备」。
+ *
+ *  从前这里还存着一份「这一次处理怎么做」——哪一档、哪个模型、放大几倍、DLSSNR 走哪几层，
+ *  现在整个删掉了。理由不只是「设置项太多」：对面 `/v2/process` 在客户端不传 `model_id`
+ *  时取的是**它自己**的默认模型，不传 `dlssnr` 时取 `DlssnrSettings::default()`；本机再存
+ *  一套，只会出现「这边显示按 4 倍跑，对面其实照自己的设置跑 2 倍」这种对不上的情况。
+ *  处理方式固定跟随对面那份设置，本机只决定「用不用远端」和「这一页做哪几档」。
+ *
+ *  `.strip()`：旧数据里多出来的那几个键读进来直接丢掉，用户升上来不会因为多几个键就回默认。 */
 export const RemoteOpsSchema = z
   .object({
     enabled: z.boolean().default(false),
-    op: RemoteOpSchema.default({}),
     pairedDevices: z.array(z.object({ address: z.string().max(256), name: z.string().max(80), token: z.string().max(128) })).max(8).default([]),
   })
   .strip();
@@ -87,7 +99,6 @@ export type RemoteOps = z.output<typeof RemoteOpsSchema>;
 
 export const DEFAULT_REMOTE_OPS: RemoteOps = {
   enabled: false,
-  op: { op: 'upscale', modelId: '', scale: 2, dlssnrPasses: [] },
   pairedDevices: [],
 };
 
@@ -146,12 +157,16 @@ export class NativeComputeCenterRepository {
     return invokeCommand('remote_compute_capabilities', { url, token }, RemoteCapabilitiesSchema);
   }
 
-  /** 把本机缓存里的一页发给远端处理，取回 PNG 字节。起点由阅读器自动选择。 */
+  /** 把本机缓存里的一页发给远端处理，取回 PNG 字节。起点由阅读器自动选择。
+   *
+   *  `params.op` 仍要发（Rust 侧那个字段是必填），`params.chain` 才是这一页要做哪几档；
+   *  两者不一致时以 `chain` 为准。**不发模型与参数**：对面按自己的设置跑。 */
   remoteProcess(input: {
     url: string;
     token: string;
     params: {
       op: string;
+      chain?: readonly string[];
       modelId?: string;
       scale?: number;
       dlssnr?: unknown;

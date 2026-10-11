@@ -57,11 +57,18 @@ describe('NativeImageCacheAdapter', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    const transform = remoteTransform({ device: '192.168.1.9:47653', source: 'enhanced', op: 'dlssnr', modelId: '', scale: 2, passes: '' });
+    const transform = remoteTransform({ device: '192.168.1.9:47653', source: 'enhanced', chain: ['decensor', 'dlssnr'] });
     const identity = { scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'remote' as const, pageIndex: 2, modelId: 'local-upscale', transform };
     await new NativeImageCacheAdapter().fetch(identity);
-    expect(adapter).toHaveBeenCalledWith('remote_compute_process', { input: expect.objectContaining({ source: 'enhanced', upscaleModel: 'local-upscale' }) });
-    const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', op: 'dlssnr', modelId: '', scale: 2, passes: '' });
+    expect(adapter).toHaveBeenCalledWith('remote_compute_process', {
+      // 键传的是「做哪几档」这一串；模型/倍数/层数一个都不发，由对面那份设置决定。
+      input: expect.objectContaining({
+        source: 'enhanced',
+        upscaleModel: 'local-upscale',
+        params: { op: 'decensor', chain: ['decensor', 'dlssnr'] },
+      }),
+    });
+    const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', chain: ['decensor', 'dlssnr'] });
     expect(createImageCacheKey(identity)).not.toBe(createImageCacheKey({ ...identity, transform: otherDevice }));
   });
 

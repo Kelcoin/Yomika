@@ -4,6 +4,7 @@ import { afterEach, vi } from 'vitest';
 import { setImageDecoderForTests } from '../src/lib/decodeImage';
 import { resetRouteCacheForTests } from '../src/lib/routeCache';
 import { resetOverlayBackGuardForTests } from '../src/lib/overlayBackGuard';
+import { resetServerPresenceForTests } from '../src/lib/serverPresence';
 import { registerTauriListener, resetTauriEvents } from './tauriEvents';
 
 // jsdom 里没有 Tauri 的事件总线，`listen` 会 reject（应用里那句 `.catch` 把它咽掉），
@@ -30,6 +31,9 @@ afterEach(() => {
   resetTauriEvents();
   // 浮层的返回栈也是模块级的：上一个用例留下的浮层会决定下一个用例的返回行为。
   resetOverlayBackGuardForTests();
+  // 「有没有服务器」同样记在模块里，而且它是**首帧初值**：上一个用例读到过
+  // 「一台都没有」的话，下一个用例的骨架就没了。
+  resetServerPresenceForTests();
   // 图片解码器同理：一个用例装上的假解码器会决定下一个用例换不换 src。复位到默认的
   // 那个（见下），而不是 undefined——jsdom 里真解码会一直挂着。
   setImageDecoderForTests(alreadyDecoded);

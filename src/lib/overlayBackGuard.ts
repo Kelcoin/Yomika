@@ -1,24 +1,39 @@
 import { useEffect, useRef } from 'react';
 
-/** 一个开着的浮层：关掉它的动作，以及「刚才没关掉就把守卫补回去」。 */
-type Overlay = { close: () => void; restore: () => void };
+/** 一个开着的浮层：关掉它的动作、「刚才没关掉就把守卫补回去」，以及它在历史里的层号。 */
+type Overlay = { close: () => void; restore: () => void; depth: number };
 
 const stack: Overlay[] = [];
-/** 自己按下的那几次后退：`popstate` 要认出来并忽略。 */
-let selfPops = 0;
 let bound = false;
 
+/**
+ * 现在这一格历史是守卫区里的第几层。
+ *
+ * 压守卫时把层号写进 `history.state.yomikaOverlay`，返回手势落地时读的就是它：裸的页面格
+ * （路由自己压的、或者被一次真跳转替换掉的）读到 0。
+ */
+function guardDepth(): number {
+  const depth = (window.history.state as { yomikaOverlay?: unknown } | null)?.yomikaOverlay;
+  return typeof depth === 'number' && Number.isFinite(depth) && depth > 0 ? depth : 0;
+}
+
 function onPopState() {
-  if (selfPops > 0) {
-    selfPops -= 1;
-    return;
+  // 退几层由**落地那一格的层号**说了算，不由事件个数说了算。手机上同一次手势会被补发成
+  // 两个 `popstate`（一个是延迟送达的）；按事件个数退就会一次关掉两层——用户看到的是
+  // 「当前这一层和整个页面一起返回了」。
+  const landedAt = guardDepth();
+  const layers = stack.length - landedAt;
+  // <= 0：这一下没有退进守卫区——补发的重复事件、退的是压在守卫上面的页面格、或者是我们
+  // 自己那次 `history.back()` 落回了已经对齐的层号。
+  if (layers <= 0) return;
+  for (let index = 0; index < layers; index += 1) {
+    const top = stack.pop();
+    if (!top) break;
+    top.close();
+    // 有的浮层会拒绝这一次关闭（正在忙的确认框、脏表单）：那它得把自己的守卫补回去，
+    // 不然下一次返回就直接弹到页面上去了。
+    window.setTimeout(top.restore, 0);
   }
-  const top = stack.pop();
-  if (!top) return;
-  top.close();
-  // 有的浮层会拒绝这一次关闭（正在忙的确认框、脏表单）：那它得把自己的守卫补回去，
-  // 不然下一次返回就直接弹到页面上去了。
-  window.setTimeout(top.restore, 0);
 }
 
 /**
@@ -49,36 +64,37 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
       bound = true;
     }
     const overlay: Overlay = {
+      depth: stack.length + 1,
       close: () => latestClose.current(),
       restore: () => {
         if (!openRef.current || stack.includes(overlay)) return;
+        overlay.depth = stack.length + 1;
         stack.push(overlay);
-        pushGuard(stack.length);
+        pushGuard(overlay.depth);
       },
     };
-    // 压守卫时这一页是哪个地址：关掉它的时候要拿这个判断「还是不是我们那一格」。
-    const guardUrl = currentUrl();
     stack.push(overlay);
-    pushGuard(stack.length);
+    pushGuard(overlay.depth);
     return () => {
       const index = stack.indexOf(overlay);
       // 历史里那一条已经被返回手势弹掉了（正是它关掉了这一层），这里不用再动历史。
       if (index < 0) return;
       stack.splice(index, 1);
-      // 这一层是**被一次真跳转带走的**（确认框点了「去更新」、把人送到设置页之类）：地址已经
-      // 不是压守卫时那一个了，说明有人在这条守卫上面压了新的一格（或把它替换掉了）。
-      // 这时再 `history.back()` 正好把刚跳过去的那一格退回来——用户看到的就是「点了没反应」。
-      // 那一条由这次跳转自己收拾，守卫什么都不做。
-      if (currentUrl() !== guardUrl) return;
-      selfPops += 1;
-      window.history.back();
+      const landedAt = guardDepth();
+      // 我们压的那一格已经不在了：被一次真跳转替换掉了（确认框点了「去更新」、把人送到设置
+      // 页之类）。地址可能原样没变——所以判据是层号而不是地址——这时再 `history.back()`
+      // 退掉的是刚跳过来的那一格，用户看到的是「点了没反应」，严重时整页跟着后退。
+      if (landedAt === 0) return;
+      if (landedAt === overlay.depth) {
+        // 还站在自己那一格上：把这一格也收回去，免得下一次返回先弹掉没人认领的记录。落地时
+        // `stack.length` 恰好是 `depth - 1`，`onPopState` 靠层号对齐认出这是自己那一下。
+        window.history.back();
+        return;
+      }
+      // 退掉的是压在它上面的那一格（外层浮层先关了）：把当前格的层号对齐到现在的层数。
+      renumberGuard(stack.length);
     };
   }, [open]);
-}
-
-/** 当前地址（不含 hash）：守卫条目压的就是它。 */
-function currentUrl(): string {
-  return `${window.location.pathname}${window.location.search}`;
 }
 
 /** URL 不变，所以路由不动；`idx` 之类的既有状态照搬，react-router 靠它算 pop 的方向。 */
@@ -86,8 +102,15 @@ function pushGuard(depth: number): void {
   window.history.pushState({ ...(window.history.state ?? {}), yomikaOverlay: depth }, '');
 }
 
+/** 就地改写当前这一格的层号（同样不动 URL、不压新格）。 */
+function renumberGuard(depth: number): void {
+  const state: Record<string, unknown> = { ...(window.history.state ?? {}) };
+  if (depth > 0) state.yomikaOverlay = depth;
+  else delete state.yomikaOverlay;
+  window.history.replaceState(state, '');
+}
+
 /** 测试用：栈是模块级的，一个用例留下的浮层会决定下一个用例的返回行为。 */
 export function resetOverlayBackGuardForTests(): void {
   stack.length = 0;
-  selfPops = 0;
 }

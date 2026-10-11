@@ -384,6 +384,7 @@ fn the_centers_upscale_op_goes_through_the_worker() {
 
     let page = page_png();
     let params = ProcessParams {
+        chain: Vec::new(),
         op: "upscale".into(),
         model_id: Some("probe-model".into()),
         scale: Some(2),
@@ -423,6 +424,7 @@ fn the_centers_decensor_op_goes_through_the_worker() {
 
     let page = page_png();
     let params = ProcessParams {
+        chain: Vec::new(),
         op: "decensor".into(),
         model_id: Some("aletheia-lens".into()),
         scale: None,
@@ -455,6 +457,7 @@ fn the_centers_dlssnr_op_goes_through_the_worker() {
 
     let page = page_png();
     let params = ProcessParams {
+        chain: Vec::new(),
         op: "dlssnr".into(),
         model_id: None,
         scale: None,

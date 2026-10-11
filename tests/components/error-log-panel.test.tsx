@@ -1,5 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, vi } from 'vitest';
 
 import { ERROR_LOG_REFRESH_MS, ErrorLogPanel, useErrorLog } from '../../src/components/ErrorLogPanel';
@@ -184,5 +186,26 @@ describe('error log panel', () => {
     expect(copied).toContain('core/panic');
     expect(copied).toContain('src/commands/compute_center.rs:761');
     expect(copied).toContain('提交: abcdef123456');
+  });
+
+  /** 面板的高度变化要能读出「长出来」这件事：jsdom 里没有排版，动画只能按源码对账。
+   *  （用户报的「错误日志页面的高度变化没有动画」。） */
+  it('grows every expandable region instead of jumping', () => {
+    const read = (path: string) => readFileSync(resolve(__dirname, '../..', path), 'utf8').replace(/\r\n/g, '\n');
+    const css = read('src/styles/shell.css');
+    const reveal = /\.error-log-reveal \{([^}]*)\}/.exec(css)?.[1] ?? '';
+    // 展开后的高度就是内容的自然高度；进场从 0fr 起，靠网格行过渡读成「长出来」。
+    expect(reveal).toContain('grid-template-rows: 1fr');
+    expect(reveal).toMatch(/animation: error-log-reveal var\(--motion-standard\)/);
+    expect(css).toMatch(/@keyframes error-log-reveal \{\s*from \{ grid-template-rows: 0fr;/);
+    // 剪掉滚动：不然 0fr 那一格还是会被内容撑开。
+    expect(css).toMatch(/\.error-log-reveal > :not\(\.error-log-list\) \{[^}]*overflow: hidden;/);
+    // 列表自己是滚动容器，别被上面那条压掉。
+    expect(css).toMatch(/\.error-log-reveal > :not\(\.error-log-list\)/);
+    expect(css).toMatch(/prefers-reduced-motion[^}]*\{[^}]*\.error-log-reveal \{ animation: none; \}/);
+
+    // 三处会改高度的内容都住在 reveal 里：列表、一条记录的详情、相关信息。
+    const source = read('src/components/ErrorLogPanel.tsx');
+    expect(source.match(/className="error-log-reveal"/g) ?? []).toHaveLength(3);
   });
 });

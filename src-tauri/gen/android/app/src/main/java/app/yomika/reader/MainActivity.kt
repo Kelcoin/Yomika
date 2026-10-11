@@ -44,10 +44,18 @@ class MainActivity : TauriActivity() {
       WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
     )
     val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+    // androidx 交来的 inset 是**物理像素**，而页面吃的是 CSS 像素（Android WebView 里
+    // 1 CSS px = 1 dp，`devicePixelRatio` 就是 density）：直接写进 `--safe-top` 会大出
+    // density 倍——3x 机上状态栏那 24dp 变成 72px，页面顶部与底栏上方各留一条空白
+    // （「移动端上下避让过大」）。键盘那一份不换算：它落在**视图**的内边距上，
+    // 而 View 本来就以物理像素计。
+    val density = resources.displayMetrics.density
+    val top = Math.round(bars.top / density)
+    val bottom = Math.round(bars.bottom / density)
     view.setPadding(0, 0, 0, ime.bottom)
-    SystemBars.top = bars.top
-    SystemBars.bottom = bars.bottom
-    pushInsetsToPage(appWebView(view), bars.top, bars.bottom)
+    SystemBars.top = top
+    SystemBars.bottom = bottom
+    pushInsetsToPage(appWebView(view), top, bottom)
     // 键盘那一份已经被内边距吃掉了，别再让 WebView 按它缩一次——两次叠加的结果是页面比
     // 可见区域还短一截。
     return WindowInsetsCompat.Builder(windowInsets)

@@ -11,6 +11,7 @@ import { SplashFrame } from '../components/SplashFrame';
 import { ToastProvider } from '../components/Toast';
 import { UpdateNotice } from '../components/UpdateNotice';
 import { ComputeWorkerNotice } from '../components/ComputeWorkerNotice';
+import { PairingCodeNotice } from '../components/PairingCodeNotice';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -100,6 +101,9 @@ export function App() {
         <UpdateNotice />
         {/* 计算进程的状态也是全应用一条：阅读器要用它，整本预扫也用它（§12.3）。 */}
         <ComputeWorkerNotice />
+        {/* 配对码同样挂在所有页面之外：请求来自**另一台设备**，人到那一刻不一定停在设置页
+            （阅读器里、任何路由上都要弹得出来）。 */}
+        <PairingCodeNotice />
       </ToastProvider>
     </PreferencesProvider>
   );

@@ -540,14 +540,15 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
     validate_preferences(&value)
 }
 
-pub fn save_preferences_to(
-    connection: &mut Connection,
-    value: PreferenceSnapshot,
-) -> Result<PreferenceSnapshot, String> {
-    let value = validate_preferences(&value)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
+/// 把一份偏好快照逐字段写回 `settings` 表里那些 `preferences.*` 的行。
+///
+/// 读的那一半（`load_preferences_from`）读的就是这些逐字段的行。远端来的应用设置
+/// （同步与导入）以前只写了一份名叫 `preferences` 的整份 JSON，读的人却一个也没有
+/// ——偏好因此永远落不了地；现在两份存储一起写，这张表就是唯一的写入口。
+pub(crate) fn write_preference_keys(
+    connection: &Connection,
+    value: &PreferenceSnapshot,
+) -> Result<(), String> {
     for (key, encoded) in [
         (THEME_KEY, serde_json::to_string(&value.theme)),
         (LAYOUT_KEY, serde_json::to_string(&value.default_layout)),
@@ -662,13 +663,25 @@ pub fn save_preferences_to(
             serde_json::to_string(&value.remote_compute_ops),
         ),
     ] {
-        transaction
+        connection
             .execute(
                 "INSERT INTO settings (key,value_json) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
                 params![key, encoded.map_err(|error| error.to_string())?],
             )
             .map_err(|error| error.to_string())?;
     }
+    Ok(())
+}
+
+pub fn save_preferences_to(
+    connection: &mut Connection,
+    value: PreferenceSnapshot,
+) -> Result<PreferenceSnapshot, String> {
+    let value = validate_preferences(&value)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    write_preference_keys(&transaction, &value)?;
     // 偏好进同步日志（全局范围、单对象）：勾了「应用设置」的设备之间按字段合并。
     // 属于本机的两项（下载目录、缓存上限）留在本机：推上去只会让别的设备把自己的
     // 设置改成一台机器上的路径。

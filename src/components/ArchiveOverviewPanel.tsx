@@ -54,8 +54,10 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
           tag groups down by a line for no reason. */}
       <div className="reader-overview-identity">
         {/* 封面装在一个裁切框里：SFW 的模糊与 1.12 倍放大都会画到元素盒子外面，
-            没有 overflow: hidden 就会糊到旁边的页数、标签上。 */}
-        {cover && <span className="reader-overview-cover-frame"><img className="reader-overview-cover" src={cover} alt="" decoding="async" /></span>}
+            没有 overflow: hidden 就会糊到旁边的页数、标签上。
+            SFW 下这张封面在触屏上要"按住才看清"，而 pressFeedback 只标记可点元素：
+            这个框自己不是可点元素，所以由它认领这次按压（data-press-surface）。 */}
+        {cover && <span className="reader-overview-cover-frame" data-press-surface><img className="reader-overview-cover" src={cover} alt="" decoding="async" /></span>}
         <dl className="reader-overview-stats" aria-label="档案信息">
           {facts.map(({ kind, label, value }) => (
             <div key={kind} data-fact={kind} title={label}>

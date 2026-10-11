@@ -283,58 +283,66 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
         }}><Copy aria-hidden="true" /></button>
       </div>
       {factsOpen && (
-        <div className="error-log-facts-body">
-          {facts.sections.map((section) => (
-            <div key={section.title} className="error-log-facts-section">
-              <h3>{section.title}</h3>
-              <dl>
-                {section.rows.map((row) => (
-                  <div key={row.label}>
-                    <dt>{row.label}</dt>
-                    <dd>{row.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ))}
+        <div className="error-log-reveal">
+          <div className="error-log-facts-body">
+            {facts.sections.map((section) => (
+              <div key={section.title} className="error-log-facts-section">
+                <h3>{section.title}</h3>
+                <dl>
+                  {section.rows.map((row) => (
+                    <div key={row.label}>
+                      <dt>{row.label}</dt>
+                      <dd>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>
 
-    {entries && entries.length > 0 && <ul className="error-log-list" aria-label="错误记录">
-      {/* 原生侧给的就是从新到旧的顺序（本次在前、上次在后，各自新的在上），这里原样铺开。
-          展开按 `entryKey` 记而不是序号：轮询每两秒把列表换一份，序号会串到隔壁那条上。 */}
-      {entries.map((entry) => {
-        const key = entryKey(entry);
-        const open = openEntry === key;
-        const { detail, stack } = splitDetail(entry);
-        return <li key={key} className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
-          <div className="error-log-entry-head">
-            <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={() => setOpenEntry(open ? undefined : key)}>
-              <span className="error-log-entry-title" title={entry.message}>{entry.message}</span>
-              <span className="error-log-entry-meta">
-                <span className="error-log-time">{formatEntryTime(entry.at)}</span>
-                <span className="error-log-source" title={entry.source}>{entry.source}</span>
-              </span>
-              <ChevronDown className={`error-log-caret${open ? ' is-open' : ''}`} aria-hidden="true" />
-            </button>
-            <button className="error-log-icon" type="button" aria-label="复制这条记录" title="复制这条记录" onClick={() => void copyEntry(entry)}>
-              <Copy aria-hidden="true" />
-            </button>
-          </div>
-          {open && (
-            <div className="error-log-entry-body">
-              <h4>错误详情</h4>
-              <pre className="error-log-code">{detail ?? entry.message}</pre>
-              {stack && <>
-                <h4>堆栈跟踪</h4>
-                <pre className="error-log-code">{stack}</pre>
-              </>}
+    {/* 第一次读回来时列表整块长出来（`.error-log-reveal` 的 0fr → 1fr）：
+        面板从「正在读取…」跳到几十条记录，那一截高度变化不该是硬跳。 */}
+    {entries && entries.length > 0 && <div className="error-log-reveal">
+      <ul className="error-log-list" aria-label="错误记录">
+        {/* 原生侧给的就是从新到旧的顺序（本次在前、上次在后，各自新的在上），这里原样铺开。
+            展开按 `entryKey` 记而不是序号：轮询每两秒把列表换一份，序号会串到隔壁那条上。 */}
+        {entries.map((entry) => {
+          const key = entryKey(entry);
+          const open = openEntry === key;
+          const { detail, stack } = splitDetail(entry);
+          return <li key={key} className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
+            <div className="error-log-entry-head">
+              <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={() => setOpenEntry(open ? undefined : key)}>
+                <span className="error-log-entry-title" title={entry.message}>{entry.message}</span>
+                <span className="error-log-entry-meta">
+                  <span className="error-log-time">{formatEntryTime(entry.at)}</span>
+                  <span className="error-log-source" title={entry.source}>{entry.source}</span>
+                </span>
+                <ChevronDown className={`error-log-caret${open ? ' is-open' : ''}`} aria-hidden="true" />
+              </button>
+              <button className="error-log-icon" type="button" aria-label="复制这条记录" title="复制这条记录" onClick={() => void copyEntry(entry)}>
+                <Copy aria-hidden="true" />
+              </button>
             </div>
-          )}
-        </li>;
-      })}
-    </ul>}
+            {open && (
+              <div className="error-log-reveal">
+                <div className="error-log-entry-body">
+                  <h4>错误详情</h4>
+                  <pre className="error-log-code">{detail ?? entry.message}</pre>
+                  {stack && <>
+                    <h4>堆栈跟踪</h4>
+                    <pre className="error-log-code">{stack}</pre>
+                  </>}
+                </div>
+              </div>
+            )}
+          </li>;
+        })}
+      </ul>
+    </div>}
 
     {/* 四个动作铺在底部、各占一份宽（`.settings-menu-actions` 的既有规则就是「一行动作平分
         宽度」）：清空是破坏性的那一个，用 `is-danger` 说清楚。 */}

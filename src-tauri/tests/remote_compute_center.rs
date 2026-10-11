@@ -207,6 +207,7 @@ fn page_png() -> Vec<u8> {
 /// 一条 `/v2/process` 请求（和 `remote_process` 发的一模一样：参数走 base64 头）。
 fn process_request(page: &[u8]) -> Vec<u8> {
     let params = ProcessParams {
+        chain: Vec::new(),
         op: "upscale".to_string(),
         model_id: Some(REMOTE_MODEL.to_string()),
         scale: Some(2),

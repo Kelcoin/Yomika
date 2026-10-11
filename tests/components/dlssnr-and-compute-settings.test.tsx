@@ -13,7 +13,7 @@ import { DEFAULT_PREFERENCES, type PreferenceSnapshot } from '../../src/reposito
 import { DlssnrSettingsGroup } from '../../src/components/DlssnrSettingsGroup';
 import { ToastProvider } from '../../src/components/Toast';
 import { MAX_DLSSNR_PASSES, parseDlssnrPasses, serializeDlssnrPasses } from '../../src/repositories/nativeDlssnrRepository';
-import { parseRemoteOps, serializeRemoteOps, COMPUTE_CENTER_PAIRING_CHANGED_EVENT } from '../../src/repositories/nativeComputeCenterRepository';
+import { parseRemoteOps, serializeRemoteOps, DEFAULT_REMOTE_OPS, COMPUTE_CENTER_PAIRING_CHANGED_EVENT } from '../../src/repositories/nativeComputeCenterRepository';
 import { emitTauriEvent } from '../tauriEvents';
 
 afterEach(() => {
@@ -915,11 +915,30 @@ describe('compute center settings group', () => {
 
     await user.click(within(group).getByRole('button', { name: '已配对设备' }));
     const deviceDialog = await screen.findByRole('dialog', { name: '已配对设备' });
-    await user.click(within(deviceDialog).getByRole('button', { name: '刷新模型' }));
+    await user.click(within(deviceDialog).getByRole('button', { name: '刷新服务' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('remote_compute_capabilities', { url: '192.168.1.9:47653', token: 'remote-token' }));
     await waitFor(() => expect(within(deviceDialog).getByText(/DESKTOP-PC · 超分、DLSS5/)).toBeTruthy());
-    await user.click(within(deviceDialog).getByRole('button', { name: '超分 x4' }));
-    await waitFor(() => expect(adapter.mock.calls.some(([command, args]) => command === 'save_preferences' && String((args?.input as PreferenceSnapshot | undefined)?.remoteComputeOps).includes('upscale-x4'))).toBe(true));
+
+    // 远端能做什么就亮什么：能力标签照它对上来的 `ready` 亮/暗，能用的在外面那一片
+    // 小标签上看得见。（模型、倍数、层数这些「这次怎么做」的控件全都删了。）
+    const services = within(group).getByRole('group', { name: '远端可用服务' });
+    expect(within(services).getByText('超分')).toHaveClass('is-ready');
+    expect(within(services).getByText('DLSS5')).toHaveClass('is-ready');
+
+    // 第 8 项的判据：存下去的 remoteComputeOps 只剩「开不开」和「配过哪几台」——
+    // 这一次用哪个模型、放大几倍都不再由客户端记，写进去就等于把老毛病存回来。
+    // 取配完对之后那几次写盘（认刚配上的这台设备），逐次核对键集合。
+    // 第 8 项的判据：存下去的 remoteComputeOps 只剩「开不开」和「配过哪几台」——
+    // 这一次用哪个模型、放大几倍都不再由客户端记，写进去就等于把老毛病存回来。
+    // 取配完对之后那几次写盘（认刚配上的这台设备），逐次核对键集合。
+    const currentWrites = () => adapter.mock.calls
+      .filter(([command]) => command === 'save_preferences')
+      .map(([, args]) => (args?.input as PreferenceSnapshot | undefined)?.remoteComputeOps ?? '')
+      .filter((value) => value.includes('DESKTOP-PC'));
+    await waitFor(() => expect(currentWrites().length).toBeGreaterThan(0));
+    for (const value of currentWrites()) {
+      expect(Object.keys(JSON.parse(value) as Record<string, unknown>).sort()).toEqual(['enabled', 'pairedDevices']);
+    }
   });
 });
 
@@ -935,14 +954,21 @@ describe('derived settings storage', () => {
     expect(parseDlssnrPasses('{')).toHaveLength(1);
     expect(parseDlssnrPasses('[]')).toHaveLength(1);
 
-    const ops = parseRemoteOps(serializeRemoteOps({
-      enabled: true,
-      op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: [{ style: 1 }] },
-      pairedDevices: [],
-    }));
+    const ops = parseRemoteOps(serializeRemoteOps({ enabled: true, pairedDevices: [] }));
     expect(ops.enabled).toBe(true);
-    expect(ops.op.op).toBe('dlssnr');
-    expect(parseRemoteOps('not json').op.op).toBe('upscale');
+    expect(parseRemoteOps('not json')).toEqual(DEFAULT_REMOTE_OPS);
+
+    // 旧数据里那些「这次怎么做」的字段（op / modelId / scale / dlssnrPasses）读进来直接
+    // 丢掉，但 enabled 和配过的设备要留住：从前它们跟 op 挤在同一段 schema 里，字段一对
+    // 不上就整段回默认，用户会发现自己「配对没了」。
+    const legacy = parseRemoteOps(JSON.stringify({
+      enabled: true,
+      op: { op: 'dlssnr', modelId: 'upscale-x4', scale: 2, dlssnrPasses: [{ style: 1, intensity: 1 }] },
+      pairedDevices: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'remote-token' }],
+    }));
+    expect(legacy.enabled).toBe(true);
+    expect(legacy.pairedDevices).toHaveLength(1);
+    expect(Object.keys(legacy).sort()).toEqual(['enabled', 'pairedDevices']);
   });
 
   it('round-trips four and five saved layers and leaves the old three-layer data intact', () => {
@@ -968,32 +994,28 @@ describe('derived settings storage', () => {
     expect(parseDlssnrPasses(serializeDlssnrPasses([...layers, layers[0]!]))).toHaveLength(MAX_DLSSNR_PASSES);
   });
 
-  it('keeps four and five remote DLSSNR layers instead of dropping the whole op', () => {
-    /* 远端处理参数里还有第二份「层数」形状（`RemoteOpSchema.dlssnrPasses`）。它比本地那份
-       更容易被漏掉：上限在那里又写了一份常量 3，于是存 4/5 层时——写出去的时候
-       `serializeRemoteOps` 的 `.parse()` 直接抛错，读回来的时候 `parseRemoteOps` 静默回
-       `DEFAULT_REMOTE_OPS`（`enabled:false`、op 回 `upscale`），用户选的层参数一声不响地
-       消失。三处上限必须是同一个数。 */
-    const layers = [1, 2, 3, 4, 5].map((intensity) => ({ style: 1, intensity, autoMask: false }));
-    const stored = serializeRemoteOps({
+  it('reads back remote operations that still carry the retired op fields', () => {
+    /* 远端那份设置从前还记着「这一次用什么模型、放大几倍、DLSSNR 走几层」（`RemoteOpSchema`），
+       现在整段删了：客户端只留「开不开」和「配过哪几台」，模型与参数由对面自己的设置决定
+       （第 8 项）。老用户存下的那份 JSON 里那些字段还在，读的时候必须只是被忽略——
+       若为它们整段回 `DEFAULT_REMOTE_OPS`，用户会发现自己「远端处理被关了、设备也没了」。 */
+    const stored = JSON.stringify({
       enabled: true,
-      op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: layers },
-      pairedDevices: [],
+      op: { op: 'dlssnr', modelId: 'upscale-x4', scale: 4, dlssnrPasses: [1, 2, 3, 4, 5] },
+      pairedDevices: [{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'remote-token' }],
     });
     const ops = parseRemoteOps(stored);
     expect(ops.enabled).toBe(true);
-    expect(ops.op.op).toBe('dlssnr');
-    expect(ops.op.dlssnrPasses).toHaveLength(MAX_DLSSNR_PASSES);
-    expect(ops.op.dlssnrPasses.map((pass) => pass.intensity)).toEqual([1, 2, 3, 4, 5]);
+    expect(ops.pairedDevices).toEqual([{ address: '192.168.1.9:47653', name: 'DESKTOP-PC', token: 'remote-token' }]);
+    expect(Object.keys(ops).sort()).toEqual(['enabled', 'pairedDevices']);
 
-    // 超过上限的仍然只截到上限，而不是整段作废。
-    const over = parseRemoteOps(JSON.stringify({
-      enabled: true,
-      op: { op: 'dlssnr', modelId: '', scale: 2, dlssnrPasses: [...layers, layers[0]!] },
-      pairedDevices: [],
-    }));
-    expect(over.enabled).toBe(true);
-    expect(over.op.dlssnrPasses).toHaveLength(MAX_DLSSNR_PASSES);
+    // 而且写回去的时候不该再带上它们（否则删掉的字段会被这棵老数据复活）。
+    const written = serializeRemoteOps(ops);
+    expect(written).not.toMatch(/"(op|modelId|scale|dlssnrPasses)"/);
+
+    // 已配对设备本身还是坏的（缺 token / 不是数组）时，才轮到回默认。
+    expect(parseRemoteOps(JSON.stringify({ enabled: true, pairedDevices: [{ address: 'a' }] }))).toEqual(DEFAULT_REMOTE_OPS);
+    expect(parseRemoteOps(JSON.stringify({ enabled: true, pairedDevices: 'nope' }))).toEqual(DEFAULT_REMOTE_OPS);
   });
 });
 

@@ -17,7 +17,13 @@ import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSourc
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
-import { parseRemoteOps } from '../repositories/nativeComputeCenterRepository';
+import {
+  NativeComputeCenterRepository,
+  parseRemoteOps,
+  remoteServiceReady,
+  type RemoteCapabilities,
+  type RemoteService,
+} from '../repositories/nativeComputeCenterRepository';
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import { loadLocalRenditions, loadReaderComputedPage, READER_UPSCALE_STAGE_ID, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
 import type { ImageCacheIdentity } from '../domain/cache';
@@ -155,6 +161,43 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const goBack = useReturnNavigation();
   const { showToast } = useToast();
   const { preferences, save } = usePreferences();
+  /** 远端那一档配了什么：只有「用不用」与「配过哪台设备」。
+   *
+   * 处理方式（哪一档、哪个模型、放大几倍）不在这里——它跟随**对面**那份设置，见
+   * `RemoteOpsSchema` 的注释。这一段要排在下面 DLSSNR 那段之前：本地那次检查在走远端
+   * 时整段不跑（见那里的注释）。 */
+  const remoteOps = useMemo(
+    () => parseRemoteOps(preferences.remoteComputeOps),
+    [preferences.remoteComputeOps],
+  );
+  const remoteConfigured = remoteOps.enabled
+    && !preferences.computeCenterEnabled
+    && remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)
+    && preferences.remoteComputeUrl.trim() !== ''
+    && preferences.remoteComputeToken.trim() !== '';
+  const centerRepository = useMemo(() => new NativeComputeCenterRepository(), []);
+  /** 对面有哪些处理服务能用：连上远端之后，阅读器里那三枚开关**按这份清单**说话。
+   *
+   * 从前这里看的是本机装没装模型（`upscaleModel !== ''` 那一套），于是手机上「连上了
+   * 远端」和「三枚按钮全是灰的」同时出现——它本来就没有、也不需要那些模型。清单到手
+   * 之前三档一律不可用：宁可先不显示，也不能先按本机的答案显示一遍再跳。
+   *
+   * 拉清单失败（对面没开着）就是「一档都没有」，不弹错：阅读器不该在打开一本漫画的
+   * 时候先报一句网络错。 */
+  const [remoteCapabilities, setRemoteCapabilities] = useState<RemoteCapabilities>();
+  useEffect(() => {
+    if (!remoteConfigured) {
+      setRemoteCapabilities(undefined);
+      return;
+    }
+    let cancelled = false;
+    void centerRepository.remoteCapabilities(preferences.remoteComputeUrl, preferences.remoteComputeToken).then((result) => {
+      if (cancelled) return;
+      setRemoteCapabilities(result.ok ? result.value : undefined);
+    });
+    return () => { cancelled = true; };
+  }, [centerRepository, remoteConfigured, preferences.remoteComputeUrl, preferences.remoteComputeToken]);
+  const remoteServiceUp = (service: RemoteService) => remoteServiceReady(remoteCapabilities, service);
   /** DLSSNR 与远端处理要先检查本机能力或配对信息。
    *
    * 但「设置里开了」只是一句**持久化**的意图：它可能来自另一台机器、或者那个 DLL
@@ -167,6 +210,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 一页都弹一次。 */
   const dlssnrNoticeRef = useRef<string>();
   useEffect(() => {
+    // 走远端时这一趟本机不跑 DLSSNR：本地那份检查（有没有 DLL、版本对不对）说的不是
+    // 这一件事，而且它在手机上必然失败——真去问，就会把用户手动打开的开关自动关掉。
+    if (remoteConfigured) return;
     if (!dlssnrRequested) {
       setDlssnrReady(false);
       dlssnrNoticeRef.current = undefined;
@@ -195,31 +241,26 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       void save({ ...current, dlssnrEnabled: false });
     });
     return () => { cancelled = true; };
-  }, [dlssnrRequested, save, showToast]);
+  }, [dlssnrRequested, remoteConfigured, save, showToast]);
   const [dlssnrWanted, setDlssnrWanted] = useState(false);
-  const dlssnrConfigured = dlssnrRequested && dlssnrReady && dlssnrWanted;
-  const remoteOps = useMemo(
-    () => parseRemoteOps(preferences.remoteComputeOps),
-    [preferences.remoteComputeOps],
-  );
-  const remoteConfigured = remoteOps.enabled
-    && !preferences.computeCenterEnabled
-    && remoteOps.pairedDevices.some((device) => device.address === preferences.remoteComputeUrl && device.token === preferences.remoteComputeToken)
-    && preferences.remoteComputeUrl.trim() !== ''
-    && preferences.remoteComputeToken.trim() !== '';
   // 队列回调只依赖稳定值，设置改了就靠这两个 ref 取最新的一份（改设置本身会让
   // derived 重新排队，见下面的 enhancementToken）。
   const dlssnrPassesRef = useRef(preferences.dlssnrPasses);
   dlssnrPassesRef.current = preferences.dlssnrPasses;
-  const remoteOpsRef = useRef(remoteOps);
-  remoteOpsRef.current = remoteOps;
   const prefetchDistance = preferences.prefetchPages;
   // A backend with no model runs the nearest-neighbour fallback, which returns
   // the same pixels at four times the bytes — strictly worse than the plain
   // page. Upscaling therefore needs a model, not just a backend.
-  const upscaleConfigured = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+  //
+  // 走远端时这两条都不看本机：一档在这一台能不能用，由**对面**那份能力清单说了算。
+  const upscaleConfigured = remoteConfigured
+    ? remoteServiceUp('upscale')
+    : preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
   // Settings grant availability; every reading session starts with original images.
-  const decensorConfigured = preferences.decensorModel !== '';
+  const decensorConfigured = remoteConfigured ? remoteServiceUp('decensor') : preferences.decensorModel !== '';
+  /** 一档在这一次阅读里到底能不能用：远端看对面的清单，本机看自己跑不跑得起来。 */
+  const dlssnrAvailable = remoteConfigured ? remoteServiceUp('dlssnr') : dlssnrRequested && dlssnrReady;
+  const dlssnrConfigured = dlssnrAvailable && dlssnrWanted;
   /** Per-session overrides for the two enhancements, driven from the reader's own
    * toolbar. Settings decide whether a model exists; these decide whether this
    * sitting uses it, which is the only way to see what either one does to the
@@ -238,7 +279,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [archiveId]);
   useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
   useEffect(() => { if (!decensorConfigured) setDecensorWanted(false); }, [decensorConfigured]);
-  useEffect(() => { if (!dlssnrRequested) setDlssnrWanted(false); }, [dlssnrRequested]);
+  useEffect(() => { if (!dlssnrAvailable) setDlssnrWanted(false); }, [dlssnrAvailable]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
   const decensorEnabled = decensorConfigured && decensorWanted;
   /** 处理中那枚小胶囊写什么：正在跑哪一档就说哪一档。远端/DLSSNR 在链路上另算一步，
@@ -305,8 +346,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const visiblePagesRef = useRef<ReadonlySet<number>>(new Set());
   /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分/去码。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
-   * 结果）；本地超分/去码是前两者的输入。 */
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; tier: DerivedTier }>>([]);
+   * 结果）；本地超分/去码是前两者的输入。
+   *
+   * `remoteChain` 是交给远端的那一串（按顺序做哪几档），做几档由**阅读器里开着
+   * 哪几档**决定，模型与参数不跟着走。 */
+  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
   const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
@@ -327,7 +371,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedWarmedRef = useRef(new Set<number>());
   /** 当前这一轮的模型与档位。后台任务是从游标上补进队列的，取不到 `requestDerived`
    * 的局部变量，所以在排这一轮的时候在这里留一份。 */
-  const derivedConfigRef = useRef<{ decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local' }>({ decensorModel: '', upscaleModel: '', engine: 'local' });
+  const derivedConfigRef = useRef<{ decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[] }>({ decensorModel: '', upscaleModel: '', engine: 'local', remoteChain: [] });
   /** 每页一次任务的取消牌（正在跑或正在排队的那一个）。切页、换开关、离开阅读器时
    * 全部 abort——前端 abort 会顺着 `taskId` 叫停原生那侧的循环（见 nativeImageCache）。 */
   const derivedAbortsRef = useRef(new Map<number, AbortController>());
@@ -873,13 +917,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               : {
                 ...identity,
                 rendition: 'remote',
+                // 只报「这一页要做哪几档」；模型、放大倍数、层参数都由对面那份设置决定。
                 transform: remoteTransform({
                   device: preferences.remoteComputeUrl,
                   source: baseRendition,
-                  op: remoteOpsRef.current.op.op,
-                  modelId: remoteOpsRef.current.op.modelId,
-                  scale: remoteOpsRef.current.op.scale,
-                  passes: JSON.stringify(remoteOpsRef.current.op.dlssnrPasses),
+                  chain: job.remoteChain,
                 }),
                 ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
@@ -984,8 +1026,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 所以一本两百页的档案不会只剩视口里那几页有结果。 */
   const requestDerived = useCallback((indexes: readonly number[]) => {
     visiblePagesRef.current = new Set(indexes);
-    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured && !remoteConfigured) {
+    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured) {
       // 增强全关：这一轮连同后台预处理一起作废，重新打开时从头排一次。
+      //
+      // 这里不再带 `!remoteConfigured`：走远端时上面这三个值本身就是「对面清单里能用、
+      // 而且这次开着」的那几档，三档全关就是「这次不做处理」。从前那个条件让「配了远端
+      // 但一档都没开」也排一整本预扫——每一页都白跑一趟远端。
       derivedSweepRef.current = undefined;
       return;
     }
@@ -994,10 +1040,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       : dlssnrConfigured
         ? 'dlssnr'
         : 'local';
+    /** 交给远端的那一串：阅读器里开着哪几档就做哪几档，顺序固定「去码 → 超分 →
+     *  DLSSNR」——去码出来的干净像素是另外两步更好的输入。模型与参数不跟着走（对面
+     *  按自己那份设置跑），所以这一串变了才需要重算。 */
+    const remoteChain: readonly RemoteService[] = remoteConfigured
+      ? [
+        ...(decensorEnabled ? (['decensor'] as const) : []),
+        ...(upscaleEnabled ? (['upscale'] as const) : []),
+        ...(dlssnrConfigured ? (['dlssnr'] as const) : []),
+      ]
+      : [];
     const decensorModel = decensorEnabled ? preferences.decensorModel : '';
     const upscaleModel = upscaleEnabled ? preferences.upscaleModel : '';
     // 后台任务从游标补进队列时取不到这里的局部变量，所以在排这一轮的时候留一份。
-    derivedConfigRef.current = { decensorModel, upscaleModel, engine };
+    derivedConfigRef.current = { decensorModel, upscaleModel, engine, remoteChain };
     let queued = false;
     const context = contextRef.current;
     // Only pages already inside the reader's configured preload window enter
@@ -1047,6 +1103,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         decensorModel,
         upscaleModel,
         engine,
+        remoteChain,
         tier: visible.has(index) ? 'visible' : 'neighbour',
       });
       queued = true;
@@ -1077,7 +1134,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     preferences.upscaleModel,
     releaseDerived,
     remoteConfigured,
-    remoteOps,
     upscaleEnabled,
   ]);
 
@@ -1252,7 +1308,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         toggle: () => { setDecensorWanted((value) => !value); setEnhancementToken((value) => value + 1); },
       }}
       dlssnr={{
-        configured: dlssnrRequested && dlssnrReady,
+        // 「能不能用」按上面那个 `dlssnrAvailable`：走远端时看对面的清单，本机时看
+        // 自己的 DLL 跑不跑得起来。从前这里写死本机那两个值，于是连上远端也还是灰的。
+        configured: dlssnrAvailable,
         active: dlssnrConfigured,
         toggle: () => setDlssnrWanted((value) => !value),
       }}

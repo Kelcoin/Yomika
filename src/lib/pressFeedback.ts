@@ -15,7 +15,11 @@
  */
 
 /** 会接住按压的东西：与 base.css 里那条 touch-action 名单同一批，外加几类实际承载
- * 点击的容器（列表行、卡片是 button/Link，但选择项的主按钮是 button）。 */
+ * 点击的容器（列表行、卡片是 button/Link，但选择项的主按钮是 button）。
+ *
+ * 元素自己不是可点元素、却又要让这一层认得它时（阅读器概览里那张"按住才看清"的
+ * 封面就是——它外面只有一层 span），在它身上写 `data-press-surface`。`closest` 取最近
+ * 的匹配，所以把标签写进按钮内部会从按钮手里抢走它（按钮自己的按压反馈就没了）。 */
 const PRESSABLE = [
   'button',
   'a',
@@ -26,6 +30,7 @@ const PRESSABLE = [
   '[role="radio"]',
   '[role="switch"]',
   '[role="tab"]',
+  '[data-press-surface]',
 ].join(', ');
 
 const PRESSED_CLASS = 'is-pressed';

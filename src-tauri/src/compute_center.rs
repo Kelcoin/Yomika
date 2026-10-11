@@ -49,6 +49,20 @@ const DISCOVERY_REQUEST: &[u8] = b"YOMIKA_DISCOVER_V2";
 /// `COMPUTE_CENTER_PAIRING_CHANGED_EVENT` 一致。
 pub const PAIRING_CHANGED_EVENT: &str = "compute-center-pairing-changed";
 
+/// 有人请求配对，这一端要显示六位码：发给 webview，由前端画成主题内的弹窗。
+///
+/// 以前这里用的是 `tauri_plugin_dialog` 的系统消息框，画出来是一张 Windows 原生白底
+/// 窗体，与应用主题、字体、深浅色都无关（用户报的「配对码弹窗不符合主题」）。事件之外
+/// 还要把主窗叫到前面：要读这串数字的人坐在**这一台**机器前面，而窗口可能缩在托盘里，
+/// 或者被别的窗口盖住——弹窗画在一个看不见的窗口里等于没弹。
+///
+/// 名字必须与 `nativeComputeCenterRepository.ts` 里的
+/// `COMPUTE_CENTER_PAIRING_CODE_EVENT` 一致。
+pub const PAIRING_CODE_EVENT: &str = "compute-center-pairing-code";
+
+/// 配对码的有效期：与 [`PairingState::begin`] 里写死的一致，前端拿它做倒计时。
+const PAIRING_CODE_TTL_SECONDS: u64 = 90;
+
 /// 一项能力：移动端据此显示「对面有什么、能不能用」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -477,6 +491,14 @@ fn dlssnr_capability(
 pub struct ProcessParams {
     /// `upscale` / `decensor` / `dlssnr`。
     pub op: String,
+    /// 这一页要做的**几档**，按顺序做（`["decensor","upscale"]` 就是先去码再超分）。
+    ///
+    /// 空的就按 `op` 单做一档（老客户端与直接调用的来路照旧）。客户端只说「做什么」，
+    /// **模型与参数一律不传**：那两样跟随这台服务端自己的设置（`model_id` 为空时
+    /// `resolve_upscaler` / `resolve_installed_bundle` 取的就是本机默认那一份，DLSSNR
+    /// 取 `DlssnrSettings::default()`）——这正是「远端处理固定跟随远端服务的设置」。
+    #[serde(default)]
+    pub chain: Vec<String>,
     /// 模型 id（超分 / 去码用）。
     #[serde(default)]
     pub model_id: Option<String>,
@@ -515,18 +537,43 @@ pub fn process(
     if bytes.is_empty() {
         return Err("请求体是空的（要发图片字节）".to_string());
     }
+    // 要做哪几档：`chain` 说了算，没给就按 `op` 单做一档。改写上限是三道——三档都做一遍
+    // 就是全部；重复的那一档没有第二次的意义（同样的模型吃同样的字节出来还是一样）。
+    let steps: Vec<&str> = if params.chain.is_empty() {
+        vec![params.op.as_str()]
+    } else {
+        let mut seen: Vec<&str> = Vec::new();
+        for step in &params.chain {
+            let step = step.as_str();
+            if !matches!(step, "upscale" | "decensor" | "dlssnr") {
+                return Err(format!("不认识的处理方式：{step}"));
+            }
+            if !seen.contains(&step) {
+                seen.push(step);
+            }
+        }
+        seen
+    };
     // 动图原样交回这一条规则只写一处：改像素的两种处理方式一旦动手，出来的就只有第一
     // 帧，回一个「看着成功、其实丢帧」的结果比报错更坏。DLSSNR 不在此列——worker 那边
-    // 自己会逐帧走一遍再编回 APNG（见 `worker/src/dlssnr.rs`）。
-    if params.op != "dlssnr" && crate::cache::is_animated_image(bytes) {
+    // 自己会逐帧走一遍再编回 APNG（见 `worker/src/dlssnr.rs`）；一串里有它，整串都不走
+    // 这条短路（它前面几档也改像素）。
+    if !steps.contains(&"dlssnr") && crate::cache::is_animated_image(bytes) {
         return Ok(bytes.to_vec());
     }
-    match params.op.as_str() {
-        "upscale" => upscale_bytes(manager, model_data, params, bytes, cancelled),
-        "decensor" => decensor_bytes(manager, model_data, params, bytes, cancelled),
-        "dlssnr" => dlssnr_bytes(manager, data, params, bytes, cancelled),
-        other => Err(format!("不认识的处理方式：{other}")),
+    let mut current = bytes.to_vec();
+    for step in steps {
+        if cancelled() {
+            return Err("对面把这条连接丢了".to_string());
+        }
+        current = match step {
+            "upscale" => upscale_bytes(manager, model_data, params, &current, cancelled)?,
+            "decensor" => decensor_bytes(manager, model_data, params, &current, cancelled)?,
+            "dlssnr" => dlssnr_bytes(manager, data, params, &current, cancelled)?,
+            other => return Err(format!("不认识的处理方式：{other}")),
+        };
     }
+    Ok(current)
 }
 
 /// 超分：装了 ONNX 模型的那一档交给计算进程，其余两档（内置 shader 链、没有模型的
@@ -920,6 +967,30 @@ fn notify_pairing_changed(context: &ServerContext) {
     }
 }
 
+/// 把刚生成的六位配对码交给前端，并把主窗叫到前面。
+///
+/// 没有壳（单测）就什么也不做：配对码只有人眼需要，测试里没有人在看。
+fn notify_pairing_code(context: &ServerContext, code: &str, name: &str, peer: &str) {
+    let Some(app) = &context.app else { return };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        // `unminimize` 只在桌面端存在（移动端没有「最小化」这回事）。
+        #[cfg(desktop)]
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    let _ = tauri::Emitter::emit(
+        app,
+        PAIRING_CODE_EVENT,
+        serde_json::json!({
+            "code": code,
+            "name": name,
+            "address": peer,
+            "expiresInSeconds": PAIRING_CODE_TTL_SECONDS,
+        }),
+    );
+}
+
 async fn serve(
     listener: TcpListener,
     token: Arc<RwLock<String>>,
@@ -973,13 +1044,7 @@ async fn handle_connection(
         let kind = payload.get("kind").and_then(|value| value.as_str()).map(str::to_string);
         return match pairing.begin(&peer, name, kind) {
             Ok((request_id, code)) => {
-                if let Some(app) = &context.app {
-                    use tauri_plugin_dialog::DialogExt;
-                    app.dialog()
-                        .message(format!("配对码：{code}\n\n请在发起配对的设备输入。90 秒内有效。"))
-                        .title("Yomika 远端配对")
-                        .show(|_| {});
-                }
+                notify_pairing_code(&context, &code, name, &peer);
                 write_json(&mut stream, 200, "OK", &serde_json::json!({ "requestId": request_id }).to_string()).await
             }
             Err(error) => write_json(&mut stream, 429, "Too Many Requests", &error_body("REMOTE_UNAVAILABLE", &error)).await,
@@ -1052,7 +1117,12 @@ async fn handle_connection(
                     return write_json(&mut stream, 400, "Bad Request", &body).await;
                 }
             };
-            let op = params.op.clone();
+            // 出错时回给人看的那一档：一串就写成 `decensor+upscale`，日志里能看出是哪一串。
+            let op = if params.chain.is_empty() {
+                params.op.clone()
+            } else {
+                params.chain.join("+")
+            };
             let body = request.body;
             let context = context;
             // 三个方向都要交给计算进程，把手从这里取：没有 AppHandle（测试里直接起中心的那种
@@ -1454,16 +1524,27 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    if let Ok((_, data)) = paths(&app) { center.pairing.set_storage(&data); }
+    let (model_data, data) = match paths(&app) {
+        Ok(paths) => paths,
+        Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
+    };
+    center.pairing.set_storage(&data);
     let token = preferences(&app)
         .map(|snapshot| snapshot.compute_center_token)
         .unwrap_or_default();
+    // 这一台**能提供什么**（超分 / 去码 / DLSSNR）：本机那一档的设置页要照着它说
+    // 「这台设备能对外做什么」，从前这里是空的，于是设置页那三个字一个都显示不出来。
+    let local_capabilities = capabilities(
+        &model_data,
+        &data,
+        crate::compute::manager_from_app(&app).as_deref(),
+    );
     CommandResult::success(ComputeCenterStatus {
         running: center.is_running(),
         port: center.running_port().unwrap_or_else(|| current_port(&app)),
         addresses: local_addresses(),
         token,
-        capabilities: Vec::new(),
+        capabilities: local_capabilities,
         can_start: true,
         paired_clients: center.pairing.listed(),
     })
@@ -1507,6 +1588,13 @@ pub fn compute_center_configure(
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
     center.pairing.set_storage(&data);
+    // 能力清单在起服务之前算：它问的是磁盘上的模型与 DLL 齐不齐（跟服务开没开无关），
+    // 而下面两条分支里 `model_data` / `data` 会被移进 `ServerContext`。
+    let local_capabilities = capabilities(
+        &model_data,
+        &data,
+        crate::compute::manager_from_app(&app).as_deref(),
+    );
     if rotate_token.unwrap_or(false) {
         if let Err(error) = center.pairing.clear() {
             return CommandResult::failure("UNKNOWN", error, true);
@@ -1552,7 +1640,8 @@ pub fn compute_center_configure(
         port: center.running_port().unwrap_or(saved.compute_center_port),
         addresses: local_addresses(),
         token: saved.compute_center_token,
-        capabilities: Vec::new(),
+        // 与 `compute_center_status` 同一条来路：上面那份就是此刻磁盘上的能力清单。
+        capabilities: local_capabilities,
         can_start: true,
         paired_clients: center.pairing.listed(),
     })
@@ -1840,6 +1929,7 @@ mod tests {
     fn a_page_gets_dropped_when_no_model_is_installed() {
         let dir = tempfile::tempdir().expect("临时目录");
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "upscale".into(),
             model_id: Some("nope".into()),
             scale: Some(2),
@@ -1864,6 +1954,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         install_fake_onnx_upscaler(dir.path(), "fake-onnx");
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "upscale".into(),
             model_id: Some("fake-onnx".into()),
             scale: Some(2),
@@ -1882,6 +1973,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let gif = animated_gif();
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "decensor".into(),
             model_id: Some("no-such-bundle".into()),
             scale: None,
@@ -1949,6 +2041,7 @@ mod tests {
 
         // 处理一张 1×1 的图：没有模型时走最近邻，回的是 PNG。
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "upscale".into(),
             model_id: None,
             scale: Some(2),
@@ -2079,6 +2172,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let gif = animated_gif();
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "upscale".into(),
             model_id: None,
             scale: Some(2),
@@ -2103,6 +2197,7 @@ mod tests {
         std::fs::create_dir_all(&feature).expect("建片段目录");
         std::fs::write(feature.join("nvngx_dlssnr.dll"), vec![0u8; 64]).expect("写假片段");
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "dlssnr".into(),
             model_id: None,
             scale: None,
@@ -2122,6 +2217,7 @@ mod tests {
         // 了，所以这里必须连试都不试（127.0.0.1:9 上没有任何东西在听）。
         let gif = animated_gif();
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "upscale".into(),
             model_id: None,
             scale: Some(2),
@@ -2138,6 +2234,7 @@ mod tests {
         // 交回去等于这个功能对动图根本没生效。
         let gif = animated_gif();
         let params = ProcessParams {
+            chain: Vec::new(),
             op: "dlssnr".into(),
             model_id: None,
             scale: None,

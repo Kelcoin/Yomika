@@ -195,12 +195,21 @@ export function searchTags(query: string, limit = 30): TagSuggestion[] {
                       : 0;
     if (score) matches.push({ namespace: item.namespace, key: item.key, label: item.label, score });
   }
-  return matches
-    .sort((a, b) =>
-      b.score - a.score ||
-      getTagCountForSort(`${a.namespace}:${a.key}`) - getTagCountForSort(`${b.namespace}:${b.key}`) ||
-      a.label.localeCompare(b.label))
-    .slice(0, limit);
+  return matches.sort(compareTagSuggestions).slice(0, limit);
+}
+
+/** 补全建议的排序规则（「标签补全排序规则」那个开关就是它）：先比相关度，
+ *  **同相关度内按全站使用频次从高到低**（`e-hentai-tag-count`，开关关掉时频次恒为 0，
+ *  这一档失效），最后按译名兜底——同分同频次的两条必须有确定的先后，否则每次
+ *  重排都在跳。
+ *
+ *  方向在这一档里是反的（`b - a`）不是笔误：频次高的标签才是更可能被点中的那个，
+ *  写成 `a - b` 就是把长尾里的冷门标签顶到最前面。
+ */
+export function compareTagSuggestions(a: TagSuggestion, b: TagSuggestion): number {
+  return b.score - a.score
+    || getTagCountForSort(`${b.namespace}:${b.key}`) - getTagCountForSort(`${a.namespace}:${a.key}`)
+    || a.label.localeCompare(b.label);
 }
 
 export function translateTag(namespace: string, value: string): string {

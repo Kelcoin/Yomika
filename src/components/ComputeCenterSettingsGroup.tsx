@@ -19,12 +19,6 @@ import {
   type DiscoveredDevice,
 } from '../repositories/nativeComputeCenterRepository';
 
-const OP_OPTIONS = [
-  { value: 'upscale', label: '超分' },
-  { value: 'decensor', label: '去码' },
-  { value: 'dlssnr', label: 'DLSSNR' },
-];
-
 function cacheDisplayStatus(status: ComputeCenterStatus): void {
   try { localStorage.setItem('yomika.compute-center-status', JSON.stringify({ ...status, token: '' })); } catch { /* storage unavailable */ }
 }
@@ -56,14 +50,17 @@ function DeviceRowBody({ name, address, kind }: { name: string; address: string;
 interface Props {
   preferences: PreferenceSnapshot;
   editPreferences: (patch: Partial<PreferenceSnapshot>) => void;
+  /** 手机 / 平板：这一端只能连别人的算力，不能把自己当成算力中心（见下面的门控）。 */
+  mobile?: boolean;
 }
 
 /** 算力中心：本机对外提供算力（桌面端），以及把一页交给远端算（任意端）。
  *
- * 两边的设置互不影响：远端那一份（`remoteComputeOps`）只描述「这次处理怎么做」，
- * 既不写进本机的超分/去码/DLSSNR 设置，也不会去改远端机器上的设置——远端收到的
- * 只是一次带参数的请求。 */
-export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Props) {
+ * 远端这一档只有「用不用」和「配过哪些设备」两件事：处理方式由**对面**那份设置决定，
+ * 本机不存 op / 模型 / 倍数 / 层参数（从前存过，见 `RemoteOpsSchema` 的注释）。这一组
+ * 只把那台设备**能做什么**用最小面积显示出来（`settings-capability-row`），让用户知道
+ * 开起来会得到什么——至于具体怎么算，去对面那台机器上设。 */
+export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobile = false }: Props) {
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeComputeCenterRepository(), []);
   const [status, setStatus] = useState<ComputeCenterStatus>();
@@ -85,10 +82,23 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
   const [verified, setVerified] = useState(false);
 
   const remoteOps = useMemo(() => parseRemoteOps(preferences.remoteComputeOps), [preferences.remoteComputeOps]);
+  /** 「本机对外提供算力」这一组什么时候在：手机上没有这一档（它只连别人），而且**远端算力
+   *  开着的时候也不在**——两档是同一件事的两种做法（这台机器算，或者别人算），一起摆着
+   *  就是让人以为能同时选。从前只有单向：本机开着时藏远端那一组，反过来没做，于是开着
+   *  远端还留着「开启本机远程后处理服务」这条。 */
+  const showLocalServing = !mobile && !remoteOps.enabled;
+  /** 远端那一组什么时候在：桌面端要等到 status 回来（本机开着算力中心时这一档没意义），
+   *  手机上没有本机那一档可争，status 取不到（网页调试、命令失败）也得留着——不然手机
+   *  用户就一个入口都没有了。 */
+  const showRemote = mobile || (Boolean(status) && !status?.running);
+  /** 自动搜到的、**还没配对过**的设备：已经配好的在上面「已配对设备」那一条里，搜出来
+   *  再列一遍只会让人分不清点哪个。 */
+  const unpairedDevices = useMemo(
+    () => devices.filter((device) => !remoteOps.pairedDevices.some((paired) => paired.address === device.address)),
+    [devices, remoteOps.pairedDevices],
+  );
   const updateRemoteOps = (patch: Partial<typeof remoteOps>) =>
     editPreferences({ remoteComputeOps: serializeRemoteOps({ ...remoteOps, ...patch }) });
-  const updateRemoteOp = (patch: Partial<typeof remoteOps.op>) =>
-    updateRemoteOps({ op: { ...remoteOps.op, ...patch } as typeof remoteOps.op });
 
   const refresh = useCallback(async () => {
     const result = await repository.status();
@@ -123,6 +133,20 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
       .catch(() => { /* 不在壳里就没有事件 */ });
     return () => { active = false; unlisten?.(); };
   }, [refresh]);
+
+  // 那三枚「对面能做什么」的小标签要一直是准的，所以打开这一组时就顺带问一次；不能等
+  // 用户点开「已配对设备」才去取（从前就是这样，于是设置页上根本看不见对面有什么）。
+  // 失败不吭声：对面没开着、手机不在同一个网里都是常态。
+  useEffect(() => {
+    if (!showRemote) return;
+    const url = preferences.remoteComputeUrl;
+    const token = preferences.remoteComputeToken;
+    if (!url.trim() || !token.trim()) return;
+    void connectRemote(url, token, { quiet: true });
+    // `connectRemote` 每次渲染都是新的函数，放进依赖会导致每渲染一次就连一次对面；这里
+    // 真正要跟的是「用哪台设备」这三个值。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showRemote, preferences.remoteComputeUrl, preferences.remoteComputeToken]);
 
   async function toggleServing(next: boolean) {
     setBusy(true);
@@ -169,7 +193,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
     setPortMenu(false);
   }
 
-  async function connectRemote(url = preferences.remoteComputeUrl, token = preferences.remoteComputeToken) {
+  /** 连一次对面并取能力清单。
+   *
+   *  `quiet` 是给「打开这一组时顺带问一次」用的：对面没开着是常态，那一次失败不该弹错误。 */
+  async function connectRemote(url = preferences.remoteComputeUrl, token = preferences.remoteComputeToken, options?: { quiet?: boolean }) {
     const request = ++remoteRequest.current;
     setRemote(undefined);
     setProbingRemote(true);
@@ -178,11 +205,11 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
     setProbingRemote(false);
     if (!result.ok) {
       setRemote(undefined);
-      showToast(result.error.message, 'error');
+      if (!options?.quiet) showToast(result.error.message, 'error');
       return;
     }
     setRemote(result.value);
-    showToast(`已连上 ${result.value.name}`, 'success');
+    if (!options?.quiet) showToast(`已连上 ${result.value.name}`, 'success');
   }
 
   async function scanDevices() {
@@ -228,8 +255,9 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
 
   return (
     <>
-      {/* 本机节点与远端客户端互斥，避免一台设备同时显示两套连接入口。 */}
-      <div className="settings-group" role="region" aria-label="本机远程后处理服务">
+      {/* 本机节点与远端客户端互斥，避免一台设备同时显示两套连接入口；手机上一律不显示
+          本机这一档（见 `showLocalServing`）。 */}
+      {showLocalServing && <div className="settings-group" role="region" aria-label="本机远程后处理服务">
         <SettingsSwitch
           icon={<Server />}
           label="开启本机远程后处理服务"
@@ -284,10 +312,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             </div>
           </>}
         </SettingsMenu>}
-      </div>
+      </div>}
 
       {/* 远端算力：把这一页交给另一台设备处理。 */}
-      {status && !status.running && <div className="settings-group" role="region" aria-label="远程后处理服务">
+      {showRemote && <div className="settings-group" role="region" aria-label="远程后处理服务">
         <SettingsSwitch
           icon={<Wand2 />}
           label="使用远程后处理服务"
@@ -297,6 +325,16 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
           onToggle={() => updateRemoteOps({ enabled: !remoteOps.enabled })}
         />
         <SettingsRow icon={<Server />} label="已配对设备" value={remoteOps.pairedDevices.find((device) => device.address === preferences.remoteComputeUrl)?.name ?? '未选择'} onClick={() => { setDeviceMenu(true); if (preferences.remoteComputeUrl && preferences.remoteComputeToken) void connectRemote(); }} />
+        {/* 对面能做什么，最小面积地说一遍：三枚小标签，能用的一组亮着，不能用的一组压暗
+            （`title` 里是它自己报上来的细节，比如「还没有装好的超分模型」）。具体用哪个
+            模型、放大几倍、DLSSNR 走哪几层，都跟随对面那份设置，这里不摆那些控件。 */}
+        {remote && <div className="settings-capability-row" role="group" aria-label="远端可用服务">
+          {remote.capabilities.map((item) => <span
+            className={`settings-capability-chip${item.ready ? ' is-ready' : ''}`}
+            key={item.id}
+            title={item.detail}
+          >{item.label}</span>)}
+        </div>}
         <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />
         {deviceMenu && <SettingsMenu title="已配对设备" icon={<Server />} onClose={() => setDeviceMenu(false)}>
           <div className="settings-choice-list">
@@ -313,30 +351,14 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
             {remoteOps.pairedDevices.length === 0 && <p className="settings-choice-empty">还没有配对过的设备</p>}
           </div>
           <div className="settings-menu-actions">
-            <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新模型</button>
+            <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新服务</button>
           </div>
-          {remote && <p className="settings-menu-desc">{remote.name} · {remote.capabilities.filter((item) => item.ready).map((item) => item.label).join('、')}</p>}
-          {remote && <div className="settings-choice-list" role="group" aria-label="远端处理方式">
-            {OP_OPTIONS.filter((option) => remote.capabilities.some((item) => item.id === option.value && item.ready)).map((option) => <div className={`settings-choice-option${remoteOps.op.op === option.value ? ' is-active' : ''}`} key={option.value}>
-              <button type="button" className="settings-choice-option-main" aria-pressed={remoteOps.op.op === option.value} onClick={() => updateRemoteOp({ op: option.value as typeof remoteOps.op.op, modelId: '' })}>{option.label}</button>
-            </div>)}
-          </div>}
-          {remote && remoteOps.op.op !== 'dlssnr' && <div className="settings-choice-list" role="group" aria-label="远端模型">
-            {remoteOps.op.op === 'upscale' && <div className={`settings-choice-option${remoteOps.op.modelId === '' ? ' is-active' : ''}`}>
-              <button className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === ''} onClick={() => updateRemoteOp({ modelId: '' })}>默认放大</button>
-            </div>}
-            {remote.models.filter((model) => model.kind === remoteOps.op.op).map((model) => <div className={`settings-choice-option${remoteOps.op.modelId === model.id ? ' is-active' : ''}`} key={model.id}>
-              <button className="settings-choice-option-main" type="button" aria-pressed={remoteOps.op.modelId === model.id} onClick={() => updateRemoteOp({ modelId: model.id })}>{model.label}</button>
-            </div>)}
-          </div>}
-          {remote && remoteOps.op.op === 'upscale' && remoteOps.op.modelId === '' && <label className="settings-menu-field">
-            <span className="settings-menu-field-label">放大倍数</span>
-            <input className="settings-port-input" type="number" min={1} max={4} aria-label="远端放大倍数" value={remoteOps.op.scale} onChange={(event) => updateRemoteOp({ scale: Math.min(4, Math.max(1, Number(event.target.value) || 1)) })} />
-          </label>}
+          {/* 选哪一档不在这里选：处理方式跟随对面那份设置，这里只把它的清单念一遍。 */}
+          {remote && <p className="settings-menu-desc">{remote.name} · {remote.capabilities.filter((item) => item.ready).map((item) => item.label).join('、') || '这台设备还没有可用的处理服务'}</p>}
         </SettingsMenu>}
         {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { setPairMenu(false); setRequestId(''); }}>
           <div className="settings-choice-list">
-            {devices.map((device) => <div className="settings-choice-option" key={device.address}>
+            {unpairedDevices.map((device) => <div className="settings-choice-option" key={device.address}>
               <button
                 className="settings-choice-option-main settings-device-option"
                 type="button"
@@ -346,12 +368,15 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences }: Pro
                 <DeviceRowBody name={device.name} address={device.address} />
               </button>
             </div>)}
-            {devices.length === 0 && <p className="settings-choice-empty">没搜到其他设备，可以填地址直接配对</p>}
+            {unpairedDevices.length === 0 && <p className="settings-choice-empty">
+              {devices.length > 0 ? '搜到的设备都已经配对过了，在上面「已配对设备」里选' : '没搜到其他设备，可以填地址直接配对'}
+            </p>}
           </div>
           {/* 字段名写在框上面：占位符放不下「这台设备是什么」，读起来也不再是一行孤零零的输入框。 */}
           <label className="settings-menu-field">
             <span className="settings-menu-field-label">设备地址</span>
             <input
+              className="settings-address-input"
               aria-label="设备地址"
               placeholder="192.168.1.5:47653"
               value={address}

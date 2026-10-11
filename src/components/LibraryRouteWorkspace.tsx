@@ -15,6 +15,7 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { UNTAGGED_FILTER_ID, assignableCategories } from '../lib/tags';
 import { mirrorFavorites } from '../lib/favoritesMirror';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
+import { readKnownServerPresence } from '../lib/serverPresence';
 
 /** 分类镜像一次性读取：注水只发生在挂载和换服务器时。原先这读写在
  * 组件体里无条件执行，搜索每敲一键、卡片每次悬停都要 parse 一遍。 */
@@ -124,8 +125,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   /** Whether the server list has been read and came back with nothing usable:
    * `undefined` while unknown, which keeps the first-load skeletons (we do not
    * know yet), and `false` only once we do — the state that shows the shared
-   * "add a server" prompt instead of skeletons that would never resolve. */
-  const [hasServer, setHasServer] = useState<boolean>();
+   * "add a server" prompt instead of skeletons that would never resolve.
+   *
+   * 会话里已经读到过「一台服务器都没有」的话，就从那个答案起步：否则每次切回
+   * 档案库都要先把骨架转一遍，再由这次 IPC 把它换成引导（见 src/lib/serverPresence.ts）。 */
+  const [hasServer, setHasServer] = useState<boolean | undefined>(() => readKnownServerPresence());
   const [scopeId, setScopeId] = useState<string>();
   const [metadata, setMetadata] = useState<import('../repositories/nativeLibraryRepository').ArchiveMetadata>();
   const [metadataLoading, setMetadataLoading] = useState(false);

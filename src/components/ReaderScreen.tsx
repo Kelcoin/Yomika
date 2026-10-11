@@ -1203,6 +1203,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const timer = window.setTimeout(() => setIndicatorFlash(false), INDICATOR_FLASH_MS);
     return () => window.clearTimeout(timer);
   }, [state.pageIndex]);
+  // The bottom bar answers every page turn (see `reader-toolbar-turn` in
+  // reader.css). The cue is a keyed child, not a class or an attribute: React
+  // remounting the node is what restarts a CSS animation. Alternating an
+  // attribute value looks like it should work and does not — measured in
+  // debug_outputs/reader-motion, where the second value ran no animation at all.
+  const previousPage = useRef(state.pageIndex);
+  const [turnCue, setTurnCue] = useState(0);
+  useEffect(() => {
+    if (previousPage.current === state.pageIndex) return;
+    previousPage.current = state.pageIndex;
+    setTurnCue((value) => value + 1);
+  }, [state.pageIndex]);
   // One transform for the slots on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. It sits
   // *inside* the current frame rather than on the track that carries all three —
@@ -1401,6 +1413,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             aria-label="阅读控制"
             onClick={stopChromeToggle}
           >
+              {/* Re-mounted on every page turn: that is what replays the cue. */}
+              {turnCue > 0 && <span key={turnCue} className="reader-toolbar-turn" aria-hidden="true" />}
               {/* Three slots, left to right: how the pages are arranged, where the
                   reader is, what is done to the page. The counter is the middle
                   slot by grid position, not by luck — the sides are equal `1fr`

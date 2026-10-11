@@ -30,6 +30,7 @@ import {
 import type { CommandResult } from '../domain/result';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { notifyLocalWrite } from '../lib/localWrite';
+import { rememberServerPresence } from '../lib/serverPresence';
 
 function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) {
@@ -360,7 +361,12 @@ export class NativeLibraryRepository {
   }
 
   listServers(): Promise<CommandResult<ServerRecord[]>> {
-    return invokeCommand('list_servers', {}, z.array(ServerRecordSchema));
+    return invokeCommand('list_servers', {}, z.array(ServerRecordSchema)).then((result) => {
+      // 这一问同时也答了「有没有服务器」：页面拿它决定第一帧画骨架还是画引导
+      // （见 src/lib/serverPresence.ts）。读失败什么也没说，上一次的答案保持原样。
+      if (result.ok) rememberServerPresence(result.value.length > 0);
+      return result;
+    });
   }
 
   checkServerStatus(): Promise<CommandResult<ServerStatus[]>> {
@@ -371,7 +377,11 @@ export class NativeLibraryRepository {
     return invokeCommand('save_server', {
       server: input.identity,
       apiKey: input.apiKey,
-    }, ServerRecordSchema);
+    }, ServerRecordSchema).then((result) => {
+      // 存下一台（新的或改的）之后「没有服务器」这个答案就过期了。
+      if (result.ok) rememberServerPresence(true);
+      return result;
+    });
   }
 
   /** 切换当前启用的服务器：启用一台即停用其余，书架与首页随之改读它。
@@ -379,7 +389,11 @@ export class NativeLibraryRepository {
    * （首页/书架/档案库/详情）都不该在切换后闪现旧服务器的数据。 */
   setServerEnabled(serverId: string): Promise<CommandResult<ServerRecord>> {
     return invokeCommand('set_server_enabled', { serverId, enabled: true }, ServerRecordSchema).then((result) => {
-      if (result.ok) invalidateRouteCache();
+      if (result.ok) {
+        invalidateRouteCache();
+        // 启用的前提是这台服务器还在，答案只能是「有」。
+        rememberServerPresence(true);
+      }
       return result;
     });
   }
@@ -389,7 +403,12 @@ export class NativeLibraryRepository {
    * 列表、当前数据源与所有按服务器缓存的快照都可能变。 */
   deleteServer(serverId: string): Promise<CommandResult<ServerRecord[]>> {
     return invokeCommand('delete_server', { serverId }, z.array(ServerRecordSchema)).then((result) => {
-      if (result.ok) invalidateRouteCache();
+      if (result.ok) {
+        invalidateRouteCache();
+        // 回的是删完剩下的那份列表，随手把答案改对：删掉最后一台时下一个页面
+        // 的第一帧就该是引导，而不是先给一次骨架。
+        rememberServerPresence(result.value.length > 0);
+      }
       return result;
     });
   }
