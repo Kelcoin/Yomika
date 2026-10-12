@@ -1,0 +1,26 @@
+{
+  "full": {
+    "ok": true,
+    "value": {
+      "version": "Sat, 10 Oct 2026 16:54:00 GMT",
+      "unchanged": false,
+      "data": "female:big breasts\t1306417\nfemale:big ass\t332586\n"
+    }
+  },
+  "unchanged": {
+    "ok": true,
+    "value": {
+      "version": "Sat, 10 Oct 2026 16:54:00 GMT",
+      "unchanged": true,
+      "data": null
+    }
+  },
+  "failure": {
+    "ok": false,
+    "error": {
+      "code": "NETWORK",
+      "message": "标签频次数据下载失败：HTTP 503",
+      "retryable": true
+    }
+  }
+}

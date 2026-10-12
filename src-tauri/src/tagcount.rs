@@ -10,6 +10,7 @@
 //! 这一层只负责「取字节、解压、变成 `key<TAB>count` 行」；「哪些条目参与排序」仍旧
 //! 只有前端 `installTagCounts` 一处说了算（`TAG_COUNT_MIN_COUNT`）。
 
+use crate::domain::result::CommandResult;
 use std::io::Read;
 
 /// 与 JHenTai 同一份数据源：`mokurin000/e-hentai-tag-count` 每天一个 release，
@@ -23,7 +24,7 @@ const TAG_COUNT_ASSET_URL: &str =
 const TAG_COUNT_CLIENT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 /// 前端要的东西：版本（用来判断要不要重新装表）与那张表本身。
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct TagCountTable {
     /// 这次应答对应的数据版本：资产的 `Last-Modified`（每天一个 release，够用），
     /// 拿不到时退回 `ETag`。前端把它存下来，下次刷新时回传，同版本就不再下载正文。
@@ -109,21 +110,68 @@ pub fn decode_rows(bytes: &[u8]) -> Result<String, String> {
     Ok(rows)
 }
 
+/// 这次取数为什么不成，以及它在 `src/domain/errors.ts` 那张闭集里叫什么码。
+///
+/// 那张表是闭集，桥接拿它校验**整条**错误信封：没登记过的码不是「原样透传」，而是整条
+/// 被判成 `INVALID_RESPONSE`——真正的理由（网络、资产没发布、字节坏了）反而看不见。
+#[derive(Debug)]
+struct TagCountFailure {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+}
+
+impl TagCountFailure {
+    /// 还没拿到可用的字节：建客户端、发请求、读正文失败，或者 HTTP 非 2xx。
+    /// 过一会儿再试通常就好了，所以标成可重试。
+    fn network(message: impl Into<String>) -> Self {
+        Self { code: "NETWORK", message: message.into(), retryable: true }
+    }
+
+    /// 字节到手了、但这份内容不能用（不是 gzip、整表空）。同一份资产再下一遍还是这个
+    /// 样子，标成可重试只会让设置页白转圈，所以不可重试。
+    fn payload(message: impl Into<String>) -> Self {
+        Self { code: "INVALID_RESPONSE", message: message.into(), retryable: false }
+    }
+}
+
+/// 精解压、成表那一半。与网络无关，于是「坏字节给什么码」能离线测。
+fn table_from_bytes(version: String, bytes: &[u8]) -> Result<TagCountTable, TagCountFailure> {
+    let data = decode_rows(bytes).map_err(TagCountFailure::payload)?;
+    Ok(TagCountTable { version, unchanged: false, data: Some(data) })
+}
+
 /// 取一份最新的标签频次表。`since` 是前端手里的版本（没有就传 `None`）：
 /// 与本次应答的版本相同就只回报 `unchanged`，正文一个字节都不读。
+///
+/// 应答**必须**走 `CommandResult` 这层信封。`src/bridge/invoke.ts` 先按
+/// `{ ok: true, value }` / `{ ok: false, error }` 判一次，之后才轮到值 schema；裸
+/// `Result` 成功时序列化成 `{"version":…}`、失败时序列化成一个**字符串**，两种都不像
+/// 信封，于是**每一次**调用都在桥里落成
+/// `bridge/fetch_tag_counts  Native command returned an invalid response`
+/// （用户 2026-10-12 的 `data/error.log` 就是这个形状：`{"request":{"since":null}}`，
+/// 连第一次刷新都失败，标签补全排序因此一条频次都拿不到）。
 #[tauri::command]
-pub async fn fetch_tag_counts(since: Option<String>) -> Result<TagCountTable, String> {
-    let response = tag_count_client()?
+pub async fn fetch_tag_counts(since: Option<String>) -> CommandResult<TagCountTable> {
+    match load_tag_counts(since).await {
+        Ok(table) => CommandResult::success(table),
+        Err(failure) => CommandResult::failure(failure.code, failure.message, failure.retryable),
+    }
+}
+
+async fn load_tag_counts(since: Option<String>) -> Result<TagCountTable, TagCountFailure> {
+    let response = tag_count_client()
+        .map_err(TagCountFailure::network)?
         .get(TAG_COUNT_ASSET_URL)
         .send()
         .await
-        .map_err(|error| format!("标签频次数据下载失败：{error}"))?;
+        .map_err(|error| TagCountFailure::network(format!("标签频次数据下载失败：{error}")))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
+        return Err(TagCountFailure::network(format!(
             "标签频次数据下载失败：HTTP {}",
             status.as_u16()
-        ));
+        )));
     }
 
     let version = version_of(&response);
@@ -134,9 +182,8 @@ pub async fn fetch_tag_counts(since: Option<String>) -> Result<TagCountTable, St
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("标签频次数据读取失败：{error}"))?;
-    let data = decode_rows(&bytes)?;
-    Ok(TagCountTable { version, unchanged: false, data: Some(data) })
+        .map_err(|error| TagCountFailure::network(format!("标签频次数据读取失败：{error}")))?;
+    table_from_bytes(version, &bytes)
 }
 
 #[cfg(test)]
@@ -196,6 +243,64 @@ mod tests {
         assert!(!same_version(None, "Sat, 10 Oct 2026 16:54:00 GMT"));
     }
 
+    /// 这一条钉的是桥接那一层：应答必须是信封，而且三个字段名、`data` 的 null 写法都要与
+    /// 前端 schema 对得上。夹具 `tests/fixtures/tagcount-envelope.json` 是两边共用的那一份：
+    /// Rust 在这里断言「我序列化出来的就是它」，前端 `tests/lib/tag-count-table.test.ts`
+    /// 拿同一个文件喂给真桥与真服务。裸 `Result` 的成功形状（`{"version":…}`）在同一份
+    /// 夹具上会直接对不上——修前的缺陷就是这个形状。
+    #[test]
+    fn answers_in_the_bridge_envelope_the_frontend_reads() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/tagcount-envelope.json"
+        ))
+        .expect("fixture");
+
+        let full = CommandResult::success(TagCountTable {
+            version: "Sat, 10 Oct 2026 16:54:00 GMT".to_string(),
+            unchanged: false,
+            data: Some("female:big breasts\t1306417\nfemale:big ass\t332586\n".to_string()),
+        });
+        assert_eq!(serde_json::to_value(full).expect("serialize"), expected["full"], "带正文的成功应答");
+
+        let unchanged = CommandResult::success(TagCountTable {
+            version: "Sat, 10 Oct 2026 16:54:00 GMT".to_string(),
+            unchanged: true,
+            data: None,
+        });
+        assert_eq!(
+            serde_json::to_value(unchanged).expect("serialize"),
+            expected["unchanged"],
+            "版本没变时 data 要是 null：前端 schema 写的是 nullish"
+        );
+
+        let failure: CommandResult<TagCountTable> =
+            CommandResult::failure("NETWORK", "标签频次数据下载失败：HTTP 503", true);
+        assert_eq!(
+            serde_json::to_value(failure).expect("serialize"),
+            expected["failure"],
+            "失败要落在 error 信封里，而不是把理由塞进 value"
+        );
+    }
+
+    #[test]
+    fn a_body_that_cannot_become_a_table_is_an_invalid_response_not_a_retry() {
+        let broken = table_from_bytes("v".to_string(), b"not gzip at all").expect_err("bad gzip");
+        assert_eq!(broken.code, "INVALID_RESPONSE");
+        assert!(!broken.retryable, "同一份资产再下一遍还是这个样子，别让设置页白转圈");
+
+        let empty = table_from_bytes("v".to_string(), &gzip("tag_name,len\n")).expect_err("empty");
+        assert_eq!(empty.code, "INVALID_RESPONSE");
+
+        let table = table_from_bytes(
+            "v".to_string(),
+            &gzip("tag_name,len\nfemale:big breasts,1306417\nbroken,not-a-number\n"),
+        )
+        .expect("table");
+        assert_eq!(table.version, "v");
+        assert!(!table.unchanged);
+        assert_eq!(table.data.as_deref(), Some("female:big breasts\t1306417\n"));
+    }
+
     /// 真数据核对（网络）：`cargo test --lib -- --ignored --nocapture tag_count`。
     /// 它证明的不是「函数能跑」，而是「实际拿到的那份库真的能喂进排序规则」——
     /// 行数、命名空间数、过了 `TAG_COUNT_MIN_COUNT` 的条目数都打出来。
@@ -224,6 +329,17 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>()
             .len();
         println!("REAL rows={total} kept_at_5={kept} namespaces={namespaces}");
+
+        // 真实字节走完整条成形路径：落的还得是桥接那层信封（前端 schema 要的三个键都在）。
+        let table = table_from_bytes("real".to_string(), &bytes).expect("table");
+        let answer = serde_json::to_value(CommandResult::success(table)).expect("serialize");
+        println!("REAL envelope={answer}");
+        assert_eq!(answer["ok"], serde_json::Value::Bool(true));
+        let value = answer.get("value").expect("value");
+        for key in ["version", "unchanged", "data"] {
+            assert!(value.get(key).is_some(), "信封里缺 {key}");
+        }
+
         assert!(total > 100_000, "真实资产的行数不该这么少：{total}");
         assert!(kept > 50_000, "过了频次门槛的条目太少：{kept}");
         assert!(namespaces > 5, "命名空间太少：{namespaces}");

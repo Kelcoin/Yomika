@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { DomainErrorCodeSchema } from '../../src/domain/errors';
+
 function read(path: string): string {
   return readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
 }
@@ -2205,5 +2207,31 @@ describe('native shell configuration', () => {
       if (readFileSync(resolve(root, entry), 'utf8').includes('haptic_feedback')) offenders.push(entry);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('answers the tag count fetch in the bridge envelope, with codes the table knows', () => {
+    const tagcount = read('../../src-tauri/src/tagcount.rs');
+
+    // 这一条就是本项缺陷的判据。裸 `Result` 的成功形状是 `{"version":…}`、失败时是一个
+    // **字符串**，两种都不像 `{ ok: true, value }` / `{ ok: false, error }`：`src/bridge/invoke.ts`
+    // 先按信封判一次，判不过就落成
+    // `bridge/fetch_tag_counts  Native command returned an invalid response`——每一次刷新
+    // 都失败（用户 2026-10-12 的 error.log 正是这个形状），标签补全排序一条频次都拿不到。
+    expect(tagcount, '取数命令要回信封').toContain(
+      'pub async fn fetch_tag_counts(since: Option<String>) -> CommandResult<TagCountTable> {',
+    );
+    expect(tagcount, '不能再有裸 Result 的那条命令').not.toContain(
+      'async fn fetch_tag_counts(since: Option<String>) -> Result<TagCountTable',
+    );
+
+    // 信封里那几个码必须在 `src/domain/errors.ts` 的闭集里：没登记过的码不是「原样透传」，
+    // 而是整条被判成 `INVALID_RESPONSE`，真正的理由（离线、资产没发布、字节坏了）反而看不见。
+    const codes = [...tagcount.matchAll(/code: "([A-Z_]+)"/g)].map((match) => match[1] ?? '');
+    expect(codes, '至少要说清两种失败：拿不到字节、字节不能用').toEqual(
+      expect.arrayContaining(['NETWORK', 'INVALID_RESPONSE']),
+    );
+    for (const code of codes) {
+      expect(DomainErrorCodeSchema.safeParse(code).success, code).toBe(true);
+    }
   });
 });

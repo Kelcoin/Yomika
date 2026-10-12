@@ -14,6 +14,7 @@ import {
   setTagCountOrderEnabled,
 } from '../../src/lib/tagCountService';
 import { installTagTranslations, searchTags } from '../../src/lib/tags';
+import envelope from '../fixtures/tagcount-envelope.json';
 
 /** 真实资产里的几行。数字来自 `debug_outputs/tagcount/real-data-check.mjs` 的读数：
  *  gz 1,326,369 字节 → 正文 3,306,354 字节 / 160,212 行，过了 5 次地板的 88,528 行，
@@ -148,5 +149,29 @@ describe('tag count table transport', () => {
     // 搬数据的那一层不筛，筛的还是 install 这一处：低于地板的不进表。
     expect(service.getCount('female:rare')).toBeUndefined();
     expect(service.getCount('female:common')).toBe(TAG_COUNT_MIN_COUNT);
+  });
+
+  it('accepts the exact envelope the native command prints', async () => {
+    // 夹具是两边共用的那一份：`src-tauri/src/tagcount.rs` 的
+    // `answers_in_the_bridge_envelope_the_frontend_reads` 断言「我序列化出来的就是它」，
+    // 这里把**同一个文件**喂给真桥（不是 `fetchTable` 注入点，那条路绕开 `invokeCommand`）。
+    // 修前那条命令是裸 `Result`：成功时是 `{"version":…}`，桥在第一层就判成
+    // `INVALID_RESPONSE`，标签补全排序于是连第一次刷新都失败。
+    setTagCountOrderEnabled(true);
+
+    setInvokeAdapterForTests(vi.fn(async () => envelope.full));
+    await refreshTagCounts();
+    expect(getTagCountVersion()).toBe(envelope.full.value.version);
+    expect(getTagCountForSort('female:big breasts')).toBe(1306417);
+
+    // 版本没变那一档：`data` 是 null，手里那份表照旧用着，而不是被清空。
+    setInvokeAdapterForTests(vi.fn(async () => envelope.unchanged));
+    await refreshTagCounts();
+    expect(getTagCountForSort('female:big ass')).toBe(332586);
+
+    // 失败那一档也得是桥认得的信封：码没登记在闭集里，整条会被判成 `INVALID_RESPONSE`，
+    // 真正的理由（下载失败：HTTP 503）反而看不见。
+    setInvokeAdapterForTests(vi.fn(async () => envelope.failure));
+    await expect(refreshTagCounts()).rejects.toThrow(/NETWORK: 标签频次数据下载失败/);
   });
 });
