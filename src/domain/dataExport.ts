@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { SYNC_SCOPE_CATEGORIES } from './syncScope';
 
 /** 数据迁移（docs/30 重构后）：一份明文 JSON，装什么由导出弹层的勾选决定。
  *
@@ -12,14 +11,22 @@ export const DATA_EXPORT_VERSION = 1;
 
 export type DataExportItem = string;
 
-/** 「记录与设置」那半边在文件里就是同步范围那六类（`syncScope.ts` 是 Rust 侧
- * `SYNC_SCOPE_CATEGORIES` 的镜像，顺序即界面顺序）。
+/** 「记录与设置」那半边在文件里逐类列出：进度、历史、待看、搜索预设、非重复标记、
+ * 应用设置。**这份清单比同步范围多一项应用设置**——同步那边已经把应用设置摘掉了
+ * （两台设备各有各的屏幕与显卡，同步主题与后处理开关只会互相覆盖），而换机器带走
+ * 设置恰恰要靠这份显式文件，所以这里必须留着它。两处清单各写各的、不再互为镜像：
+ * 同步范围管「自动在设备之间流动什么」，这里管「我主动带走什么」。
  *
- * 从前这里只有一条 `records`：勾了就把进度、历史、待看、搜索预设、非重复标记
- * 与应用设置一起打包，想只带进度走都做不到。现在逐类勾选、逐类写进文件——
- * 「记录和设置混在一起没法细选」指的就是这件事。 */
-export const DATA_EXPORT_RECORD_ITEMS: readonly { id: DataExportItem; label: string }[] =
-  SYNC_SCOPE_CATEGORIES.map((category) => ({ id: category.id, label: category.label }));
+ * 从前这里只有一条 `records`：勾了就把六项一起打包，想只带进度走都做不到。现在
+ * 逐类勾选、逐类写进文件——「记录和设置混在一起没法细选」指的就是这件事。 */
+export const DATA_EXPORT_RECORD_ITEMS: readonly { id: DataExportItem; label: string }[] = [
+  { id: 'progress', label: '阅读进度' },
+  { id: 'history', label: '历史' },
+  { id: 'watchlist', label: '待看' },
+  { id: 'search_presets', label: '搜索预设' },
+  { id: 'dedup', label: '非重复标记' },
+  { id: 'app_settings', label: '应用设置' },
+];
 
 /** 含敏感信息的三类：勾选时界面必须提醒「切勿分享」。 */
 export const DATA_EXPORT_CREDENTIAL_ITEMS: readonly { id: DataExportItem; label: string; credential: true }[] = [

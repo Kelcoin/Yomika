@@ -381,7 +381,8 @@ if (killWorker) {
   } catch (error) {
     throw new Error(`杀不掉 worker ${killTarget}：${error.message}`);
   }
-  // 量的是**那一条状态本身**（`[data-testid="compute-worker-status"]`，`ComputeWorkerNotice` 画的），
+  // 量的是**那一条状态本身**（`[data-testid="compute-worker-status"]`，`ComputeWorkerToasts` 把状态
+  // 转成的那张 toast 卡上就带着它），
   // 不是满页找「正在恢复/不可用」几个字：满页找字在阅读器里一定能碰上（错误屏、别的提示里都有这些词），
   // 那样量到的「2 秒内给到状态」什么都不证明。
   const signalled = await evaluate(`(async () => {

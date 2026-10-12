@@ -94,10 +94,16 @@ fn pack(bytes: &[u8]) -> Vec<u8> {
 
 /// 让 worker 在 `target` 那个位置上真的存在，并返回该用哪一个路径去起进程。
 ///
-/// 顺序是：同级目录里已经有一份 ⇒ 就用它（开发机构建、绿色目录、用户手工换过一份；
-/// 它是不是给这个宿主编的由握手的构建戳判，见 Task 10 第②条）；否则把主 exe 里那份
-/// 载荷落成一份**名字带摘要**的副本再用它；两条都不成立就把原路径原样还回去，
-/// `maybe_spawn` 于是照旧说「找不到 worker 可执行文件」。
+/// 顺序是：主 exe 里带着载荷 ⇒ **载荷赢**，落成一份**名字带摘要**的副本再用它；没有载荷
+/// （开发机构建、绿色目录、`YOMIKA_EMBED_WORKER` 没开）才认同级目录里那一份，它也没有
+/// 就把原路径原样还回去，`maybe_spawn` 于是照旧说「找不到 worker 可执行文件」。
+///
+/// 为什么有载荷时同级那份**不许**赢（这一条是上一版写反的地方）：同级目录里那个固定的
+/// `yomika-compute-worker.exe` 是**上一版**的字节（就地升级只换主 exe），10-a 的构建戳
+/// 会把它拒掉；而宿主的「重试」只重起同一个已经定死的路径（`manager.rs` 的
+/// `Command::RetryWorker` 不清 `worker_path`），于是拒了再重试、重试再拒——界面上一句
+/// 「计算进程不可用」永远撤不掉，日志里则是每一页两行 `INFERENCE_UNAVAILABLE`。
+/// 认自己**这一份**载荷，这件事才有解；同级那份旧字节随后由 [forget_older] 收走。
 ///
 /// 落点先试主 exe 旁边（便携包、开发机都在这儿），写不进去（装在 `Program Files` 下、
 /// 或者主程序就是从一张只读的盘上跑的）就退到 `fallback_dir`——按定义它可写，否则这个
@@ -108,10 +114,9 @@ fn pack(bytes: &[u8]) -> Vec<u8> {
 /// 捡起来——那一份是上一版的字节，10-a 的判据会把它拒掉，而且**永远拒下去**。名字
 /// 带摘要之后，新版落新名字，旧的那一份最多是废文件，随后被 [forget_older] 收走。
 pub fn ensure(beside: &Path, fallback_dir: &Path, payload: Option<&[u8]>) -> PathBuf {
-    if beside.is_file() {
-        return beside.to_path_buf();
-    }
     let Some(payload) = payload else {
+        // 没有载荷可落：这一条路与从前一字不差——同级目录里那一份就是它要的（开发机构建、
+        // 绿色目录、用户手工换过一份），没有就把原路径还回去让 maybe_spawn 说找不到。
         return beside.to_path_buf();
     };
     let Some(digest) = header_digest(payload) else {
@@ -329,20 +334,25 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_already_beside_the_host_wins_over_the_payload() {
+    fn a_stale_worker_beside_the_host_does_not_beat_the_payload() {
         let sandbox = tempfile::tempdir().expect("临时目录");
         let target = sandbox.path().join("yomika-compute-worker.exe");
+        // 上一位住在这儿的宿主留下的那一份（就地升级只换主 exe，这一份会留在原地）。
         std::fs::write(&target, b"hand-placed").expect("摆一份");
-        let payload = pack(&vec![0x22u8; 4096]);
+        let bytes = vec![0x22u8; 4096];
+        let payload = pack(&bytes);
 
         let resolved = ensure(&target, &sandbox.path().join("data"), Some(&payload));
 
-        assert_eq!(resolved, target, "同级目录里有就用它，不许拿载荷盖掉");
-        assert_eq!(std::fs::read(&target).expect("读回来"), b"hand-placed");
+        assert_ne!(
+            resolved, target,
+            "同级目录里那一份是上一版的字节，认它就等于每一页都拒一次，重试也只重起它"
+        );
+        assert_eq!(std::fs::read(&resolved).expect("读回来"), bytes, "要跑的是这一份载荷");
         assert_eq!(
-            std::fs::read_dir(sandbox.path()).expect("目录").count(),
-            1,
-            "这一条路上什么都不该落出来"
+            std::fs::read(&target).expect("读回来"),
+            b"hand-placed",
+            "别人的文件不许动（它是用户的，不是我们的缓存）"
         );
     }
 
@@ -352,9 +362,15 @@ mod tests {
         let target = sandbox.path().join("yomika-compute-worker.exe");
 
         // 开发机构建：没嵌载荷。这一条路必须与旧行为一字不差——`maybe_spawn` 会照旧
-        // 说「找不到 worker 可执行文件：<这个路径>」。
+        // 说「找不到 worker 可执行文件：<这个路径>」；而同时摆着的那一份要照旧被认。
         assert_eq!(ensure(&target, &sandbox.path().join("data"), None), target);
         assert!(!target.exists());
+        std::fs::write(&target, b"hand-placed").expect("摆一份");
+        assert_eq!(
+            ensure(&target, &sandbox.path().join("data"), None),
+            target,
+            "没有载荷时才认同级目录里那一份：开发机构建、绿色目录都靠它"
+        );
     }
 
     #[test]

@@ -686,13 +686,16 @@ body::-webkit-scrollbar,
    text, so a dark theme gets a dark toast and a light theme a light one — no
    inverted white card. The state rides on the icon's shape plus the state role,
    both readable on the container in either theme. A phone redraws it as a pill;
-   see the compact card rules at the end of the toast block. */.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter var(--motion-standard) both; }
+   see the compact card rules at the end of the toast block. */.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter var(--motion-standard) both; }
 .toast-card.is-closing { animation: toast-exit var(--motion-standard) both; }
 /* 图标带一层语义色的圆底：三个标记长得像一组，而不是三个随便挑的图标。 */.toast-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 14%, transparent); color: var(--primary); }
 .toast-card.is-success .toast-icon { color: var(--success); }
 .toast-card.is-error .toast-icon { color: var(--error); }
 .toast-icon svg { width: 18px; height: 18px; }
 .toast-text { min-width: 0; font-size: var(--text-sm); line-height: var(--leading-snug); overflow-wrap: anywhere; }
+/* 提示里自带的那颗动作按钮（只有「计算进程不可用」用它）。它比关闭按钮醒目一档：这是一件
+   要用户去做的事，而关闭只是「我看过了」。 */
+.toast-action { min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--primary); font-family: inherit; font-size: var(--text-sm); font-weight: var(--weight-semibold); cursor: pointer; }
 .toast-close { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-pill); background: transparent; color: inherit; cursor: pointer; }
 .toast-close svg { width: 16px; height: 16px; }
 @keyframes toast-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -728,6 +731,16 @@ body::-webkit-scrollbar,
   /* Nothing here is actionable, so nothing here is dismissable. */
   .toast-close {
     display: none;
+  }
+
+  /* 例外只有一颗：「计算进程不可用」那张提示里的『重试』。卡片本身照旧穿透，只有
+     这颗按钮自己收点击——手机上阅读器一旦碰上坏掉的 worker，这里是唯一能把宿主
+     那道 `compute_retry_worker` 叫起来的地方。 */
+  .toast-action {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--space-2);
+    pointer-events: auto;
   }
 }
 
@@ -6540,18 +6553,3 @@ body::-webkit-scrollbar,
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
-
-/* 「计算进程不在 / 不可用」那一条（§12.3）。
- *
- * 位置：顶部居中、贴着阅读器自己的 chrome 之上（z-index 取 --z-toast，和提示条同层：
- * 它是全应用的一条状态，不该被某条路由的层叠上下文关在里面）。用顶部而不是角落，是因为
- * 它要能压住全屏阅读器，而阅读器的上下两条栏都在顶部/底部——放中间横一条最不会被误当成页面内容。
- *
- * 触控穿透：整条只做陈述，只有「重试」那个按钮收点击（pointer-events 在容器上关掉、
- * 在按钮上打开）。一条状态条吞掉页面上的点按，就是网页在告诉用户它是网页。
- *
- * 颜色走主题自己的 tonality：不可用用 --error，恢复中用 --primary，两个主题下都读得清。 */
-.compute-worker-notice { position: fixed; z-index: var(--z-toast); top: var(--space-5); left: 50%; display: flex; align-items: center; gap: var(--space-3); max-width: min(720px, calc(100vw - 32px)); padding: 8px var(--space-3) 8px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-pill); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); font-size: var(--text-sm); line-height: var(--leading-snug); transform: translateX(-50%); pointer-events: none; overflow-wrap: anywhere; }
-.compute-worker-notice[data-worker-state='unavailable'] { color: var(--error); }
-.compute-worker-notice[data-worker-state='recovering'] { color: var(--primary); }
-.compute-worker-retry { padding: 4px 12px; border: 1px solid currentColor; border-radius: var(--radius-pill); background: transparent; color: inherit; font: inherit; font-weight: var(--weight-semibold); cursor: pointer; pointer-events: auto; }

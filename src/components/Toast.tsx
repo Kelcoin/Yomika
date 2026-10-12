@@ -20,9 +20,19 @@ function ToastMark({ type }: { type: ToastType }) {
     {type === 'info' && <><path d="M12 11.4v5" /><path d="M12 7.6h.01" /></>}
   </svg>;
 }
-type ToastItem = { id: number; text: string; type: ToastType; closing: boolean };
+// `| undefined` 是必须的：`exactOptionalPropertyTypes` 开着，可选的 `testId?: string`
+// 不许被显式赋成 `undefined`，而调用方（`ComputeWorkerToasts`）永远是整份 meta 一起传。
+type ToastAction = { label: string; run: () => void };
+type ToastItem = { id: number; text: string; type: ToastType; closing: boolean; testId?: string | undefined; attributes?: Record<string, string> | undefined; action?: ToastAction | undefined };
+/** 给需要「在屏幕上留下一个可量读数」的提示用：`testId` 落成 `data-testid`，`attributes`
+ * 原样铺到卡片上。§12.3 那条「计算进程掉线后 2 秒内界面上有状态」原来量的是常驻提示条，
+ * 现在量的是它换成的那张 toast——同一个选择器，同一个属性（见 `compute-ui-probe.mjs`）。
+ *
+ * `action` 是给「提示里本来就有一颗按钮」的场景留的（计算进程坏了那颗「重试」）：常驻条删掉
+ * 之后，这条路只剩 toast 能承载，而 toast 自己会走，所以按钮也跟着走。 */
+export type ToastMeta = { testId?: string | undefined; attributes?: Record<string, string> | undefined; action?: ToastAction | undefined };
 type ToastContextValue = {
-  showToast: (text: string, type?: ToastType, duration?: number) => void;
+  showToast: (text: string, type?: ToastType, duration?: number, meta?: ToastMeta) => void;
   clearToasts: (type?: ToastType) => void;
 };
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -47,7 +57,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       setItems((current) => current.filter((item) => item.id !== id));
     }, 220));
   }, []);
-  const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600) => {
+  const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600, meta?: ToastMeta) => {
     const message = String(text ?? '').trim();
     if (!message) return;
     // 同一句话、同一种颜色已经挂在屏幕上时不叠第二张：它们说的是同一件事（「已连上 X」
@@ -61,7 +71,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       return;
     }
     const id = ++nextId.current;
-    const item: ToastItem = { id, text: message, type, closing: false };
+    const item: ToastItem = { id, text: message, type, closing: false, testId: meta?.testId, attributes: meta?.attributes, action: meta?.action };
     // 同一个 tick 里连着来两句同文时也要看见前一句：ref 跟着一起挪，state 走函数式更新。
     itemsRef.current = [...itemsRef.current, item].slice(-4);
     setItems((current) => [...current, item].slice(-4));
@@ -84,8 +94,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // 入场 transform、列表的 z-index…）会把这个栈关在里面，二级菜单那道 `position: fixed`
   // 的遮罩就会盖在它上面——浮层当初就是因为这个才改用 portal 的，toast 同理。
   return <ToastContext.Provider value={value}>{children}<OverlayLayer><div className="toast-stack" aria-live="polite">
-    {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} role={item.type === 'error' ? 'alert' : 'status'} key={item.id}>
-      <span className="toast-icon" aria-hidden="true"><ToastMark type={item.type} /></span><span className="toast-text">{item.text}</span><button className="toast-close" type="button" aria-label="关闭提示" onClick={() => closeToast(item.id)}><X aria-hidden="true" /></button>
+    {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} role={item.type === 'error' ? 'alert' : 'status'} data-testid={item.testId} {...item.attributes} key={item.id}>
+      <span className="toast-icon" aria-hidden="true"><ToastMark type={item.type} /></span><span className="toast-text">{item.text}</span>{item.action && <button className="toast-action" type="button" onClick={item.action.run}>{item.action.label}</button>}<button className="toast-close" type="button" aria-label="关闭提示" onClick={() => closeToast(item.id)}><X aria-hidden="true" /></button>
     </div>)}
   </div></OverlayLayer></ToastContext.Provider>;
 }

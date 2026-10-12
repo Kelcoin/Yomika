@@ -331,22 +331,18 @@ type SyncSettingsState = ReturnType<typeof useSyncSettings>;
  * 与那份口令加密的文件走，同步永远不带它们。 */
 export function SyncScopeChecks({ sync }: { sync: SyncSettingsState }) {
   return (
-    <>
-      <CheckRowGroup label="同步范围">
-        {SYNC_SCOPE_CATEGORIES.map((category) => (
-          <CheckRow
-            key={category.id}
-            label={category.label}
-            checked={sync.scopeDraft.includes(category.id)}
-            disabled={sync.scopeSaving}
-            ariaLabel={`同步${category.label}`}
-            onToggle={() => sync.toggleScope(category.id)}
-          />
-        ))}
-      </CheckRowGroup>
-      {/* 一句就够（原来这里是两句话、还和上面的提示重复）。 */}
-      <p className="sync-scope-hint">凭据只在本机，要从「导入导出范围」带走。</p>
-    </>
+    <CheckRowGroup label="同步范围">
+      {SYNC_SCOPE_CATEGORIES.map((category) => (
+        <CheckRow
+          key={category.id}
+          label={category.label}
+          checked={sync.scopeDraft.includes(category.id)}
+          disabled={sync.scopeSaving}
+          ariaLabel={`同步${category.label}`}
+          onToggle={() => sync.toggleScope(category.id)}
+        />
+      ))}
+    </CheckRowGroup>
   );
 }
 

@@ -159,9 +159,10 @@ describe('sync settings', () => {
     setInvokeAdapterForTests(adapter);
     renderSync();
 
-    // 范围是独立一行：值直接说自己现在同步什么。
+    // 范围是独立一行：值直接说自己现在同步什么。这个账户勾着五类记录全勾
+    // （`account.syncScope`），所以摘要就是「记录全选」。
     const row = await screen.findByRole('button', { name: '同步范围' }, { timeout: 10_000 });
-    expect(row).toHaveTextContent('阅读进度');
+    expect(row).toHaveTextContent('记录全选');
     await user.click(row);
     const menu = await screen.findByRole('dialog', { name: '同步范围' });
 
@@ -173,14 +174,10 @@ describe('sync settings', () => {
       accountId: 'personal',
       syncScope: '["progress","history","search_presets","dedup"]',
     }));
-    // 应用设置是可勾的记录/设置类里后补的一项：勾上就写回去。
-    const appSettings = within(menu).getByRole('checkbox', { name: '同步应用设置' });
-    expect(appSettings).not.toHaveClass('is-checked');
-    await user.click(appSettings);
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_sync_scope', {
-      accountId: 'personal',
-      syncScope: '["progress","history","search_presets","dedup","app_settings"]',
-    }));
+    // 应用设置不再是同步类别：这条菜单里连行都没有——本地存一次偏好就写一条
+    // app_setting 日志，勾着它同步的两台设备会互相覆盖主题与后处理开关（用户看到的
+    // 是主题来回跳、DLSSNR 自己关掉）。它跟着「导入导出范围」的显式文件走。
+    expect(within(menu).queryByRole('checkbox', { name: '同步应用设置' })).toBeNull();
 
     // 凭据在这里连行都没有：API Key、Cookie 与同步口令在系统凭据库，服务器地址与
     // 账户名在别的设备上也不成立（没有 Key 连不上、没有 Cookie 要重新登录）。它们
@@ -190,9 +187,12 @@ describe('sync settings', () => {
     expect(within(menu).queryByRole('checkbox', { name: '同步LRR 服务器' })).toBeNull();
     expect(within(menu).queryByRole('checkbox', { name: '同步E-H 账户' })).toBeNull();
     expect(within(menu).queryByRole('checkbox', { name: '同步凭据' })).toBeNull();
-    // 留下的六个全是记录与设置：没有一个是封着的。
+    // 留下的五个全是记录：没有一个是封着的。
     expect(within(menu).getAllByRole('checkbox').filter((item) => item.hasAttribute('disabled'))).toEqual([]);
-    expect(menu).toHaveTextContent('只在本机');
+    expect(within(menu).getAllByRole('checkbox')).toHaveLength(5);
+    // 菜单底部那行小字已经删了：凭据去哪儿的说明只在「导入导出范围」里有，
+    // 这里再写一遍既是重复，也让人以为上面那几行能勾到凭据。
+    expect(within(menu).queryByText('凭据只在本机，要从「导入导出范围」带走。')).toBeNull();
 
     // 账户表单里不再有范围：它只管账户本身。
     await user.keyboard('{Escape}');

@@ -10,7 +10,7 @@ import { installPressFeedback } from '../lib/pressFeedback';
 import { SplashFrame } from '../components/SplashFrame';
 import { ToastProvider } from '../components/Toast';
 import { UpdateNotice } from '../components/UpdateNotice';
-import { ComputeWorkerNotice } from '../components/ComputeWorkerNotice';
+import { ComputeWorkerToasts } from '../components/ComputeWorkerToasts';
 import { PairingCodeNotice } from '../components/PairingCodeNotice';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
@@ -99,8 +99,9 @@ export function App() {
         </RetainedPage>)}
         {/* 版本提醒挂在所有页面之外：在阅读器里也该收到，而它自己不做任何渲染。 */}
         <UpdateNotice />
-        {/* 计算进程的状态也是全应用一条：阅读器要用它，整本预扫也用它（§12.3）。 */}
-        <ComputeWorkerNotice />
+        {/* 计算进程的状态也是全应用一条：阅读器要用它，整本预扫也用它（§12.3）。
+            它不是一条常驻提示条，而是把状态转成 toast（同一次故障只说一次，自己会走）。 */}
+        <ComputeWorkerToasts />
         {/* 配对码同样挂在所有页面之外：请求来自**另一台设备**，人到那一刻不一定停在设置页
             （阅读器里、任何路由上都要弹得出来）。 */}
         <PairingCodeNotice />

@@ -711,6 +711,62 @@ describe('design system contract', () => {
     expect(form).not.toMatch(/toggleScope|CheckRowGroup/);
   });
 
+  it('keeps app settings out of sync while the export list still carries them', () => {
+    // 两张词表刻意分家：同步管「自动在设备之间流动什么」（应用设置不在其中——主题与
+    // 后处理开关同步只会让两台设备互相覆盖，用户看到的是主题来回跳、DLSSNR 自己关
+    // 掉），「导入导出范围」管「我主动带走什么」（必须含应用设置，否则换机器带不走
+    // 设置）。判据落在两侧的词表与派生关系上，任何一侧被顺手改回去都会红。
+    const syncScope = read('src/domain/syncScope.ts');
+    const syncTable = syncScope.slice(
+      syncScope.indexOf('export const SYNC_SCOPE_CATEGORIES'),
+      syncScope.indexOf('] as const;'),
+    );
+    expect(syncTable).not.toMatch(/app_settings/);
+
+    // 导出清单自己逐项列，不许再从同步词表派生：派生的话摘掉同步那一步就顺手把它
+    // 一起摘掉了（「勾了应用设置却什么都没带」）。
+    const dataExport = read('src/domain/dataExport.ts');
+    expect(dataExport).not.toMatch(/SYNC_SCOPE_CATEGORIES/);
+    const recordItems = dataExport.slice(
+      dataExport.indexOf('export const DATA_EXPORT_RECORD_ITEMS'),
+      dataExport.indexOf('export const DATA_EXPORT_CREDENTIAL_ITEMS'),
+    );
+    expect(recordItems).toMatch(/\{ id: 'app_settings', label: '应用设置' \}/);
+    expect(recordItems.match(/id: '/g)).toHaveLength(6);
+
+    // 原生侧同一件事：同步词表五项（无应用设置），文件词表六项（有）。
+    const sync = read('src-tauri/src/commands/sync.rs');
+    const rustSyncTable = sync.slice(
+      sync.indexOf('pub(crate) const SYNC_SCOPE_CATEGORIES'),
+      sync.indexOf('/// 默认勾选'),
+    );
+    expect(rustSyncTable).not.toMatch(/"app_settings"/);
+    const transfer = read('src-tauri/src/data_transfer.rs');
+    const rustRecordTable = transfer.slice(
+      transfer.indexOf('pub(crate) const RECORD_CATEGORIES'),
+      transfer.indexOf('pub(crate) const DATA_RECORDS_ITEM'),
+    );
+    expect(rustRecordTable).toMatch(/"app_settings"/);
+    // 文件导入导出走的是文件词表，不许再借同步那份解析（借了应用设置就搬不动）。
+    for (const call of [
+      sync.slice(sync.indexOf('pub fn export_scoped_data')),
+      sync.slice(sync.indexOf('pub fn import_scoped_data')),
+    ]) {
+      expect(call).toMatch(/parse_record_categories/);
+    }
+
+    // 同步范围菜单底部那行小字删掉了：说明凭据去哪儿是「导入导出范围」的事，
+    // 写在这里既是重复，也让人以为上面那几行能勾到凭据。
+    const syncSettings = read('src/components/SyncSettings.tsx');
+    const scopeChecks = syncSettings.slice(
+      syncSettings.indexOf('function SyncScopeChecks'),
+      syncSettings.indexOf('export function SyncAccountForm'),
+    );
+    expect(scopeChecks).not.toMatch(/sync-scope-hint/);
+    // 账户表单自己也用这个 class 放一句提示，CSS 因此留着——这条是「不要连 CSS 一起删」。
+    expect(read('src/styles/shell.css')).toMatch(/\.sync-scope-hint\s*\{/);
+  });
+
   it('draws each multi-value control exactly once', () => {
     // 复选框行、开关与「勾选行组」各只有一份实现：三处复制过的行、两处复制过的
     // 开关，都改成从这里取。任何一处再自己画一个，这条就红。
@@ -2392,6 +2448,25 @@ describe('design system contract', () => {
     expect(desktop).toMatch(/border: 1px solid var\(--outline-variant\)/);
     expect(desktop).toMatch(/display: grid/);
     expect(ruleBody(shell, '.toast-close')).toMatch(/cursor: pointer/);
+  });
+
+  it('keeps the one actionable toast reachable on a phone', () => {
+    // 计算进程坏掉那条提示（`ComputeWorkerToasts`）是 toast 上唯一长着按钮的一张：常驻条
+    // `ComputeWorkerNotice` 删掉之后，宿主那道 `compute_retry_worker`（清 broken、按需再拉
+    // 起）就只剩这里能进去。桌面卡片上按钮和关闭按钮并排；手机那条提示是穿透的胶囊
+    // （上面那条判据钉着 `pointer-events: none`），所以按钮必须自己把点击收回来——否则
+    // 手机上 worker 一坏就再也没有恢复的入口，只能重启应用。
+    const shell = read('src/styles/shell.css');
+    const action = ruleBody(shell, '.toast-action');
+    expect(action).toMatch(/color:\s*var\(--primary\)/);
+    expect(action).toMatch(/min-height:\s*36px/);
+    const phone = nestedRuleBody(shell, '.toast-action');
+    expect(phone, '手机上的动作按钮要自己收点击').toMatch(/pointer-events:\s*auto/);
+    // 按钮从 `Toast` 的卡片里长出来，由 `ComputeWorkerToasts` 挂上真命令。
+    const toast = read('src/components/Toast.tsx');
+    expect(toast).toMatch(/\{item\.action && <button className="toast-action"/);
+    const bridge = read('src/components/ComputeWorkerToasts.tsx');
+    expect(bridge).toMatch(/action: \{ label: '重试', run: \(\) => \{ lastKey = ''; void repository\.retryWorker\(\); \} \}/);
   });
 
   it('cleans up records that point at archives the server no longer has', () => {

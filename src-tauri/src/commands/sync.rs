@@ -63,23 +63,30 @@ const SYNC_STATE_VERSION: i64 = 1;
 /// （凭据库按设备各存各的，别的设备拿到地址也连不上、拿到账户名还要重新登录）。
 /// 它们由「导入导出范围」单独管——同步永远不带凭据，而换机器要靠那份口令加密的
 /// 文件（见 `crate::data_transfer` 与 `credentials.rs`）。
-pub(crate) const SYNC_SCOPE_CATEGORIES: [&str; 6] = [
+///
+/// **应用设置也不在这张表里**：主题、阅读偏好、后处理开关是「这台机器怎么用」，不是
+/// 「用户记了什么」。两台设备各有各的屏幕与显卡，把它们当数据同步只会互相覆盖——
+/// 手机把主题推给桌面、桌面又把后处理开关推回去，用户看到的就是主题来回跳、DLSSNR
+/// 之类自己关掉。要换机器带走设置，走「导入导出范围」的显式文件：那边的记录类词表
+/// 是 `crate::data_transfer::RECORD_CATEGORIES`（仍然含 `app_settings`），与这张表
+/// 刻意分家——同步管「自动在设备之间流动什么」，文件管「我主动带走什么」。
+/// `object_type_category("app_setting")` 仍映射到 `app_settings`：文件那条路要用它，
+/// 而同步的 `enabled` 里永远不会有这个类别，`scope_includes` 于是恒假（双保险）。
+pub(crate) const SYNC_SCOPE_CATEGORIES: [&str; 5] = [
     "progress",
     "history",
     "watchlist",
     "search_presets",
     "dedup",
-    "app_settings",
 ];
 
-/// 默认勾选：全部记录与设置（也就是全部可勾的类别）。
-pub(crate) const DEFAULT_SYNC_SCOPE: [&str; 6] = [
+/// 默认勾选：全部记录（也就是全部可勾的类别）。
+pub(crate) const DEFAULT_SYNC_SCOPE: [&str; 5] = [
     "progress",
     "history",
     "watchlist",
     "search_presets",
     "dedup",
-    "app_settings",
 ];
 
 /// 不按某台服务器切分的数据（服务器列表、E-H 账户、应用设置）挂在固定 scope 上。
@@ -1902,13 +1909,17 @@ pub struct ScopedExportReport {
 ///
 /// `categories` 是要装进这份文档的目录，由调用方给：数据迁移那边按弹层的勾选逐类
 /// 裁（只勾进度就只装进度），未知条目丢掉——空清单就是空文档，不回落到全部目录。
+///
+/// 这里认的是**导出词表**（`data_transfer::RECORD_CATEGORIES`，六类含应用设置），
+/// 不是同步词表：同步已经从范围里摘掉了应用设置，拿同步词表来过滤会让「导出应用设置」
+/// 勾了却什么都不装。
 pub(crate) fn export_scoped_document(
     connection: &Connection,
     categories: &[String],
 ) -> Result<(serde_json::Value, usize), String> {
     let enabled: Vec<String> = categories
         .iter()
-        .filter(|category| SYNC_SCOPE_CATEGORIES.contains(&category.as_str()))
+        .filter(|category| crate::data_transfer::RECORD_CATEGORIES.contains(&category.as_str()))
         .cloned()
         .collect();
     let scope_ids = local_scope_ids(connection)?;
@@ -1945,7 +1956,9 @@ pub fn export_scoped_data(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let enabled = parse_sync_scope(&categories);
+    // 文件这条路认的是导出词表（含应用设置），不是同步词表：见
+    // `data_transfer::parse_record_categories`。
+    let enabled = crate::data_transfer::parse_record_categories(&categories);
     let scope_ids = match local_scope_ids(&connection) {
         Ok(scope_ids) => scope_ids,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
@@ -2019,7 +2032,8 @@ pub fn import_scoped_data(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
     };
-    let enabled = parse_sync_scope(&categories);
+    // 同 `export_scoped_data`：导入按导出词表裁，应用设置才搬得动。
+    let enabled = crate::data_transfer::parse_record_categories(&categories);
     match import_scoped_documents(&mut connection, document, &enabled) {
         Ok(report) => CommandResult::success(report),
         Err(error) => CommandResult::failure("INVALID_INPUT", error, false),
@@ -3969,8 +3983,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_scope_is_records_and_settings() {
-        // 默认集合＝记录与设置全勾，「账户与服务器」不勾。新增一类却忘了进默认集合，
+    fn the_default_scope_is_every_record() {
+        // 默认集合＝记录全勾，「账户与服务器」不勾。新增一类却忘了进默认集合，
         // 就等于那类数据默认不同步——所以拿类别表本身来对。
         for category in SYNC_SCOPE_CATEGORIES {
             assert_eq!(
@@ -3979,6 +3993,81 @@ mod tests {
                 "{category} 的默认勾选状态不对"
             );
         }
+    }
+
+    /// 应用设置**不进同步、但进导出文件**——这是这一轮改动的核心不变式，两头都要钉。
+    ///
+    /// 不进同步是因为主题、阅读偏好、后处理开关是「这台机器怎么用」：两台设备各自
+    /// 往账户里推一份，用户看到的就是主题来回跳、DLSSNR 自己关掉。所以同步词表里
+    /// 没有它、默认集合里没有它，`build_local_state` 折本机状态时也不该把它折进去
+    /// （即使本机为它写了日志行——存偏好就会写）。
+    ///
+    /// 进文件是因为「换机器带走设置」只靠那份显式导出：导出词表留着它，导入时
+    /// `parse_record_categories` 也认它。**只把同步词表删一项是半个改动**：文件那条路
+    /// 若是继续拿同步词表过滤，用户勾了「应用设置」会发现什么都没带。
+    #[test]
+    fn app_settings_stay_out_of_sync_but_ride_in_the_export_file() {
+        assert!(
+            !SYNC_SCOPE_CATEGORIES.contains(&"app_settings"),
+            "应用设置不该是同步类别"
+        );
+        assert!(
+            !DEFAULT_SYNC_SCOPE.contains(&"app_settings"),
+            "应用设置不该默认勾选"
+        );
+        assert!(
+            crate::data_transfer::RECORD_CATEGORIES.contains(&"app_settings"),
+            "导出词表仍要认应用设置"
+        );
+        assert_eq!(
+            crate::data_transfer::parse_record_categories(r#"["app_settings"]"#),
+            vec!["app_settings".to_string()],
+            "文件那条路要能只带应用设置"
+        );
+        // 映射留着：文件的导入/导出都要靠它把 `app_setting` 归到类别上。
+        assert_eq!(object_type_category("app_setting"), Some("app_settings"));
+
+        // 本机存一次偏好 → 写出一条 app_setting 日志行 → 同步折状态时它不出现，
+        // 换导出词表再看它就在。这就是「同步不动它、文件搬得动它」。
+        let mut connection = migrated_connection();
+        crate::settings::save_preferences_to(
+            &mut connection,
+            crate::settings::PreferenceSnapshot {
+                theme: "dark".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("save preferences");
+        let synced: Vec<String> = build_local_state(
+            &connection,
+            &[GLOBAL_SCOPE, "scope-a"],
+            &DEFAULT_SYNC_SCOPE.map(String::from).to_vec(),
+        )
+        .expect("sync state")
+        .objects
+        .into_values()
+        .map(|object| object.object_type)
+        .collect();
+        assert!(
+            !synced.iter().any(|object_type| object_type == "app_setting"),
+            "同步折出来的状态里不该有应用设置，实际是 {synced:?}"
+        );
+        let exported: Vec<String> = build_local_state(
+            &connection,
+            &[GLOBAL_SCOPE, "scope-a"],
+            &crate::data_transfer::RECORD_CATEGORIES
+                .map(String::from)
+                .to_vec(),
+        )
+        .expect("export state")
+        .objects
+        .into_values()
+        .map(|object| object.object_type)
+        .collect();
+        assert!(
+            exported.iter().any(|object_type| object_type == "app_setting"),
+            "导出折出来的状态里要有应用设置，实际是 {exported:?}"
+        );
     }
 
     #[test]
@@ -4340,10 +4429,14 @@ mod tests {
     fn default_scope_parsing_falls_back_and_drops_unknown_categories() {
         // 空值＝默认集合（旧账户的列是空串）；未知条目丢弃，不让远端塞进不认识的类别。
         assert_eq!(parse_sync_scope(""), default_scope());
+        // 未知条目丢弃；**应用设置也在这里被丢掉**——它已经从同步范围里摘出去了
+        // （主题与后处理开关同步只会让两台设备互相覆盖），文件那边另有词表认它。
         assert_eq!(
             parse_sync_scope(r#"["history","app_settings","nonsense"]"#),
-            vec!["history".to_string(), "app_settings".to_string()]
+            vec!["history".to_string()]
         );
+        // 老账户里存着「只勾了应用设置」时不能变成「不同步任何数据」，回落到默认集合。
+        assert_eq!(parse_sync_scope(r#"["app_settings"]"#), default_scope());
         assert_eq!(parse_sync_scope("not json").len(), DEFAULT_SYNC_SCOPE.len());
     }
 
@@ -4659,7 +4752,9 @@ mod tests {
         // （理由见 `import_scoped_data` 的说明：两台设备的 journal 计数器从没见过面，
         // 按时钟比大小只会把整份文件挡在门外），所以更旧的那一份也要落地，把本机那
         // 六行改回文件里的样子（历史除外：它是并集，不参与赛跑）。
-        let enabled = SYNC_SCOPE_CATEGORIES.map(String::from).to_vec();
+        let enabled = crate::data_transfer::RECORD_CATEGORIES
+            .map(String::from)
+            .to_vec();
         let mut connection = migrated_connection();
         let newer = document_from_objects(six_record_objects(
             "device-b",

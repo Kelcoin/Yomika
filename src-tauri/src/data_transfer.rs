@@ -3,14 +3,27 @@
 //! 导出不再有「范围偏好」：要什么在导出/导入的弹层里当场勾。这里的词表只回答
 //! 「条目名认不认识」——未知条目在命令入口就被丢掉，而不是被当成数据落地。
 //!
-//! 条目分两组：记录类（六个目录，与同步范围同名，因为它们命名的是同一批数据）
-//! 与凭据类（三类，只在本机）。记录类的 id 与词表本体都在 `commands::sync` 的
-//! `SYNC_SCOPE_CATEGORIES`，这里只引用，不再重复一份。
+//! 条目分两组：记录类（六个目录）与凭据类（三类，只在本机）。
+//!
+//! **记录类的词表是这里自己的 `RECORD_CATEGORIES`，不是同步那张 `SYNC_SCOPE_CATEGORIES`
+//! 的镜像了**：同步范围把应用设置摘掉了（主题与后处理开关是「这台机器怎么用」，两家
+//! 设备同步只会互相覆盖），而换机器带走设置恰恰要靠这份显式文件——所以文件这边比同步
+//! 多一项 `app_settings`。两张表刻意分家：同步管「自动在设备之间流动什么」，这里管
+//! 「我主动带走什么」。
 //!
 //! `records` 是记录类的旧 id：旧文件与旧界面只有它，含义是「六个目录全都要」。
 //! 它继续被接受，新导出则按目录逐个列清单——只导「阅读进度」这种选择才回得来。
 
-use crate::commands::sync::SYNC_SCOPE_CATEGORIES;
+/// 记录类的六个目录，顺序即弹层顺序。比 `commands::sync::SYNC_SCOPE_CATEGORIES`
+/// 多 `app_settings`（见文件头：文件是换机器带设置的唯一通路）。
+pub(crate) const RECORD_CATEGORIES: [&str; 6] = [
+    "progress",
+    "history",
+    "watchlist",
+    "search_presets",
+    "dedup",
+    "app_settings",
+];
 
 /// 记录类的旧 id（整包）。
 pub(crate) const DATA_RECORDS_ITEM: &str = "records";
@@ -20,7 +33,7 @@ pub(crate) const DATA_CREDENTIAL_ITEMS: [&str; 3] = ["lrr_servers", "eh_account"
 
 pub(crate) fn is_known_item(item: &str) -> bool {
     item == DATA_RECORDS_ITEM
-        || SYNC_SCOPE_CATEGORIES.contains(&item)
+        || RECORD_CATEGORIES.contains(&item)
         || DATA_CREDENTIAL_ITEMS.contains(&item)
 }
 
@@ -33,20 +46,40 @@ pub(crate) fn normalize_items(items: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// 勾选的记录类条目 → 这次要导出/导入的目录，按 `SYNC_SCOPE_CATEGORIES` 的固定
+/// 勾选的记录类条目 → 这次要导出/导入的目录，按 `RECORD_CATEGORIES` 的固定
 /// 顺序去重。`records` 展开成全部六个目录，所以旧文件照旧整包能用。
 pub(crate) fn record_categories(items: &[String]) -> Vec<String> {
     if items.iter().any(|item| item == DATA_RECORDS_ITEM) {
-        return SYNC_SCOPE_CATEGORIES
+        return RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
     }
-    SYNC_SCOPE_CATEGORIES
+    RECORD_CATEGORIES
         .iter()
         .filter(|category| items.iter().any(|item| item.as_str() == **category))
         .map(|category| category.to_string())
         .collect()
+}
+
+/// 弹层勾选（或导出信封里的 `categories`，都是同一串 JSON 数组）→ 这次要用的记录
+/// 目录，顺序按 `RECORD_CATEGORIES` 固定。空清单回落到全部六个目录：旧文件与新界面
+/// 都可能不写 `categories`，那意味着「记录全都要」，而不是「什么都不要」。
+///
+/// 与同步那边 `parse_sync_scope` 的唯一区别就是词表：这张含 `app_settings`。导出与
+/// 导入都必须走这一个，否则「勾了应用设置却什么都没带」——那正是把应用设置摘出同步
+/// 之后最容易漏掉的一处。
+pub(crate) fn parse_record_categories(value: &str) -> Vec<String> {
+    let parsed: Vec<String> = serde_json::from_str(value).unwrap_or_default();
+    let known = record_categories(&parsed);
+    if known.is_empty() {
+        RECORD_CATEGORIES
+            .iter()
+            .map(|category| category.to_string())
+            .collect()
+    } else {
+        known
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +96,7 @@ mod tests {
     /// 局面；A 机那一侧顺带钉住导出里真的有 `sfwMode`（缺了就是等价的反方向缺口）。
     #[test]
     fn importing_a_file_lands_the_reading_settings_and_sfw_mode() {
-        let items: Vec<String> = SYNC_SCOPE_CATEGORIES
+        let items: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
@@ -119,7 +152,7 @@ mod tests {
     /// 导入同一份 worker JSON 就能把待看填上」，所以这条路径上的待看最多）。
     #[test]
     fn worker_imported_to_read_records_travel_through_a_data_export() {
-        let items: Vec<String> = SYNC_SCOPE_CATEGORIES
+        let items: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
@@ -188,7 +221,7 @@ mod tests {
     /// 导入用上规范名字，用户机器上已经有的那批旧日志只能靠这里的别名。
     #[test]
     fn journal_rows_that_carry_the_old_reading_list_name_still_travel() {
-        let items: Vec<String> = SYNC_SCOPE_CATEGORIES
+        let items: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
@@ -251,7 +284,7 @@ mod tests {
     /// 两边都要跟着回来。
     #[test]
     fn importing_a_file_restores_the_reading_direction_of_each_archive() {
-        let items: Vec<String> = SYNC_SCOPE_CATEGORIES
+        let items: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
@@ -392,7 +425,7 @@ mod tests {
 
     #[test]
     fn every_category_and_credential_id_is_known() {
-        let mut all: Vec<String> = SYNC_SCOPE_CATEGORIES
+        let mut all: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect();
@@ -403,7 +436,7 @@ mod tests {
 
     #[test]
     fn records_expands_to_every_category_while_a_subset_stays_a_subset() {
-        let every_category = SYNC_SCOPE_CATEGORIES
+        let every_category = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
             .collect::<Vec<_>>();

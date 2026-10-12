@@ -1275,7 +1275,6 @@ describe('native shell configuration', () => {
     const driver = read('../../.github/scripts/compute-ui-probe.mjs');
     const harness = read('../../.github/scripts/measure-compute-responsiveness.ps1');
     const manager = read('../../src-tauri/src/compute/manager.rs');
-    const notice = read('../../src/components/ComputeWorkerNotice.tsx');
     const app = read('../../src/app/App.tsx');
 
     // ① 「重载」压的是应用自己那条路：同一个仓储、同一份载荷形状，不另造一份负载。
@@ -1304,16 +1303,28 @@ describe('native shell configuration', () => {
     );
     expect(driver, '找词那一版必须已经不在').not.toContain("const words = ['正在恢复'");
     expect(driver, '状态条上的那两个属性就是读数').toContain("state: found.getAttribute('data-worker-state'),");
-    expect(notice, '状态条把「state」摆在 DOM 上，仪器才有得量').toContain(
-      'data-worker-state={notice.state}',
+    const toast = read('../../src/components/Toast.tsx');
+    expect(toast, 'toast 卡片要把 testId 与属性铺到 DOM 上，仪器才有得量').toContain(
+      'data-testid={item.testId} {...item.attributes}',
     );
-    expect(notice, '只有这一代真起来过、且宿主说它正在起，才叫「正在恢复」；stopped 是常态（没有要跑的活就没有 worker），不许读成恢复').toContain(
+    const bridge = read('../../src/components/ComputeWorkerToasts.tsx');
+    expect(bridge, '状态是转成 toast 报的（常驻提示条已经删掉：它与 toast 说同一件事，且落进 broken 就再也撤不掉）').toContain(
+      "testId: 'compute-worker-status',",
+    );
+    expect(bridge, '这条状态把「state」摆在 DOM 上，仪器才有得量').toContain(
+      "'data-worker-state': notice.state",
+    );
+    expect(bridge, '只有这一代真起来过、且宿主说它正在起，才叫「正在恢复」；stopped 是常态（没有要跑的活就没有 worker），不许读成恢复').toContain(
       "if (status.kind === 'starting' && seenReadyEpoch >= 0) {",
     );
-    expect(app, '这条状态挂在全应用上：挂在某条路由里，从阅读器退出来就看不见了').toContain('<ComputeWorkerNotice />');
-    expect(read('../../tests/components/compute-worker-notice.test.tsx'), '这条状态有人看着').toContain(
-      'only calls it a restart after this session has actually seen a ready worker',
+    expect(bridge, '宿主每轮重播同一个状态，只说一次：重复的那一轮靠 key 折掉，不叠第二张').toContain(
+      'if (notice.key === lastKey) return;',
     );
+    expect(app, '这条状态挂在全应用上：挂在某条路由里，从阅读器退出来就看不见了').toContain('<ComputeWorkerToasts />');
+    expect(
+      () => read('../../src/components/ComputeWorkerNotice.tsx'),
+      '旧那条常驻提示条必须已经不在了：它与 toast 说同一件事，而它一旦落进 broken 就再也没人撤掉（宿主每轮重播同一个 broken），屏幕上是永远下不去的一句话',
+    ).toThrow();
 
     // ③ 桥那头解不出来的那次真缺陷：serde 的 rename_all 只管变体名，字段要 rename_all_fields。
     expect(manager, '字段名也要 camelCase，不然 compute_worker_status 的响应永远解不出来').toContain(

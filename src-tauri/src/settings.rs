@@ -703,9 +703,11 @@ pub fn save_preferences_to(
         .transaction()
         .map_err(|error| error.to_string())?;
     write_preference_keys(&transaction, &value)?;
-    // 偏好进同步日志（全局范围、单对象）：勾了「应用设置」的设备之间按字段合并。
-    // 属于本机的两项（下载目录、缓存上限）留在本机：推上去只会让别的设备把自己的
-    // 设置改成一台机器上的路径。
+    // 偏好进同步日志（全局范围、单对象），**但只供「导入导出」那条路用**：自动同步
+    // 的类别表里已经没有 `app_settings`（主题与后处理开关同步只会让两台设备互相覆盖，
+    // 见 `commands::sync::SYNC_SCOPE_CATEGORIES`），所以这条日志行只会在用户显式导出
+    // 文件时被折进文档。属于本机的两项（下载目录、缓存上限）连文件里也不带：导到别的
+    // 设备上只会让它把设置改成一台机器上的路径。
     if let Ok(serde_json::Value::Object(mut payload)) = serde_json::to_value(&value) {
         payload.retain(|key, _| !DEVICE_LOCAL_PREFERENCE_KEYS.contains(&key.as_str()));
         let _ = crate::commands::sync::journal_global_object(
