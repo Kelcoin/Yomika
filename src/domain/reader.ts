@@ -75,15 +75,27 @@ export function settleZoom(zoom: ZoomState): ZoomState {
   return scale <= 1 ? { scale, panX: 0, panY: 0 } : { ...zoom, scale };
 }
 
-/** Double click/tap: enlarge from 1, otherwise go back to 1.
+/** Double click/tap: enlarge from 1, otherwise go back to 1 — **around the point
+ * the gesture landed on**, the same way the wheel does (`zoomAtPoint`).
  *
  * The old rule only reset once the scale had reached the double-tap target, so
  * anything the wheel had left in between — 1.4, say — was enlarged further and
  * getting back to 100% took two more gestures. Resetting from *any* scale other
- * than 1 makes the gesture a reliable escape hatch, which is what it is for. */
-export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {
+ * than 1 makes the gesture a reliable escape hatch, which is what it is for.
+ *
+ * The anchor is the second half of the same complaint: the old version flipped
+ * the scale and dropped the pan to zero, so a double click on a face at the top
+ * left threw it to the middle of the screen. Passing the point through
+ * `zoomAtPoint` gives the two gestures one piece of arithmetic instead of two —
+ * enlarging keeps what was under the pointer under the pointer, and going back
+ * to 1 zeroes the pan by construction (`scale <= 1` inside `zoomAtPoint`). */
+export function doubleTapZoomAt(zoom: ZoomState, x: number, y: number): ZoomState {
   const target = zoom.scale === 1 ? DOUBLE_TAP_ZOOM : 1;
-  return { scale: target, panX: 0, panY: 0 };
+  return settleZoom(zoomAtPoint(zoom, target, x, y));
+}
+
+export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {
+  return doubleTapZoomAt(zoom, 0, 0);
 }
 
 /** Whether a page is narrow enough to sit beside another one.

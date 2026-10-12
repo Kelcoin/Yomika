@@ -15,6 +15,28 @@ import { UnifiedImageCache } from './unifiedImageCache';
  * 时错误日志里就什么都没有。封面、缩略图不记：那些的原生失败本来就由桥接记录。 */
 const READER_RENDITIONS: readonly string[] = ['reader-page', 'enhanced', 'decensored', 'dlssnr', 'remote'];
 
+/** 阅读器这几版里由**原生那一步**产出的那些（DLSSNR / 远端）没算出来时抛的就是它。
+ *
+ * 为什么要带着码抛：上层（`ReaderRoute` 的派生队列）拿这一页的失败去判「这是阵发问题
+ * 还是定局」——`RETRYABLE_COMPUTE_ERROR_CODES` 里那几个（队列满、worker 忙/被杀、超时）
+ * 只是「现在没位置」，不该把这一页记成「做过了」，否则用户翻回去也只有原图，这一趟阅读
+ * 里再也拿不到结果（docs/71:645 第四句）。只抛一句话，那个码就在这里丢了，上层只能把
+ * 每一次阵发失败都当成定局——那正是「开着 DLSSNR 却一直什么都没有」的样子。 */
+export class RenditionError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'RenditionError';
+    this.code = code;
+  }
+}
+
+/** 从抛出来的东西里取回那个码；不是这条来路的失败（解不开图、被掐掉…）返回 `undefined`。 */
+export function renditionErrorCode(error: unknown): string | undefined {
+  return error instanceof RenditionError ? error.code : undefined;
+}
+
 export class NativeImageCacheAdapter implements ImageCacheRepository {
   constructor(
     private readonly cache = new NativeCacheRepository(),
@@ -103,7 +125,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         ...(identity.priority ? { priority: identity.priority } : {}),
         settings: { passes: parseDlssnrPasses(passes) },
       });
-      if (!processed.ok) throw new Error(processed.error.message);
+      if (!processed.ok) throw new RenditionError(processed.error.code, processed.error.message);
       const bytes = new Uint8Array(processed.value);
       return { bytes, mime: detectImageMime(bytes) };
     }
@@ -130,7 +152,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         // 当前页插到整本预扫前面。
         ...(identity.priority ? { priority: identity.priority } : {}),
       });
-      if (!processed.ok) throw new Error(processed.error.message);
+      if (!processed.ok) throw new RenditionError(processed.error.code, processed.error.message);
       const bytes = new Uint8Array(processed.value);
       return { bytes, mime: detectImageMime(bytes) };
     }

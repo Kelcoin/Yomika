@@ -806,9 +806,11 @@ pub fn save_preferences(
     };
     #[cfg(target_os = "windows")]
     {
+        let _ = &app;
         let previous = load_preferences_from(&connection).ok();
         if previous.as_ref().is_none_or(|value| value.start_with_windows != input.start_with_windows) {
-            if let Err(error) = update_windows_autostart(&app, input.start_with_windows) {
+            let executable = std::env::current_exe().map_err(|error| error.to_string());
+            if let Err(error) = executable.and_then(|path| update_windows_autostart(&path, input.start_with_windows)) {
                 return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
             }
         }
@@ -823,18 +825,104 @@ pub fn save_preferences(
     }
 }
 
+/// 开机自启那条注册表值里该写什么。
+///
+/// `--background` 是这一条的全部要点：启动器把这份字符串交给 Windows，Windows 再把它
+/// 拆成「程序 + 参数」来跑。少了这个参数，自启那次就是一次**正常启动**——主窗会亮、
+/// 会抢焦点，而用户开的明明是「开机自启」，他期待的是安静地待在托盘里。
+pub fn autostart_value(executable: &std::path::Path) -> String {
+    format!("\"{}\" --background", executable.display())
+}
+
+/// 启动时对那条注册表值该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutostartAction {
+    /// 和该有的样子一致，别动它。
+    Keep,
+    /// 缺了、或者指的还是别的 exe / 别的参数：写一条新的。
+    Write,
+    /// 设置里已经关掉了，但那条值还在：删掉。
+    Delete,
+}
+
+/// 「现在是什么」+「该不该开」⇒「做什么」。纯函数：不碰注册表、不看时钟，所以这条判据
+/// 能在任何平台上跑（`reg.exe` 那半边只能靠真机）。
+///
+/// 之所以要有这一步：那条值是**上一次拨开关时**写下的，之后没有任何东西再看它一眼。
+/// 于是「exe 搬了家」和「更早的构建写下的、那时还没有 `--background` 的值」两种情况都会
+/// 一直留着——前者让自启跑的是旧那份程序，后者正是用户报的「明明该进托盘，窗口却弹出来」。
+/// 对账一次就把这两种情形收干净，而且对已经正确的值没有任何副作用（`Keep`）。
+pub fn autostart_action(stored: Option<&str>, wanted: bool, desired: &str) -> AutostartAction {
+    match (stored, wanted) {
+        (None, false) => AutostartAction::Keep,
+        (Some(_), false) => AutostartAction::Delete,
+        (Some(value), true) if value.trim() == desired => AutostartAction::Keep,
+        (_, true) => AutostartAction::Write,
+    }
+}
+
 #[cfg(target_os = "windows")]
-fn update_windows_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// 读回那条值。值不存在时 `reg.exe` 是非零退出且 stderr 写着「找不到」，那不是失败——
+/// 「没写」和「写坏了」在这里是同一个答案：`None`。
+#[cfg(target_os = "windows")]
+fn read_windows_autostart() -> Option<String> {
+    let output = std::process::Command::new("reg.exe")
+        .args(["query", AUTOSTART_KEY, "/v", "Yomika"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        // `reg query` 的输出是「名字    REG_SZ    值」，名字与类型之间是空格，值里可以有
+        // 空格（我们要的就是有空格的那一份）。类型令牌本身跨语言不变，所以拿它做锚点。
+        if let Some((_, rest)) = line.split_once("REG_SZ") {
+            let value = rest.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 把那条注册表值对到设置说的样子。返回一句「改了什么」，没改就是 `None`。
+#[cfg(target_os = "windows")]
+pub fn reconcile_windows_autostart(wanted: bool) -> Result<Option<String>, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let _ = app;
+    let desired = autostart_value(&executable);
+    let stored = read_windows_autostart();
+    match autostart_action(stored.as_deref(), wanted, &desired) {
+        AutostartAction::Keep => Ok(None),
+        AutostartAction::Write => {
+            update_windows_autostart(&executable, true)?;
+            Ok(Some(format!(
+                "开机自启那条值对不上设置（现在是 {:?}），已重写成当前这份程序：{desired}",
+                stored.unwrap_or_default()
+            )))
+        }
+        AutostartAction::Delete => {
+            update_windows_autostart(&executable, false)?;
+            Ok(Some(format!(
+                "设置里已经关掉开机自启，但那条值还在（{:?}），已删掉",
+                stored.unwrap_or_default()
+            )))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn update_windows_autostart(executable: &std::path::Path, enabled: bool) -> Result<(), String> {
     let mut command = std::process::Command::new("reg.exe");
-    command.args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Yomika", "/t", "REG_SZ", "/d"]);
     if enabled {
-        command.arg(format!("\"{}\" --background", executable.display()));
+        command.args(["add", AUTOSTART_KEY, "/v", "Yomika", "/t", "REG_SZ", "/d"]);
+        command.arg(autostart_value(executable));
         command.arg("/f");
     } else {
-        command = std::process::Command::new("reg.exe");
-        command.args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Yomika", "/f"]);
+        command.args(["delete", AUTOSTART_KEY, "/v", "Yomika", "/f"]);
     }
     let output = command.output().map_err(|error| format!("更新开机自启失败：{error}"))?;
     if output.status.success() { Ok(()) } else { Err(format!("更新开机自启失败：{}", String::from_utf8_lossy(&output.stderr))) }
@@ -865,8 +953,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        import_legacy_preferences_from, load_preferences_from, normalize_bottom_nav_items,
-        save_preferences_to, PreferenceSnapshot, MAX_PREFETCH_PAGES,
+        autostart_action, autostart_value, import_legacy_preferences_from, load_preferences_from,
+        normalize_bottom_nav_items, save_preferences_to, AutostartAction, PreferenceSnapshot,
+        MAX_PREFETCH_PAGES,
     };
 
     fn settings_db() -> Connection {
@@ -1154,5 +1243,42 @@ mod tests {
             load_preferences_from(&connection).expect("unchanged defaults"),
             PreferenceSnapshot::default()
         );
+    }
+
+    #[test]
+    fn the_autostart_value_carries_the_only_flag_that_keeps_the_window_hidden() {
+        // 这一条钉的是「值和写入方必须一致」：`autostart_value` 既给 `update_windows_autostart`
+        // 用，也给启动时的对账用。少了 `--background`，自启那次就是一次正常启动——窗口
+        // 会亮、会抢焦点，而用户开的是「开机自启」。
+        let value = autostart_value(std::path::Path::new(r"C:\Program Files\Yomika\yomika.exe"));
+        assert_eq!(value, r#""C:\Program Files\Yomika\yomika.exe" --background"#);
+        assert!(value.ends_with("--background"));
+        assert!(value.starts_with('"'));
+    }
+
+    #[test]
+    fn a_stale_autostart_value_is_rewritten_and_an_unwanted_one_is_removed() {
+        let desired = autostart_value(std::path::Path::new(r"C:\Yomika\yomika.exe"));
+        // 设置开着、值也就是该有的样子（`reg query` 会加空白，所以按 trim 后比较）。
+        assert_eq!(autostart_action(Some(&format!("  {desired}\t")), true, &desired), AutostartAction::Keep);
+        // 设置开着，但值还是更早的构建写下的——那时还不带 `--background`。
+        assert_eq!(
+            autostart_action(Some(r#""C:\old\yomika.exe""#), true, &desired),
+            AutostartAction::Write
+        );
+        // 设置开着，值带着参数但指向另一份程序（exe 搬了家）。
+        assert_eq!(
+            autostart_action(Some(r#""D:\builds\yomika.exe" --background"#), true, &desired),
+            AutostartAction::Write
+        );
+        // 设置开着、值还没有。
+        assert_eq!(autostart_action(None, true, &desired), AutostartAction::Write);
+        // 设置关着、值却在：留着它就会一直自启，所以删。
+        assert_eq!(
+            autostart_action(Some(r#""C:\old\yomika.exe" --background"#), false, &desired),
+            AutostartAction::Delete
+        );
+        // 设置关着、值也没有：什么也不用做。
+        assert_eq!(autostart_action(None, false, &desired), AutostartAction::Keep);
     }
 }

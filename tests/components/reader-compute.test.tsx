@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { ComputedImageCache } from '../../src/lib/computedImageCache';
-import { useComputedPage, type ComputedPageRequest } from '../../src/lib/readerCompute';
+import { useComputedPage, type ComputedPageRepository, type ComputedPageRequest } from '../../src/lib/readerCompute';
 import type { ComputeJobSnapshot } from '../../src/domain/compute';
 
 const LEASE_ID = 'a'.repeat(32);
@@ -62,7 +62,9 @@ function makeRepository() {
       listeners.add(handler);
       return () => { listeners.delete(handler); calls.push('unsubscribe'); };
     },
-    async submit(payload: unknown) {
+    // 返回类型按接口写死：字面量推断出来的只有「成功那半边」，而「现在没位置」这条判据
+    // 要的正是失败那半边（`useComputedPage` 拿到 `ok: false` 之后做什么）。
+    async submit(payload: unknown): ReturnType<ComputedPageRepository['submit']> {
       calls.push('submit');
       void payload;
       // 刚入队的诚实形状：这时还没有任何产物，所以页面必须还是空的。
@@ -297,6 +299,69 @@ describe('reader compute lifecycle', () => {
     expect(view.getByTestId('error').textContent).toBe('GPU_BACKEND_UNAVAILABLE');
     // 这一页原本什么都没有，失败之后也不该突然冒出一张图。
     expect(view.getByTestId('url').textContent).toBe('none');
+  });
+
+  it('backs off and asks again when the queue is full, instead of reporting a failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeRepository();
+      const { cache } = makeCache();
+      setImageDecoderForTests(() => Promise.resolve());
+      const realSubmit = fake.repository.submit.bind(fake.repository);
+      let attempts = 0;
+      fake.repository.submit = async (payload: unknown) => {
+        attempts += 1;
+        // 「计算队列满了：Pressure」是这台机器上刷得最多的一条（一份 925 行的日志里有 424
+        // 条）：它是 `resource_policy::admission` 的 `ForegroundOnly` 把后台提交挡回来，
+        // 不是那个东西坏了。前面两次按现场如实拒绝，第三次队列松开了。
+        if (attempts <= 2) {
+          return {
+            ok: false as const,
+            error: { code: 'COMPUTE_QUEUE_FULL', message: '计算队列满了：Pressure', retryable: true },
+          };
+        }
+        return realSubmit(payload);
+      };
+      const view = render(<Probe repository={fake.repository} cache={cache} pageKey="page-1" pageRequest={request} />);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(attempts).toBe(1);
+      // 拒绝之后这一页不是 failed：它还在排队，界面不该冒出「处理失败」。
+      expect(view.getByTestId('status').textContent).toBe('queued');
+      expect(view.getByTestId('error').textContent).toBe('none');
+
+      // 让位的等待是 0.6s 起、翻倍：第一次等到 600ms 就再问一次。
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      expect(attempts).toBe(2);
+      expect(view.getByTestId('status').textContent).toBe('queued');
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_200); });
+      expect(attempts).toBe(3);
+      // 第三次收下了：这一页照常走出结果，从头到尾没有一次 failed。
+      await act(async () => { fake.emit(snapshot({ state: 'completed', sequence: 5, settledMs: 9 })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(view.getByTestId('status').textContent).toBe('ready');
+      expect(view.getByTestId('url').textContent).toBe(LEASE_URL);
+      expect(view.getByTestId('error').textContent).toBe('none');
+    } finally {
+      vi.useRealTimers();
+      setImageDecoderForTests(undefined);
+    }
+  });
+
+  it('still reports a submit rejection that is not about there being no room', async () => {
+    const fake = makeRepository();
+    const { cache } = makeCache();
+    fake.repository.submit = async () => ({
+      ok: false as const,
+      error: { code: 'COMPUTE_INPUT_INVALID', message: '这一页的输入不对', retryable: false },
+    });
+    const view = render(<Probe repository={fake.repository} cache={cache} pageKey="page-1" pageRequest={request} />);
+
+    // 让位只留给「现在没位置」那一类。真正坏掉的输入必须照旧报出来——不然这一页会
+    // 永远停在「排队中」，而它其实是永远不会成的那一件。
+    await waitFor(() => expect(view.getByTestId('status').textContent).toBe('failed'));
+    expect(view.getByTestId('error').textContent).toBe('COMPUTE_INPUT_INVALID');
   });
 
   it('cancels its subscription and hands the lease back when the reader is unmounted', async () => {

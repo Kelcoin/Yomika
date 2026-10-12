@@ -170,13 +170,25 @@ pub fn run() {
             let database = Database::open(app.handle()).map_err(std::io::Error::other)?;
             // 「关闭到托盘」的即时答案在启动时读一次（此刻没人抢库锁）；窗口的关闭按钮
             // 之后只问这份缓存，不去等锁——详情见 `settings::close_to_tray`。
-            let close_to_tray = database
+            let launch_preferences = database
                 .connection
                 .lock()
                 .ok()
-                .and_then(|connection| settings::load_preferences_from(&connection).ok())
-                .is_some_and(|snapshot| snapshot.close_to_tray);
+                .and_then(|connection| settings::load_preferences_from(&connection).ok());
+            let close_to_tray = launch_preferences.as_ref().is_some_and(|snapshot| snapshot.close_to_tray);
             settings::remember_close_to_tray(close_to_tray);
+            // 开机自启那条注册表值也要对一次账。它是**上一次拨开关时**写下的，之后没人
+            // 再看它：exe 搬了家、或者那条值还是某个更早的构建留下的（那次还不带
+            // `--background`）都会一直留着，而后者正是用户报的「明明该进托盘、窗口却弹
+            // 出来」。对账只碰自己名下那一条值，正确的值原样不动。
+            #[cfg(target_os = "windows")]
+            if let Some(snapshot) = &launch_preferences {
+                match settings::reconcile_windows_autostart(snapshot.start_with_windows) {
+                    Ok(Some(note)) => eprintln!("{note}"),
+                    Ok(None) => {}
+                    Err(error) => eprintln!("无法对账开机自启：{error}"),
+                }
+            }
             app.manage(database);
             app.manage(DedupScanRegistry::default());
             app.manage(InAppLoginState::default());

@@ -99,8 +99,20 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  * - `LRR_NOT_FOUND`：档案已经从 LANraragi 上移除了，本地索引清掉就行。档案详情页本来
  *   就会说「该档案已从 LANraragi 移除，本地索引已清理」。
  * - `INFERENCE_CANCELLED` / `COMPUTE_CANCELLED`：取消是这一页这一档的结果，不是失败
- *   （`INFERENCE_CANCELLED` 上面那条注释早就写着「取消的结果既不该进错误日志」）。 */
-export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set(['LRR_NOT_FOUND', 'INFERENCE_CANCELLED', 'COMPUTE_CANCELLED']);
+ *   （`INFERENCE_CANCELLED` 上面那条注释早就写着「取消的结果既不该进错误日志」）。
+ * - `COMPUTE_QUEUE_FULL` / `COMPUTE_UNAVAILABLE` / `COMPUTE_WORKER_BUSY`：这三个说的是
+ *   「现在没位置」——队列排满了、内存/显存处在软阈值上（`resource_policy::admission`
+ *   的 `ForegroundOnly`）、或者 worker 手上正有一件。它们都会自己过去，而提交方要做的
+ *   是**退让再问一次**（`readerCompute` 的让位重试），不是报故障。一份真实的设备日志里
+ *   这三个码刷了 848 条，占整份日志的 92%——把正常状态记成错误，现场就被埋掉了。 */
+export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
+  'LRR_NOT_FOUND',
+  'INFERENCE_CANCELLED',
+  'COMPUTE_CANCELLED',
+  'COMPUTE_QUEUE_FULL',
+  'COMPUTE_UNAVAILABLE',
+  'COMPUTE_WORKER_BUSY',
+]);
 
 export interface DomainError {
   code: DomainErrorCode;

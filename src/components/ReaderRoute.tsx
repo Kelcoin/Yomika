@@ -13,7 +13,7 @@ import { LoadingIndicator } from './LoadingIndicator';
 import { RETRYABLE_COMPUTE_ERROR_CODES } from '../domain/compute';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
-import { dlssnrTransform, getNativeImageCache, remoteTransform, type DlssnrSource } from '../lib/nativeImageCache';
+import { dlssnrTransform, getNativeImageCache, remoteTransform, renditionErrorCode, type DlssnrSource } from '../lib/nativeImageCache';
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
@@ -324,9 +324,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const incognito = searchParams.get('incognito') === '1';
   const [scopeId, setScopeId] = useState<string>();
   const [initialPage, setInitialPage] = useState(0);
-  /** Reading mode and direction for this archive: its own record if it has one,
-   * otherwise the global preference. Both were previously ignored — the reader
-   * always started on `auto`/`ltr`, which made the two settings do nothing. */
+  /** Reading mode and direction for this archive. The layout comes from this
+   * archive's own record when it says "continuous", otherwise from the global
+   * preference; the direction comes from the preference alone — see the loader
+   * below for why the stored direction no longer decides it. Both were previously
+   * ignored — the reader always started on `auto`/`ltr`, which made the two
+   * settings do nothing. */
   const [readingLayout, setReadingLayout] = useState<ReaderLayoutPreference>('auto');
   const [readingDirection, setReadingDirection] = useState<ReadingDirection>('ltr');
   const [title, setTitle] = useState('阅读器');
@@ -911,6 +914,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             : censored
               ? 'decensored'
               : 'reader-page';
+          /** 这一档（DLSSNR / 远端）自己那一份失败。它**不走**本地链的 `onFailure`：那条路
+           * 报的是「本地哪一阶段没落地」，这里报的是「后面这一步没算出来」。两处都归到
+           * `jobFailure` 上，下面那句「阵发失败不算做过」才看得见它——只报个提示、不带码的
+           * 话，队列满/worker 被杀这类现场问题会把这一页永久记成「做过了」（docs/71:645 第四句）。 */
+          let engineFailure: ReaderPageFailure | undefined;
           let derived = local;
           if (job.engine === 'dlssnr' || job.engine === 'remote') {
             setDerivingStage(job.engine);
@@ -942,7 +950,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
                 taskId: `${taskBase}:${job.engine}`,
-              }, { signal: controller.signal }).catch(() => undefined);
+              }, { signal: controller.signal }).catch((error: unknown) => {
+              // 失败不抛给外面（这一档本来就是可选的高档，本地那一版已经画出来了），
+              // 但**码要留下**：`RenditionError` 带着原生那句的 code，见下面的判定。
+              const code = renditionErrorCode(error);
+              if (code !== undefined) {
+                // `exactOptionalPropertyTypes` 下 `message?: string` 不能收 `string | undefined`，
+                // 所以有文案才带上这一栏。
+                engineFailure = error instanceof Error ? { code, message: error.message } : { code };
+              }
+              return undefined;
+            });
             if (controller.signal.aborted) {
               if (processed) imageCache.release(processed);
               continue;
@@ -954,6 +972,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               // 次原因：不然用户看到的是「开着却没反应」。
               noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
             }
+            // 这一步失败也要算进 `jobFailure`：下面判「阵发失败不算做过」时认的就是它。
+            if (engineFailure) jobFailure = engineFailure;
             // 不写「远端失败」的提示：远端地址与令牌的失败在错误日志里，而且那一档本
             // 来就是本机处理的可选替代（本机这一版已经画出来了）。
           }
@@ -1226,13 +1246,21 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         ? Math.min(progress.value.pageIndex, Math.max(0, manifest.value.pages.length - 1))
         : 0;
       setInitialPage(firstPage);
-      // Reading mode and direction: the archive's own record wins over the global
-      // default, because it is the more specific answer. The stored layout only
-      // distinguishes paged from continuous — whether paged meant single, double
-      // or auto was never recorded, so that part comes from the preference.
+      // Reading mode and direction. The layout still lets the archive's own record
+      // win for the one thing it can distinguish — paged vs continuous — because
+      // "I scrolled this one" is about *this* archive and nothing else.
+      //
+      // The direction is not that kind of fact. It used to be read from the same
+      // record (`stored?.direction ?? preferences.defaultDirection`), which made
+      // the setting unable to take effect on any archive that had been opened once
+      // before, and made two archives disagree with each other for no reason the
+      // user could see. 设置里那一条现在是**这一次翻页的方向**（标题也从「默认方向」
+      // 改成了「翻页方向」），所以它说了算；阅读器里那颗方向按钮是这一趟的临时翻转。
+      // `direction` 仍然随进度写回去（`saveProgress` 的载荷与它同步出去的那一列都
+      // 还要求这个字段），但进入阅读模式时不再读它。
       const stored = progress.ok ? progress.value : null;
       setReadingLayout(stored?.layout === 'continuous' ? 'webtoon' : preferences.defaultLayout);
-      setReadingDirection(stored?.direction ?? preferences.defaultDirection);
+      setReadingDirection(preferences.defaultDirection);
       // ReaderScreen owns asynchronous neighbouring-page loading. Waiting for
       // Promise.all(prefetch) here made a ready first page wait for a slow LRR
       // neighbour, delaying navigation even though no compute was needed.

@@ -36,7 +36,7 @@ use yomika_compute_protocol::{DlssnrGrant, PASSTHROUGH_ENGINE_ID};
 use super::decensor::InpaintPreparation;
 use super::inputs;
 use super::manager::{ComputeManager, SubmitRequest};
-use super::scheduler::{JobKey, JobState, Priority};
+use super::scheduler::{JobKey, JobState, Priority, SubmitError};
 
 /// worker 是另一个进程，终态只能靠快照看出来（`ComputeManager` 没有「等终态」的 API，
 /// 也不该有：命令层与调度器之间只有事件，没有回调）。20 ms 比一次超分的用时小三个数量级。
@@ -422,16 +422,43 @@ struct FinishedArtifact {
     engine_id: String,
 }
 
+/// 提交被调度器挡回来时，桥这一侧报什么。
+///
+/// 与 `super::commands::enqueue` 同一张表（那边是渲染进程那条来路，这里是字节桥）。
+/// 从前这里把**所有**提交失败都写成 `COMPUTE_QUEUE_FULL` 配一句 `计算队列满了：{error:?}`
+/// ——一份真实的设备日志里 424 条 `计算队列满了：Pressure` 就是这么来的：压力档位
+/// （§8.1 软阈值、§8.4 显存预留）被说成「队列排满」，而它其实是「现在这台机器不算这一版」。
+/// 两者都**不是故障**，是「现在没位置」：回可重试的码，由调用方退让再问。
+///
+/// 抽成函数是为了能直接钉住这张表：`run_finished` 要一个真 `ComputeManager` 才跑得起来，
+/// 而这段映射就是「被挡回来该怎么报」的全部语义。
+fn submit_refused(error: SubmitError) -> ProxyError {
+    match error {
+        SubmitError::ForegroundFull => ProxyError {
+            code: "COMPUTE_QUEUE_FULL",
+            message: "前台队列已满，且没有可替换的后台占位".to_string(),
+            retryable: true,
+        },
+        SubmitError::BackgroundFull => ProxyError {
+            code: "COMPUTE_QUEUE_FULL",
+            message: "后台预扫槽位已满，等一件跑完再来".to_string(),
+            retryable: true,
+        },
+        SubmitError::Pressure => ProxyError {
+            code: "COMPUTE_UNAVAILABLE",
+            message: "这台机器现在内存/显存吃紧，先不算这一版（原图还在，等会儿再看会自动重试）"
+                .to_string(),
+            retryable: true,
+        },
+    }
+}
+
 fn run_finished(
     manager: &ComputeManager,
     request: SubmitRequest,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<FinishedArtifact, ProxyError> {
-    let submitted = manager.submit(request).map_err(|error| ProxyError {
-        code: "COMPUTE_QUEUE_FULL",
-        message: format!("计算队列满了：{error:?}"),
-        retryable: true,
-    })?;
+    let submitted = manager.submit(request).map_err(submit_refused)?;
     let state = wait_for_terminal(manager, &submitted.job_id, submitted.subscription_id, cancelled)?;
     match state {
         JobState::Completed => read_artifact(manager, &submitted.job_id),
@@ -654,6 +681,32 @@ mod tests {
             // 翻译过的码要把原码留在文案里；没翻译的就不必重复一遍。
             let carries_original = error.message.contains(incoming);
             assert!(carries_original, "文案里丢了原码：{}", error.message);
+        }
+    }
+
+    /// 提交被挡回来 ≠ 队列排满。压力档位（内存/显存吃紧）必须报成 `COMPUTE_UNAVAILABLE`：
+    /// 两种都是「现在没位置」，前端那两个码都按**可重试**处理，但只有它说得清是哪一种。
+    /// 一份真实的设备日志里 424 条 `计算队列满了：Pressure` 就是因为这里把两者合成了一句
+    /// ——码说谎的代价是前端判不了「该退让还是该收手」。
+    #[test]
+    fn a_refused_submit_says_which_kind_of_no_room_it_was() {
+        let cases = [
+            (SubmitError::ForegroundFull, "COMPUTE_QUEUE_FULL", "前台"),
+            (SubmitError::BackgroundFull, "COMPUTE_QUEUE_FULL", "后台"),
+            (SubmitError::Pressure, "COMPUTE_UNAVAILABLE", "吃紧"),
+        ];
+        for (refusal, expected_code, expected_word) in cases {
+            let error = submit_refused(refusal);
+            assert_eq!(error.code, expected_code, "码报错了：{expected_word}");
+            assert!(
+                error.retryable,
+                "「现在没位置」必须可重试：{expected_code}"
+            );
+            assert!(
+                error.message.contains(expected_word),
+                "文案说不清是哪一种：{}",
+                error.message
+            );
         }
     }
 

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProper
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
-import { advanceReader, classifyPageShape, createReaderState, createZoomState, effectiveReaderLayout, fitPageSize, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleDoubleTapZoom, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
+import { advanceReader, classifyPageShape, createReaderState, createZoomState, doubleTapZoomAt, effectiveReaderLayout, fitPageSize, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, shouldCommitPageTurn, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
@@ -1016,7 +1016,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const now = Date.now();
     if (now - lastTapRef.current < 300 && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       lastTapRef.current = 0;
-      if (layoutRef.current !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current));
+      // 缩放的锚点就是这一下点在哪里：和滚轮同一套数学（`zoomAtPoint`）。以前这里只
+      // 翻倍率、把 pan 归零，于是点画面左上角会把那一块甩到屏幕正中。
+      if (layoutRef.current !== 'webtoon') {
+        const point = viewportPoint(touch.clientX, touch.clientY);
+        setZoom((current) => doubleTapZoomAt(current, point.x, point.y));
+      }
       return;
     }
     lastTapRef.current = now;
@@ -1377,7 +1382,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         // （加载态那条顶栏也要同一套，所以不能只留在这一个组件里）。
         handleCanvasClick(event);
       }}
-      onDoubleClick={() => { if (effectiveLayout !== 'webtoon') setZoom((current) => toggleDoubleTapZoom(current)); }}
+      // 两条栏是压在画布上的自己的界面，落在它们上面的双击不是画布手势。以前这里
+      // 只认「target 是不是按钮/输入框」，于是顶栏标题那一行、底栏三条分组之间的空处
+      // 上双击会一路冒到这里，把它下面的图放大一次。顶栏上那两下手势（`windowDrag`）
+      // 靠 `stopPropagation` 挡住了自己那一半，可它碰到控件就早退，底栏又根本没铺它，
+      // 所以这一句必须落在画布这一层——两条栏都盖在 `.reader-chrome` 里。
+      onDoubleClick={(event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+        if (effectiveLayout === 'webtoon') return;
+        // 锚点是鼠标点的那个位置，和滚轮同一套数学（`zoomAtPoint`）：点在左上角的
+        // 人物上，放大后那一块还在指针下，而不是被甩到屏幕正中。
+        const point = viewportPoint(event.clientX, event.clientY);
+        setZoom((current) => doubleTapZoomAt(current, point.x, point.y));
+      }}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
         onPointerDown={(event) => {

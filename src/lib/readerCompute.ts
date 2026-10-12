@@ -106,6 +106,28 @@ function toPayload(request: ComputedPageRequest): ComputeSubmitPayload {
  * - **解好才换**：`decodeImage` 成功之前不设 `url`，否则就是那道黑闪。
  * - 任何一步失败都留着**已经显示的那一版**，并如实报错（取消不算失败）。
  */
+/** 「现在没位置」这一类：队列排满、内存/显存吃紧、worker 手上正有一件。
+ *
+ * 它们说的不是「哪里坏了」，而是「这一件现在挤不进去」，所以这一页**不进 `failed`**：
+ * 原地安静地等一会儿再问一次。把它们当失败报出去，用户看到的是「处理失败（计算队列
+ * 满了）」——什么都没坏，只是需要等；而一路抢着重问只会让队列更挤，那正是一份真实设备
+ * 日志里同一条错误刷了 424 遍、占全日志 92% 的成因。
+ *
+ * 与 `src/domain/errors.ts` 的 `QUIET_ERROR_CODES` 守同一条边界：那边管「不写进错误日志」，
+ * 这里管「不进失败态」。两处都要有，少一处就还剩一半噪声。 */
+const BACKPRESSURE_COMPUTE_CODES: ReadonlySet<string> = new Set([
+  'COMPUTE_QUEUE_FULL',
+  'COMPUTE_UNAVAILABLE',
+  'COMPUTE_WORKER_BUSY',
+]);
+
+/** 让位的等待：0.6s 起，翻倍到 10s 封顶。
+ *
+ * 为什么是指数而不是固定间隔：软阈值（`resource_policy::admission` 的 `ForegroundOnly`）
+ * 要等手上那一件算完、内存落回去才松开，而那件事的时长本来就是几秒到几十秒。固定间隔
+ * 重问等于拿一串必然被拒的提交去刷日志与调度器。 */
+const BACKPRESSURE_RETRY_MS: readonly number[] = [600, 1_200, 2_400, 4_800, 10_000];
+
 export function useComputedPage(options: UseComputedPageOptions): ComputedPageState {
   const { repository, cache, key, request, onDiagnostic } = options;
   const [state, setState] = useState<ComputedPageState>({ status: 'idle' });
@@ -244,38 +266,67 @@ export function useComputedPage(options: UseComputedPageOptions): ComputedPageSt
 
     const detach = repository.onJobChanged(handleEvent);
 
-    void repository.submit(toPayload(current)).then((result) => {
-      if (tracking.cancelled) {
-        if (result.ok) void repository.cancel(result.value.jobId, result.value.subscriptionId);
-        return;
+    let retryTimer: number | undefined;
+    let deferrals = 0;
+
+    /** 让位：这一件现在没位置。留着已经显示的那一版，回到 `queued`，过一会儿再问一次。 */
+    const defer = () => {
+      const wait = BACKPRESSURE_RETRY_MS[Math.min(deferrals, BACKPRESSURE_RETRY_MS.length - 1)]!;
+      deferrals += 1;
+      // 只记第一次：让位本身是正常状态，但「这一页等过」值得留一条线索——一条，不是每
+      // 六百毫秒一条。
+      if (deferrals === 1) {
+        diagnosticRef.current?.(`compute page ${key}: 让位`, { message: '计算队列现在没有位置，等一会儿再问一次' });
       }
-      if (!result.ok) {
-        fail(result.error.code, result.error.message);
-        return;
-      }
-      tracking.jobId = result.value.jobId;
-      tracking.subscriptionId = result.value.subscriptionId;
-      const observed = tracking.lastSequence;
-      tracking.lastSequence = Math.max(observed, result.value.snapshot.sequence);
-      const settled = result.value.snapshot.state;
-      if (typeof settled === 'object' && 'failed' in settled) fail(settled.failed.code, '任务失败');
-      // 提交回来的时候任务可能已经在跑（宿主把这次提交并进了已经在跑的那个任务：重新进入阅读器
-      // 就会这样），也可能已经完成（命中缓存）。两种都要立刻去问产物——更早阶段的产物可能已经
-      // 发布了，等下一次阶段切换才显示，等于把「已经躺在磁盘上的图」白按住一个阶段。
-      // 但要是事件流里已经先送来了更新的一条（序号更大），这份应答就是旧的，别拿它再走一遍。
-      else if (
-        observed <= result.value.snapshot.sequence &&
-        (settled === 'completed' || (typeof settled === 'object' && 'running' in settled))
-      ) {
-        if (typeof settled === 'object') {
-          setState((previous) => ({ status: 'running', ...(previous.url === undefined ? {} : { url: previous.url }) }));
+      setState((previous) => ({ status: 'queued', ...(previous.url === undefined ? {} : { url: previous.url }) }));
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        if (!tracking.cancelled) submit();
+      }, wait);
+    };
+
+    const submit = () => {
+      void repository.submit(toPayload(current)).then((result) => {
+        if (tracking.cancelled) {
+          if (result.ok) void repository.cancel(result.value.jobId, result.value.subscriptionId);
+          return;
         }
-        void pick();
-      }
-    });
+        if (!result.ok) {
+          // 队列满 / 内存吃紧 / worker 正忙：退让再问，不报故障。
+          if (BACKPRESSURE_COMPUTE_CODES.has(result.error.code)) {
+            defer();
+            return;
+          }
+          fail(result.error.code, result.error.message);
+          return;
+        }
+        tracking.jobId = result.value.jobId;
+        tracking.subscriptionId = result.value.subscriptionId;
+        const observed = tracking.lastSequence;
+        tracking.lastSequence = Math.max(observed, result.value.snapshot.sequence);
+        const settled = result.value.snapshot.state;
+        if (typeof settled === 'object' && 'failed' in settled) fail(settled.failed.code, '任务失败');
+        // 提交回来的时候任务可能已经在跑（宿主把这次提交并进了已经在跑的那个任务：重新进入阅读器
+        // 就会这样），也可能已经完成（命中缓存）。两种都要立刻去问产物——更早阶段的产物可能已经
+        // 发布了，等下一次阶段切换才显示，等于把「已经躺在磁盘上的图」白按住一个阶段。
+        // 但要是事件流里已经先送来了更新的一条（序号更大），这份应答就是旧的，别拿它再走一遍。
+        else if (
+          observed <= result.value.snapshot.sequence &&
+          (settled === 'completed' || (typeof settled === 'object' && 'running' in settled))
+        ) {
+          if (typeof settled === 'object') {
+            setState((previous) => ({ status: 'running', ...(previous.url === undefined ? {} : { url: previous.url }) }));
+          }
+          void pick();
+        }
+      });
+    };
+
+    submit();
 
     return () => {
       tracking.cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       detach();
       const { jobId, subscriptionId } = tracking;
       if (jobId !== undefined && subscriptionId !== undefined) void repository.cancel(jobId, subscriptionId);

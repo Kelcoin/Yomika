@@ -70,6 +70,21 @@ function trackRects(image: HTMLElement) {
   return { count: () => reads };
 }
 
+/** 数一数整个文档在某个窗口里做了几次 `getBoundingClientRect`。在样式刚写过之后量是
+ * 一次强制同步布局，一次拖动里多量几次就是「手指走了、画面还在后面追」。 */
+function countRects() {
+  const native = Element.prototype.getBoundingClientRect;
+  let reads = 0;
+  Element.prototype.getBoundingClientRect = function patched(this: Element) {
+    reads += 1;
+    return native.call(this);
+  };
+  return {
+    count: () => reads,
+    restore() { Element.prototype.getBoundingClientRect = native; },
+  };
+}
+
 function stubHoverNone(initial = false) {
   const original = window.matchMedia;
   const listeners = new Map<string, Set<(event: { matches: boolean }) => void>>();
@@ -171,13 +186,33 @@ describe('reader screen', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
-    fireEvent.doubleClick(reader);
+    // 落点写出来是因为双击现在会**锚在它上面**：锚点在画面正中时 pan 才是 0。
+    // 锚点本身由下面那条用例钉住，这一条只关心「放大之后还能拖」。
+    fireEvent.doubleClick(reader, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
     fireEvent.mouseDown(reader, { button: 0, clientX: 300, clientY: 300 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 400, clientY: 360 });
     expect(frame.style.transform).toBe('scale(2) translate(50px, 30px)');
     expect(frame.style.transition).toBe('none');
     fireEvent.mouseUp(reader, { button: 0, clientX: 400, clientY: 360 });
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  // 用户报的：双击缩放和滚轮缩放不是同一种——滚轮以指针为锚点，双击却只翻倍率、
+  // 再把 pan 归零，于是双击画面左侧的人物，那一块会被甩到屏幕正中。
+  it('anchors the double-click zoom on the point it landed on, the way the wheel does', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    // 画布盒子量不到时按视口兜底（`measureReaderRoot`），所以落点从视口中心算：
+    // 中心往左 100px ⇒ 锚点 (-100, 0)；1 倍放大到 2 倍，`zoomAtPoint` 给
+    // panX = -100·(1/2 - 1) = 50，panY = 0。
+    const fromCentre = -100;
+    fireEvent.doubleClick(reader, { clientX: window.innerWidth / 2 + fromCentre, clientY: window.innerHeight / 2 });
+    expect(frame.style.transform).toBe('scale(2) translate(50px, 0px)');
+    // 换一种说法验同一件事：缩放前落在指针下的内容点，缩放后仍然在指针下。
+    // 屏上位置 = scale·(内容点 + pan)，两边都该等于锚点自己。
+    const panX = 50;
+    expect(2 * (fromCentre + panX)).toBe(fromCentre);
   });
 
   it('zooms about the midpoint of two fingers and springs undershoot back', () => {
@@ -773,6 +808,53 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
   });
 
+  it('follows a drag from the box it took at the press, not from a fresh measurement per move', () => {
+    vi.useFakeTimers();
+    const view = renderReader();
+    const rects = countRects();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const track = reader.querySelector('.reader-track') as HTMLDivElement;
+      fireEvent.mouseDown(reader, { button: 0, clientX: 600, clientY: 200 });
+      // 按下那一下量一次是对的（这一趟拖动要用多宽是那一刻的事实）。错的是一路跟着量：
+      // 每次 `mousemove` 都量，就是在每次都在样式刚写过之后强制同步布局一次。
+      const atPress = rects.count();
+      for (let step = 1; step <= 12; step += 1) {
+        fireEvent.mouseMove(reader, { buttons: 1, clientX: 600 - step * 20, clientY: 200 });
+      }
+      act(() => { vi.advanceTimersByTime(32); });
+      expect(rects.count()).toBe(atPress);
+      expect(track.style.transform).toBe('translate3d(-240px,0,0)');
+    } finally {
+      rects.restore();
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces a burst of pointer moves into one transform write per frame', () => {
+    vi.useFakeTimers();
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.mouseDown(reader, { button: 0, clientX: 640, clientY: 200 });
+      const scheduled = vi.spyOn(window, 'requestAnimationFrame');
+      // 一只 1000Hz 的鼠标在两帧之间能塞进十几个 `mousemove`。每一次都排一帧的话，
+      // 这一帧里就要往同一个 transform 上写十几遍——写一次和写十六次的画面一样，代价不一样。
+      for (let step = 1; step <= 16; step += 1) {
+        fireEvent.mouseMove(reader, { buttons: 1, clientX: 640 - step * 10, clientY: 200 });
+      }
+      expect(scheduled).toHaveBeenCalledTimes(1);
+      act(() => { vi.advanceTimersByTime(32); });
+      // 这一帧的那一次写要落到最后一个位置，而不是中间某一个。
+      const track = reader.querySelector('.reader-track') as HTMLDivElement;
+      expect(track.style.transform).toBe('translate3d(-160px,0,0)');
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it('finishes the slide before replacing the current page', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
@@ -1137,6 +1219,44 @@ describe('reader screen', () => {
       invoke.mockClear();
       fireEvent.mouseDown(screen.getByRole('button', { name: '返回上一页' }), { button: 0, detail: 1 });
       expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  // 用户报的：在顶栏/底栏上双击，会让它下面的图缩放一次（事件穿透）。上面那条用例
+  // 量不到它——顶栏那两下手势自己 `stopPropagation` 了，它在乎的是**没有漏到画布上**
+  // 这一件事实；漏的是另外两条路：底栏根本没铺那两下手势，而顶栏铺了却在碰到控件时
+  // 早退（`isControl`）。所以这一条把落点放在底栏的空白处与顶栏的按钮上。
+  it('keeps a double click on either bar off the page underneath it', () => {
+    const invoke = vi.fn(() => Promise.resolve(false));
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const view = renderReader();
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const zoomed = () => view.container.querySelector('.reader-single, .reader-spread') as HTMLElement;
+      fireEvent.click(reader);
+      const bottom = view.container.querySelector('.reader-toolbar') as HTMLElement;
+      expect(bottom).not.toBeNull();
+
+      // 先把比例从 1 挪开：这样「双击有没有漏到画布上」才看得出来。
+      fireEvent.wheel(reader, { deltaY: -200 });
+      const anchored = zoomed().style.transform;
+      expect(anchored).not.toContain('scale(1)');
+
+      // 底栏三条分组之间的空处。
+      fireEvent.doubleClick(bottom);
+      expect(zoomed().style.transform).toBe(anchored);
+
+      // 顶栏那颗按钮：`useWindowDrag` 碰到控件会早退，这一下同样会漏。
+      fireEvent.doubleClick(screen.getByRole('button', { name: '缩略面板' }));
+      expect(zoomed().style.transform).toBe(anchored);
+
+      // 顶栏标题那一行：这一条以前靠 `windowDrag` 的 `stopPropagation` 挡着，
+      // 换成栏自己的那一层守卫之后必须仍然挡住。
+      fireEvent.doubleClick(view.container.querySelector('.reader-chrome-top strong') as HTMLElement);
+      expect(zoomed().style.transform).toBe(anchored);
     } finally {
       view.unmount();
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;

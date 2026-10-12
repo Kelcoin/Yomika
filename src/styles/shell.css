@@ -3922,8 +3922,11 @@ body::-webkit-scrollbar,
   margin-block-start: var(--space-3);
 }
 
-/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 各占一份宽度，谁也不折行。 */.settings-menu-account-actions {
+/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 各占一份宽度，谁也不折行。
+   `wrap` 只为「重置远端」那一下变形留着：它变成两枚胶囊时要占满整行，否则在窄面板里
+   两枚都挤成一行放不下四个字。未变形时三项的 `flex-basis` 是 0，收缩而不会换行。 */.settings-menu-account-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
@@ -3931,6 +3934,46 @@ body::-webkit-scrollbar,
 .settings-menu-account-actions > .secondary-action {
   flex: 1 1 0;
   min-width: 0;
+}
+
+/* 破坏性动作的「原地变形」：一颗常驻按钮 + 一条件件长出来的对手方。
+   变形时这一组占满整行，两枚胶囊各分一半——它们要写得下「确认重置」四个字。 */
+.settings-menu-reset {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.settings-menu-reset.is-armed { flex: 1 1 100%; }
+
+.settings-menu-reset > .secondary-action {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 变形的那一帧：那颗按钮轻轻张开（同一个节点换了图标与标签），对手方从左边淡入。
+   两段是同一个动作的两半，所以共用 `--motion-fast`；`backwards` 让首帧立刻生效，
+   不会先闪一下终态。 */
+@keyframes settings-reset-morph {
+  from { opacity: 0.45; transform: scale(0.94); }
+}
+
+@keyframes settings-reset-partner-in {
+  from { opacity: 0; transform: translateX(-6px); }
+}
+
+.settings-menu-reset.is-armed > .settings-menu-reset-toggle {
+  animation: settings-reset-morph var(--motion-fast) backwards;
+}
+
+.settings-menu-reset.is-armed > .settings-menu-reset-cancel {
+  animation: settings-reset-partner-in var(--motion-fast) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-menu-reset.is-armed > .settings-menu-reset-toggle,
+  .settings-menu-reset.is-armed > .settings-menu-reset-cancel { animation: none; }
 }
 
 /* 收起/展开：0fr → 1fr 的网格行过渡，让「高度自动」的表单也能动画——按钮的显隐

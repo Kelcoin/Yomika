@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { NativeImageCacheAdapter, remoteTransform } from '../../src/lib/nativeImageCache';
+import { dlssnrTransform, NativeImageCacheAdapter, remoteTransform, renditionErrorCode } from '../../src/lib/nativeImageCache';
 import { createImageCacheKey } from '../../src/domain/cache';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
@@ -88,5 +88,46 @@ describe('NativeImageCacheAdapter', () => {
       ).rejects.toThrow(/compute/);
     }
     expect(adapter).not.toHaveBeenCalled();
+  });
+
+  it('keeps the native code when a computed rendition is not produced', async () => {
+    // 阅读器这两档（DLSSNR / 远端）算不出来时抛出去的东西**必须带着码**：上层（阅读器的
+    // 派生队列）按码判「这是阵发问题还是这一页的定局」（`RETRYABLE_COMPUTE_ERROR_CODES`）
+    // ——队列满、worker 手上正有一件这类只是「现在没位置」，把这一页记成「做过了」就等于
+    // 这一趟阅读里再也拿不到那一版（docs/71:645 第四句）。这里只抛一句话，那个码就丢在
+    // 这一层了，上层只能把每一次阵发失败都当成定局：那正是「开着 DLSSNR 却一直没有反应」。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'dlssnr_apply_page') {
+        return { ok: false, error: { code: 'COMPUTE_QUEUE_FULL', message: '计算队列满了：Pressure', retryable: true } };
+      }
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, remoteComputeUrl: '192.168.1.9:47653', remoteComputeToken: 'paired-token' } };
+      if (command === 'remote_compute_process') {
+        return { ok: false, error: { code: 'COMPUTE_WORKER_BUSY', message: '计算进程手上正有一件', retryable: true } };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeImageCacheAdapter();
+    const rejected = async (identity: Parameters<NativeImageCacheAdapter['fetch']>[0]) => {
+      try {
+        const fetched = await repository.fetch(identity);
+        throw new Error(`这一版没算出来时不该当成功：${fetched.mime}`);
+      } catch (error) {
+        return error;
+      }
+    };
+
+    const dlssnr = await rejected({
+      scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a',
+      rendition: 'dlssnr', pageIndex: 4, transform: dlssnrTransform('reader-page', ''),
+    });
+    expect(renditionErrorCode(dlssnr)).toBe('COMPUTE_QUEUE_FULL');
+
+    const remote = await rejected({
+      scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a',
+      rendition: 'remote', pageIndex: 4,
+      transform: remoteTransform({ device: '192.168.1.9:47653', source: 'reader-page', chain: ['upscale'] }),
+    });
+    expect(renditionErrorCode(remote)).toBe('COMPUTE_WORKER_BUSY');
   });
 });

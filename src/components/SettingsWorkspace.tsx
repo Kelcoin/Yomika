@@ -1172,8 +1172,8 @@ export function SettingsWorkspace() {
             {selectedSettingsSection === 'settings-reading' && (
               <SettingsChoice
                 icon={<ArrowLeftRight />}
-                label="默认方向"
-                hint="从哪一侧开始阅读"
+                label="翻页方向"
+                hint="往哪一侧翻是下一页；进入阅读模式时就按这一档"
                 value={preferenceDraft.defaultDirection}
                 options={[{ value: 'ltr', label: '从左到右' }, { value: 'rtl', label: '从右到左' }]}
                 onChange={(value) => editPreferences({ defaultDirection: value as PreferenceSnapshot['defaultDirection'] })}
@@ -1386,14 +1386,32 @@ export function SettingsWorkspace() {
                             <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined || autoSync.running || sync.servers.length === 0} aria-busy={sync.syncingId === account.id || autoSync.running} onClick={() => void sync.runSync(account)}>
                               <RefreshCw aria-hidden="true" />{sync.syncingId === account.id || autoSync.running ? '同步中…' : '立即同步'}
                             </button>
-                            {sync.resetAccount?.id === account.id ? (
-                              <>
-                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={() => void sync.resetRemote(account)}><Check aria-hidden="true" />确认重置</button>
-                                <button className="secondary-action" type="button" disabled={sync.resetting} onClick={sync.cancelReset}><X aria-hidden="true" />取消</button>
-                              </>
-                            ) : (
-                              <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} title="删掉远端那份同步文档，下次同步按本地重新写一份" onClick={() => sync.beginReset(account)}><RotateCcw aria-hidden="true" />重置远端</button>
-                            )}
+                            {/* 破坏性动作点两下：**同一颗按钮**在原地变成确认按钮。所以这里是
+                                一颗常驻的 `button`（同一个节点换图标与标签，不是删掉再插一颗），
+                                它旁边那枚「取消」才是新长出来的对手方——参考的两枚胶囊。
+                                变形过程走 CSS 动画（`settings-reset-*`）；举着没人管、窗口被
+                                切走或失焦都会退回初始形态（见 `useSyncSettings` 里那条 effect）。 */}
+                            <span className={`settings-menu-reset${sync.resetAccount?.id === account.id ? ' is-armed' : ''}`}>
+                              <button
+                                className="secondary-action settings-menu-reset-toggle"
+                                type="button"
+                                disabled={sync.resetAccount?.id === account.id ? sync.resetting : sync.syncingId !== undefined}
+                                aria-expanded={sync.resetAccount?.id === account.id}
+                                title={sync.resetAccount?.id === account.id ? undefined : '删掉远端那份同步文档，下次同步按本地重新写一份'}
+                                onClick={() => {
+                                  if (sync.resetAccount?.id === account.id) void sync.resetRemote(account);
+                                  else sync.beginReset(account);
+                                }}
+                              >
+                                {sync.resetAccount?.id === account.id ? <Check aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
+                                {sync.resetting ? '正在重置…' : sync.resetAccount?.id === account.id ? '确认重置' : '重置远端'}
+                              </button>
+                              {sync.resetAccount?.id === account.id && (
+                                <button className="secondary-action settings-menu-reset-cancel" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>
+                                  <X aria-hidden="true" />取消
+                                </button>
+                              )}
+                            </span>
                           </div>
                         </div>
                       </div>

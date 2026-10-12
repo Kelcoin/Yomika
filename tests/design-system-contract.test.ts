@@ -2842,3 +2842,40 @@ describe('the paired-device link holds still', () => {
     );
   });
 });
+
+/** 「重置远端」那一下是**原地变形**：点下去以后，用户刚按的那一颗自己变成确认按钮，
+ *  它旁边长出一枚「取消」。行为那一半（同一个节点还在、举着没人管会退回去、窗口被切走
+ *  也退回去）钉在 `tests/components/settings-workspace.test.tsx` 里；jsdom 看不见的是
+ *  「变形」本身——两颗胶囊之间的那一段过渡落在样式表上，所以在这里钉。 */
+describe('the destructive confirmation morphs in place', () => {
+  const shell = read('src/styles/shell.css');
+  const plain = shell.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  it('opens the pair out to its own full row so both labels fit', () => {
+    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时它跟另外两颗动作平分一行').toMatch(/flex:\s*1 1 0/);
+    expect(ruleBody(shell, '.settings-menu-reset.is-armed'), '变形后占满整行，两枚各分一半').toMatch(/flex:\s*1 1 100%/);
+    expect(ruleBody(shell, '.settings-menu-account-actions'), '变形时整行让位，别把「立即同步」挤扁').toMatch(/flex-wrap:\s*wrap/);
+    expect(ruleBody(shell, '.settings-menu-reset > .secondary-action')).toMatch(/flex:\s*1 1 0/);
+  });
+
+  it('animates the morph instead of snapping between two button sets', () => {
+    expect(shell, '常驻那一颗轻轻张开').toContain('@keyframes settings-reset-morph');
+    expect(shell, '对手方从左边淡入').toContain('@keyframes settings-reset-partner-in');
+    expect(
+      ruleBody(shell, '.settings-menu-reset.is-armed > .settings-menu-reset-toggle'),
+      '变形动画挂在常驻那颗按钮上，而且用同一档时长',
+    ).toMatch(/animation:\s*settings-reset-morph\s+var\(--motion-fast\)\s+backwards/);
+    expect(
+      ruleBody(shell, '.settings-menu-reset.is-armed > .settings-menu-reset-cancel'),
+      '对手方那一半同拍进场',
+    ).toMatch(/animation:\s*settings-reset-partner-in\s+var\(--motion-fast\)\s+backwards/);
+  });
+
+  it('lets a reader who asked for less motion have the morph turned off', () => {
+    const optOut = [...plain.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/g)]
+      .map(([, body]) => body ?? '')
+      .filter((body) => body.includes('.settings-menu-reset.is-armed'));
+    expect(optOut, '这两条动画必须有自己那一档「少动效」的出口，而且只该有一条').toHaveLength(1);
+    expect(optOut[0]).toMatch(/\.settings-menu-reset\.is-armed > \.settings-menu-reset-cancel \{\s*animation:\s*none/);
+  });
+});

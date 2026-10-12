@@ -6,6 +6,7 @@ import {
   classifyPageShape,
   createReaderState,
   createZoomState,
+  doubleTapZoomAt,
   effectiveReaderLayout,
   filterArchivesByQuery,
   fitPageSize,
@@ -340,6 +341,23 @@ describe('reader domain', () => {
       // getting back to 100% took two more gestures.
       expect(toggleDoubleTapZoom({ scale: 1.4, panX: 20, panY: 8 })).toEqual({ scale: 1, panX: 0, panY: 0 });
       expect(toggleDoubleTapZoom({ scale: 0.7, panX: 0, panY: 0 }).scale).toBe(1);
+    });
+
+    // 用户报的：双击缩放和滚轮缩放不是同一种——滚轮以指针为锚点（`zoomAtPoint`），
+    // 双击却只翻倍率、再把 pan 归零，于是双击画面左上角的人物，那一块被甩到正中。
+    // 这一条钉住的是「两个手势共用同一套数学」，不是某一次算出来的具体数字。
+    it('anchors a double tap on the point it landed on, the way the wheel does', () => {
+      const anchored = doubleTapZoomAt(createZoomState(), -100, 40);
+      expect(anchored.scale).toBe(2);
+      // 屏上位置 = scale·(内容点 + pan)：锚点自己缩放前后都该停在原处。
+      const screen = (content: number, pan: number, scale: number) => scale * (content + pan);
+      expect(screen(-100, anchored.panX, anchored.scale)).toBe(-100);
+      expect(screen(40, anchored.panY, anchored.scale)).toBe(40);
+      // 同一个落点、同一个倍率：双击与滚轮给出同一个 pan。
+      expect(anchored).toEqual(zoomAtPoint(createZoomState(), 2, -100, 40));
+
+      // 回到 1 倍时 pan 仍然归零——不管从哪个比例、哪个落点回去。
+      expect(doubleTapZoomAt({ scale: 1.4, panX: 20, panY: 8 }, -100, 40)).toEqual({ scale: 1, panX: 0, panY: 0 });
     });
   });
 

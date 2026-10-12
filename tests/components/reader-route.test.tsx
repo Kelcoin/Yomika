@@ -6,7 +6,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { getNativeImageCache } from '../../src/lib/nativeImageCache';
+import { getNativeImageCache, RenditionError } from '../../src/lib/nativeImageCache';
 import { serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
 import type { ImageHandle } from '../../src/lib/unifiedImageCache';
 
@@ -316,6 +316,56 @@ describe('reader route', () => {
     expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
     await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
+
+  it('asks again for a DLSSNR page the queue turned away instead of recording it as done', async () => {
+    // 用户报的问题：开着 DLSSNR，这一页却什么都没有。现场日志（925 条）里 424 条是
+    // `COMPUTE_QUEUE_FULL: 计算队列满了：Pressure`——那是「现在没位置」，不是这一页算不出来。
+    // 从前这条失败只换回一句提示、**不带码**（`nativeImageCache` 只抛 `error.message`），
+    // 所以阅读器判不了「阵发还是定局」，把这一页记成了「做过了」：翻回去也不再问，
+    // 这一趟阅读里它永远只有原图。判据就是「队列放行以后，这一页还得再问一次」。
+    const cache = getNativeImageCache();
+    const attempts: number[] = [];
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    let refuseDlssnr = true;
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      if (identity.rendition !== 'dlssnr') {
+        return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+      }
+      attempts.push(identity.pageIndex);
+      if (refuseDlssnr) throw new RenditionError('COMPUTE_QUEUE_FULL', '计算队列满了：Pressure');
+      return { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 };
+    });
+    installHost();
+    setInvokeAdapterForTests(async (command, args) => {
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+
+    // ① 让位期间这一页留在手上的那一版上，不是空白。
+    await waitFor(() => expect(attempts).toContain(0));
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:reader-page-0');
+
+    // ② 队列放行、用户翻回来：这一页必须再问一次，并且这次真的换上了 DLSSNR 那一版。
+    refuseDlssnr = false;
+    const first = attempts.filter((pageIndex) => pageIndex === 0).length;
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await screen.findByRole('img', { name: '第 2 页' });
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    await waitFor(() => expect(attempts.filter((pageIndex) => pageIndex === 0).length).toBeGreaterThan(first));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:dlssnr-0'));
+  });
+
   it('runs the DLSS5 prerequisites through the compute chain', async () => {
     // 更高档（dlssnr / remote）的本地前置两版从前走的是 `inference_decensor_page` /
     // `inference_upscale_page` 这两条只有宿主会跑模型的旧命令：出来的图不在 compute 账上，
@@ -1083,7 +1133,7 @@ describe('reader route', () => {
     );
   }, 10_000);
 
-  it('applies the default layout and direction, and lets the archive override them', async () => {
+  it('applies the default layout and direction, and lets the archive override the layout', async () => {
     const preferences = { theme: 'system', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     let stored: unknown = null;
     setInvokeAdapterForTests(async (command: string) => {
@@ -1110,11 +1160,38 @@ describe('reader route', () => {
     expect(screen.getByRole('button', { name: '从右到左' })).toBeInTheDocument();
     view.unmount();
 
-    // The archive's own record is the more specific answer, so it wins. 'paged'
-    // cannot say whether it meant single or double, so only continuous overrides.
+    // The archive's own record is the more specific answer for the LAYOUT, so it
+    // wins: 'paged' cannot say whether it meant single or double, so only
+    // continuous overrides. (The direction is the settings' call — see the next
+    // test; an archive that once stored one used to pin it forever.)
     stored = { scopeId: 'scope-a', archiveId: 'a1', pageIndex: 0, pageCount: 3, layout: 'continuous', direction: 'ltr', updatedAt: '2026-09-05T00:00:00Z', revision: 1 };
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('region', { name: '连续阅读' })).toBeInTheDocument();
+  });
+
+  it('takes the reading direction from the setting, not from the archive that stored its own', async () => {
+    // 改设置对读过的档案不再无效：方向归设置管。以前是 `stored?.direction ??
+    // defaultDirection`，档案里那份比设置更「具体」，于是一次都没改过设置的档案
+    // 会把方向钉死，换一本档案又是另一个方向——用户看到的就是
+    //「翻页方向设置有时不生效，甚至不同档案进入阅读模式后方向不一致」。
+    const preferences = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'rtl', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', customCss: '' };
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: preferences };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
+      // 这本档案上次是按「从左到右」读的：一份比设置更旧的记录。
+      if (command === 'load_reading_progress') return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a1', pageIndex: 0, pageCount: 3, layout: 'paged', direction: 'ltr', updatedAt: '2026-09-05T00:00:00Z', revision: 1 } };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'save_reading_progress') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(await screen.findByRole('button', { name: '从右到左' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '从左到右' })).not.toBeInTheDocument();
   });
 
   it('opens page 1 when the URL explicitly asks for page=0, even with saved progress', async () => {
