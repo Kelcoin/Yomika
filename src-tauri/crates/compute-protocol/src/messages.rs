@@ -46,6 +46,19 @@ pub const PASSTHROUGH_ENGINE_ID: &str = "passthrough";
 /// 时整组收起来），或者反过来把开关放给一台跑不起来的机器。
 pub const DLSSNR_ENGINE_ID: &str = "dlssnr";
 
+/// 内置超分链那一档的引擎名（握手报的 `BuildInfo.engines` 里那一项，也是产物报告里
+/// `EngineReport.id` 那一项）。
+///
+/// 为什么它属于协议层：这一档**没有模型文件**，宿主交过去的只有一句身份
+/// （`BuiltinChainGrant`：名字 + 版本），worker 拿它在自己编着的那份着色器里再解析一次。
+/// 于是「宿主报的名字」与「worker 认的名字」必须是同一个字面量——各写一份，漂了不会报错，
+/// 只会让产物报告把「链算出来的」说成别的引擎算的（宿主的诊断与缓存修订都按这个名字走）。
+///
+/// 第 30 轮之前这一档根本交不出去：`inference/anime4k.rs` 只编在宿主里，worker 的构建
+/// 没有它，所以宿主只能当场拒（`COMPUTE_BAD_REQUEST`）。解析器与两个执行体搬进
+/// `yomika-compute-core` 之后，两边编的是同一份，这一档才成为一条正常的来路。
+pub const ANIME4K_ENGINE_ID: &str = "anime4k";
+
 /// 计算进程在 staging 下给自己建的那棵暂存子树的目录名。
 ///
 /// 为什么它属于协议层：**两边都要认得这个字面量**。worker 拿它当 NGX 的数据目录（那
@@ -296,6 +309,27 @@ pub struct DlssnrGrant {
     pub settings: GrantedFile,
 }
 
+/// 宿主内置的**超分链**（Anime4K 那三档）交给 worker 的声明：**没有文件**。
+///
+/// 为什么不像 ONNX 那样给一份 `GrantedFile`：这条链不是权重文件，而是编进宿主与 worker
+/// **两个二进制**里的着色器程序（`resources/anime4k/*.glsl`，`core::anime4k`）。既然两边
+/// 都有，交过去的就只能是**身份**——链的名字与版本；worker 拿着这个名字在自己那一份里再
+/// 解析一次（`preset_by_id`），版本对不上就报 `COMPUTE_MODEL_UNAVAILABLE`：宿主与 worker
+/// 的着色器不是同一份时，用户看到的会是一张按别的算法算出来的图，那比报错糟得多
+/// （与 §7.2「宿主写的只是声明」同一条规矩）。
+///
+/// 为什么也带 `scale`：链的倍率是**链自己**的事实（Anime4K 的 x2 卷积决定），宿主写在
+/// `stage.scale` 里只是它的说法；worker 两边比一下，不一致就是请求坏了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinChainGrant {
+    /// 链的名字（`anime4k` / `anime4k-hq` / `anime4k-ultra`）。
+    pub chain_id: String,
+    /// 链的版本（着色器改了就要换它：缓存身份与「两边是不是同一份」都挂在它上面）。
+    pub version: String,
+    pub scale: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PipelineStage {
@@ -322,6 +356,11 @@ pub struct PipelineStage {
     /// 是页面本身，同一页没法既按 DLSSNR 的一层参数重绘、又拿去当超分/去码的输入。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dlssnr: Option<DlssnrGrant>,
+    /// 这一阶段要跑**宿主内置的超分链**（Anime4K）时要填的声明。与前四样相互排斥：
+    /// 它同样是一种「拿这一页算出另一页」的授权，只是那份算法在**两个二进制的代码里**，
+    /// 不在模型目录里——所以它没有文件，只有名字与版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<BuiltinChainGrant>,
     /// 模型能接受的最小边长（源像素）：低于它的分块由引擎自己垫大、算完再裁回来。
     /// Real-CUGAN 图内 reflect 18 px，把 9 px 的页边条喂进去会直接失败；默认 1
     /// 就是「照分块规划的原样交给它」。
@@ -848,16 +887,17 @@ impl PipelineStage {
         }
         // 两样都给 = 一次说不清的请求：这个阶段的输入是页面本身，引擎没法同时按
         // 「拿模型把图变形」和「自己找框、自己把图补回来」两种解码方式来用它（docs/91）。
-        // DLSSNR 加入之后这条判的是**三样里恰有一份**：多一份就必有一份是摆设，
+        // DLSSNR 加入之后这条判的是**四样里恰有一份**：多一份就必有一份是摆设，
         // 而「哪一份是摆设」worker 只能猜——猜错的那一种会变成一张看起来对、其实
         // 没按用户要求处理过的图（DLSSNR 的输入要求与超分模型正好不兼容）。
         let grants = u8::from(self.model.is_some())
             + u8::from(self.decensor.is_some())
-            + u8::from(self.dlssnr.is_some());
+            + u8::from(self.dlssnr.is_some())
+            + u8::from(self.builtin.is_some());
         if grants > 1 {
             return Err(out_of_range(
-                "dlssnr",
-                "a stage carries exactly one of a model, a decensor grant, or a dlssnr grant",
+                "builtin",
+                "a stage carries exactly one of a model, a decensor grant, a dlssnr grant, or a builtin chain grant",
             ));
         }
         if let Some(decensor) = &self.decensor {
@@ -868,6 +908,14 @@ impl PipelineStage {
         if let Some(dlssnr) = &self.dlssnr {
             granted_file("dlssnr.feature", &dlssnr.feature)?;
             granted_file("dlssnr.settings", &dlssnr.settings)?;
+        }
+        if let Some(builtin) = &self.builtin {
+            // 名字与版本都按 id 收：它们是**标识**，不是自由文本（版本里出现空白或控制
+            // 字符只可能是谁拼错了，而拼错的版本号在 worker 那边会变成一句「两边不是同一
+            // 份」——那句话说不出到底哪儿错了）。
+            id("builtin.chainId", &builtin.chain_id)?;
+            id("builtin.version", &builtin.version)?;
+            bounded("builtin.scale", u64::from(builtin.scale), 1, u64::from(MAX_SCALE))?;
         }
         if let Some(edge) = self.min_input_edge {
             bounded(

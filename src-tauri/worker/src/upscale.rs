@@ -9,25 +9,41 @@
 //! 4. 分块、预算、取消、`Pad` 这些都在 [`yomika_compute_core::upscale`] 与
 //!    [`yomika_compute_core::onnx`] 里，宿主那条老路径用的是同一份代码。
 //!
+//! 放大器有两类，协议里各占一栏（互斥，见 `Stage::validate`）：
+//!
+//! * `model`：模型目录里的一份 ONNX。文件由宿主内容寻址地摆进输入根，这里再核一遍
+//!   长度与哈希（**这是信任边界**：宿主说它是谁不算数，读出来的字节才算数）。
+//! * `builtin`：编在两个二进制里的内置链（Anime4K）。**没有文件可核**——交过来的只有
+//!   名字与版本，因为宿主与 worker 各自编着同一份钉住的 GLSL。所以这里要核的是**身份**：
+//!   预设表里得真有这个 id、版本得对得上、倍率得和阶段声明一致；对不上就报
+//!   `COMPUTE_MODEL_UNAVAILABLE`（两边构建不一致，重试好不了）。
+//!
 //! 引擎的政策边界也在这里落地：`Auto` 允许「探针不过就退 CPU」（并留日志），
 //! `Gpu` 是**承诺**——拿不到 GPU、或这个模型在这条运行库上实测不通过，就是失败，
-//! 决不许悄悄用 CPU 顶上（§5.1/§12.1）。
+//! 决不许悄悄用 CPU 顶上（§5.1/§12.1）。内置链那条来路对这条政策是同一个意思：
+//! 显卡可用就走显卡（wgpu 计算管道），不可用才退 CPU 解释器，且只许在 `Auto`/`Cpu` 下退。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use yomika_compute_core::anime4k::{self, Anime4kEngine};
 use yomika_compute_core::engine::ValidationVerdict;
 use yomika_compute_core::fit;
 use yomika_compute_core::inputs;
 use yomika_compute_core::onnx::{validate_runtime_cached, OnnxEngine};
 use yomika_compute_core::runtime::{self, RuntimeId};
-use yomika_compute_core::upscale::{self, UpscaleOptions, DEFAULT_TILE_SIZE};
-use yomika_compute_protocol::messages::{EngineFallback, EnginePolicy, EngineReport, Precision};
+use yomika_compute_core::upscale::{
+    self, UpscaleEngine as UpscaleEngineTrait, UpscaleOptions, DEFAULT_TILE_SIZE,
+};
+use yomika_compute_protocol::messages::{
+    BuiltinChainGrant, EngineFallback, EnginePolicy, EngineReport, Precision, ANIME4K_ENGINE_ID,
+};
 
 use crate::engine::{Engine, StageError, StageOutput, StageRequest};
 use crate::stage_io::{
     check_cancelled, device_id, encode_png, fallback_of, probe_dimensions, to_stage_error, ENGINE_ID,
-    GPU_BACKEND_UNAVAILABLE_CODE, GPU_OUTPUT_INVALID_CODE, RESOURCE_LIMIT_CODE,
+    GPU_BACKEND_UNAVAILABLE_CODE, GPU_OUTPUT_INVALID_CODE, MODEL_UNAVAILABLE_CODE,
+    RESOURCE_LIMIT_CODE,
 };
 
 /// 只留一份会话：worker 一次只跑一个重算（宿主调度器就是单许可），而模型是几十 MB、
@@ -38,6 +54,34 @@ pub struct UpscaleEngine {
     /// worker 唯一允许读文件的根：模型与页面都从这里解析（§7.1 的同一条边界）。
     input_root: PathBuf,
     session: Mutex<Option<CachedSession>>,
+    /// 内置链（Anime4K）那一份引擎也缓存。与 ONNX 会话分开两格是因为它们的键与寿命
+    /// 都不一样：ONNX 那句是「哪份模型 + 哪条运行库」，这句是「哪条链 + 哪条政策」，
+    /// 而且它**不带任何模型文件**（内容寻址那套对它没有意义）。
+    builtin: Mutex<Option<CachedBuiltin>>,
+}
+
+/// 两条来路（ONNX 会话与内置链）在下面合流成同一种东西：一个能跑分块的引擎。它要被塞进
+/// `Mutex` 里跟着 worker 的线程走动，所以 trait 对象上得带 `Send + Sync`——核心的
+/// [`UpscaleEngineTrait`] 本身没有这两个约束（CPU 解释器与单线程调用方不需要它们）。
+type AnyEngine = Arc<dyn UpscaleEngineTrait + Send + Sync>;
+
+/// 内置链那份引擎 + 它自报的身份（显卡句柄或 `cpu`）与回退交代。
+///
+/// 为什么连身份一起缓存：同一份引擎第二次被用上时，报告里说的话必须与第一次一致
+/// （与 [`CachedSession::fallback`] 同一条理由）——否则同一页在两份产物里会写两种
+/// 「谁算的」，而宿主按这份报告记账。
+struct CachedBuiltin {
+    key: String,
+    engine: AnyEngine,
+    device: String,
+    fallback: Option<EngineFallback>,
+}
+
+/// 内置链那一档开出来的引擎：交回三件事，都是报告要用的。
+struct OpenedBuiltin {
+    engine: AnyEngine,
+    device: String,
+    fallback: Option<EngineFallback>,
 }
 
 struct CachedSession {
@@ -53,7 +97,109 @@ impl UpscaleEngine {
         Self {
             input_root,
             session: Mutex::new(None),
+            builtin: Mutex::new(None),
         }
+    }
+
+    /// 内置链那一档：把「名字 + 版本」变成一份真能跑的引擎。
+    ///
+    /// 交过来的是一句**身份**，不是文件——所以这里没有哈希可核，能核的是这条身份在这一份
+    /// 构建里成不成立：预设表里有没有这个名字、版本是不是同一份着色器、倍率和阶段声明
+    /// 一不一致。三件里任何一件对不上都报 `COMPUTE_MODEL_UNAVAILABLE` 并且**不许退让**：
+    /// 两边编着不同的链时，悄悄用这一份去算等于把另一条链的产物贴上一个不是它的名字。
+    ///
+    /// 政策落地与 ONNX 那条同一个意思：`Gpu` 是承诺（拿不到显卡就是失败），`Auto` 允许退
+    /// CPU 解释器并留下交代，`Cpu` 本来就只要 CPU。
+    fn open_builtin(
+        &self,
+        chain: &BuiltinChainGrant,
+        policy: EnginePolicy,
+        scale: u32,
+    ) -> Result<OpenedBuiltin, StageError> {
+        let unknown = |detail: String| StageError::failed(MODEL_UNAVAILABLE_CODE, detail);
+        let Some(preset) = anime4k::preset_by_id(&chain.chain_id) else {
+            return Err(unknown(format!(
+                "这一份构建里没有内置超分链 {}：宿主与 worker 的构建不是同一份",
+                chain.chain_id
+            )));
+        };
+        if preset.version != chain.version {
+            return Err(unknown(format!(
+                "内置超分链 {} 的版本对不上：宿主说的是 {}，这一份里编的是 {}",
+                chain.chain_id, chain.version, preset.version
+            )));
+        }
+        if preset.scale != scale {
+            return Err(unknown(format!(
+                "内置超分链 {} 的倍率对不上：阶段声明 x{scale}，这条链是 x{}",
+                chain.chain_id, preset.scale
+            )));
+        }
+
+        let key = format!("{}:{}:{scale}:{}", chain.chain_id, chain.version, policy.as_str());
+        let mut slot = self.builtin.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(cached) = slot.as_ref() {
+            if cached.key == key {
+                return Ok(OpenedBuiltin {
+                    engine: Arc::clone(&cached.engine),
+                    device: cached.device.clone(),
+                    fallback: cached.fallback.clone(),
+                });
+            }
+        }
+
+        // 显卡那条路先试。它拿到的是一个**共享**的设备（引擎库自己只建一次），
+        // 所以「试一次」的代价是编译这条链的管道，不是重新起一遍显卡上下文。
+        let mut fell_back = None;
+        if policy != EnginePolicy::Cpu {
+            match anime4k::gpu::Anime4kGpuEngine::open(preset) {
+                Ok(engine) => {
+                    let device = anime4k::gpu::adapter_description()
+                        .unwrap_or_else(|_| anime4k::gpu::ENGINE_LABEL.to_string());
+                    let opened = OpenedBuiltin {
+                        engine: Arc::new(engine),
+                        device,
+                        fallback: None,
+                    };
+                    *slot = Some(CachedBuiltin {
+                        key,
+                        engine: Arc::clone(&opened.engine),
+                        device: opened.device.clone(),
+                        fallback: None,
+                    });
+                    return Ok(opened);
+                }
+                Err(error) => {
+                    // `Gpu` 是承诺：这条链没跑上显卡就是失败，不许拿 CPU 顶上充数。
+                    if policy == EnginePolicy::Gpu {
+                        return Err(StageError::failed(
+                            GPU_BACKEND_UNAVAILABLE_CODE,
+                            format!("内置超分链 {} 没能用上显卡：{error}", chain.chain_id),
+                        ));
+                    }
+                    fell_back = Some(EngineFallback {
+                        requested: anime4k::gpu::ENGINE_LABEL.to_string(),
+                        used: RuntimeId::Cpu.as_str().to_string(),
+                        reason: format!("显卡这条路走不通：{error}"),
+                    });
+                }
+            }
+        }
+
+        // CPU 解释器：这一份永远在（它就是参考实现），也是 `Cpu` 与显卡不可用时的落点。
+        let engine = Anime4kEngine::open(preset).map_err(to_stage_error)?;
+        let opened = OpenedBuiltin {
+            engine: Arc::new(engine),
+            device: RuntimeId::Cpu.as_str().to_string(),
+            fallback: fell_back,
+        };
+        *slot = Some(CachedBuiltin {
+            key,
+            engine: Arc::clone(&opened.engine),
+            device: opened.device.clone(),
+            fallback: opened.fallback.clone(),
+        });
+        Ok(opened)
     }
 
     /// 拿一份能跑 `stage` 的会话：命中就复用，没命中就按政策开一份新的。
@@ -116,17 +262,26 @@ impl UpscaleEngine {
     /// 返回 0 是「缓存里本来就没有会话」，不是「交不出去」——两者在宿主那边必须能分开。
     pub fn release_cached_session(&self) -> u32 {
         let mut slot = self.session.lock().unwrap_or_else(|error| error.into_inner());
-        u32::from(slot.take().is_some())
+        let dropped = u32::from(slot.take().is_some());
+        // 内置链那一份一起丢：同一条「idle 30 秒释放」的规矩，而且它比 ONNX 会话更能攒
+        // ——显卡上那条链的管道与像素池都还挂在共享设备上。
+        let mut builtin = self.builtin.lock().unwrap_or_else(|error| error.into_inner());
+        dropped + u32::from(builtin.take().is_some())
     }
 }
 
 impl Engine for UpscaleEngine {
     fn execute(&self, request: StageRequest<'_>) -> Result<StageOutput, StageError> {
         let stage = request.stage;
-        let model = stage
-            .model
-            .as_ref()
-            .ok_or_else(|| StageError::input_invalid("这一阶段没有模型授权：不知道用哪个模型"))?;
+        // 放大器两栏任选其一（协议保证互斥，见 `Stage::validate`）：模型文件，或者内置链
+        // 的一句身份。两栏都空才是错——那时真的不知道用什么去放大。
+        let builtin = stage.builtin.as_ref();
+        let model = stage.model.as_ref();
+        if builtin.is_none() && model.is_none() {
+            return Err(StageError::input_invalid(
+                "这一阶段既没有模型授权也没有内置链：不知道用哪个引擎放大",
+            ));
+        }
         let input = request
             .input
             .ok_or_else(|| StageError::input_invalid("这一阶段没有输入：不知道放大哪张图"))?;
@@ -167,19 +322,49 @@ impl Engine for UpscaleEngine {
         }
         (request.progress)(10);
 
-        // 2. 模型：同一个输入根、同一套复核。宿主声明的 hash/长度对不上就不算。
-        let model_path = inputs::resolve_granted(&self.input_root, &model.relative_path)
-            .map_err(|error| StageError::failed(error.code(), error.message()))?;
-        inputs::verify_file(&model_path, &model.content_hash, model.byte_length)
-            .map_err(|error| StageError::failed(error.code(), error.message()))?;
-        let (engine, fallback) = self.open_for(
-            &model_path,
-            stage.engine_policy,
-            scale,
-            max_pixels,
-            min_input_edge,
-            &model.relative_path,
-        )?;
+        // 2. 放大器。两条来路在这里合流成同一个东西——一份 `UpscaleEngine` 加一段要写进
+        //    产物报告的身份。合流之后再往下走，分块、预算、取消、缩放、编码都只有一份实现。
+        //
+        //    * 模型那条：同一个输入根、同一套复核。宿主声明的 hash/长度对不上就不算。
+        //    * 内置链那条：没有文件，核的是身份（名字、版本、倍率），见 `open_builtin`。
+        let (engine, engine_id, engine_version, device, fallback): (
+            Arc<dyn UpscaleEngineTrait>,
+            &'static str,
+            String,
+            String,
+            Option<EngineFallback>,
+        ) = if let Some(chain) = builtin {
+            let opened = self.open_builtin(chain, stage.engine_policy, scale)?;
+            (
+                opened.engine,
+                ANIME4K_ENGINE_ID,
+                format!("{}/{}", chain.chain_id, chain.version),
+                opened.device,
+                opened.fallback,
+            )
+        } else {
+            let grant = model.expect("上面已经判过：两栏不会都空");
+            let model_path = inputs::resolve_granted(&self.input_root, &grant.relative_path)
+                .map_err(|error| StageError::failed(error.code(), error.message()))?;
+            inputs::verify_file(&model_path, &grant.content_hash, grant.byte_length)
+                .map_err(|error| StageError::failed(error.code(), error.message()))?;
+            let (onnx, fallback) = self.open_for(
+                &model_path,
+                stage.engine_policy,
+                scale,
+                max_pixels,
+                min_input_edge,
+                &grant.relative_path,
+            )?;
+            let device = device_id(onnx.runtime());
+            (
+                onnx as Arc<dyn UpscaleEngineTrait>,
+                ENGINE_ID,
+                runtime::runtime_label(),
+                device,
+                fallback,
+            )
+        };
         check_cancelled(request.cancel)?;
         (request.progress)(30);
 
@@ -239,10 +424,10 @@ impl Engine for UpscaleEngine {
             height: final_height,
             content_hash: written.content_hash,
             engine: EngineReport {
-                id: ENGINE_ID.to_string(),
-                version: runtime::runtime_label(),
+                id: engine_id.to_string(),
+                version: engine_version,
                 precision: Precision::Fp32,
-                device_id: device_id(engine.runtime()),
+                device_id: device,
                 // 报告里必须留下「问的是哪条政策」，否则界面无法把「我要显卡但没给上」
                 // 与「本来就跑 CPU」分开。
                 policy: Some(stage.engine_policy),
@@ -321,5 +506,92 @@ mod tests {
             fallback_of(&stayed).is_none(),
             "没回退就不许交代一条回退"
         );
+    }
+
+    /// 内置链那一档只认**这一份构建里编着的那条链**。
+    ///
+    /// 交过来的是一句身份（名字 + 版本 + 倍率），没有文件可以按哈希核——所以「宿主与 worker
+    /// 是不是同一份链」只能靠这三件对上。任何一件对不上都必须当场报
+    /// `COMPUTE_MODEL_UNAVAILABLE` 并且**不许退让**：拿这一份去算，等于把别的链的产物贴上
+    /// 这条链的名字（版本就是「着色器换过没有」的那枚戳，见 `Anime4kPreset::version`）。
+    ///
+    /// 变异检查：把 `open_builtin` 里版本那一段判断删掉，这一条会红（错的版本被混过去）；
+    /// 名字与倍率那两段同理。
+    #[test]
+    fn a_builtin_chain_is_only_recognised_in_the_version_this_build_ships() {
+        let preset = anime4k::preset_by_id("anime4k-hq").expect("这一份里编着这条链");
+        let engine = UpscaleEngine::new(PathBuf::from("不读盘的输入根"));
+        // `OpenedBuiltin` 里的引擎是 trait 对象（没有 `Debug`），所以这里不用 `expect_err`。
+        let refuse = |chain: &BuiltinChainGrant, scale: u32| -> StageError {
+            match engine.open_builtin(chain, EnginePolicy::Cpu, scale) {
+                Ok(_) => panic!("这一份不该认这条身份：{chain:?}"),
+                Err(error) => error,
+            }
+        };
+
+        let unknown = BuiltinChainGrant {
+            chain_id: "anime4k-from-the-future".to_string(),
+            version: preset.version.to_string(),
+            scale: preset.scale,
+        };
+        let error = refuse(&unknown, preset.scale);
+        assert_eq!(error.code, MODEL_UNAVAILABLE_CODE);
+        assert!(
+            error.message.contains("anime4k-from-the-future"),
+            "拒绝的话里必须出现那个名字：{}",
+            error.message
+        );
+
+        let next_version = format!("{}-next", preset.version);
+        let wrong_version = BuiltinChainGrant {
+            chain_id: preset.id.to_string(),
+            version: next_version.clone(),
+            scale: preset.scale,
+        };
+        let error = refuse(&wrong_version, preset.scale);
+        assert_eq!(error.code, MODEL_UNAVAILABLE_CODE);
+        assert!(
+            error.message.contains(&next_version),
+            "拒绝的话里必须出现对不上的那个版本：{}",
+            error.message
+        );
+
+        let wrong_scale = BuiltinChainGrant {
+            chain_id: preset.id.to_string(),
+            version: preset.version.to_string(),
+            scale: preset.scale + 1,
+        };
+        let error = refuse(&wrong_scale, preset.scale + 1);
+        assert_eq!(error.code, MODEL_UNAVAILABLE_CODE);
+    }
+
+    /// 认得的身份要真的开得出来。`Cpu` 政策走核心里的 CPU 解释器——这一条不需要显卡，
+    /// 所以它在任何机器上都跑；显卡那条路由核心的 parity 用例（真显卡上逐像素比对）管。
+    #[test]
+    fn the_builtin_chain_this_build_ships_opens_on_the_cpu_policy() {
+        let preset = anime4k::preset_by_id("anime4k").expect("这一份里编着这条链");
+        let engine = UpscaleEngine::new(PathBuf::from("不读盘的输入根"));
+        let chain = BuiltinChainGrant {
+            chain_id: preset.id.to_string(),
+            version: preset.version.to_string(),
+            scale: preset.scale,
+        };
+        let opened = engine
+            .open_builtin(&chain, EnginePolicy::Cpu, preset.scale)
+            .expect("自己编着的链该开得出来");
+        assert!(
+            opened.fallback.is_none(),
+            "点名 CPU 时不存在回退这回事：{:?}",
+            opened.fallback
+        );
+        assert_eq!(opened.device, RuntimeId::Cpu.as_str());
+        assert_eq!(opened.engine.scale(), preset.scale, "倍率由预设说了算");
+
+        // 同一个身份第二次要命中缓存：不然每一页都会重编一遍着色器。
+        let again = engine
+            .open_builtin(&chain, EnginePolicy::Cpu, preset.scale)
+            .expect("第二次也该开得出来");
+        assert_eq!(again.device, opened.device);
+        assert!(Arc::ptr_eq(&again.engine, &opened.engine), "第二次该复用同一份引擎");
     }
 }

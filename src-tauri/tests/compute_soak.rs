@@ -248,6 +248,7 @@ fn request_with_policy(
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
             engine_policy: policy,

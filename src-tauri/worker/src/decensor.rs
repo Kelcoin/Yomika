@@ -490,6 +490,7 @@ mod tests {
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
         };
@@ -535,6 +536,7 @@ mod tests {
                 mosaic: file("mosaic.onnx"),
             }),
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
         };

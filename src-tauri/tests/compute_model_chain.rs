@@ -182,6 +182,7 @@ fn request(model_id: &str, source: Option<&Path>) -> SubmitRequest {
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             // 这条链条只验「模型和页面走同一条输入根」，交出去的尺寸与模型原生倍率一致。
             output_scale: None,
@@ -266,6 +267,150 @@ fn make_page(path: &Path) {
         }
     }
     image.save(path).expect("存源图 PNG");
+}
+
+/// G 组：内置超分链（Anime4K）走产品路径——**这台机器上一份模型都没有**，却要算出一张
+/// 真被放大过的图。
+///
+/// 这一条就是缺陷 6 的判据。修之前这一档只编在宿主进程里，宿主读到它就去模型目录找文件、
+/// 找不到就当场 `COMPUTE_MODEL_UNAVAILABLE`；worker 那份构建里根本没有这条链，所以
+/// 「在 worker 里跑它」在那时是**做不到**的事，不是一个坏掉的参数。解析器与两个执行体都
+/// 搬进 `yomika-compute-core` 之后，这条链以「一句身份」（`builtin` 那一栏）过协议，
+/// 于是这一段要证三件事：
+///   ① 没有模型目录也能算（这条链不需要文件，需要的是两边编着同一份着色器）；
+///   ② 产物上自报的引擎是这条链自己，而且倍率来自预设；
+///   ③ `auto` 政策下要么真跑在显卡上（没有回退交代），要么把「为什么退回 CPU」说清楚
+///      ——「想要显卡却什么都不说」是不许的（docs/71:126）。
+#[test]
+fn a_builtin_chain_upscales_a_page_without_any_model_on_disk() {
+    let sandbox = Sandbox::new("builtin-chain");
+    let page = sandbox.root.join("page.png");
+    make_page(&page);
+    // 起手就不该有模型目录：这条链要是还去模型目录里找文件，下面那一件会以
+    // `COMPUTE_MODEL_UNAVAILABLE` 收场——那正是缺陷 6 的形态。
+    assert!(
+        !sandbox.root.join("models").exists(),
+        "这一组的前提是：这台机器上一份模型都没有"
+    );
+
+    let manager = ComputeManager::start(config(&sandbox), no_events()).expect("起 supervisor");
+
+    // ① 点名 CPU：任何机器上都该过的一档，也是这条链最确定的形态（CPU 解释器）。
+    let mut cpu = request("anime4k-hq", Some(&page));
+    cpu.key.settings_id = "settings-builtin-cpu".to_string();
+    let submitted = manager.submit(cpu).expect("宿主收下这件任务");
+    let state = wait_until("内置链算完", HANDOFF, || {
+        terminal_of(&manager, &submitted.job_id)
+    });
+    assert_eq!(
+        state,
+        JobState::Completed,
+        "内置链必须真的算出来（缺陷 6 的判据：没有模型文件也要能放大）"
+    );
+
+    let artifacts = manager.job_artifacts(&submitted.job_id);
+    assert_eq!(artifacts.len(), 1, "一个阶段一件产物");
+    let artifact = artifacts.first().expect("有一件");
+    assert!(artifact.verified, "宿主必须自己核过：{artifact:?}");
+    assert_eq!(artifact.engine_id, "anime4k", "自报的引擎该是这条链自己");
+    assert_eq!(artifact.engine_policy.as_deref(), Some("cpu"));
+    assert!(
+        artifact.engine_fallback.is_none(),
+        "点名 CPU 时不存在回退这回事：{:?}",
+        artifact.engine_fallback
+    );
+    assert_eq!(
+        (artifact.width, artifact.height),
+        (PAGE_WIDTH * SCALE, PAGE_HEIGHT * SCALE),
+        "这条链是 x2，倍率该来自预设而不是调用方填的那个数"
+    );
+    assert!(
+        artifact.pipeline_revision.starts_with("worker-v1:"),
+        "revision 由这一份 run 派生：{}",
+        artifact.pipeline_revision
+    );
+    let produced_bytes = std::fs::read(&artifact.path).expect("读产物");
+    assert!(
+        produced_bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+        "产物该是真 PNG"
+    );
+    let produced = image::load_from_memory(&produced_bytes)
+        .expect("按内容解码产物")
+        .to_rgba8();
+    let source = image::open(&page).expect("读源图").to_rgba8();
+    let total = (produced.width() * produced.height()) as usize;
+    let mut differing = 0usize;
+    for y in 0..produced.height() {
+        for x in 0..produced.width() {
+            let produced_pixel = produced.get_pixel(x, y).0;
+            let nearest = source.get_pixel(x / SCALE, y / SCALE).0;
+            if produced_pixel
+                .iter()
+                .zip(nearest.iter())
+                .any(|(a, b)| a.abs_diff(*b) >= 8)
+            {
+                differing += 1;
+            }
+        }
+    }
+    assert!(
+        differing > 0,
+        "产物与最近邻一模一样：那说明这条链没跑，只是把图放大了（{total} 个像素）"
+    );
+
+    // 输入根里只有这一页：内置链不摆任何模型文件进去。这条断言是「它不需要文件」的
+    // 另一半证据——上面那条「没有模型目录」说的是磁盘上没有，这条说的是它没从别处补。
+    let inputs = yomika_lib::compute::inputs::inputs_root_for(&sandbox.staging);
+    let blobs = input_blobs(&inputs);
+    assert!(
+        !blobs
+            .iter()
+            .any(|(path, _)| path.extension().is_some_and(|ext| ext == "onnx")),
+        "内置链不该往输入根里摆模型：{blobs:?}"
+    );
+
+    // ② 自动：Windows 上这条链真有显卡可要。这一条不假设显卡一定拿得到（别人的机器上
+    //    可能没有），它钉的是**说实话**：要么没有回退交代（真跑在显卡上），要么交代里
+    //    有「想要谁、用了谁、为什么」。
+    let mut auto = request("anime4k-hq", Some(&page));
+    auto.key.settings_id = "settings-builtin-auto".to_string();
+    auto.key.backend = "auto".to_string();
+    auto.pipeline[0].engine_policy = EnginePolicy::Auto;
+    let submitted = manager.submit(auto).expect("宿主收下这件任务");
+    let state = wait_until("内置链（auto）算完", HANDOFF, || {
+        terminal_of(&manager, &submitted.job_id)
+    });
+    assert_eq!(state, JobState::Completed, "auto 也要算出来");
+    let auto_artifact = manager
+        .job_artifacts(&submitted.job_id)
+        .into_iter()
+        .next()
+        .expect("有一件");
+    assert_eq!(auto_artifact.engine_id, "anime4k");
+    assert_eq!(auto_artifact.engine_policy.as_deref(), Some("auto"));
+    if let Some(fallback) = auto_artifact.engine_fallback.as_ref() {
+        assert_ne!(
+            fallback.requested, fallback.used,
+            "交代里「想要谁」与「用了谁」不能是同一句话：{fallback:?}"
+        );
+        assert!(
+            !fallback.reason.trim().is_empty(),
+            "退回 CPU 必须给理由：{fallback:?}"
+        );
+    }
+
+    eprintln!(
+        "内置链：没有模型文件也算出 {}×{} 产物，engine={} policy={} 回退={:?}，与最近邻有差别的像素 {differing}/{total}（auto 那一件 policy={:?} 回退={:?}）",
+        artifact.width,
+        artifact.height,
+        artifact.engine_id,
+        artifact.engine_policy.as_deref().unwrap_or(""),
+        artifact.engine_fallback,
+        auto_artifact.engine_policy.as_deref().unwrap_or(""),
+        auto_artifact.engine_fallback,
+    );
+
+    manager.shutdown();
 }
 
 /// A 组：产品路径的整体闭环。找不到真模型就跳过（明说，不算通过）。

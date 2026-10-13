@@ -75,15 +75,21 @@ impl EngineKind {
 fn onnx_engines() -> Vec<String> {
     #[cfg(windows)]
     {
-        // 这两个字面量是宿主也要认的（`crates/compute-protocol` 里的常量），别在这里另写一份。
+        // 这三个字面量是宿主也要认的（`crates/compute-protocol` 里的常量），别在这里另写一份。
+        // `anime4k` 那一项不是「有没有显卡」：这一档没有模型文件，worker 认的是内置链的
+        // 授权形状（`BuiltinChainGrant`），认得的构建就在这里报出来。
         vec![
             "onnx".to_string(),
+            yomika_compute_protocol::ANIME4K_ENGINE_ID.to_string(),
             yomika_compute_protocol::DLSSNR_ENGINE_ID.to_string(),
         ]
     }
     #[cfg(not(windows))]
     {
-        vec!["onnx".to_string()]
+        vec![
+            "onnx".to_string(),
+            yomika_compute_protocol::ANIME4K_ENGINE_ID.to_string(),
+        ]
     }
 }
 

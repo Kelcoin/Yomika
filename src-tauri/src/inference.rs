@@ -329,7 +329,10 @@ pub fn install_model_archive(
     result
 }
 
-pub mod anime4k;
+// Anime4K 的解析器与 CPU 解释器搬进了计算核心（docs/71 §11 Task 2）：worker 也要
+// 编进这一档，两边必须解同一份 GLSL。宿主的 `inference::anime4k::*` 路径原样保留，
+// 调用点（`inference.rs` 与阅读器/去码那几条规划）一行都不用改。
+pub use yomika_compute_core::anime4k;
 pub mod cancel;
 pub mod decensor;
 // 下面这两个模块（以及它们背后的核心层）只有测试用得上：`inpaint` 是几何那边点名
@@ -847,14 +850,18 @@ pub fn builtin_upscale_models() -> Vec<InstalledModel> {
         .collect()
 }
 
-/// Whether `model_id` names an upscaler that only exists inside this process.
+/// The built-in upscaling chain `model_id` names, if it names one.
 ///
-/// Anime4K is a shader chain compiled into the host binary, not an ONNX file: the
-/// compute worker's build has no copy of it, so a pipeline stage naming one can
-/// never run there. The distinction matters to the caller because "not
-/// downloaded" is fixed by downloading and this is not.
-pub(crate) fn is_host_only_upscaler(model_id: &str) -> bool {
-    anime4k::preset_by_id(model_id).is_some()
+/// Anime4K is a shader chain compiled into the binary rather than an ONNX file.
+/// It used to be **host only** — the worker's build carried no copy, so a pipeline
+/// stage naming one could never run there, and the caller had to tell that apart
+/// from "not downloaded". Since the parser and both executors moved into
+/// `yomika-compute-core` (which the worker also links) the chain is no longer a
+/// host privilege: the worker compiles the same shaders and runs the same tier.
+/// The distinction that remains is *what kind of thing* an id names, which is what
+/// this function answers — and `compute::models` turns it into a `StagedModel`.
+pub(crate) fn builtin_upscaler(model_id: &str) -> Option<&'static anime4k::Anime4kPreset> {
+    anime4k::preset_by_id(model_id)
 }
 
 /// What a `upscaleModel` id names: a built-in chain, a model on disk, or nothing

@@ -242,6 +242,7 @@ mod tests {
             model: None,
             decensor: None,
             dlssnr,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
         }

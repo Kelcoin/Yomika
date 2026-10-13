@@ -387,6 +387,7 @@ pub fn into_request(job: DecensorPageJob, source: SourceFile) -> SubmitRequest {
         // 三件套授权由宿主在派发前补齐（`manager::prepare_run`）——与模型授权同一条
         // 规矩：调用方不许指名输入根里的文件。
         model: None,
+        builtin: None,
         decensor: None,
         dlssnr: None,
         // 修补不改尺寸，这两栏对它没有意义：真实的最小边长是**图自己**要的 256×256，
@@ -408,6 +409,7 @@ pub fn into_request(job: DecensorPageJob, source: SourceFile) -> SubmitRequest {
             stage_id: UPSCALE_STAGE_ID.to_string(),
             model_spec_id: upscale.model_spec_id,
             model: None,
+            builtin: None,
             decensor: None,
             dlssnr: None,
             min_input_edge: None,
@@ -1012,23 +1014,32 @@ mod tests {
         std::fs::remove_dir_all(root).expect("收摊");
     }
 
-    /// 超分模型只活在宿主里（Anime4K 是编进宿主的 shader 链，worker 的构建里没有它）：
-    /// **整件任务当场拒绝**。
+    /// 去码 + 内置链（Anime4K）现在和「去码 + 一个装了模型」是同一件事：**两个阶段**。
     ///
-    /// 为什么不悄悄退成「只去码」：那会让用户在设置里选了 Anime4K、拿到的却是一张没放大的
-    /// 图，而且没有任何一处报错——比拒了更难查。退一步是**前端**在失败路径上做的决定
-    /// （它能把已经算好的那一版先显示出来），不是后端替它猜。
+    /// 这条以前断言整件任务当场拒绝——那时编进宿主的 shader 链在 worker 的构建里没有，
+    /// 所以那是「这条路根本不通」。解析器与两个执行体都搬进 `yomika-compute-core` 之后，
+    /// worker 那一份同样编着它，判据于是换成：真铸出两阶段，第二步指名那条链、倍率取预设。
+    ///
+    /// 顺带钉住一个不肯退让的决定：失败时**不**悄悄退成「只去码」——那会让用户在设置里
+    /// 选了 Anime4K、拿到的却是一张没放大的图，而且没有任何一处报错。退一步是**前端**在
+    /// 失败路径上做的决定（它能把已经算好的那一版先显示出来），不是后端替它猜。
     #[test]
-    fn an_upscaler_that_only_lives_in_the_host_refuses_the_whole_job() {
-        let root = scratch("host-only-upscale");
+    fn a_builtin_chain_chains_after_decensor_like_any_model() {
+        let root = scratch("builtin-upscale");
         install_bundle(&root, "aletheia-lens", b"bar-and-mosaic");
 
-        let error = plan_decensor_page(&root, &chained("aletheia-lens", "anime4k-hq"))
-            .expect_err("shader 链进不了 worker");
+        let job = plan_decensor_page(&root, &chained("aletheia-lens", "anime4k-hq"))
+            .expect("内置链与模型走同一条来路");
 
-        assert_eq!(error.code, MODEL_UNAVAILABLE_CODE);
-        assert!(error.message.contains("anime4k-hq"), "{}", error.message);
-        assert!(!error.retryable, "这不是「等一会儿再试」能好的");
+        let upscale = job.upscale.as_ref().expect("指名了超分，就该有第二步");
+        assert_eq!(upscale.model_spec_id, "anime4k-hq");
+        assert_eq!(upscale.scale, 2, "倍率由预设说了算，不由调用方填");
+
+        let pipeline = into_request(job, located()).pipeline;
+        assert_eq!(pipeline.len(), 2, "去码 + 放大 = 两个阶段");
+        assert_eq!(pipeline[0].stage_id, DECENSOR_STAGE_ID);
+        assert_eq!(pipeline[1].stage_id, UPSCALE_STAGE_ID);
+        assert_eq!(pipeline[1].model_spec_id, "anime4k-hq");
 
         std::fs::remove_dir_all(root).expect("收摊");
     }

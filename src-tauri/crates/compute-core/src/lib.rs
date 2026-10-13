@@ -22,7 +22,9 @@
 //! 三份张量、框与掩膜怎么搬回页面坐标——**几何那一半不门 feature**，只有开会话的
 //! [`detect::DetectorEngine`] 门在 `ort` 后面）、[`image_kind`]（这是哪一类容器、动不动、
 //! 画布多大——只看头几个字节。宿主与 worker 共用这一份判定，否则同一张图会在一边是动图、
-//! 在另一边成了静态首帧）。
+//! 在另一边成了静态首帧）、[`anime4k`]（Anime4K 的内置 shader 链：解析器把钉住的 GLSL 解成
+//! 一条 pass 链，CPU 解释器是任何目标都能跑的参照执行体，GPU 那条路门在 feature 后面
+//! ——宿主与 worker 解的是同一份 GLSL，才不会一边是 Anime4K 一边是别的）。
 //!
 //! 8-g④ 起又搬来一件：[`dlssnr`]（NGX + D3D12 的滤镜引擎与它的设置/探针）。`docs/71`
 //! Task 8 的出口要求宿主不再持有 NGX 资源，而 NGX 只能在计算进程里初始化、worker 又不许
@@ -34,6 +36,10 @@
 //! 仍然要回答前面那一半，所以元数据那一半**必须不门 feature**（细节见 `dlssnr/mod.rs`
 //! 的抬头）；门错一层，宿主就只能整份依赖一起留着，那就是 8-g④-b 要解决的事。
 
+// Anime4K 的内置 shader 链。解析器与 CPU 解释器不门 feature：没有显卡的机器、Android
+// 目标、以及探针的参照实现都要用它，而且它是 GPU 那条路的比对基准——「GPU 算得对不对」
+// 只有拿它当答案才问得出来。
+pub mod anime4k;
 pub mod cancel;
 pub mod cpu_scale;
 pub mod decensor;

@@ -21,7 +21,14 @@ path = "src/main.rs"
 #
 # `cpu` feature 把 ONNX 执行体（`yomika_compute_core::onnx`）与运行库策略（`runtime`）
 # 编进 worker。DirectML 在下面的 windows 段里合并进来——与宿主完全同形，理由见那一段。
-yomika-compute-core = { path = "../crates/compute-core", features = ["cpu"] }
+#
+# `anime4k-gpu` 是第 30 轮加的那一档：内置超分链（Anime4K）以前只编在宿主里，所以
+# 阅读器一选它就是 `COMPUTE_MODEL_UNAVAILABLE`（缺陷 6）。把解析器与两个执行体搬进
+# compute-core 之后，worker 这一个 feature 就把它接到显卡上（wgpu 计算管道）；不开
+# 这个 feature 的构建（宿主、Android）只剩同一模块里的 CPU 解释器，行为不变。
+# 为什么写在 base 而不是 windows 段：worker 的这一份源码对两条来路一视同仁，写进
+# windows 段会让非 Windows 的 worker 构建编不过（那份构建里 `anime4k::gpu` 根本不存在）。
+yomika-compute-core = { path = "../crates/compute-core", features = ["cpu", "anime4k-gpu"] }
 yomika-compute-protocol = { path = "../crates/compute-protocol" }
 # 命名管道两端归传输 crate 所有：宿主与 worker 共用同一份重叠 IO 实现。
 yomika-compute-transport = { path = "../crates/compute-transport" }

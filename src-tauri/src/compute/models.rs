@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use yomika_compute_protocol::messages::GrantedFile;
+use yomika_compute_protocol::messages::{BuiltinChainGrant, GrantedFile};
 
 use super::artifacts::hash_file;
 use super::inputs;
@@ -20,13 +20,36 @@ use super::inputs;
 /// 一个是去下载/检查安装，另一个是重新取一页。
 pub const MODEL_UNAVAILABLE_CODE: &str = "COMPUTE_MODEL_UNAVAILABLE";
 
-/// 一次成功的交接：worker 要的声明 + 清单给的最小输入边长。
+/// 一次成功的交接。两种形状，对应两种**根本不同**的东西：模型目录里的一份 ONNX（内容
+/// 寻址的一只只读文件），与编在两个二进制里的超分链（没有文件，只有名字与版本）。
+///
+/// 为什么写成一个枚举而不是「`grant` 加一个 `Option`」：它们要交给 worker 的是协议里
+/// 两个互斥的栏位（`model` / `builtin`），而「两栏都填」在协议层就是要被拒的请求。枚举
+/// 让「恰好一种」在类型上就成立，派发那一侧不必再判一遍。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedModel {
-    pub grant: GrantedFile,
-    /// 清单里的 `minInputEdge`。搬进 worker 是因为引擎要拿它判断「这张图对这个模型
-    /// 来说太小了」——那是模型自带的事实，不该让调用方猜。
-    pub min_input_edge: u32,
+pub enum StagedModel {
+    /// 模型目录里的一份 ONNX：worker 拿着这只只读授权自己再核一遍长度与哈希。
+    File {
+        grant: GrantedFile,
+        /// 清单里的 `minInputEdge`。搬进 worker 是因为引擎要拿它判断「这张图对这个模型
+        /// 来说太小了」——那是模型自带的事实，不该让调用方猜。
+        min_input_edge: u32,
+    },
+    /// 宿主内置的超分链（Anime4K）：worker 那一份构建里编着**同一份**着色器，所以这里
+    /// 交过去的只有身份——名字与版本，由 worker 在自己那一份里再解析一次。
+    Builtin(BuiltinChainGrant),
+}
+
+impl StagedModel {
+    /// 给测试与日志用的一句话：这一份交接到底是什么。
+    pub fn describe(&self) -> String {
+        match self {
+            StagedModel::File { grant, .. } => format!("file:{}", grant.relative_path),
+            StagedModel::Builtin(chain) => {
+                format!("builtin:{}:{}", chain.chain_id, chain.version)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,17 +58,11 @@ pub enum ModelError {
     NotFound { id: String },
     /// 模型在，但在交给 worker 之前就出错了（读不到、算不出哈希、摆不进输入根）。
     NotStaged { id: String, detail: String },
-    /// 宿主内置的 shader 链（Anime4K 那类）：它只编译在宿主进程里，worker 那份构建
-    /// 里根本没有它，所以这不是「没下载」，是「这条路根本不通」。
-    HostOnly { id: String },
 }
 
 impl ModelError {
     pub fn code(&self) -> &'static str {
-        match self {
-            ModelError::NotFound { .. } | ModelError::NotStaged { .. } => MODEL_UNAVAILABLE_CODE,
-            ModelError::HostOnly { .. } => "COMPUTE_BAD_REQUEST",
-        }
+        MODEL_UNAVAILABLE_CODE
     }
 
     pub fn message(&self) -> String {
@@ -56,9 +73,6 @@ impl ModelError {
             ModelError::NotStaged { id, detail } => {
                 format!("模型 {id} 在交给计算进程之前就出错了：{detail}")
             }
-            ModelError::HostOnly { id } => format!(
-                "{id} 是宿主内置的超分链，计算进程里没有它：这一阶段不能交给 worker"
-            ),
         }
     }
 }
@@ -81,9 +95,15 @@ impl ModelCatalog {
         }
     }
 
-    /// 把 `model_spec_id` 指的那份模型摆进 `inputs_root`，返回给 worker 的声明。
+    /// 把 `model_spec_id` 指的那一份**东西**变成 worker 能收的声明。
     ///
-    /// 这是一次**内容寻址**的摆放：同一个模型第二次来会命中已有的那块，不会第二份。
+    /// 两条来路：模型目录里的一份 ONNX（内容寻址地摆进输入根），或者宿主内置的超分链
+    /// （没有文件——它编在两个二进制里，交过去的只是名字与版本）。哪一条由 id 是哪种
+    /// 东西决定，不是由调用方说。
+    ///
+    /// 「内置的那一档」以前在这里被当成**走不通**（`HostOnly`）：那时 worker 的构建里
+    /// 没有那条链。现在两边的 `compute-core` 都编着它（`core::anime4k`），所以它变成
+    /// 一条正常的来路——见 `StagedModel::Builtin`。
     pub fn stage(
         &self,
         inputs_root: &Path,
@@ -95,8 +115,12 @@ impl ModelCatalog {
                 id: model_spec_id.to_string(),
             });
         }
-        if crate::inference::is_host_only_upscaler(id) {
-            return Err(ModelError::HostOnly { id: id.to_string() });
+        if let Some(preset) = crate::inference::builtin_upscaler(id) {
+            return Ok(StagedModel::Builtin(BuiltinChainGrant {
+                chain_id: preset.id.to_string(),
+                version: preset.version.to_string(),
+                scale: preset.scale,
+            }));
         }
         let Some((path, manifest)) = crate::inference::resolve_installed_model(&self.data_root, id)
         else {
@@ -114,7 +138,7 @@ impl ModelCatalog {
                 detail: format!("{}：{}", error.code(), error.message()),
             }
         })?;
-        Ok(StagedModel {
+        Ok(StagedModel::File {
             grant: GrantedFile {
                 relative_path,
                 content_hash,
@@ -195,32 +219,38 @@ mod tests {
         let staged = catalog(&sandbox)
             .stage(&inputs, "demo")
             .expect("已安装的模型应该能交出去");
+        let StagedModel::File {
+            grant,
+            min_input_edge,
+        } = staged
+        else {
+            panic!("模型目录里的一份 ONNX 该走文件那条来路");
+        };
 
         // 声明里的三件事必须和磁盘上的那份**同一件东西**：长度、内容哈希、相对路径。
-        assert_eq!(staged.grant.byte_length, bytes.len() as u64);
-        assert_eq!(staged.grant.content_hash.len(), 64);
+        assert_eq!(grant.byte_length, bytes.len() as u64);
+        assert_eq!(grant.content_hash.len(), 64);
         // 相对路径是内容寻址的：**前两位**做前缀目录、文件名是**整条**内容哈希，扩展名
         // 跟着源文件（`.onnx`）。这里按形状断言，而不是把实现里的拼接式子抄一遍——
         // 真正证明「交给 worker 的就是模型本体」的是下面那几行读文件比字节。
-        let (dir, file) = staged
-            .grant
+        let (dir, file) = grant
             .relative_path
             .split_once('/')
             .expect("相对路径该有前缀目录");
-        assert_eq!(dir, &staged.grant.content_hash[..2], "前缀目录取哈希前两位");
+        assert_eq!(dir, &grant.content_hash[..2], "前缀目录取哈希前两位");
         assert_eq!(
             file,
-            format!("{}.onnx", staged.grant.content_hash),
+            format!("{}.onnx", grant.content_hash),
             "文件名是整条哈希 + 源扩展名"
         );
-        assert_eq!(staged.min_input_edge, 20, "清单里的最小边长要带出来");
+        assert_eq!(min_input_edge, 20, "清单里的最小边长要带出来");
 
-        let handed = blob_path(&inputs, &staged.grant.relative_path);
+        let handed = blob_path(&inputs, &grant.relative_path);
         let handed_bytes = std::fs::read(&handed).expect("授权文件必须真的在输入根里");
         assert_eq!(handed_bytes, bytes, "交出去的必须是模型本体的字节");
         assert_eq!(
             std::fs::metadata(&model).expect("源模型还在").len(),
-            staged.grant.byte_length
+            grant.byte_length
         );
     }
 
@@ -289,23 +319,48 @@ mod tests {
     }
 
     #[test]
-    fn a_host_only_shader_chain_is_refused_as_a_bad_request() {
-        let sandbox = Sandbox::new("hostonly");
+    fn a_builtin_chain_is_handed_over_as_an_identity_and_nothing_on_disk() {
+        let sandbox = Sandbox::new("builtin");
         let inputs = sandbox.inputs();
 
-        let error = catalog(&sandbox)
+        let staged = catalog(&sandbox)
             .stage(&inputs, "anime4k-hq")
-            .expect_err("宿主内置的链进不了 worker");
+            .expect("内置的超分链现在也是一条正常的来路");
 
-        // 「没下载」和「这条路根本不通」是两件事：前者让用户去下载，后者不会因为
-        // 下载而变好。所以码也不一样。
-        assert_eq!(error.code(), "COMPUTE_BAD_REQUEST");
+        // 版本是**缓存身份**的一部分（rendition key 里带着它），所以这里按字面值钉住：
+        // 哪天上游的着色器换了、版本号跟着跳，这条断言会先红，提醒去核 rendition key。
         assert_eq!(
-            error,
-            ModelError::HostOnly {
-                id: "anime4k-hq".into()
-            }
+            staged,
+            StagedModel::Builtin(BuiltinChainGrant {
+                chain_id: "anime4k-hq".into(),
+                version: "2".into(),
+                scale: 2,
+            })
         );
-        assert!(error.message().contains("宿主内置"), "理由要说清楚");
+        // 内置链**没有文件**：输入根里不该被摆进任何东西。这是这一条与「模型」那条最
+        // 本质的差别，也是变异检查会咬的地方（把 builtin 分支改成走文件就会红）。
+        let entries: Vec<_> = std::fs::read_dir(&inputs)
+            .expect("读输入根")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "内置链不该往输入根里摆东西，摆的是 {entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_builtin_id_the_presets_do_not_know_is_still_a_missing_model() {
+        let sandbox = Sandbox::new("builtin-unknown");
+        let inputs = sandbox.inputs();
+
+        // 名字里带 anime4k 不是通行证：只有预设表里真有的那几个 id 才走内置那条来路，
+        // 其余的仍旧按「这台机器上没有这个模型」报。
+        let error = catalog(&sandbox)
+            .stage(&inputs, "anime4k-does-not-exist")
+            .expect_err("预设表里没有的 id");
+
+        assert_eq!(error.code(), MODEL_UNAVAILABLE_CODE);
     }
 }

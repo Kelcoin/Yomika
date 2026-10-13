@@ -157,6 +157,7 @@ fn request(input_id: &str, page: u32) -> SubmitRequest {
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
             engine_policy: EnginePolicy::Cpu,

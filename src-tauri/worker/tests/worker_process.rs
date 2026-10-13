@@ -181,6 +181,7 @@ fn run_message_with_input(
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
             engine_policy: EnginePolicy::Auto,
@@ -806,6 +807,7 @@ fn run_message_with_model(
             }),
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: Some(min_input_edge),
             output_scale: None,
             // 显式点 CPU：这份 worker 构建里没有硬件运行库（`worker/Cargo.toml` 只开
@@ -892,10 +894,13 @@ fn the_real_engine_upscales_a_granted_page_with_a_granted_model() {
 
     let (worker, mut host, hello) = start_worker(&name, &epoch, &staging, &inputs, "onnx");
     // 构建事实必须与**实际**装上的引擎一致：要了 onnx 就不许再报自己是 echo。
-    // Windows 上这一份还真的带着 DLSSNR 那一档（NGX 只有 Windows/D3D12 一版）。
+    // Windows 上这一份还真的带着 DLSSNR 那一档（NGX 只有 Windows/D3D12 一版），
+    // 以及第 30 轮起那一档内置链（Anime4K：解析器与 CPU/GPU 两个执行体都在 compute-core，
+    // 这份 worker 编着它，所以握手里必须报出来——它正是「anime4k-hq 能不能交给 worker」的
+    // 那一句自述）。
     assert_eq!(
         hello.build.engines,
-        vec!["onnx".to_string(), "dlssnr".to_string()],
+        vec!["onnx".to_string(), "anime4k".to_string(), "dlssnr".to_string()],
         "{hello:?}"
     );
     assert!(
@@ -1117,7 +1122,7 @@ fn a_gpu_promise_that_cannot_be_kept_fails_loudly() {
     let (worker, mut host, hello) = start_worker(&name, &epoch, &staging, &inputs, "onnx");
     assert_eq!(
         hello.build.engines,
-        vec!["onnx".to_string(), "dlssnr".to_string()],
+        vec!["onnx".to_string(), "anime4k".to_string(), "dlssnr".to_string()],
         "{hello:?}"
     );
 

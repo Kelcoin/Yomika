@@ -962,6 +962,7 @@ mod tests {
                 // 这条测试只走 `plan()`（提交前的本地护栏），到不了 worker：没带模型，
                 // 也没声明模型要求的最小边长。
                 model: None,
+                builtin: None,
                 decensor: None,
                 dlssnr: None,
                 min_input_edge: None,

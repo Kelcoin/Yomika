@@ -552,6 +552,7 @@ fn run_message(job_id: &str, stages: &[&str]) -> Message {
                 model: None,
                 decensor: None,
                 dlssnr: None,
+                builtin: None,
                 min_input_edge: None,
                 output_scale: None,
                 engine_policy: EnginePolicy::Auto,

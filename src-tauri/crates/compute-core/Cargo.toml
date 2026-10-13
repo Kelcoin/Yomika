@@ -43,6 +43,21 @@ image-webp = { version = "0.2", optional = true }
 # 输入复核、协议帧）在没有它的情况下必须照样能编译——`cargo test -p yomika-compute-core`
 # 不带 feature 走的正是这条路，Android 目标也走它（docs/71 §5.2）。
 ort = { version = "2.0.0-rc.13", features = ["download-binaries"], optional = true }
+# Anime4K 那条 GPU 路要用的三件：`wgpu` 出设备与计算管道，`pollster` 把
+# `request_adapter`/`request_device` 的 future 在当前线程上跑完（核心不是 async
+# 运行时，也不该为了一次放大引入一个），`bytemuck` 把 `[f32]` 当字节上传/取回。
+# 全是 optional：不开 `anime4k-gpu` 的构建（Android、无显卡的机器、`cargo test`
+# 的默认那一路）连编都不会编到它们。
+wgpu = { version = "30.0.1", optional = true, default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "dx12",
+    "vulkan",
+    "gles",
+] }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true }
 
 [dev-dependencies]
 blake3 = "1"
@@ -83,3 +98,9 @@ ncnn-vulkan = []
 # 跟着这个 feature 走——**不开它构建出来的核心一个解码器都不带**（Android 走那条路）。
 # 元数据那一半（设置、变体身份、导入、探针记账）不在这里：它不依赖这份 feature。
 dlssnr = ["dep:png", "dep:image-webp", "image/gif", "image/png", "image/webp"]
+# Anime4K 的 GPU 执行体：WGSL 由**同一份**解析结果生成（`anime4k::gpu`），跑在一次
+# wgpu 计算派发上。为什么值得单独一个 feature：它把 wgpu/naga 整棵树拖进编出来的
+# 那份二进制，而 worker 正是「只编进去什么就带什么」的单文件载荷（docs/71 §11
+# Task 9），Android 目标与没有显卡的机器都不该付这份体积。没开或拿不到设备时回落
+# 的是同一个模块里的 CPU 解释器，行为不变。
+anime4k-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

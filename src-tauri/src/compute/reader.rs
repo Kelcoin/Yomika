@@ -140,10 +140,10 @@ pub(super) fn resolve_worker_upscaler(
     model_id: &str,
 ) -> Result<(ResolvedUpscaler, u32), ReaderPlanError> {
     // 没选模型就等于「用最近邻」——那条路在宿主进程里，不到 worker 里来。这不是用户填错
-    // 了什么，而是这条来路只服务「要在 worker 里跑的模型」，所以说清楚它要什么。
+    // 了什么，而是这条来路只服务「指名了某个引擎的页面」，所以说清楚它要什么。
     if model_id.is_empty() {
         return Err(ReaderPlanError::bad(
-            "这一页要指名一个能在 worker 里跑的模型（宿主内置的那几档不走这条来路）",
+            "这一页要指名一个超分引擎（模型，或者内置的 Anime4K 链）",
         ));
     }
     // 模型是**指名**的：查不到就得当场说「没装」，不许悄悄换成就近邻——那会让一个装丢了
@@ -155,12 +155,11 @@ pub(super) fn resolve_worker_upscaler(
     };
     let scale = match &resolved {
         ResolvedUpscaler::Onnx(_, manifest) => manifest.scale.clamp(1, 4),
-        // 编进宿主的 shader 链只在宿主进程里存在：worker 的构建里没有它，这条来路送不过去。
-        ResolvedUpscaler::Anime4k(_) => {
-            return Err(ReaderPlanError::no_model(format!(
-                "{model_id} 是宿主内置的那一档（编进宿主的 shader 链），worker 里没有它"
-            )))
-        }
+        // 内置的 shader 链也走这一条来路：解析器与两个执行体（CPU 解释器、WGSL 计算
+        // 管道）都在 `yomika-compute-core` 里，worker 那一份构建同样编着它，所以这里
+        // 它和「模型目录里的一份 ONNX」一样是**能交给 worker 的东西**——区别只在交过去
+        // 的是文件还是一句身份（`compute::models::StagedModel`）。
+        ResolvedUpscaler::Anime4k(preset) => preset.scale,
     };
     Ok((resolved, scale))
 }
@@ -244,8 +243,10 @@ pub fn into_request(job: ReaderPageJob, source: SourceFile) -> SubmitRequest {
             stage_id: UPSCALE_STAGE_ID.to_string(),
             model_spec_id: job.model_spec_id,
             // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）——调用方
-            // 不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。
+            // 不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。内置链的授权
+            // （`builtin`）同样在那一侧填：这一层只说「要哪一档」。
             model: None,
+            builtin: None,
             decensor: None,
             dlssnr: None,
             min_input_edge: None,
@@ -410,19 +411,28 @@ mod tests {
         std::fs::remove_dir_all(root).expect("收摊");
     }
 
-    /// 宿主内置的那一档（Anime4K）不是「没装」——它是**装不了**：worker 的构建里没有这条
-    /// shader 链。两种情况的处理都是「这条来路送不过去」，但话要说得出来。
+    /// 宿主内置的那一档（Anime4K）在这一层与模型**同一条来路**：解析器与执行体都搬进了
+    /// `yomika-compute-core`，worker 那一份构建同样编着它，所以它不是「装不了」，而是
+    /// 一件正常的、可以派给 worker 的任务。
+    ///
+    /// 这条以前反向断言「送不过去」（COMPUTE_MODEL_UNAVAILABLE）。改成断言它**铸得出身份**
+    /// 之后，判据的方向也跟着换了：谁要是把 Anime4k 分支退回成拒绝，这里当场红。
     #[test]
-    fn a_chain_that_only_lives_in_the_host_cannot_go_to_the_worker() {
-        let root = scratch("host-only");
-        let error = plan_reader_page(&root, &request("anime4k-hq")).expect_err("shader 链不走 worker");
+    fn a_builtin_chain_plans_like_a_model_and_keeps_its_own_identity() {
+        let root = scratch("builtin-chain");
+        let job = plan_reader_page(&root, &request("anime4k-hq")).expect("内置链也派得出去");
 
-        assert_eq!(error.code, "COMPUTE_MODEL_UNAVAILABLE");
-        assert!(
-            error.message.contains("宿主"),
-            "要说清楚它为什么送不过去：{}",
-            error.message
+        assert_eq!(job.model_spec_id, "anime4k-hq");
+        assert_eq!(job.scale, 2, "倍率由预设自己说了算");
+        assert_eq!(
+            job.settings_id,
+            enhanced_revision(&resolve_upscaler(&root, "anime4k-hq"), None),
+            "身份仍旧只有一份算法：内置链也不例外"
         );
+
+        // 与同一档的另一个预设必须是**两件任务**，否则换了链会吃到旧链的产物。
+        let small = plan_reader_page(&root, &request("anime4k")).expect("小链");
+        assert_ne!(job.settings_id, small.settings_id, "不同链 = 不同身份");
 
         std::fs::remove_dir_all(root).expect("收摊");
     }

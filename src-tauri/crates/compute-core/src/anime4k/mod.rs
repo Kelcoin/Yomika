@@ -5,10 +5,18 @@
 //! texture, and declares its output size with `//!WIDTH` / `//!HEIGHT`; a later
 //! pass reads what an earlier one saved. The reference port in
 //! `docs/mihon_img_upscale-master` does the same thing through an OpenGL ES
-//! context, and this module does it on the CPU so the reader does not need a
-//! working GPU, the way Anime4KCPP does.
+//! context.
 //!
-//! The shaders are shipped verbatim under `resources/anime4k/` and compiled into
+//! 这一份住在**计算核心**里（docs/71 §11 Task 2：纯算法随核心走），不认 Tauri、
+//! 不认数据库：解析器只吃 GLSL 文本，解释器只吃 RGBA 缓冲、尺寸和一块取消牌。
+//! 宿主与 worker 因此编的是**同一份**解析结果——同一串 GLSL 在两边解出两个网络
+//! 这种事故没有发生的余地。
+//!
+//! 执行有两条路：这里的 CPU 解释器（任何目标都能跑，也是 GPU 那条路的参照实现）
+//! 与 [`gpu`] 子模块里按 feature 打开的 GPU 执行体（WGSL 由同一份解析结果生成）。
+//! 没有 GPU、没开 feature 或开了却拿不到设备时，回落的是这一条。
+//!
+//! The shaders are shipped verbatim under `src-tauri/resources/anime4k/` and compiled into
 //! a small program at load time. Only the subset of the shader language that
 //! those files use is understood — a `vec4 hook()` built from `mat4(...) * <tap>`
 //! terms, or the depth-to-space pass — and anything else is an error rather than
@@ -18,16 +26,25 @@
 
 use std::collections::HashMap;
 
-use super::upscale::{UpscaleEngine, DEFAULT_TILE_PADDING};
-use super::InferenceError;
+use crate::error::ComputeError;
+use crate::upscale::{UpscaleEngine, DEFAULT_TILE_PADDING};
 
+// GPU 执行体：与下面这份 CPU 解释器共用**同一份**解析结果（`compile_chain`），
+// 只是把每个 pass 翻成一条 WGSL 计算管道。门在 feature 后面，没开就只剩 CPU。
+#[cfg(feature = "anime4k-gpu")]
+pub mod gpu;
+
+// 相对路径按**本源文件**算：这一份住在 `src-tauri/crates/compute-core/src/anime4k/`，
+// 钉住的 GLSL 仍在 `src-tauri/resources/anime4k/`（随仓库、随每个编它的二进制走进来，
+// 所以宿主与 worker 解的是同一份文本）。
 const UPSCALE_CNN_X2_M: &str =
-    include_str!("../../resources/anime4k/Anime4K_Upscale_CNN_x2_M.glsl");
+    include_str!("../../../../resources/anime4k/Anime4K_Upscale_CNN_x2_M.glsl");
 const UPSCALE_CNN_X2_VL: &str =
-    include_str!("../../resources/anime4k/Anime4K_Upscale_CNN_x2_VL.glsl");
-const RESTORE_CNN_VL: &str = include_str!("../../resources/anime4k/Anime4K_Restore_CNN_VL.glsl");
+    include_str!("../../../../resources/anime4k/Anime4K_Upscale_CNN_x2_VL.glsl");
+const RESTORE_CNN_VL: &str =
+    include_str!("../../../../resources/anime4k/Anime4K_Restore_CNN_VL.glsl");
 const CLAMP_HIGHLIGHTS: &str =
-    include_str!("../../resources/anime4k/Anime4K_Clamp_Highlights.glsl");
+    include_str!("../../../../resources/anime4k/Anime4K_Clamp_Highlights.glsl");
 
 /// One named Anime4K chain, offered to the reader as a built-in upscaler.
 pub struct Anime4kPreset {
@@ -225,14 +242,14 @@ impl Compiler {
         slot
     }
 
-    fn add_shader(&mut self, source: &str) -> Result<(), InferenceError> {
+    fn add_shader(&mut self, source: &str) -> Result<(), ComputeError> {
         for block in split_passes(source)? {
             self.add_pass(&block)?;
         }
         Ok(())
     }
 
-    fn add_pass(&mut self, block: &str) -> Result<(), InferenceError> {
+    fn add_pass(&mut self, block: &str) -> Result<(), ComputeError> {
         let mut hook = String::new();
         let mut save: Option<String> = None;
         let mut width: Option<String> = None;
@@ -357,7 +374,7 @@ impl Compiler {
     /// Every texture a pass reads has to appear in its `//!BIND` list. mpv uses
     /// the list to work out the dependencies; here it is a check that the parser
     /// resolved the same names the shader author declared.
-    fn validate_binds(&self, kind: &PassKind, binds: &[String]) -> Result<(), InferenceError> {
+    fn validate_binds(&self, kind: &PassKind, binds: &[String]) -> Result<(), ComputeError> {
         let mut referenced: Vec<usize> = match kind {
             PassKind::Conv {
                 terms,
@@ -391,7 +408,7 @@ impl Compiler {
 
     /// Resolves sizes and the receptive field by walking the chain, and refuses
     /// to hand back a chain whose output factor is not the one the preset claims.
-    fn finish(mut self, expected_scale: u32) -> Result<Program, InferenceError> {
+    fn finish(mut self, expected_scale: u32) -> Result<Program, ComputeError> {
         const NOMINAL: u32 = 8;
         // mpv runs every MAIN hook before every PREKERNEL hook, so the order the
         // files were listed in is not quite the order they execute in. The sort
@@ -475,7 +492,7 @@ impl Compiler {
 
 /// Splits a shader file into its passes. Anime4K's generated shaders start every
 /// pass with `//!DESC`; anything before the first one is the licence header.
-fn split_passes(source: &str) -> Result<Vec<String>, InferenceError> {
+fn split_passes(source: &str) -> Result<Vec<String>, ComputeError> {
     let mut blocks: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     for line in source.lines() {
@@ -513,7 +530,7 @@ fn split_passes(source: &str) -> Result<Vec<String>, InferenceError> {
 
 /// Parses the text after `#define`, with any trailing `//` comment already
 /// removed by the caller.
-fn parse_define(declaration: &str) -> Result<(String, MacroDef), InferenceError> {
+fn parse_define(declaration: &str) -> Result<(String, MacroDef), ComputeError> {
     let rest = declaration.trim();
     let name_end = rest
         .find(|character: char| character == '(' || character.is_whitespace())
@@ -544,7 +561,7 @@ fn parse_define(declaration: &str) -> Result<(String, MacroDef), InferenceError>
 }
 
 /// The text between the braces of `vec4 hook() { ... }`.
-fn extract_hook_body(body: &str) -> Result<String, InferenceError> {
+fn extract_hook_body(body: &str) -> Result<String, ComputeError> {
     let start = body
         .find("vec4 hook()")
         .ok_or_else(|| unsupported("pass has no `vec4 hook()`".into()))?;
@@ -561,7 +578,7 @@ fn parse_conv(
     defines: &HashMap<String, MacroDef>,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<PassKind, InferenceError> {
+) -> Result<PassKind, ComputeError> {
     let mut terms = Vec::new();
     let mut bias = None;
     let mut residual = None;
@@ -600,7 +617,7 @@ fn parse_term(
     defines: &HashMap<String, MacroDef>,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<Term, InferenceError> {
+) -> Result<Term, ComputeError> {
     let open = statement
         .find("mat4(")
         .ok_or_else(|| unsupported("term without mat4".into()))?
@@ -676,7 +693,7 @@ fn parse_term(
 
 /// Recognises the five macro bodies Anime4K's generator emits and returns the
 /// texture they read together with the activation applied to the sample.
-fn parse_macro_body(body: &str) -> Result<(String, Activation), InferenceError> {
+fn parse_macro_body(body: &str) -> Result<(String, Activation), ComputeError> {
     let normalized: String = body.chars().filter(|c| !c.is_whitespace()).collect();
     let (inner, activation) = if let Some(rest) = normalized.strip_prefix("(max(-(") {
         (rest.strip_suffix("),0.0))"), Activation::NegRelu)
@@ -694,7 +711,7 @@ fn parse_macro_body(body: &str) -> Result<(String, Activation), InferenceError> 
 
 /// Splits `conv2d_tf_tex(conv2d_tf_pos)` into its texture name and the call it
 /// makes. Only the name is needed: the call site already says which coordinate.
-fn split_texture_call(call: &str) -> Result<(String, &str), InferenceError> {
+fn split_texture_call(call: &str) -> Result<(String, &str), ComputeError> {
     let marker = if call.contains("_texOff(") {
         "_texOff("
     } else if call.contains("_tex(") {
@@ -728,7 +745,7 @@ fn parse_max_luma(
     defines: &HashMap<String, MacroDef>,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<PassKind, InferenceError> {
+) -> Result<PassKind, ComputeError> {
     let marker = body
         .find("_texOff(")
         .ok_or_else(|| unsupported("statistics pass samples no texture".into()))?;
@@ -814,7 +831,7 @@ fn parse_clamp_luma(
     body: &str,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<PassKind, InferenceError> {
+) -> Result<PassKind, ComputeError> {
     let mut names: Vec<String> = Vec::new();
     let mut cursor = 0;
     while let Some(found) = body[cursor..].find("_tex(") {
@@ -841,7 +858,7 @@ fn parse_depth_to_space(
     body: &str,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<PassKind, InferenceError> {
+) -> Result<PassKind, ComputeError> {
     let mut sources = Vec::new();
     let mut residual = None;
     for statement in body.split(';') {
@@ -889,7 +906,7 @@ fn parse_residual(
     statement: &str,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<Option<usize>, InferenceError> {
+) -> Result<Option<usize>, ComputeError> {
     let Some((_, tail)) = statement.rsplit_once('+') else {
         return Ok(None);
     };
@@ -908,7 +925,7 @@ fn resolve_texture(
     name: &str,
     slots: &HashMap<String, usize>,
     hooked: usize,
-) -> Result<usize, InferenceError> {
+) -> Result<usize, ComputeError> {
     if name == "HOOKED" {
         return Ok(hooked);
     }
@@ -928,7 +945,7 @@ fn name_before(body: &str, marker: usize) -> String {
     prefix[start..].to_string()
 }
 
-fn parse_vec4(statement: &str) -> Result<[f32; 4], InferenceError> {
+fn parse_vec4(statement: &str) -> Result<[f32; 4], ComputeError> {
     let open = statement
         .find("vec4(")
         .ok_or_else(|| unsupported("bias is not a vec4".into()))?
@@ -943,7 +960,7 @@ fn parse_vec4(statement: &str) -> Result<[f32; 4], InferenceError> {
 fn parse_size(
     expression: &str,
     slots: &HashMap<String, usize>,
-) -> Result<Vec<SizeToken>, InferenceError> {
+) -> Result<Vec<SizeToken>, ComputeError> {
     if expression.trim().is_empty() {
         return Err(unsupported("pass has no //!WIDTH or //!HEIGHT".into()));
     }
@@ -979,7 +996,7 @@ fn parse_size(
     Ok(tokens)
 }
 
-fn eval_size(tokens: &[SizeToken], sizes: &[Option<(u32, u32)>]) -> Result<u32, InferenceError> {
+fn eval_size(tokens: &[SizeToken], sizes: &[Option<(u32, u32)>]) -> Result<u32, ComputeError> {
     let mut stack: Vec<f32> = Vec::new();
     for token in tokens {
         match token {
@@ -1026,7 +1043,7 @@ fn eval_size(tokens: &[SizeToken], sizes: &[Option<(u32, u32)>]) -> Result<u32, 
 /// Index of the closing brace matching the one at `open`. Hook bodies have to be
 /// matched on braces, not parentheses: the body of a convolution pass is full of
 /// balanced `mat4(...)` calls that would confuse a paren matcher.
-fn find_matching_brace(text: &str, open: usize) -> Result<usize, InferenceError> {
+fn find_matching_brace(text: &str, open: usize) -> Result<usize, ComputeError> {
     let mut depth = 0_i32;
     for (offset, character) in text[open..].char_indices() {
         match character {
@@ -1044,7 +1061,7 @@ fn find_matching_brace(text: &str, open: usize) -> Result<usize, InferenceError>
 }
 
 /// Index of the closing paren matching the one at `open`.
-fn find_matching(text: &str, open: usize) -> Result<usize, InferenceError> {
+fn find_matching(text: &str, open: usize) -> Result<usize, ComputeError> {
     let mut depth = 0_i32;
     for (offset, character) in text[open..].char_indices() {
         match character {
@@ -1061,7 +1078,7 @@ fn find_matching(text: &str, open: usize) -> Result<usize, InferenceError> {
     Err(unsupported("unbalanced parentheses in shader".into()))
 }
 
-fn parse_floats(text: &str) -> Result<Vec<f32>, InferenceError> {
+fn parse_floats(text: &str) -> Result<Vec<f32>, ComputeError> {
     text.split(',')
         .map(|value| {
             value
@@ -1072,8 +1089,8 @@ fn parse_floats(text: &str) -> Result<Vec<f32>, InferenceError> {
         .collect()
 }
 
-fn unsupported(message: String) -> InferenceError {
-    InferenceError::InvalidInput(format!("Anime4K shader not supported: {message}"))
+fn unsupported(message: String) -> ComputeError {
+    ComputeError::InvalidInput(format!("Anime4K shader not supported: {message}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,7 +1182,7 @@ fn run_conv(
     width: u32,
     height: u32,
     names: &[String],
-) -> Result<Vec<f32>, InferenceError> {
+) -> Result<Vec<f32>, ComputeError> {
     let mut out = vec![0_f32; width as usize * height as usize * 4];
     for y in 0..height {
         let v = (y as f32 + 0.5) / height as f32;
@@ -1200,7 +1217,7 @@ fn run_depth_to_space(
     width: u32,
     height: u32,
     names: &[String],
-) -> Result<Vec<f32>, InferenceError> {
+) -> Result<Vec<f32>, ComputeError> {
     let mut out = vec![0_f32; width as usize * height as usize * 4];
     for y in 0..height {
         let v = (y as f32 + 0.5) / height as f32;
@@ -1249,7 +1266,7 @@ fn add_residual(
     width: u32,
     height: u32,
     names: &[String],
-) -> Result<(), InferenceError> {
+) -> Result<(), ComputeError> {
     let texture = slots[residual]
         .as_ref()
         .ok_or_else(|| unsupported(format!("texture {} was never written", names[residual])))?;
@@ -1282,7 +1299,7 @@ fn run_max_luma(
     width: u32,
     height: u32,
     names: &[String],
-) -> Result<Vec<f32>, InferenceError> {
+) -> Result<Vec<f32>, ComputeError> {
     let texture = slots[source]
         .as_ref()
         .ok_or_else(|| unsupported(format!("texture {} was never written", names[source])))?;
@@ -1325,7 +1342,7 @@ fn run_clamp_luma(
     width: u32,
     height: u32,
     names: &[String],
-) -> Result<Vec<f32>, InferenceError> {
+) -> Result<Vec<f32>, ComputeError> {
     let image = slots[source]
         .as_ref()
         .ok_or_else(|| unsupported(format!("texture {} was never written", names[source])))?;
@@ -1348,43 +1365,70 @@ fn run_clamp_luma(
     Ok(out)
 }
 
+/// 把一份预设的 shader 文件编成一条 pass 链。**只有这一处解析**：CPU 解释器、GPU
+/// 生成器、测试都从它拿 `Program`，所以「同一串 GLSL 在两边解出两个网络」不存在。
+pub(crate) fn compile_chain(preset: &Anime4kPreset) -> Result<Program, ComputeError> {
+    let mut compiler = Compiler::new();
+    for shader in preset.shaders {
+        compiler.add_shader(shader)?;
+    }
+    compiler.finish(preset.scale)
+}
+
+/// Nearest-neighbour source alpha, so the page's transparency (if any)
+/// survives a network that only knows about opaque colour.
+pub(crate) fn carry_alpha(
+    rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+    scale: u32,
+) -> Vec<u8> {
+    let mut alpha = vec![0_u8; width as usize * height as usize * 4];
+    for y in 0..height {
+        let source_y = (y / scale).min(source_height.saturating_sub(1));
+        for x in 0..width {
+            let source_x = (x / scale).min(source_width.saturating_sub(1));
+            let source = ((source_y * source_width + source_x) * 4 + 3) as usize;
+            let target = ((y * width + x) * 4 + 3) as usize;
+            alpha[target] = rgba[source];
+        }
+    }
+    alpha
+}
+
+/// 一条链跑完之后的那一步：RGB 从 f32 画布量化回 8 位（clamp 到 `[0, 1]` 再 round，
+/// 与 GPU 那条路**逐字节**共用），alpha 走最近邻搬运。两条执行体都从这里出图。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quantize_tile(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    scale: u32,
+) -> Vec<u8> {
+    let mut result = carry_alpha(source, source_width, source_height, width, height, scale);
+    for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for channel in 0..3 {
+            result[index * 4 + channel] = (pixel[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    result
+}
+
 /// A compiled Anime4K chain, ready to run over a tile.
 pub struct Anime4kEngine {
     program: Program,
 }
 
 impl Anime4kEngine {
-    pub fn open(preset: &Anime4kPreset) -> Result<Self, InferenceError> {
-        let mut compiler = Compiler::new();
-        for shader in preset.shaders {
-            compiler.add_shader(shader)?;
-        }
+    pub fn open(preset: &Anime4kPreset) -> Result<Self, ComputeError> {
         Ok(Self {
-            program: compiler.finish(preset.scale)?,
+            program: compile_chain(preset)?,
         })
-    }
-
-    /// Nearest-neighbour source alpha, so the page's transparency (if any)
-    /// survives a network that only knows about opaque colour.
-    fn carry_alpha(
-        rgba: &[u8],
-        source_width: u32,
-        source_height: u32,
-        width: u32,
-        height: u32,
-        scale: u32,
-    ) -> Vec<u8> {
-        let mut alpha = vec![0_u8; width as usize * height as usize * 4];
-        for y in 0..height {
-            let source_y = (y / scale).min(source_height.saturating_sub(1));
-            for x in 0..width {
-                let source_x = (x / scale).min(source_width.saturating_sub(1));
-                let source = ((source_y * source_width + source_x) * 4 + 3) as usize;
-                let target = ((y * width + x) * 4 + 3) as usize;
-                alpha[target] = rgba[source];
-            }
-        }
-        alpha
     }
 }
 
@@ -1402,9 +1446,9 @@ impl UpscaleEngine for Anime4kEngine {
         rgba: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<Vec<u8>, InferenceError> {
+    ) -> Result<Vec<u8>, ComputeError> {
         if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
-            return Err(InferenceError::InvalidInput(
+            return Err(ComputeError::InvalidInput(
                 "RGBA tile dimensions do not match".into(),
             ));
         }
@@ -1499,21 +1543,15 @@ impl UpscaleEngine for Anime4kEngine {
                 height * self.program.scale
             )));
         }
-        let mut result = Self::carry_alpha(
+        Ok(quantize_tile(
             rgba,
             width,
             height,
+            &output.pixels,
             output.width,
             output.height,
             self.program.scale,
-        );
-        for (index, pixel) in output.pixels.chunks_exact(4).enumerate() {
-            for channel in 0..3 {
-                result[index * 4 + channel] =
-                    (pixel[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
-        Ok(result)
+        ))
     }
 }
 
@@ -1869,7 +1907,7 @@ mod tests {
             output.chunks_exact(4).all(|pixel| pixel[3] == 200),
             "the network only sees opaque colour, so alpha has to be carried across"
         );
-        let nearest = crate::inference::cpu_scale_rgba(&source, 32, 32, 2, 64_000_000)
+        let nearest = crate::cpu_scale::cpu_scale_rgba(&source, 32, 32, 2, 64_000_000)
             .expect("nearest reference")
             .rgba;
         assert_ne!(
@@ -1909,7 +1947,7 @@ vec4 hook() {
 ";
         let mut compiler = Compiler::new();
         let error = compiler.add_shader(shader).expect_err("unbound texture");
-        assert!(matches!(error, InferenceError::InvalidInput(_)));
+        assert!(matches!(error, ComputeError::InvalidInput(_)));
     }
 
     #[test]

@@ -21,6 +21,10 @@ pub const RESOURCE_LIMIT_CODE: &str = "COMPUTE_RESOURCE_LIMIT";
 pub const GPU_BACKEND_UNAVAILABLE_CODE: &str = "GPU_BACKEND_UNAVAILABLE";
 /// 点了 GPU，也有硬件运行库，但这份模型在它上面实测算错（例如 Real-CUGAN 的负垫边）。
 pub const GPU_OUTPUT_INVALID_CODE: &str = "GPU_OUTPUT_INVALID";
+/// 这一阶段要的放大器这一份构建里没有：模型文件不在输入根里/哈希对不上，或者内置链的
+/// 名字与版本和这一份构建编着的对不上。**重试好不了**——要么用户在设置里换一档，要么
+/// 两边构建必须一致（内置链是编进二进制的，没有「下载一下」这条出路）。
+pub const MODEL_UNAVAILABLE_CODE: &str = "COMPUTE_MODEL_UNAVAILABLE";
 
 /// 引擎自报的 id：宿主的诊断与缓存修订都按它认这一条路径。超分与去码共用一条
 /// `--engine onnx`（它们是同一份构建里同一族的 ONNX 执行体），所以这个 id 也共用。

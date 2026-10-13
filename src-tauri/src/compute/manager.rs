@@ -2130,7 +2130,15 @@ impl Supervisor {
             // 模型目录里的 id**（它是「这一档叫什么」）。不跳过的后果是宿主拿着这一档的名字
             // 去模型目录里找一个叫 `dlssnr` 的模型，找不到就报 `COMPUTE_MODEL_UNAVAILABLE`
             // ——一条看起来像「模型没下载」的错，而这一页根本不需要任何模型。
-            if stage.model.is_some() || stage.decensor.is_some() || stage.dlssnr.is_some() {
+            // 内置超分链那一档（`stage.builtin`）同理：它的 `model_spec_id` 也不是模型目录里
+            // 的 id，而是「哪条链」（`compute::models::StagedModel::Builtin`）。重复补一遍
+            // 不会写错，但会让「阶段自带声明就不动它」这条规矩在这里留一个例外——而例外正是
+            // 下次改这一栏时会被踩空的地方。
+            if stage.model.is_some()
+                || stage.decensor.is_some()
+                || stage.dlssnr.is_some()
+                || stage.builtin.is_some()
+            {
                 continue;
             }
             // 去码那条路不走模型目录：它的三件套（检测器 + 两份修补模型）在**这一台机器**上，
@@ -2161,8 +2169,26 @@ impl Supervisor {
                         code: error.code(),
                         detail: error.message(),
                     })?;
-                stage.model = Some(staged.grant);
-                stage.min_input_edge = Some(staged.min_input_edge);
+                // 两条来路在这里分岔，但只有**一栏**会被填：模型目录里的一份 ONNX 交的是
+                // 一只只读文件授权（`model`），宿主内置的超分链交的是一句身份（`builtin`）。
+                // 协议层规定这两栏互斥（`validate`），所以这个 match 不是风格，是那条规矩
+                // 在类型上的落点。
+                match staged {
+                    super::models::StagedModel::File {
+                        grant,
+                        min_input_edge,
+                    } => {
+                        stage.model = Some(grant);
+                        stage.min_input_edge = Some(min_input_edge);
+                    }
+                    super::models::StagedModel::Builtin(chain) => {
+                        stage.builtin = Some(chain);
+                        // 内置链没有「最小输入边长」这回事：它的着色器对任意尺寸都成立
+                        // （tile 管道自己管边界），所以这一栏**不填**——填一个假数字会让
+                        // worker 去拒一张本来能算的图。
+                        stage.min_input_edge = None;
+                    }
+                }
             }
         }
         Ok(PreparedRun { input, pipeline })

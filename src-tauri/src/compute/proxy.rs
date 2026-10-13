@@ -146,6 +146,7 @@ pub fn upscale(
             // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）
             // ——调用方不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。
             model: None,
+            builtin: None,
             decensor: None,
             dlssnr: None,
             min_input_edge: None,
@@ -191,6 +192,7 @@ pub fn decensor(
             // 去码阶段不认 `model`，它认的是「哪三份模型」：三件套由 `prepare_run` 从
             // `inpaint` 那一栏摆进只读输入根（协议里这两条路互斥）。
             model: None,
+            builtin: None,
             decensor: None,
             dlssnr: None,
             min_input_edge: None,
@@ -283,6 +285,7 @@ pub fn dlssnr(
             model_spec_id: DLSSNR_STAGE_ID.to_string(),
             // 模型是「哪一份片段」，走 `dlssnr` 那一栏；`model` 是 ONNX 模型那条路。
             model: None,
+            builtin: None,
             decensor: None,
             dlssnr: Some(DlssnrGrant {
                 feature,

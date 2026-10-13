@@ -75,6 +75,7 @@ fn a_run_message_round_trips() {
             model: None,
             decensor: None,
             dlssnr: None,
+            builtin: None,
             min_input_edge: None,
             output_scale: None,
         }],
@@ -406,10 +407,11 @@ fn a_stage_with_both_a_model_and_a_decensor_grant_is_rejected() {
     let ProtocolError::OutOfRange { field, .. } = &error else {
         panic!("应当被判成越界，实际 {error:?}");
     };
-    // 这一栏报的是**规则**的名字（「三样里恰有一份」），不是被撞上的那两样的名字：
+    // 这一栏报的是**规则**的名字（「四样里恰有一份」），不是被撞上的那两样的名字：
     // 报 `decensor` 会让「模型 + DLSSNR」那一对看起来是另一条规则（DLSSNR 加入前
-    // 这里确实报的是 `decensor`，那时规则只覆盖两样）。
-    assert_eq!(field, "dlssnr");
+    // 这里确实报的是 `decensor`，那时规则只覆盖两样；DLSSNR 加入之后是 `dlssnr`，
+    // 内置链加入之后是 `builtin`）。字面量跟着最新那一栏走，规则本身只有一条。
+    assert_eq!(field, "builtin");
 }
 
 #[test]
@@ -709,7 +711,37 @@ fn a_stage_that_carries_two_kinds_of_grant_is_rejected() {
         let ProtocolError::OutOfRange { field, .. } = &error else {
             panic!("expected OutOfRange, got {error:?}");
         };
-        assert_eq!(field, "dlssnr");
+        // 与上面那条同一个约定：这一栏报规则的名字，字面量跟着最新那一栏（`builtin`）走。
+        assert_eq!(field, "builtin");
+    }
+}
+
+/// 内置链那一栏与另外三栏都互斥。
+///
+/// 它与「模型 + 去码」那种互斥不是同一件事：内置链交的是一句**身份**而不是文件，所以
+/// 同乘的后果不是「多摆一份文件」，而是**这条阶段到底要不要文件**说不清——一条来路要
+/// 读模型、一条只在两边编着的着色器里跑。说不清的请求在协议层就该被挡下。
+#[test]
+fn a_builtin_chain_cannot_ride_along_with_any_file_grant() {
+    let builtin = r#", "builtin": { "chainId": "anime4k-hq", "version": "2-1", "scale": 2 }"#;
+    for extra in [
+        r#", "model": { "relativePath": "ab/abcd.onnx", "contentHash": "deadbeef", "byteLength": 4096 }"#,
+        r#", "decensor": { "detector": { "relativePath": "ab/d.onnx", "contentHash": "aa", "byteLength": 1 }, "bar": { "relativePath": "ab/b.onnx", "contentHash": "bb", "byteLength": 1 }, "mosaic": { "relativePath": "ab/m.onnx", "contentHash": "cc", "byteLength": 1 } }"#,
+        r#", "dlssnr": { "feature": { "relativePath": "ab/abcd.dll", "contentHash": "deadbeef", "byteLength": 165000000 }, "settings": { "relativePath": "cd/cdef.json", "contentHash": "cafebabe", "byteLength": 128 } }"#,
+    ] {
+        let body = RUN.replacen(
+            r#""tile": 512 }"#,
+            &format!(r#""tile": 512{builtin}{extra} }}"#),
+            1,
+        );
+        let error = match parse(body.as_bytes()) {
+            Err(error) => error,
+            Ok(message) => validate_message(&message).expect_err("两种授权同时出现要判非法"),
+        };
+        let ProtocolError::OutOfRange { field, .. } = &error else {
+            panic!("expected OutOfRange, got {error:?}");
+        };
+        assert_eq!(field, "builtin");
     }
 }
 

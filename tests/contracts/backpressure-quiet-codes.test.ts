@@ -52,13 +52,16 @@ describe('backpressure codes stay out of the error log', () => {
   }
 
   it('still writes a submit rejection that is a real answer', async () => {
-    // 反例：宿主内置的那一档进不了 worker 是**真的没成**（用户点名的 anime4k-hq 就是它），
+    // 反例：指名了一个这台机器上没有的模型是**真的没成**（`COMPUTE_MODEL_UNAVAILABLE`），
     // 这一条必须留在日志里——安静名单只收「现在没位置」，不收「这件事办不成」。
+    // （这一栏以前拿 anime4k-hq 当例子：它当时是宿主内置、worker 里没有的一档；第 30 轮
+    // 把那条链连解析器带执行体搬进 compute-core 之后它就走得通了，例子换成仍然真会发生的
+    // 「模型没装」。）
     setInvokeAdapterForTests(async () => ({
       ok: false as const,
       error: {
         code: 'COMPUTE_MODEL_UNAVAILABLE',
-        message: 'anime4k-hq 是宿主内置的那一档（编进宿主的 shader 链），worker 里没有它',
+        message: '这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）',
         retryable: false,
       },
     }));
@@ -69,7 +72,7 @@ describe('backpressure codes stay out of the error log', () => {
     expect(result.ok).toBe(false);
     expect(records).toHaveLength(1);
     expect(records[0]?.source).toBe('bridge/compute_submit_reader_page');
-    expect(records[0]?.message).toBe('COMPUTE_MODEL_UNAVAILABLE: anime4k-hq 是宿主内置的那一档（编进宿主的 shader 链），worker 里没有它');
+    expect(records[0]?.message).toBe('COMPUTE_MODEL_UNAVAILABLE: 这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）');
     expect(records[0]?.detail).toBe('{"request":{"archiveId":"a:12"},"retryable":false}');
   });
 });
