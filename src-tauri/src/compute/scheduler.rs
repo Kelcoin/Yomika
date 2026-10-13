@@ -98,6 +98,11 @@ pub struct JobSnapshot {
     pub state: JobState,
     pub subscribers: usize,
     /// 单调序号：前端事件排序用，也是「谁更旧」的判据。
+    ///
+    /// **每一次送出都推进一次**（[`Scheduler::touch`]），不是任务出生时定下的常量：界面拿
+    /// `event.sequence <= lastSequence` 丢旧事件，而起点正是提交应答里那份快照的序号；同一个
+    /// 序号代表两份不同的快照，第二条以后的事件就全被当成旧的丢掉——任务跑完了界面还停在
+    /// 「处理中」。
     pub sequence: u64,
     pub created_ms: u64,
     /// 只有终态有值。
@@ -722,6 +727,26 @@ impl Scheduler {
 
     pub fn snapshot(&self, job_id: &str) -> Option<JobSnapshot> {
         self.jobs.get(job_id).map(|job| job.snapshot.clone())
+    }
+
+    /// 送出这条快照**之前**推进它的序号，然后交出要送的那一份。
+    ///
+    /// 序号是交给界面的事件版本号（任务的身份是 `job_id`）：界面用它丢旧事件
+    /// （`event.sequence <= lastSequence`），而它记下的起点是**提交应答**里那份快照的序号。
+    /// 序号要是一直停在任务出生时的那个值上，同一件任务的第二条以后的事件（在跑、跑完、
+    /// 阶段产物就绪）会被一律当成旧事件丢掉：界面永远停在「处理中」，不报错，而任务其实
+    /// 已经跑完、产物也已经发布到正式目录——没人去认领。所以**每一次送出都推进一次**，
+    /// 哪怕快照内容一个字没变（状态没变也还是一条要送的事件）。
+    pub fn touch(&mut self, job_id: &str) -> Option<JobSnapshot> {
+        if !self.jobs.contains_key(job_id) {
+            return None;
+        }
+        self.next_sequence += 1;
+        let sequence = self.next_sequence;
+        // 上面查过存在，这里取不到只可能是逻辑错，不该把序号白推进一次。
+        let job = self.jobs.get_mut(job_id)?;
+        job.snapshot.sequence = sequence;
+        Some(job.snapshot.clone())
     }
 
     /// 断订阅之后按 id 批量恢复（`job_get_many`）。

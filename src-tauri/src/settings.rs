@@ -866,9 +866,13 @@ const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 /// 读回那条值。值不存在时 `reg.exe` 是非零退出且 stderr 写着「找不到」，那不是失败——
 /// 「没写」和「写坏了」在这里是同一个答案：`None`。
+///
+/// 走 `hidden_process` 而不是直接 `Command::new`：宿主没有控制台，这条命令是**启动
+/// 路径**上的（`lib.rs` 的对账），少了那个标志 Windows 会给它新开一个控制台窗口，
+/// 用户看到的就是「启动时先闪一个来源不明的窗口」。
 #[cfg(target_os = "windows")]
 fn read_windows_autostart() -> Option<String> {
-    let output = std::process::Command::new("reg.exe")
+    let output = crate::hidden_process::command("reg.exe")
         .args(["query", AUTOSTART_KEY, "/v", "Yomika"])
         .output()
         .ok()?;
@@ -914,9 +918,10 @@ pub fn reconcile_windows_autostart(wanted: bool) -> Result<Option<String>, Strin
     }
 }
 
+/// 写/删那条值。同样走 `hidden_process`——这条也在启动路径上（对账发现值不对时）。
 #[cfg(target_os = "windows")]
 fn update_windows_autostart(executable: &std::path::Path, enabled: bool) -> Result<(), String> {
-    let mut command = std::process::Command::new("reg.exe");
+    let mut command = crate::hidden_process::command("reg.exe");
     if enabled {
         command.args(["add", AUTOSTART_KEY, "/v", "Yomika", "/t", "REG_SZ", "/d"]);
         command.arg(autostart_value(executable));
@@ -1254,6 +1259,31 @@ mod tests {
         assert_eq!(value, r#""C:\Program Files\Yomika\yomika.exe" --background"#);
         assert!(value.ends_with("--background"));
         assert!(value.starts_with('"'));
+    }
+
+    #[test]
+    fn the_autostart_reconcile_never_builds_its_own_command() {
+        // 判据（缺陷 2）：开机自启对账那两条命令必须走 `hidden_process`（那里带
+        // `CREATE_NO_WINDOW`）。直接自己构造进程就是缺陷形态：宿主是 GUI 子系统、
+        // 进程里没有控制台，Windows 会给这个控制台子进程**新开一个控制台窗口**闪一下，
+        // 而主窗要等首帧画完才 show()——用户看到的就是「启动时先闪一个来源不明的
+        // 窗口，然后主窗才出现」。行为那一半量的是入口本身
+        // （`hidden_process::tests::a_child_started_this_way_has_no_console_window`），
+        // 这一条钉的是**调用点没有绕开它**。
+        let source = include_str!("settings.rs");
+        // 判据自己就住在这个文件里，所以不能把这个名字写成连着的字面量（否则它自己
+        // 命中自己）；拼出来再找。
+        let needle = ["std::process", "::Command"].concat();
+        assert!(
+            !source.contains(&needle),
+            "开机自启对账不许自己构造进程：从这里拉起的控制台程序会被 Windows 新开一个 \
+             窗口闪一下（宿主自己没有控制台，见 hidden_process）"
+        );
+        assert_eq!(
+            source.matches("hidden_process::command(\"reg.exe\")").count(),
+            2,
+            "开机自启那两条命令（读、写/删）都要走 hidden_process"
+        );
     }
 
     #[test]

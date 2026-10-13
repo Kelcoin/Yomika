@@ -42,6 +42,10 @@ use super::scheduler::{
     CancelOutcome, Dispatched, DroppedGeneration, JobKey, JobSnapshot, JobState, Priority,
     PromoteOutcome, Scheduler, SubmitError, Submitted, WorkerEvent, WORKER_UNAVAILABLE_CODE,
 };
+// 拉起子进程时「不要窗口」的唯一落点（`CREATE_NO_WINDOW`）：宿主是 GUI 子系统、
+// 自己没控制台，少了它 Windows 会给控制台子进程新开一个窗口闪一下。worker 那一串
+// 命令行与开机自启对账的 `reg.exe` 都从这里走。
+use crate::hidden_process::hide_console;
 
 /// 落盘之后、`artifact_ack` 之前宿主自己核出来的产物记录。
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -463,13 +467,14 @@ impl Shared {
     }
 
     fn emit(&self, ids: &[String]) {
-        // 先在锁里把快照抄出来，出了锁再回调：回调里做什么都不影响状态锁。
-        let snapshots: Vec<JobSnapshot> = {
-            let state = self.lock();
+        // 先在锁里把快照抄出来（顺手用 `touch` 推进序号：序号是**交给界面的事件版本号**，
+        // 每送一条就得往前走一格，否则界面会把后面的事件当成旧的丢掉——见 `Scheduler::touch`），
+        // 出了锁再回调：回调里做什么都不影响状态锁。
+        let snapshots: Vec<JobSnapshot> = self.with_state(|state| {
             ids.iter()
-                .filter_map(|job_id| state.scheduler.snapshot(job_id))
+                .filter_map(|job_id| state.scheduler.touch(job_id))
                 .collect()
-        };
+        });
         for snapshot in &snapshots {
             (self.events)(snapshot);
         }
@@ -2540,16 +2545,6 @@ fn worker_environment(command: &mut ProcessCommand) {
         command.env(key, std::env::var(key).unwrap_or_default());
     }
 }
-
-#[cfg(windows)]
-fn hide_console(command: &mut ProcessCommand) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console(_command: &mut ProcessCommand) {}
 
 #[cfg(windows)]
 fn physical_ram_bytes() -> Option<u64> {

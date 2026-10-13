@@ -174,20 +174,39 @@ fn wait_until<T>(what: &str, budget: Duration, mut probe: impl FnMut() -> Option
 #[derive(Clone, Default)]
 struct Recorder {
     seen: Arc<Mutex<Vec<(String, JobState)>>>,
+    /// 每条事件的序号也记下来：序号是**交给界面的事件版本号**，界面拿它丢旧事件
+    /// （见 `every_snapshot_of_a_job_is_sent_with_a_greater_sequence_than_the_one_before`）。
+    frames: Arc<Mutex<Vec<(String, u64, JobState)>>>,
 }
 
 impl Recorder {
     fn sink(&self) -> yomika_lib::compute::manager::EventSink {
         let seen = Arc::clone(&self.seen);
+        let frames = Arc::clone(&self.frames);
         Arc::new(move |snapshot: &yomika_lib::compute::scheduler::JobSnapshot| {
             seen.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push((snapshot.job_id.clone(), snapshot.state.clone()));
+            frames
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((
+                    snapshot.job_id.clone(),
+                    snapshot.sequence,
+                    snapshot.state.clone(),
+                ));
         })
     }
 
     fn states(&self) -> Vec<(String, JobState)> {
         self.seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn frames(&self) -> Vec<(String, u64, JobState)> {
+        self.frames
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -1438,5 +1457,52 @@ fn coalescing_a_new_subscriber_does_not_replace_the_dispatched_output_grant() {
     let result = wait_until("shared result", HANDOFF, || manager.job(&first.job_id).filter(|snapshot| snapshot.state.is_terminal()));
     assert_eq!(result.state, JobState::Completed);
     assert_eq!(manager.job_artifacts(&first.job_id).iter().filter(|artifact| artifact.verified).count(), 1);
+    manager.shutdown();
+}
+
+/// 一件任务的每一次快照都要带上一个**比上一次更大的**事件序号。
+///
+/// `sequence` 是宿主交给界面的事件版本号，不是任务的身份（身份是 `job_id`）。阅读器里本地
+/// 那一档（去码/超分）拿它丢旧事件：`event.sequence <= lastSequence` 就 return，而起点正是
+/// **提交应答**里那份快照的序号（`src/lib/readerComputedPage.ts:247` 与 `:292`）。序号要是停在
+/// 任务出生时的那个值上，「排到队里 → 真的在跑 → 算完了」这几条事件会被一律当成旧事件丢掉：
+/// 界面永远停在「处理中」、不报错，而任务其实已经跑完、产物也已经发布到正式目录。
+///
+/// 现场就是这一形态：`src-tauri/target/release/data/cache/images` 里三个大产物
+/// （`704984da…` 9,560,026 B 等）在 `cache_entries` 里一行都没有——没人去认领，因为
+/// `pick()` 从来没被叫起来过。
+#[test]
+fn every_snapshot_of_a_job_is_sent_with_a_greater_sequence_than_the_one_before() {
+    let sandbox = Sandbox::new("sequence");
+    let recorder = Recorder::default();
+    let manager = ComputeManager::start(config(&sandbox), recorder.sink()).expect("起 supervisor");
+    let submitted = submit_foreground(&manager, "sequence", 0);
+    wait_until("这件任务跑完", HANDOFF, || {
+        terminal_of(&manager, &submitted.job_id)
+    });
+
+    let frames: Vec<(u64, JobState)> = recorder
+        .frames()
+        .into_iter()
+        .filter(|(job_id, _, _)| job_id == &submitted.job_id)
+        .map(|(_, sequence, state)| (sequence, state))
+        .collect();
+    // 提交应答那份快照是消费方记下的起点（`lastSequence`），事件流必须从它之后往前走。
+    let mut sequences = vec![submitted.snapshot.sequence];
+    sequences.extend(frames.iter().map(|(sequence, _)| *sequence));
+    assert!(
+        frames.len() >= 2,
+        "一件任务至少该送出「在跑」和「跑完」两条快照，实际 {} 条：{:?}",
+        frames.len(),
+        frames
+    );
+    for window in sequences.windows(2) {
+        assert!(
+            window[0] < window[1],
+            "同一件任务的快照序号必须严格递增，否则界面会把新事件当成旧事件丢掉、永远停在「处理中」：{:?}（事件：{:?}）",
+            sequences,
+            frames
+        );
+    }
     manager.shutdown();
 }

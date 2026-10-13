@@ -28,6 +28,11 @@ mod dedup;
 mod diagnostics;
 mod domain;
 mod error_log;
+// 拉起控制台程序（`reg.exe` 这类）的唯一入口：宿主自己是 GUI 子系统、没有控制台，
+// 不带上 `CREATE_NO_WINDOW` 的话 Windows 会给子进程新开一个控制台窗口闪一下。
+// 判据住在它自己的 `mod tests` 里：让子进程自报 `GetConsoleWindow()`，并做一次反向
+// 对照（直接 `Command::new` 拉起时必须报「有控制台」），否则那条判据会一直是绿的。
+pub mod hidden_process;
 mod inference;
 // 只为了让「离开阅读器」这件事能把已释放的页真的还给系统：Rust 释放了，Windows
 // 还不一定收。见该模块顶部。
