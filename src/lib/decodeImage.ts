@@ -32,3 +32,21 @@ export function decodeImage(url: string): Promise<void> {
   }
   return image.decode().catch(() => undefined);
 }
+
+/** 同 `decodeImage`，但**不吞失败**：加载不出来就 reject。
+ *
+ * 用在「换上去的那一版必须真的能显示」的地方——算出来的产物就是一例：宿主给的取图地址
+ * 一旦打不开（scheme 形状不对、租借过期、文件被清），宽松版会当作「可以换」，页面就被
+ * 换成一张破图，用户看到的是图片消失，日志里一个字都没有（2026-10-13 的真机现场）。
+ */
+export function decodeImageStrict(url: string): Promise<void> {
+  if (testDecoder) return testDecoder(url);
+  if (typeof Image === 'undefined') return Promise.resolve();
+  const image = new Image();
+  image.decoding = 'async';
+  return new Promise((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error(`图片加载不出来：${url}`));
+    image.src = url;
+  });
+}

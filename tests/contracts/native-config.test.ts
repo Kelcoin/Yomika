@@ -2245,4 +2245,31 @@ describe('native shell configuration', () => {
       expect(DomainErrorCodeSchema.safeParse(code).success, code).toBe(true);
     }
   });
+
+  it('the CSP lets the webview load the lease URL in the shape this platform can actually reach', () => {
+    // Windows/Android 上 WebView 只把「HTTP 请求」交给自定义 scheme 处理器：wry 注册的是
+    // `http://yomika-image.*` 的拦截表，处理器看到的是换回前缀后的
+    // `yomika-image://localhost/asset/{id}`。所以取图地址是
+    // `http://yomika-image.localhost/asset/{id}`（Rust 侧 `compute::leases::lease_url`），
+    // CSP 少这一条时 `<img>` 会被 CSP 挡掉——症状与 URL 形状写错一样：图片直接消失、
+    // 错误日志里一行都没有（2026-10-13 真机）。
+    const leases = read('../../src-tauri/src/compute/leases.rs');
+    expect(leases, 'Windows/Android 的取图地址必须是 HTTP 形状').toContain(
+      'format!("http://{SCHEME}.localhost/{HOST}/{lease_id}")',
+    );
+    const protocol = read('../../src-tauri/src/compute/asset_protocol.rs');
+    expect(protocol, '处理器要认下 wry 换回来的 localhost 那一段').toContain(
+      'rest.strip_prefix("localhost/").unwrap_or(rest)',
+    );
+
+    const config = readJson('../../src-tauri/tauri.conf.json') as {
+      app: { security: { csp: string } };
+    };
+    const imageSources = config.app.security.csp
+      .split(';')
+      .map((directive) => directive.trim().split(/\s+/))
+      .find(([name]) => name === 'img-src')
+      ?.slice(1) ?? [];
+    expect(imageSources, 'img-src 要放行取图地址的来源').toContain('http://yomika-image.localhost');
+  });
 });

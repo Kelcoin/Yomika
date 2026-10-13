@@ -12,6 +12,7 @@ import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { decodeImage } from '../lib/decodeImage';
+import { logError } from '../lib/errorLog';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
@@ -320,6 +321,18 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       onLoad={(event) => {
         onMeasured(index, event.currentTarget);
         onDisplayed?.(index, shown);
+      }}
+      onError={(event) => {
+        // 图片加载失败曾是**完全静默**的：算出来的那一版取图地址打不开时，页面上只剩一个
+        // 破图，`onLoad` 不响、`naturalWidth` 是 0，日志里连一行都没有（2026-10-13 现场）。
+        // 这里至少把「哪一页、哪个地址」写进 error.log。
+        const image = event.currentTarget;
+        logError('reader/page-image', '阅读器的图片没加载出来', {
+          page: index + 1,
+          url: shown,
+          naturalWidth: image.naturalWidth,
+          complete: image.complete,
+        });
       }}
     />
   );

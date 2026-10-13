@@ -244,7 +244,7 @@ impl LeaseStore {
             return Err(LeaseError::BudgetFull { limit: self.capacity });
         }
         let lease_id = self.new_id(&spec);
-        let url = format!("{SCHEME}://{HOST}/{}", lease_id);
+        let url = lease_url(&lease_id);
         let view = LeaseView {
             artifact_id: spec.artifact_id.clone(),
             job_id: spec.job_id.clone(),
@@ -344,6 +344,27 @@ pub const LEASE_ID_HEX_BYTES: usize = 32;
 pub const SCHEME: &str = "yomika-image";
 pub const HOST: &str = "asset";
 
+/// 一张租借交给渲染器时用的取图地址。
+///
+/// **Windows 与 Android 上不能写 `yomika-image://asset/{id}`**：那两边的 WebView 只把
+/// 「HTTP 请求」交给自定义 scheme 的处理器。wry 的做法是注册一张 `http://yomika-image.*`
+/// 的资源拦截表，等真的来了 `http://yomika-image.localhost/...` 再把前缀换回
+/// `yomika-image://localhost/...` 转给处理器（见 wry 的 `custom_protocol_workaround.rs`，
+/// Tauri 自己的 `convertFileSrc` 也是这么分的：Windows/Android 用
+/// `http://<scheme>.localhost/<path>`）。直接写 scheme 形状的 `<img>` 在 WebView2 里
+/// 根本不会被拦到，也就没人回它——解码只是一直不完成，页面上留下一张破图。
+/// macOS/Linux/iOS 走原生 scheme handler，原样写 scheme 就够。
+pub fn lease_url(lease_id: &str) -> String {
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        format!("http://{SCHEME}.localhost/{HOST}/{lease_id}")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        format!("{SCHEME}://{HOST}/{lease_id}")
+    }
+}
+
 /// 解码后的估计字节数。宽高都是 worker 自报的，0 就当 0——估算是为了预算，
 /// 不是为了拒绝，所以要倾向保守而不是精确。
 fn decoded_bytes(width: u32, height: u32) -> u64 {
@@ -374,6 +395,17 @@ mod tests {
         let store = LeaseStore::new();
         let now = Instant::now();
         let acquired = store.acquire(spec("art-1"), now).expect("开一张租借");
+        // 取图地址必须是这个 WebView 真能拦到的形状：Windows/Android 只拦
+        // `http://yomika-image.*`，把 scheme 形状写回 `<img>` 就是一个没人回的死链。
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        assert_eq!(
+            acquired.lease.url,
+            format!(
+                "http://yomika-image.localhost/asset/{}",
+                acquired.lease.lease_id
+            )
+        );
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
         assert_eq!(
             acquired.lease.url,
             format!("yomika-image://asset/{}", acquired.lease.lease_id)

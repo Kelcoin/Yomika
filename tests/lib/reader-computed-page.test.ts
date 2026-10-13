@@ -404,6 +404,45 @@ describe('loadReaderComputedPage', () => {
     expect(peekCachedImage(cache, IDENTITY)).toBeUndefined();
   });
 
+  it('does not adopt a lease the real image element cannot load', async () => {
+    // 上面那条用的是测试用的 decoder 替身，它自己会 reject——所以它证明不了**生产**那条路：
+    // 真的 `decodeImage` 把失败吞掉了（`decode().catch(() => undefined)`），URL 打不开时
+    // 产品里就是「换上一张破图、日志一行都没有」（2026-10-13 真机现场）。这条换掉全局
+    // `Image`（src 一设就报 onerror、`decode()` 也 reject）走真实现：把调用改回宽松版，
+    // 它立刻转红（会认领、会显示成坏图）。
+    setImageDecoderForTests(undefined);
+    const original = (globalThis as { Image?: unknown }).Image;
+    class BrokenImage {
+      decoding = 'async';
+      complete = false;
+      naturalWidth = 0;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_url: string) {
+        queueMicrotask(() => this.onerror?.());
+      }
+      decode(): Promise<void> {
+        return Promise.reject(new Error('解不开'));
+      }
+    }
+    (globalThis as { Image?: unknown }).Image = BrokenImage;
+    try {
+      const b = bridge({ artifacts: [artifact()] });
+      const { cache } = readonlyCache();
+
+      const promise = load(b, cache);
+      await flush();
+      b.emit(snapshot('completed', 1));
+      const handle = await promise;
+
+      expect(handle).toBeUndefined();
+      expect(b.releaseArtifact).toHaveBeenCalledWith('lease-artifact-1');
+      expect(peekCachedImage(cache, IDENTITY)).toBeUndefined();
+    } finally {
+      (globalThis as { Image?: unknown }).Image = original;
+    }
+  });
+
   it('needs no job at all when the page is already in hand', async () => {
     const b = bridge();
     const { cache } = readonlyCache();
@@ -801,5 +840,31 @@ describe('loadLocalRenditions', () => {
     expect(renditions.enhanced?.url).toBe('yomika-image://assets/upscale-1');
 
     cache.release(renditions.enhanced!);
+  });
+
+  it('carries the chain diagnostics out so a page that fails silently can still be logged', async () => {
+    // 2026-10-13 真机：超分/去码「失败」时错误日志里一行都没有——这条链的 note（产物解不开、
+    // 租借拿不到、摘不掉…）在 `loadLocalRenditions` 这一层被丢掉了，没人把它写进日志。
+    // 这条把「话有没有传出来」钉住：把 `onDiagnostic` 那一行删掉，它立刻转红。
+    setImageDecoderForTests(async () => {
+      throw new Error('这个 URL 解不开');
+    });
+    const b = bridge({ artifacts: [artifact({ stageId: READER_UPSCALE_STAGE_ID })] });
+    const { cache } = readonlyCache();
+    const diagnostics: string[] = [];
+    const failures: string[] = [];
+
+    const promise = local(b, cache, {
+      decensorModel: undefined,
+      onDiagnostic: (message) => diagnostics.push(message),
+      onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
+    });
+    await flush();
+    b.emit(snapshot('completed', 1));
+    const renditions = await promise;
+
+    expect(renditions.enhanced).toBeUndefined();
+    expect(failures).toEqual([`${READER_UPSCALE_STAGE_ID}:${UPSCALE_MODEL}:READER_ARTIFACT_UNDECODABLE`]);
+    expect(diagnostics).toContain('阅读器算图：产物解不开');
   });
 });

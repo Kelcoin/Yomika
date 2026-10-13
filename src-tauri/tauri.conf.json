@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: https: data: blob: yomika-image:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://fastly.jsdelivr.net"
+      "csp": "default-src 'self'; img-src 'self' asset: https: data: blob: yomika-image: http://yomika-image.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://fastly.jsdelivr.net"
     }
   },
   "bundle": {

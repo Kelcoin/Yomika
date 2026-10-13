@@ -10,7 +10,7 @@ import type {
   ReaderPagePayload,
 } from '../domain/compute';
 import type { CommandResult } from '../domain/result';
-import { decodeImage } from './decodeImage';
+import { decodeImageStrict } from './decodeImage';
 import { peekCachedImage, type ImageHandle, type UnifiedImageCache } from './unifiedImageCache';
 
 /** 阅读器那条超分阶段的 id（宿主 `src-tauri/src/compute/reader.rs` 的 `UPSCALE_STAGE_ID`）。 */
@@ -202,7 +202,9 @@ export async function loadReaderComputedPage(
 
       const lease = acquired.value;
       try {
-        await decodeImage(lease.url);
+        // 必须用**不吞失败**的那一版：取图地址打不开时（scheme 形状不对、租借过期、
+        // 文件被清）要让下面的 catch 真的接住，页面留在手上那一版，而不是换上一张破图。
+        await decodeImageStrict(lease.url);
       } catch (error) {
         // 解不开就不认领：已经显示的那一版留着（宁可旧，也不要黑闪或白图）。
         void repository.releaseArtifact(lease.leaseId);
@@ -352,6 +354,9 @@ export interface LocalRenditionOptions {
    * 第一个参数是**哪一阶段**输的，不是「谁被点名了」：链式两阶段整件被拒时，两头的模型
    * 都在任务里，只有「谁没落地」能说明该把这笔账记在谁头上——记错方向用户会去查错的模型。 */
   onFailure: (stage: 'decensor' | 'upscale', model: string, failure: ReaderPageFailure) => void;
+  /** 一路上的诊断（拿不到租借、产物解不开、产物列表拿不到…）。默认丢掉，调用方接住才能进日志：
+   * 2026-10-13 的真机上「超分/去码失效」时错误日志里什么都没有，就是因为这条线没人接。 */
+  onDiagnostic?: (message: string, detail?: Record<string, unknown>) => void;
 }
 
 /** 本地这一档算出来的东西。两个都可以没有：算不成就是空对象，页面照旧显示手上的那一版。 */
@@ -362,7 +367,7 @@ export interface LocalRenditions {
 
 export async function loadLocalRenditions(options: LocalRenditionOptions): Promise<LocalRenditions> {
   const { repository, cache, signal, scopeId, archiveId, pageIndex, generation, priority } = options;
-  const { decensorModel, upscaleModel, onDecensored, onEngine, onFailure } = options;
+  const { decensorModel, upscaleModel, onDecensored, onEngine, onFailure, onDiagnostic } = options;
   const base = { scopeId, archiveId, pageIndex, generation, priority, deadlineMs: 0 };
 
   /** 运行期真正的答案在这里攒：`enhanced` 是终点那一版，`censored` 是路上的那一版。 */
@@ -390,6 +395,9 @@ export async function loadLocalRenditions(options: LocalRenditionOptions): Promi
       stages,
       submit,
       signal,
+      // `exactOptionalPropertyTypes` 下不能把 `undefined` 显式塞进可选字段：要么给函数，
+      // 要么这个键根本不在。少了这一条话就传不出去——那条链失败时日志里会一行都没有。
+      ...(onDiagnostic ? { onDiagnostic } : {}),
       onFailure: (value) => { failure = value; },
     });
     if (handle === undefined) return;

@@ -136,12 +136,19 @@ impl From<LeaseError> for AssetError {
 /// 形状卡死成 `yomika-image://asset/{32 位小写十六进制}`：多一段、带查询串、带片段、
 /// 大小写混用、百分号编码，一律不收。宽松解析在这里没有任何好处——我们自己拼 URL，
 /// 严格只会让「有人往这个 scheme 上塞东西」变成一条明确的 400。
+///
+/// 唯一被允许的「多一段」是 Windows/Android 上的 `localhost/`：那边 `lease_url` 发出去的是
+/// `http://yomika-image.localhost/asset/{id}`，wry 把前缀换回来之后处理器看到的是
+/// `yomika-image://localhost/asset/{id}`（`localhost` 落在 host 位上）。这一段要么没有
+/// （macOS/Linux/iOS 的原生 scheme 处理器原样送 `yomika-image://asset/{id}`），要么正好是
+/// `localhost`——`localhostfoo` 之类一样不收。
 pub fn parse_lease_id(uri: &str) -> Result<String, AssetError> {
     let Some(rest) = uri.strip_prefix(&format!("{SCHEME}://")) else {
         return Err(AssetError::BadRequest {
             why: format!("不是 {SCHEME} 协议：{uri}"),
         });
     };
+    let rest = rest.strip_prefix("localhost/").unwrap_or(rest);
     let Some(rest) = rest.strip_prefix(&format!("{HOST}/")) else {
         return Err(AssetError::BadRequest {
             why: format!("只认 {HOST}/ 下的东西：{uri}"),
@@ -544,6 +551,32 @@ mod tests {
             bad.uri = uri.to_string();
             let error = plan(&bad, &store, now).expect_err(uri);
             assert_eq!(error.status(), STATUS_BAD_REQUEST, "{uri} 应该被拒");
+        }
+    }
+
+    #[test]
+    fn the_windows_work_around_uri_reaches_the_same_lease() {
+        // Windows/Android：wry 把 `http://yomika-image.localhost/asset/{id}` 换回
+        // `yomika-image://localhost/asset/{id}` 才交给处理器。形状上多一段 host，
+        // 取出来必须是同一张租借；别的多法一律不收。
+        let (store, lease_id) = store_with_lease();
+        let now = Instant::now();
+        let helper = format!("{SCHEME}://localhost/{HOST}/{lease_id}");
+        assert_eq!(parse_lease_id(&helper), Ok(lease_id.clone()));
+
+        let mut windows = request(&lease_id);
+        windows.uri = helper.clone();
+        let reply = plan(&windows, &store, now).expect("Windows 那段 localhost 不该被拒");
+        assert_eq!(reply.status, STATUS_OK);
+
+        for bad in [
+            format!("{SCHEME}://localhost/other/{lease_id}"),
+            format!("{SCHEME}://localhostfoo/{HOST}/{lease_id}"),
+            format!("{SCHEME}://localhost/"),
+            format!("{SCHEME}://localhost/{HOST}/{lease_id}/extra"),
+            format!("{SCHEME}://localhost/{HOST}/0123456789ABCDEF0123456789ABCDEF"),
+        ] {
+            assert!(parse_lease_id(&bad).is_err(), "{bad} 应该被拒");
         }
     }
 

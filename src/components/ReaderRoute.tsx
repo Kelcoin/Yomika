@@ -15,6 +15,7 @@ import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLay
 import { pickServer } from '../domain/server';
 import { dlssnrTransform, getNativeImageCache, remoteTransform, renditionErrorCode, type DlssnrSource } from '../lib/nativeImageCache';
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
+import { logError } from '../lib/errorLog';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
 import {
@@ -881,6 +882,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               if (job.upscaleModel) setDerivingStage('upscale');
             },
             onEngine: (model, engine) => noticeEngineFallback(model, engine),
+            // 链路上的诊断必须落到 error.log：产物解不开、租借拿不到这些**不弹提示**，
+            // 没人接这条线时用户在日志里只能看到一个静悄悄失败的页面。
+            onDiagnostic: (message, detail) => logError('reader/compute', message, detail),
             // 账记在**没落地的那一阶段**头上（`loadLocalRenditions` 判的），不是记在被点名的
             // 那一个头上：链式两阶段整件被拒时，真凶常常是去码模型包。
             onFailure: (stage, model, failure) => {
