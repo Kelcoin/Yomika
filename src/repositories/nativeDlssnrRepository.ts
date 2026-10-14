@@ -98,6 +98,11 @@ const InstalledDllSchema = z.object({
   version: z.string().nullable().optional(),
 });
 
+const ImportedDllSchema = InstalledDllSchema.extend({
+  /** 独立 worker 在本机运行候选 DLL 的结果；只保证这次测试尺寸。 */
+  verification: DlssnrProbeSchema,
+});
+
 /** 一层 DLSSNR 的参数：与后端 `dlssnr::PassSettings` 一一对应。 */
 export const DlssnrPassSchema = z
   .object({
@@ -157,8 +162,8 @@ export class NativeDlssnrRepository {
     return invokeCommand('dlssnr_probe', { force }, DlssnrProbeSchema);
   }
 
-  importDll(path: string): Promise<CommandResult<z.output<typeof InstalledDllSchema>>> {
-    return invokeCommand('dlssnr_import_dll', { path }, InstalledDllSchema);
+  importDll(path: string): Promise<CommandResult<z.output<typeof ImportedDllSchema>>> {
+    return invokeCommand('dlssnr_import_dll', { path }, ImportedDllSchema);
   }
 
   /** 有哪些变体可选（模型仓库里的那份清单）。 */

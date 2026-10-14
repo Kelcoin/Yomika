@@ -16,6 +16,9 @@
 #[cfg(windows)]
 pub mod commands;
 
+#[cfg(windows)]
+mod import_transaction;
+
 /// 非 Windows 上的同名命令：设置页在这些平台上根本不显示 DLSSNR，但
 ///  要求命令在所有平台上都存在，所以留一组只会回「不可用」的
 /// 壳。（命令名与参数要和 Windows 那份一致，前端只按名字调。）

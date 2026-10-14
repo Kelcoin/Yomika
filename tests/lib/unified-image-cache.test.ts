@@ -34,6 +34,40 @@ function repository(bytes = new Uint8Array([1, 2, 3])): ImageCacheRepository & {
 afterEach(() => vi.restoreAllMocks());
 
 describe('UnifiedImageCache', () => {
+  it('loads a raw page while the derived image worker is stalled', async () => {
+    const urls = blobUrlFactory();
+    let finishDerived!: (data: CachedImageData) => void;
+    let started!: () => void;
+    const derivedStarted = new Promise<void>((resolve) => { started = resolve; });
+    const data = { bytes: new Uint8Array([1]), mime: 'image/png' };
+    const repo: ImageCacheRepository = {
+      read: async () => null,
+      fetch: async (identity) => {
+        if (identity.rendition === 'dlssnr') {
+          started();
+          return new Promise<CachedImageData>((resolve) => { finishDerived = resolve; });
+        }
+        return data;
+      },
+      store: async () => undefined,
+    };
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024, maxConcurrentFetches: 1 });
+    const identity = { scopeId: 's', archiveId: 'a', pageIndex: 0 };
+    const derived = cache.load({ ...identity, rendition: 'dlssnr' });
+    await derivedStarted;
+    try {
+      const raw = await Promise.race([
+        cache.load({ ...identity, pageIndex: 1, rendition: 'reader-page' }),
+        new Promise<undefined>((resolve) => setTimeout(resolve, 100)),
+      ]);
+      expect(raw?.url).toBeDefined();
+      if (raw) cache.release(raw);
+    } finally {
+      finishDerived(data);
+      cache.release(await derived);
+    }
+  });
+
   it('produces image URLs allowed by the desktop content security policy', async () => {
     const repo = repository();
     const cache = new UnifiedImageCache(repo, {

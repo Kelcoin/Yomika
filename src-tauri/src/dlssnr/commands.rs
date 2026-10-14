@@ -139,9 +139,12 @@ fn probe_report_from(
         Ok(decoded) => decoded.into_rgba8(),
         Err(error) => return failed(format!("算出来的那一张解不开：{error}")),
     };
+    if rendered.dimensions() != (image.width, image.height) {
+        return failed(format!("验证输出尺寸不符：需要 {}×{}，实际 {}×{}", image.width, image.height, rendered.width(), rendered.height()));
+    }
     let difference =
         crate::dlssnr::mean_absolute_difference(&image.rgba, rendered.as_raw());
-    let supported = difference > PROBE_MIN_DIFFERENCE;
+    let supported = output.computed && difference > PROBE_MIN_DIFFERENCE;
     ProbeReport {
         supported,
         width: image.width,
@@ -160,6 +163,15 @@ fn probe_with_gpu(
     manager: Option<&crate::compute::manager::ComputeManager>,
     data_dir: &std::path::Path,
     gpu: Option<yomika_compute_core::dlssnr::GpuInfo>,
+) -> ProbeReport {
+    probe_with_gpu_cancellable(manager, data_dir, gpu, &|| false)
+}
+
+fn probe_with_gpu_cancellable(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    data_dir: &std::path::Path,
+    gpu: Option<yomika_compute_core::dlssnr::GpuInfo>,
+    cancelled: &dyn Fn() -> bool,
 ) -> ProbeReport {
     if let Err(error) = super::runtime_gate_with(data_dir, gpu) {
         return probe_refused(error);
@@ -188,7 +200,7 @@ fn probe_with_gpu(
             page: &page,
         },
         // 探针没有可取消的说法：它只有一张 96×96 的图，用户按下去就是在等它。
-        &|| false,
+        cancelled,
     )
     .map_err(|error| error.message);
     probe_report_from(&image, outcome, started.elapsed().as_millis() as u64)
@@ -228,32 +240,108 @@ pub fn dlssnr_release_workspaces(app: tauri::AppHandle) -> CommandResult<u32> {
     CommandResult::success(count)
 }
 
-/// 新的 DLL 片段装上了：这一代 worker 手里的进程内状态就此作废（docs/71:640）。
-///
-/// NGX 的 context 活在 worker 进程里，而且**同一份 context 上换不了片段**（`worker/src/dlssnr.rs`
-/// 里那句原话）。所以装完必须让这一代退下：不退的话，worker 会拿新片段去要一份新 context，
-/// 而它会拒绝——用户点完「导入」看到的还是旧片段跑出来的结论。
-///
-/// 顺手作废宿主这边的探针结论：它记的是旧片段跑出来的数。
-fn a_new_snippet_arrived(app: &tauri::AppHandle) {
-    if let Some(manager) = crate::compute::manager_from_app(app) {
-        manager.retire_worker("DLSSNR 片段换了版本");
+/// 先退旧 worker，再在 supervisor 暂停派发期间安装；NGX context 与指纹
+/// 都属于旧片段。导入验证成功的报告绑定到安装后那份 DLL 的身份。
+fn commit_candidate(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    candidate: &std::path::Path,
+    data: &std::path::Path,
+    verification: Option<ProbeReport>,
+) -> Result<InstalledDll, String> {
+    let candidate = candidate.to_path_buf();
+    let data = data.to_path_buf();
+    let install = move || {
+        let installed = super::install_dll(&candidate, &data)?;
+        super::forget_probe();
+        if let Some(report) = verification {
+            super::probe_cached_with(&data, true, || report);
+        }
+        Ok(installed)
+    };
+    match manager {
+        Some(manager) => manager.retire_and_mutate("DLSSNR 片段换了版本", install)?,
+        None => install(),
     }
-    super::forget_probe();
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedDll {
+    #[serde(flatten)]
+    installed: InstalledDll,
+    verification: ProbeReport,
+}
+
+/// Independent supervisor, process, input root and NGX context; the production
+/// worker remains untouched until this report passes.
+fn probe_candidate(data: &std::path::Path) -> Result<ProbeReport, String> {
+    use crate::compute::manager::{ComputeManager, SupervisorConfig, WorkerEngine};
+    use std::sync::{atomic::{AtomicBool, Ordering}, Arc, mpsc};
+    use std::time::Duration;
+
+    const TIMEOUT: Duration = Duration::from_secs(60);
+    let worker_path = crate::compute::worker_binary::ensure(
+        &crate::compute::worker_binary_path(),
+        &data.join("compute"),
+        crate::compute::worker_binary::payload(),
+    );
+    let mut config = SupervisorConfig::new(worker_path, data.join("compute").join("staging"));
+    config.worker_engine = WorkerEngine::Onnx;
+    config.models = Some(crate::compute::models::ModelCatalog::new(data));
+    config.publish_root = Some(data.to_path_buf());
+    for root in [&config.staging_root, &config.inputs_root] {
+        std::fs::create_dir_all(root).map_err(|error| format!("建 DLL 验证计算目录失败：{error}"))?;
+    }
+    let manager = ComputeManager::start(config, Arc::new(|_| {}))
+        .map_err(|error| format!("起 DLL 验证进程失败：{error}"))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker = manager.clone();
+    let token = cancelled.clone();
+    let candidate_data = data.to_path_buf();
+    let (send, receive) = mpsc::channel();
+    let task = std::thread::Builder::new().name("dlssnr-candidate-probe".into()).spawn(move || {
+        let gpu = super::engine_facts(None).gpu;
+        let report = probe_with_gpu_cancellable(Some(&worker), &candidate_data, gpu, &|| token.load(Ordering::Relaxed));
+        let _ = send.send(report);
+    });
+    let task = match task {
+        Ok(task) => task,
+        Err(error) => { manager.shutdown(); return Err(format!("起 DLL 验证任务失败：{error}")); }
+    };
+    let result = match receive.recv_timeout(TIMEOUT) {
+        Ok(report) if report.supported => Ok(report),
+        Ok(report) => Err(format!("DLL 本机验证失败：{}", report.error.unwrap_or_else(|| "网络没有参与".to_string()))),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            cancelled.store(true, Ordering::Relaxed);
+            // The bridge cancels queued jobs too; a stuck in-flight worker is
+            // then retired and killed by the supervisor's normal grace policy.
+            let _ = receive.recv_timeout(Duration::from_secs(5));
+            Err("DLL 本机验证超时（60 秒）；保留原 DLL".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("DLL 验证任务异常退出；保留原 DLL".to_string()),
+    };
+    manager.retire_worker("DLL 候选验证结束");
+    manager.shutdown();
+    if task.is_finished() { let _ = task.join(); }
+    result
 }
 
 /// 导入一份 `nvngx_dlssnr.dll`（用户在文件选择器里指的那一份）。
 #[tauri::command(async)]
-pub fn dlssnr_import_dll(app: tauri::AppHandle, path: String) -> CommandResult<InstalledDll> {
+pub fn dlssnr_import_dll(app: tauri::AppHandle, path: String) -> CommandResult<ImportedDll> {
     let data = match data_dir(&app) {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
     };
-    match super::install_dll(std::path::Path::new(&path), &data) {
-        Ok(installed) => {
-            // 换了 DLL，旧结论作废（可能换了一种变体）。
-            a_new_snippet_arrived(&app);
-            CommandResult::success(installed)
+    let manager = crate::compute::manager_from_app(&app);
+    match super::import_transaction::run(
+        std::path::Path::new(&path), &data.join("compute").join("dll-validation"),
+        |candidate, candidate_data| super::install_dll(candidate, candidate_data).map(|_| ()),
+        probe_candidate,
+        |candidate, report| commit_candidate(manager.as_deref(), candidate, &data, Some(report.clone())),
+    ) {
+        Ok((installed, verification)) => {
+            CommandResult::success(ImportedDll { installed, verification })
         }
         Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
     }
@@ -285,19 +373,24 @@ pub async fn dlssnr_download_variant(
     let emitter = app.clone();
     let id = variant_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        release::download_variant(&data, &id, |done, total| {
-            let _ = tauri::Emitter::emit(
-                &emitter,
-                "dlssnr-download-progress",
-                serde_json::json!({"variantId": id, "completed": done, "total": total}),
-            );
+        super::import_transaction::with_install_lock(|| {
+            let candidate_data = tempfile::Builder::new().prefix("dlssnr-download-").tempdir_in(&data)
+                .map_err(|error| format!("建 DLL 下载目录失败：{error}"))?;
+            release::download_variant(candidate_data.path(), &id, |done, total| {
+                let _ = tauri::Emitter::emit(
+                    &emitter,
+                    "dlssnr-download-progress",
+                    serde_json::json!({"variantId": id, "completed": done, "total": total}),
+                );
+            })?;
+            let manager = crate::compute::manager_from_app(&emitter);
+            commit_candidate(manager.as_deref(), &super::dll_path(candidate_data.path()), &data, None)
         })
     })
     .await;
     match result {
         // 换了 DLL，旧结论作废（刚换成另一种变体）。
         Ok(Ok(installed)) => {
-            a_new_snippet_arrived(&app);
             CommandResult::success(installed)
         }
         Ok(Err(error)) => CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true),
@@ -616,6 +709,12 @@ mod tests {
         let mut stub = vec![0u8; bytes];
         stub[0] = b'M';
         stub[1] = b'Z';
+        stub[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        stub[0x80..0x84].copy_from_slice(b"PE\0\0");
+        stub[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        stub[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes());
+        stub[0x96..0x98].copy_from_slice(&0x2000u16.to_le_bytes());
+        stub[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
         stub
     }
 
@@ -1102,6 +1201,22 @@ mod tests {
         let refused = probe_report_from(&image, Err("NGX 起不来".to_string()), 5);
         assert!(!refused.supported);
         assert_eq!(refused.error.as_deref(), Some("NGX 起不来"));
+    }
+
+    #[test]
+    fn candidate_probe_rejects_changed_dimensions_and_uncomputed_outputs() {
+        let (image, _) = synthetic_png(PROBE_EDGE, PROBE_EDGE).unwrap();
+        let wrong_shape = probe_report_from(&image, Ok(crate::compute::proxy::DlssnrOutput {
+            bytes: page_png(192, 96), computed: true,
+        }), 1);
+        assert!(!wrong_shape.supported);
+        assert!(wrong_shape.error.unwrap().contains("尺寸不符"));
+        let mut shifted = image.rgba.clone();
+        for byte in &mut shifted { *byte = byte.wrapping_add(50); }
+        let uncomputed = probe_report_from(&image, Ok(crate::compute::proxy::DlssnrOutput {
+            bytes: encode_rgba_png(&shifted, PROBE_EDGE, PROBE_EDGE), computed: false,
+        }), 1);
+        assert!(!uncomputed.supported, "pixel changes alone must not override a passthrough result");
     }
 
     /// 任意 RGBA 编成 PNG（上面那条要用一张「被挪过」的产物）。

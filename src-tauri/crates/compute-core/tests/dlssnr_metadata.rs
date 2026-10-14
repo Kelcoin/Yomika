@@ -35,6 +35,11 @@ fn fake_dll_file(dir: &Path, bytes: usize) -> PathBuf {
     content[0..2].copy_from_slice(b"MZ");
     let offset: u32 = 0x80;
     content[0x3c..0x40].copy_from_slice(&offset.to_le_bytes());
+    content[0x80..0x84].copy_from_slice(b"PE\0\0");
+    content[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    content[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes());
+    content[0x96..0x98].copy_from_slice(&0x2000u16.to_le_bytes());
+    content[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
     std::fs::write(&path, &content).expect("写假片段");
     path
 }
@@ -343,7 +348,7 @@ fn a_status_can_be_assembled_from_facts_the_engine_told_us() {
     // 可言。这一份是 `fake_dll_file` 那 1_000_001 个字节的真实 SHA-256（小写十六进制）。
     assert_eq!(
         live.dll_sha256.as_deref(),
-        Some("6d2cffcc3aac60c4cb57e73d444842a645b354c30d4c654279e217c9c51f04ec"),
+        Some("54a7ccb3722ecb7fb63596f827d66479ceaa1c6d66c9280cfe7d5aeeaa473546"),
         "指纹是这份文件自己的哈希"
     );
     assert_eq!(bare.dll_sha256, None, "没有片段就没有指纹");

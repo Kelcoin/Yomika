@@ -16,11 +16,11 @@
 //!   4MP 的 bucket 里只要 31ms（评估耗时跟着 bucket 走，不完全是跟着 subrect）。
 //!   所以「装得下但面积超过这一页 [`WASTE_RATIO`] 倍」的旧工作区不直接用，宁可
 //!   按这一页新建一个——见 [`choose`]。
-//! - **小页与大页各留一档**：一本档案里来一张长条页，不该让后面每一页都变慢。
-//!   缓存上限 [`MAX_WORKSPACES`]，按面积最紧的先挑。
+//! - 缓存规模随显存和系统提交余量变化：量不到就只留当前尺寸；余量不足时
+//!   在新工作区创建之前释放旧档，NGX 内部资源也计入观测预算。
 //!
 //! 顺带把另外两笔每页开销也收进来了：零引导（8 字节/像素的零，恒零，建一次就够）
-//! 和「纹理每页新建」，并让一页的整套命令（上传 → 各层 → 回读）合成**一次提交**。
+//! 和「纹理每页新建」，并让一页的整套命令（上传 → 各层 → 回读）逐层提交，共用一份 feature。
 //!
 //! **状态机**（D3D12 的 `StateBefore` 必须写对，这里刻意写成每页都一样）：
 //!
@@ -48,14 +48,30 @@ use super::ngx::{NgxCore, Parameters};
 /// 漫画页的差异多半只有十几像素（扫描/裁边），量化之后它们就是同一个 bucket。
 pub const BUCKET_STEP: u32 = 64;
 
-/// 同时留几个工作区：一档给「这一本档案的主体尺寸」，一档给偶尔出现的长条页。
-pub const MAX_WORKSPACES: usize = 2;
+/// 条数用于防止小尺寸缓存无限增长；实际资源预算优先。
+pub const MAX_WORKSPACES: usize = 4;
+
+/// Cached buckets may coexist only when there is room for the next allocation
+/// in BOTH budgets. Unknown telemetry cannot justify keeping a spare bucket.
+pub fn spare_allocation_fits(
+    gpu: Option<super::gpu::VideoMemory>,
+    system: Option<crate::resources::SystemMemory>,
+    predicted_gpu: u64,
+    predicted_commit: u64,
+) -> bool {
+    let (Some(gpu), Some(system)) = (gpu, system) else { return false; };
+    let gpu_headroom = gpu.budget_bytes.saturating_sub(gpu.budget_bytes / 4).saturating_sub(gpu.used_bytes);
+    let commit_reserve = (system.physical_bytes / 8).max(512 << 20);
+    predicted_gpu <= gpu_headroom
+        && gpu.used_bytes <= gpu.budget_bytes.saturating_sub(gpu.budget_bytes / 4)
+        && predicted_commit <= system.available_commit_bytes.saturating_sub(commit_reserve)
+        && system.available_commit_bytes >= commit_reserve
+        && system.private_commit_bytes.saturating_add(predicted_commit) <= system.physical_bytes / 4
+}
 
 /// 装得下但面积超过这一页这么多倍的旧工作区不值得用（实测 3 倍就开始明显变慢）。
 pub const WASTE_RATIO: u64 = 3;
 
-/// 工作区缓存的显存软上限：一个 25MP 的长条页工作区约 600MB，两个就上千了。
-pub const WORKSPACE_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// 一个 pass：特性句柄 + 它的参数表。
 ///
@@ -64,6 +80,13 @@ pub const WORKSPACE_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 pub struct FeatureSlot {
     pub handle: *mut std::ffi::c_void,
     pub parameters: Parameters,
+}
+
+#[cfg(test)]
+static FAIL_GUIDE_ALLOCATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub fn fail_next_guide_allocation() {
+    FAIL_GUIDE_ALLOCATION.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 一套按某个尺寸建好的 GPU 资源 + feature：一页跑完不用扔，下一页接着用。
@@ -78,6 +101,9 @@ pub struct Workspace {
     pub motion: ID3D12Resource,
     pub depth: ID3D12Resource,
     pub features: Vec<FeatureSlot>,
+    /// A fence completed inside a multi-layer page. Cancellation must dispose
+    /// of these textures rather than assume the old opening states.
+    pub partial_submission: bool,
 }
 
 impl Workspace {
@@ -94,6 +120,10 @@ impl Workspace {
         // 零引导：恒零的一对图（运动、深度），跟页面内容无关。以前每页都要重新铺
         // 一遍 8 字节/像素的零，25MP 的页上一次就是 200MB 的 memset + 上传。
         let (motion, _motion_upload) = context.record_zero_guide(width, height, DXGI_FORMAT_R16G16_FLOAT, 4)?;
+        #[cfg(test)]
+        if FAIL_GUIDE_ALLOCATION.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err("E_OUTOFMEMORY: injected guide allocation failure".into());
+        }
         let (depth, _depth_upload) = context.record_zero_guide(width, height, DXGI_FORMAT_R32_FLOAT, 4)?;
 
         // 把「每页开场时该在的状态」在这里一次性摆好，这样第一页与后面每一页走的是
@@ -113,6 +143,7 @@ impl Workspace {
             motion,
             depth,
             features: Vec::new(),
+            partial_submission: false,
         };
         if let Err(error) = workspace.ensure_features(context, passes) {
             if context.poisoned.is_none() {
@@ -125,15 +156,14 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// 保留相同 bucket 的已有 feature；增加层只补后缀，减少层立即释放后缀。
+    /// 每个 bucket 保留一个 feature；层数变化只调整中间纹理。
     ///
     /// 只在「刚建好工作区」或「层数变多」时走到；同一 bucket 内的换页**不会**重建
     /// ——这正是这层存在的理由。
     pub fn ensure_features(&mut self, context: &mut GpuContext, passes: usize) -> Result<(), String> {
         let passes = passes.clamp(1, super::settings::MAX_PASS_COUNT as usize);
-        // Calls run only after the preceding page's fence completed. Removed
-        // layers own NGX allocations far larger than our texture-byte estimate.
-        for slot in self.features.drain(passes.min(self.features.len())..) {
+        // Layer fences and Reset=1 let one feature serve all passes.
+        for slot in self.features.drain(1.min(self.features.len())..) {
             context.core.release_feature(slot.handle);
         }
         self.intermediates.truncate(passes.saturating_sub(1));
@@ -156,12 +186,11 @@ impl Workspace {
             }
             context.execute_and_wait()?;
         }
-        if self.features.len() >= passes {
+        if !self.features.is_empty() {
             return Ok(());
         }
-        // Parameters and feature handles remain paired. Existing passes are
-        // independently Reset=1 on every page; adding layers needs no rebuild.
-        for _ in self.features.len()..passes {
+        // Parameters and the single feature handle remain paired.
+        for _ in self.features.len()..1 {
             // 创建参数一个都不能少（尺寸、缩放比、回调、质量档……），少一个片段就
             // 回「参数缺失或类型不对」。
             let parameters = create_parameters(context, self.size.0, self.size.1)?;
@@ -206,7 +235,7 @@ pub enum Choice {
 ///
 /// 「浪费」是实测出来的：评估耗时跟着 bucket 走，25MP 的 bucket 跑 3MP 的页要
 /// 85–103ms，4MP 的只要 31ms。所以宁可多建一个小档，也不拿大档凑合——缓存里
-/// 一档小页、一档大页正好是 [`MAX_WORKSPACES`] 想要的两个。
+/// 不合适的旧档在创建新档之前释放，不把长条页的 feature 一直留着。
 pub fn choose(cached: &[(u32, u32)], page: (u32, u32)) -> Choice {
     let page_area = page.0 as u64 * page.1 as u64;
     let exact = bucket_size(page.0, page.1);
@@ -297,6 +326,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spare_buckets_follow_both_live_budgets() {
+        let system = crate::resources::SystemMemory { physical_bytes: 32 << 30, available_commit_bytes: 20 << 30, private_commit_bytes: 1 << 30 };
+        let roomy = super::super::gpu::VideoMemory { budget_bytes: 24 << 30, used_bytes: 4 << 30 };
+        assert!(spare_allocation_fits(Some(roomy), Some(system), 2 << 30, 2 << 30));
+        let tight = super::super::gpu::VideoMemory { budget_bytes: 2 << 30, used_bytes: 1 << 30 };
+        assert!(!spare_allocation_fits(Some(tight), Some(system), 2 << 30, 2 << 30));
+        let commit_tight = crate::resources::SystemMemory { available_commit_bytes: 1 << 30, ..system };
+        assert!(!spare_allocation_fits(Some(roomy), Some(commit_tight), 1 << 30, 2 << 30));
+        assert!(!spare_allocation_fits(None, Some(system), 0, 0));
+    }
+
+    #[test]
     fn sizes_quantize_to_the_step() {
         // 1478 与 1500 落进同一个 bucket：漫画页之间的十几像素差异不该换来一次重建。
         assert_eq!(bucket_size(1478, 2100), (1536, 2112));
@@ -352,18 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_covers_two_tiers() {
-        // 25MP 那一档约 600MB：预算得容得下「普通页 + 长条页」两个档，否则长条页
-        // 会把普通页那一档挤掉，下一页又要重建一次。
-        let small = 1536u64 * 2112 * (3 * 4 + 8);
-        let large = 1856u64 * 14016 * (3 * 4 + 8);
-        assert!(
-            small + large < WORKSPACE_BUDGET_BYTES,
-            "两个档放不进预算：{small} + {large}"
-        );
-    }
-
-    #[test]
     fn changing_pass_count_preserves_the_prefix_and_releases_the_unused_suffix() {
         let _gpu = crate::dlssnr::tests::gpu_test_lock();
         let Some(dll) = crate::dlssnr::tests::test_dll() else { return; };
@@ -380,7 +409,7 @@ mod tests {
             context.execute_and_wait()?;
             eprintln!("DLSSNR 1->3 append took {}ms (first feature retained)", grow_started.elapsed().as_millis());
             assert_eq!(workspace.features[0].handle, first, "growing passes must not rebuild an unchanged prefix");
-            assert_eq!(workspace.features.len(), 3);
+            assert_eq!(workspace.features.len(), 1, "layers share a single reset feature");
             fn private_commit() -> usize {
                 use windows::Win32::System::{ProcessStatus::*, Threading::GetCurrentProcess};
                 let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();

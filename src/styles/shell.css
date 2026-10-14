@@ -3623,6 +3623,15 @@ body::-webkit-scrollbar,
   backdrop-filter: blur(4px);
 }
 
+/* Portals live outside the retained workspace. Only the visible Windows
+   workspace has title chrome; the fullscreen reader and mobile start at 0. */
+body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
+  .dialog-overlay, .archive-cover-preview, .settings-choice-overlay,
+  .search-preset-overlay
+) {
+  top: calc(44px + var(--safe-top));
+}
+
 .dialog-content {
   position: fixed;
   z-index: var(--z-modal);

@@ -55,5 +55,6 @@ pub mod onnx;
 // 记账不依赖 ORT：容量与键的策略要能独立测。
 pub mod probe;
 pub mod runtime;
+pub mod resources;
 pub mod tensor;
 pub mod upscale;

@@ -85,6 +85,9 @@ interface PendingEntry {
 
 export class UnifiedImageCache {
   private fetchGate: Semaphore;
+  // Computation may never return. It must not occupy a slot used to fetch the
+  // ordinary pages that keep navigation usable while the worker recovers.
+  private readonly computeGate = createSemaphore(1);
 
   constructor(
     private readonly repository: ImageCacheRepository,
@@ -253,7 +256,12 @@ export class UnifiedImageCache {
     const cached = await this.repository.read(identity);
     if (cached && cached.bytes.byteLength > 0) return cached;
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const fetched = await this.fetchGate.run(() => this.repository.fetch(identity, signal));
+    const derived = identity.rendition === 'enhanced' || identity.rendition === 'dlssnr' || identity.rendition === 'remote';
+    const gate = derived ? this.computeGate : this.fetchGate;
+    const fetched = await gate.run(() => {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      return this.repository.fetch(identity, signal);
+    });
     if (fetched.bytes.byteLength === 0) throw new Error('Image response was empty');
     await this.repository.store(identity, fetched);
     return fetched;

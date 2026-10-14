@@ -32,8 +32,9 @@ use yomika_compute_core::fit;
 use yomika_compute_core::inputs;
 use yomika_compute_core::onnx::{validate_runtime_cached, OnnxEngine};
 use yomika_compute_core::runtime::{self, RuntimeId};
+use yomika_compute_core::resources;
 use yomika_compute_core::upscale::{
-    self, UpscaleEngine as UpscaleEngineTrait, UpscaleOptions, DEFAULT_TILE_SIZE,
+    self, UpscaleEngine as UpscaleEngineTrait, UpscaleOptions,
 };
 use yomika_compute_protocol::messages::{
     BuiltinChainGrant, EngineFallback, EnginePolicy, EngineReport, Precision, ANIME4K_ENGINE_ID,
@@ -370,14 +371,26 @@ impl Engine for UpscaleEngine {
 
         // 3. 算。分块规划、预算（按输出像素）、每块前看取消牌都在核心的 `upscale` 里。
         let tile = stage.tile.unwrap_or(0);
+        let gpu_memory = if engine_id == ENGINE_ID && device == "gpu:0" {
+            #[cfg(windows)]
+            { yomika_compute_core::dlssnr::gpu::video_memory_for_device_index(0).map(|m| resources::GpuMemory { budget_bytes: m.budget_bytes, used_bytes: m.used_bytes }) }
+            #[cfg(not(windows))]
+            { None }
+        } else if engine_id == ANIME4K_ENGINE_ID && device != RuntimeId::Cpu.as_str() {
+            anime4k::gpu::video_memory()
+        } else { None };
+        let fixed = engine.fixed_input_size();
+        let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
+        let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
         let options = UpscaleOptions {
-            tile_size: if tile == 0 { DEFAULT_TILE_SIZE } else { tile },
+            tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
             tile_sleep_ms: 0,
+            tile_padding: padding,
             max_pixels,
             cancel: Some(request.cancel.clone()),
             ..UpscaleOptions::default()
         };
-        let upscaled = upscale::upscale_rgba(engine.as_ref(), rgba.as_raw(), width, height, options)
+        let upscaled = upscale::upscale_rgba_with_allocation_recovery(engine.as_ref(), rgba.as_raw(), width, height, options, min_input_edge)
             .map_err(to_stage_error)?;
         check_cancelled(request.cancel)?;
         (request.progress)(85);

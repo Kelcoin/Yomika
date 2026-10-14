@@ -108,6 +108,40 @@ function adapterFor(handlers: Record<string, (args?: Record<string, unknown>) =>
   });
 }
 
+describe('local DLL import verification', () => {
+  it('shows validation while a custom version is probed and reports the verified version', async () => {
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    setInvokeAdapterForTests(adapterFor({ dlssnr_import_dll: () => pending }));
+    setModelPickerForTests(async () => 'C:/custom/nvngx_dlssnr.dll');
+    renderAdvanced();
+    const button = await screen.findByRole('button', { name: '选择模型文件…' });
+    fireEvent.click(button);
+    expect(await screen.findByRole('button', { name: '正在验证 DLL…' })).toBeDisabled();
+    await act(async () => finish({ ok: true, value: {
+      bytes: 165840496, variant: null, variantLabel: null, version: '311.0.0.0',
+      verification: { supported: true, width: 96, height: 96, elapsedMs: 21, difference: 4, error: null },
+    } }));
+    expect(await screen.findByText('DLSSNR 组件已导入：自定义 DLL · 311.0.0.0 · 本机验证通过（96×96）')).toBeInTheDocument();
+  });
+
+  it('shows the validation failure without announcing an installed DLL', async () => {
+    setInvokeAdapterForTests(adapterFor({ dlssnr_import_dll: () => ({
+      ok: false, error: { code: 'INVALID_RESPONSE', message: 'DLL 本机验证超时（60 秒）；保留原 DLL', retryable: false },
+    }) }));
+    setModelPickerForTests(async () => 'C:/custom/nvngx_dlssnr.dll');
+    const imported = vi.fn();
+    window.addEventListener('yomika:dlssnr-imported', imported);
+    try {
+      renderAdvanced();
+      fireEvent.click(await screen.findByRole('button', { name: '选择模型文件…' }));
+      expect(await screen.findByText('DLL 本机验证超时（60 秒）；保留原 DLL')).toBeInTheDocument();
+      expect(imported).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: '选择模型文件…' })).toBeEnabled();
+    } finally { window.removeEventListener('yomika:dlssnr-imported', imported); }
+  });
+});
+
 describe('DLSS5 settings group', () => {
   it('does not render, and does not ask for a status, while the group is hidden', async () => {
     // 平台门控在调用点（设置页把它绑在 `platform === 'windows'` 上），所以这一条盯的是

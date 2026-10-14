@@ -120,7 +120,7 @@ describe('native shell configuration', () => {
       'workspace.rs',
     ];
     const host = readdirSync(resolve(__dirname, '../../src-tauri/src/dlssnr')).sort();
-    expect(host).toEqual(['commands.rs', 'mod.rs', 'release.rs', 'testdata']);
+    expect(host).toEqual(['commands.rs', 'import_transaction.rs', 'mod.rs', 'release.rs', 'testdata']);
     const core = readdirSync(
       resolve(__dirname, '../../src-tauri/crates/compute-core/src/dlssnr'),
     ).sort();
@@ -446,20 +446,20 @@ describe('native shell configuration', () => {
     // 宿主这一侧只有一个形状：**请这一代退下**——把宿主的旧结论忘掉是不够的，那一代还会拿
     // 新片段去要一份它拒绝给的新 context，用户看到的仍是旧片段跑出来的图。
     const commands = read('../../src-tauri/src/dlssnr/commands.rs');
-    expect(commands).toContain('fn a_new_snippet_arrived(');
-    expect(commands).toContain('manager.retire_worker("DLSSNR 片段换了版本")');
+    expect(commands).toContain('fn commit_candidate(');
+    expect(commands).toContain('manager.retire_and_mutate("DLSSNR 片段换了版本", install)');
     // 两条装片段的入口（导入文件 / 下载变体）都要换代；旧做法（只 `forget_probe`）不该
     // 留在调用点上——那正是「换了片段但那一代还在跑」。
     expect(
-      commands.match(/a_new_snippet_arrived\(&app\);/g) ?? [],
+      commands.match(/commit_candidate\(manager\.as_deref\(\),/g) ?? [],
       '两条装片段的入口都要换代',
     ).toHaveLength(2);
     expect(commands.match(/super::forget_probe\(\);/g) ?? [], '作废探针只在助手体内发生一次').toHaveLength(1);
 
     // 宿主这一侧的形状。
     const manager = read('../../src-tauri/src/compute/manager.rs');
-    expect(manager).toContain('pub fn retire_worker(&self, reason: &str) -> bool');
-    expect(manager).toContain('Command::RetireWorker {');
+    expect(manager).toContain('pub fn retire_and_mutate<T: Send');
+    expect(manager).toContain('Command::RetireAndMutate {');
     expect(manager).toContain('fn close_session(&mut self, reason: &str)');
     // **故意的换代不是崩溃**：走优雅收尾那条路。`lose_session` 会把这一次算进重启窗口的账，
     // 用户在设置页连换四次片段就会把熔断点亮（而它一次都没崩过）。

@@ -19,7 +19,8 @@ pub use super::GpuInfo;
 /// 显存预算与当前用量（§8.4 的「预留 ≥25%」要有数才算得出来）。
 ///
 /// `budget_bytes` 是**这段预算里我们最多能用多少**（由 DXGI 与系统一起决定，不是显卡总量），
-/// `used_bytes` 是这段预算里**已经用了多少**（含别的进程）。两者都是瞬时值。
+/// `used_bytes` 是**调用进程**在这个适配器上的用量，不含其他进程。
+/// 两者都是瞬时值；宿主不能用自己的读数代替计算进程的用量。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoMemory {
     pub budget_bytes: u64,
@@ -78,6 +79,60 @@ pub fn video_memory() -> Option<VideoMemory> {
             used_bytes: info.CurrentUsage,
         });
     }
+}
+
+/// Sample the exact DXGI adapter selected by DirectML's device index.
+#[cfg(windows)]
+pub fn video_memory_for_device_index(index: u32) -> Option<VideoMemory> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    query_adapter_memory(&unsafe { factory.EnumAdapters1(index) }.ok()?)
+}
+
+/// D3D12 reports its adapter LUID, so hybrid/multi-GPU PCs never sample a
+/// different device's budget. All readings belong to the calling process.
+#[cfg(windows)]
+pub fn video_memory_for_luid(luid: i64) -> Option<VideoMemory> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut index = 0;
+    loop {
+        let adapter = unsafe { factory.EnumAdapters1(index) }.ok()?;
+        index += 1;
+        let desc = unsafe { adapter.GetDesc1() }.ok()?;
+        let id = ((desc.AdapterLuid.HighPart as i64) << 32) | desc.AdapterLuid.LowPart as i64;
+        if id == luid { return query_adapter_memory(&adapter); }
+    }
+}
+
+/// WGPU may use Vulkan, where a DXGI LUID is unavailable. Only accept an
+/// unambiguous hardware identity, otherwise return an unknown reading.
+#[cfg(windows)]
+pub fn video_memory_for_identity(name: &str, vendor: u32, device: u32) -> Option<VideoMemory> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut index = 0;
+    let mut matched = None;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
+        index += 1;
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue; };
+        let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+        if desc.VendorId == vendor && desc.DeviceId == device && String::from_utf16_lossy(&desc.Description[..end]) == name {
+            if matched.is_some() { return None; }
+            matched = Some(adapter);
+        }
+    }
+    query_adapter_memory(&matched?)
+}
+
+#[cfg(windows)]
+fn query_adapter_memory(adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> Option<VideoMemory> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{IDXGIAdapter3, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO};
+    let adapter: IDXGIAdapter3 = adapter.cast().ok()?;
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.ok()?;
+    Some(VideoMemory { budget_bytes: info.Budget, used_bytes: info.CurrentUsage })
 }
 
 /// 非 Windows 上没有 DXGI：量不到（`None`），不是「没有压力」。

@@ -79,6 +79,7 @@ pub struct OnnxEngine {
     /// 而分块器在页面右缘真的会递过来一条 9 px 的窄条；小于这个值时瓦片先按边缘复制
     /// 长大，答完再裁回来。
     min_input_edge: u32,
+    fixed_input: Option<(u32, u32)>,
 }
 
 impl OnnxEngine {
@@ -99,12 +100,15 @@ impl OnnxEngine {
         }
         let session = open_session(path, runtime)
             .map_err(|error| ComputeError::InvalidInput(format!("ONNX session failed: {error}")))?;
+        let fixed_input = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
+            .and_then(|shape| static_input_dimensions(shape));
         Ok(Self {
             session: Mutex::new(session),
             runtime,
             scale,
             max_pixels,
             min_input_edge: min_input_edge.max(1),
+            fixed_input,
         })
     }
 
@@ -198,6 +202,20 @@ impl OnnxEngine {
 ///
 /// 点 `RuntimeId::Cpu` 时返回 [`ValidationVerdict::Passed`]：它**就是**参照实现，
 /// 没有第二条可以对照的路。真正需要证明的是硬件那几条。
+fn static_input_dimensions(shape: &[i64]) -> Option<(u32, u32)> {
+    if shape.len() != 4 { return None; }
+    let width = if shape[3] > 0 { u32::try_from(shape[3]).ok()? } else { 0 };
+    let height = if shape[2] > 0 { u32::try_from(shape[2]).ok()? } else { 0 };
+    (width > 0 || height > 0).then_some((width, height))
+}
+
+fn resolve_input_dimensions(fixed: Option<(u32,u32)>, width: u32, height: u32) -> (u32,u32) {
+    match fixed {
+        Some((w,h)) => (if w == 0 { width } else { w }, if h == 0 { height } else { h }),
+        None => (width,height),
+    }
+}
+
 pub fn validate_runtime(
     path: &Path,
     runtime: RuntimeId,
@@ -212,8 +230,17 @@ pub fn validate_runtime(
             reason: format!("scale {scale} is outside the probe range 1..=4"),
         };
     }
-    let width = PROBE_WIDTH.max(min_input_edge as usize);
-    let height = PROBE_HEIGHT.max(min_input_edge as usize);
+    let probe = |runtime: RuntimeId| -> Result<Vec<f32>, String> {
+        probe::note_probe_opened();
+        let mut session = open_session(path, runtime)?;
+        let fixed = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
+            .and_then(|shape| static_input_dimensions(shape));
+        let (width, height) = resolve_input_dimensions(fixed, PROBE_WIDTH.max(min_input_edge as usize) as u32, PROBE_HEIGHT.max(min_input_edge as usize) as u32);
+        let (width, height) = (width as usize, height as usize);
+        // A probe must remain bounded even for a malformed static model contract.
+        if width.saturating_mul(height).saturating_mul(scale as usize).saturating_mul(scale as usize) > 64_000_000 {
+            return Err("fixed model input exceeds probe pixel budget".to_string());
+        }
     let mut input = vec![0.0_f32; width * height * 3];
     for y in 0..height {
         for x in 0..width {
@@ -228,11 +255,6 @@ pub fn validate_runtime(
         (height * scale as usize) as i64,
         (width * scale as usize) as i64,
     ];
-    let probe = |runtime: RuntimeId| -> Result<Vec<f32>, String> {
-        // 计数代表「真的试过」：开不出来也算这次探过了（否则「每次都在失败重试」看起来
-        // 像一次都没探）。
-        probe::note_probe_opened();
-        let mut session = open_session(path, runtime)?;
         let tensor = ort::value::Tensor::from_array(([1_usize, 3, height, width], input.clone()))
             .map_err(|error| error.to_string())?;
         let started = Instant::now();
@@ -331,6 +353,7 @@ fn check_tile_shape(rgba: &[u8], width: u32, height: u32) -> Result<(), ComputeE
 }
 
 impl UpscaleEngine for OnnxEngine {
+    fn fixed_input_size(&self) -> Option<(u32, u32)> { self.fixed_input }
     fn scale(&self) -> u32 {
         self.scale
     }
@@ -346,10 +369,13 @@ impl UpscaleEngine for OnnxEngine {
         // 也造不出对不上的缓冲区。
         let mut output = cpu_scale_rgba(rgba, width, height, self.scale, self.max_pixels)?.rgba;
 
-        let (input_width, input_height) = (
+        let (input_width, input_height) = resolve_input_dimensions(self.fixed_input,
             width.max(self.min_input_edge),
             height.max(self.min_input_edge),
         );
+        if width > input_width || height > input_height {
+            return Err(ComputeError::InvalidInput("tile exceeds fixed model input shape".into()));
+        }
         let grown;
         let source = if (input_width, input_height) == (width, height) {
             rgba
@@ -411,6 +437,49 @@ impl UpscaleEngine for OnnxEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(windows, feature = "directml"))]
+    #[test]
+    #[ignore = "requires an installed x2 ONNX model and real DirectML GPU"]
+    fn adaptive_gpu_tiles_benchmark_against_default_tiles() {
+        let path = std::env::var_os("YOMIKA_UPSCALE_MODEL").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/data/models/waifu2x-upconv7/1/model.onnx"));
+        assert!(path.is_file(), "set YOMIKA_UPSCALE_MODEL to an installed x2 model");
+        assert_eq!(validate_runtime(&path, RuntimeId::DirectMl, 2, 1), ValidationVerdict::Passed);
+        let engine = OnnxEngine::open_with_runtime(&path, RuntimeId::DirectMl, 2, 64_000_000, 1).unwrap();
+        let memory = crate::dlssnr::gpu::video_memory_for_device_index(0).map(|m| crate::resources::GpuMemory { budget_bytes: m.budget_bytes, used_bytes: m.used_bytes });
+        let padding = crate::upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
+        let adaptive = crate::resources::auto_tile_size(memory, 2, padding, 1, engine.fixed_input_size());
+        let mut rgba = vec![0; 256 * 256 * 4];
+        for y in 0..256 { for x in 0..256 {
+            let index = (y * 256 + x) * 4;
+            rgba[index..index+4].copy_from_slice(&[x as u8,y as u8,((x+y)/2) as u8,255]);
+        }}
+        // Warm the session before timing the two tile plans.
+        engine.upscale_tile(&vec![128; 32*32*4],32,32).unwrap();
+        let run = |tile_size| {
+            let start = Instant::now();
+            let output = crate::upscale::upscale_rgba(&engine,&rgba,256,256,crate::upscale::UpscaleOptions { tile_size, tile_padding: padding, ..Default::default() }).unwrap();
+            (output,start.elapsed())
+        };
+        let (baseline,baseline_time) = run(crate::upscale::DEFAULT_TILE_SIZE);
+        let (actual,adaptive_time) = run(adaptive);
+        let mean = baseline.rgba.iter().zip(&actual.rgba).map(|(a,b)| f64::from(a.abs_diff(*b))).sum::<f64>() / baseline.rgba.len() as f64;
+        let max = baseline.rgba.iter().zip(&actual.rgba).map(|(a,b)| a.abs_diff(*b)).max().unwrap();
+        eprintln!("adaptive upscale GPU memory={memory:?} default_tiles={} adaptive_tile={adaptive} adaptive_tiles={} baseline={baseline_time:?} adaptive={adaptive_time:?} mean_byte_difference={mean:.6} max_byte_difference={max}",baseline.tiles,actual.tiles);
+        assert_eq!((actual.width,actual.height),(baseline.width,baseline.height));
+        assert!(mean <= 2.0,"tile seam average exceeded 2/255: {mean}");
+    }
+
+    #[test]
+    fn fixed_and_partial_model_axes_control_probe_and_tile_dimensions() {
+        assert_eq!(static_input_dimensions(&[1, 3, 256, 384]), Some((384, 256)));
+        assert_eq!(static_input_dimensions(&[1, 3, -1, 256]), Some((256, 0)));
+        assert_eq!(static_input_dimensions(&[1, 3, 128, -1]), Some((0, 128)));
+        assert_eq!(static_input_dimensions(&[1, 3, -1, -1]), None);
+        assert_eq!(resolve_input_dimensions(Some((384, 256)), 72, 64), (384, 256));
+        assert_eq!(resolve_input_dimensions(Some((256, 0)), 72, 64), (256, 64));
+    }
 
     /// CPU 就是参照，所以「对 CPU 做实测」只能有一个结论：通过。这条看着像废话，但它
     /// 挡住的是「探针在 CPU 上也硬要比一次、比完还可能判失败」那种自相矛盾。

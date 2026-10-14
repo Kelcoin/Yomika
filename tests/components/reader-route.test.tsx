@@ -387,7 +387,7 @@ describe('reader route', () => {
     await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
 
-  it('asks again for a DLSSNR page the queue turned away instead of recording it as done', async () => {
+  it.each(['COMPUTE_QUEUE_FULL', 'COMPUTE_UNAVAILABLE'])('asks again for a DLSSNR page refused with %s instead of recording it as done', async (failureCode) => {
     // 用户报的问题：开着 DLSSNR，这一页却什么都没有。现场日志（925 条）里 424 条是
     // `COMPUTE_QUEUE_FULL: 计算队列满了：Pressure`——那是「现在没位置」，不是这一页算不出来。
     // 从前这条失败只换回一句提示、**不带码**（`nativeImageCache` 只抛 `error.message`），
@@ -402,7 +402,7 @@ describe('reader route', () => {
         return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
       }
       attempts.push(identity.pageIndex);
-      if (refuseDlssnr) throw new RenditionError('COMPUTE_QUEUE_FULL', '计算队列满了：Pressure');
+      if (refuseDlssnr) throw new RenditionError(failureCode, '计算任务暂时被拒绝');
       return { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 };
     });
     installHost();
@@ -425,6 +425,10 @@ describe('reader route', () => {
     // ① 让位期间这一页留在手上的那一版上，不是空白。
     await waitFor(() => expect(attempts).toContain(0));
     expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:reader-page-0');
+    // A rejected worker must not immediately march through every background
+    // page and report the same failure for the whole archive.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    expect(attempts).toEqual([0]);
 
     // ② 队列放行、用户翻回来：这一页必须再问一次，并且这次真的换上了 DLSSNR 那一版。
     refuseDlssnr = false;

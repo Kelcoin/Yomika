@@ -235,7 +235,7 @@ fn enqueue(manager: &ComputeManager, request: SubmitRequest) -> CommandResult<Su
         // 正好是这里要的语义——原图还在，压力过去再看同一页会自动重试。
         Err(SubmitError::Pressure) => CommandResult::failure(
             "COMPUTE_UNAVAILABLE",
-            "这台机器现在内存/显存吃紧，先不算这一版（原图还在，等会儿再看会自动重试）",
+            "计算进程达到应用的资源预算，暂缓这一版（不代表整机内存或显存已满；原图还在，等会儿再看会自动重试）",
             true,
         ),
     }

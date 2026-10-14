@@ -12,8 +12,6 @@ pub const PAGE_PIXEL_LIMIT: u64 = 64 * 1024 * 1024;
 /// worker 重任务的 CPU 线程上限。再多就是和界面抢核，而重任务已经在 GPU 上了。
 pub const MAX_WORKER_INTRA_THREADS: usize = 2;
 
-/// worker 私有提交的软阈值上限：`min(4 GiB, 物理内存 × 25%)`。
-pub const SOFT_COMMIT_CEILING: u64 = 4 * 1024 * 1024 * 1024;
 
 /// 长闲置多久可以先收回 worker（§8.4）。
 pub const IDLE_SHUTDOWN_MS: u64 = 120_000;
@@ -74,9 +72,9 @@ pub fn worker_intra_threads(available_cores: usize) -> u32 {
         .clamp(1, MAX_WORKER_INTRA_THREADS) as u32
 }
 
-/// 私有提交软阈值：`min(4 GiB, 物理内存 × 25%)`。
+/// Private commit follows physical memory, independently from GPU budget.
 pub fn soft_commit_limit(physical_ram_bytes: u64) -> u64 {
-    SOFT_COMMIT_CEILING.min(physical_ram_bytes / 4)
+    physical_ram_bytes / 4
 }
 
 /// 私有提交硬限：软值 × 1.25。
@@ -178,6 +176,16 @@ pub enum Admission {
 /// ⇒ [`Admission::Run`]。显存那一条比的是**预算里的余量**（DXGI 的 `Budget - CurrentUsage`）
 /// 与**卡的总容量**（适配器描述里的 `DedicatedVideoMemory`）——都不是猜的数。
 pub fn admission(reading: &PressureReading, physical_ram_bytes: u64) -> Admission {
+    admission_with_available_commit(reading, physical_ram_bytes, None)
+}
+
+/// Preserve OS/UI commit headroom even when this worker itself is small.
+pub fn admission_with_available_commit(reading: &PressureReading, physical_ram_bytes: u64, available_commit_bytes: Option<u64>) -> Admission {
+    if let Some(available) = available_commit_bytes {
+        let reserve = (physical_ram_bytes / 16).max(256 * 1024 * 1024);
+        if available < reserve / 2 { return Admission::Refuse; }
+        if available < reserve { return Admission::ForegroundOnly; }
+    }
     if let Some(commit) = reading.private_commit_bytes {
         match commit_pressure(commit, physical_ram_bytes) {
             CommitPressure::Hard => return Admission::Refuse,
@@ -243,12 +251,19 @@ mod tests {
     }
 
     #[test]
-    fn the_soft_commit_limit_is_the_smaller_of_four_gib_and_a_quarter_of_ram() {
-        // 63.4 GiB 的内存：25% 是 15.85 GiB，但上限是 4 GiB。
-        assert_eq!(soft_commit_limit(63 * GIB), SOFT_COMMIT_CEILING);
+    fn the_soft_commit_limit_scales_past_four_gib() {
+        // Large machines may use more than the former fixed 4 GiB ceiling.
+        assert_eq!(soft_commit_limit(64 * GIB), 16 * GIB);
         // 8 GiB 的小机器：25% 只有 2 GiB，那才是它该用的数。
         assert_eq!(soft_commit_limit(8 * GIB), 2 * GIB);
         assert_eq!(soft_commit_limit(GIB), GIB / 4);
+    }
+
+    #[test]
+    fn system_commit_pressure_is_independent_of_worker_usage() {
+        assert_eq!(admission_with_available_commit(&PressureReading::unknown(), 16 * GIB, Some(GIB / 4)), Admission::Refuse);
+        assert_eq!(admission_with_available_commit(&PressureReading::unknown(), 16 * GIB, Some(3 * GIB / 4)), Admission::ForegroundOnly);
+        assert_eq!(admission_with_available_commit(&PressureReading::unknown(), 16 * GIB, Some(2 * GIB)), Admission::Run);
     }
 
     #[test]

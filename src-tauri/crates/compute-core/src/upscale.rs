@@ -21,6 +21,71 @@ use crate::error::ComputeError;
 pub const DEFAULT_TILE_SIZE: u32 = 128;
 pub const DEFAULT_TILE_PADDING: u32 = 8;
 
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    struct Limited { calls: AtomicU32, fail_above: u32, fixed: bool, message: &'static str }
+    impl UpscaleEngine for Limited {
+        fn scale(&self) -> u32 { 1 }
+        fn fixed_input_size(&self) -> Option<(u32,u32)> { self.fixed.then_some((256,256)) }
+        fn upscale_tile(&self, rgba: &[u8], width: u32, _: u32) -> Result<Vec<u8>, ComputeError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if width > self.fail_above { Err(ComputeError::InvalidInput(self.message.into())) }
+            else { Ok(rgba.to_vec()) }
+        }
+    }
+    #[test]
+    fn recovered_tiles_keep_pixels_and_padding() {
+        let engine = Limited { calls: AtomicU32::new(0), fail_above: 80, fixed: false, message: "E_OUTOFMEMORY" };
+        let source: Vec<u8> = (0..128*128*4).map(|n| (n % 251) as u8).collect();
+        let result = upscale_rgba_with_allocation_recovery(&engine, &source, 128,128,UpscaleOptions::default(),1).unwrap();
+        assert_eq!(result.rgba, source);
+        assert_eq!(result.tiles, 4);
+        assert_eq!(engine.calls.load(Ordering::Relaxed), 5);
+    }
+    #[test]
+    fn fixed_contract_and_device_errors_never_retry() {
+        for (fixed,message) in [(true,"E_OUTOFMEMORY"),(false,"device removed")] {
+            let engine = Limited { calls: AtomicU32::new(0), fail_above: 0, fixed, message };
+            assert!(upscale_rgba_with_allocation_recovery(&engine,&vec![0;128*128*4],128,128,UpscaleOptions::default(),1).is_err());
+            assert_eq!(engine.calls.load(Ordering::Relaxed),1);
+        }
+    }
+    #[test]
+    fn cancellation_prevents_initial_allocation_attempt() {
+        let cancel = CancelToken::watch(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        let engine = Limited { calls: AtomicU32::new(0), fail_above: 0, fixed: false, message: "E_OUTOFMEMORY" };
+        let options = UpscaleOptions { cancel: Some(cancel), ..Default::default() };
+        assert_eq!(upscale_rgba_with_allocation_recovery(&engine,&vec![0;128*128*4],128,128,options,1).unwrap_err(),ComputeError::Cancelled);
+        assert_eq!(engine.calls.load(Ordering::Relaxed),0);
+    }
+}
+
+/// Retry an entire frame only for identifiable native allocation failures.
+/// Completed partial output is dropped before the smaller attempt, preserving seam padding.
+pub fn upscale_rgba_with_allocation_recovery(
+    engine: &dyn UpscaleEngine, source: &[u8], width: u32, height: u32,
+    mut options: UpscaleOptions, min_edge: u32,
+) -> Result<UpscaledImage, ComputeError> {
+    let mut attempt = 0;
+    loop {
+        options.check_cancelled()?;
+        match upscale_rgba(engine, source, width, height, options.clone()) {
+            Ok(output) => return Ok(output),
+            Err(error) => {
+                let next = crate::resources::is_allocation_error(&error).then(||
+                    crate::resources::next_tile_after_allocation_failure(options.tile_size, min_edge, engine.fixed_input_size().is_some(), attempt)
+                ).flatten();
+                let Some(next) = next else { return Err(error); };
+                eprintln!("upscale allocation recovery: tile {} -> {next}", options.tile_size);
+                options.tile_size = next;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tile {
     /// Region handed to the engine, padding included.
@@ -121,6 +186,9 @@ pub fn blit_tile(
 /// below never needs to know which engine it is talking to.
 pub trait UpscaleEngine {
     fn scale(&self) -> u32;
+    /// Static NCHW input dimensions, with zero denoting a dynamic axis.
+    /// The engine pads smaller boundary tiles to each fixed axis.
+    fn fixed_input_size(&self) -> Option<(u32, u32)> { None }
     /// How far past a tile's edge the engine reads, in source pixels. The tiler
     /// keeps this much margin around every tile and crops it away again, so an
     /// engine whose kernel reaches further than the default has to say so or its
@@ -140,6 +208,7 @@ pub trait UpscaleEngine {
 /// E0117，因为 `Arc` 也是外部的）——所以 ONNX 会话的共享类型只要能自己实现
 /// [`UpscaleEngine`]，Arc 这一格就自动成立。
 impl<T: UpscaleEngine + ?Sized> UpscaleEngine for std::sync::Arc<T> {
+    fn fixed_input_size(&self) -> Option<(u32, u32)> { (**self).fixed_input_size() }
     fn scale(&self) -> u32 {
         (**self).scale()
     }

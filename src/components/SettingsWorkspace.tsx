@@ -305,6 +305,7 @@ export function SettingsWorkspace() {
     if (!result.ok) showToast(result.error.message, 'error');
   };
   const [modelPending, setModelPending] = useState(false);
+  const [dllValidating, setDllValidating] = useState(false);
   /** The model being downloaded right now, plus how far along it is: the backend
    * reports `model-download-progress` while a release bundle comes down, and only
    * one download runs at a time. */
@@ -505,10 +506,12 @@ export function SettingsWorkspace() {
     setModelPending(true);
     try {
       if (path.toLowerCase().endsWith('.dll')) {
+        setDllValidating(true);
         const result = await new NativeDlssnrRepository().importDll(path);
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         window.dispatchEvent(new Event('yomika:dlssnr-imported'));
-        showToast(`DLSSNR 组件已导入：${installedDllLabel(result.value.variantLabel, '自定义 DLL', result.value.version)}`, 'success');
+        const { width, height } = result.value.verification;
+        showToast(`DLSSNR 组件已导入：${installedDllLabel(result.value.variantLabel, '自定义 DLL', result.value.version)} · 本机验证通过（${width}×${height}）`, 'success');
         return;
       }
       const result = await inferenceRepository.importModelPath(path);
@@ -517,7 +520,7 @@ export function SettingsWorkspace() {
       await refreshModels();
     } catch (error) {
       showToast(error instanceof Error ? error.message : '模型导入失败', 'error');
-    } finally { setModelPending(false); }
+    } finally { setModelPending(false); setDllValidating(false); }
   }
 
   async function downloadModel(modelId: string, label: string) {
@@ -1672,7 +1675,7 @@ export function SettingsWorkspace() {
                 <SettingsRow
                   icon={<Upload />}
                   label="模型导入"
-                  hint="导入超分模型或 DLSSNR DLL"
+                  hint="导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸"
                   control={
                     <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1681,7 +1684,7 @@ export function SettingsWorkspace() {
                         <path d="m7 8 5-5 5 5" />
                         <path d="M8 15h8" />
                       </svg>
-                      {modelPending ? '导入中…' : '选择模型文件…'}
+                      {dllValidating ? '正在验证 DLL…' : modelPending ? '导入中…' : '选择模型文件…'}
                     </button>
                   }
                 />

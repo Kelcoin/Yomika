@@ -53,6 +53,7 @@ struct SharedContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter: String,
+    adapter_info: wgpu::AdapterInfo,
     limits: wgpu::Limits,
     /// 每条预设一次：解析结果 + 已经编好的管道。
     chains: Mutex<std::collections::HashMap<&'static str, Arc<Chain>>>,
@@ -88,6 +89,19 @@ pub fn is_available() -> bool {
     matches!(CONTEXT.get(), Some(Ok(_)))
 }
 
+/// Do not initialize a device merely to measure its budget.
+pub fn video_memory() -> Option<crate::resources::GpuMemory> {
+    #[cfg(windows)]
+    {
+        let context = CONTEXT.get()?.as_ref().ok()?;
+        let info = &context.adapter_info;
+        let reading = crate::dlssnr::gpu::video_memory_for_identity(&info.name, info.vendor, info.device)?;
+        Some(crate::resources::GpuMemory { budget_bytes: reading.budget_bytes, used_bytes: reading.used_bytes })
+    }
+    #[cfg(not(windows))]
+    { None }
+}
+
 fn context() -> Result<&'static SharedContext, ComputeError> {
     CONTEXT
         .get_or_init(open_context)
@@ -119,6 +133,7 @@ fn open_context() -> Result<SharedContext, String> {
             info.name, info.backend, info.driver, info.driver_info
         ),
         limits,
+        adapter_info: info,
         chains: Mutex::new(std::collections::HashMap::new()),
     })
 }

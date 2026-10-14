@@ -440,6 +440,7 @@ enum Command {
     ReleaseIdle { reply: Sender<u32> },
     /// 请这一代 worker 退下（换了 DLL 片段/换了引擎版本），`reply` 收到「当时有没有会话」。
     RetireWorker { reason: String, reply: Sender<bool> },
+    RetireAndMutate { reason: String, operation: Box<dyn FnOnce() + Send> },
     Shutdown,
 }
 
@@ -496,7 +497,11 @@ impl Shared {
             PressureSource::Injected(gauge) => gauge.read(),
             PressureSource::Measured => state.pressure,
         };
-        resource_policy::admission(&reading, self.config.physical_ram_bytes)
+        let available_commit = match &self.config.pressure_source {
+            PressureSource::Measured => yomika_compute_core::resources::system_memory().map(|m| m.available_commit_bytes),
+            PressureSource::Injected(_) => None,
+        };
+        resource_policy::admission_with_available_commit(&reading, self.config.physical_ram_bytes, available_commit)
     }
 
     /// 记一次自动交回，返回累计次数。
@@ -747,6 +752,18 @@ impl ComputeManager {
             .unwrap_or(false)
     }
 
+    /// Retire and mutate installation files while the supervisor cannot dispatch or restart.
+    pub fn retire_and_mutate<T: Send + 'static>(
+        &self, reason: &str, operation: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, String> {
+        let (reply, answers) = mpsc::channel();
+        self.commands.send(Command::RetireAndMutate {
+            reason: reason.to_owned(),
+            operation: Box::new(move || { let _ = reply.send(operation()); }),
+        }).map_err(|_| "计算监督线程已关闭".to_string())?;
+        answers.recv().map_err(|_| "安装事务未完成：计算监督线程已关闭".to_string())
+    }
+
     /// 同上，但**不等**回信——关闭窗口那条路要的是窗口马上消失（§8.4「UI 马上返回」）。
     ///
     /// 回信没人接就等于这次不记账：worker 那边该交的还是交了。这条路上**不报错**，
@@ -795,6 +812,8 @@ struct Session {
     job: Option<JobObject>,
     limits_applied: bool,
     limits_note: Option<String>,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_drain: Option<JoinHandle<()>>,
     spawned_at: Instant,
     handshaked: bool,
     ping_at: Instant,
@@ -901,6 +920,10 @@ impl Supervisor {
                     self.close_session(reason.as_str());
                 }
                 let _ = reply.send(had);
+            }
+            Command::RetireAndMutate { reason, operation } => {
+                if self.session.is_some() { self.close_session(&reason); }
+                operation();
             }
             Command::Shutdown => *shutdown = true,
         }
@@ -1112,6 +1135,7 @@ impl Supervisor {
                 );
             }
             Message::Failed(failed) => {
+                let reset_required = failed.message.contains("DLSSNR_DEVICE_RESET_REQUIRED");
                 self.finish_running(&failed.job_id);
                 // worker 那句「为什么」只在这一条消息里出现一次。调度器与前端词汇都只认
                 // 码，所以先抄一份下来，等代理翻文案时带上（`failure_note`）。
@@ -1125,6 +1149,11 @@ impl Supervisor {
                     },
                     &failed.job_id,
                 );
+                if reset_required {
+                    // A removed/timed-out D3D12 device cannot be repaired by
+                    // reinitialising NGX inside the same process.
+                    self.close_session("DLSSNR_DEVICE_RESET_REQUIRED：重建计算进程");
+                }
             }
             Message::Pong(pong) => self.on_pong(pong),
             Message::WorkspacesReleased(released) => self.on_workspaces_released(released),
@@ -1656,11 +1685,40 @@ impl Supervisor {
         }
         // 这一代的握手事实随它一起作废：`worker_build()` 的答案只对当前这一代负责，
         // 留着一份上一代的构建事实比没有更坏（垫片在不在会答成上一代的答案）。
-        self.shared.with_state(|state| state.build = None);
+        self.shared.with_state(|state| {
+            state.build = None;
+            state.pressure = resource_policy::PressureReading::unknown();
+        });
         if let Some(state) = settle {
             settle_job(&self.shared, session.epoch, &session.running, state, now_ms);
         }
+        let private_commit = private_commit_of(session.peer_pid);
+        let natural_exit = session.child.try_wait().ok().flatten().map(|status| status.to_string());
         terminate_process(&mut session, self.shared.config.shutdown_grace);
+        // The final abort/driver error may still be buffered in the OS pipe.
+        // With the process gone, EOF closes the drain without waiting on NGX.
+        if let Some(drain) = session.stderr_drain.take() {
+            let _ = drain.join();
+        }
+        if restart {
+            let tail = session.stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
+            let stderr = String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>()).into_owned();
+            let note = format!("{reason}；自然退出状态={}；worker stderr: {}", natural_exit.as_deref().unwrap_or("未退出，由宿主终止"), stderr.trim());
+            if let Some(running) = &session.running {
+                self.shared.with_state(|state| state.remember_failure_note(&running.job_id, &note));
+            }
+            if let Some(data_root) = self.shared.config.publish_root.as_ref() {
+                let detail = serde_json::json!({
+                    "pid": session.peer_pid,
+                    "jobId": session.running.as_ref().map(|running| &running.job_id),
+                    "privateCommitBytes": private_commit,
+                    "hardCommitBytes": self.shared.config.hard_commit_bytes,
+                    "exitStatus": natural_exit,
+                    "stderrTail": stderr,
+                }).to_string();
+                let _ = crate::error_log::record_at_data_dir(data_root, "error", "compute/worker", reason, Some(&detail));
+            }
+        }
         // 进程已经真退出了（`terminate_process` 等到它退出或杀掉），此刻 staging 里
         // 不会再有人写：上一代留下的半成品与 worker 攒的暂存子树都该收回去（§11 Task 8
         // 第⑤条 idle/release/shutdown 要回收所有可回收的东西）。放在 `terminate_process`
@@ -1872,8 +1930,9 @@ impl Supervisor {
 
         // 必须把两个输出流抽干：管道缓冲满了会把 worker 卡在写日志上，
         // 那看起来就像「worker 无响应」。
-        drop(drain(child.stdout.take()));
-        drop(drain(child.stderr.take()));
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        drop(drain(child.stdout.take(), None));
+        let stderr_drain = drain(child.stderr.take(), Some(stderr_tail.clone()));
 
         let reader_stream = accepted.stream.clone();
         let (sender, reports) = mpsc::channel();
@@ -1892,6 +1951,8 @@ impl Supervisor {
             job,
             limits_applied,
             limits_note,
+            stderr_tail,
+            stderr_drain,
             spawned_at: Instant::now(),
             handshaked: false,
             ping_at: Instant::now() + Duration::from_millis(PING_INTERVAL_MS),
@@ -2344,7 +2405,7 @@ fn read_loop(mut stream: PipeStream, sender: Sender<Report>) {
     }
 }
 
-fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<JoinHandle<()>> {
+fn drain(pipe: Option<impl Read + Send + 'static>, tail: Option<Arc<Mutex<VecDeque<u8>>>>) -> Option<JoinHandle<()>> {
     let mut pipe = pipe?;
     thread::Builder::new()
         .name("yomika-compute-drain".to_string())
@@ -2354,9 +2415,20 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<JoinHandle<()>> {
                 if read == 0 {
                     return;
                 }
+                if let Some(tail) = &tail {
+                    append_stderr_tail(&mut tail.lock().unwrap_or_else(|p| p.into_inner()), &buffer[..read]);
+                }
             }
         })
         .ok()
+}
+
+fn append_stderr_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
+    const LIMIT: usize = 16 * 1024;
+    tail.extend(bytes.iter().copied());
+    if tail.len() > LIMIT {
+        tail.drain(..tail.len() - LIMIT);
+    }
 }
 
 fn send_frame(stream: &mut PipeStream, message: &Message) -> io::Result<()> {
@@ -2543,8 +2615,10 @@ fn physical_ram_bytes() -> Option<u64> {
 /// （`error[E0433]: cannot find dlssnr in yomika_compute_core`）。
 #[cfg(windows)]
 fn gpu_memory_reading() -> Option<(u64, u64)> {
-    let memory = yomika_compute_core::dlssnr::gpu::video_memory()?;
-    Some((memory.free_bytes(), memory.budget_bytes))
+    // QueryVideoMemoryInfo measures the CALLING process. The host does not
+    // own the worker's GPU allocations, so its budget cannot gate that worker.
+    // Until the worker reports its own reading, this measurement is unknown.
+    None
 }
 
 #[cfg(not(windows))]
@@ -2614,6 +2688,15 @@ fn private_commit_of(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use yomika_compute_protocol::{EngineFallback, EnginePolicy, EngineReport, Precision};
+
+    #[test]
+    fn worker_stderr_keeps_only_a_bounded_recent_tail() {
+        let mut tail = VecDeque::new();
+        append_stderr_tail(&mut tail, &vec![b'a'; 20 * 1024]);
+        append_stderr_tail(&mut tail, b"device removed");
+        assert_eq!(tail.len(), 16 * 1024);
+        assert!(tail.iter().copied().collect::<Vec<_>>().ends_with(b"device removed"));
+    }
 
     /// worker 的环境白名单要真的落到命令行上，而且 `SystemDrive` 一个都不能少。
     ///

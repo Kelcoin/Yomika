@@ -508,14 +508,10 @@ pub struct InstalledModel {
     /// From the installed manifest. `None` means the directory has no manifest,
     /// so the model can be listed but not run.
     pub scale: Option<u32>,
-    /// What the model does, read from the shape of the install rather than from
-    /// the manifest: a directory holding the four de-censoring files is a
-    /// de-censoring bundle whatever its manifest says. Keeps a bundle out of the
-    /// upscaler's picker, where selecting it silently produced plain nearest
-    /// neighbour output.
+    /// Supported model kind. Cached entries from removed features are never
+    /// returned to the frontend's strictly validated model list.
     pub kind: String,
-    /// Individual graphs exposed by a de-censor install. The bundle id remains
-    /// the runtime selector, while the UI can name each stage precisely.
+    /// Reserved component metadata; current upscalers use a single graph.
     #[serde(default)]
     pub components: Vec<InstalledModelComponent>,
 }
@@ -685,7 +681,7 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
         if let Ok((cached_fp, models)) =
             serde_json::from_slice::<(String, Vec<InstalledModel>)>(&bytes)
         {
-            if &cached_fp == fp {
+            if &cached_fp == fp && models.iter().all(|model| model.kind == MODEL_KIND_UPSCALE) {
                 return models;
             }
         }
@@ -722,6 +718,14 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
         for version in ids {
             let root = model_dir.path().join(&version);
             let scale = read_model_manifest(&root).map(|manifest| manifest.scale);
+            // Old multi-directory bundles are not single-graph upscalers.
+            // Rebuilding their cache must not relabel them as supported models.
+            if scale.is_none() && model_file_in(&root).is_none()
+                && std::fs::read_dir(&root).ok().is_some_and(|entries| {
+                    entries.flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                }) {
+                continue;
+            }
             found.push(InstalledModel {
                 id: id.clone(),
                 version,
@@ -858,7 +862,7 @@ pub fn inference_install_model(
         });
 
     match result {
-        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
+        Ok(_) => crate::domain::result::CommandResult::success(InstalledModel {
             id: input.manifest.id,
             version: input.manifest.version,
             scale: Some(input.manifest.scale),
@@ -2136,6 +2140,28 @@ mod tests {
         std::fs::write(index, b"broken cache").unwrap();
         assert!(!installed_models_in(&base).is_empty());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn model_index_rejects_cached_kinds_from_removed_features() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("models/current/1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("current.onnx"), b"model").unwrap();
+        let bundle = base.path().join("models/retired/1/nested");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("weights.onnx"), b"old graph").unwrap();
+        let mut models = installed_models_in(base.path());
+        models[0].kind = "retired-feature".into();
+        let fingerprint = model_fingerprint(&base.path().join("models")).unwrap();
+        std::fs::write(
+            base.path().join("model-index.json"),
+            serde_json::to_vec(&(fingerprint, models)).unwrap(),
+        ).unwrap();
+        let refreshed = listed_upscale_models_in(base.path());
+        assert!(refreshed.iter().all(|model| model.kind == MODEL_KIND_UPSCALE));
+        assert!(refreshed.iter().any(|model| model.id == "current"));
+        assert!(!refreshed.iter().any(|model| model.id == "retired"));
     }
 
     #[test]

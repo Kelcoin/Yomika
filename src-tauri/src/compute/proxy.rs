@@ -379,7 +379,7 @@ fn submit_refused(error: SubmitError) -> ProxyError {
         },
         SubmitError::Pressure => ProxyError {
             code: "COMPUTE_UNAVAILABLE",
-            message: "这台机器现在内存/显存吃紧，先不算这一版（原图还在，等会儿再看会自动重试）"
+            message: "计算进程达到应用的资源预算，暂缓这一版（不代表整机内存或显存已满；原图还在，等会儿再看会自动重试）"
                 .to_string(),
             retryable: true,
         },
@@ -510,13 +510,14 @@ fn read_artifact(manager: &ComputeManager, job_id: &str) -> Result<FinishedArtif
 /// `COMPUTE_INTERNAL` 并把原码写进文案里——日志里看得见，前端拿到的仍然是一个登记过的码。
 /// 旧词汇里没有对应词、但前端登记过、而且**暂态**（过一会儿重来有意义）的几个码。
 /// 它们说的是旧代码里根本没有过的几件事，所以不硬塞进旧词汇。
-const TRANSIENT_CODES: [&str; 6] = [
+const TRANSIENT_CODES: [&str; 7] = [
     "COMPUTE_QUEUE_FULL",
     "COMPUTE_TIMEOUT",
     "COMPUTE_WORKER_LOST",
     "COMPUTE_WORKER_BUSY",
     "COMPUTE_ARTIFACT_INVALID",
     "COMPUTE_INTERNAL",
+    "COMPUTE_UNAVAILABLE",
 ];
 
 /// 把 worker 报的失败码翻成前端认识的那一个，并把「为什么」一起写进文案。
@@ -528,7 +529,7 @@ fn failure(code: String, note: Option<&str>) -> ProxyError {
     // 第一遍：旧词汇里有对应词的就翻过去（同一条命令不许两套词）。
     let legacy = match code.as_str() {
         "COMPUTE_RESOURCE_LIMIT" | "GPU_BACKEND_UNAVAILABLE" | "GPU_OUTPUT_INVALID"
-        | "COMPUTE_MODEL_UNAVAILABLE" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_UNAVAILABLE" => {
+        | "COMPUTE_MODEL_UNAVAILABLE" | "COMPUTE_WORKER_UNAVAILABLE" => {
             Some("INFERENCE_UNAVAILABLE")
         }
         "COMPUTE_INPUT_INVALID" | "COMPUTE_BAD_REQUEST" | "COMPUTE_PROTOCOL_MISMATCH"
@@ -598,6 +599,7 @@ mod tests {
             ("COMPUTE_ARTIFACT_REJECTED", "INVALID_RESPONSE", false),
             ("COMPUTE_CANCELLED", "INFERENCE_CANCELLED", false),
             ("COMPUTE_QUEUE_FULL", "COMPUTE_QUEUE_FULL", true),
+            ("COMPUTE_UNAVAILABLE", "COMPUTE_UNAVAILABLE", true),
             ("COMPUTE_TIMEOUT", "COMPUTE_TIMEOUT", true),
             ("COMPUTE_WORKER_LOST", "COMPUTE_WORKER_LOST", true),
             ("COMPUTE_WORKER_BUSY", "COMPUTE_WORKER_BUSY", true),
@@ -626,7 +628,7 @@ mod tests {
         let cases = [
             (SubmitError::ForegroundFull, "COMPUTE_QUEUE_FULL", "前台"),
             (SubmitError::BackgroundFull, "COMPUTE_QUEUE_FULL", "后台"),
-            (SubmitError::Pressure, "COMPUTE_UNAVAILABLE", "吃紧"),
+            (SubmitError::Pressure, "COMPUTE_UNAVAILABLE", "资源预算"),
         ];
         for (refusal, expected_code, expected_word) in cases {
             let error = submit_refused(refusal);

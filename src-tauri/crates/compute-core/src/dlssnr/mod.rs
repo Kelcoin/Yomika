@@ -815,7 +815,7 @@ pub fn install_dll_with(
     // 只认 PE：`MZ` 头 + PE 签名。用户很容易误选到别的文件（说明文档、压缩包），
     // 这时候要当场说清楚，别等 NGX 加载失败。
     {
-        use std::io::Read;
+        use std::io::{Read, Seek, SeekFrom};
         let mut header = [0u8; 0x40];
         let mut file = std::fs::File::open(source).map_err(|error| format!("打开失败：{error}"))?;
         file.read_exact(&mut header).map_err(|error| format!("读文件头失败：{error}"))?;
@@ -823,8 +823,24 @@ pub fn install_dll_with(
             return Err("这个文件不是 Windows 的 DLL（没有 MZ 头）".to_string());
         }
         let offset = u32::from_le_bytes([header[0x3c], header[0x3d], header[0x3e], header[0x3f]]) as u64;
-        if offset + 4 > metadata.len() {
+        if offset + 26 > metadata.len() {
             return Err("这个文件的 PE 头越界了，文件可能不完整".to_string());
+        }
+        file.seek(SeekFrom::Start(offset)).map_err(|error| format!("读 PE 头失败：{error}"))?;
+        let mut pe = [0u8; 26];
+        file.read_exact(&mut pe).map_err(|error| format!("读 PE 头失败：{error}"))?;
+        if &pe[..4] != b"PE\0\0" {
+            return Err("这个文件没有有效的 PE 签名".to_string());
+        }
+        if u16::from_le_bytes([pe[4], pe[5]]) != 0x8664 || u16::from_le_bytes([pe[24], pe[25]]) != 0x20b {
+            return Err("DLSSNR 需要 Windows x64 的 DLL（PE32+）".to_string());
+        }
+        if u16::from_le_bytes([pe[22], pe[23]]) & 0x2000 == 0 {
+            return Err("选中的 PE 文件不是 DLL".to_string());
+        }
+        let optional_len = u16::from_le_bytes([pe[20], pe[21]]) as u64;
+        if optional_len < 2 || offset + 24 + optional_len > metadata.len() {
+            return Err("DLL 的可选头不完整".to_string());
         }
     }
 
@@ -1158,7 +1174,26 @@ mod tests {
         let mut content = vec![0u8; bytes];
         content[0..2].copy_from_slice(b"MZ");
         content[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        content[0x80..0x84].copy_from_slice(b"PE\0\0");
+        content[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        content[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes());
+        content[0x96..0x98].copy_from_slice(&0x2000u16.to_le_bytes());
+        content[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
         std::fs::write(path, &content).expect("写假 PE");
+    }
+
+    #[test]
+    fn import_rejects_wrong_pe_architecture_before_installation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("candidate.dll");
+        unsigned_pe(&source, 1_000_001);
+        let mut bytes = std::fs::read(&source).unwrap();
+        bytes[0x84..0x86].copy_from_slice(&0x14cu16.to_le_bytes());
+        std::fs::write(&source, bytes).unwrap();
+        let target = dir.path().join("installed");
+        let error = install_dll_with(&source, &target, SnippetTrust::Skipped).unwrap_err();
+        assert!(error.contains("x64"), "{error}");
+        assert!(!dll_path(&target).exists());
     }
 
     /// 驱动认不认这份片段：官方原版有效；社区那两版签过名但被改过；随手写的假 PE 与
@@ -1772,6 +1807,72 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    fn serial_layers_share_one_feature_and_match_individual_passes() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        device::release_cached_workspaces();
+        let page = synthetic_image(600, 800);
+        let passes = vec![
+            PassSettings { local_tone_strength: 0.5, ..Default::default() },
+            PassSettings { style: 1, intensity: 0.8, ..Default::default() },
+            PassSettings { local_structure_strength: 1.8, ..Default::default() },
+        ];
+        let combined = filter::apply_with_dll(&dir, &dll, &page, &DlssnrSettings { passes: passes.clone() }).unwrap();
+        let features = device::with_context_at(&dir, &dll, |context| {
+            Ok(context.workspaces.iter().map(|workspace| workspace.features.len()).sum::<usize>())
+        }).unwrap();
+        let mut chained = page;
+        for pass in passes {
+            chained = filter::apply_with_dll(&dir, &dll, &chained, &DlssnrSettings { passes: vec![pass] }).unwrap();
+        }
+        assert_eq!(combined.rgba, chained.rgba, "feature reuse must preserve every pixel");
+        assert_eq!(features, 1, "serial layers must not retain one NGX model allocation per layer");
+        device::release_cached_workspaces();
+    }
+
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    fn cancellation_after_a_submitted_layer_drops_partial_texture_states() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        device::release_cached_workspaces();
+        let page = synthetic_image(600, 800);
+        let settings = DlssnrSettings { passes: vec![PassSettings::default(); 3] };
+        let expected = filter::apply_with_dll(&dir, &dll, &page, &settings).unwrap();
+        filter::cancel_after_first_layer();
+        let error = filter::apply_with_dll(&dir, &dll, &page, &settings).unwrap_err();
+        assert_eq!(error, filter::CANCELLED);
+        assert_eq!(device::cached_workspace_count(), 0, "partial barriers must not return to the cache");
+        let retried = filter::apply_with_dll(&dir, &dll, &page, &settings).unwrap();
+        assert_eq!(expected.rgba, retried.rgba);
+        device::release_cached_workspaces();
+    }
+
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    fn failed_guide_allocation_does_not_leave_commands_for_the_next_page() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = synthetic_image(600, 800);
+        let expected = filter::apply_with_dll(&dir, &dll, &page, &DlssnrSettings::default()).unwrap();
+        device::release_cached_workspaces();
+        workspace::fail_next_guide_allocation();
+        let error = filter::apply_with_dll(&dir, &dll, &page, &DlssnrSettings::default()).unwrap_err();
+        assert!(error.contains("E_OUTOFMEMORY"));
+        assert_eq!(device::cached_workspace_count(), 0);
+        let next = filter::apply_with_dll(&dir, &dll, &page, &DlssnrSettings::default()).unwrap();
+        assert_eq!(next.rgba, expected.rgba);
+        device::release_cached_workspaces();
+    }
+
     /// 强度 0 就是「完全保留原图」，DLL 真的会把输入原样交回。
     ///
     /// 实测（合成图与四张真页）：`DLSSNR.Intensity` 是「DLSSNR 结果与原图之间的混合权重」，
@@ -1866,7 +1967,7 @@ mod tests {
     ///
     /// 这条是内存回归的守卫：工作区缓存与进程同寿，而它按「层数 × 页面积」占的是
     /// **提交内存**——真机实测一页 2731×4096 跑五层留下几个 GB（台账见 `docs/69`），
-    /// 上限还是两份。判据四条：跑完一页缓存里确实有一份、交回之后**当下**的数量归零
+    /// 缓存按实时预算保留。判据四条：跑完一页缓存里确实有一份、交回之后**当下**的数量归零
     /// （不是只改了计数器）、NGX 那边确实收到了那些 feature（`released_features` 得涨）、
     /// 紧接着同一页还能跑出逐像素相同的结果（纹理放掉再建回来，语义没变）。
     ///
@@ -1954,6 +2055,87 @@ mod tests {
         let released = private_bytes();
         eprintln!("DLSSNR private commit: passes={passes} warm={} MiB, after32={} MiB, released={} MiB", before/1048576, after/1048576, released/1048576);
         assert!(after.saturating_sub(before) < 32 * 1048576, "private commit kept growing per page");
+        assert_eq!(device::cached_workspace_count(), 0);
+    }
+
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    #[ignore = "real GPU: verifies that cached page buckets can return NGX allocations"]
+    fn changing_page_buckets_respects_live_budget_and_releases_features() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-bucket-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = DlssnrSettings::default();
+        device::release_cached_workspaces();
+        let first = synthetic_image(512, 768);
+        filter::apply_with_dll(&dir, &dll, &first, &settings).unwrap();
+        let released = ngx::released_features();
+        let second = synthetic_image(1024, 1536);
+        filter::apply_with_dll(&dir, &dll, &second, &settings).unwrap();
+        assert!(device::cached_workspace_count() <= workspace::MAX_WORKSPACES);
+        device::release_cached_workspaces();
+        assert!(ngx::released_features() > released, "cached NGX allocations must actually return to the driver");
+    }
+
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    #[ignore = "real GPU: reports cache reuse under the machine's live budgets"]
+    fn alternating_buckets_report_adaptive_cache_reuse() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        device::release_cached_workspaces();
+        let pages = [synthetic_image(600, 800), synthetic_image(1280, 1920)];
+        for page in &pages { filter::apply_with_dll(&dir, &dll, page, &DlssnrSettings::default()).unwrap(); }
+        let cached = device::cached_workspace_count();
+        let before = filter::context_counts(&dir, &dll).unwrap().0;
+        let started = std::time::Instant::now();
+        for _ in 0..8 {
+            for page in &pages { filter::apply_with_dll(&dir, &dll, page, &DlssnrSettings::default()).unwrap(); }
+        }
+        let after = filter::context_counts(&dir, &dll).unwrap().0;
+        eprintln!("adaptive bucket cache: cached={cached}, rebuilds={}, alternating16={:?}", after-before, started.elapsed());
+        if cached == 2 { assert_eq!(before, after, "roomy budgets should reuse both buckets"); }
+        assert!(device::cached_workspace_count() <= workspace::MAX_WORKSPACES);
+        device::release_cached_workspaces();
+    }
+
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    #[ignore = "real GPU: replay an externally supplied PNG without committing user pages"]
+    fn replay_real_page_with_default_settings() {
+        let _gpu = gpu_test_lock();
+        let dll = test_dll().expect("requires the real DLL");
+        let input = std::env::var("YOMIKA_DLSSNR_REPLAY_PNG").expect("supply a replay PNG");
+        let decoded = image::open(input).unwrap().into_rgba8();
+        let page = DlssnrImage::new(decoded.width(), decoded.height(), decoded.into_raw()).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-replay");
+        std::fs::create_dir_all(&dir).unwrap();
+        fn private_bytes() -> usize {
+            use windows::Win32::System::{ProcessStatus::*, Threading::GetCurrentProcess};
+            let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();
+            unsafe { GetProcessMemoryInfo(GetCurrentProcess(), (&mut memory as *mut PROCESS_MEMORY_COUNTERS_EX).cast(), std::mem::size_of_val(&memory) as u32) }.unwrap();
+            memory.PrivateUsage
+        }
+        device::release_cached_workspaces();
+        let started = std::time::Instant::now();
+        let passes = dlssnr_passes();
+        let settings = DlssnrSettings { passes: vec![PassSettings::default(); passes] };
+        for round in 0..3 {
+            let round_started = std::time::Instant::now();
+            let output = filter::apply_with_dll(&dir, &dll, &page, &settings).unwrap();
+            assert_eq!((output.width, output.height), (page.width, page.height));
+            eprintln!("replay {}x{} passes={passes} round={round}: private={} MiB pass_time={:?} elapsed={:?}", page.width, page.height, private_bytes()/1048576, round_started.elapsed(), started.elapsed());
+            if round == 0 {
+                if let Some(path) = std::env::var_os("YOMIKA_DLSSNR_REPLAY_OUTPUT") {
+                    image::save_buffer_with_format(path, &output.rgba, output.width, output.height, image::ColorType::Rgba8, image::ImageFormat::Png).unwrap();
+                }
+            }
+        }
+        device::release_cached_workspaces();
+        eprintln!("replay released: private={} MiB", private_bytes()/1048576);
         assert_eq!(device::cached_workspace_count(), 0);
     }
 

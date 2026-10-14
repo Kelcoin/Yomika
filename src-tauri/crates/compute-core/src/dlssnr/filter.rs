@@ -9,8 +9,7 @@
 //!
 //! **纹理与 feature 不在这里建**：它们按量化尺寸缓存在 [`Workspace`] 里（换尺寸
 //! 重建 feature 是这条链路上最大的单项开销，同一 bucket 内换页不再重建）。这一层
-//! 只负责把一页的整套命令记进同一张命令表——上传 → 各层 → 回读——**一次提交、
-//! 一次等待**，以前那一页四次提交加四次轮询也在这里收掉了。
+//! 一页只上传和回读一次；层间等待 fence 后复用同一个 feature，避免每层独立模型驻留。
 
 use std::path::Path;
 
@@ -72,6 +71,13 @@ pub fn is_not_computed(error: &str) -> bool {
 /// 一次早退，赛跑要么早退要么跑完，不可复现），所以这里注入同一条错误路径。
 #[cfg(test)]
 static FAIL_RECORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_AFTER_LAYER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub fn cancel_after_first_layer() {
+    FAIL_AFTER_LAYER.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 #[cfg(test)]
 pub fn fail_next_record(fail: bool) {
@@ -307,25 +313,28 @@ fn evaluate(
     let mut workspace = context.acquire_workspace(width, height, pass_count, forced)?;
     phase("取/建工作区（含 feature）", &mut mark);
 
-    // 一页的整套命令走同一张命令表：上传 → 各层 → 回读，末尾一次提交一次等待。
+    // 上传一次，各层通过 fence 隔离同一 feature 的内部状态，最后回读。
     let recorded = record_page(context, &mut workspace, image, settings, cancel);
     // 上传缓冲要活到提交之后（提交的命令里还要从它拷进纹理）：下划线前缀的绑定照样
     // 活到作用域结束，裸 `_` 会立刻析构。
     let (_upload, readback) = match recorded {
         Ok(buffers) => buffers,
         Err(error) => {
-            // 出错了：一条命令都还没提交，丢掉就是（已记录的 barrier 一条都没执行，
-            // 纹理在 GPU 上的实际状态还是上一页收尾时的样子，而 `workspace` 模块保证
-            // 每页收尾都摆回开场状态，所以这份工作区下回照样能用）。
-            // 收不回去（reset 失败）时上下文已经中毒，那就整份丢掉——还给一个已经
-            // 作废的上下文没有意义；否则把**工作区**交回缓存：取消在后台预扫被前台
-            // 抢断时是常态，`Workspace::release` 会把 feature 还掉、工作区跟着销毁，
-            // 于是每次取消都要重建一遍（120ms 级）。
+            // Discard unsubmitted commands. If a layer already completed,
+            // dispose of its partial texture states instead of caching them.
+            if context.poisoned.is_some() {
+                drop(workspace);
+                return Err(error);
+            }
             if let Err(reset) = context.discard_recorded() {
                 drop(workspace);
                 return Err(reset);
             }
-            context.release_workspace(workspace);
+            if workspace.partial_submission {
+                workspace.release(&context.core);
+            } else {
+                context.release_workspace(workspace);
+            }
             return Err(error);
         }
     };
@@ -343,6 +352,7 @@ fn evaluate(
         return Err(error);
     }
     phase("提交 + 等 GPU（含全部推理）", &mut mark);
+    workspace.partial_submission = false;
 
     let rgba = match context.map_read_back(&readback, width, height) {
         Ok(rgba) => rgba,
@@ -373,7 +383,7 @@ fn evaluate(
     })
 }
 
-/// 把一页的整套命令记进命令表：上传 → 各层 → 回读。**不提交**。
+/// 上传与回读各一次；非末层提交并等待后复用 feature。
 ///
 /// 返回（上传缓冲, 回读缓冲）：两张都被这一批命令引用，要活到提交之后。
 fn record_page(
@@ -404,8 +414,7 @@ fn record_page(
         return Err(CANCELLED.to_string());
     }
     for index in 0..pass_count {
-        // 层与层之间仍是取消点。（整页只有一次提交，所以这里的取消等于整页作废：
-        // 一条命令都还没发出去，已经花掉的只有记录的时间和一次上传的行拷贝。）
+        // Layers are cancellation points; completed layers are fenced already.
         if cancel.cancelled() {
             return Err(CANCELLED.to_string());
         }
@@ -440,7 +449,7 @@ fn record_page(
 
         // 就用创建时那张参数表（NGX 在里面放了内部句柄）。尺寸参数保持工作区的
         // 尺寸，这一页多大只由 subrect 说明——实测两者输出一致（差 0.012/255）。
-        let parameters = &workspace.features[index].parameters;
+        let parameters = &workspace.features[0].parameters;
         fill_evaluate_parameters(
             parameters,
             source,
@@ -453,7 +462,17 @@ fn record_page(
         );
         context
             .core
-            .evaluate_feature(context.list.as_raw(), workspace.features[index].handle, parameters)?;
+            .evaluate_feature(context.list.as_raw(), workspace.features[0].handle, parameters)?;
+        if !last {
+            // NGX's internal scratch/history belong to the feature. Complete
+            // this pass before resetting and reusing it for the next layer.
+            workspace.partial_submission = true;
+            context.execute_and_wait()?;
+            #[cfg(test)]
+            if FAIL_AFTER_LAYER.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(CANCELLED.to_string());
+            }
+        }
     }
 
     let readback = context.record_read_back(&workspace.output, width, height, bucket_width, bucket_height)?;

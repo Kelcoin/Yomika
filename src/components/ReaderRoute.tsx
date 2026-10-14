@@ -84,7 +84,7 @@ function trimProcessMemory(): void {
  *
  * 工作区与它内部每个 NGX feature 的资源是按「层数 × 页面积」占**提交内存**的：
  * 实测一页 2731×4096 跑五层，进程提交内存从 45MB 涨到 9.5GB，交回之后立刻回到
- * 1.0GB 上下（`docs/69`）。它跟进程同寿、上限还是两份，所以「没人再看图」的时候必须
+ * 1.0GB 上下（`docs/69`）。它跟进程同寿、按可用资源保留，所以「没人再看图」的时候必须
  * 交回；代价只是下一页第一趟重建 feature（几十到几百毫秒）。
  *
  * 与 `trimProcessMemory` 分开：那条会顺手把 165MB 的 DLL 与 240MB 的 ONNX 一起扫出
@@ -429,6 +429,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** 任务号的来源：同一页重跑（换模型、改层参数）必须是新的号，否则旧任务的取消会
    * 误伤新任务。 */
   const derivedTaskSeqRef = useRef(0);
+  const derivedBackgroundRetryAtRef = useRef(0);
+  const derivedRetryTimerRef = useRef<ReturnType<typeof setTimeout>>();
   /** 已经说过一次的「某一档没跑成」：按阶段 + 模型去重。 */
   const upscaleFailureRef = useRef(new Set<string>());
   const dlssnrFailureRef = useRef(new Set<string>());
@@ -560,6 +562,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [cancelWorkspaceRelease]);
 
   const releaseAllPages = useCallback(() => {
+    if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
+    derivedRetryTimerRef.current = undefined;
+    derivedBackgroundRetryAtRef.current = 0;
     cancelWorkspaceRelease();
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
@@ -693,6 +698,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 21–27 MB 的派生结果没有任何人能看见（501 页的实测案例就这样攒到 2.9 GB）。 */
   const releaseDerived = useCallback((options?: { dropVisible?: boolean }) => {
     derivedGenerationRef.current += 1;
+    if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
+    derivedRetryTimerRef.current = undefined;
+    derivedBackgroundRetryAtRef.current = 0;
     for (const controller of derivedAbortsRef.current.values()) controller.abort();
     derivedAbortsRef.current.clear();
     for (const [pageIndex, handle] of derivedHandlesRef.current) {
@@ -780,6 +788,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 「翻一页就重排一次队列」永远是常数级的——把整本排成任务列表的话，每次可见页
    * 变化都要重扫两百条。 */
   const pumpSweep = useCallback(() => {
+    if (Date.now() < derivedBackgroundRetryAtRef.current) return;
     const context = contextRef.current;
     const sweep = derivedSweepRef.current;
     if (!context || !sweep || sweep.generation !== derivedGenerationRef.current) return;
@@ -794,7 +803,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
   }, []);
 
-  const runDerivedQueue = useCallback(async () => {
+  const runDerivedQueue = useCallback(async function drainDerivedQueue() {
     // 进入这一本时那次清理还没落地就不开工（见 `sessionPurged` 的注释）：清理只认「执行那一刻
     // 已经在表里」的行，而它和队列抢同一把 DB 锁——晚到一秒就会把这一秒里算出来的成品删掉。
     // 闸门只有这一处：队列空转与三档开关两个入口都从这儿进，放在入口上就会留下第二条路。
@@ -813,6 +822,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (derivedQueueRef.current.length === 0) pumpSweep();
         if (derivedQueueRef.current.length === 0) break;
         derivedQueueRef.current.sort((a, b) => DERIVED_TIER_ORDER[a.tier] - DERIVED_TIER_ORDER[b.tier]);
+        if (derivedQueueRef.current[0]?.tier !== 'visible' && Date.now() < derivedBackgroundRetryAtRef.current) break;
         const job = derivedQueueRef.current.shift();
         if (!job) break;
         const { pageIndex } = job;
@@ -962,6 +972,22 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             // 不写「远端失败」的提示：远端地址与令牌的失败在错误日志里，而且那一档本
             // 来就是本机处理的可选替代（本机这一版已经画出来了）。
           }
+          if (!controller.signal.aborted && job.generation === derivedGenerationRef.current
+              && jobFailure && RETRYABLE_COMPUTE_ERROR_CODES.has(jobFailure.code)) {
+            // Keep foreground navigation available, but stop asking the same
+            // unavailable worker about every page in the background sweep.
+            derivedAttemptedRef.current.delete(pageIndex);
+            // Let the idle release timer fire first. Retrying at exactly the
+            // same deadline cancels that timer and keeps the cached pressure.
+            const delay = jobFailure.code === 'COMPUTE_UNAVAILABLE' ? WORKSPACE_IDLE_RELEASE_MS + 1_000 : 5_000;
+            derivedBackgroundRetryAtRef.current = Date.now() + delay;
+            if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
+            if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
+            derivedRetryTimerRef.current = setTimeout(() => {
+              derivedRetryTimerRef.current = undefined;
+              if (mountedRef.current && pageActiveRef.current) void drainDerivedQueue();
+            }, delay);
+          }
           if (!derived) {
             // 一页什么都没落地，它就**不算「做过」**——但只对阵发性的失败这样算。worker 被杀、
             // 队列满、超时都是现场问题（看门狗会把 worker 拉回来），而「做过」这个记号是给
@@ -984,7 +1010,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           retainDerived(pageIndex, derived);
           // 后台预处理这一页就算做完了，记一笔：内存预算以后把它挤出会话时不再重算
           // （整本预处理要是有「做完又重做」的页，它永远走不到后面）。
-          if (job.tier === 'background') derivedWarmedRef.current.add(pageIndex);
+          if (job.tier === 'background' && !jobFailure) derivedWarmedRef.current.add(pageIndex);
           // Yield between pages so navigation/input can be serviced promptly on
           // slower devices while the native inference worker continues.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));

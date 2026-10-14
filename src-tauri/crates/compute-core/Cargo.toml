@@ -78,7 +78,7 @@ cc = "1"
 # 「初始化功能失败」，用户完全看不出是签名的事。`WINTRUST_DATA` / `WINTRUST_FILE_INFO`
 # 这两个结构在 windows 0.62 里门在 `Win32_Security_Cryptography` 后面，所以那一节也要开。
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_WinTrust", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_WinTrust", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [features]
 default = []
@@ -104,3 +104,4 @@ dlssnr = ["dep:png", "dep:image-webp", "image/gif", "image/png", "image/webp"]
 # Task 9），Android 目标与没有显卡的机器都不该付这份体积。没开或拿不到设备时回落
 # 的是同一个模块里的 CPU 解释器，行为不变。
 anime4k-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+

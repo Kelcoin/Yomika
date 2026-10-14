@@ -59,6 +59,9 @@ pub struct GpuContext {
     /// 诊断用计数：建过几个工作区、建过几次 feature。测试拿它证明「换页不重建」。
     pub workspace_builds: u64,
     pub feature_builds: u64,
+    /// Conservative initial estimate, corrected upwards by actual allocations.
+    workspace_gpu_bytes_per_pixel: u64,
+    workspace_commit_bytes_per_pixel: u64,
     /// `Some(原因)` ＝ 这一份上下文已经作废，不能再记录、不能再复用。
     ///
     /// 提交失败/栅栏超时/命令表重置失败都走这里：GPU 有没有停下不知道，命令表也未必
@@ -478,6 +481,8 @@ impl GpuContext {
             workspaces: Vec::new(),
             workspace_builds: 0,
             feature_builds: 0,
+            workspace_gpu_bytes_per_pixel: 192,
+            workspace_commit_bytes_per_pixel: 192,
             poisoned: None,
         })
     }
@@ -609,7 +614,39 @@ impl GpuContext {
                 }
                 Ok(existing)
             }
-            workspace::Choice::Create(size) => Workspace::create(self, size, passes),
+            workspace::Choice::Create(size) => {
+                let pixels = u64::from(size.0) * u64::from(size.1);
+                // Internal NGX allocations dominate textures. Spare buckets
+                // survive only if BOTH live budgets can cover the new bucket.
+                // Unknown readings revert to releasing before creating.
+                let predicted_gpu = pixels.saturating_mul(self.workspace_gpu_bytes_per_pixel).saturating_add(256 << 20);
+                let predicted_commit = pixels.saturating_mul(self.workspace_commit_bytes_per_pixel).saturating_add(256 << 20);
+                while !self.workspaces.is_empty() && (!workspace::spare_allocation_fits(
+                    self.video_memory(), crate::resources::system_memory(), predicted_gpu, predicted_commit,
+                ) || self.workspaces.len() >= workspace::MAX_WORKSPACES) {
+                    if let Some(mut old) = self.workspaces.pop() { old.release(&self.core); }
+                }
+                let gpu_before = self.video_memory();
+                let commit_before = crate::resources::system_memory();
+                let mut result = self.create_clean_workspace(size, passes);
+                if !self.workspaces.is_empty() && self.poisoned.is_none() && result.as_ref().err().is_some_and(|error| {
+                    crate::resources::is_allocation_error(&crate::error::ComputeError::InvalidInput(error.clone()))
+                }) {
+                    // A model may exceed the learned estimate. Release all
+                    // spares and make exactly one clean allocation attempt.
+                    for mut old in self.workspaces.drain(..) { old.release(&self.core); }
+                    result = self.create_clean_workspace(size, passes);
+                }
+                if result.is_ok() {
+                    if let (Some(before), Some(after)) = (gpu_before, self.video_memory()) {
+                        self.workspace_gpu_bytes_per_pixel = self.workspace_gpu_bytes_per_pixel.max(after.used_bytes.saturating_sub(before.used_bytes).saturating_sub(256 << 20).div_ceil(pixels.max(1)));
+                    }
+                    if let (Some(before), Some(after)) = (commit_before, crate::resources::system_memory()) {
+                        self.workspace_commit_bytes_per_pixel = self.workspace_commit_bytes_per_pixel.max(after.private_commit_bytes.saturating_sub(before.private_commit_bytes).saturating_sub(256 << 20).div_ceil(pixels.max(1)));
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -624,15 +661,30 @@ impl GpuContext {
             stale.release(&self.core);
         }
         self.workspaces.insert(0, workspace);
-        let mut total: u64 = self.workspaces.iter().map(Workspace::bytes).sum();
-        while self.workspaces.len() > 1
-            && (self.workspaces.len() > workspace::MAX_WORKSPACES || total > workspace::WORKSPACE_BUDGET_BYTES)
-        {
+        let gpu = self.video_memory();
+        let system = crate::resources::system_memory();
+        let keep_spares = workspace::spare_allocation_fits(gpu, system, 0, 0);
+        let limit = if keep_spares { workspace::MAX_WORKSPACES } else if gpu.is_some() && system.is_some() { 0 } else { 1 };
+        while self.workspaces.len() > limit {
             if let Some(mut dropped) = self.workspaces.pop() {
-                total = total.saturating_sub(dropped.bytes());
                 dropped.release(&self.core);
             }
         }
+    }
+
+    fn video_memory(&self) -> Option<super::gpu::VideoMemory> {
+        let id = unsafe { self.device.GetAdapterLuid() };
+        let luid = ((id.HighPart as i64) << 32) | id.LowPart as i64;
+        super::gpu::video_memory_for_luid(luid)
+    }
+
+    fn create_clean_workspace(&mut self, size: (u32, u32), passes: usize) -> Result<Workspace, String> {
+        let result = Workspace::create(self, size, passes);
+        // Even early texture allocation failures may leave guide upload
+        // commands recorded against resources that are now gone. Never let
+        // the next attempt submit those dangling commands.
+        if result.is_err() && self.poisoned.is_none() { self.discard_recorded()?; }
+        result
     }
 
     /// 现有工作区的尺寸，按「最近用过」排（给 `workspace::choose` 挑）。
