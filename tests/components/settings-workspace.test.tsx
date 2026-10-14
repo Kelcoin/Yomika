@@ -4,6 +4,7 @@ import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
+import * as platformBridge from '../../src/bridge/platform';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForTests, setSavePickerForTests, setTextFilePickerForTests } from '../../src/bridge/filePicker';
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
@@ -682,7 +683,8 @@ describe('settings workspace', () => {
 
     expect(await screen.findByRole('radio', { name: '深色' })).toBeChecked();
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
-    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#121412');
+    expect(localStorage.getItem('yomika.last-theme')).toBe('dark');
 
     // No save button: a change is the save. The old form let a toggle look
     // applied while nothing had been written. There is no autosave caption
@@ -691,11 +693,33 @@ describe('settings workspace', () => {
 
     await vi.waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'light'));
     expect(screen.queryByText(/自动保存/)).not.toBeInTheDocument();
-    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#f3eee4');
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#fbf8f3');
+    expect(localStorage.getItem('yomika.last-theme')).toBe('light');
     // Saving one section still writes the whole snapshot.
     expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...DEFAULT_PREFERENCES, ...loaded, theme: 'light' },
     });
+  });
+
+  it('bridges the displayed functional CSS canvas as native hex', async () => {
+    const bridge = vi.spyOn(platformBridge, 'setSystemBarStyle').mockResolvedValue({ ok: true, value: undefined });
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: {
+        ...DEFAULT_PREFERENCES, theme: 'dark', customCss: ':root { --surface-canvas: rgba(30, 40, 50, 0.5); }',
+      } };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      return { ok: true, value: [] };
+    });
+    try {
+      renderSettings('appearance');
+      await waitFor(() => expect(bridge).toHaveBeenCalledWith(true, '#801e2832'));
+      expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute('content', '#1e283280');
+      expect(localStorage.getItem('yomika.last-theme')).toBe('dark');
+    } finally {
+      bridge.mockRestore();
+      document.getElementById('yomika-custom-css')?.remove();
+      localStorage.removeItem('yomika.last-custom-css');
+    }
   });
 
   it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {

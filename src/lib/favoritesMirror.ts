@@ -1,28 +1,38 @@
+import type { ArchiveRecord } from '../domain/library';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-
 const repository = new NativeLibraryRepository();
 
-/** 把收藏写入镜像到 LANraragi 的 🔖 Favorites 分类。
- *
- * 收藏夹书架读的就是那条分类，只写本地那一份永远显示不出来——所以详情页的心、
- * 右键菜单与多选都把写入镜像过去。返回镜像失败的条数：服务器上没有这条分类时
- * 也算 0（那不是失败，只是这台服务器没开收藏分类，本机那份就是全部）。
- *
- * 取那条分类走 `readFavoritesCategory`：它不解析动态分类，一次两百毫秒；`listCategories`
- * 在快照过期后要把每条动态分类各跑一次不分页的全库搜索（1.5 万档案的库上 23 秒）。 */
-export async function mirrorFavorites(
-  serverId: string,
-  archiveIds: readonly string[],
-  next: boolean,
-): Promise<number> {
-  if (archiveIds.length === 0) return 0;
-  const favorites = await repository.readFavoritesCategory(serverId);
-  if (!favorites.ok || !favorites.value) return 0;
-  const categoryId = favorites.value.id;
-  const results = await Promise.all(archiveIds.map((archiveId) => (
-    next
-      ? repository.addArchiveToCategory(serverId, categoryId, archiveId)
-      : repository.removeArchiveFromCategory(serverId, categoryId, archiveId)
-  )));
-  return results.filter((result) => !result.ok).length;
+/** Favorites has one authority: the server category. Failures never become local success. */
+export async function mirrorFavorites(serverId: string, archiveIds: readonly string[], next: boolean): Promise<number> {
+  if (!archiveIds.length) return 0;
+  try {
+    const favorites = await repository.readFavoritesCategory(serverId);
+    if (!favorites.ok || !favorites.value) return archiveIds.length;
+    const results = await Promise.allSettled(archiveIds.map(id => next
+      ? repository.addArchiveToCategory(serverId, favorites.value!.id, id)
+      : repository.removeArchiveFromCategory(serverId, favorites.value!.id, id)));
+    return results.filter(result => result.status === 'rejected' || !result.value.ok).length;
+  } catch { return archiveIds.length; }
+}
+
+/** Resolve remote-only favorites without unbounded parallel metadata requests. */
+export async function loadFavoriteArchives(serverId: string, ids: readonly string[]): Promise<ArchiveRecord[]> {
+  const unique = [...new Set(ids)];
+  const cached = await repository.listArchivesByIds(serverId, unique);
+  if (!cached.ok) throw new Error(cached.error.message);
+  const records = new Map(cached.value.filter(a => unique.includes(a.archiveId)).map(a => [a.archiveId, a]));
+  const missing = unique.filter(id => !records.has(id));
+  for (let offset = 0; offset < missing.length; offset += 4) {
+    await Promise.all(missing.slice(offset, offset + 4).map(async id => {
+      const metadata = await repository.loadArchiveMetadata(serverId, id);
+      if (!metadata.ok) {
+        if (metadata.error.code === 'LRR_NOT_FOUND') return;
+        throw new Error(metadata.error.message);
+      }
+      const value = metadata.value;
+      records.set(id, { serverId, archiveId: id, title: value.title, pageCount: value.pageCount,
+        fileSize: value.size, tags: value.tags.split(',').map(tag => tag.trim()).filter(Boolean), updatedAt: new Date().toISOString() });
+    }));
+  }
+  return unique.map(id => records.get(id)).filter((record): record is ArchiveRecord => Boolean(record));
 }

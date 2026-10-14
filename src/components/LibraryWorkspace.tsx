@@ -1,10 +1,12 @@
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
-import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { useDefaultLayout } from 'react-resizable-panels';
+import { Group, Panel, Separator } from './AdaptivePanels';
+import { usePageActive } from '../app/RetainedPage';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -327,6 +329,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const [localCategoryFilter, setLocalCategoryFilter] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const pageActive = usePageActive();
   /** The element the pull is bound to: see scrollHost for how it is chosen. */
   const [scrollHostElement, setScrollHostElement] = useState<HTMLElement>();
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -335,7 +339,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   // 上没有任何可滚祖先，滚轮就整个作废。把这份手势转发给同面板的滚动区域。
   useEffect(() => {
     const region = scrollRef.current;
-    if (!region) return undefined;
+    if (!pageActive || compact || !region) return undefined;
     const host = region.closest('.library-shell-list') ?? region.parentElement;
     if (!host) return undefined;
     const forward = (event: Event) => {
@@ -348,7 +352,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     };
     host.addEventListener('wheel', forward, { passive: true });
     return () => host.removeEventListener('wheel', forward);
-  }, []);
+  }, [compact, pageActive]);
   /** Undefined until something is actually chosen. Seeding it with the first
    * archive made the top row render as pressed on every visit — including on the
    * shelves, which show no detail pane for it to be the subject of. */
@@ -413,6 +417,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollRef.current = 0;
     overscrollDirection.current = undefined;
     overscrollClaimed.current = false;
+    overscrollEdge.current = undefined;
+    overscrollStartY.current = undefined;
     paintPull(0);
     setOverscroll(0);
     setOverscrollGesture(null);
@@ -472,7 +478,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   // every wheel notch is work the compositor thread does not need. The host only
   // decides who listens — which end a notch is past is asked per gesture, from
   // the event's own target (see gestureScroller).
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
     const resolve = () => {
@@ -482,13 +488,15 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     resolve();
     window.addEventListener('resize', resolve);
     return () => window.removeEventListener('resize', resolve);
-  }, []);
+  }, [compact, pageActive]);
 
   useEffect(() => {
     const host = scrollHostElement;
-    if (!host) return undefined;
+    if (!pageActive || !host) return undefined;
+    const owns = (target: EventTarget | null) => target instanceof Node && rootRef.current?.contains(target);
 
     const wheel = (event: WheelEvent) => {
+      if (!owns(event.target)) return;
       // Deltas arrive in pixels, lines or pages; a line is about 16px.
       const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
       // 每次手势重新问一次「这一格滚轮会滚谁」：绑定的宿主只决定谁收到事件，
@@ -519,6 +527,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     };
 
     const touchStart = (event: TouchEvent) => {
+      if (!owns(event.target)) return;
       // The end the finger lands on is the only one it may pull past; anywhere
       // else the scroller needs the finger for its own scrolling.
       const position = gestureScroller(event.target, host) ?? host;
@@ -583,8 +592,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       host.removeEventListener('touchmove', touchMove);
       host.removeEventListener('touchend', touchEnd);
       host.removeEventListener('touchcancel', touchEnd);
+      cancelOverscroll();
     };
-  }, [scrollHostElement, applyOverscroll, cancelOverscroll, releaseOverscroll]);
+  }, [scrollHostElement, pageActive, compact, applyOverscroll, cancelOverscroll, releaseOverscroll]);
   const savedPanelLayout = useDefaultLayout({
     id: 'library-detail-layout',
     panelIds: showDetail ? ['library-list', 'library-detail'] : ['library-list'],
@@ -602,7 +612,27 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const categoryFilter = controlledCategoryFilter ?? localCategoryFilter;
   const displayMode = controlledCardStyle ?? localCardStyle;
   // Compact history folds the right-hand rail into a horizontal day divider.
-  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    const list = scrollRef.current;
+    const host = scrollHostElement;
+    if (!pageActive) return;
+    if (!compact || !list || !host || host === list) { setScrollMargin(0); return; }
+    const measure = () => setScrollMargin(Math.max(0, list.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop + list.clientTop));
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(rootRef.current!);
+    observer?.observe(host);
+    window.addEventListener('resize', measure);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
+  }, [compact, scrollHostElement, pageActive]);
+  useEffect(() => {
+    if (!pageActive || !compact || !scrollHostElement || !hasMore || loadingMore || !onLoadMore) return;
+    const host = scrollHostElement;
+    const more = () => { if (host.scrollTop + host.clientHeight >= host.scrollHeight - 320) onLoadMore(); };
+    host.addEventListener('scroll', more, { passive: true });
+    return () => host.removeEventListener('scroll', more);
+  }, [compact, scrollHostElement, hasMore, loadingMore, onLoadMore, pageActive]);
   const displayCategories = useMemo(() => sortCategoriesForDisplay((categories ?? []).filter((category) => category.name !== FAVORITES_CATEGORY_NAME)), [categories]);
   const filteredArchives = archives;
   /** Row index -> the day label to print above it. A day's first row starts a
@@ -730,7 +760,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const selected = filteredArchives.find((archive) => archive.archiveId === selectedId) ?? filteredArchives[0];
   const rows = useVirtualizer({
     count: filteredArchives.length,
-    getScrollElement: () => scrollRef.current,
+    getScrollElement: () => compact ? scrollHostElement ?? null : scrollRef.current,
+    scrollMargin,
     // Keep in step with `.archive-list.is-wide .archive-row-wrap` in shell.css:
     // the virtualizer positions rows, so a mismatch overlaps them. Each row is a
     // 158px card inside a 166px stride, which is where the 8px gap comes from;
@@ -759,7 +790,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [compact, pageActive]);
   const gridColumns = getArchiveGridColumns(gridWidth || 720);
   const gridRows = useMemo(
     () => (displayMode === 'thumbnail'
@@ -769,7 +800,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   );
   const thumbnailRows = useVirtualizer({
     count: gridRows.length,
-    getScrollElement: () => scrollRef.current,
+    getScrollElement: () => compact ? scrollHostElement ?? null : scrollRef.current,
+    scrollMargin,
     estimateSize: () => ARCHIVE_GRID_ROW_HEIGHT + ARCHIVE_GRID_GAP,
     overscan: 2,
     initialRect: { width: 720, height: 560 },
@@ -1152,7 +1184,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                     <div
                       className="archive-thumb-grid-row"
                       key={virtualRow.key}
-                      style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                      style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
                     >
                       {(gridRows[virtualRow.index] ?? []).map((archive) => (
                         <div
@@ -1178,7 +1210,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                       role="listitem"
                       // Every row is its own card; the wrap only carries the 8px
                       // gap between rows, so no first/last rounding is needed.
-                      style={{ height: row.size, transform: `translateY(${row.start}px)` }}
+                      style={{ height: row.size, transform: `translateY(${row.start - scrollMargin}px)` }}
                     >
                       {renderArchiveButton(archive, row.index < 8, dayStarts.get(row.index))}
                     </div>

@@ -2,7 +2,11 @@
     <!-- Base application theme. -->
     <style name="Theme.yomika" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
-        <!-- 开屏画面（docs/30）：Canvas 底 + 居中印记，冷启动到 webview 首帧之间画的就是它。 -->
+        <!-- 开屏画面（docs/30）：**只有画布**，冷启动到 webview 首帧之间画的就是它。
+             印记交给 Android 12+ 的系统开屏（`windowSplashScreenAnimatedIcon`，见
+             values-v31/themes.xml）；12 以下的启动窗口不再画第二个品牌帧——网页首帧
+             自己会画（index.html 的静态帧 + SplashFrame），这里再画一次就是用户报过的
+             「先闪一个不认识的窗口」。 -->
         <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 </resources>

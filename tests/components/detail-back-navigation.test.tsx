@@ -30,6 +30,8 @@ function answered() {
     if (command === 'list_servers') return { ok: true, value: [server] };
     if (command === 'search_archives_page') return { ok: true, value: { items: [archive], total: 1, hasMore: false } };
     if (command === 'search_random_archives') return { ok: true, value: [archive] };
+    if (command === 'read_favorites_category') return { ok: true, value: { id: 'fav', archives: ['archive-a'] } };
+    if (command === 'list_archives_by_ids') return { ok: true, value: [archive] };
     if (command === 'load_archive_metadata') return { ok: true, value: metadata };
     if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
     if (command.startsWith('list_')) return { ok: true, value: [] };
@@ -67,13 +69,11 @@ describe('the detail page goes back to the page it belongs to', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^Probe Archive\b/ }));
     await waitFor(() => expect(window.location.pathname).toBe('/library/archive-a'));
 
-    // 离开档案库（详情还开着），再从首页点回档案库：保留页面把这份详情恢复了。
+    // 主导航打开列表，不恢复上次详情子路由。
     fireEvent.click(nav.getByRole('link', { name: '首页' }));
     await waitFor(() => expect(window.location.pathname).toBe('/'));
     fireEvent.click(nav.getByRole('link', { name: '档案库' }));
-    await waitFor(() => expect(window.location.pathname).toBe('/library/archive-a'));
-
-    await clickDetailBack('/library');
+    await waitFor(() => expect(window.location.pathname).toBe('/library'));
     // 真的回到了列表：那一排卡片还在。
     expect(await screen.findByRole('button', { name: /^Probe Archive\b/ })).toBeInTheDocument();
   });
@@ -108,5 +108,36 @@ describe('the detail page goes back to the page it belongs to', () => {
     // 编辑页的返回读的是详情页写进 state 的 returnTo：从首页那份详情进来的，
     // 就该回首页那份详情（而不是硬编码的档案库详情）。
     await clickDetailBack('/home/archive-a');
+    await clickDetailBack('/');
+    const nav = await mainNav();
+    fireEvent.click(nav.getByRole('link', { name: '档案库' }));
+    await waitFor(() => expect(window.location.pathname).toBe('/library'));
+    expect(screen.queryByRole('heading', { name: '编辑元数据' })).not.toBeInTheDocument();
   });
+});
+
+
+it.each([['/library', '档案库'], ['/watchlist', '收藏夹']])('returns through the editor to its %s origin and list', async (origin, label) => {
+  answered();
+  renderAt('/');
+  const nav = await mainNav();
+  fireEvent.click(nav.getByRole('link', { name: label }));
+  await waitFor(() => expect(window.location.pathname).toBe(origin));
+  fireEvent.click(await screen.findByRole('button', { name: /^Probe Archive\b/ }));
+  await waitFor(() => expect(window.location.pathname).toBe(`${origin}/archive-a`));
+  fireEvent.click(await screen.findByRole('button', { name: '编辑元数据' }));
+  await waitFor(() => expect(window.location.pathname).toBe('/library/archive-a/edit'));
+  await clickDetailBack(`${origin}/archive-a`);
+  await clickDetailBack(origin);
+  fireEvent.click(nav.getByRole('link', { name: '档案库' }));
+  await waitFor(() => expect(window.location.pathname).toBe('/library'));
+  expect(screen.queryByRole('heading', { name: '编辑元数据' })).not.toBeInTheDocument();
+});
+
+it('falls back to the library list for a direct editor link with no history', async () => {
+  answered();
+  renderAt('/library/archive-a/edit');
+  await screen.findByRole('heading', { name: '编辑元数据' });
+  await clickDetailBack('/library');
+  expect(await screen.findByRole('button', { name: /^Probe Archive\b/ })).toBeInTheDocument();
 });

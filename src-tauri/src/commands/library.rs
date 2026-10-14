@@ -1459,6 +1459,12 @@ pub async fn load_archive_metadata(
             false,
         ));
     }
+    let persisted = database.connection.lock()
+        .map_err(|_| "Database lock failed".to_string())
+        .and_then(|mut connection| persist_archive_metadata(&mut connection, &server_id, &wire));
+    if let Err(error) = persisted {
+        return Ok(CommandResult::failure("LOCAL_DATABASE", error, true));
+    }
     Ok(CommandResult::success(ArchiveMetadataRecord {
         archive_id: wire.arcid,
         title: wire.title,
@@ -4422,6 +4428,27 @@ fn upsert_archive_rows(
     Ok(())
 }
 
+// Metadata responses may omit optional facts. Preserve known summary and the
+// existing upsert boundary's added_at/first_seen/category/local-overlay state.
+fn persist_archive_metadata(
+    connection: &mut rusqlite::Connection,
+    server_id: &str,
+    wire: &ArchiveMetadataWire,
+) -> Result<(), String> {
+    let summary = match &wire.summary {
+        Some(summary) => Some(summary.clone()),
+        None => connection.query_row(
+            "SELECT summary FROM archives WHERE server_id=?1 AND archive_id=?2",
+            params![server_id, wire.arcid], |row| row.get::<_, Option<String>>(0),
+        ).optional().map_err(|error| error.to_string())?.flatten(),
+    };
+    upsert_server_archives(connection, server_id, &[RemoteArchive {
+        archive_id: wire.arcid.clone(), title: wire.title.clone(), summary,
+        tags: wire.tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()).map(str::to_owned).collect(),
+        page_count: wire.pagecount, size: wire.size,
+    }])
+}
+
 fn replace_server_archives(
     connection: &mut rusqlite::Connection,
     server_id: &str,
@@ -4767,33 +4794,14 @@ fn favorites_from_cached_snapshot(
     )
 }
 
-/// `/api/categories` 里那一条 🔖 Favorites，**不做任何动态解析**。
-///
-/// 不能走 `list_categories`：那条路会把每条动态分类各跑一次不分页的全库搜索，
-/// 1.5 万档案的库上量到 23 秒——而收藏夹的书架、详情页的心、右键菜单与多选都只问
-/// 这一条**静态**分类，它的会员名单就在 `/api/categories` 的回包里（API 文档中
-/// `CategoryMetadataJson.archives`：静态分类直接给出 id 列表）。所以这里依次问：
-/// 共享分类快照（新鲜）→ 收藏自己的快照（新鲜）→ 现取一次 `/api/categories`。
-/// 都不成时退回不论年龄的收藏快照；再没有才是失败。
-///
-/// 现取的那一次会写进收藏自己的快照，而不是共享快照：共享快照的语义是「动态分类
-/// 都解析过了」，用一份没有解析的结果覆盖它，会让档案卡片在六小时里丢掉分类标签。
+/// Read the current server Favorites membership without resolving unrelated dynamic categories.
+/// A missing category is a successful empty shelf; transport/schema failures remain failures.
+/// Persisted snapshots are not authoritative for online favorites reads.
 #[tauri::command]
 pub async fn read_favorites_category(
     server_id: String,
     database: State<'_, Database>,
 ) -> Result<CommandResult<Option<FavoritesCategoryRecord>>, String> {
-    {
-        let connection = match database.connection.lock() {
-            Ok(connection) => connection,
-            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
-        };
-        match favorites_from_cached_snapshot(&connection, &server_id, current_unix_seconds()) {
-            Ok(Some(favorites)) => return Ok(CommandResult::success(Some(favorites))),
-            Ok(None) => {}
-            Err(error) => return Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
-        }
-    }
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -4829,9 +4837,9 @@ pub async fn read_favorites_category(
     }
     .await;
     let favorites = match fetched {
-        None => None,
+        None => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "读取 LANraragi 分类失败", true)),
         Some(raw) => match parse_category_list(&raw) {
-            Err(_) => None,
+            Err(_) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "LANraragi 分类数据无效", true)),
             Ok(wire) => {
                 let categories = wire.into_iter().map(category_record).collect::<Vec<_>>();
                 // 静态收藏分类的名单是现成的；万一服务器上这条被改成了动态分类，
@@ -4846,10 +4854,9 @@ pub async fn read_favorites_category(
                     .map(str::to_owned);
                 if let (Some(favorites), Some(search)) = (found.as_mut(), search) {
                     if favorites.archives.is_empty() {
-                        if let Some(archives) =
-                            resolve_category_archives(&base_url, &api_key, &search).await
-                        {
-                            favorites.archives = archives;
+                        match resolve_category_archives(&base_url, &api_key, &search).await {
+                            Some(archives) => favorites.archives = archives,
+                            None => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "读取收藏分类成员失败", true)),
                         }
                     }
                 }
@@ -4864,19 +4871,7 @@ pub async fn read_favorites_category(
         }
         return Ok(CommandResult::success(Some(favorites)));
     }
-    let connection = match database.connection.lock() {
-        Ok(connection) => connection,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
-    };
-    match read_favorites_cache_from(&connection, &server_id, current_unix_seconds(), None) {
-        Ok(Some(favorites)) => Ok(CommandResult::success(Some(favorites))),
-        Ok(None) => Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            "读取 LANraragi 分类失败".to_string(),
-            true,
-        )),
-        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
-    }
+    Ok(CommandResult::success(None))
 }
 
 fn current_unix_seconds() -> i64 {
@@ -8045,6 +8040,30 @@ mod tests {
             ))
             .expect("local archive metadata migration");
         connection
+    }
+
+    #[test]
+    fn resolved_favorite_metadata_persists_and_preserves_optional_facts() {
+        let mut connection = migrated_connection();
+        connection.execute("INSERT INTO servers (id,name,base_url,scope_id) VALUES ('scope-a','Home','https://example.com','scope-a')", []).unwrap();
+        let wire = ArchiveMetadataWire {
+            arcid: "remote-only".into(), title: "Remote favorite".into(), filename: "archive.cbz".into(),
+            tags: "artist:sample, date_added:123".into(), summary: Some("Known summary".into()),
+            extension: "cbz".into(), progress: 0, pagecount: 12, lastreadtime: 0, size: 1024,
+        };
+        persist_archive_metadata(&mut connection, "scope-a", &wire).unwrap();
+        let records = query_archive_records(&connection, "scope-a").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].archive_id, "remote-only");
+        let wire = ArchiveMetadataWire { summary: None, tags: "artist:sample".into(), ..wire };
+        persist_archive_metadata(&mut connection, "scope-a", &wire).unwrap();
+        let preserved: (Option<String>, Option<i64>) = connection.query_row(
+            "SELECT summary, added_at FROM archives WHERE archive_id='remote-only'", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(preserved, (Some("Known summary".into()), Some(123)));
+        let again = query_archive_records(&connection, "scope-a").unwrap();
+        assert_eq!(again.len(), 1);
     }
 
     #[test]

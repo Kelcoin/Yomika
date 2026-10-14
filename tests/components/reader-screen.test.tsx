@@ -556,7 +556,7 @@ describe('reader screen', () => {
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     for (const image of document.querySelectorAll<HTMLElement>('.reader-frame img')) fillHeightLetterbox(image, 700);
     await settle();
-    expect(pageIndicator()?.getAttribute('data-placement')).toBe('bottom');
+    expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
 
     const reads = trackRects(pageIndicator() as HTMLElement);
     const before = reads.count();
@@ -1468,6 +1468,7 @@ describe('reader screen', () => {
     const leavingPill = pageIndicator() as HTMLElement;
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
     expect(leavingPill).toHaveClass('is-leaving');
+    expect(leavingPill).toHaveClass('is-raised');
 
     // 窗口过去之后栏摘掉，胶囊也交还标记——它此时已经在落点上了，可以正常淡入。
     await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });

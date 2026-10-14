@@ -524,7 +524,7 @@ describe('native library repository bridge', () => {
     };
     const adapter = vi.fn(async (command: string) => ({
       ok: true,
-      value: command === 'list_watchlist' ? [value] : value,
+      value: command === 'list_reading_list' ? [value] : value,
     }));
     setInvokeAdapterForTests(adapter);
     const repository = new NativeLibraryRepository();
@@ -532,9 +532,9 @@ describe('native library repository bridge', () => {
     expect(await repository.setWatchlist('scope-a', 'a1', true)).toEqual({ ok: true, value });
     expect(await repository.setWatchlist('scope-a', 'a1', false)).toEqual({ ok: true, value });
     expect(await repository.listWatchlist('scope-a')).toEqual({ ok: true, value: [value] });
-    expect(adapter).toHaveBeenNthCalledWith(1, 'set_watchlist', { scopeId: 'scope-a', archiveId: 'a1', added: true });
-    expect(adapter).toHaveBeenNthCalledWith(2, 'set_watchlist', { scopeId: 'scope-a', archiveId: 'a1', added: false });
-    expect(adapter).toHaveBeenNthCalledWith(3, 'list_watchlist', { scopeId: 'scope-a' });
+    expect(adapter).toHaveBeenNthCalledWith(1, 'set_reading_list', { scopeId: 'scope-a', archiveId: 'a1', added: true });
+    expect(adapter).toHaveBeenNthCalledWith(2, 'set_reading_list', { scopeId: 'scope-a', archiveId: 'a1', added: false });
+    expect(adapter).toHaveBeenNthCalledWith(3, 'list_reading_list', { scopeId: 'scope-a' });
   });
 
   it('lists scoped reading history records', async () => {

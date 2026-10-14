@@ -487,6 +487,47 @@ describe('reader route', () => {
     // DLSS5 的输入就是本地算出来的那一版（超分那一版），不是原图。
     await waitFor(() => expect(dlssnrSource).toBe('enhanced'));
   });
+  it('keeps screen-owned raw neighbours valid through background warming and later revisits', async () => {
+    const cache = getNativeImageCache();
+    const revoked = new Set<string>();
+    const rawHandles = new Map<number, ImageHandle>();
+    const release = vi.spyOn(cache, 'release').mockImplementation((handle) => { revoked.add(handle.url); });
+    const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
+      const handle = { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+      if (identity.rendition === 'reader-page') rawHandles.set(identity.pageIndex!, handle);
+      return handle;
+    });
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, dlssnrEnabled: true } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'raw-owner', title: 'Reader', pages: Array.from({ length: 6 }, (_, i) => `${i}.jpg`) } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/raw-owner']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    await waitFor(() => expect(rawHandles.has(1)).toBe(true));
+    const retainedNeighbour = rawHandles.get(1)!;
+    fireEvent.click(reader);
+    fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    // Waiting for the last background-only release proves the sweep has passed
+    // the screen's retained neighbour, rather than asserting before its finally.
+    await waitFor(() => expect(release.mock.calls.some(([handle]) => handle.key === 'reader-page-5')).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: '关闭 DLSSNR' }));
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', retainedNeighbour.url));
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', retainedNeighbour.url));
+    expect(revoked.has(retainedNeighbour.url)).toBe(false);
+    expect(release).not.toHaveBeenCalledWith(retainedNeighbour);
+    expect(load.mock.calls.filter(([identity]) => identity.rendition === 'reader-page' && identity.pageIndex === 1)).toHaveLength(1);
+    for (let step = 0; step < 4; step += 1) fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await waitFor(() => expect(release).toHaveBeenCalledWith(retainedNeighbour));
+  });
+
   it('does not retain source page handles for background-only preprocessing', async () => {
     const cache = getNativeImageCache();
     const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
@@ -509,8 +550,11 @@ describe('reader route', () => {
       fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
       fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
       await waitFor(() => expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr')).toBe(true));
-      await waitFor(() => expect(release.mock.calls.map(([handle]) => handle.key)).toContain('reader-page-1'));
+      // Page 1 is already held as the screen's next swipe slot even with zero
+      // configured prefetch. Page 2 is background-only and must be released.
+      await waitFor(() => expect(release.mock.calls.map(([handle]) => handle.key)).toContain('reader-page-2'));
       expect(release.mock.calls.map(([handle]) => handle.key)).not.toContain('reader-page-0');
+      expect(release.mock.calls.map(([handle]) => handle.key)).not.toContain('reader-page-1');
     } finally {
       view.unmount();
     }
@@ -548,7 +592,7 @@ describe('reader route', () => {
     // 可见的那一页排在后台那些页前面——预处理不该让正在读的这页等。
     expect(dlssnrPages()[0]).toBe(0);
     // Preprocessing reads every source, but must not pin all raw pages for the
-    // entire session: only visible+prefetch pages belong to the display window.
+    // entire session: only pages claimed by the screen belong to its window.
     await waitFor(() => {
       const released = release.mock.calls.map(([handle]) => handle.key);
       expect(released).toEqual(expect.arrayContaining(

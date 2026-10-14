@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
-import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { useDefaultLayout } from 'react-resizable-panels';
+import { Group, Panel, Separator } from './AdaptivePanels';
 
 import { panelLayout } from '../lib/panelLayout';
 import { ArchiveDetailRoute } from './ArchiveDetailRoute';

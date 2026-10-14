@@ -1,3 +1,4 @@
+import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
@@ -84,9 +85,19 @@ detailBasePath?: string | undefined }) {
   const [error, setError] = useState<string>();
   const [serverId, setServerId] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
+  const favoritePageActive = usePageActive();
   const [favorite, setFavorite] = useState(false);
+  const [favoriteReady, setFavoriteReady] = useState(false);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
   const [inReadingList, setInReadingList] = useState(false);
   const [message, setMessage] = useState<string>();
+  const favoriteIdentity = `${serverParam ?? 'default'}:${serverId ?? ''}:${archiveId}`;
+  const favoriteOwner = useRef({ identity: favoriteIdentity, generation: 0 });
+  if (favoriteOwner.current.identity !== favoriteIdentity) {
+    favoriteOwner.current = { identity: favoriteIdentity, generation: favoriteOwner.current.generation + 1 };
+  }
+  const favoriteGeneration = favoriteOwner.current.generation;
+  useEffect(() => { setFavorite(false); setFavoriteReady(false); setFavoriteBusy(false); setMessage(undefined); }, [favoriteIdentity]);
   const navigate = useNavigate();
   /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
    * also follow the link, so the click is swallowed once. */
@@ -147,6 +158,7 @@ detailBasePath?: string | undefined }) {
     setServerId(undefined);
     setScopeId(undefined);
     setFavorite(false);
+    setFavoriteReady(false);
     setMessage(undefined);
     setEhAccountId(undefined);
     setDetailPanel('media');
@@ -196,10 +208,6 @@ detailBasePath?: string | undefined }) {
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
-      void repository.listWatchlist(server.scopeId).then((result) => {
-        if (!active || !result.ok) return;
-        setFavorite(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
-      });
       void repository.listReadingList(server.scopeId).then((result) => {
         if (!active || !result.ok) return;
         setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
@@ -213,6 +221,25 @@ detailBasePath?: string | undefined }) {
     return () => { active = false; };
   }, [archiveId, navigate, serverParam, showToast]);
 
+  useEffect(() => {
+    if (!serverId) return;
+    let active = true;
+    let request = 0;
+    const refresh = () => {
+      const current = ++request;
+      void repository.readFavoritesCategory(serverId).then(result => {
+        if (!active || current !== request) return;
+        if (!result.ok) { setMessage(result.error.message); return; }
+        setFavorite(result.value?.archives.includes(archiveId) ?? false); setFavoriteReady(true);
+      });
+    };
+    const invalidate = (event: Event) => {
+      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix === 'favorites:') refresh();
+    };
+    if (favoritePageActive) refresh();
+    window.addEventListener('yomika:route-cache-invalidated', invalidate);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
+  }, [serverId, archiveId, favoritePageActive]);
   // A retained detail does not remount after saving metadata in the editor.
   // Refresh only its metadata on explicit invalidation, never on tab changes.
   useEffect(() => {
@@ -246,7 +273,10 @@ detailBasePath?: string | undefined }) {
   const detailDateKind = useDetailDateKind();
   const [downloading, setDownloading] = useState(false);
   const { open: openMenu, menu } = useArchiveContextMenu({
-    onMembershipChange: (_id, list, next) => list === 'reading' ? setInReadingList(next) : setFavorite(next),
+    onMembershipChange: (id, list, next) => {
+      if (id !== archiveId || favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;
+      if (list === 'reading') setInReadingList(next); else { favoriteOwner.current.generation++; setFavorite(next); }
+    },
     onDeleted: () => navigate(shelfBase, { replace: true }),
   });
   const title = metadata?.title || '';
@@ -333,26 +363,25 @@ detailBasePath?: string | undefined }) {
           {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
         </button>}
-        {detailActions.includes('favorites') && <button className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
-          if (!scopeId) return;
-          void repository.setWatchlist(scopeId, archiveId, !favorite).then((result) => {
-            if (result.ok) setFavorite(!result.value.deleted);
-            else setMessage(result.error.message);
-            // 收藏夹 reads the LANraragi 🔖 Favorites category, so the heart
-            // mirrors the write there too — best effort, the local row stays
-            // as the offline mirror and for WebDAV sync either way.
-            if (!serverId) return;
-            void mirrorFavorites(serverId, [archiveId], !favorite).then((mirrored) => {
-              if (mirrored > 0) setMessage('未能同步到服务器收藏夹');
-            });
-          });
+        {detailActions.includes('favorites') && <button disabled={!favoriteReady || favoriteBusy} className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
+          if (!serverId) return;
+          const identity = favoriteIdentity;
+          const generation = ++favoriteOwner.current.generation;
+          const ownsMutation = () => favoriteOwner.current.identity === identity && favoriteOwner.current.generation === generation;
+          setFavoriteBusy(true);
+          const next = !favorite;
+          void mirrorFavorites(serverId, [archiveId], next).then(failed => {
+            if (!ownsMutation()) return;
+            if (failed) setMessage('未能更新服务器收藏夹');
+            else setFavorite(next);
+          }).finally(() => { if (ownsMutation()) setFavoriteBusy(false); });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
         {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
           if (!serverId || downloading) return;
           setDownloading(true);
           void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error')).finally(() => setDownloading(false));
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
-        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}` } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
+        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>

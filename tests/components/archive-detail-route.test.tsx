@@ -6,7 +6,7 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
-import { readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
+import { invalidateRouteCache, readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -38,6 +38,43 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
+  it('ignores an A favorite completion after B membership has loaded', async () => {
+    let finish!: (value: unknown) => void;
+    const pending = new Promise(resolve => { finish = resolve; });
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: args?.archiveId, title: args?.archiveId } };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'fav', archives: [] } };
+      if (command === 'add_archive_to_category') return pending;
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const view = render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '收藏' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    view.rerender(<MemoryRouter><ArchiveDetailRoute archiveId="archive-b" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-b' });
+    await waitFor(() => expect(screen.getByRole('button', { name: '收藏' })).not.toBeDisabled());
+    await act(async () => finish({ ok: true, value: { operation: 'add_to_category', success: 1 } }));
+    expect(screen.getByRole('button', { name: '收藏' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('refreshes its heart after a favorite write on another surface', async () => {
+    let favorite = false;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'fav', archives: favorite ? ['archive-a'] : [] } };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await waitFor(() => expect(screen.getByRole('button', { name: '收藏' })).not.toBeDisabled());
+    favorite = true;
+    act(() => invalidateRouteCache('favorites:'));
+    expect(await screen.findByRole('button', { name: '取消收藏' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('paints the last detail snapshot before server lookup completes', async () => {
     const cached = { ...metadata, title: 'Cached detail' };
     writeRouteCache('archive-detail:last:archive-a', cached);

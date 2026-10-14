@@ -1,8 +1,9 @@
+import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
-import { RetainedPage } from './RetainedPage';
+import { RetainedPage, usePageActive } from './RetainedPage';
 import { EmptyState } from '../components/EmptyState';
 import { LibraryShell } from '../components/LibraryShell';
 import { HomeShell } from '../components/HomeShell';
@@ -307,9 +308,7 @@ function HomeWorkspace() {
     }),
     [archiveById, history, preferences.continueReadingShowFinished],
   );
-  /** 收藏夹 rail 已移除：watchlist 表里的数据（含从 Readoshi 导入的待看记录）
-   * 曾在首页与 /to-read 书架两边同时出现，语义上互相打架。收藏操作本身不受
-   * 影响，档案详情页与右键菜单照常读写 watchlist。 */
+  /** 首页待看只读 reading_list；收藏详情与菜单统一读写远端 Favorites 分类。 */
   const toRead = useMemo(
     () => readingList.filter((item) => !item.deleted).map((item) => archiveById.get(item.archiveId)).filter((item): item is ArchiveRecord => Boolean(item)).slice(0, HOME_RAIL_LIMIT),
     [archiveById, readingList],
@@ -388,6 +387,8 @@ const repository = new NativeLibraryRepository();
 const stateImageCache = getNativeImageCache();
 
 interface ShelfSnapshot {
+  favoritesSource?: 'remote';
+  favoritesCategoryPresent?: boolean;
   history: ReadingHistoryRecord[];
   watchlist: WatchlistRecord[];
   archives: ArchiveRecord[];
@@ -400,19 +401,25 @@ interface ShelfSnapshot {
 }
 
 function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist' | 'toRead'; detailBasePath: string }) {
+  const pageActive = usePageActive();
   const { showToast } = useToast();
   const [searchParams] = useSearchParams();
   const serverParam = searchParams.get('server');
   // Per-server cache: two servers keep two shelves, and a snapshot restored
   // across them would paint one server's records under the other's shelf.
   const cacheKey = `state:${name}:${serverParam ?? 'default'}`;
-  const snapshot = useRef(readRouteCache<ShelfSnapshot>(cacheKey)).current;
+  const favoriteFallbackKey = `favorites:last:${serverParam ?? 'default'}`;
+  const snapshot = useRef((() => {
+    if (name !== 'watchlist') return readRouteCache<ShelfSnapshot>(cacheKey);
+    return undefined; // Favorites provenance is checked after resolving the server.
+  })()).current;
+  const [favoritesCategoryPresent, setFavoritesCategoryPresent] = useState<boolean>();
+  const [hasFavoriteSnapshot, setHasFavoriteSnapshot] = useState(Boolean(snapshot && name === 'watchlist'));
+  const canShowStale = name === 'watchlist' && hasFavoriteSnapshot;
   const [reloadToken, setReloadToken] = useState(0);
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
-  /** 收藏夹画的是**本机**那张表（`watchlist`），所以这里不再缓存服务器分类的 id：
-   * 那条分类是共享状态，本机没有记录的 id 画出来就是「我没加过的收藏」。 */
   /** 收藏与待看的顶栏与档案库同一套（分类筛选、排序方式、多选、显示模式）。
    * 历史没有：它的顺序就是那列时间线，按标题重排会把它读的东西弄丢。 */
   const showShelfToolbar = name !== 'history';
@@ -498,8 +505,12 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
-    if (snapshot && reloadToken === 0) return;
+    if (!pageActive) return;
+    if (snapshot && reloadToken === 0 && name !== 'watchlist') return;
     let active = true;
+    if (name === 'watchlist') {
+      setLoading(true); setHasFavoriteSnapshot(false); setArchives([]); setWatchlist([]); setCategories(undefined); setError(undefined);
+    }
     void (async () => {
       const servers = await repository.listServers();
       if (!active) return;
@@ -510,50 +521,76 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       // 之后才出现的服务器）之后，这一页的提示会一直挂着——装载重跑了、书架也读回
       // 来了，结论却没人撤销。
       setHasServer(true);
+      if (name === 'watchlist') {
+        const cached = readRouteCache<ShelfSnapshot>(`favorites:last:${server.id}`, Infinity)
+          ?? readRouteCache<ShelfSnapshot>(favoriteFallbackKey, Infinity);
+        const valid = cached?.favoritesSource === 'remote' && cached.serverId === server.id
+          && cached.scopeId === server.scopeId && cached.archives.every(archive => archive.serverId === server.id);
+        setHasFavoriteSnapshot(Boolean(valid));
+        setArchives(valid ? cached.archives : []);
+        setWatchlist(valid ? cached.watchlist : []);
+        setFavoritesCategoryPresent(valid ? cached.favoritesCategoryPresent : undefined);
+        setLoading(!valid);
+      }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      // 书架列表与顶栏分类并行拉。**不读** 🔖 Favorites 那条分类：它是共享状态，
-      // 本机没有记录的那些（网页端/别的设备加的、或本机已删成墓碑的）画出来就是用户
-      // 报的「我根本没加入收藏夹的东西」（2026-10-13 真机：分类 15 个 id、本机 8 条活
-      // 行，13 张卡只来自分类）。分类仍然只是本机**推送**的镜像（`favoritesMirror`）。
-      const needsCategories = showShelfToolbar && categoriesRef.current === undefined;
+      const needsCategories = showShelfToolbar && (name === 'watchlist' || categoriesRef.current === undefined);
       const [shelf, categoryResult] = await Promise.all([
         name === 'history'
           ? repository.listHistory(server.scopeId)
           : name === 'toRead'
             ? repository.listReadingList(server.scopeId)
-            : repository.listWatchlist(server.scopeId),
+            : repository.readFavoritesCategory(server.id),
         needsCategories ? repository.listCategories(server.id) : Promise.resolve(undefined),
       ] as const);
       if (!active) return;
       if (categoryResult) setCategories(categoryResult.ok ? categoryResult.value : []);
       if (!shelf.ok) { setError(shelf.error.message); setLoading(false); return; }
-      const result = shelf;
-      if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
-      else setWatchlist(result.value as WatchlistRecord[]);
-      // 收藏夹只画本机记着的那些（`watchlist` 里没删的行）。从前这里取的是
-      // 「分类 ∪ 本机」的并集，于是分类里凡是本机没有阳性记录的 id 都会变成一张卡。
+      const favoriteIds = name === 'watchlist' ? (shelf.value as { archives: string[] } | null)?.archives ?? [] : [];
       const shelfIds = name === 'history'
-        ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
-        : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
-      const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
+        ? (shelf.value as ReadingHistoryRecord[]).map(item => item.archiveId)
+        : name === 'watchlist' ? favoriteIds : (shelf.value as WatchlistRecord[]).filter(item => !item.deleted).map(item => item.archiveId);
+      const archiveResult = name === 'watchlist'
+        ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds) }
+        : await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
-      else setArchives(archiveResult.value);
+      else {
+      if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
+      else if (name === 'toRead') setWatchlist(shelf.value as WatchlistRecord[]);
+      else setWatchlist(favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })));
+        setArchives(archiveResult.value);
+        setError(undefined);
+        if (name === 'watchlist') {
+          const favoritesCategoryPresent = shelf.value !== null;
+          setFavoritesCategoryPresent(favoritesCategoryPresent);
+          setHasFavoriteSnapshot(true);
+          const value: ShelfSnapshot = {
+            favoritesSource: 'remote', favoritesCategoryPresent, history: [],
+            watchlist: favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })),
+            archives: archiveResult.value, serverId: server.id, scopeId: server.scopeId, query: '',
+            categories: categoryResult?.ok ? categoryResult.value : [],
+          };
+          writeRouteCache(cacheKey, value, { persist: true });
+          writeRouteCache(favoriteFallbackKey, value, { persist: true });
+          writeRouteCache(`favorites:last:${server.id}`, value, { persist: true });
+        }
+      }
       setLoading(false);
       // Same reason as the home rails: the mirror does not hear about deletions,
       // so a shelf would keep offering archives the server no longer has.
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
       if (!active || missing.size === 0) return;
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
-    })().finally(() => { if (active) setPulling(false); });
+    })().catch(error => { if (active) { setError(String(error)); setLoading(false); } }).finally(() => { if (active) setPulling(false); });
     return () => { active = false; };
-  }, [name, reloadToken, serverParam, snapshot]);
+  }, [name, pageActive, reloadToken, serverParam, snapshot]);
   useEffect(() => {
-    if (loading || error || !serverId || !scopeId) return;
+    if (name === 'watchlist' || loading || error || !serverId || !scopeId) return;
     // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
-    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(categories ? { categories } : {}) } satisfies ShelfSnapshot, { persist: true });
-  }, [archives, cacheKey, categories, error, history, loading, name, query, scopeId, serverId, watchlist]);
+    const value = { history, watchlist, archives, serverId, scopeId, query, ...(categories ? { categories } : {}) } satisfies ShelfSnapshot;
+    writeRouteCache(cacheKey, value, { persist: true });
+  }, [archives, cacheKey, categories, error, favoriteFallbackKey, history, loading, name, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
   // Saved searches work on every shelf, not just the library.
   const [presets, setPresets] = useState<SearchPreset[]>([]);
@@ -571,10 +608,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const shelfArchives = useMemo(() => {
     // 历史与首页「继续阅读」共用同一份口径（顺序、解析、已读完过滤）；这里全都要。
     if (name === 'history') return historyShelfArchives(history, archiveById);
-    // 收藏夹画的就是本机那张表（`sortedWatchlist` 已经滤掉墓碑）。服务器那条
-    // 🔖 Favorites 分类**不并进来**：它是共享状态，本机没有记录的那些（网页端/别的
-    // 设备加的、或本机已删的）画出来就是用户报的「我根本没加入收藏夹的东西」。
-    // 分类仍然只是本机**推送**的镜像（`favoritesMirror`）。
+    // Membership is remote Favorites for favorites, local reading_list for pending reading.
     const ids = sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
   }, [archiveById, history, name, sortedWatchlist]);
@@ -708,15 +742,15 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           {...(name === 'history' ? { timelineByArchiveId: new Map<string, ShelfTimelineEntry>() } : {})}
         />
       )}
-      {error && <p className="form-error" role="alert">{error}</p>}
+      {error && <p className="form-error" role="alert">{canShowStale ? `离线缓存：显示上次收藏快照，可能已过期。${error}` : error}</p>}
       {/* 已知没有服务器时不等 loading：这次拉取的结果只会再确认一遍这个事实，
           而它落地之前用户看到的就是这一页该给的引导（`!loading` 那版会让骨架
           先转一帧）。 */}
       {!error && hasServer === false && <ServerRequiredPrompt />}
-      {!loading && !error && hasServer && shelfArchives.length === 0 && (
-        <EmptyState icon={FolderHeart} title={`暂无${title}`} description={description} />
+      {!loading && (!error || canShowStale) && hasServer && shelfArchives.length === 0 && (
+        <EmptyState icon={FolderHeart} title={name === 'watchlist' && favoritesCategoryPresent === false ? '服务器尚未创建 🔖 Favorites 分类' : `暂无${title}`} description={name === 'watchlist' && favoritesCategoryPresent === false ? '请先在 LANraragi 中创建名为 🔖 Favorites 的静态分类，之后才能添加收藏。' : description} />
       )}
-      {!loading && !error && hasServer && shelfArchives.length > 0 && (
+      {!loading && (!error || canShowStale) && hasServer && shelfArchives.length > 0 && (
         // Same list and card system as the library, and the same search bar, so
         // the only difference is what it searches. The 16px side padding comes
         // from the ShelfShell panel; this page adds none of its own.
@@ -818,30 +852,15 @@ function UploadRoute() {
 
 export function WorkspaceRoutes() {
   const location = useLocation();
-  const navigate = useNavigate();
   /** 一条详情路由与它的列表同属一页：`/library/:id` 归 `/library`，三个书架的
    * `/history/:id` 之类归各自的书架，首页的 `/home/:id` 归 `/`。保留页面按这个键
    * 复用（见 RetainedPage）。 */
   const pageKeys: Record<string, string> = { home: '/', library: '/library', history: '/history', watchlist: '/watchlist', 'to-read': '/to-read' };
-  const keyFor = (path: string) => pageKeys[path.split('/')[1] ?? ''] ?? path;
+  // Editors are temporary destinations, not the library tab's remembered page.
+  const keyFor = (path: string) => path.endsWith('/edit') ? path : pageKeys[path.split('/')[1] ?? ''] ?? path;
   const routeKey = keyFor(location.pathname);
   const visited = useRef(new Map<string, typeof location>());
-  const previousKey = useRef(routeKey);
-  const savedLibrary = visited.current.get('/library');
-  // A navigation entry to the library resumes its split pane. Explicit close,
-  // tag searches and server changes are real new destinations.
-  const resume = routeKey === '/library' && previousKey.current !== '/library'
-    && location.pathname === '/library' && !location.search
-    && savedLibrary?.pathname !== '/library' ? savedLibrary : undefined;
-  const current = resume ?? location;
-  visited.current.set(routeKey, current);
-  useEffect(() => {
-    previousKey.current = routeKey;
-    // 恢复必须**压在**列表那一条上面，不能顶掉它：`replace` 会让历史里那条
-    // `/library` 消失，详情页的「返回上一页」于是弹到更早的一页（从首页进来的
-    // 人看到的就是「返回固定回首页」），系统返回键也一样少一站。
-    if (resume) navigate(`${resume.pathname}${resume.search}`, { state: resume.state });
-  }, [navigate, resume, routeKey]);
+  visited.current.set(routeKey, location);
   return <>{[...visited.current].map(([key, saved]) => (
     <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
       <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>

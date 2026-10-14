@@ -155,7 +155,19 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [totalArchives, setTotalArchives] = useState(cachedPage?.totalArchives ?? 0);
   const [hasMoreArchives, setHasMoreArchives] = useState(cachedPage?.hasMoreArchives ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [watchlist, setWatchlist] = useState<import('../domain/library').WatchlistRecord[]>([]);
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+  const favoriteIdentity = `${serverParam ?? 'default'}:${serverId ?? ''}`;
+  const favoriteOwner = useRef({ identity: favoriteIdentity, generation: 0 });
+  if (favoriteOwner.current.identity !== favoriteIdentity) {
+    favoriteOwner.current = { identity: favoriteIdentity, generation: favoriteOwner.current.generation + 1 };
+  }
+  const favoriteGeneration = favoriteOwner.current.generation;
+  const [favoriteMembershipIdentity, setFavoriteMembershipIdentity] = useState<string>();
+  const favoriteMembershipKnown = favoriteMembershipIdentity === favoriteIdentity && (!serverParam || serverId === serverParam);
+  useEffect(() => {
+    setFavoriteIds([]);
+    setFavoriteMembershipIdentity(undefined);
+  }, [favoriteIdentity]);
   const [readingList, setReadingList] = useState<import('../domain/library').WatchlistRecord[]>([]);
   const [presets, setPresets] = useState<import('../repositories/nativeLibraryRepository').SearchPreset[]>([]);
   const [readingHistory, setReadingHistory] = useState<import('../domain/library').ReadingHistoryRecord[]>([]);
@@ -195,6 +207,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   }, []);
   const { open: openContextMenu, menu: contextMenu, requestDelete } = useArchiveContextMenu({
     onDeleted: (archiveId) => removeArchives([archiveId]),
+    onMembershipChange: (archiveId, list, next) => {
+      if (favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;
+      if (list === 'favorites') setFavoriteIds(current => next ? [...new Set([...current, archiveId])] : current.filter(id => id !== archiveId));
+    },
     inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
     categories: assignableCategories(categories),
     onAddCategory: (archive, categoryId) => {
@@ -319,12 +335,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     // the native side serves a persisted snapshot. Loading them here as well
     // meant every visit to the library re-resolved every dynamic category.
     setCategoryError(undefined);
-    const [watchlistResult, historyResult, readingListResult] = await Promise.all([
-      repository.listWatchlist(server.scopeId),
+    const [historyResult, readingListResult] = await Promise.all([
       repository.listHistory(server.scopeId),
       repository.listReadingList(server.scopeId),
     ]);
-    if (watchlistResult.ok) setWatchlist(watchlistResult.value);
     if (historyResult.ok) setReadingHistory(historyResult.value);
     if (readingListResult.ok) setReadingList(readingListResult.value);
     void repository.listSearchPresets(server.scopeId).then((result) => {
@@ -549,6 +563,30 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   // Coming back is the moment to re-read the page; the loader and the server id are
   // read through refs so that a filter change cannot fire a second, duplicate read.
   const pageActive = usePageActive();
+  useEffect(() => {
+    if (!serverId) return;
+    let active = true;
+    let request = 0;
+    const refresh = () => {
+      const current = ++request;
+      void repository.readFavoritesCategory(serverId).then(result => {
+        if (!active || current !== request || favoriteOwner.current.identity !== favoriteIdentity) return;
+        if (!result.ok) {
+          setFavoriteIds([]);
+          setFavoriteMembershipIdentity(undefined);
+          return;
+        }
+        setFavoriteIds(result.value?.archives ?? []);
+        setFavoriteMembershipIdentity(favoriteIdentity);
+      });
+    };
+    const invalidate = (event: Event) => {
+      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix === 'favorites:') refresh();
+    };
+    if (pageActive) refresh();
+    window.addEventListener('yomika:route-cache-invalidated', invalidate);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
+  }, [serverId, pageActive, favoriteIdentity]);
   const wasActiveRef = useRef(pageActive);
   const loadFirstPageRef = useRef(loadFirstPage);
   loadFirstPageRef.current = loadFirstPage;
@@ -715,19 +753,18 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         categoryFilter={categoryFilter}
         onCategoryFilterChange={setCategoryFilter}
         readingProgressByArchiveId={readingProgressByArchiveId}
-        isFavorite={!!watchlist.find((item) => item.archiveId === selectedArchiveId && !item.deleted)}
-        onToggleFavorite={async () => {
-          if (!serverId || !selectedArchiveId) return;
+        isFavorite={favoriteMembershipKnown && favoriteIds.includes(selectedArchiveId ?? '')}
+        onToggleFavorite={favoriteMembershipKnown ? async () => {
+          if (!serverId || !selectedArchiveId || !favoriteMembershipKnown || favoriteOwner.current.identity !== favoriteIdentity) return;
           if (!scopeId) return;
-          const next = !watchlist.some((item) => item.archiveId === selectedArchiveId && !item.deleted);
-          const result = await repository.setWatchlist(scopeId, selectedArchiveId, next);
-          if (result.ok) setWatchlist((current) => [...current.filter((item) => item.archiveId !== selectedArchiveId), result.value]);
-          // 收藏夹 shelf reads the LANraragi 🔖 Favorites category, so the heart
-          // mirrors the write there too — best effort, the local row is kept for
-          // the offline mirror and WebDAV sync either way.
-          const mirrored = await mirrorFavorites(serverId, [selectedArchiveId], next);
-          if (mirrored > 0) showToast('未能同步到服务器收藏夹', 'error');
-        }}
+          const identity = favoriteIdentity;
+          const generation = ++favoriteOwner.current.generation;
+          const next = !favoriteIds.includes(selectedArchiveId);
+          const failed = await mirrorFavorites(serverId, [selectedArchiveId], next);
+          if (favoriteOwner.current.identity !== identity || favoriteOwner.current.generation !== generation) return;
+          if (failed) showToast('未能更新服务器收藏夹', 'error');
+          else setFavoriteIds(current => next ? [...new Set([...current, selectedArchiveId])] : current.filter(id => id !== selectedArchiveId));
+        } : undefined}
         onLoadThumbnail={loadThumbnail}
         onReleaseThumbnail={releaseThumbnail}
         onUpdateMetadata={async (input) => {

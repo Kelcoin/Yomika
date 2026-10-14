@@ -54,29 +54,28 @@ export function useArchiveContextMenu(options: {
       const servers = await repository.listServers();
       const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
       if (!server) return;
-      const status = await repository.archiveMembership(server.scopeId, target.archive.archiveId);
+      const [status, favorites] = await Promise.all([repository.archiveMembership(server.scopeId, target.archive.archiveId), repository.readFavoritesCategory(server.id)]);
       if (request !== membershipRequest.current) return;
-      if (!status.ok) showToast('待看或收藏状态读取失败', 'error');
-      setMembership({ scopeId: server.scopeId, reading: status.ok ? status.value.reading : undefined, favorites: status.ok ? status.value.favorites : undefined });
+      if (!status.ok || !favorites.ok) showToast('待看或收藏状态读取失败', 'error');
+      setMembership({ scopeId: server.scopeId, reading: status.ok ? status.value.reading : undefined, favorites: favorites.ok ? (favorites.value?.archives.includes(target.archive.archiveId) ?? false) : undefined });
     })();
     return () => { membershipRequest.current += 1; };
   }, [target, showToast]);
   const toggleMembership = (archive: ArchiveRecord, list: 'reading' | 'favorites', next: boolean) => {
     if (!membership) return;
-    const update = list === 'reading' ? repository.setReadingList(membership.scopeId, archive.archiveId, next) : repository.setWatchlist(membership.scopeId, archive.archiveId, next);
-    void update.then((result) => {
-      if (!result.ok) { showToast(result.error.message, 'error'); return; }
+    void (async () => {
+      if (list === 'favorites') {
+        if (await mirrorFavorites(archive.serverId, [archive.archiveId], next)) {
+          showToast('未能更新服务器收藏夹', 'error'); return;
+        }
+      } else {
+        const result = await repository.setReadingList(membership.scopeId, archive.archiveId, next);
+        if (!result.ok) { showToast(result.error.message, 'error'); return; }
+      }
+      setMembership(current => current ? { ...current, [list]: next } : current);
       options.onMembershipChange?.(archive.archiveId, list, next);
       showToast(`${next ? '已加入' : '已移出'}${list === 'reading' ? '待看' : '收藏夹'}`, 'success');
-      // 收藏夹 reads the LANraragi 🔖 Favorites category, so the heart mirrors
-      // the write there too — best effort, the local row stays as the offline
-      // mirror and for WebDAV sync either way.
-      if (list === 'favorites') {
-        void mirrorFavorites(archive.serverId, [archive.archiveId], next).then((mirrored) => {
-          if (mirrored > 0) showToast('未能同步到服务器收藏夹', 'error');
-        });
-      }
-    });
+    })();
   };
   const open = useCallback(
     (archive: ArchiveRecord, at: { x: number; y: number }) => setTarget({ archive, ...at }),

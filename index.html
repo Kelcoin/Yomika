@@ -21,13 +21,18 @@
       /* 首帧开屏（docs/30）：与 SplashFrame 同一构图，颜色走应用令牌——
          主题预设与自定义样式都会改写这些令牌，开屏跟着变。回退值只在
          令牌样式尚未就绪的那一拍出现。 */
+      @layer tokens {
+      :root { --surface-canvas: #fbf8f3; --ink-primary: #1a1c1a; --yomika-mark-plate: var(--surface-container-highest, #e3e4df); --yomika-mark-ink-accent: var(--on-surface-variant, #454845); }
+      :root[data-theme='dark'] { --surface-canvas: #121412; --ink-primary: #e4e3df; --yomika-mark-plate: var(--surface-container-highest, #353936); --yomika-mark-ink-accent: var(--on-surface-variant, #bec8c1); }
+      @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --surface-canvas: #121412; --ink-primary: #e4e3df; --yomika-mark-plate: var(--surface-container-highest, #353936); --yomika-mark-ink-accent: var(--on-surface-variant, #bec8c1); } }
+      }
       .app-splash-static {
         position: fixed;
         inset: 0;
         display: grid;
         place-items: center;
-        background: var(--surface-canvas, #0B0B0F);
-        color: var(--ink-primary, #F3EEE4);
+        background: var(--surface-canvas, #fbf8f3);
+        color: var(--ink-primary, #1a1c1a);
         /* 字体也走令牌：写死一族的话，React 那一帧（继承 --font-body）在替换的
            那一刻会换字形，wordmark 跟着重排——两帧同构图包括这一项。 */
         font-family: var(--font-body, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif);
@@ -36,6 +41,7 @@
       /* margin 必须自己写死：侧栏那条 `.brand`（shell.css:145，`margin: 0 8px 40px`）
          一旦加载就会落到这个 div 上——两帧都居中，静态帧的居中盒却被这条下边距撑高
          40px，于是替换那一刻整组印记**跳 20px**。 */
+      :root[data-native-mobile='true'] .app-splash-static .brand { visibility: hidden; }
       .app-splash-static .brand { display: grid; justify-items: center; gap: 20px; margin: 0; }
       .app-splash-static svg { width: 128px; height: 128px; display: block; }
       .app-splash-static .wordmark {
@@ -47,6 +53,28 @@
       }
       .app-splash-static .wordmark i { font-style: normal; color: var(--brand-vermilion, #B63A2E); }
     </style>
+    <script>
+      // Native mobile already has an OS launch screen; show only its canvas here.
+      if (window.__TAURI_INTERNALS__ && (/Android|iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1))) document.documentElement.dataset.nativeMobile = 'true';
+      // 自定义样式镜像在首帧前预置（与 preferences.tsx 的模块级应用同一份键、
+      // 同一个 CSSStyleSheet 实例）：静态开屏帧因此跟着用户的主题预设与自定义
+      // CSS 走。必须走 adoptedStyleSheets（CSSOM）——Tauri 给 CSP 注入 nonce 后
+      // 运行时创建的 <style> 会被 style-src 拦截。
+      try {
+        var theme = localStorage.getItem('yomika.last-theme');
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+        var dark = theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+
+        document.querySelector('meta[name="theme-color"]').content = dark ? '#121412' : '#fbf8f3';
+        var cached = localStorage.getItem('yomika.last-custom-css');
+        if (cached) {
+          var sheet = new CSSStyleSheet();
+          sheet.replaceSync(cached);
+          document.adoptedStyleSheets = [sheet].concat(document.adoptedStyleSheets ?? []);
+          window.__yomikaCustomSheet = sheet;
+        }
+      } catch (e) { /* storage unavailable */ }
+    </script>
   </head>
   <body>
     <!-- 首帧开屏（docs/30）：这段静态品牌帧随 HTML 本身立即上屏，React 首次
@@ -54,13 +82,10 @@
     <div id="root">
       <div class="app-splash-static">
         <div class="brand">
-          <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <rect width="512" height="512" rx="112" fill="#0D0D0D"/>
-            <rect x="88" y="64" width="128" height="384" rx="64" fill="#F5F5F5"/>
-            <rect x="88" y="64" width="320" height="128" rx="64" fill="#F5F5F5"/>
-            <rect x="216" y="224" width="96" height="64" rx="32" fill="#F5F5F5"/>
-            <circle cx="368" cy="368" r="80" fill="#E8E8E8"/>
-          </svg>
+          <!-- YOMIKA_STATIC_MARK --><svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="512" height="512" rx="112" fill="var(--yomika-mark-plate, #0D0D0D)"/><g id="yomika-glyph"><path d="M112 130 Q181 132 236 174 L236 278 Q182 238 112 238 Z" fill="currentColor"/>
+<path d="M400 130 Q331 132 276 174 L276 278 Q330 238 400 238 Z" fill="currentColor"/>
+<path d="M127 264 Q193 268 256 313 Q319 268 385 264 L385 293 Q322 300 276 340 L276 390 L236 390 L236 340 Q190 300 127 293 Z" fill="currentColor"/>
+<path d="M340 142 Q360 135 378 133 L378 208 L359 194 L340 210 Z" fill="var(--yomika-mark-ink-accent, #B63A2E)"/></g></svg><!-- /YOMIKA_STATIC_MARK -->
           <p class="wordmark">Yomika<i>.</i></p>
         </div>
       </div>
@@ -86,20 +111,6 @@
         requestAnimationFrame(function () { requestAnimationFrame(tick); });
       })();
     </script>
-    <script>
-      // 自定义样式镜像在首帧前预置（与 preferences.tsx 的模块级应用同一份键、
-      // 同一个 CSSStyleSheet 实例）：静态开屏帧因此跟着用户的主题预设与自定义
-      // CSS 走。必须走 adoptedStyleSheets（CSSOM）——Tauri 给 CSP 注入 nonce 后
-      // 运行时创建的 <style> 会被 style-src 拦截。
-      try {
-        var cached = localStorage.getItem('yomika.last-custom-css');
-        if (cached) {
-          var sheet = new CSSStyleSheet();
-          sheet.replaceSync(cached);
-          document.adoptedStyleSheets = [sheet].concat(document.adoptedStyleSheets ?? []);
-          window.__yomikaCustomSheet = sheet;
-        }
-      } catch (e) { /* storage unavailable */ }
-    </script>
+
   </body>
 </html>

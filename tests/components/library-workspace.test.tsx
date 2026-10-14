@@ -695,24 +695,25 @@ describe('library workspace', () => {
     // a rotation puts the app into the compact layout.
     fireEvent(window, new Event('resize'));
 
-    fireEvent.wheel(page, { deltaY: -200 });
+    // Start inside the owned list; the surrounding page supplies the scroll metrics.
+    fireEvent.wheel(list, { deltaY: -200 });
     // Half the travel, capped — the same damping the list gets.
     expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
-    fireEvent.wheel(page, { deltaY: 0 });
+    fireEvent.wheel(list, { deltaY: 0 });
 
-    fireEvent.touchStart(page, { touches: [{ clientY: 10 }] });
-    fireEvent.touchMove(page, { touches: [{ clientY: 170 }] });
+    fireEvent.touchStart(list, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 170 }] });
     expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
-    fireEvent.touchEnd(page);
+    fireEvent.touchEnd(list);
     expect(onRefresh).toHaveBeenCalledTimes(1);
 
     // And the page keeps its own scrolling: an upward drag from the top is the
     // page moving, not a pull, so nothing is asked for.
     onRefresh.mockClear();
     page.scrollTop = 400;
-    fireEvent.touchStart(page, { touches: [{ clientY: 400 }] });
-    fireEvent.touchMove(page, { touches: [{ clientY: 300 }] });
-    fireEvent.touchEnd(page);
+    fireEvent.touchStart(list, { touches: [{ clientY: 400 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 300 }] });
+    fireEvent.touchEnd(list);
     expect(onRefresh).not.toHaveBeenCalled();
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });

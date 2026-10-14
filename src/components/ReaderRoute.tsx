@@ -389,6 +389,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());
+  // A shared raw handle can be warmed by compute and retained by the screen.
+  // Only the screen knows its complete retention window (including swipe slots
+  // and recently visited pages), so compute must not infer ownership by viewport.
+  const screenOwnedPagesRef = useRef(new Set<number>());
   const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
   const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
   const derivedHandlesRef = useRef(new Map<number, ImageHandle>());
@@ -448,6 +452,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * stepping back over a spread shows the enhanced page at once instead of
    * running the model again. */
   const releasePage = useCallback((pageIndex: number) => {
+    screenOwnedPagesRef.current.delete(pageIndex);
     const handle = pageHandlesRef.current.get(pageIndex);
     pageHandlesRef.current.delete(pageIndex);
     if (handle) imageCache.release(handle);
@@ -568,6 +573,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     cancelWorkspaceRelease();
     for (const handle of pageHandlesRef.current.values()) imageCache.release(handle);
     pageHandlesRef.current.clear();
+    screenOwnedPagesRef.current.clear();
     // 离开阅读器时把正在跑的原生推理也掐掉：那一件重活占着全局闸，而用户已经在别处了。
     for (const controller of derivedAbortsRef.current.values()) controller.abort();
     derivedAbortsRef.current.clear();
@@ -625,10 +631,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     }
   }, []);
 
-  const loadPage = useCallback(async (pageIndex: number, signal?: AbortSignal) => {
+  const loadPage = useCallback(async (pageIndex: number, signal?: AbortSignal, screenOwned = true) => {
     const context = contextRef.current;
     const path = context?.paths[pageIndex];
     if (!context || !path || pageIndex < 0) return undefined;
+    // Claim before either fast path or await: a screen request can join a raw
+    // load started by the sweep, and must own that handle when it lands.
+    if (screenOwned) screenOwnedPagesRef.current.add(pageIndex);
     const existing = pageHandlesRef.current.get(pageIndex);
     if (existing) return existing.url;
     const pending = pendingPagesRef.current.get(pageIndex);
@@ -829,14 +838,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const context = contextRef.current;
         if (!context || !mountedRef.current) break;
         derivedAttemptedRef.current.add(pageIndex);
-        if (!await loadPage(pageIndex)) {
+        if (!await loadPage(pageIndex, undefined, false)) {
           // 源页这一次没读出来（LRR 掉线 / 超时 / 一时取不到）。这一页**没有**做过，
           // 不能把「尝试过」记在它头上：记上以后整本预扫剩下的部分和用户真的翻到它时
           // 都会跳过它，于是这一页在这次阅读里永远是原图——「翻页了也不处理」。
           derivedAttemptedRef.current.delete(pageIndex);
           continue;
         }
-        if (job.generation !== derivedGenerationRef.current) continue;
+        if (job.generation !== derivedGenerationRef.current) {
+          if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
+          continue;
+        }
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
         setDerivingStage(job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
@@ -1022,14 +1034,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             // 永远漏掉这一页（让位只发生在用户翻页时，所以它很快会再轮到）。
             if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
           }
-          // The whole-archive sweep warms disk, not the reader's raw-image
-          // residency. Re-check the current viewport after awaits: a background
-          // page may have become visible while it was being processed.
-          const visible = [...visiblePagesRef.current];
-          const neighbours = visible.length > 0
-            ? getPrefetchPages(visible[0]!, context.paths.length, prefetchDistance)
-            : [];
-          if (contextRef.current === context && !visible.includes(pageIndex) && !neighbours.includes(pageIndex)) {
+          // The sweep owns only background-only sources. The screen may retain
+          // this page beyond visible+prefetch, or claim it during computation.
+          // Revoking its shared handle here would leave a stale loadedPages URL.
+          if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) {
             releasePage(pageIndex);
           }
           derivedAbortsRef.current.delete(pageIndex);

@@ -61,23 +61,17 @@ export function useArchiveSelection(options: {
     if (!scopeId || selected.length === 0) return;
     setBusy(true);
     try {
-      const results = await Promise.all(selected.map((archive) => (
-        membership?.list === 'reading'
-          ? repository.setReadingList(scopeId, archive.archiveId, next)
-          : repository.setWatchlist(scopeId, archive.archiveId, next)
-      )));
-      // Mirror the favorites writes to the LANraragi 🔖 Favorites category: the
-      // 收藏夹 shelf reads the category, so a local-only write would never show.
-      if (membership?.list === 'favorites' && serverId) {
-        const mirrored = await mirrorFavorites(serverId, selected.map((archive) => archive.archiveId), next);
-        if (mirrored > 0) showToast(`${mirrored} 个档案未能同步到服务器收藏夹`, 'error');
-      }
-      const failed = results.filter((result) => !result.ok).length;
-      if (failed > 0) showToast(`${failed} 个档案未能更新`, 'error');
+      const results = await Promise.all(selected.map(async archive => {
+        if (membership?.list === 'reading') {
+          const result = await repository.setReadingList(scopeId, archive.archiveId, next);
+          return { id: archive.archiveId, ok: result.ok };
+        }
+        return { id: archive.archiveId, ok: (await mirrorFavorites(serverId ?? archive.serverId, [archive.archiveId], next)) === 0 };
+      }));
+      const failed = results.filter(result => !result.ok).length;
+      if (failed) showToast(`${failed} 个档案未能更新`, 'error');
       else showToast(next ? `已加入${membership?.label ?? '收藏夹'}` : `已移出${membership?.label ?? '收藏夹'}`, 'success');
-      // A shelf holds the membership it was built from, so leaving it means the
-      // rows go; the library only changes a flag and keeps them.
-      if (!next && membership) onRemoved(selected.map((archive) => archive.archiveId));
+      if (!next && membership) onRemoved(results.filter(result => result.ok).map(result => result.id));
       setSelectedArchiveIds(new Set());
     } finally {
       setBusy(false);

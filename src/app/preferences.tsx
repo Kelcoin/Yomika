@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import type { CommandResult } from '../domain/result';
 import { setSystemBarStyle } from '../bridge/platform';
+import { nativeCanvasColor } from '../lib/nativeCanvasColor';
 import { SYNC_COMPLETED_EVENT, setAutoSyncEnabled, startAutoSync } from '../lib/autoSync';
 import { startHistoryMaintenance } from '../lib/historyMaintenance';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -30,6 +31,7 @@ const repository = new NativeSettingsRepository();
 
 
 function applyTheme(theme: PreferenceSnapshot['theme']) {
+  try { window.localStorage.setItem('yomika.last-theme', theme); } catch { /* storage unavailable */ }
   if (theme === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = theme;
   let themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -39,14 +41,16 @@ function applyTheme(theme: PreferenceSnapshot['theme']) {
     document.head.append(themeColor);
   }
   const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
-  themeColor.content = dark ? '#09090b' : '#f3eee4';
+  const canvas = nativeCanvasColor(Boolean(dark));
+  themeColor.content = canvas.css;
   // 系统栏图标与窗口底色也跟着这个主题：Android 上系统栏是透明的（内容画到边），
   // 图标明暗由应用说了算——跟着系统主题走的话，深色应用碰上浅色系统就是深色图标
   // 落在深色栏上（「状态栏很突兀」有一半是它）。
-  void setSystemBarStyle(dark, themeColor.content);
+  void setSystemBarStyle(dark, canvas.native);
 }
 
 function applyPreferences(preferences: PreferenceSnapshot) {
+  applyCustomCss(preferences.customCss);
   applyTheme(preferences.theme);
   getNativeImageCache().setMaxConcurrentFetches(preferences.coverConcurrency);
   setEhMyTagsPriorityEnabled(preferences.ehMyTagsPriority);
@@ -54,7 +58,7 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   if (preferences.sfwMode) document.documentElement.dataset.sfw = 'true';
   else delete document.documentElement.dataset.sfw;
   try { window.localStorage.setItem('yomika.last-sfw-mode', String(preferences.sfwMode)); } catch { /* storage unavailable */ }
-  applyCustomCss(preferences.customCss);
+
   // 标签翻译与补全排序的开关（docs/30）：镜像给下一帧用，服务开关即时生效。
   const tagTranslationOn = preferences.tagTranslationEnabled;
   setTagTranslationServiceEnabled(tagTranslationOn);

@@ -303,10 +303,7 @@ describe('library route workspace', () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_watchlist') return { ok: true, value: [
-        { scopeId: 'scope-a', archiveId: 'b', addedAt: '2026-08-27T00:00:00Z', updatedAt: '2026-08-27T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
-        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 2, deleted: false },
-      ] };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'favorites', archives: ['a', 'b'] } };
       if (command === 'list_archives_by_ids') return { ok: true, value: [
         { serverId: 'scope-a', archiveId: 'a', title: 'Alpha archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' },
         { serverId: 'scope-a', archiveId: 'b', title: 'Beta archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
@@ -335,13 +332,11 @@ describe('library route workspace', () => {
     let removed = false;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_watchlist') return { ok: true, value: removed ? [] : [
-        { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1, deleted: false },
-      ] };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'favorites', archives: removed ? [] : ['a'] } };
       // 右键菜单现在只探两个布尔，不再拉全量列表。
       if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: !removed } };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a', title: 'Remove archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' }] };
-      if (command === 'set_watchlist') { removed = true; return { ok: true, value: { scopeId: 'scope-a', archiveId: 'a', addedAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T01:00:00Z', deviceId: 'device-a', deletedAt: '2026-08-28T01:00:00Z', revision: 2, deleted: true } }; }
+      if (command === 'remove_archive_from_category') { removed = true; return { ok: true, value: { operation: 'remove_from_category', success: 1 } }; }
       if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
@@ -354,7 +349,7 @@ describe('library route workspace', () => {
     fireEvent.contextMenu(await screen.findByRole('button', { name: /Remove archive/ }));
     await user.click(await screen.findByRole('menuitem', { name: /移出收藏夹/ }));
 
-    expect(adapter).toHaveBeenCalledWith('set_watchlist', { scopeId: 'scope-a', archiveId: 'a', added: false });
+    expect(adapter).toHaveBeenCalledWith('remove_archive_from_category', { serverId: 'scope-a', categoryId: 'favorites', archiveId: 'a' });
     await waitFor(() => expect(screen.queryByRole('button', { name: /Remove archive/ })).not.toBeInTheDocument());
     expect(await screen.findByText('已移出收藏夹')).toBeInTheDocument();
   });

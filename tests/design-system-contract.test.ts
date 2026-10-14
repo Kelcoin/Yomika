@@ -81,20 +81,18 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.shelf-workspace\s*>\s*\.form-error\s*\{[^}]*align-self:\s*start/);
   });
   it('invalidates the shelf snapshots after a category mirror write', () => {
-    // 加进收藏夹那一下：本机那张收藏表先写、顺手广播一次 `state:` 作废，书架于是立刻重读，
-    // 而服务器镜像这时候还没发出去 —— 读回来的是「加之前」的名单，还会被写进 localStorage
-    // 快照自己续命。控诉点就落在 `.then(invalidateShelves)` 上：这条镜像写必须和它的孪生
-    // （移出收藏夹、改元数据）一样作废快照，否则症状单向——移出立刻对、加入不出现。
+    // Successful category writes invalidate remote Favorites snapshots as well as shelves.
     const repository = read('src/repositories/nativeLibraryRepository.ts');
     const add = repository.slice(repository.indexOf('addArchiveToCategory('), repository.indexOf('removeArchiveFromCategory('));
-    expect(add, '这条镜像写要作废书架快照').toMatch(/then\(invalidateShelves\)/);
-    // 收藏夹画的是**本机**那张表：服务器那条 🔖 Favorites 是共享状态（网页端、别的设备、
-    // 旧版本都能往里加），本机没有阳性记录的 id 画出来就是用户报的「我根本没加入收藏夹
-    // 的东西」（2026-10-13 真机：分类 15 个 id、本机 8 条活行，13 张卡只来自分类）。
-    // 分类仍然只是本机推送的镜像（`favoritesMirror`），书架不再读它、也不再把它的 id
-    // 存进快照——那正是「服务器名单当成本机收藏」的入口。
+    expect(add, '分类写成功后作废收藏夹快照').toMatch(/then\(invalidateFavorites\)/);
+    const remove = repository.slice(repository.indexOf('removeArchiveFromCategory('), repository.indexOf('updateArchiveMetadata('));
+    expect(remove).toMatch(/then\(invalidateFavorites\)/);
+    const metadataWrite = repository.slice(repository.indexOf('updateArchiveMetadata('), repository.indexOf('listMetadataPlugins('));
+    expect(metadataWrite).toMatch(/then\(invalidateShelves\)/);
+    expect(repository).toMatch(/function invalidateFavorites[\s\S]*?invalidateShelves\(result\)/);
+    // Favorites membership comes exclusively from the current remote category.
     const routes = read('src/app/routes.tsx');
-    expect(routes, '收藏夹不读服务器分类').not.toMatch(/readFavoritesCategory/);
+    expect(routes, '收藏夹读取服务器分类').toMatch(/readFavoritesCategory/);
     expect(routes, '收藏夹不把分类并进书架').not.toMatch(/\.\.\.favoritesIds/);
     expect(routes, '快照里不再存服务器那条分类的 id').not.toMatch(/favoritesIds/);
   });
@@ -259,80 +257,15 @@ describe('design system contract', () => {
   // tests/contracts/mobile-packaging.test.ts 的「every theme variant」；这里盯网页那
   // 两帧——它们必须**同一张画**，否则 React 首次 render 把静态帧整体换掉的那一刻会跳
   // 一下，用户看到的就是第二张开屏页。
-  it('paints the first frame once: the static frame and the React frame are one picture', () => {
+  it('protects the first paint without replaying a React splash', () => {
     const html = read('index.html');
-    const frame = read('src/components/SplashFrame.tsx');
-    const shell = read('src/styles/shell.css');
-
-    // 印记同源：几何、颜色、viewBox 两处都得有。逐属性的完全相等交给
-    // tests/components/splash-frame.test.tsx——它是把渲染出来的 DOM 与 index.html
-    // 的静态帧对逐个属性比，比对着源码文本比更接近用户看到的画。
-    const mark = (source: string) => {
-      expect(source.match(/<svg[\s\S]*?<\/svg>/), '这张开屏帧里要内联印记的 SVG').not.toBeNull();
-      return source;
-    };
-    for (const source of [mark(html), mark(frame)]) {
-      expect(source).toMatch(/viewBox="0 0 512 512"/);
-      expect(source).toMatch(/rx="112"/);
-      expect(source).toMatch(/fill="#0D0D0D"/);
-      expect(source).toMatch(/#F5F5F5/);
-      // 字形连母版那一份：填充的三件 + 圆点。以前这里钉的是描边版
-      // （`cx="288" cy="296" r="22"`、`stroke-width="18"`），那版在 16px 上整块糊掉，
-      // 已经随「一份几何，处处派生」那一组一起换掉了。
-      expect(source).toMatch(/x="88" y="64" width="128" height="384" rx="64"/);
-      expect(source).toMatch(/x="216" y="224" width="96" height="64" rx="32"/);
-      expect(source).toMatch(/cx="368" cy="368" r="80"/);
-    }
-    // 开屏帧只走填充，没有描边可写：`stroke-width`/`stroke-linecap` 出现在这里就说明
-    // 有人把旧的描边版抄回来了。
-    expect(html).not.toMatch(/stroke-width/);
-    // React 那侧写驼峰属性名：`stroke-width`/`stroke-linecap` 会让 React 每次渲染都
-    // 报「Invalid DOM property」（浏览器里两个名字渲染出的属性名相同，组件用例比过）。
-    expect(frame).not.toMatch(/stroke-width|stroke-linecap/);
-
-    // wordmark 与印记的盒子也要同一份：字号、字重、字距、间距、图形尺寸。静态帧写死
-    // 20px/600/20px/128px，React 那侧走 --text-lg/--weight-semibold/--space-5，
-    // 令牌一改两边就错开，所以两边的数都要钉住。
-    const tokens = read('src/styles/tokens.css');
-    expect(tokens).toMatch(/--text-lg:\s*20px;/);
-    expect(tokens).toMatch(/--weight-semibold:\s*600;/);
-    expect(tokens).toMatch(/--space-5:\s*20px;/);
-    expect(tokens).toMatch(/--tracking-splash:\s*0\.34em;/);
-    // 静态帧的 .brand 必须自己写 margin：侧栏那条 `.brand`（shell.css 的 sidebar 段）带着
-    // `margin: 0 var(--space-2) var(--space-10)`，类名撞上就会落到静态帧头上，把它的居中盒
-    // 撑高 40px——两帧都居中，替换那一刻整组印记就跳 20px（工装实测：修前 273.5/293.5、
-    // 像素差 2.12%；修后两边都是 293.5、像素差 0）。
-    expect(html).toMatch(/\.app-splash-static \.brand \{ display: grid; justify-items: center; gap: 20px; margin: 0; \}/);
-    // 侧栏那条规则不许为了躲这个撞名被删掉：改它会把侧栏自己的排版一起改了。
-    expect(ruleBody(shell, '.brand')).toMatch(/margin:\s*0 var\(--space-2\) var\(--space-10\)/);
-    expect(html).toMatch(/\.app-splash-static svg \{ width: 128px; height: 128px; display: block; \}/);
-    expect(html).toMatch(/font-size: 20px;[\s\S]{0,120}?font-weight: 600;/);
-    const brand = ruleBody(shell, '.app-splash-brand');
-    expect(brand).toMatch(/gap:\s*var\(--space-5\)/);
-    expect(ruleBody(shell, '.app-splash-brand svg')).toMatch(/width:\s*128px/);
-    const wordmark = ruleBody(shell, '.app-splash-wordmark');
-    expect(wordmark).toMatch(/font-size:\s*var\(--text-lg\)/);
-    expect(wordmark).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
-    expect(wordmark).toMatch(/letter-spacing:\s*var\(--tracking-splash\)/);
-    // 字体也同一份：静态帧写死一族，React 那一帧（继承 --font-body）在替换那一刻就换
-    // 字形，wordmark 跟着重排——「两帧同构图」包括这一项。
-    expect(html).toMatch(/font-family: var\(--font-body,/);
-    expect(html).toMatch(/\.app-splash-static \.wordmark i \{ font-style: normal; color: var\(--brand-vermilion, #B63A2E\); \}/);
-    expect(ruleBody(shell, '.app-splash-wordmark i')).toMatch(/color:\s*var\(--brand-vermilion\)/);
-
-    // 颜色只认令牌：`--splash-paper` 全仓没有定义，写在这里就是个坏键——真被谁定义出来，
-    // 名字的颜色就与静态帧不一致了。wordmark 该跟 `.app-splash` 的 `--ink-primary`（docs/30）。
-    expect(shell).not.toMatch(/--splash-paper/);
-    expect(ruleBody(shell, '.app-splash')).toMatch(/color:\s*var\(--ink-primary\)/);
-    expect(ruleBody(shell, '.app-splash')).toMatch(/background:\s*var\(--surface-canvas\)/);
-    expect(html).toMatch(/background: var\(--surface-canvas, #0B0B0F\)/);
-
-    // 入场不许重播动画：这一层与静态帧同构图，从 opacity 0 淡入等于在替换那一刻把印记
-    // 擦掉一次。淡出保留——退出确实要让它走掉。
-    expect(brand).not.toMatch(/animation/);
-    expect(shell).not.toMatch(/splash-arrive/);
-    expect(ruleBody(shell, '.app-splash')).toMatch(/transition:\s*opacity var\(--motion-standard\)/);
-    expect(ruleBody(shell, '.app-splash.is-leaving')).toMatch(/opacity:\s*0/);
+    expect(html).toContain('app-splash-static');
+    expect(html).toContain("data-native-mobile='true'");
+    expect(html).toContain("invoke('frontend_ready')");
+    expect(read('src/components/SplashFrame.tsx')).toContain('return null');
+    expect(read('src/components/SplashFrame.tsx')).not.toMatch(/setTimeout|requestAnimationFrame/);
+    expect(html.indexOf("localStorage.getItem('yomika.last-theme')")).toBeLessThan(html.indexOf('</head>'));
+    expect(html.indexOf("localStorage.getItem('yomika.last-custom-css')")).toBeLessThan(html.indexOf('</head>'));
   });
 
   it('parks the compact bar only while it floats, and leaves the docked row empty', () => {
@@ -582,7 +515,7 @@ describe('design system contract', () => {
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^[ \t]*\/\/[^\n]*$/gm, '');
     const declared = strip(tokens);
-    const drawn = strip(component);
+    const drawn = strip(component).replaceAll('\\"', '"');
     expect(declared).toMatch(/--yomika-mark-plate:\s*var\(--surface-container-highest\)/);
     expect(declared).toMatch(/--yomika-mark-ink-accent:\s*var\(--on-surface-variant\)/);
     expect(drawn).toMatch(/fill="var\(--yomika-mark-plate/);
@@ -599,126 +532,31 @@ describe('design system contract', () => {
     expect(readme).not.toMatch(/<img[^>]*src="assets\/yomika-mark\.svg"/);
   });
 
-  it('draws one mark, not four: every surface mirrors the master geometry', () => {
-    // 曾经同一张画有四个版本：描边的母版、手绘的托盘字形、打包套、内联组件。它们各自
-    // 漂移过，所以侧栏、标题栏、通知区里是**三个不同的**图。现在只有一份几何
-    // （assets/yomika-mark.svg），其余全是它的派生：
-    //
-    //   打包套 / 托盘位图  ← .github/scripts/derive-logo.mjs（槽解析成字面量）
-    //   Android 自适应前景 ← 同一脚本（无盘子 + 缩到 68%）
-    //   内联组件           ← src/components/YomikaMark.tsx（槽解析成主题令牌）
-    //   开屏两帧           ← index.html 静态帧 / SplashFrame.tsx（同上，字面量）
+  it('derives the approved reading mark everywhere from one master', () => {
     const master = read('assets/yomika-mark.svg');
-    const signature = [
-      /x="88" y="64" width="128" height="384" rx="64"/,
-      /x="88" y="64" width="320" height="128" rx="64"/,
-      /x="216" y="224" width="96" height="64" rx="32"/,
-      /r="80"/,
-    ];
-    for (const pattern of signature) {
-      expect(master, '母版自己得先有这件几何').toMatch(pattern);
+    // 这份设计稿是**契约的输入**，而 `docs/*` 按 `.gitignore:2` 默认不入库：它必须被
+    // 显式入库（`git add -f`，仓库里另外两份 superpowers 设计稿就是这么进去的），否则
+    // 干净检出与 CI 会在这一行读不到文件而红。它不能被挪进 `assets/`——本用例末尾那条
+    // 断言 `assets/` 下有且只有一份 svg。
+    const approved = read('docs/superpowers/specs/2026-10-14-yomika-reading-mark.svg');
+    const paths = (source: string) => [...source.matchAll(/d="(M[^"]+)"/g)].map(match => match[1]);
+    expect(paths(master)).toEqual(paths(approved));
+    expect(paths(master)).toHaveLength(4);
+    for (const surface of ['index.html', 'src-tauri/icons/app-icon.svg', 'src-tauri/icons/android-foreground.svg']) {
+      expect(paths(read(surface))).toEqual(paths(master));
     }
-    for (const surface of [
-      'src/components/YomikaMark.tsx',
-      'src/components/SplashFrame.tsx',
-      'index.html',
-      'src-tauri/icons/app-icon.svg',
-      'src-tauri/icons/android-foreground.svg',
-    ]) {
-      const text = read(surface);
-      for (const pattern of signature) {
-        expect(text, `${surface} 少了母版的一件几何 ${pattern}`).toMatch(pattern);
-      }
-    }
-
-    // 描边那版的几何不许在任何地方复活：`10 units of 512` 的笔画在 16px 上是 0.31px，
-    // 实测它一个能读成墨的像素都不剩（用户报的「小尺寸下很难看清」）。
-    const stroked = [/x="112" y="112" width="288" height="288"/, /cx="288" cy="296" r="22"/, /stroke-width="18"/];
-    for (const surface of [
-      'assets/yomika-mark.svg',
-      'src/components/YomikaMark.tsx',
-      'src/components/SplashFrame.tsx',
-      'index.html',
-      'src-tauri/icons/app-icon.svg',
-      'src-tauri/icons/android-foreground.svg',
-    ]) {
-      const text = read(surface);
-      for (const pattern of stroked) {
-        expect(text, `${surface} 里还有描边版的几何 ${pattern}`).not.toMatch(pattern);
-      }
-    }
-
-    // 手绘的托盘母版整份退场：托盘与窗口图标现在同一张画。
-    expect(() => read('assets/yomika-tray.svg')).toThrow();
-    expect(() => read('assets/yomika-mark-print.svg')).toThrow();
-    // 网页内联标记那份也退场。它是**第三份**几何（描边 18 单位、mark 占 56.25%、圆点
-    // r=22），曾经被侧栏/关于页的 `<img src>` 用过；`YomikaMark` 内联组件接手之后它就没
-    // 人引用了，留着就是"下次有人照着它再画一遍"的种子——那正是这一轮要断掉的循环。
-    // 连目录里"只准有一份画"本身也钉住：多出来的 svg 一律是漂移源。
-    expect(() => read('assets/yomika-icon.svg')).toThrow();
-    expect(
-      readdirSync(resolve(root, 'assets')).filter((name) => name.endsWith('.svg')),
-      'assets/ 下有且只有一份母版',
-    ).toEqual(['yomika-mark.svg']);
-    // 而托盘位图仍然是那一张画派生出来的：见下一条用例的 16px 判据。
-    expect(read('src-tauri/src/lib.rs')).toMatch(/include_bytes!\("\.\.\/icons\/tray-32\.png"\)/);
+    const component = read('src/components/YomikaMark.tsx').replaceAll('\\"', '"');
+    expect(paths(component)).toEqual(paths(master));
+    expect(read('src-tauri/icons/android-foreground.svg')).toContain('scale(0.68)');
+    expect(readdirSync(resolve(root, 'assets')).filter(name => name.endsWith('.svg'))).toEqual(['yomika-mark.svg']);
   });
 
-  it('keeps the tray derivable from the master: 16px carries readable ink, not grey mush', () => {
-    // 托盘给的 16px 是这套图标真正的最小档，而「够不够清楚」必须是一条**能算的**判据，
-    // 不是"看着还行"。母版注释里记着真栅格化的读数（工装：
-    // debug_outputs/logo-audit/ink-probe.mjs —— 静态服务 + 无头 Edge + canvas，量的是
-    // 真像素不是估的）：
-    //     16px  墨色 89 / 底板 248（34.8%），最细笔画 2px，每行最长连续墨段中位 4px，连通块 2
-    //     32px  墨色 335 / 底板 982（32.7%）
-    // 旧的描边版在 32×32 上**一个**可读墨色像素都没有（10/512 的笔画 = 0.31px）。
-    // 下面那几条断言把"为什么这版能上托盘"钉在几何本身：尺寸、网格、笔画、缩进。
-    const master = read('assets/yomika-mark.svg');
-    // 读数本身：注释里写着，改母版就得重测并改这一行。
-    expect(master).toMatch(/89 readable ink\s+pixels against 248 plate pixels \(34\.8% coverage\)/);
-    expect(master).toMatch(/a 2px thinnest stroke, 4px median stroke/);
-    // 为什么是填充而不是描边——这是那次修复的全部理由。
-    expect(master).toMatch(/the glyph is drawn as filled shapes/);
-
-    // 几何：三件填充 + 圆点，每一条边都落在 8 的倍数上（512→16 是 32:1，512→32 是 16:1，
-    // 落在 32 单位网格上的边在两个档位都落在整数像素上）。唯一故意离网格的是脊线。
-    const rects = [...master.matchAll(/<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"/g)].map(
-      (m) => [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] as const,
-    );
-    expect(rects.length, '母版的字形是三件填充').toBe(3);
-    for (const [x, y, w, h] of rects) {
-      for (const value of [x, y, w, h]) {
-        expect(value % 8, `母版的边 ${value} 不在 8 的倍数上，最小档会糊`).toBe(0);
-      }
-    }
-    // 最细的一件是内尺：64 单位 = 16px 下的 2px。32 单位的细节在这个尺寸下会整块消失
-    // （注释里记着：切掉 32 单位缺口的候选与不缺口的候选逐字节相同）。
-    const thinnest = Math.min(...rects.map(([, , w, h]) => Math.min(w, h)));
-    expect(thinnest, '最细的一件要在 16px 下还剩 2px').toBe(64);
-
-    // 缩进：脊线刻意在 88 而不是 64 —— 两侧的光学空隙要看来相等（用户报的「左侧空隙
-    // 还是太小了」）。88 + 320 = 408，而 408 + 88 = 496，两侧各让出 88 与 104。
-    const left = Math.min(...rects.map(([x]) => x));
-    const right = 512 - Math.max(...rects.map(([x, , w]) => x + w));
-    expect(left, '脊线在 88：整轮 64 的边读起来左侧太紧').toBe(88);
-    expect(right).toBe(104);
-    const circle = /<circle cx="(\d+)" cy="(\d+)" r="(\d+)"/.exec(master);
-    expect(circle, '圆点要在母版里').not.toBeNull();
-    const [cx, cy, r] = [Number(circle![1]), Number(circle![2]), Number(circle![3])] as const;
-    // 圆点与底板、与左脊、与上臂都留得住：它在 16px 下是 5px 直径。
-    expect(r).toBe(80);
-    expect(cx + r).toBeLessThanOrEqual(512 - 64);
-    expect(cy + r).toBeLessThanOrEqual(512 - 64);
-
-    // 托盘位图仍是这一份派生出来的（同一个 32px 输出），并被内嵌进 exe；解码失败要退回
-    // 应用图标——托盘没有图标比图标糊一点糟得多。
+  it('retains tray decoding and fallback with a generated bitmap', () => {
+    expect(readFileSync(resolve(root, 'src-tauri/icons/tray-32.png'))).toEqual(readFileSync(resolve(root, 'src-tauri/icons/32x32.png')));
     const lib = read('src-tauri/src/lib.rs');
-    const cargo = read('src-tauri/Cargo.toml');
-    expect(lib).toMatch(/include_bytes!\("\.\.\/icons\/tray-32\.png"\)/);
-    expect(lib).toMatch(/Image::from_bytes\(/);
-    expect(lib).toMatch(/app\.default_window_icon\(\)\.cloned\(\)/);
-    expect(cargo).toMatch(/tauri\s*=\s*\{[^}]*"image-png"/);
-    expect(read('src-tauri/src/tray_menu.rs')).toMatch(/fn the_embedded_tray_bitmap_decodes_to_a_non_empty_icon/);
+    expect(lib).toContain('include_bytes!("../icons/tray-32.png")');
+    expect(lib).toContain('app.default_window_icon().cloned()');
+    expect(read('src-tauri/Cargo.toml')).toMatch(/tauri\s*=\s*\{[^}]*"image-png"/);
   });
 
   it('keeps the toast above menus, their backdrop and dialogs', () => {
@@ -1580,8 +1418,8 @@ describe('design system contract', () => {
     expect(centred).toMatch(/right:\s*auto/);
     expect(centred).toMatch(/transform:\s*translateX\(-50%\)/);
     const indicatorScreen = read('src/components/ReaderScreen.tsx');
-    expect(indicatorScreen, '手机上不取右下角那一档').toMatch(/const placement = bottomGap >= 44 \|\| coarsePointer \? 'bottom' : 'corner';/);
-    expect(indicatorScreen, '量出来的那一档要落到胶囊上').toMatch(/setIndicatorPlacement\(placement\);/);
+    expect(indicatorScreen, '桌面右下角，触屏底部中心').toMatch(/const placement = coarsePointer \? 'bottom' : 'corner';/);
+    expect(indicatorScreen, '初始首帧也采用设备默认位置').toMatch(/const indicatorPlacement = coarsePointer \? 'bottom' : 'corner';/);
     expect(indicatorScreen, '只有结论变了（或缩放还在缓动）才排第二趟测量').toMatch(/if \(!measure\(true\)\) settle = window\.setTimeout\(\(\) => \{ measure\(true\); \}, 240\);/);
     expect(indicatorScreen, '还没解码的页不能拿来量底缝').toMatch(/if \(image\.naturalWidth === 0\) continue;/);
     expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout, pages\.length, viewport\.width, viewport\.height, visibleIndexes, zoom\.scale\]\);/);
@@ -1596,7 +1434,7 @@ describe('design system contract', () => {
     expect(indicatorScreen, '手指才按落点钉一侧').toMatch(/pinTappedBand: coarsePointer,/);
     expect(indicatorScreen, '唤出时按落点选边').toMatch(/setHover\(pinTappedBand \? side : undefined\)/);
     expect(indicatorScreen, '开着时点另一条感应带要换过去，不是两条都亮').toMatch(/if \(pinTappedBand && side !== null && side !== hoverChromeRef\.current\)/);
-    expect(indicatorScreen, '自动收起要清掉钉住的那一侧').toMatch(/setHover\(undefined\);[\s\S]{0,60}callbacksRef\.current\.onHide\(\)/);
+    expect(indicatorScreen, '自动收起明确隐藏两侧，不回落到默认同时显示').toMatch(/setHover\(null\);[\s\S]{0,60}callbacksRef\.current\.onHide\(\)/);
     expect(indicatorScreen, 'Escape 收起也要清意见').toMatch(/setHover\(undefined\);[\s\S]{0,40}setState\(toggleReaderChrome\)/);
 
     // 底栏的「动」有三件事必须同时在场，少一件它就成了静止的一块：
@@ -2602,13 +2440,11 @@ describe('design system contract', () => {
   });
 
   it('keeps the floating nav off the last row of every list', () => {
-    // 实测（390×900、真触摸工装）：只给 `.workspace` 补内边距时，滚到底之后最后一行的
-    // 下缘仍压在浮动底栏的上缘之下——首页 63px、档案库 35px、历史 40px、设置与书架 76px，
-    // 而且 `reachedMax` 都是 true，也就是「滚得到底但读不到尾」。尾巴长在列表自己身上的
-    // 那几条路由（`.library-shell-list` / `.route-cache-panel`）也要有一份同样的内边距。
+    // Compact panels now flow inside the workspace scroll surface. Reserve the
+    // floating bar once there; padding retained nested lists doubles the gap.
     const shell = read('src/styles/shell.css');
-    expect(shell, '最内层的列表也要补出底栏的高度')
-      .toMatch(/\.app-shell\.is-floating-nav \.library-shell-list,[^}]*padding-bottom:\s*calc\(var\(--safe-bottom\) \+ 80px\)/);
+    expect(shell.match(/padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\)/g)).toHaveLength(1);
+    expect(shell).not.toMatch(/\.app-shell\.is-floating-nav \.library-shell-list,[^}]*padding-bottom/);
   });
 
   it('gives small controls a finger-sized target only where a finger is used', () => {

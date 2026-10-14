@@ -11,7 +11,7 @@ import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { getPlatformCapabilities } from '../bridge/platform';
-import { decodeImage } from '../lib/decodeImage';
+import { decodeImageStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
@@ -187,7 +187,7 @@ export function useReaderChrome({ rootRef, visible, active, suspended = false, p
     const timer = window.setTimeout(() => {
       // 钉住的那一侧比 `visible` 强势（见下面 topChromeVisible 的算法），自动收起时
       // 不把意见清掉，被钉住的那条栏就再也摘不下来。
-      setHover(undefined);
+      setHover(null);
       callbacksRef.current.onHide();
     }, CHROME_AUTO_HIDE_MS);
     return () => window.clearTimeout(timer);
@@ -214,7 +214,7 @@ export function useReaderChrome({ rootRef, visible, active, suspended = false, p
       setKeepAliveToken((value) => value + 1);
       return;
     }
-    setHover(undefined);
+    setHover(null);
     callbacksRef.current.onToggle();
   }, [hoverTarget, pinTappedBand, setHover, visible]);
 
@@ -296,20 +296,32 @@ interface ReaderScreenProps {
  * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
  * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
  */
-const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed }: {
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
   onMeasured: (index: number, image: HTMLImageElement) => void;
   onDisplayed?: ((index: number, url: string) => void) | undefined;
+  onFailed: (index: number, url: string) => void;
 }) {
   const [shown, setShown] = useState(source);
+  const displayedFailed = useRef(false);
   useEffect(() => {
     if (source === shown) return;
     let active = true;
-    void decodeImage(source).then(() => { if (active) setShown(source); });
+    void decodeImageStrict(source).then(() => {
+      if (!active) return;
+      displayedFailed.current = false;
+      setShown(source);
+    }, (error) => {
+      if (!active) return;
+      logError('reader/page-image', '替换图片解码失败', { page: index + 1, url: source, error: String(error), recovery: displayedFailed.current });
+      // A healthy displayed page survives a bad candidate. A broken displayed
+      // page needs recovery; if that also fails, surface the page retry.
+      if (displayedFailed.current) onFailed(index, source);
+    });
     return () => { active = false; };
-  }, [source, shown]);
+  }, [source, shown, index, onFailed]);
   return (
     <img
       draggable={false}
@@ -323,6 +335,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
         onDisplayed?.(index, shown);
       }}
       onError={(event) => {
+        displayedFailed.current = true;
         // 图片加载失败曾是**完全静默**的：算出来的那一版取图地址打不开时，页面上只剩一个
         // 破图，`onLoad` 不响、`naturalWidth` 是 0，日志里连一行都没有（2026-10-13 现场）。
         // 这里至少把「哪一页、哪个地址」写进 error.log。
@@ -333,6 +346,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
           naturalWidth: image.naturalWidth,
           complete: image.complete,
         });
+        onFailed(index, shown);
       }}
     />
   );
@@ -343,10 +357,10 @@ function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void 
   if (!failed) return <div className="reader-page-status"><LoadingIndicator /></div>;
   return (
     <div className="reader-page-status is-failed">
-      <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={onRetry}>
+      <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={(event) => { event.stopPropagation(); onRetry(); }}>
         <RotateCcw aria-hidden="true" />
       </button>
-      <p role="alert">加载失败</p>
+      <p role="alert">点击重新加载</p>
     </div>
   );
 }
@@ -630,9 +644,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // already held is now the wrong rendition, so drop it and let the window
   // refill: without this, flipping upscaling changed nothing you could see.
   const reloadedRef = useRef(reloadToken);
+  const pageRequestGeneration = useRef(0);
   useEffect(() => {
     if (reloadedRef.current === reloadToken) return;
     reloadedRef.current = reloadToken;
+    pageRequestGeneration.current += 1;
+    setRetryTick((value) => value + 1);
     failedPagesRef.current.clear();
     setExhaustedPages((current) => current.size === 0 ? current : new Set());
     setLoadedPages((current) => {
@@ -723,7 +740,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         }
       }
       loadingPagesRef.current.add(index);
+      const generation = pageRequestGeneration.current;
       void loadPage(index).then((page) => {
+        if (generation !== pageRequestGeneration.current) return;
         if (page) {
           failedPagesRef.current.delete(index);
           setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
@@ -738,7 +757,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (attempts < MAX_PAGE_LOAD_ATTEMPTS) setRetryTick((value) => value + 1);
         // Only now is the page a failure rather than a page still on its way.
         else setExhaustedPages((current) => current.has(index) ? current : new Set(current).add(index));
-      }).finally(() => loadingPagesRef.current.delete(index));
+      }).finally(() => {
+        loadingPagesRef.current.delete(index);
+        if (generation !== pageRequestGeneration.current) {
+          releasePage?.(index);
+          setRetryTick((value) => value + 1);
+        }
+      });
     }
     if (soonest !== Infinity) {
       if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
@@ -747,6 +772,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
 
   const retryPage = useCallback((index: number) => {
+    releasePage?.(index);
+    setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? '' : value));
     failedPagesRef.current.delete(index);
     setExhaustedPages((current) => {
       if (!current.has(index)) return current;
@@ -755,7 +782,19 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       return next;
     });
     setRetryTick((value) => value + 1);
-  }, []);
+  }, [releasePage]);
+
+  const [rejectedDerived, setRejectedDerived] = useState<Map<number, string>>(() => new Map());
+  const failPage = useCallback((index: number, url: string) => {
+    // The displayed rendition may be a predecessor of the newest derived
+    // candidate while that candidate is still decoding.
+    if (loadedPages[index] !== url) {
+      setRejectedDerived((current) => new Map(current).set(index, url));
+      return;
+    }
+    failedPagesRef.current.set(index, { attempts: MAX_PAGE_LOAD_ATTEMPTS, nextAt: Infinity });
+    setExhaustedPages((current) => new Set(current).add(index));
+  }, [loadedPages]);
 
   /** Records what a page actually is, once the browser knows.
    *
@@ -1213,9 +1252,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const indicatorIndexes = effectiveLayout === 'webtoon' ? [webtoonAnchor] : visibleIndexes;
   const shownIndexes = (indicatorIndexes.length > 0 ? indicatorIndexes : [state.pageIndex]).filter((index) => index >= 0 && index < pages.length);
   const pageIndicator = pages.length === 0 ? '' : `${shownIndexes.map((index) => index + 1).join('–')} / ${pages.length}`;
-  /** The pill avoids the page the way Readoshi's did: it rests in the bottom
-   * letterbox when the image fills the width (top/bottom gaps), drops to the
-   * bottom-right corner when the image fills the height (side gaps), and fades
+  /** Desktop keeps the pill in the bottom-right corner; touch devices keep it
+   * centred at the bottom, including the first paint before image measurement.
+   * It fades
    * out entirely in continuous mode or while zoomed — zooming back to 100%
    * brings it back. Measured off the real images: object-fit means the drawn
    * rect is the element's own.
@@ -1224,7 +1263,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * bottom-right too), no placement can be clear — Readoshi's answer is
    * overlap detection: the pill then only flashes after a page turn and goes
    * quiet until the next one. */
-  const [indicatorPlacement, setIndicatorPlacement] = useState<'bottom' | 'corner'>('bottom');
+  const indicatorPlacement = coarsePointer ? 'bottom' : 'corner';
   const [indicatorOverlaps, setIndicatorOverlaps] = useState(false);
   const [indicatorFlash, setIndicatorFlash] = useState(true);
   /** 上一趟量到的结论（胶囊该在哪一档、当时的缩放）。第二趟只在它变了的时候才需要：
@@ -1252,13 +1291,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         union = union ? new DOMRect(Math.min(union.x, rect.x), Math.min(union.y, rect.y), Math.max(union.right, rect.right) - Math.min(union.x, rect.x), Math.max(union.bottom, rect.bottom) - Math.min(union.y, rect.y)) : rect;
       }
       if (!union) return true;
-      const bottomGap = window.innerHeight - union.bottom;
       // 手机上不取右下角那一档：竖着把屏幕占满的页在桌面上会把胶囊推到右边缝里，可手指
       // 也在右下角，而且手机上那半格本来就不宽——用户报「移动端应该居中而不是在右下角」。
-      const placement = bottomGap >= 44 || coarsePointer ? 'bottom' : 'corner';
+      const placement = coarsePointer ? 'bottom' : 'corner';
       const settled = measuredIndicator.current.placement === placement && measuredIndicator.current.scale === zoom.scale;
       if (remember) measuredIndicator.current = { placement, scale: zoom.scale };
-      setIndicatorPlacement(placement);
       // Overlap is the pill's own rect (whatever placement it settled into —
       // the settle pass below runs after the placement transition) against the
       // drawn image union.
@@ -1359,7 +1396,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * empty — a spread whose halves appeared one at a time used to re-centre when
    * the second arrived, shifting the page under the reader's eyes. */
   const renderSlot = (index: number, pagesInSlot = 1) => {
-    const source = derivedPages?.get(index) ?? loadedPages[index];
+    const derived = derivedPages?.get(index);
+    const source = derived && rejectedDerived.get(index) !== derived ? derived : loadedPages[index];
     // Whatever rendition is on screen, the page draws at the size its first
     // measurement established: an enhanced page must not be drawn larger than the
     // plain one it replaced (see `.reader-page` in reader.css).
@@ -1368,9 +1406,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // 帧就要画它"时在主线程上同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈
     // ——它就是主线程画的。
     return (
-      <div className="reader-slot" key={index}>
-        {source
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} />
+      <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
+        {source && !exhaustedPages.has(index)
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -1607,7 +1645,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           : indicatorPlacement;
         return (
           <div
-            className={`reader-page-indicator${bottomChromeVisible ? ' is-raised' : ''}${bottomPresence.leaving ? ' is-leaving' : ''}`}
+            className={`reader-page-indicator${bottomPresence.mounted ? ' is-raised' : ''}${bottomPresence.leaving ? ' is-leaving' : ''}`}
             data-placement={placement}
             aria-hidden="true"
           >{pageIndicator}</div>

@@ -2177,7 +2177,11 @@ body::-webkit-scrollbar,
   align-items: center;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--outline-variant);
 }
+.metadata-edit-heading { min-width: 0; display: grid; gap: var(--space-1); }
+.metadata-edit-heading p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--on-surface-variant); }
 .metadata-edit-header h1 { margin: 0; font-size: var(--text-title); }
 .metadata-edit-header h1 { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; white-space: normal; }
 .metadata-edit-form,
@@ -2299,8 +2303,9 @@ body::-webkit-scrollbar,
 .metadata-tag-input { position: relative; display: block; min-width: 0; }
 .metadata-tag-input input { width: 100%; }
 
-.metadata-edit-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+.metadata-edit-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--space-3); padding-block: var(--space-4); border-top: 1px solid var(--outline-variant); }
 .metadata-edit-actions > * { justify-content: center; }
+.metadata-edit-actions .metadata-delete-action { color: var(--state-danger); }
 .metadata-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; }.library-controls,
   .library-toolbar {
   display: flex;
@@ -4575,17 +4580,18 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
      so its tail stays reachable instead of being clamped behind the nav. */.shelf-workspace,
   .shelf-workspace .library-workspace {
     height: auto;
-    min-height: 100%;
+    min-height: 0;
   }
 
   .library-shell,
-  .library-shell.has-detail { display: block; height: auto; min-height: 100%; }
+  .library-shell.has-detail { display: block; height: auto; min-height: 0; }
   /* react-resizable-panels writes flex basis/height inline styles. On a phone
      the route is a single drilled-in surface, so those desktop sizing values
      must not leave an empty flex track below the visible panel. */.library-shell[data-group] {
     display: block !important;
     height: auto !important;
-    min-height: 100%;
+    min-height: 0;
+    overflow: visible !important;
   }
   .library-shell[data-group] > [data-panel] {
     display: block !important;
@@ -4597,7 +4603,10 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .library-shell.has-detail[data-group] > [data-panel]:has(.library-shell-list) {
     display: none !important;
   }
-  .library-shell-panel-content > section { height: auto; min-height: 100%; }
+  .library-shell-panel-content > section { height: auto; min-height: 0; }
+  .library-workspace { height: auto; min-height: 0; }
+  .metadata-edit-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metadata-edit-actions > .primary-action { grid-column: 1 / -1; }
   .library-shell-list,
   .library-shell-detail { padding: var(--space-4); border: 0; }
   .library-shell.has-detail .library-shell-list { display: none; }
@@ -4770,6 +4779,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .archive-list {
     height: auto;
     min-height: 0;
+    overflow: visible;
+    padding-bottom: var(--space-4);
   }
 
   .panel-separator {
@@ -4841,9 +4852,14 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   .compact-nav.is-floating {
-    right: var(--space-4);
+    right: auto;
     bottom: calc(var(--safe-bottom) + var(--space-3));
-    left: var(--space-4);
+    left: 50%;
+    translate: -50% 0;
+    display: flex;
+    width: max-content;
+    max-width: calc(100% - 2 * var(--space-4));
+    gap: var(--space-1);
     min-height: 64px;
     padding: var(--space-1) var(--space-2);
     border: 1px solid var(--outline-variant);
@@ -4857,6 +4873,9 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   .compact-nav.is-floating .nav-link {
     min-height: 52px;
+    flex: 1 1 64px;
+    width: 64px;
+    min-width: 0;
     border-radius: var(--radius-pill);
   }
 
@@ -4913,15 +4932,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     padding-bottom: calc(var(--safe-bottom) + 80px);
   }
 
-  /* 上面那条内边距只落在 `.workspace` 上，可首页 / 书架 / 档案库的尾巴长在列表自己
-     身上：实测（390×900、真触摸工装）滚到底之后最后一行的下缘仍落在底栏上缘之下——
-     首页 887 vs 824（盖住 63px）、档案库 35px、历史 40px、设置与书架 76px，
-     `reachedMax` 都是 true，也就是「滚得到底但读不到尾」。同一份内边距补到最内层的
-     列表上。如果哪天底栏不是浮动的，这两条要跟着上面的规则一起收掉。 */
-  .app-shell.is-floating-nav .library-shell-list,
-  .app-shell.is-floating-nav .route-cache-panel {
-    padding-bottom: calc(var(--safe-bottom) + 80px);
-  }
+  /* Native compact flow has one scroller: only workspace clears the nav.
+     Repeating that clearance in retained panels inflated every page's tail. */
 
   /* react-resizable-panels 会在 Group / Panel 上写**内联** `touch-action`
      （`orientation="horizontal"` 时是 `pan-y`）。内联样式压过任何不带 `!important`

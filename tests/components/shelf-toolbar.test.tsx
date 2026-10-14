@@ -31,10 +31,11 @@ const categories = [
 function makeAdapter() {
   return vi.fn(async (command: string) => {
     if (command === 'list_servers') return { ok: true, value: [{ id: 'server-1', scopeId: 'scope-1', name: 'Home', baseUrl: 'https://example.com', enabled: true }] };
-    if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: watchlist };
+    if (command === 'list_watchlist') return { ok: true, value: [watchlist[0]] };
+    if (command === 'list_reading_list') return { ok: true, value: watchlist };
     if (command === 'list_reading_history' || command === 'list_search_presets') return { ok: true, value: [] };
-    // 收藏夹那一条分类不存在时，收藏书架回落到本地那份收藏记录。
-    if (command === 'read_favorites_category') return { ok: true, value: null };
+    // 收藏的成员与顺序来自远端分类；本地待看记录不决定收藏。
+    if (command === 'read_favorites_category') return { ok: true, value: { id: 'favorites00001', archives: ['archive-1', 'archive-0'] } };
     if (command === 'list_archives_by_ids') return { ok: true, value: [archive(0), archive(1)] };
     if (command === 'verify_archives_exist') return { ok: true, value: [] };
     if (command === 'list_categories') return { ok: true, value: categories };
@@ -78,9 +79,12 @@ describe('shelf toolbar', () => {
   });
 
   it('filters by category and re-sorts by title', async () => {
-    renderShelf('/watchlist', makeAdapter());
+    const adapter = makeAdapter();
+    renderShelf('/watchlist', adapter);
     await screen.findByRole('combobox', { name: '分类筛选' });
-    // 默认按加入时间倒序：后加入的 archive-1 在前。
+    expect(adapter).toHaveBeenCalledWith('read_favorites_category', { serverId: 'server-1' });
+    expect(adapter.mock.calls.some(([command]) => command === 'list_watchlist')).toBe(false);
+    // 默认保留远端 Favorites 分类顺序：archive-1 在前。
     expect(listTitles()).toEqual(['Archive 1', 'Archive 0']);
 
     fireEvent.change(screen.getByRole('combobox', { name: '分类筛选' }), { target: { value: 'category000001' } });

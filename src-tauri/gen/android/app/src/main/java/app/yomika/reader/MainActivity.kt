@@ -26,6 +26,12 @@ class MainActivity : TauriActivity() {
       statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
       navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
     )
+    // This matches the last app canvas after activity creation. Android 12's
+    // earlier OS launch screen still uses system day/night resources.
+    val startup = getSharedPreferences("yomika_startup", MODE_PRIVATE)
+    startup.getString("canvas", null)?.let { canvas ->
+      applySystemBarAppearance(this, startup.getBoolean("dark", true), canvas)
+    }
     super.onCreate(savedInstanceState)
 
     // 边到边之后，那一圈高度得有人管：系统栏（状态栏、手势条、刘海）交给**页面**——WebView

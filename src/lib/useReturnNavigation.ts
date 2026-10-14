@@ -5,6 +5,12 @@ export function useReturnNavigation(fallback = '/library') {
   const location = useLocation();
   const navigate = useNavigate();
   return useCallback(() => {
+    // In-app editors are pushed from their origin. Pop that entry instead of
+    // replacing it with a duplicate of the origin (which makes Back stay put).
+    if ((location.state as { returnViaHistory?: boolean } | null)?.returnViaHistory && location.key !== 'default') {
+      navigate(-1);
+      return;
+    }
     const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo;
     if (typeof returnTo === 'string' && returnTo.startsWith('/')) {
       navigate(returnTo, { replace: true });

@@ -147,14 +147,14 @@ describe('mobile packaging', () => {
       expect(theme).toContain('<item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>');
     }
 
-    // 窗口背景里那张印记要与网页帧同尺寸：网页帧的印板是 128px，自适应图标 108dp 画布
-    // 里裁出来的印板是 2/3，所以 item 给 192dp（192 × 2/3 = 128）。从前是 96dp 且不带
-    // 印板，印记既小一截又看不见。
+    // The OS owns the branded launch; the activity supplies only a canvas.
     const drawable = read(`${res}/drawable/splash_background.xml`);
-    expect(drawable).toContain('android:width="192dp"');
-    expect(drawable).toContain('android:height="192dp"');
-    expect(drawable).toContain('android:drawable="@mipmap/ic_launcher"');
-    expect(drawable).not.toContain('ic_launcher_foreground');
+    expect(drawable).toContain('@color/splash_canvas');
+    expect(drawable).not.toContain('@mipmap/');
+    const activity = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/MainActivity.kt');
+    const host = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/MobileHost.kt');
+    expect(activity).toContain('getSharedPreferences("yomika_startup", MODE_PRIVATE)');
+    expect(host).toContain('putString("canvas", background)');
 
     // WebView 一挂上就用自己的背景色盖住窗口背景，而它到页面画出首帧之间有一段空档：
     // 不透明时印记在那段里整个消失（用户看到的就是「闪一下又出来」）。alpha 0 会被

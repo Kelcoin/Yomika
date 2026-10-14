@@ -41,6 +41,10 @@ function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   }
   return result;
 }
+function invalidateFavorites<T>(result: CommandResult<T>): CommandResult<T> {
+  if (result.ok) invalidateRouteCache('favorites:');
+  return invalidateShelves(result);
+}
 import type { ServerIdentity } from '../domain/server';
 
 type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'> & { allowProgressRegression?: boolean };
@@ -164,17 +168,14 @@ function archiveMatchesSearch(archive: ArchiveRecord, tokens: readonly string[])
 }
 
 export class NativeLibraryRepository {
-  /** 收藏/待看写的是**绝对值**（`added`），不是「切换」：连点两次就是先写 true 再写
-   * false，谁最后落库谁说了算。这两条命令也在 tokio 线程池上跑，所以要按同一个键排好
-   * ——不然界面上是「已取消」，库里还留着那一行（见 `queuedWrite`）。 */
+  /** Public watchlist means local 待看. Keep the existing reading_list storage and sync migration. */
   setWatchlist(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return queuedWrite(`watchlist\0${scopeId}\0${archiveId}`, () => invokeCommand('set_watchlist', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
+    return this.setReadingList(scopeId, archiveId, added);
   }
   listWatchlist(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
-    return invokeCommand('list_watchlist', { scopeId }, z.array(WatchlistRecordSchema));
+    return this.listReadingList(scopeId);
   }
-  /** Reading list ("待看") is a second list beside the watchlist ("收藏夹"):
-   * intent to read versus having liked something. */
+  /** Compatibility name for the established local pending-reading store. */
   setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
     return queuedWrite(`reading-list\0${scopeId}\0${archiveId}`, () => invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
   }
@@ -315,10 +316,10 @@ export class NativeLibraryRepository {
    * 分类快照还在，读回来的是**加收藏之前**的名单，并且被写进 localStorage 快照自己
    * 续命下去。所以症状是单向的：移出收藏夹立刻正确（那条有作废），加进去却不出现。 */
   addArchiveToCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateShelves);
+    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateFavorites);
   }
   removeArchiveFromCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateShelves);
+    return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateFavorites);
   }
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(invalidateShelves);

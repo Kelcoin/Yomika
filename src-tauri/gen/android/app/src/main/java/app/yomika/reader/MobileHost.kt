@@ -113,6 +113,8 @@ fun pushInsetsToPage(web: WebView?, top: Int, bottom: Int) {
 fun applySystemBarAppearance(activity: Activity, dark: Boolean, background: String) {
   val color = runCatching { Color.parseColor(background) }.getOrNull()
   if (color != null) {
+    activity.getSharedPreferences("yomika_startup", android.content.Context.MODE_PRIVATE)
+      .edit().putString("canvas", background).putBoolean("dark", dark).apply()
     activity.window?.setBackgroundDrawable(ColorDrawable(color))
   }
   val window = activity.window ?: return

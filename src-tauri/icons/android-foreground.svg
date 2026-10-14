@@ -13,9 +13,9 @@
        produce byte-identical output), so the scale has to live in the source.
        Do not hand-edit: run the script. -->
   <g transform="translate(256 256) scale(0.68) translate(-256 -256)">
-    <rect x="88" y="64" width="128" height="384" rx="64" fill="#F5F5F5"/>
-    <rect x="88" y="64" width="320" height="128" rx="64" fill="#F5F5F5"/>
-    <rect x="216" y="224" width="96" height="64" rx="32" fill="#F5F5F5"/>
-    <circle cx="368" cy="368" r="80" fill="#E8E8E8"/>
+    <path d="M112 130 Q181 132 236 174 L236 278 Q182 238 112 238 Z" fill="#F5F5F5"/>
+    <path d="M400 130 Q331 132 276 174 L276 278 Q330 238 400 238 Z" fill="#F5F5F5"/>
+    <path d="M127 264 Q193 268 256 313 Q319 268 385 264 L385 293 Q322 300 276 340 L276 390 L236 390 L236 340 Q190 300 127 293 Z" fill="#F5F5F5"/>
+    <path d="M340 142 Q360 135 378 133 L378 208 L359 194 L340 210 Z" fill="#B63A2E"/>
   </g>
 </svg>

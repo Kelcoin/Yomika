@@ -41,11 +41,11 @@ describe('repository write ordering', () => {
 
     // 第一条还在路上：第二条**一个字节都不该发出去**。
     await Promise.resolve();
-    expect(dispatched).toEqual(['set_watchlist:true']);
+    expect(dispatched).toEqual(['set_reading_list:true']);
 
     releaseFirst();
     await Promise.all([first, second]);
-    expect(dispatched).toEqual(['set_watchlist:true', 'set_watchlist:false']);
+    expect(dispatched).toEqual(['set_reading_list:true', 'set_reading_list:false']);
   });
 
   it('lets a different archive write through immediately', async () => {
@@ -63,7 +63,7 @@ describe('repository write ordering', () => {
     const first = repository.setWatchlist('s', 'a', true);
     const other = repository.setWatchlist('s', 'b', true);
     await other;
-    expect(dispatched).toEqual(['set_watchlist:a', 'set_watchlist:b']);
+    expect(dispatched).toEqual(['set_reading_list:a', 'set_reading_list:b']);
     releaseFirst();
     await first;
   });

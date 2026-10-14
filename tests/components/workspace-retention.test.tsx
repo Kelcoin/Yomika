@@ -21,7 +21,7 @@ function Navigation() {
 }
 afterEach(resetInvokeAdapterForTests);
 
-it('retains split selection, route scope, page DOM and input state through settings and reader', async () => {
+it('retains page DOM and input state, closes detail on explicit list entry, and preserves explicit route scope', async () => {
   setInvokeAdapterForTests(async (command) => ({ ok: true, value: command === 'load_preferences' ? DEFAULT_PREFERENCES : [] }));
   render(<MemoryRouter initialEntries={['/library']}><Navigation /><App /></MemoryRouter>);
   const library = screen.getByRole('textbox', { name: 'retained library' });
@@ -35,8 +35,12 @@ it('retains split selection, route scope, page DOM and input state through setti
   expect(detail).not.toBeVisible();
   expect(detail).toHaveTextContent('archive-a:server-a');
   fireEvent.click(screen.getByRole('button', { name: '/library' }));
-  expect(await screen.findByRole('heading', { name: 'archive-a:server-a' })).toBe(detail);
+  expect(screen.queryByRole('heading', { name: 'archive-a:server-a' })).not.toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: 'retained library' })).toBe(library);
   expect(library).toHaveValue('my search');
+  fireEvent.click(screen.getByRole('button', { name: '/library/archive-a?server=server-a' }));
+  expect(await screen.findByRole('heading', { name: 'archive-a:server-a' })).toHaveTextContent('archive-a:server-a');
+  expect(screen.getByRole('textbox', { name: 'retained library' })).toBe(library);
   fireEvent.click(screen.getByRole('button', { name: '/reader/archive-a?server=server-a' }));
   const reader = await screen.findByRole('textbox', { name: 'retained reader' });
   fireEvent.change(reader, { target: { value: 'page 12' } });

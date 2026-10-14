@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -6,6 +6,16 @@ import { DomainErrorCodeSchema } from '../../src/domain/errors';
 
 function read(path: string): string {
   return readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
+}
+
+/**
+ * 读一份**可能不在检出里**的文件：`docs/*` 按 `.gitignore:2` 是本机的架构与迁移文档、
+ * 不入库，所以 CI 的检出里没有它（`src-tauri/src/inference.rs:2381` 那条真模型测试也是
+ * 这么跳过的）。返回 `undefined` 让调用方自己决定「没有这份文档时还要不要判」。
+ */
+function readIfPresent(path: string): string | undefined {
+  const file = fileURLToPath(new URL(path, import.meta.url));
+  return existsSync(file) ? readFileSync(file, 'utf8') : undefined;
 }
 
 function readJson(path: string): Record<string, unknown> {
@@ -1827,10 +1837,15 @@ describe('native shell configuration', () => {
     );
     expect(manifest, '给人的那一份也要说得出「跑起来仍是独立进程」').toContain('跑起来仍是独立进程');
 
-    const operators = read('../../docs/14-release-and-operations.md');
-    expect(operators, '运行命令要写在文档里，不是只活在 CI 里').toContain('.github/scripts/package-windows.ps1');
-    expect(operators, '便携布局的事实要写清楚：数据落在 exe 同级').toContain('data/webview/EBWebView/');
-    expect(operators, '已知限制要一条条列出来').toContain('已知限制（每条都有实测依据）');
+    // `docs/*` 不入库（`.gitignore:2`），所以 CI 的检出里没有这份运行文档。有它就照原样
+    // 钉三条（运行命令、便携布局、已知限制都要写在文档里，不是只活在 CI 里），没有就跳过
+    // ——让整条契约在 CI 上因为一份**本就不该入库**的文件而红，是把纪律判成了环境。
+    const operators = readIfPresent('../../docs/14-release-and-operations.md');
+    if (operators !== undefined) {
+      expect(operators, '运行命令要写在文档里，不是只活在 CI 里').toContain('.github/scripts/package-windows.ps1');
+      expect(operators, '便携布局的事实要写清楚：数据落在 exe 同级').toContain('data/webview/EBWebView/');
+      expect(operators, '已知限制要一条条列出来').toContain('已知限制（每条都有实测依据）');
+    }
 
     // 这一条是这一轮真正的发现：`BUILD_COMMIT` 那一串在 release 里**不会**以明文留在
     // `.rdata`（LLVM 折成立即数），留给打包核查的是另一份字节形态。所以「按字节改一份

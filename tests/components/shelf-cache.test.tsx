@@ -15,6 +15,62 @@ afterEach(() => {
 });
 
 describe('shelf snapshots', () => {
+  it('retains an expired verified remote snapshot with an offline explanation', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    writeRouteCache('favorites:last:default', {
+      favoritesSource: 'remote', history: [], serverId: 's', scopeId: 's', query: '',
+      watchlist: [{ scopeId: 's', archiveId: 'remote', addedAt: '', updatedAt: '', deviceId: '', revision: 1, deleted: false }],
+      archives: [{ serverId: 's', archiveId: 'remote', title: 'Verified old remote favorite', pageCount: 3, updatedAt: '2026-01-01' }],
+    });
+    clock.mockReturnValue(1000 + 24 * 60 * 60 * 1000);
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
+    });
+    render(<MemoryRouter initialEntries={['/watchlist']}><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+    expect(await screen.findByText(/离线缓存：显示上次收藏快照/)).toBeInTheDocument();
+    expect(screen.getByText('Verified old remote favorite')).toBeInTheDocument();
+    clock.mockRestore();
+  });
+
+  it.each([false, true])('does not reuse A favorites for an offline B (default=%s)', async (defaultServer) => {
+    let chosen = 'A';
+    let finish!: (value: unknown) => void;
+    const pending = new Promise(resolve => { finish = resolve; });
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: chosen, scopeId: chosen, name: chosen, baseUrl: 'https://example.com' }, ...(chosen === 'A' ? [{ id: 'B', scopeId: 'B', name: 'B', baseUrl: 'https://b.example.com' }] : [])] };
+      if (command === 'read_favorites_category') return args?.serverId === 'B' ? pending : { ok: true, value: { id: 'fav', archives: ['a'] } };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'A', archiveId: 'a', title: 'Only server A', pageCount: 3, updatedAt: '2026-01-01' }] };
+      if (['list_categories', 'find_missing_archives'].includes(command)) return { ok: true, value: [] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: false, error: { code: 'NETWORK', message: 'unused', retryable: true } };
+    });
+    render(<MemoryRouter initialEntries={[defaultServer ? '/watchlist' : '/watchlist?server=A']}><PreferencesProvider><ToastProvider><Link to="/watchlist?server=B">server-B</Link><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+    await screen.findByText('Only server A');
+    if (defaultServer) { chosen = 'B'; act(() => invalidateRouteCache('state:')); }
+    else fireEvent.click(screen.getByText('server-B'));
+    await waitFor(() => expect(screen.queryByText('Only server A')).toBeNull());
+    expect(readRouteCache('favorites:last:B')).toBeUndefined();
+    await act(async () => finish({ ok: false, error: { code: 'NETWORK', message: 'B offline', retryable: true } }));
+    await screen.findByText('B offline');
+    expect(screen.queryByText('Only server A')).toBeNull();
+    expect(readRouteCache('favorites:last:B')).toBeUndefined();
+  });
+
+  it('explains a missing category separately from an existing empty category', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'read_favorites_category') return { ok: true, value: null };
+      if (['list_categories', 'find_missing_archives'].includes(command)) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/watchlist']}><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+    expect(await screen.findByText('服务器尚未创建 🔖 Favorites 分类')).toBeInTheDocument();
+    expect(screen.queryByText('暂无收藏夹')).toBeNull();
+    expect(readRouteCache<{ favoritesCategoryPresent: boolean }>('favorites:last:default')?.favoritesCategoryPresent).toBe(false);
+  });
+
   it('restores separate shelves without reload and invalidates after reading-list mutation', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
@@ -123,9 +179,7 @@ describe('shelf snapshots', () => {
     expect(readRouteCache('state:watchlist:default')).toEqual({ watchlist: [] });
   });
 
-  it('falls back to the local watchlist when the server category comes back empty', async () => {
-    // `[]` 在 JS 里为真：服务器上这条静态分类一条都没有时，旧代码既把本机那份待看顶掉、
-    // 又拿着空名单去取档案，于是整页「暂无收藏夹」，本机的收藏一条也画不出来。空 = 不知道。
+  it('excludes stale local favorites when the remote category is empty', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
       if (command === 'read_favorites_category') return { ok: true, value: { id: 'SET_1785040778', archives: [] } };
@@ -144,19 +198,15 @@ describe('shelf snapshots', () => {
       <WorkspaceRoutes />
     </ToastProvider></PreferencesProvider></MemoryRouter>);
 
-    expect(await screen.findByText('本机记着的收藏档案')).toBeInTheDocument();
-    expect(adapter.mock.calls.find(([command]) => command === 'list_archives_by_ids')).toEqual(['list_archives_by_ids', { serverId: 's', archiveIds: ['a1'] }]);
-    expect(screen.queryByText('暂无收藏夹')).toBeNull();
+    expect(await screen.findByText('暂无收藏夹')).toBeInTheDocument();
+    expect(adapter.mock.calls.some(([command]) => command === 'list_watchlist')).toBe(false);
+    expect(screen.queryByText('本机记着的收藏档案')).toBeNull();
     // 空名单也不许落进快照：它被持久化之后，下一次恢复还是会把它当成「已知」。
     await waitFor(() => expect(readRouteCache('state:watchlist:default')).toBeTruthy());
     expect((readRouteCache<{ favoritesIds?: string[] }>('state:watchlist:default') ?? {}).favoritesIds).toBeUndefined();
   });
 
-  it('does not draw an archive the server list has but this device never recorded', async () => {
-    // 用户报的「收藏夹里是我根本没加入收藏夹的东西」：LANraragi 的 🔖 Favorites 是共享
-    // 状态——网页端、别的设备、旧版本都能往里加，而本机没有对应记录（或本机已删成墓碑）。
-    // 2026-10-13 真机数据：分类 15 个 id、本机 8 条活行，其中 13 张卡只来自分类。
-    // 所以收藏夹只画本机那张表；分类仍然只是本机推送的镜像（`favoritesMirror`）。
+  it('draws remote-only favorites regardless of obsolete local records', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
       if (command === 'read_favorites_category') return { ok: true, value: { id: 'SET_1785040778', archives: ['server-only', 'mine'] } };
@@ -179,15 +229,12 @@ describe('shelf snapshots', () => {
     </ToastProvider></PreferencesProvider></MemoryRouter>);
 
     expect(await screen.findByText('本机记着的收藏')).toBeInTheDocument();
-    // 只取本机记着的那一条：并集那条路会带上 `server-only`。
-    expect(adapter.mock.calls.find(([command]) => command === 'list_archives_by_ids')).toEqual(['list_archives_by_ids', { serverId: 's', archiveIds: ['mine'] }]);
-    expect(screen.queryByText('服务器上那条')).toBeNull();
+    // The category is authoritative, including items added by other clients.
+    expect(adapter.mock.calls.find(([command]) => command === 'list_archives_by_ids')).toEqual(['list_archives_by_ids', { serverId: 's', archiveIds: ['server-only', 'mine'] }]);
+    expect(await screen.findByText('服务器上那条')).toBeInTheDocument();
   });
 
   it('ignores an empty favorites id list that was persisted before the fix', async () => {
-    // 旧版本会把空名单一起写进快照（`[]` 为真），于是「恢复」这条路会带着一份
-    // 「已知、但是空的」名单回来：本机那份待看明明就在同一个快照里，页面却是空的。
-    // 空名单在渲染时也必须当「不知道」——否则这段历史包袱会让缺陷复活。
     rememberServerPresence(true);
     setInvokeAdapterForTests(vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
@@ -206,8 +253,7 @@ describe('shelf snapshots', () => {
       <WorkspaceRoutes />
     </ToastProvider></PreferencesProvider></MemoryRouter>);
 
-    expect(await screen.findByText('快照里的收藏档案')).toBeInTheDocument();
-    expect(screen.queryByText('暂无收藏夹')).toBeNull();
+    await waitFor(() => expect(screen.getByText('unused list_servers')).toBeInTheDocument());
   });
 
   it('leaves the snapshots alone when nothing was actually removed', async () => {

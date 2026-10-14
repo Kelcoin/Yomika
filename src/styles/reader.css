@@ -202,6 +202,8 @@
 .reader-page-status p { margin: 0; }
 .reader-page-status .reader-retry-button { margin: 0; }
 .reader-page-status.is-failed p { color: var(--reader-ink); }
+.reader-slot.is-failed { width: 100%; height: 100%; }
+.reader-page-status.is-failed { text-align: center; }
 
 /* 阅读器里的加载指示就是全应用那一个（M3 圆形指示器），只换颜色：它落在自己的
    深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */.reader-screen-loading .loading-indicator,

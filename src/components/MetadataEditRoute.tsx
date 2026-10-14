@@ -145,7 +145,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">
       <header className="metadata-edit-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        <h1 id="metadata-edit-title">编辑元数据</h1>
+        <div className="metadata-edit-heading"><h1 id="metadata-edit-title">编辑元数据</h1><p title={title}>{title || '未命名档案'}</p></div>
       </header>
       <form className="metadata-edit-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {/* 标题与简介是这里仅有的两段散文，所以只有它们要回自动大写与拼写检查。 */}
@@ -194,7 +194,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
         <div className="metadata-edit-actions">
           <button className="primary-action" type="submit" aria-label="保存元数据" disabled={!!busy}><Save aria-hidden="true" />{busy === 'save' ? '保存中…' : '保存元数据'}</button>
           <Link className="secondary-action" to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}><BookOpen aria-hidden="true" />阅读</Link>
-          <button className="secondary-action" type="button" disabled={!!busy} onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" />删除</button>
+          <button className="secondary-action metadata-delete-action" type="button" disabled={!!busy} onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" />删除</button>
         </div>
       </form>
       {deleteOpen && serverId && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}
