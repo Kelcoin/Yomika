@@ -221,9 +221,9 @@ mod tests {
         assert_eq!(MENU_HEIGHT, 62.0);
     }
 
-    /// 托盘图标是一份**单独**的资源（`icons/tray-32.png`，源头 `assets/yomika-tray.svg`）：
-    /// 应用图标那版在 16px 下糊成一团（用户报的）。这条测试盯的是「它编进来了、解得开、
-    /// 而且不是空的」——路径写错、`image-png` 特性掉了、资源被挪走，都会在这里断。
+    /// 托盘位图是母版 `assets/yomika-mark.svg` 的派生件（`icons/tray-32.png`，与
+    /// `icons/32x32.png` 逐字节相同），不是另一张画。这条测试盯的是「它编进来了、
+    /// 解得开、而且不是空的」——路径写错、`image-png` 特性掉了、资源被挪走，都会在这里断。
     #[test]
     fn the_embedded_tray_bitmap_decodes_to_a_non_empty_icon() {
         let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32.png"))
@@ -232,9 +232,10 @@ mod tests {
         let rgba = image.rgba();
         assert_eq!(rgba.len(), 32 * 32 * 4);
         // 必须有真正画上去的像素，而且不能是一块实心圆角方（那样就成了一个色块）。
-        // 门槛是量出来的：这一份 333 个亮像素，而应用图标那版（`icons/32x32.png`，
-        // print 标记）在同样的 32×32 上只有 **1** 个——它的笔画是 10/512，落到 32px
-        // 是 0.6px，抗锯齿之后全糊成灰。所以把托盘图标换回应用图标，这条会直接失败。
+        // 门槛是量出来的（工装 debug_outputs/logo-audit/ink-probe.mjs，真栅格化读像素）：
+        // 这一份 32×32 上有 357 个可读墨色像素，而旧描边母版派生的位图只有 **1** 个
+        // （它的笔画是 10/512，落到 32px 是 0.31px，抗锯齿之后全糊成灰）。所以谁把
+        // 描边版抄回母版，这条会直接失败。
         let opaque = rgba.chunks_exact(4).filter(|pixel| pixel[3] > 200).count();
         let ink = rgba.chunks_exact(4).filter(|pixel| pixel[3] > 200 && pixel[0] > 200).count();
         assert!(opaque > 400, "盘子不该是空的：{opaque} 个不透明像素");

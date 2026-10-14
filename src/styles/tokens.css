@@ -281,12 +281,24 @@
        that has to keep reaching an edge — the history rail — overshoots by this
        much; keep it above PULL_MAX + BOUNCE_MAX in LibraryWorkspace. */
     --overscroll-reach: 120px;
-    /* The brand mark's plate: a surface step rather than hard black, so the
-       inline YomikaMark reads on both themes and every colour scheme. The
-       frame rides the theme accent — a tier between the plate and the ink
-       glyph, so the mark's three layers stay distinguishable at a glance. */
+    /* The brand mark's three colour slots, resolved for the in-app drawing.
+       `assets/yomika-mark.svg` names them instead of inlining colours because
+       one master has to serve two worlds; `YomikaMark` maps them here, and
+       `tools/visual-check/derive-logo.mjs` maps the same three names to the
+       packed set's literals. Adding a slot means adding a line in both places —
+       the contract test `names every colour slot the master uses` counts them.
+
+         plate  — a surface step rather than hard black, so the inline mark
+                  reads on both themes and every colour scheme.
+         ink    — NOT here: it is `currentColor`, so the glyph rides the host
+                  element's colour and cannot drift from the surrounding text.
+         accent — the dot, the one part of the mark that says "this machine,
+                  not the other one"; it keeps its own tier in both worlds.
+       The old `--yomika-mark-frame` (a stroked square riding --primary) is gone
+       with the stroked glyph: at 16px the frame took the width the glyph needs,
+       and the plate already carries the identity. */
     --yomika-mark-plate: var(--surface-container-highest);
-    --yomika-mark-frame: var(--primary);
+    --yomika-mark-ink-accent: var(--on-surface-variant);
 
     /* ---- Typography ----------------------------------------------------- */
     --font-body: "Noto Sans SC Variable", "Noto Sans JP Variable", ui-sans-serif, system-ui, sans-serif;
@@ -353,18 +365,27 @@
 
        Nesting rule (同心圆角): a filled row living inside a rounded shell must
        not reuse the shell's radius nor pick one by taste — the inner radius is
-       the outer radius minus the shell's own inset (border + padding), so both
-       arcs share one centre. The floating panels are the only shell at
-       `--radius-overlay` with a 16px (`--space-4`) inset, so the rows inside
-       them use `--radius-card`: 28 - 16 = 12. A row that keeps `8px` under a
-       28px shell leaves a visibly oval corner (that was the user's report).
-       When a panel's bottom padding is cut on purpose (see the
-       `.settings-choice-panel:has(...)` rule in shell.css) the bottom inset is
-       smaller than the sides, so the *last* row needs a second radius for its
-       two bottom corners — `calc(var(--radius-overlay) - 8.7px)`, where 8.7px is
-       that reduced inset measured in the probe (1px border + `--space-1` + the
-       scroll container's own slack). Every other row keeps the single
-       `--radius-card`. ------------------------------------------------ */
+       the outer radius minus the shell's own inset, so both arcs share one
+       centre. The floating panels are the only shell at `--radius-overlay`, and
+       their inset is exactly `--space-4` of padding — no border, because a
+       hairline would add 1px to every inset and turn the derivation into
+       `28 - 17`, which lands off the scale. The scroll container inside them
+       contributes **zero** inset of its own for the same reason: it used to
+       carry 2px "for the focus ring", but that ring is drawn with
+       `outline-offset: -2px` inside the button, so the 2px protected nothing
+       and only pushed the rows out to an 18px inset (`28 - 18 = 10`, again off
+       the scale, and 2px wider than the title's 16px gutter). With a clean 16px
+       inset the value is exact: `28 - 16 = 12`, which *is* `--radius-card`, so
+       every filled row in the family already carries the right radius and no
+       rule has to derive one. A row that keeps `8px` under a 28px shell leaves a
+       visibly oval corner (that was the user's report).
+
+       The inset has to be the same on all four sides for that single radius to
+       hold, which is why the panels below do **not** trim their own bottom
+       padding when a list happens to be the last thing in them; the extra
+       bottom sliver that used to be removed that way is now removed on the
+       scroll container instead, where it cannot overflow (see
+       `.settings-menu-body` in shell.css). */
     --radius-control: 8px;
     --radius-card: 12px;
     --radius-overlay: 28px;

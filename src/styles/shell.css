@@ -5065,7 +5065,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    by the panel's `max-height`, so a tall form was clipped instead of scrolling
    (title/description/body stayed at their content heights and the overflow was
    simply hidden). A column flex container does shrink its content box to the
-   definite `max-height`, and the scrollable body takes what is left. */.settings-choice-panel {
+   definite `max-height`, and the scrollable body takes what is left.
+
+   没有 1px 描边，是**同心圆角算得出来**的前提：外壳的内缩必须四边相等，而描边会
+   给每条边各加 1px（16px 内边距 + 1px 边框 = 17px 内缩），内半径就变成 28 − 17 =
+   11px，一个不在形状尺度上的数。四边都是 `--space-4` 的纯内边距时，内半径正好是
+   28 − 16 = 12px，也就是 `--radius-card`，家族里每一行都已经带着这个值。 */
+.settings-choice-panel {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -5074,7 +5080,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   max-height: min(85dvh, 760px);
   overflow: hidden;
   padding: var(--space-4);
-  border: 1px solid var(--outline-variant);
+  border: 0;
   border-radius: var(--radius-overlay);
   background: var(--surface-container-high);
   box-shadow: var(--shadow-overlay);
@@ -5114,31 +5120,44 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .settings-choice-panel > .settings-menu-actions { animation: none; }
 }
 
-/* 二级菜单的标题：居中，左边一枚图标（与它来源那一行是同一个），比正文稍大一点——
-   「这是从哪一行开出来的」看一眼就知道，不必回头认标题。 */
+/* 二级菜单的标题：左边一枚图标（与它来源那一行是同一个），图标与文字都落在下面
+   条目行的那条视觉栏上——`--space-3` 内缩 + 32px 图标槽，和设备行里那枚设备图标
+   （`.settings-device-icon`，32px 圆底）是同一格，所以标题文字与设备名从同一个 x
+   起画，扫一眼就知道「这块是从哪一行开出来的」。
+   早先这里是**居中**的 20px/700：标题块 33px、下面第一行 44px，量出的头/行重量比是
+   0.80——头比行轻，而四周留白又厚（内容区只占面板的 24% 高，上下各一大段空），读起
+   来就是用户报的「头重脚轻」。现在标题落到 `--text-md`/`--weight-semibold`，把「比
+   正文重」交给字重与颜色（`--on-surface`）说，不靠字号；标题块 44px = 行高，重量比
+   1.0，一行标题正好是一行的高度。 */
 .search-preset-title,
 .settings-choice-title {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
+  justify-content: flex-start;
+  gap: var(--space-3);
   /* 标题行里可能钉着菜单自己的动作（层参数说明的问号），它相对这一行定位。 */
   position: relative;
+  /* 图标槽那份内缩只给标题，不给这一行本身：`.settings-choice-action` 钉在行右端，
+     整行内缩会让它跟着挪。 */
+  padding-inline-start: var(--space-3);
   margin: 0 0 var(--space-2);
   color: var(--on-surface);
-  font-size: var(--text-lg);
-  font-weight: var(--weight-bold);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  /* 32px 的图标槽 + gap，标题与设备行的文字起点对齐：两个数都由这一行自己出，
+     锚点漂了就一起漂。 */
 }
 
 .settings-choice-icon {
   display: grid;
   place-items: center;
   flex: none;
-  width: 20px;
+  width: 32px;
+  height: 32px;
   color: var(--on-surface-variant);
 }
 
-.settings-choice-icon svg { width: 20px; height: 20px; }
+.settings-choice-icon svg { width: 18px; height: 18px; }
 
 /* 菜单级动作的窝：标题是居中的，所以动作必须脱出文档流钉在行右端——跟着 flex 排在
    标题后面会把它整条推偏，而「这一屏是什么」比「旁边那枚按钮」更该留在正中。 */
@@ -5241,7 +5260,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-layer-actions { display: flex; gap: var(--space-2); }
 .settings-layer-actions > .secondary-action { flex: 1 1 0; }
 
-/* ---- Menu content: the second level every setting opens -------------------- */.settings-menu-body {
+/* ---- Menu content: the second level every setting opens -------------------- */
+/* 内容区是**纯滚动容器**：外边距 0，内边距就是它自己留给焦点环的那 2px，不额外
+   负外边距去抵面板的内边距。早先这里写 `padding: 2px; margin: -2px`，为的是让
+   「面板内边距 − 2px 再 + 2px」抵回来；可滚动容器的负外边距会把内容盒顶出容器
+   自己的边界，于是最后一行永久有一截落在视野之外（下面那段注释记着这次实测）。
+   面板四边同内缩之后这里不再需要抵任何东西，最后一行离面板底正好是 `--space-4`。 */
+.settings-menu-body {
   display: grid;
   gap: var(--space-3);
   /* 内容区吃掉面板剩下的高度，并在里面滚动：表单再长也够得着保存/取消。 */
@@ -5250,9 +5275,15 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  /* Room for the focus ring without it being clipped by the panel edge. */
-  padding: 2px;
-  margin: -2px;
+  /* 内缩是**零**，不是 2px。这里从前留过一圈 2px「给焦点环的余量」，但焦点环压根不在
+     外面：`.settings-choice-option-main:focus-visible` 用的是 `outline-offset: -2px`
+     （见上面的选择器组），环画在按钮**自己**的盒子里，再往外让 2px 没有保护到任何东西，
+     只是把行从面板的 16px 内缩推到 18px。于是同一块面板里出现两个内缩节奏：标题跟着
+     16px，行跟着 18px，两个左边缘差 2px（探针量到的 gutterMismatch），而行的同心半径
+     也从 28 − 16 = 12 变成 28 − 18 = 10，四角与面板不再共用圆心——「四周圆角不一致」
+     的最后那一点残留就来自这里。做到 0 之后，四边内缩就是 `--space-4`，`--radius-card`
+     是它唯一正确的内半径。 */
+  padding: 0;
 }
 
 .settings-menu-desc {
@@ -5262,33 +5293,30 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   line-height: var(--leading-relaxed);
 }
 
-/* 选项列表正好是最后一个子元素时，面板的下内边距和内容区自己的 2px 会叠成一段比
-   标题下面那 6px 大一截的空白（实测：标题底→第一项顶 5.8px，最后一项底→面板底
-   20.4px），看起来就是「底部空了一块」。
-   收这段空白只能动面板自己的下内边距。早先这里是给列表加 `margin-bottom` 负外边距
-   ——那是错的：`.settings-menu-body` 是滚动容器（`overflow-y: auto`），负外边距让
-   内容比容器的内容盒高出这么多，最后一项就永久有一截落在视野之外（实测初始态被切
-   10px，`scrollHeight - (last.offsetTop + last.offsetHeight) = 2px` 连滚到底都差一点
-   露不全），用户看到的就是「菜单显示不全」。改成面板下内边距收到 `space-1`：空白
-   照样收掉，而内容区不再溢出（实测 `clientHeight == scrollHeight`、最后一项底距
-   面板底 8.7px、`scrollTop` 停在 0）。
-   底下还有动作按钮的菜单（保存/取消那一排）保持完整内边距，它们需要那段空间。 */
-.settings-choice-panel:has(> .settings-menu-body > .settings-choice-list:last-child) {
-  padding-bottom: var(--space-1);
-}
+/* 选项列表正好是最后一个子元素时，最后一行**下面不再加任何东西**：内容区保持内缩 0，
+   所以连一条收尾规则都不需要了——这条选择器从前是 `padding-bottom: var(--space-2)`，
+   现在那个尾巴也去掉了（写成 `padding-bottom: 0` 是同一件事，但不如不写）。
 
-/* 上面把下内边距收到 space-1 之后，最后一行离面板底只剩 8.7px 了（实测），可它的圆角还是
-   12px —— 面板那个 28px 的弧线在 8.7px 里面画不下一个 12px 的弧，两个弧就不平行，看着就是
-   「内外圆角不统一」。双层同心圆角的规矩是「内半径 = 外半径 − 两层之间的间距」，所以这一行
-   只有贴底的那两个角要单独收：28 − 8.7 = 19.3px。
-   8.7px 是量出来的，不是估的：探针 h4.html 复现了真机几何（1px 边框 + `--space-1` 4px 内边距
-   + 滚动内容区自身约 3.7px 的余量），和上面注释里 Batch F 在真机上量到的 8.7px 一致。
-   只订这一种情况：面板底部还有动作按钮（保存/取消那一排）时内边距是完整的 16px，按钮又是
-   胶囊（`--radius-pill`），是刻意的另一种形状，不参与同心。 */
-.settings-choice-panel:has(> .settings-menu-body > .settings-choice-list:last-child) > .settings-menu-body > .settings-choice-list > .settings-choice-option:last-child {
-  border-bottom-left-radius: calc(var(--radius-overlay) - 8.7px);
-  border-bottom-right-radius: calc(var(--radius-overlay) - 8.7px);
-}
+   这里先后放过两种「多给一点」的写法，两种都退回：
+     ① 砍面板自己的下内边距（`padding-bottom: var(--space-1)`）——面板四边内缩不再相等，
+        同心半径就没法用一个数（28 − 16 = 12）解出来，只好给末行的两个下角单开一个
+        `calc(var(--radius-overlay) - 8.7px)`，把实测值写死进 CSS。用户看到的就是
+        「四周圆角不一致」。
+     ② 给滚动容器自己加 `padding-bottom: var(--space-2)`——四边相等保住了，但末行离
+        底边成了 16（面板）+ 8 = 24px，而左右是 16px，同一行的三个方向仍然不成套；
+        而且末行底角与面板底角之间那 8px 正是让两个弧看起来在「各画各的」的东西。
+   末行是 44px 高的实心行，它的两个下角在 16px 内缩处正好落进面板 28px 弧线的起点，
+   不需要再让位。底下还有动作按钮的菜单（保存/取消那一排）本来就不吃这一手。
+
+   用户报的「头重脚轻」在这条改完之后只剩**纵向**的那一份，而那一份是对的：标题上面是
+   面板内边距 16 + 标题 32 + 标题下外边距 8 = 上 56px，末行下面是 16px。上重下轻是
+   标题块的固有高度，不是内边距不成套——横向（左 16 / 右 16）与四角半径（全 12px）
+   现在都成套，探针量到的 gutterMismatch 从 −2 归零。 */
+
+/* 列表收尾时最后一行的那两个下角**不再单独改半径**：四边内缩都回到 `--space-4`
+   之后，它和其它三边、其它行一样是 `--radius-card`，内外弧同心（28 − 16 = 12）。
+   这条规则的残留解释留在上面那段里；真要给某个面板再开内缩，先回 tokens.css 的
+   「Nesting rule (同心圆角)」把内半径重新算一遍。 */
 
 .settings-menu-strong {
   color: var(--on-surface);

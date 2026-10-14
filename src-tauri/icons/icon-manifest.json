@@ -1,5 +1,5 @@
 {
-  "default": "../../assets/yomika-mark-print.svg",
+  "default": "app-icon.svg",
   "bg_color": "#0D0D0D",
   "android_fg": "android-foreground.svg",
   "android_monochrome": "android-foreground.svg"

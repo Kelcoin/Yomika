@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/yomika-mark-print.svg" width="96" alt="Yomika" />
+  <img src="src-tauri/icons/app-icon.svg" width="96" alt="Yomika" />
 </p>
 
 <h1 align="center">Yomika</h1>

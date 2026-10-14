@@ -43,10 +43,44 @@ describe('mobile packaging', () => {
     // launcher icon; `tauri icon` is the step that replaces it with ours.
     expect(runs).toBe(2);
     expect(readJson('../../src-tauri/icons/icon-manifest.json')).toMatchObject({
-      default: '../../assets/yomika-mark-print.svg',
+      // 打包的图标源是**从母版派生的那一份**（`.github/scripts/derive-logo.mjs`），
+      // 不是母版本身：母版里的颜色是 YOMIKA_PLATE / YOMIKA_INK 两个槽名，打包器
+      // 认不了，只有派生文件才是字面量墨色。这一条与「一份几何，处处派生」那条
+      // 契约（tests/design-system-contract.test.ts）配套，改一处必须改两处。
+      default: 'app-icon.svg',
       bg_color: '#0D0D0D',
       android_fg: 'android-foreground.svg',
     });
+  });
+
+  it('keeps the fallback mobile icon set identical to the generated one', () => {
+    // `tauri icon` writes into the **generated** project when one exists, and only falls
+    // back to `src-tauri/icons/android` when it doesn't. 这个仓库两样都有，于是同一次
+    // 派生会落成两份拷贝——而只有 gen/ 那份会随每次 `tauri icon` 更新，icons/android
+    // 那份会**静静地停在上一代几何上**（实测就是这样：改完母版重生成之后，20 张
+    // mipmap 全部与 gen/ 不一致，其中前景层还是描边版的旧字形）。`android init` 恰恰
+    // 是从 icons/android 拷贝的，所以漂移的那份会把旧字形重新种回新工程里。
+    //
+    // 判据不是"看起来像"，是逐字节相同——两份拷贝没有理由不同。
+    const fallback = '../../src-tauri/icons/android';
+    const generated = '../../src-tauri/gen/android/app/src/main/res';
+    const densities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
+    const variants = [
+      'ic_launcher.png',
+      'ic_launcher_round.png',
+      'ic_launcher_foreground.png',
+      'ic_launcher_monochrome.png',
+    ];
+    const files = [
+      ...densities.flatMap((density) => variants.map((v) => `mipmap-${density}/${v}`)),
+      'mipmap-anydpi-v26/ic_launcher.xml',
+      'values/ic_launcher_background.xml',
+    ];
+    for (const rel of files) {
+      const a = readFileSync(pathOf(`${fallback}/${rel}`));
+      const b = readFileSync(pathOf(`${generated}/${rel}`));
+      expect(a.equals(b), `${rel} 在 icons/android 与 gen/android 之间已经漂移`).toBe(true);
+    }
   });
 
   it('strips the prebuilt native libraries that AGP leaves alone', () => {

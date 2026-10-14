@@ -276,12 +276,19 @@ describe('design system contract', () => {
       expect(source).toMatch(/rx="112"/);
       expect(source).toMatch(/fill="#0D0D0D"/);
       expect(source).toMatch(/#F5F5F5/);
-      expect(source).toMatch(/cx="288" cy="296" r="22"/);
+      // 字形连母版那一份：填充的三件 + 圆点。以前这里钉的是描边版
+      // （`cx="288" cy="296" r="22"`、`stroke-width="18"`），那版在 16px 上整块糊掉，
+      // 已经随「一份几何，处处派生」那一组一起换掉了。
+      expect(source).toMatch(/x="88" y="64" width="128" height="384" rx="64"/);
+      expect(source).toMatch(/x="216" y="224" width="96" height="64" rx="32"/);
+      expect(source).toMatch(/cx="368" cy="368" r="80"/);
     }
+    // 开屏帧只走填充，没有描边可写：`stroke-width`/`stroke-linecap` 出现在这里就说明
+    // 有人把旧的描边版抄回来了。
+    expect(html).not.toMatch(/stroke-width/);
     // React 那侧写驼峰属性名：`stroke-width`/`stroke-linecap` 会让 React 每次渲染都
     // 报「Invalid DOM property」（浏览器里两个名字渲染出的属性名相同，组件用例比过）。
     expect(frame).not.toMatch(/stroke-width|stroke-linecap/);
-    expect(html).toMatch(/stroke-width="18"/);
 
     // wordmark 与印记的盒子也要同一份：字号、字重、字距、间距、图形尺寸。静态帧写死
     // 20px/600/20px/128px，React 那侧走 --text-lg/--weight-semibold/--space-5，
@@ -554,24 +561,164 @@ describe('design system contract', () => {
     expect(read('src/components/TrayMenu.tsx')).not.toMatch(/focusItem\(0\)/);
   });
 
-  it('gives the tray its own mark, not the app icon', () => {
-    // 托盘给的 16px 上，print 那版标记的 18/512 笔画是 0.56px — 整块糊成一团灰
-    // （用户报的「小尺寸下很难看清」）。所以托盘用的是单独一份：`assets/yomika-tray.svg`
-    // 是源头，`icons/tray-32.png` 是 `npx tauri icon` 出来的、被 include_bytes! 编进 exe。
+  it('names every colour slot the master mark uses', () => {
+    // 母版把颜色写成槽名而不是字面量，因为它一张画要供两个世界（打包件没有
+    // currentColor，内联组件必须跟随主题）。槽名是**契约**：漏一处就会出现一个浏览器
+    // 认不出的 `fill="YOMIKA_…"`，图标直接画不出来——托盘那次就是这么踩的。
+    const master = read('assets/yomika-mark.svg');
+    const used = [...new Set([...master.matchAll(/fill="(YOMIKA_[A-Z_]+)"/g)].map((m) => m[1]))].sort();
+    expect(used, '母版至少要用一个颜色槽').not.toHaveLength(0);
+
+    // 打包世界：派生脚本把槽解析成字面量。名单从母版现读，脚本只提供一张表。
+    const script = read('.github/scripts/derive-logo.mjs');
+    for (const slot of used) {
+      expect(script, `derive-logo.mjs 里没有 ${slot} 的下场`).toContain(slot);
+    }
+    // 内联世界：每个槽都要在令牌里有一条线，并且在组件里真的被引用。
+    const tokens = read('src/styles/tokens.css');
+    const component = read('src/components/YomikaMark.tsx');
+    // 两处都要先剥注释：注释里会**提到**退场的旧令牌名，那是历史说明，不是声明/引用。
+    const strip = (source: string) => source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+    const declared = strip(tokens);
+    const drawn = strip(component);
+    expect(declared).toMatch(/--yomika-mark-plate:\s*var\(--surface-container-highest\)/);
+    expect(declared).toMatch(/--yomika-mark-ink-accent:\s*var\(--on-surface-variant\)/);
+    expect(drawn).toMatch(/fill="var\(--yomika-mark-plate/);
+    expect(drawn).toMatch(/fill="var\(--yomika-mark-ink-accent/);
+    // 旧的描边框令牌随描边字形一起退场：16px 下它抢的是字形要用的宽度。
+    expect(declared).not.toMatch(/--yomika-mark-frame\s*:/);
+    expect(drawn).not.toMatch(/yomika-mark-frame/);
+
+    // 母版带的是槽名，所以**它不能被当成图片引用**：`<img src>` 是独立文档，没有
+    // CSS 变量可解析，浏览器看到 `fill="YOMIKA_PLATE"` 只会画出一个方块（README 上一版
+    // 就指向母版）。会渲染的地方一律指派生件——那里槽已经解析成字面量。
+    const readme = read('README.md');
+    expect(readme, 'README 的标记要指派生件，不能指带槽名的母版').toMatch(/assets\/yomika-mark\.svg|<img[^>]*src="[^"]*app-icon\.svg"/);
+    expect(readme).not.toMatch(/<img[^>]*src="assets\/yomika-mark\.svg"/);
+  });
+
+  it('draws one mark, not four: every surface mirrors the master geometry', () => {
+    // 曾经同一张画有四个版本：描边的母版、手绘的托盘字形、打包套、内联组件。它们各自
+    // 漂移过，所以侧栏、标题栏、通知区里是**三个不同的**图。现在只有一份几何
+    // （assets/yomika-mark.svg），其余全是它的派生：
+    //
+    //   打包套 / 托盘位图  ← .github/scripts/derive-logo.mjs（槽解析成字面量）
+    //   Android 自适应前景 ← 同一脚本（无盘子 + 缩到 68%）
+    //   内联组件           ← src/components/YomikaMark.tsx（槽解析成主题令牌）
+    //   开屏两帧           ← index.html 静态帧 / SplashFrame.tsx（同上，字面量）
+    const master = read('assets/yomika-mark.svg');
+    const signature = [
+      /x="88" y="64" width="128" height="384" rx="64"/,
+      /x="88" y="64" width="320" height="128" rx="64"/,
+      /x="216" y="224" width="96" height="64" rx="32"/,
+      /r="80"/,
+    ];
+    for (const pattern of signature) {
+      expect(master, '母版自己得先有这件几何').toMatch(pattern);
+    }
+    for (const surface of [
+      'src/components/YomikaMark.tsx',
+      'src/components/SplashFrame.tsx',
+      'index.html',
+      'src-tauri/icons/app-icon.svg',
+      'src-tauri/icons/android-foreground.svg',
+    ]) {
+      const text = read(surface);
+      for (const pattern of signature) {
+        expect(text, `${surface} 少了母版的一件几何 ${pattern}`).toMatch(pattern);
+      }
+    }
+
+    // 描边那版的几何不许在任何地方复活：`10 units of 512` 的笔画在 16px 上是 0.31px，
+    // 实测它一个能读成墨的像素都不剩（用户报的「小尺寸下很难看清」）。
+    const stroked = [/x="112" y="112" width="288" height="288"/, /cx="288" cy="296" r="22"/, /stroke-width="18"/];
+    for (const surface of [
+      'assets/yomika-mark.svg',
+      'src/components/YomikaMark.tsx',
+      'src/components/SplashFrame.tsx',
+      'index.html',
+      'src-tauri/icons/app-icon.svg',
+      'src-tauri/icons/android-foreground.svg',
+    ]) {
+      const text = read(surface);
+      for (const pattern of stroked) {
+        expect(text, `${surface} 里还有描边版的几何 ${pattern}`).not.toMatch(pattern);
+      }
+    }
+
+    // 手绘的托盘母版整份退场：托盘与窗口图标现在同一张画。
+    expect(() => read('assets/yomika-tray.svg')).toThrow();
+    expect(() => read('assets/yomika-mark-print.svg')).toThrow();
+    // 网页内联标记那份也退场。它是**第三份**几何（描边 18 单位、mark 占 56.25%、圆点
+    // r=22），曾经被侧栏/关于页的 `<img src>` 用过；`YomikaMark` 内联组件接手之后它就没
+    // 人引用了，留着就是"下次有人照着它再画一遍"的种子——那正是这一轮要断掉的循环。
+    // 连目录里"只准有一份画"本身也钉住：多出来的 svg 一律是漂移源。
+    expect(() => read('assets/yomika-icon.svg')).toThrow();
+    expect(
+      readdirSync(resolve(root, 'assets')).filter((name) => name.endsWith('.svg')),
+      'assets/ 下有且只有一份母版',
+    ).toEqual(['yomika-mark.svg']);
+    // 而托盘位图仍然是那一张画派生出来的：见下一条用例的 16px 判据。
+    expect(read('src-tauri/src/lib.rs')).toMatch(/include_bytes!\("\.\.\/icons\/tray-32\.png"\)/);
+  });
+
+  it('keeps the tray derivable from the master: 16px carries readable ink, not grey mush', () => {
+    // 托盘给的 16px 是这套图标真正的最小档，而「够不够清楚」必须是一条**能算的**判据，
+    // 不是"看着还行"。母版注释里记着真栅格化的读数（工装：
+    // debug_outputs/logo-audit/ink-probe.mjs —— 静态服务 + 无头 Edge + canvas，量的是
+    // 真像素不是估的）：
+    //     16px  墨色 89 / 底板 248（34.8%），最细笔画 2px，每行最长连续墨段中位 4px，连通块 2
+    //     32px  墨色 335 / 底板 982（32.7%）
+    // 旧的描边版在 32×32 上**一个**可读墨色像素都没有（10/512 的笔画 = 0.31px）。
+    // 下面那几条断言把"为什么这版能上托盘"钉在几何本身：尺寸、网格、笔画、缩进。
+    const master = read('assets/yomika-mark.svg');
+    // 读数本身：注释里写着，改母版就得重测并改这一行。
+    expect(master).toMatch(/89 readable ink\s+pixels against 248 plate pixels \(34\.8% coverage\)/);
+    expect(master).toMatch(/a 2px thinnest stroke, 4px median stroke/);
+    // 为什么是填充而不是描边——这是那次修复的全部理由。
+    expect(master).toMatch(/the glyph is drawn as filled shapes/);
+
+    // 几何：三件填充 + 圆点，每一条边都落在 8 的倍数上（512→16 是 32:1，512→32 是 16:1，
+    // 落在 32 单位网格上的边在两个档位都落在整数像素上）。唯一故意离网格的是脊线。
+    const rects = [...master.matchAll(/<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"/g)].map(
+      (m) => [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] as const,
+    );
+    expect(rects.length, '母版的字形是三件填充').toBe(3);
+    for (const [x, y, w, h] of rects) {
+      for (const value of [x, y, w, h]) {
+        expect(value % 8, `母版的边 ${value} 不在 8 的倍数上，最小档会糊`).toBe(0);
+      }
+    }
+    // 最细的一件是内尺：64 单位 = 16px 下的 2px。32 单位的细节在这个尺寸下会整块消失
+    // （注释里记着：切掉 32 单位缺口的候选与不缺口的候选逐字节相同）。
+    const thinnest = Math.min(...rects.map(([, , w, h]) => Math.min(w, h)));
+    expect(thinnest, '最细的一件要在 16px 下还剩 2px').toBe(64);
+
+    // 缩进：脊线刻意在 88 而不是 64 —— 两侧的光学空隙要看来相等（用户报的「左侧空隙
+    // 还是太小了」）。88 + 320 = 408，而 408 + 88 = 496，两侧各让出 88 与 104。
+    const left = Math.min(...rects.map(([x]) => x));
+    const right = 512 - Math.max(...rects.map(([x, , w]) => x + w));
+    expect(left, '脊线在 88：整轮 64 的边读起来左侧太紧').toBe(88);
+    expect(right).toBe(104);
+    const circle = /<circle cx="(\d+)" cy="(\d+)" r="(\d+)"/.exec(master);
+    expect(circle, '圆点要在母版里').not.toBeNull();
+    const [cx, cy, r] = [Number(circle![1]), Number(circle![2]), Number(circle![3])] as const;
+    // 圆点与底板、与左脊、与上臂都留得住：它在 16px 下是 5px 直径。
+    expect(r).toBe(80);
+    expect(cx + r).toBeLessThanOrEqual(512 - 64);
+    expect(cy + r).toBeLessThanOrEqual(512 - 64);
+
+    // 托盘位图仍是这一份派生出来的（同一个 32px 输出），并被内嵌进 exe；解码失败要退回
+    // 应用图标——托盘没有图标比图标糊一点糟得多。
     const lib = read('src-tauri/src/lib.rs');
     const cargo = read('src-tauri/Cargo.toml');
     expect(lib).toMatch(/include_bytes!\("\.\.\/icons\/tray-32\.png"\)/);
     expect(lib).toMatch(/Image::from_bytes\(/);
-    // 解不出来要退回应用图标：托盘没有图标比图标糊一点糟得多。
     expect(lib).toMatch(/app\.default_window_icon\(\)\.cloned\(\)/);
-    // 那条 `Image::from_bytes` 要能解码 PNG，靠的是这个特性。
     expect(cargo).toMatch(/tauri\s*=\s*\{[^}]*"image-png"/);
-
-    // 源头、产物、以及「产物是从源头来的」都要在仓库里说得清。
-    expect(read('assets/yomika-tray.svg')).toContain('Yomika tray mark');
-    expect(read('src-tauri/icons/README.md')).toContain('tray-32.png');
-    const tray = read('src-tauri/src/tray_menu.rs');
-    expect(tray).toMatch(/fn the_embedded_tray_bitmap_decodes_to_a_non_empty_icon/);
+    expect(read('src-tauri/src/tray_menu.rs')).toMatch(/fn the_embedded_tray_bitmap_decodes_to_a_non_empty_icon/);
   });
 
   it('keeps the toast above menus, their backdrop and dialogs', () => {
@@ -606,15 +753,23 @@ describe('design system contract', () => {
     expect(read('src/components/MetadataTagRows.tsx')).toMatch(/Math\.max\(originalWidth, translatedWidth\) \+ 34/);
   });
 
-  it('centers the second-level menu title with the row icon on its left', () => {
+  it('lays the second-level menu title on the row gutter with the source icon on its left', () => {
     const shell = read('src/styles/shell.css');
     const title = ruleBody(shell, '.settings-choice-title');
-    // 居中：菜单顶上的标题不再左对齐——它说的是「这是从哪一行开出来的」。
-    expect(title).toMatch(/justify-content:\s*center/);
+    // 用户报的「头重脚轻」量出来是：居中 20px/700 的标题块 33px、下面第一行 44px，
+    // 头/行重量比 0.80，而内容区只占面板 24% 高（上下各一大段空）。现在标题落到条目行
+    // 的那条视觉栏上（`--space-3` 内缩 + 32px 图标槽 = 设备行的设备图标那一格），
+    // 字号收到 `--text-md`、层级交给字重与颜色说。探针实测：标题文字与设备名同一个 x
+    // （420px 面板上都是 72），标题块 44px = 行高，重量比 1.00，面板高 101 → 118。
+    expect(title).toMatch(/justify-content:\s*flex-start/);
     expect(title).toMatch(/display:\s*flex/);
-    // 比正文大一点（原来是 --text-md）。
-    expect(title).toMatch(/font-size:\s*var\(--text-lg\)/);
-    expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*20px/);
+    expect(title).toMatch(/padding-inline-start:\s*var\(--space-3\)/);
+    expect(title).toMatch(/font-size:\s*var\(--text-md\)/);
+    expect(title).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
+    expect(title).toMatch(/gap:\s*var\(--space-3\)/);
+    // 32px 的图标槽与设备行里那枚 `.settings-device-icon` 同宽，文字起点才对得上。
+    expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*32px/);
+    expect(shell).toMatch(/\.settings-choice-icon svg \{\s*width:\s*18px;\s*height:\s*18px/);
     const settings = read('src/components/SettingsWorkspace.tsx');
     const controls = read('src/components/SettingsValueControls.tsx');
     // 图标是**来源那一行的同一个**：三个菜单容器都把 icon 传下去。其中选择与数字
@@ -627,10 +782,11 @@ describe('design system contract', () => {
     expect(menuIcons).toHaveLength(3);
   });
 
-  it('pins a menu-level action to the title row without pushing the title off centre', () => {
+  it('pins a menu-level action to the title row without pushing the title off the gutter', () => {
     const shell = read('src/styles/shell.css');
-    // 标题是居中的（上一条），所以菜单自己的动作必须脱出文档流钉在行右端：跟着 flex
-    // 排在标题后面会把它整条推偏，而「这一屏是什么」比旁边那枚按钮更该留在正中。
+    // 标题左对齐落在条目行那条栏上（上一条），菜单自己的动作仍然必须脱出文档流钉在
+    // 行右端：跟着 flex 排在标题后面会把这一条整体推长，问号还会随标题文字长短左右
+    // 横跳。「这一屏是什么」比旁边那枚按钮更该留在原位。
     expect(ruleBody(shell, '.settings-choice-title')).toMatch(/position:\s*relative/);
     const action = ruleBody(shell, '.settings-choice-action');
     expect(action).toMatch(/position:\s*absolute/);
@@ -698,8 +854,65 @@ describe('design system contract', () => {
     expect(body).toMatch(/overflow-y:\s*auto/);
     expect(body).toMatch(/flex:\s*1 1 auto/);
     expect(body).toMatch(/min-height:\s*0/);
+    // 内容区是纯滚动容器：没有任何负外边距。负外边距会把内容盒顶出滚动容器自己的
+    // 边界，最后一项永久有一截落在视野之外（实测被切 10px）。早先它的 `margin: -2px`
+    // 是拿来抵面板内边距的，那条抵账现在不需要了（见下面「四边同内缩」那条）。
+    expect(body).not.toMatch(/margin:\s*-?\d/);
+    // 内容区自己**不添内缩**（0，不是 2px）：从前那圈「给焦点环的余量」保护不到任何
+    // 东西——焦点环是 `outline-offset: -2px` 朝内画的——却把行推到 18px 内缩上，同心
+    // 半径成了 28 − 18 = 10，行里第一行文字也比标题宽出 2px（见「四边同内缩」那条）。
+    // 末行下面也不许再补一层内边距，那就把同一行的三个方向弄成套不起来了。
+    expect(body).toMatch(/padding:\s*0;/);
+    expect(body).not.toMatch(/padding:\s*2px/);
+    expect(shell).not.toMatch(/\.settings-choice-panel:has\([^)]*\)[^{]*\{\s*padding-bottom/);
+    expect(shell).not.toMatch(/settings-menu-body\s*\{\s*padding-bottom/);
     // 标题与说明是选择器列表，ruleBody 只吃单条选择器，这里直接看规则本体。
     expect(shell).toMatch(/\.settings-choice-panel > \.settings-choice-title,\s*\n\.settings-choice-panel > \.settings-menu-desc\s*\{\s*\n\s*flex:\s*none/);
+  });
+
+  it('keeps the floating panel inside one inset so every row stays concentric with it', () => {
+    // 用户报的「四周圆角不一致」：面板的圆角在四边不相等（上 52 / 左 17 / 右 17 / 下 5，
+    // 实测），最后一行只好单开一个 `calc(var(--radius-overlay) - 8.7px)` 的下半径，
+    // 8.7px 是量出来的死数。同心规则（tokens.css「Nesting rule (同心圆角)」）只在四边
+    // 内缩相等时才解得开：内半径 = 外半径 − 内缩，28 − 16 = 12 = `--radius-card`。
+    const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const panel = ruleBody(shell, '.settings-choice-panel');
+    expect(panel).toMatch(/padding:\s*var\(--space-4\)/);
+    expect(panel).toMatch(/border-radius:\s*var\(--radius-overlay\)/);
+    // 描边会给每条边各加 1px：16 + 1 = 17，内半径就成了 28 − 17 = 11，不在尺度上。
+    expect(panel).toMatch(/border:\s*0/);
+    expect(panel).not.toMatch(/border:\s*1px/);
+    // 面板不再砍自己的下内边距（那条 `:has(...) { padding-bottom: var(--space-1) }`），
+    // 也不再借滚动容器的下内边距偷偷补回来——两种写法都让同一行的内缩不成套。
+    expect(shell).not.toMatch(/\.settings-choice-panel:has\([^)]*\)\s*\{\s*padding-bottom/);
+    expect(shell).not.toMatch(/\.settings-choice-panel:has\([^)]*\)[^{]*\{\s*padding-bottom/);
+    expect(shell).not.toMatch(/settings-menu-body\s*\{\s*padding-bottom/);
+    // 最后一行不再需要第二个半径：四边同内缩之后 28 − 16 = 12 就是它本来就有的值。
+    expect(shell).not.toMatch(/radius-overlay\)\s*-\s*8\.7px/);
+    expect(shell).not.toMatch(/settings-choice-option:last-child\s*\{[^}]*border-bottom/);
+    // 同一族里另一个 28px 外壳也按同一个内缩走。
+    expect(ruleBody(shell, '.search-preset-panel')).toMatch(/padding:\s*var\(--space-4\)/);
+
+    // 面板**里面**那层滚动容器不许再添内缩。它从前带一圈 2px「给焦点环的余量」，
+    // 于是行落在 18px 上：同心半径变成 28 − 18 = 10（又不在尺度上），行里第一行文字
+    // 也比标题文字宽出 2px（探针量到的 gutterMismatch）。判据是这一对：容器内缩为零，
+    // 而焦点环必须是**朝内画**的（`outline-offset: -2px`）——否则环会被面板边裁掉，
+    // 那时这 2px 就重新变成必要，两条断言必须一起改。
+    const body = ruleBody(shell, '.settings-menu-body');
+    expect(body).toMatch(/padding:\s*0;/);
+    expect(body).not.toMatch(/padding:\s*2px/);
+    expect(body).not.toMatch(/margin:\s*-2px/);
+    // 焦点环是**朝内画**的（`outline-offset: -2px`，写在选择器组里，所以直接扫源码
+    // 而不是 ruleBody——ruleBody 只吃单个选择器）。
+    const ringGroup = shell.slice(
+      shell.indexOf('.settings-row-button:focus-visible'),
+      shell.indexOf('.settings-row-button:focus-visible') + 400,
+    );
+    expect(ringGroup).toMatch(/\.settings-choice-option-main:focus-visible/);
+    expect(ringGroup).toMatch(/outline-offset:\s*-2px/);
+    // 末行下面那点内缩**哪儿都不许有**：不在面板上，也不在滚动容器上。
+    expect(shell).not.toMatch(/\.settings-choice-panel:has\([^)]*\)[^{]*\{\s*padding-bottom/);
+    expect(shell).not.toMatch(/settings-menu-body\s*\{\s*padding-bottom/);
   });
 
   it('reuses the shared multi-select rows for the sync scope', () => {
@@ -2748,11 +2961,15 @@ describe('design system contract', () => {
     const touchBlock = shell.slice(shell.lastIndexOf('@media (hover: none) {'));
     expect(touchBlock).toMatch(/\.settings-choice-option:is\(\.is-pressed, :active\)\s*\{\s*background:\s*var\(--surface-container-highest\)/);
 
-    // 图③的另一半：列表正好收尾时面板的下内边距只有 space-1，最后一行离面板底只有 8.7px，
-    // 它的 12px 圆角和面板的 28px 弧线就不平行了。内半径 = 外半径 − 间距。
-    expect(shell).toMatch(
-      /\.settings-choice-panel:has\(> \.settings-menu-body > \.settings-choice-list:last-child\) > \.settings-menu-body > \.settings-choice-list > \.settings-choice-option:last-child\s*\{\s*border-bottom-left-radius:\s*calc\(var\(--radius-overlay\) - 8\.7px\);\s*border-bottom-right-radius:\s*calc\(var\(--radius-overlay\) - 8\.7px\)/,
-    );
+    // 图③的另一半：最后一行不再需要第二个半径，也不再需要任何「末尾补一点」的内缩。
+    // 此前列表正好收尾时面板的下内边距被砍到 space-1、加上内容区那点余量只剩 8.7px，
+    // 而左右是 16px——四边不等，12px 的内弧和 28px 的外弧就不平行，于是代码给最后一行
+    // 两个下角写死了 `calc(var(--radius-overlay) - 8.7px)`。之后又一度把尾巴挪到内容区
+    // 自己身上（`--space-2`），那仍然让末行的左 16 / 右 16 / 下 24 不成套。现在**一处
+    // 都不留**：面板四边 16px，内容区内缩 0，末行的两个下角正好落进面板 28px 弧线的
+    // 起点（见「四边同内缩」那条），内半径回到 28 − 16 = 12px = `--radius-card`。
+    expect(shell).not.toMatch(/\.settings-choice-panel:has\([^)]*\)[^{]*\{\s*padding-bottom/);
+    expect(shell).not.toMatch(/settings-menu-body\s*\{\s*padding-bottom/);
   });
 
   it('steps the neutral rows inside a settings panel up a tone, where the panel is already high', () => {

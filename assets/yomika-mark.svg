@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Yomika mark</title>
+  <desc id="desc">Yomika geometric mark in a rounded square.</desc>
+  <!--
+    The **only** source of Yomika's mark geometry. Every surface derives from
+    this file: the window/installer/Android/iOS icon set (through
+    `src-tauri/icons/icon-manifest.json`), the tray bitmap
+    (`src-tauri/icons/tray-32.png`), and the in-app mark
+    (`src/components/YomikaMark.tsx`, whose geometry these coordinates mirror).
+
+    There used to be three drawings of the same mark: this stroked one, a
+    separate hand-drawn tray glyph, and a fourth copy inlined in the React
+    component. They had drifted apart, so the logo was a different picture in
+    the sidebar, in the title bar and in the notification area. They are now
+    one picture.
+
+    ## Why the glyph is filled and not stroked
+
+    The previous mark was stroked at 10 units of 512. Rasterised at the 16px the
+    Windows notification area actually grants, that stroke is 0.31px: measured
+    on the real bitmap it leaves **zero** pixels bright enough to read as ink,
+    and the app icon's 32×32 export carries only a handful. The user report was
+    "小尺寸下很难看清". A stroke that thin cannot survive anti-aliasing at any
+    plate size, so the fix is not tuning — the glyph is drawn as filled shapes.
+
+    ## Why every edge sits on the 32-unit grid
+
+    512 ÷ 32 = 16, and the tray's real rungs are 16/20/24/32px. Any edge on a
+    multiple of 32 lands on an integer pixel at both 512→16 (32:1) and 512→32
+    (16:1), so the glyph does not spend its width on anti-aliasing. The measured
+    result at 16px: a 2px thinnest stroke, 4px median stroke, 89 readable ink
+    pixels against 248 plate pixels (34.8% coverage).
+
+    A 32-unit gap is the floor for a *feature*: the earlier candidate that cut a
+    32-unit notch out of the spine measured **byte-identical to the un-notched
+    glyph at every size** — the notch anti-aliases away completely. Details must
+    be at least 64 units (2px at 16px) to exist at all down there.
+
+    ## The one edge that leaves the grid, on purpose
+
+    The spine sits at x=88 rather than 64. Measured gaps of 64 all round still
+    read as a tight left edge (user report: "左侧空隙还是太小了"), because a
+    full-height flat spine reads as extending to its own bounding box while the
+    round dot reads as inset by about a fifth of its radius. 88 against 64 makes
+    the two sides read equal — 4px against 3px at the 24px this machine's tray
+    uses, 5px against 4px at 32px. Legal 64-unit edges are 88 and 408.
+
+    ## The accent slot
+
+    The dot rides YOMIKA_INK_ACCENT, a second and slightly heavier tier than the
+    glyph's YOMIKA_INK. It is the only element not at full weight, because it is
+    the one part of the mark that means "this machine, not the other one".
+  -->
+  <!-- YOMIKA_PLATE -->
+  <rect width="512" height="512" rx="112" fill="YOMIKA_PLATE"/>
+  <!-- YOMIKA_GLYPH -->
+  <g id="yomika-glyph">
+    <!-- Spine: full height, 64 units of air top and bottom.
+
+         The three colour slots are named, not inlined, because this one master
+         has to serve two colour worlds and the names are what keep them one
+         picture:
+
+           YOMIKA_PLATE  — the plate. Packed: #0D0D0D (the mark has to hold on a
+                           light taskbar, so the plate is always the dark one).
+                           In-app: --yomika-mark-plate, because the app's plates
+                           are lifted surfaces, not the literal brand black.
+           YOMIKA_INK    — the glyph. Packed: #F5F5F5. In-app: currentColor, so
+                           the mark rides the page's ink on both themes and all
+                           six colour schemes.
+           YOMIKA_ACCENT — the dot. #E8E8E8 in both worlds: it is the one part
+                           of the mark that says "this machine, not the other
+                           one", so it keeps a constant second tier.
+
+         tools/visual-check/derive-logo.mjs resolves these for the packed
+         sources; src/components/YomikaMark.tsx resolves the same names for the
+         in-app one. Neither file restates a coordinate. -->
+    <rect x="88" y="64" width="128" height="384" rx="64" fill="YOMIKA_INK"/>
+    <!-- Top arm: reaches to the dot's right edge, so the glyph box is 360x384. -->
+    <rect x="88" y="64" width="320" height="128" rx="64" fill="YOMIKA_INK"/>
+    <!-- Inner gauge: the print mark's inner horizontal stroke, moved into the
+         filled world. 64 units thick (2px at 16px) so it survives; it was a
+         32-unit notch in the rejected candidate and vanished. -->
+    <rect x="216" y="224" width="96" height="64" rx="32" fill="YOMIKA_INK"/>
+    <!-- The accent dot, tangent to the 288/448 grid lines. -->
+    <circle cx="368" cy="368" r="80" fill="YOMIKA_ACCENT"/>
+  </g>
+</svg>
