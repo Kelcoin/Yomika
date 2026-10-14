@@ -21,7 +21,7 @@ const CacheStatsSchema = z.object({
     'page-thumbnail': CacheBreakdownSchema,
     'reader-page': CacheBreakdownSchema,
     enhanced: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
-    decensored: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
+    dlssnr: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
     inference: CacheBreakdownSchema.default({ bytes: 0, entries: 0 }),
     other: CacheBreakdownSchema,
   }),
@@ -73,5 +73,17 @@ export class NativeCacheRepository {
   }
   invalidateArchive(scopeId: string, archiveId: string): Promise<CommandResult<CacheInvalidateResult>> {
     return invokeCommand('cache_invalidate_archive', { scopeId, archiveId }, CacheInvalidateResultSchema);
+  }
+  /**
+   * 清掉一次阅读会话的「成品」（超分 / DLSSNR 的产物）。
+   *
+   * 这些产物只在本次阅读会话里有意义：真机上 2.84 GiB 的 DLSSNR 产物把 4 GiB 的配额
+   * 吃到 90%，LRU 只好去挤别人的封面。进出阅读器各清一次，别指望配额。
+   *
+   * **必须带上是哪一本**：两本阅读器可以同时挂在保留里（`MAX_RETAINED_READERS = 2`），
+   * 不带范围就会把另一本的产物一起删掉；宿主也会拒收空范围。
+   */
+  purgeReaderRenditions(scopeId: string, archiveId: string): Promise<CommandResult<CacheInvalidateResult>> {
+    return invokeCommand('cache_purge_reader_renditions', { scopeId, archiveId }, CacheInvalidateResultSchema);
   }
 }

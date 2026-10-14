@@ -85,6 +85,12 @@ fn reset_required(reason: &str) -> String {
 /// `Failed` 是「试过一次、没建起来」：不记住它，每个请求都会重新去初始化 NGX——
 /// 而 NGX 一旦失败，进程内就不该再反复试（且报告要求这种错误「一次性、不会无限
 /// 重试」）。记住的是**按 DLL 指纹**失败的：换一份片段（大小/修改时间变了）会重新试。
+///
+/// 但「记住」不等于「记到进程结束」。真机日志里那 11 条 `0xBAD00001` 是同一秒里同一个
+/// 失败被记住了 11 次，而用户随后换回官方片段、也重启过应用之外什么都没做——失败当时
+/// 可能是**当时**的状态（驱动刚被 NVIDIA App 换掉、另一份进程占着设备、文件刚落地）。
+/// 所以记失败时同时记下**试过几次**与**什么时候**：过了 `INIT_RETRY_COOLDOWN` 且还没试满
+/// `MAX_INIT_ATTEMPTS` 次，下一次请求会真的再建一遍；试满了才彻底记住，等换 DLL 或重启。
 enum ContextState {
     Empty,
     Ready {
@@ -94,8 +100,18 @@ enum ContextState {
     Failed {
         key: ContextKey,
         message: String,
+        attempts: u32,
+        failed_at: std::time::Instant,
     },
 }
+
+/// 建不起来之后隔多久允许再试一次。60 秒：比一次阅读会话里翻页的间隔长得多（否则等于
+/// 每页都重试），又短到用户换完 DLL 或驱动更新完回来时通常已经过了。
+const INIT_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 同一份 DLL 最多真去建几次上下文。第三次之后彻底记住：那时候它多半是真的不兼容，
+/// 继续重试只会把每一页都拖成一次几秒的初始化失败。
+const MAX_INIT_ATTEMPTS: u32 = 3;
 
 static CONTEXT: OnceLock<Mutex<ContextState>> = OnceLock::new();
 
@@ -164,8 +180,9 @@ impl ContextKey {
     }
 }
 
-/// 拿到全局上下文（第一次调用时建）。失败会被记住：第二次调用直接报同一个错，
-/// 不会反复去初始化 NGX（它出错之后进程内就不该再试）。
+/// 拿到全局上下文（第一次调用时建）。失败会被记住，但**不是永远**：同一份片段过了冷却窗
+/// （`INIT_RETRY_COOLDOWN`）会再试一次，试满 `MAX_INIT_ATTEMPTS` 才彻底记住——一次瞬时
+/// 失败（显卡刚唤醒、驱动/NVIDIA 应用刚更新完）不该让用户只能重启应用。
 pub fn with_context<T>(
     data_dir: &std::path::Path,
     use_context: impl FnOnce(&mut GpuContext) -> Result<T, String>,
@@ -187,19 +204,32 @@ enum SlotStep {
     AlreadyInitialized,
     /// 这一份已经失败过：报同一个错，不再初始化一遍。
     Remembered,
-    /// 空槽，或只是另一份 DLL 的失败记录：去建一份。
+    /// 空槽、只是另一份 DLL 的失败记录、或者冷却窗已经过去且还没试满次数：去建一份。
     Rebuild,
 }
 
-fn slot_step(cached: Option<&ContextKey>, failed: Option<&ContextKey>, key: &ContextKey) -> SlotStep {
+/// 这一次 `(data_dir, dll)` 该怎么走。`now` 与失败记录的 `failed_at` 一起决定冷却窗；
+/// 抽成参数是为了能单测「同一份 DLL 在冷却窗内记住、过了窗再试、试满次数又记住」。
+fn slot_step(
+    cached: Option<&ContextKey>,
+    failed: Option<(&ContextKey, u32, std::time::Instant)>,
+    key: &ContextKey,
+    now: std::time::Instant,
+) -> SlotStep {
     if cached.is_some_and(|existing| existing == key) {
         return SlotStep::Run;
     }
     if cached.is_some() {
         return SlotStep::AlreadyInitialized;
     }
-    if failed.is_some_and(|remembered| remembered == key) {
-        return SlotStep::Remembered;
+    if let Some((remembered, attempts, failed_at)) = failed {
+        if remembered == key {
+            let cooled = now.saturating_duration_since(failed_at) >= INIT_RETRY_COOLDOWN;
+            if cooled && attempts < MAX_INIT_ATTEMPTS {
+                return SlotStep::Rebuild;
+            }
+            return SlotStep::Remembered;
+        }
     }
     SlotStep::Rebuild
 }
@@ -221,10 +251,24 @@ pub fn with_context_at<T>(
     let state = std::mem::replace(&mut *guard, ContextState::Empty);
     let (cached, failed) = match &state {
         ContextState::Ready { key, .. } => (Some(key), None),
-        ContextState::Failed { key, .. } => (None, Some(key)),
+        ContextState::Failed {
+            key,
+            attempts,
+            failed_at,
+            ..
+        } => (None, Some((key, *attempts, *failed_at))),
         ContextState::Empty => (None, None),
     };
-    match slot_step(cached, failed, &key) {
+    // 这一次失败已经试过几次：同一份 DLL 的失败记录会把它带下去，另一份从 0 起。
+    let attempts = match &state {
+        ContextState::Failed {
+            key: failed_key,
+            attempts,
+            ..
+        } if failed_key == &key => *attempts,
+        _ => 0,
+    };
+    match slot_step(cached, failed, &key, std::time::Instant::now()) {
         SlotStep::Run => {
             let ContextState::Ready {
                 key: existing,
@@ -266,19 +310,44 @@ pub fn with_context_at<T>(
             let ContextState::Failed {
                 key: failed_key,
                 message,
+                attempts,
+                failed_at,
             } = state
             else {
                 unreachable!("Remembered 只可能来自 Failed")
             };
-            // 同一份 DLL 已经失败过：给同一个错，不再去初始化一遍 NGX。
+            // 同一份 DLL 已经失败过（且在冷却窗内、或者已经试满次数）：给同一个错，
+            // 不再去初始化一遍 NGX。记录原样放回，冷却时间到了下一次自然会走 Rebuild。
             *guard = ContextState::Failed {
                 key: failed_key,
                 message: message.clone(),
+                attempts,
+                failed_at,
             };
             Err(message)
         }
-        SlotStep::Rebuild => create_and_run(&mut guard, key, data_dir, dll, use_context),
+        SlotStep::Rebuild => create_and_run(&mut guard, key, data_dir, dll, attempts, use_context),
     }
+}
+
+/// 初始化失败时给用户看的那句话：错误码 + **哪一份片段** + 怎么办 + 第几次。
+///
+/// 抽成纯函数是为了能不碰 GPU / NGX 就钉住这句话的每一段：真让 `GpuContext::create` 失败
+/// 需要一台有显卡的机器，而且失败形态取决于当时车上的是哪一份 DLL。
+fn init_failure_message(error: &str, dll: &std::path::Path, bytes: u64, tried: u32) -> String {
+    // 试满次数之后就把「换一份 DLL 或重启」说死；还没试满则说明冷却窗过后会自动再试一次
+    // ——用户看到的这句话决定了他是去换 DLL 还是干等。
+    let hint = if tried >= MAX_INIT_ATTEMPTS {
+        "这一份片段没能建起 GPU 上下文：换一份 DLL 或重启应用会重新尝试"
+    } else {
+        "这一份片段没能建起 GPU 上下文：过一会儿这一份会自己再试一次，也可以换一份 DLL 或重启应用"
+    };
+    // 文件名 + 字节数足以对上目录里那一份，又不必把 165MB 的哈希算一遍。
+    let snippet = dll
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| dll.display().to_string());
+    format!("{error}（片段 {snippet} · {bytes} 字节；{hint}；第 {tried} 次）")
 }
 
 /// 建一份新上下文并立刻跑这次请求（失败记住、中毒丢掉）。
@@ -287,6 +356,7 @@ fn create_and_run<T>(
     key: ContextKey,
     data_dir: &std::path::Path,
     dll: &std::path::Path,
+    attempts: u32,
     use_context: impl FnOnce(&mut GpuContext) -> Result<T, String>,
 ) -> Result<T, String> {
     match GpuContext::create(data_dir, dll) {
@@ -302,12 +372,13 @@ fn create_and_run<T>(
             }
         }
         Err(error) => {
-            let message = format!(
-                "{error}（这一份片段没能建起 GPU 上下文：换一份 DLL 或重启应用会重新尝试）"
-            );
+            let tried = attempts.saturating_add(1);
+            let message = init_failure_message(&error, dll, key.dll_bytes, tried);
             *guard = ContextState::Failed {
                 key,
                 message: message.clone(),
+                attempts: tried,
+                failed_at: std::time::Instant::now(),
             };
             Err(message)
         }
@@ -329,7 +400,8 @@ fn create_and_run<T>(
 /// 的是空闲占用落回基线。
 ///
 /// 只放工作区，不动上下文本身：device / queue / NGX 的初始化比建 feature 贵得多，
-/// 而且换一份 DLL 之后进程内不该再初始化 NGX（`ContextState::Failed` 就是为它留的）。
+/// 而且**同一份片段**在冷却窗内失败过就该记住（换一份 DLL 是另一份 key，会重新初始化，
+/// 见 `slot_step`）。
 pub fn release_cached_workspaces() -> usize {
     let cell = CONTEXT.get_or_init(|| Mutex::new(ContextState::Empty));
     let Ok(mut guard) = cell.lock() else {
@@ -1006,36 +1078,105 @@ mod tests {
         let first_key = ContextKey::of(&dir, &first);
         let second_key = ContextKey::of(&dir, &second);
         let other_key = ContextKey::of(&other_dir, &first);
+        let now = std::time::Instant::now();
 
         // 空槽：去建。
-        assert_eq!(slot_step(None, None, &first_key), SlotStep::Rebuild);
+        assert_eq!(slot_step(None, None, &first_key, now), SlotStep::Rebuild);
         // 缓存里是第一份：同一份直接跑。
         assert_eq!(
-            slot_step(Some(&first_key), None, &first_key),
+            slot_step(Some(&first_key), None, &first_key, now),
             SlotStep::Run
         );
         // 换一份 DLL、或换一个数据目录：都换不掉（NGX 只认一块设备，只能报错让用户重启）。
         assert_eq!(
-            slot_step(Some(&first_key), None, &second_key),
+            slot_step(Some(&first_key), None, &second_key, now),
             SlotStep::AlreadyInitialized
         );
         assert_eq!(
-            slot_step(Some(&first_key), None, &other_key),
+            slot_step(Some(&first_key), None, &other_key, now),
             SlotStep::AlreadyInitialized
         );
-        // 第一份失败过之后：同一份报回记住的那个错，不再初始化一遍。
+        // 第一份**刚**失败过：同一份报回记住的那个错，不再初始化一遍（冷却窗还没到）。
         assert_eq!(
-            slot_step(None, Some(&first_key), &first_key),
+            slot_step(None, Some((&first_key, 1, now)), &first_key, now),
             SlotStep::Remembered
         );
         // 而另一份（或另一个数据目录）不该被那份记录挡着：重新试。
         assert_eq!(
-            slot_step(None, Some(&first_key), &second_key),
+            slot_step(None, Some((&first_key, 1, now)), &second_key, now),
             SlotStep::Rebuild
         );
         assert_eq!(
-            slot_step(None, Some(&first_key), &other_key),
+            slot_step(None, Some((&first_key, 1, now)), &other_key, now),
             SlotStep::Rebuild
+        );
+    }
+
+    /// 冷却窗与重试次数：同一份 DLL 的失败**不该**记到进程结束。
+    ///
+    /// 真机日志里那 11 条 `0xBAD00001` 是同一秒里同一个失败被记住了 11 次，而用户随后
+    /// 换回了官方片段——旧行为下他除了重启应用没有任何办法让它再试一次。这条判据钉住的
+    /// 是「过了冷却窗就真的再建一遍」，同时钉住「试满次数之后不再反复试」。
+    /// 失败那句话必须说清「哪一份片段」：真机上用户换过变体，三份都叫同一个文件名，
+    /// 日志里只留一个错误码时谁也说不清当时车上的是哪一份（2026-10-13 的 0xBAD00001）。
+    #[test]
+    fn the_init_failure_message_names_the_snippet_that_was_in_use() {
+        let dll = std::path::Path::new("C:\\data\\dlssnr\\nvngx_dlssnr.dll");
+        let failure = "NGX 核心初始化失败：这个功能在当前系统/硬件/图形 API 上不支持（0xBAD00001）";
+        let first = init_failure_message(failure, dll, 165_840_496, 1);
+        assert!(first.contains("nvngx_dlssnr.dll"), "{first}");
+        assert!(first.contains("165840496 字节"), "{first}");
+        assert!(first.contains("第 1 次"), "{first}");
+        // 还没试满：这句话得让用户知道「可以等」。
+        assert!(first.contains("过一会儿这一份会自己再试一次"), "{first}");
+        // 试满之后不能再承诺重试：只能让他换 DLL 或重启。
+        let last = init_failure_message(failure, dll, 165_840_496, MAX_INIT_ATTEMPTS);
+        assert!(last.contains("换一份 DLL 或重启应用会重新尝试"), "{last}");
+        assert!(!last.contains("过一会儿这一份会自己再试一次"), "{last}");
+    }
+
+    #[test]
+    fn a_remembered_failure_is_retried_after_the_cooldown_until_the_attempts_run_out() {
+        let dir = std::env::temp_dir().join("yomika-dlssnr-slot-cooldown");
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let dll = dir.join("snippet.dll");
+        std::fs::write(&dll, vec![0u8; 8]).expect("写片段");
+        let other = dir.join("other.dll");
+        std::fs::write(&other, vec![1u8; 8]).expect("写另一份片段");
+        let key = ContextKey::of(&dir, &dll);
+        let other_key = ContextKey::of(&dir, &other);
+        let now = std::time::Instant::now();
+        let almost = INIT_RETRY_COOLDOWN - std::time::Duration::from_secs(1);
+
+        assert_eq!(
+            slot_step(None, Some((&key, 1, now)), &key, now),
+            SlotStep::Remembered,
+            "刚失败过的同一份 DLL 不该立刻重试"
+        );
+        assert_eq!(
+            slot_step(None, Some((&key, 1, now)), &key, now + almost),
+            SlotStep::Remembered,
+            "冷却窗没到就不该重试"
+        );
+        assert_eq!(
+            slot_step(None, Some((&key, 1, now)), &key, now + INIT_RETRY_COOLDOWN),
+            SlotStep::Rebuild,
+            "过了冷却窗、还没试满次数，就该真的再建一遍"
+        );
+        assert_eq!(
+            slot_step(
+                None,
+                Some((&key, MAX_INIT_ATTEMPTS, now)),
+                &key,
+                now + INIT_RETRY_COOLDOWN * 10
+            ),
+            SlotStep::Remembered,
+            "试满次数之后不该再试"
+        );
+        assert_eq!(
+            slot_step(None, Some((&other_key, MAX_INIT_ATTEMPTS, now)), &key, now),
+            SlotStep::Rebuild,
+            "另一份 DLL 的失败记录不该挡着这一份"
         );
     }
 

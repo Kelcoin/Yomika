@@ -550,7 +550,6 @@ fn run_message(job_id: &str, stages: &[&str]) -> Message {
                 // 协议会话测试用 echo 引擎：没有模型授权（模型那一路由
                 // `crates/compute-protocol/tests/messages.rs` 与真进程测试各测一遍）。
                 model: None,
-                decensor: None,
                 dlssnr: None,
                 builtin: None,
                 min_input_edge: None,

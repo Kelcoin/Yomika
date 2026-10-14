@@ -11,6 +11,7 @@ import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { resetOverlayBackGuardForTests } from '../../src/lib/overlayBackGuard';
+import { COARSE_POINTER_QUERY } from '../../src/lib/horizontalScroller';
 
 afterEach(resetInvokeAdapterForTests);
 
@@ -89,8 +90,13 @@ function stubHoverNone(initial = false) {
   const original = window.matchMedia;
   const listeners = new Map<string, Set<(event: { matches: boolean }) => void>>();
   let hoverNone = initial;
+  // 真的 `matchMedia` 会解析逗号分隔的媒体查询列表（任一条命中就是真）。读者界面与横向
+  // 导轨共用 `COARSE_POINTER_QUERY`（`(hover: none), (pointer: coarse)`），这个替身也得
+  // 认那一条：只认 `(hover: none)` 会让「手指」在测试里永远是假的，于是被量到的是鼠标那
+  // 一档，六条关于指示器落位的用例一起转红（真机上两者都对，是替身没跟上）。
+  const answers = (query: string) => query === '(hover: none)' || query === COARSE_POINTER_QUERY;
   window.matchMedia = ((query: string) => ({
-    get matches() { return query === '(hover: none)' ? hoverNone : false; },
+    get matches() { return answers(query) ? hoverNone : false; },
     media: query,
     onchange: null,
     addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
@@ -106,10 +112,13 @@ function stubHoverNone(initial = false) {
     dispatchEvent: () => false,
   })) as unknown as typeof window.matchMedia;
   return {
-    /** 换输入方式：改一下 `(hover: none)` 的答案再发一次 change，就是接上鼠标 / 拔掉鼠标。 */
+    /** 换输入方式：改一下那两条查询的答案再发一次 change，就是接上鼠标 / 拔掉鼠标。 */
     setHoverNone(next: boolean) {
       hoverNone = next;
-      for (const listener of listeners.get('(hover: none)') ?? []) listener({ matches: next });
+      for (const [query, set] of listeners) {
+        if (!answers(query)) continue;
+        for (const listener of set) listener({ matches: next });
+      }
     },
     restore() {
       window.matchMedia = original;
@@ -119,7 +128,7 @@ function stubHoverNone(initial = false) {
 
 describe('reader screen', () => {
   it('keeps the plain page on screen until the processed one is decoded', async () => {
-    // 超分/去码算完是**同一页换 src**：浏览器在换的那一帧会先把旧图扔掉（旧图 → 空 → 新图），
+    // 超分/DLSSNR 算完是**同一页换 src**：浏览器在换的那一帧会先把旧图扔掉（旧图 → 空 → 新图），
     // 阅读器底是深的，中间那一帧空档就是用户看到的黑闪。所以新图先解码，解好了才换上去。
     let release: (() => void) | undefined;
     setImageDecoderForTests(() => new Promise<void>((resolve) => { release = resolve; }));
@@ -1273,7 +1282,6 @@ describe('reader screen', () => {
           title="Test archive"
           pages={pages}
           upscale={{ configured: true, active: true, toggle: toggleUpscale }}
-          decensor={{ configured: false, active: false, toggle: () => undefined }}
         />
       </MemoryRouter>,
     );
@@ -1281,7 +1289,6 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '关闭超分' }));
     expect(toggleUpscale).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: /去码/ })).not.toBeInTheDocument();
   });
 
   it('loads only a window of pages in continuous mode', async () => {
@@ -1353,8 +1360,8 @@ describe('reader screen', () => {
   });
 
   it('says the page is being processed instead of looking like nothing happened', async () => {
-    // 去码/超分在本机跑一页要好几秒，两样一起近二十秒。这段时间屏幕上从前什么
-    // 都没有——按下去像没反应，用户看到的就是「去码失效了」。胶囊只说在算。
+    // 超分/DLSSNR 在本机跑一页要好几秒，两样一起近二十秒。这段时间屏幕上从前什么
+    // 都没有——按下去像没反应，用户看到的就是「按钮点了没动静」。胶囊只说在算。
     const view = render(
       <MemoryRouter>
         <ReaderScreen
@@ -1363,20 +1370,20 @@ describe('reader screen', () => {
           pages={pages}
           derivedPages={new Map()}
           derivingPages={new Set([0])}
-          derivingLabel="去码处理中…"
+          derivingLabel="超分处理中…"
         />
       </MemoryRouter>,
     );
     const pill = await screen.findByRole('status');
-    expect(pill).toHaveTextContent('去码处理中…');
+    expect(pill).toHaveTextContent('超分处理中…');
 
     // 处理完了（产物换上去、或者失败退到原图）就不再压着那句话。
     view.rerender(
       <MemoryRouter>
-        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map()} derivingPages={new Set()} derivingLabel="去码处理中…" />
+        <ReaderScreen archiveId="a1" title="Test archive" pages={pages} derivedPages={new Map()} derivingPages={new Set()} derivingLabel="超分处理中…" />
       </MemoryRouter>,
     );
-    expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument();
+    expect(screen.queryByText('超分处理中…')).not.toBeInTheDocument();
   });
 
   it('drops the fullscreen control and keeps the counter in the middle slot', async () => {
@@ -1509,10 +1516,10 @@ describe('reader screen', () => {
     const user = userEvent.setup();
     const on = { configured: true, active: false, toggle: () => undefined };
     const autoPlay = () => screen.getByRole('button', { name: /自动翻页/ });
-    // 左格固定两枚（布局、方向），右格是开着的增强开关（超分/去码/DLSSNR）。自动翻页要补到
+    // 左格固定两枚（布局、方向），右格是开着的增强开关（超分/DLSSNR）。自动翻页要补到
     // **更空**的那一格——判据是数量，不是「有没有开超分」：只开一个开关时右边仍比左边轻，
     // 只按布尔判断会把自动翻页丢到已经更重的一侧去（曾经就是这么写反的）。
-    const placement = async (props: { upscale?: typeof on; decensor?: typeof on; dlssnr?: typeof on }) => {
+    const placement = async (props: { upscale?: typeof on; dlssnr?: typeof on }) => {
       const view = render(
         <MemoryRouter>
           <ReaderScreen archiveId="a1" title="Test archive" pages={pages} {...props} />
@@ -1532,9 +1539,7 @@ describe('reader screen', () => {
     // 开一个：右格 1 枚，仍比左格轻 → 继续留在右边（2 对 2）。
     expect(await placement({ upscale: on })).toEqual({ layout: false, processing: true });
     // 开两个：右格 2 枚，轮到左格轻 → 自动翻页回到左边（3 对 2）。
-    expect(await placement({ upscale: on, decensor: on })).toEqual({ layout: true, processing: false });
-    // 开三个：右格 3 枚（3 对 3，左格仍不更重）。
-    expect(await placement({ upscale: on, decensor: on, dlssnr: on })).toEqual({ layout: true, processing: false });
+    expect(await placement({ upscale: on, dlssnr: on })).toEqual({ layout: true, processing: false });
   });
 
   it('keeps the chrome out of the way while the thumbnail panel is open', async () => {

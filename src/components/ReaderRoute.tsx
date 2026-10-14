@@ -5,6 +5,7 @@ import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { z } from 'zod';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
 import { getNativeComputeRepository } from '../repositories/nativeComputeRepository';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ReaderScreen, useReaderChrome } from './ReaderScreen';
@@ -35,6 +36,34 @@ import { shouldAutoEnableUpscale } from '../lib/autoUpscale';
 const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 const computeRepository = getNativeComputeRepository();
+const cacheRepository = new NativeCacheRepository();
+
+/** 清掉这次阅读会话留在盘上的「成品」（超分 / DLSSNR 的产物）。
+ *
+ * 这些产物只在本次会话里有意义，可它们和封面、缩略图、原页躺在同一张 `cache_entries`
+ * 里，走同一条配额 + LRU：真机上 2.84 GiB 的 DLSSNR 产物把 4 GiB 的配额吃到 90%，
+ * LRU 只好去挤别人的封面。用户的口径是「进出阅读模式各清一次，彻底防残留」，所以不
+ * 指望配额。封面、缩略图、原页**不动**——它们下一趟还要用，也不是这一趟算出来的。
+ *
+ * 必须带上是哪一本：两本阅读器可以同时挂在保留里（`MAX_RETAINED_READERS = 2`），
+ * 不带范围会把另一本还在读的产物一起删掉。`scopeId` 要等清单到手才有，所以还没拿到时
+ * 直接返回——effect 会随着 `scopeId` 落定再跑一次。
+ *
+ * 失败不做事：`invokeCommand` 自己记错误日志，这里没有可补救的。 */
+function purgeReaderProducts(
+  scopeId: string | undefined,
+  archiveId: string,
+): Promise<unknown> | undefined {
+  if (!scopeId) return undefined;
+  return cacheRepository.purgeReaderRenditions(scopeId, archiveId);
+}
+
+/** 进入这一本时那次清理最多等多久。
+ *
+ * 派生队列必须等清理落地（理由见 `sessionPurged` 那个 effect），但清理本身不该有能力拦住
+ * 阅读：超时就放行，只是这一次的窗口没关上——`created_at < CURRENT_TIMESTAMP` 那条条件还在
+ * 兜同一秒里写下的行。 */
+const PURGE_GATE_TIMEOUT_MS = 2_000;
 
 /** 让 Rust 把「已经释放、但 Windows 还挂在进程工作集里」的那些页交还给系统。
  *
@@ -43,9 +72,9 @@ const computeRepository = getNativeComputeRepository();
  * **用户离开这一本**的那一刻调（阅读器转后台、或它被卸载），缺页的代价落在没人看的
  * 时候。
  *
- * 绝不能每页都调：decensor 的 ONNX bundle（约 240MB）和 `nvngx_dlssnr.dll`（约
- * 165MB）是常驻的，工作集一被清空它们也跟着走，下一页第一张图就要重新从磁盘读回
- * 这几百 MB——省的是任务管理器里的数字，赔的是翻页卡顿。 */
+ * 绝不能每页都调：超分模型和 `nvngx_dlssnr.dll`（约 165MB）是常驻的，工作集一被
+ * 清空它们也跟着走，下一页第一张图就要重新从磁盘读回这几百 MB——省的是任务管理器里
+ * 的数字，赔的是翻页卡顿。 */
 function trimProcessMemory(): void {
   // 失败也不做事：`invokeCommand` 自己记错误日志并返回 Result，这里没有可补救的。
   void invokeCommand('trim_process_memory', {}, VoidResponseSchema);
@@ -158,6 +187,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
   const pageActiveRef = useRef(pageActive);
   pageActiveRef.current = pageActive;
+  /** 进入这一本时那次清理有没有落地。
+   *
+   * 派生队列必须等它（闸门在 `runDerivedQueue` 里，只有那一个入口）：清理只认「语句执行
+   * 那一刻已经在表里」的行（`created_at < CURRENT_TIMESTAMP`），可它是 fire-and-forget 的，
+   * 而队列在同一提交里就开始写产物，两边抢的是同一把 DB 锁——万一清理被挡了一秒以上，这一秒
+   * 里算出来的成品就会被它自己的清理删掉。可见页靠内存句柄还活着，当场看不到；等切回来重新
+   * 取页就是「图片消失」。等它落地（最多 `PURGE_GATE_TIMEOUT_MS`）就没有这个窗口。 */
+  const [sessionPurged, setSessionPurged] = useState(false);
   const [searchParams] = useSearchParams();
   const goBack = useReturnNavigation();
   const { showToast } = useToast();
@@ -218,7 +255,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** DLSSNR 与远端处理要先检查本机能力或配对信息。
    *
    * 但「设置里开了」只是一句**持久化**的意图：它可能来自另一台机器、或者那个 DLL
-   * 已经被换掉。本地超分/去码的模型在不在问得出来，DLSSNR 能不能跑要问原生（见下）。 */
+   * 已经被换掉。本地超分的模型在不在问得出来，DLSSNR 能不能跑要问原生（见下）。 */
   const [dlssnrReady, setDlssnrReady] = useState(false);
   const dlssnrRequested = preferences.dlssnrEnabled;
   const preferencesRef = useRef(preferences);
@@ -274,7 +311,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     ? remoteServiceUp('upscale')
     : preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
   // Settings grant availability; every reading session starts with original images.
-  const decensorConfigured = remoteConfigured ? remoteServiceUp('decensor') : preferences.decensorModel !== '';
   /** 一档在这一次阅读里到底能不能用：远端看对面的清单，本机看自己跑不跑得起来。 */
   const dlssnrAvailable = remoteConfigured ? remoteServiceUp('dlssnr') : dlssnrRequested && dlssnrReady;
   const dlssnrConfigured = dlssnrAvailable && dlssnrWanted;
@@ -283,30 +319,25 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * sitting uses it, which is the only way to see what either one does to the
    * page in front of you. */
   const [upscaleWanted, setUpscaleWanted] = useState(false);
-  const [decensorWanted, setDecensorWanted] = useState(false);
   /** Whether the user has already chosen this sitting's upscale state. Once
    * they touch the toggle, the auto-enable must not flip it back behind them
    * when the metadata (size) arrives later. */
   const upscaleChosenRef = useRef(false);
   useLayoutEffect(() => {
     setUpscaleWanted(false);
-    setDecensorWanted(false);
     setDlssnrWanted(false);
     upscaleChosenRef.current = false;
   }, [archiveId]);
   useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
-  useEffect(() => { if (!decensorConfigured) setDecensorWanted(false); }, [decensorConfigured]);
   useEffect(() => { if (!dlssnrAvailable) setDlssnrWanted(false); }, [dlssnrAvailable]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
-  const decensorEnabled = decensorConfigured && decensorWanted;
   /** 处理中那枚小胶囊写什么：正在跑哪一档就说哪一档。远端/DLSSNR 在链路上另算一步，
    * 它失败时本机那一版会顶上（见下面的降级），所以这里说的是「正在算」而不是
    * 「一定会变」。 */
-  const [derivingStage, setDerivingStage] = useState<'decensor' | 'upscale' | 'dlssnr' | 'remote'>();
-  const derivingLabel = derivingStage === 'decensor' ? '去码处理中…'
-    : derivingStage === 'upscale' ? '超分处理中…'
-      : derivingStage === 'dlssnr' ? 'DLSSNR 处理中…'
-        : derivingStage === 'remote' ? '远端处理中…' : '处理中…';
+  const [derivingStage, setDerivingStage] = useState<'upscale' | 'dlssnr' | 'remote'>();
+  const derivingLabel = derivingStage === 'upscale' ? '超分处理中…'
+    : derivingStage === 'dlssnr' ? 'DLSSNR 处理中…'
+      : derivingStage === 'remote' ? '远端处理中…' : '处理中…';
   /** Bumped whenever a switch flips, so the reader drops the renditions it is
    * holding instead of showing the previous answer until the next page turn. */
   const [enhancementToken, setEnhancementToken] = useState(0);
@@ -364,13 +395,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const retiredDerivedRef = useRef(new Map<number, ImageHandle[]>());
   const derivedAttemptedRef = useRef(new Set<number>());
   const visiblePagesRef = useRef<ReadonlySet<number>>(new Set());
-  /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分/去码。三者是同一
+  /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
-   * 结果）；本地超分/去码是前两者的输入。
+   * 结果）；本地超分是前两者的输入。
    *
    * `remoteChain` 是交给远端的那一串（按顺序做哪几档），做几档由**阅读器里开着
    * 哪几档**决定，模型与参数不跟着走。 */
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier }>>([]);
+  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
   const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
@@ -391,7 +422,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedWarmedRef = useRef(new Set<number>());
   /** 当前这一轮的模型与档位。后台任务是从游标上补进队列的，取不到 `requestDerived`
    * 的局部变量，所以在排这一轮的时候在这里留一份。 */
-  const derivedConfigRef = useRef<{ decensorModel: string; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[] }>({ decensorModel: '', upscaleModel: '', engine: 'local', remoteChain: [] });
+  const derivedConfigRef = useRef<{ upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[] }>({ upscaleModel: '', engine: 'local', remoteChain: [] });
   /** 每页一次任务的取消牌（正在跑或正在排队的那一个）。切页、换开关、离开阅读器时
    * 全部 abort——前端 abort 会顺着 `taskId` 叫停原生那侧的循环（见 nativeImageCache）。 */
   const derivedAbortsRef = useRef(new Map<number, AbortController>());
@@ -399,7 +430,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 误伤新任务。 */
   const derivedTaskSeqRef = useRef(0);
   /** 已经说过一次的「某一档没跑成」：按阶段 + 模型去重。 */
-  const censoredFailureRef = useRef(new Set<string>());
   const upscaleFailureRef = useRef(new Set<string>());
   const dlssnrFailureRef = useRef(new Set<string>());
   /** 已经说过一次的「引擎交代」与「点名要显卡却没给上」：都按内容去重。
@@ -424,9 +454,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** Hold a finished derived rendition for the session, dropping the one the reader
    * is least likely to need next once the session is over its budget (`pickDerivedEvictionVictim`).
    *
-   * The same page can gain a *better* rendition while the session runs — with both
-   * enhancements on, the de-censored page arrives first and the enlarged one
-   * replaces it a few seconds later — so this is also the place that swaps one in.
+   * The same page can gain a *better* rendition while the session runs — with DLSSNR
+   * on, the local enlarged page arrives first and the DLSSNR one replaces it a few
+   * seconds later — so this is also the place that swaps one in.
    * The order inside matters: the new handle is registered and rendered first, and
    * the old one is released after that. The other way round the page would point at
    * a revoked URL for however long the two updates are apart.
@@ -443,8 +473,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const retainDerived = useCallback((pageIndex: number, handle: ImageHandle) => {
     const held = derivedHandlesRef.current;
     const existing = held.get(pageIndex);
-    // 已经是这一版了：不动。第二次落到同一个句柄只可能是「先给去码结果、超分那一步
-    // 再失败，留下的就是它」——这时候既不该换，也不该把它释放掉。
+    // 已经是这一版了：不动。第二次落到同一个句柄只可能是「同一档换了模型又算回同一版」——
+    // 这时候既不该换，也不该把它释放掉。
     if (existing === handle) return;
     if (existing) {
       held.delete(pageIndex);
@@ -643,7 +673,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * are not worth an ONNX run each, and running several at once only made every
    * one of them slower. */
   const [derivedPages, setDerivedPages] = useState<ReadonlyMap<number, string>>(() => new Map());
-  /** 正在处理（去码 / 超分）的页。一页在 CPU 上要好几秒，两样一起开近二十秒——
+  /** 正在处理（超分 / DLSSNR）的页。一页在 CPU 上要好几秒，两样一起开更久——
    * 手上没有别的信号，用户会以为按钮点了个寂寞。 */
   const [derivingPages, setDerivingPages] = useState<ReadonlySet<number>>(() => new Set());
   const markDeriving = useCallback((index: number, active: boolean) => {
@@ -691,7 +721,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedSweepRef.current = undefined;
     derivedWarmedRef.current.clear();
     // 设置换了就是新的一轮：上一轮说过的「某一档没跑成」不该让这一轮闭嘴。
-    censoredFailureRef.current.clear();
     upscaleFailureRef.current.clear();
     dlssnrFailureRef.current.clear();
     engineNoticeRef.current.clear();
@@ -703,13 +732,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   /** 某一档失败了就说一次：对应用户明确打开的那个开关。
    *
    * 每档只报一次（按阶段 + 模型去重），不然每一页都会再弹一遍；失败细节仍在错误日志
-   * 里（`nativeImageCache` 对阅读器那几版都记）。四开组合里「去码失败、超分成功」这类
+   * 里（`nativeImageCache` 对阅读器那几版都记）。「超分失败、DLSSNR 成功」这类
    * 结果因此是**可见的降级**，不是静默换图。 */
-  const noticeStageFailure = useCallback((stage: 'decensor' | 'upscale' | 'dlssnr', model: string, seen: Set<string>) => {
+  const noticeStageFailure = useCallback((stage: 'upscale' | 'dlssnr', model: string, seen: Set<string>) => {
     const key = `${stage}:${model}`;
     if (seen.has(key)) return;
     seen.add(key);
-    const label = stage === 'decensor' ? '去码' : stage === 'upscale' ? '超分' : 'DLSSNR';
+    const label = stage === 'upscale' ? '超分' : 'DLSSNR';
     showToast(`${label}这一步没跑成，这一页显示的是可用的那一版（细节在错误日志里）。`, 'error');
   }, [showToast]);
 
@@ -766,6 +795,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, []);
 
   const runDerivedQueue = useCallback(async () => {
+    // 进入这一本时那次清理还没落地就不开工（见 `sessionPurged` 的注释）：清理只认「执行那一刻
+    // 已经在表里」的行，而它和队列抢同一把 DB 锁——晚到一秒就会把这一秒里算出来的成品删掉。
+    // 闸门只有这一处：队列空转与三档开关两个入口都从这儿进，放在入口上就会留下第二条路。
+    if (!sessionPurged) return;
     if (derivedBusyRef.current) return;
     derivedBusyRef.current = true;
     // 又有活要干了：把挂起的「交回工作区」取消掉，这一趟排空时会重新排一个。
@@ -796,7 +829,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (job.generation !== derivedGenerationRef.current) continue;
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
-        setDerivingStage(job.decensorModel ? 'decensor' : job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
+        setDerivingStage(job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
         // 一次任务一个取消牌：切页 / 换开关 / 离开阅读器时把它掐掉。原生那侧一次只
         // 允许一件重活，不掐的话用户要看的那一页排在旧任务后面。
         const taskBase = `${context.generation}:${job.generation}:${pageIndex}:${derivedTaskSeqRef.current += 1}`;
@@ -813,35 +846,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         let jobFailure: ReaderPageFailure | undefined;
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
-          /** 本地这两步（去码 → 超分）在这一版里是**一条链**，任何一档都先走它。
+          /** 本地这一步（超分）在这一版里是**一条链**，任何一档都先走它。
            *
-           * 为什么要一条链：链的第二阶段只能吃第一阶段的产物，而那份产物只有内容寻址的
-           * 落点、没有按修订号登记的缓存行——出了这件任务，没人能按身份把它找回来。8-g① 在
-           * 取产物那一步把行补上了（`cache::adopt_published_blob`），所以更高档
-           * （dlssnr / remote）终于能把本地这一版当**输入**按身份读回来：它们接着这条路往下
-           * 多走一步，不再各走一条「只有宿主会在进程里跑模型」的旧命令。
+           * 为什么要一条链：链的产物只有内容寻址的落点、没有按修订号登记的缓存行——出了
+           * 这件任务，没人能按身份把它找回来。8-g① 在取产物那一步把行补上了
+           * （`cache::adopt_published_blob`），所以更高档（dlssnr / remote）终于能把本地
+           * 这一版当**输入**按身份读回来：它们接着这条路往下多走一步，不再各走一条
+           * 「只有宿主会在进程里跑模型」的旧命令。
            *
-           * 链的第一阶段一拿到就先上屏，所以「几秒就能看到去码版」这件事没丢；第二阶段
-           * 没成，第一阶段那一版留着（§9.1 ⑦）。阶梯（`loadLocalRenditions` 里那三段）对
-           * 每一档都适用：链式两阶段整件被拒时退到「只去码」，都拿不到才退回「从原图超分」。 */
-          const chainDecensorModel = job.decensorModel || undefined;
+           * 这一版没成，阅读器照旧显示原图（§9.1 ⑦）。 */
           const chainUpscaleModel = job.upscaleModel || undefined;
-          const decensoredIdentity: ImageCacheIdentity = {
-            ...identity,
-            rendition: 'decensored',
-            modelId: job.decensorModel,
-            priority,
-            taskId: `${taskBase}:decensor`,
-          };
-          const enhancedFromDecensoredIdentity: ImageCacheIdentity = {
-            ...identity,
-            rendition: 'enhanced',
-            modelId: job.upscaleModel,
-            decensorModelId: job.decensorModel,
-            source: 'decensored',
-            priority,
-            taskId: `${taskBase}:enhanced`,
-          };
           const enhancedFromPageIdentity: ImageCacheIdentity = {
             ...identity,
             rendition: 'enhanced',
@@ -859,65 +873,34 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             pageIndex,
             generation: job.generation,
             priority,
-            decensorModel: chainDecensorModel,
             upscaleModel: chainUpscaleModel,
-            decensoredIdentity,
-            enhancedFromDecensoredIdentity,
             enhancedFromPageIdentity,
-            onDecensored: (handle) => {
-              // 中间那一版先上屏，认的还是原来那套账（字节预算、淘汰、离开阅读器时统一
-              // 释放，判据都是 `ImageHandle`）。页已经翻走、或已经不在这一代，就不认领，
-              // 把租借当场还掉。
-              if (
-                controller.signal.aborted
-                || !mountedRef.current
-                || contextRef.current?.generation !== context.generation
-                || job.generation !== derivedGenerationRef.current
-              ) {
-                imageCache.release(handle);
-                return;
-              }
-              retainDerived(pageIndex, handle);
-              // 去码那一版上屏的同时，终点那一阶段才刚开始：小胶囊跟着换名字。
-              if (job.upscaleModel) setDerivingStage('upscale');
-            },
             onEngine: (model, engine) => noticeEngineFallback(model, engine),
             // 链路上的诊断必须落到 error.log：产物解不开、租借拿不到这些**不弹提示**，
             // 没人接这条线时用户在日志里只能看到一个静悄悄失败的页面。
             onDiagnostic: (message, detail) => logError('reader/compute', message, detail),
-            // 账记在**没落地的那一阶段**头上（`loadLocalRenditions` 判的），不是记在被点名的
-            // 那一个头上：链式两阶段整件被拒时，真凶常常是去码模型包。
-            onFailure: (stage, model, failure) => {
+            // 本地这一版没落地时的原因（`loadLocalRenditions` 判的），只可能是超分这一步。
+            onFailure: (_stage, model, failure) => {
               jobFailure = failure;
-              if (stage === 'decensor') noticeStageFailure('decensor', model, censoredFailureRef.current);
-              else noticeUpscaleFailure(model, failure);
+              noticeUpscaleFailure(model, failure);
             },
           });
-          const censored = renditions.censored;
           const enhanced = renditions.enhanced;
           // 从这儿往下两条路共用：谁拿到了句柄谁进这套账。
           if (controller.signal.aborted) {
             if (enhanced) imageCache.release(enhanced);
             continue;
           }
-          // 优先级就是结果本身：超分 > 去码 > 原图。两条互不依赖，所以四种组合各有
-          // 一版能显示的东西，不再有「两样都开着时什么都看不到」。
-          const local = enhanced ?? censored;
+          // 优先级就是结果本身：超分 > 原图。
+          const local = enhanced;
           if (local && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
             retainDerived(pageIndex, local);
-          }
-          if (job.decensorModel && !censored) {
-            noticeStageFailure('decensor', job.decensorModel, censoredFailureRef.current);
           }
           if (job.upscaleModel && !enhanced) {
             noticeStageFailure('upscale', job.upscaleModel, upscaleFailureRef.current);
           }
           /** 远端 / DLSSNR 那一步的输入：本地做了什么就从那一步的产物接着做。 */
-          const baseRendition: DlssnrSource = enhanced
-            ? 'enhanced'
-            : censored
-              ? 'decensored'
-              : 'reader-page';
+          const baseRendition: DlssnrSource = enhanced ? 'enhanced' : 'reader-page';
           /** 这一档（DLSSNR / 远端）自己那一份失败。它**不走**本地链的 `onFailure`：那条路
            * 报的是「本地哪一阶段没落地」，这里报的是「后面这一步没算出来」。两处都归到
            * `jobFailure` 上，下面那句「阵发失败不算做过」才看得见它——只报个提示、不带码的
@@ -935,9 +918,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
                   parseDlssnrPasses(dlssnrPassesRef.current),
                 )),
-                // 起点是按「产出它的模型」存的：两个 id 一并送过去，原生那侧才算得出
-                // 同一个 revision。
-                ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
+                // 起点是按「产出它的模型」存的：本地那一版用的是哪个超分模型，
+                // 原生那侧才算得出同一个 revision。
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
                 priority,
                 taskId: `${taskBase}:${job.engine}`,
@@ -951,7 +933,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                   source: baseRendition,
                   chain: job.remoteChain,
                 }),
-                ...(job.decensorModel ? { decensorModelId: job.decensorModel } : {}),
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
                 taskId: `${taskBase}:${job.engine}`,
               }, { signal: controller.signal }).catch((error: unknown) => {
@@ -997,8 +978,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             imageCache.release(derived);
             continue;
           }
-          // 落到这里第二次只可能是「先把去码结果给用户看、再换成超分结果」那条渐进
-          // 路径：`retainDerived` 会把这一页换到更好的那一版（同一版则什么都不做），
+          // 落到这里第二次只可能是「本地那一版先上屏、再换成 DLSSNR / 远端结果」那条
+          // 渐进路径：`retainDerived` 会把这一页换到更好的那一版（同一版则什么都不做），
           // 而不是把更好的那一版丢掉。
           retainDerived(pageIndex, derived);
           // 后台预处理这一页就算做完了，记一笔：内存预算以后把它挤出会话时不再重算
@@ -1036,7 +1017,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       // 队列排空了（这一趟没有新的活进来）：过一会儿把 DLSSNR 的工作区交回。
       scheduleWorkspaceRelease();
     }
-  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease]);
+  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease, sessionPurged]);
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
@@ -1048,6 +1029,37 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // 普通页图与缩略图**不放**：它们是压缩后的字节（共享缓存本身有 96 MiB 上限），
   // 而且 ReaderScreen 的取页逻辑在隐藏期间直接 return，回来时不会重取，放掉就是
   // 一整屏白图。
+  // 进出这一本各清一次盘上的「成品」（超分 / DLSSNR 的产物）：见 `purgeReaderProducts`。
+  //
+  // 触发点是 `pageActive`，**不是挂载 / 卸载**：阅读器被 `RetainedPage` 收着时从不卸载
+  // （`App.tsx` 的 readers 表只给子树加 `hidden`），卸载只在「第三本把它挤掉」时才发生，
+  // 那已经是下一次阅读了——真机上「读完一本回书架」那一半因此从来没跑过。
+  // `pageActive` 说的正是「这一本就是当前路由」：切到另一本会翻成 false（各自清各自的），
+  // 应用转后台不会（路由没变；`App.tsx` 的 visibilitychange 只停标签翻译）。
+  //
+  // 两半分开写，而不是一个 effect 带清理函数：那样翻成 false 时清理函数与函数体会连着跑
+  // 两遍，也就是两次删文件循环。这里只在真的离开时清一次。
+  useEffect(() => {
+    if (pageActive) return;
+    void purgeReaderProducts(scopeId, archiveId);
+  }, [pageActive, scopeId, archiveId]);
+  // 进来那一次：清掉上一趟留下的（上次可能崩了，或者离开那一半没走完）。
+  //
+  // 这一次要**等它落地**（见 `sessionPurged`）再让派生队列开工。超时或清理失败都放行：
+  // 宁可留着残留，也不能让阅读卡在一次清理上。
+  useEffect(() => {
+    if (!scopeId) return;
+    let cancelled = false;
+    setSessionPurged(false);
+    const landed = purgeReaderProducts(scopeId, archiveId) ?? Promise.resolve();
+    const gate = Promise.race([
+      landed.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => { setTimeout(resolve, PURGE_GATE_TIMEOUT_MS); }),
+    ]);
+    void gate.then(() => { if (!cancelled) setSessionPurged(true); });
+    return () => { cancelled = true; };
+  }, [scopeId, archiveId]);
+
   useEffect(() => {
     if (pageActive) return;
     releaseDerived({ dropVisible: true });
@@ -1066,7 +1078,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 所以一本两百页的档案不会只剩视口里那几页有结果。 */
   const requestDerived = useCallback((indexes: readonly number[]) => {
     visiblePagesRef.current = new Set(indexes);
-    if (!decensorEnabled && !upscaleEnabled && !dlssnrConfigured) {
+    if (!upscaleEnabled && !dlssnrConfigured) {
       // 增强全关：这一轮连同后台预处理一起作废，重新打开时从头排一次。
       //
       // 这里不再带 `!remoteConfigured`：走远端时上面这三个值本身就是「对面清单里能用、
@@ -1080,20 +1092,18 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       : dlssnrConfigured
         ? 'dlssnr'
         : 'local';
-    /** 交给远端的那一串：阅读器里开着哪几档就做哪几档，顺序固定「去码 → 超分 →
-     *  DLSSNR」——去码出来的干净像素是另外两步更好的输入。模型与参数不跟着走（对面
+    /** 交给远端的那一串：阅读器里开着哪几档就做哪几档，顺序固定「超分 → DLSSNR」
+     *  ——超分出来的像素是 DLSSNR 更好的输入。模型与参数不跟着走（对面
      *  按自己那份设置跑），所以这一串变了才需要重算。 */
     const remoteChain: readonly RemoteService[] = remoteConfigured
       ? [
-        ...(decensorEnabled ? (['decensor'] as const) : []),
         ...(upscaleEnabled ? (['upscale'] as const) : []),
         ...(dlssnrConfigured ? (['dlssnr'] as const) : []),
       ]
       : [];
-    const decensorModel = decensorEnabled ? preferences.decensorModel : '';
     const upscaleModel = upscaleEnabled ? preferences.upscaleModel : '';
     // 后台任务从游标补进队列时取不到这里的局部变量，所以在排这一轮的时候留一份。
-    derivedConfigRef.current = { decensorModel, upscaleModel, engine, remoteChain };
+    derivedConfigRef.current = { upscaleModel, engine, remoteChain };
     let queued = false;
     const context = contextRef.current;
     // Only pages already inside the reader's configured preload window enter
@@ -1140,7 +1150,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       derivedQueueRef.current.push({
         pageIndex: index,
         generation: derivedGenerationRef.current,
-        decensorModel,
         upscaleModel,
         engine,
         remoteChain,
@@ -1158,18 +1167,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
     }
     // 队列里可能已经有后台那一档的活，所以这里不能只看 `queued`。
+    // 等清理落地那一关在 `runDerivedQueue` 里（闸门只设一处）。
     if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
-  }, [decensorEnabled, dlssnrConfigured, prefetchDistance, preferences.decensorModel, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
+  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
   useLayoutEffect(() => {
     releaseDerived();
   }, [
-    decensorEnabled,
     dlssnrConfigured,
     enhancementToken,
-    preferences.decensorModel,
     preferences.dlssnrPasses,
     preferences.upscaleModel,
     releaseDerived,
@@ -1349,11 +1357,6 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         configured: upscaleConfigured,
         active: upscaleEnabled,
         toggle: () => { upscaleChosenRef.current = true; setUpscaleWanted((value) => !value); setEnhancementToken((value) => value + 1); },
-      }}
-      decensor={{
-        configured: decensorConfigured,
-        active: decensorEnabled,
-        toggle: () => { setDecensorWanted((value) => !value); setEnhancementToken((value) => value + 1); },
       }}
       dlssnr={{
         // 「能不能用」按上面那个 `dlssnrAvailable`：走远端时看对面的清单，本机时看

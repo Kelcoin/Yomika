@@ -29,11 +29,11 @@ interface HostLease {
  * 门自己的协议（先订阅再提交、只认核验过的产物、取消、认领不重复还租借）由
  * `tests/lib/reader-computed-page.test.ts` 逐条钉住；这里要的是「阅读器会不会去叫它、
  * 叫了几次、什么时候把它退掉」。 */
-/** 一份任务里的两个阶段。链式两阶段（去码 → 超分）是**一件任务**，产物按阶段各一件。 */
-type HostStage = 'decensor' | 'upscale';
+/** 门只跑一档：本地这条链就是「原图 → 超分」，一件任务一个阶段，产物按阶段登记。 */
+type HostStage = 'upscale';
 
-let hostLease: (pageIndex: number, stage: HostStage) => Promise<HostLease> = async (pageIndex, stage) => ({
-  url: `blob:${stage === 'decensor' ? 'decensored' : 'enhanced'}-${pageIndex}`,
+let hostLease: (pageIndex: number, stage: HostStage) => Promise<HostLease> = async (pageIndex) => ({
+  url: `blob:enhanced-${pageIndex}`,
   bytes: 1,
 });
 let hostSubmitFails = false;
@@ -77,7 +77,7 @@ function installHost(options: {
   failStage?: HostStage;
   failStageCode?: string;
 } = {}): void {
-  hostLease = options.lease ?? (async (pageIndex, stage) => ({ url: `blob:${stage === 'decensor' ? 'decensored' : 'enhanced'}-${pageIndex}`, bytes: 1 }));
+  hostLease = options.lease ?? (async (pageIndex) => ({ url: `blob:enhanced-${pageIndex}`, bytes: 1 }));
   hostSubmitFails = options.submitFails ?? false;
   hostAcquireNeverLands = options.acquireNeverLands ?? false;
   hostEnginePolicy = options.enginePolicy ?? null;
@@ -91,7 +91,7 @@ function installHost(options: {
   hostJobSequence = 0;
 }
 
-/** 提交那两条门共用的应答：建一个任务号、把它有几个阶段记下来、答「已经在跑」。
+/** 提交那道门共用的应答：建一个任务号、把它有几个阶段记下来、答「已经在跑」。
  *
  * 一律答「已经在跑」：宿主扫得动就会跑，而门不看状态就永远停在等结果——真的那道门也是提交
  * 回来立刻去问产物（合并进正在跑的、或直接命中缓存完成）。 */
@@ -141,12 +141,6 @@ async function hostUpscaleAnswer(command: string, args?: Record<string, unknown>
     case 'compute_submit_reader_page':
       // 「原图 → 超分」那一道门：一件任务一个阶段。
       return submitJob(args, ['upscale']);
-    case 'compute_submit_decensor_page': {
-      // 链式两阶段：点名了超分模型才有第二个阶段——宿主那侧的 `plan_decensor_page` 也是这么定的
-      // （两个阶段共用一份 `Run`，所以只能是**一件任务里的两步**）。
-      const payload = args?.payload as { upscaleModelId?: string } | undefined;
-      return submitJob(args, payload?.upscaleModelId ? ['decensor', 'upscale'] : ['decensor']);
-    }
     case 'compute_job_artifacts': {
       const jobId = String(args?.jobId ?? '');
       const job = hostJobs.get(jobId);
@@ -268,7 +262,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: {
         theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr',
-        cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: false,
+        cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'off', upscaleModel: '', dlssnrEnabled: false,
       } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'slow-neighbour', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
@@ -284,6 +278,82 @@ describe('reader route', () => {
     }
   });
 
+  it('clears this session\'s products on the way in and on the way out of the archive it belongs to', async () => {
+    // 用户的口径：超分 / DLSSNR 的产物**只在这次阅读会话里有意义**，进出阅读模式各清
+    // 一次。从前它们和封面、缩略图、原页躺在同一张表里，只受配额 + LRU 管——真机上
+    // 2.84 GiB 的 DLSSNR 产物把 4 GiB 的配额吃到 90%，LRU 只好去挤别人的封面。
+    //
+    // 两件事都要钉住：①清理带的是**这一本**的坐标——两本阅读器可以同时挂在保留里
+    // （`MAX_RETAINED_READERS = 2`），不带范围会把另一本还在读的产物一起删掉，宿主也会
+    // 拒收空范围；②「离开」按 `pageActive` 判，不是按卸载——阅读器被 `RetainedPage` 收着
+    // 时从不卸载，真机上「读完一本回书架」那一半因此从来没跑过。
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 }
+    ));
+    const purges: unknown[] = [];
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'cache_purge_reader_renditions') {
+        purges.push(args);
+        return { ok: true, value: { removedEntries: 0, removedFiles: 0, bytesFreed: 0 } };
+      }
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', dlssnrEnabled: false } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'purge-products', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/purge-products']}><App /><ReaderNavigation /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    // 进来一次：上一趟留下的产物不该带进这一趟，而且带的是这一本的坐标。
+    await waitFor(() => expect(purges[0]).toEqual({ scopeId: 's', archiveId: 'purge-products' }));
+    // 离开再一次——离开是**换一本**（路由变了、`pageActive` 翻成 false），不是卸载。
+    fireEvent.click(screen.getByRole('button', { name: '换一本' }));
+    await waitFor(() => expect(purges.length).toBeGreaterThanOrEqual(2));
+    expect(purges[1]).toEqual({ scopeId: 's', archiveId: 'purge-products' });
+  });
+
+  it('lets the first derived job out only after the entry purge has landed', async () => {
+    // 清理与派生队列抢同一把 DB 锁。清理晚到一秒，这一秒里算出来的成品就会被它自己删掉
+    // （可见页靠内存句柄还活着，当场看不到；切回来重新取页就是「图片消失」）。判据是顺序：
+    // 第一件算图任务提交之前，进入时那次清理必须已经落地。
+    installHost();
+    const cache = getNativeImageCache();
+    vi.spyOn(cache, 'release').mockImplementation(() => {});
+    vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+      { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 }
+    ));
+    const order: string[] = [];
+    let releasePurge: (() => void) | undefined;
+    setInvokeAdapterForTests(async (command, args) => {
+      order.push(command);
+      if (command === 'cache_purge_reader_renditions') {
+        await new Promise<void>((resolve) => { releasePurge = resolve; });
+        return { ok: true, value: { removedEntries: 0, removedFiles: 0, bytesFreed: 0 } };
+      }
+      const hostReply = await hostUpscaleAnswer(command, args);
+      if (hostReply !== null) return hostReply;
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'cpu', upscaleModel: 'test', dlssnrEnabled: false } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'gate', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    render(<MemoryRouter initialEntries={['/reader/gate']}><App /></MemoryRouter>);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    // 清理还没落地：一件算图任务都不许出去。
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(order).toContain('cache_purge_reader_renditions');
+    expect(order).not.toContain('compute_submit_reader_page');
+    releasePurge?.();
+    await waitFor(() => expect(order).toContain('compute_submit_reader_page'));
+    expect(order.indexOf('cache_purge_reader_renditions'))
+      .toBeLessThan(order.indexOf('compute_submit_reader_page'));
+  });
+
   it('starts DLSSNR only from its reader control and keeps the final rendition', async () => {
     const cache = getNativeImageCache();
     const processed = { key: 'dlssnr-0', url: 'blob:dlssnr-0', bytes: 1 };
@@ -293,11 +363,11 @@ describe('reader route', () => {
       ? processed
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
     setInvokeAdapterForTests(async (command, args) => {
-      // 本地去码这一版由宿主那道门给（8-f 起本地那一档整体翻了进去）。这一条盯的是
-      // DLSSNR：它自己那一版仍然走本地缓存，起点是去码那一版而不是原图。
+      // 本地超分这一版由宿主那道门给（8-f 起本地那一档整体翻了进去）。这一条盯的是
+      // DLSSNR：它自己那一版仍然走本地缓存，起点是超分那一版而不是原图。
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, upscaleBackend: 'cpu', upscaleModel: 'test', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -308,12 +378,12 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' });
     expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr')).toBe(false);
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
-    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:decensored-0'));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', processed.url));
     expect(release).not.toHaveBeenCalledWith(processed);
-    expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'decensored')).toBe(true);
+    expect(load.mock.calls.some(([identity]) => identity.rendition === 'dlssnr' && JSON.parse(identity.transform ?? '{}').source === 'enhanced')).toBe(true);
     await waitFor(() => expect(load.mock.calls.filter(([identity]) => identity.rendition === 'dlssnr').map(([identity]) => identity.pageIndex)).toEqual([0, 1, 2]));
   });
 
@@ -339,7 +409,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command, args) => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -367,19 +437,19 @@ describe('reader route', () => {
   });
 
   it('runs the DLSS5 prerequisites through the compute chain', async () => {
-    // 更高档（dlssnr / remote）的本地前置两版从前走的是 `inference_decensor_page` /
-    // `inference_upscale_page` 这两条只有宿主会跑模型的旧命令：出来的图不在 compute 账上，
+    // 更高档（dlssnr / remote）的本地前置那一版从前走的是宿主进程里跑模型的老路
+    // （`inference_upscale_page`）：出来的图不在 compute 账上，
     // 也没法按修订号找回来（8-c 被挡住的那条根因）。8-g① 在取产物那一步给 compute 产物挂上
-    // 缓存行之后，本地这两步就只剩一条路——DLSS5 按身份把它的产物当**输入**读回来，
-    // 宿主进程里那两条旧命令一次都不该被叫到。
+    // 缓存行之后，本地这一步就只剩一条路——DLSS5 按身份把它的产物当**输入**读回来，
+    // 宿主进程里那条旧命令一次都不该被叫到。
     const commands: string[] = [];
-    const decensorPayloads: Array<{ upscaleModelId?: string }> = [];
+    const upscalePayloads: Array<{ modelId?: string }> = [];
     let dlssnrSource: string | undefined;
     installHost();
     setInvokeAdapterForTests(async (command: string, args) => {
       commands.push(command);
-      if (command === 'compute_submit_decensor_page') {
-        decensorPayloads.push((args?.payload ?? {}) as { upscaleModelId?: string });
+      if (command === 'compute_submit_reader_page') {
+        upscalePayloads.push((args?.payload ?? {}) as { modelId?: string });
       }
       if (command === 'dlssnr_apply_page') {
         dlssnrSource = (args?.input as { source?: string } | undefined)?.source;
@@ -388,7 +458,7 @@ describe('reader route', () => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x', dlssnrEnabled: true } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -402,16 +472,13 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
     fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
 
-    // 去码 + 超分是**一件任务里的两步**（第二阶段只能吃第一阶段的产物），所以超分模型
-    // 跟着同一次提交走，而不是另排一件。
-    await waitFor(() => expect(decensorPayloads[0]?.upscaleModelId).toBe('realcugan-2x'));
-    expect(commands.filter((command) => command === 'compute_submit_decensor_page')).toHaveLength(1);
-    // 宿主进程里那两条旧命令一次都没被叫到。
-    expect(commands).not.toContain('inference_decensor_page');
+    // 本地的超分是**一件任务**：点名的模型跟着这一次提交走，不另排一件。
+    await waitFor(() => expect(upscalePayloads[0]?.modelId).toBe('realcugan-2x'));
+    expect(commands.filter((command) => command === 'compute_submit_reader_page')).toHaveLength(1);
+    // 宿主进程里那条旧命令一次都没被叫到。
     expect(commands).not.toContain('inference_upscale_page');
     // DLSS5 的输入就是本地算出来的那一版（超分那一版），不是原图。
     await waitFor(() => expect(dlssnrSource).toBe('enhanced'));
@@ -425,7 +492,7 @@ describe('reader route', () => {
       bytes: 1,
     }));
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, upscaleBackend: 'off', upscaleModel: '', dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'source-window', title: 'Reader', pages: Array.from({ length: 6 }, (_, i) => `${i}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -456,7 +523,7 @@ describe('reader route', () => {
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'sweep', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -500,7 +567,7 @@ describe('reader route', () => {
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes }
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'budget', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -546,7 +613,7 @@ describe('reader route', () => {
       return { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 };
     });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 2, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'promote', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -593,7 +660,7 @@ describe('reader route', () => {
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes }
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'resident', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -633,7 +700,7 @@ describe('reader route', () => {
         : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
     });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'lost-source', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -664,7 +731,7 @@ describe('reader route', () => {
       { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 }
     ));
     const adapter = vi.fn(async (command: string) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', decensorModel: '', dlssnrEnabled: false } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', dlssnrEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'fat-pages', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'fat-pages', title: 'Reader', filename: 'fat.zip', tags: 'category:manga', summary: null, extension: 'zip', progress: 0, pageCount: 3, lastReadTime: 0, size: 12 * 1024 * 1024 } };
@@ -698,7 +765,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command, args) => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', decensorModel: '', dlssnrEnabled: false } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, upscaleBackend: 'cpu', upscaleModel: 'realcugan-2x-denoise3x', upscaleAutoEnable: true, upscaleAutoTagMode: 'whitelist', upscaleAutoWhitelist: 'category:manga', dlssnrEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'thin-pages', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'thin-pages', title: 'Reader', filename: 'thin.zip', tags: 'category:manga', summary: null, extension: 'zip', progress: 0, pageCount: 3, lastReadTime: 0, size: 300 * 1024 } };
@@ -715,7 +782,7 @@ describe('reader route', () => {
   });
 
   it('marks the page in the viewport as foreground and the rest of the sweep as background', async () => {
-    // 用户要的「超分、去码、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
+    // 用户要的「超分、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
     // 字段：队列按档位给每件活打上前台/后台，原生那侧据此插队并掐掉正在跑的后台。
     const cache = getNativeImageCache();
     const pageCount = 6;
@@ -724,7 +791,7 @@ describe('reader route', () => {
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: 1 }
       : { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 });
     setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'priority', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -883,6 +950,9 @@ describe('reader route', () => {
       'save_reading_progress',
       'app_release_latest', 'inference_list_models', 'model_release_list_upscalers',
       'compute_worker_status', 'fetch_tag_counts',
+      // 进阅读器就把上一趟留下的成品清一次（超分 / DLSSNR 的产物，见
+      // `purgeReaderProducts`）：它们只在这次会话里有意义，不该跟着配额与 LRU 走。
+      'cache_purge_reader_renditions',
     ]));
     expect(calls.filter((command) => command === 'load_reader_page')).toHaveLength(2);
     expect(calls.at(-1)).toBe('save_reading_progress');
@@ -1400,9 +1470,9 @@ describe('reader route', () => {
     expect(hostCommands.filter((command) => command === 'compute_submit_reader_page')).toHaveLength(submits);
   });
 
-  it('runs the de-censoring bundle for the page on screen', async () => {
-    // 8-f 起本地去码整体搬进了 worker：阅读器提交的是一件「去码 [+ 超分]」的任务，
-    // 不再让宿主在进程里跑模型（那是 `inference_decensor_page`，正在被删掉的那条路）。
+  it('runs the upscale stage for the page on screen', async () => {
+    // 本地这一档（超分）在 8-f 起也整体搬进了 worker：阅读器提交的是一件 compute 任务，
+    // 不再让宿主在进程里跑模型（那是 `inference_upscale_page`，被删掉的那条路）。
     const commands: string[] = [];
     installHost();
     setInvokeAdapterForTests(async (command: string, args) => {
@@ -1410,7 +1480,7 @@ describe('reader route', () => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'test' } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -1422,30 +1492,30 @@ describe('reader route', () => {
 
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(commands).not.toContain('compute_submit_decensor_page');
+    expect(commands).not.toContain('compute_submit_reader_page');
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
-    await waitFor(() => expect(commands).toContain('compute_submit_decensor_page'));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(commands).toContain('compute_submit_reader_page'));
     // 跑完那一版真的上了屏（不是「提交过了就算」）。
-    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:decensored-0'));
-    expect(commands.filter((command) => command === 'compute_submit_decensor_page')).toHaveLength(1);
-    expect(commands).not.toContain('inference_decensor_page');
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(commands.filter((command) => command === 'compute_submit_reader_page')).toHaveLength(1);
+    expect(commands).not.toContain('inference_upscale_page');
   });
 
-  it('says the page is being de-censored while the bundle runs', async () => {
-    // 一页在 CPU 上要好几秒；这段时间页面上压着一枚「去码处理中」的胶囊，
-    // 让等待有交代——不然按下「去码」看上去就是没反应。
-    let releaseDecensor: (() => void) | undefined;
+  it('says the page is being upscaled while the model runs', async () => {
+    // 一页在 CPU 上要好几秒；这段时间页面上压着一枚「超分处理中」的胶囊，
+    // 让等待有交代——不然按下「超分」看上去就是没反应。
+    let releaseUpscale: (() => void) | undefined;
     installHost();
     setInvokeAdapterForTests(async (command: string, args) => {
-      if (command === 'compute_submit_decensor_page') {
+      if (command === 'compute_submit_reader_page') {
         // 提交这一下压在手里：这正是「原生还在算」的那几秒。
-        return new Promise((resolve) => { releaseDecensor = () => resolve(submitJob(args, ['decensor'])); });
+        return new Promise((resolve) => { releaseUpscale = () => resolve(submitJob(args, ['upscale'])); });
       }
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens' } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'test' } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -1457,19 +1527,19 @@ describe('reader route', () => {
 
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
-    expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument();
+    expect(screen.queryByText('超分处理中…')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
-    expect(await screen.findByText('去码处理中…')).toBeInTheDocument();
-    await act(async () => { releaseDecensor?.(); });
-    await waitFor(() => expect(screen.queryByText('去码处理中…')).not.toBeInTheDocument());
+    expect(await screen.findByText('超分处理中…')).toBeInTheDocument();
+    await act(async () => { releaseUpscale?.(); });
+    await waitFor(() => expect(screen.queryByText('超分处理中…')).not.toBeInTheDocument());
   });
 
-  it('keeps the local de-censored page when the DLSS5 step fails', async () => {
+  it('keeps the local upscaled page when the DLSS5 step fails', async () => {
     // DLSS5 开着（设置里检测通过），但这一步在运行期失败（片段换了、驱动不对）。
-    // 从前这一失败会把**本地那一版也丢掉**，页面上还是原图——看起来就是「去码失效」。
+    // 这一步失败不能把**本地那一版也丢掉**：页面上该留着的仍然是超分那一版。
     const cache = getNativeImageCache();
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
       if (identity.rendition === 'dlssnr') throw new Error('DLSS5 跑不通');
@@ -1487,7 +1557,7 @@ describe('reader route', () => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: 'aletheia-lens', dlssnrEnabled: true } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'test', dlssnrEnabled: true } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -1513,10 +1583,10 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:reader-page-0');
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
     const image = screen.getByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
+    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
   it('auto-disables DLSS5 when this machine cannot actually run it', async () => {
@@ -1534,7 +1604,7 @@ describe('reader route', () => {
     setInvokeAdapterForTests(async (command: string, args) => {
       commands.push(command);
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', decensorModel: '', dlssnrEnabled: true } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'off', upscaleModel: '', dlssnrEnabled: true } };
       }
       if (command === 'save_preferences') {
         const input = (args?.input ?? {}) as Partial<{ dlssnrEnabled: boolean }>;
@@ -1570,22 +1640,21 @@ describe('reader route', () => {
     expect(commands).not.toContain('dlssnr_apply_page');
   });
 
-  it('shows the de-censored page first and swaps in the enlarged one when it lands', async () => {
-    // 双开时这是**一件任务里的两步**：去码先出来（几秒），超分再在它之上换成最终那一版。
-    // 从前两步折在一次调用里，用户要么等全程、要么在超分失败时连去码结果一起丢。
+  it('keeps the plain page on screen until the enlarged one lands', async () => {
+    // 超分那一版要算几秒：这段时间页面上压着的必须是原图。换版那一刻也不能先把旧图
+    // 放掉——放掉到 0 引用会把 blob URL 撤销，页面上那一张就成了坏图。
     const cache = getNativeImageCache();
     let releaseUpscale: ((lease: HostLease) => void) | undefined;
     installHost({
-      lease: async (pageIndex, stage) => {
-        // 第二阶段压在手里：用例自己决定最终那一版什么时候落地。
-        if (stage === 'upscale') return new Promise<HostLease>((resolve) => { releaseUpscale = resolve; });
-        return { url: `blob:decensored-${pageIndex}`, bytes: 1 };
+      lease: async (_pageIndex) => {
+        // 压在手里：用例自己决定最终那一版什么时候落地。
+        return new Promise<HostLease>((resolve) => { releaseUpscale = resolve; });
       },
     });
     const adopt = vi.spyOn(cache, 'adopt');
     const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      // 去码与超分两版都必须走宿主那道门：本地缓存这条路只剩原图。真去问它就要一个错——
+      // 算出来的那一版必须走宿主那道门：本地缓存这条路只剩原图。真去问它就要一个错——
       // 不然「走了旧路」也会得到同一张图，这条用例就成了白测。
       if (identity.rendition !== 'reader-page') throw new Error(`这一版不该再走本地缓存：${identity.rendition}`);
       return { key: `reader-page-${identity.pageIndex}`, url: `blob:reader-page-${identity.pageIndex}`, bytes: 1 };
@@ -1594,7 +1663,7 @@ describe('reader route', () => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', dlssnrEnabled: false } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -1605,43 +1674,41 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
     const image = screen.getByRole('img', { name: '第 1 页' });
-    // 第一步的产物先上屏（这时最终那一版还没算完）。
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
-    const decensored = adopt.mock.results[0]!.value as ImageHandle;
+    // 还没算完：这时候页面上压着的必须是原图（不是黑图，也不是空白）。
+    await waitFor(() => expect(releaseUpscale).toBeDefined());
+    expect(image).toHaveAttribute('src', 'blob:reader-page-0');
     await act(async () => { releaseUpscale?.({ url: 'blob:enhanced-0', bytes: 1 }); });
     await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
-    // 第二步要的正是第一步的产物：它那一版的身份写着起点是 `decensored`（不是原图）。
+    const adopted = adopt.mock.results[0]!.value as ImageHandle;
+    // 算出来的那一版起点是原图，不是别的阶段留下的产物。
     expect(adopt).toHaveBeenCalledWith(
-      expect.objectContaining({ rendition: 'enhanced', source: 'decensored' }),
+      expect.objectContaining({ rendition: 'enhanced', source: 'reader-page' }),
       expect.anything(),
     );
-    // 换版之前不许把它放掉：放掉到 0 引用会把 blob URL 撤销，页面上那一张就成了坏图。
-    expect(release).not.toHaveBeenCalledWith(decensored);
-    fireEvent.load(image);
-    expect(release).toHaveBeenCalledWith(decensored);
+    // 它这会儿就在屏上：不许放掉——放掉到 0 引用会把 blob URL 撤销，页面上那一张
+    // 就成了坏图。真正放掉它要等到离开这一次显示（见另一条「hands back the derived
+    // renditions it holds once the reader stops being displayed」）。
+    expect(release).not.toHaveBeenCalledWith(adopted);
   });
 
-  it('still enlarges the plain page when the de-censoring step fails', async () => {
-    // 四种组合里这是最容易出错的一种：去码失败不该把超分一起带走。这一版没有去码，
-    // 但它是可用的结果，而且用户会被告知去码那一步没跑成。
+  it('reports the failure and keeps the plain page when the local upscale fails', async () => {
+    // 本地那一档**跑起来之后再失败**（产物发过了、租借那一步答失败）——与「派发期整件被拒」
+    // 不是一回事：页面上不能是黑图，用户也该被告知哪一档没跑成。
     const cache = getNativeImageCache();
-    // 去码这一阶段**跑起来之后再失败**（产物发过了、租借那一步答失败）——与「派发期整件被拒」
-    // 不是一回事：这时候超分仍该从原图接着做，页面上也不能是黑图。
-    installHost({ failStage: 'decensor' });
+    installHost({ failStage: 'upscale' });
     vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      if (identity.rendition === 'decensored') throw new Error('这一版不该再走本地缓存：本地去码 8-f 起搬进 worker 了');
-      return { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:${identity.rendition}-${identity.pageIndex}`, bytes: 1 };
+      if (identity.rendition !== 'reader-page') throw new Error(`这一版不该再走本地缓存：${identity.rendition}`);
+      return { key: `reader-page-${identity.pageIndex}`, url: `blob:reader-page-${identity.pageIndex}`, bytes: 1 };
     });
     vi.spyOn(cache, 'release').mockImplementation(() => {});
     setInvokeAdapterForTests(async (command, args) => {
       const hostReply = await hostUpscaleAnswer(command, args);
       if (hostReply !== null) return hostReply;
       if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens', dlssnrEnabled: false } };
+        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', dlssnrEnabled: false } };
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
@@ -1652,52 +1719,16 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
     const image = screen.getByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
-    // 起点退回原图（没有去码产物可读）：这一步走的是宿主那道门。载荷里没有「起点」这一项
-    // ——宿主按 `rendition` 自己决定——所以这里能验的就是门确实被叫了、结果也上了屏。
+    // 失败也说了出来（先等这句话，提交与租借都是异步的，抢在前面看命令列表会看到半截）。
+    expect(await screen.findByText(/超分这一步没跑成/)).toBeInTheDocument();
+    // 起点就是原图：这一步走的是宿主那道门。载荷里没有「起点」这一项——宿主按 `rendition`
+    // 自己决定——所以这里能验的就是门确实被叫了。
     expect(hostCommands).toContain('compute_submit_reader_page');
-    expect(await screen.findByText(/去码这一步没跑成/)).toBeInTheDocument();
-  });
-
-  it('keeps the de-censored page and its URL when the upscale step fails', async () => {
-    // 去码结果先上屏，超分再失败——这时候页面上留着的就是去码那一版。它已经被入册
-    // 过一次，第二次落到同一个句柄时**不能**当成「换新版」把它释放掉：释放到 0 引用
-    // 会把 blob URL 撤销，页面上那一张就成了坏图。
-    const cache = getNativeImageCache();
-    // 第一阶段成了、第二阶段跑起来之后失败：这是这条用例真正要的那一种失败。
-    installHost({ failStage: 'upscale' });
-    vi.spyOn(cache, 'load').mockImplementation(async (identity) => {
-      if (identity.rendition !== 'reader-page') throw new Error(`这一版不该再走本地缓存：${identity.rendition}`);
-      return { key: `reader-page-${identity.pageIndex}`, url: `blob:reader-page-${identity.pageIndex}`, bytes: 1 };
-    });
-    const release = vi.spyOn(cache, 'release').mockImplementation(() => {});
-    setInvokeAdapterForTests(async (command: string, args) => {
-      const hostReply = await hostUpscaleAnswer(command, args);
-      if (hostReply !== null) return hostReply;
-      if (command === 'load_preferences') {
-        return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 0, coverConcurrency: 4, upscaleBackend: 'cpu', upscaleModel: 'real-esrgan', decensorModel: 'aletheia-lens' } };
-      }
-      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
-      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg'] } };
-      if (command === 'load_reading_progress') return { ok: true, value: null };
-      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
-    });
-
-    render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
-    await screen.findByRole('img', { name: '第 1 页' });
-    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
-
-    const image = screen.getByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:decensored-0'));
-    await waitFor(() => expect(screen.getByText(/超分这一步没跑成/)).toBeInTheDocument());
-    expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:decensored-0' }));
-    expect(image).toHaveAttribute('src', 'blob:decensored-0');
+    // 算不出来就退回原图：这一页必须还是能读的。
+    expect(image).toHaveAttribute('src', 'blob:reader-page-0');
   });
 
   it('cancels the native task when the reader stops wanting it', async () => {
@@ -1760,7 +1791,7 @@ describe('reader route', () => {
       commands.push(command);
       if (command === 'trim_process_memory') return { ok: true, value: null };
       if (command === 'dlssnr_release_workspaces' || command === 'inference_release_sessions') return { ok: true, value: 0 };
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, decensorModel: '', dlssnrEnabled: true } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, dlssnrEnabled: true } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: String(args?.archiveId ?? 'left'), title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
@@ -1855,7 +1886,7 @@ describe('reader route', () => {
 
   /** 远端那台机器在这次用例里的应答：三档能力各自 `ready` 与否由用例说了算。 */
   function remoteReader(options: {
-    ready: { upscale: boolean; decensor: boolean; dlssnr: boolean };
+    ready: { upscale: boolean; dlssnr: boolean };
     process?: (args: Record<string, unknown> | undefined) => unknown;
     /** 前几次问能力清单先答不上（对面刚起、网络抖一下）：默认 0。 */
     probeFailures?: number;
@@ -1871,7 +1902,7 @@ describe('reader route', () => {
             theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648,
             prefetchPages: 0, coverConcurrency: 4,
             // 本机一个模型都没有：这三枚按钮能亮，只可能是因为对面报了可用。
-            upscaleBackend: 'off', upscaleModel: '', decensorModel: '',
+            upscaleBackend: 'off', upscaleModel: '',
             remoteComputeUrl: '192.168.1.9:47653',
             remoteComputeToken: 'remote-token',
             remoteComputeOps: serializeRemoteOps({
@@ -1893,9 +1924,9 @@ describe('reader route', () => {
             version: 2,
             name: 'DESKTOP-PC',
             models: [],
-            capabilities: (['upscale', 'decensor', 'dlssnr'] as const).map((id) => ({
+            capabilities: (['upscale', 'dlssnr'] as const).map((id) => ({
               id,
-              label: { upscale: '超分', decensor: '去码', dlssnr: 'DLSS5' }[id],
+              label: { upscale: '超分', dlssnr: 'DLSS5' }[id],
               ready: options.ready[id],
               detail: options.ready[id] ? '' : '对面没装',
             })),
@@ -1917,16 +1948,15 @@ describe('reader route', () => {
   }
 
   it('takes the reader controls from the list the remote machine reports', async () => {
-    // 第 17 项：连上远端之后，阅读器那三枚开关「能不能按」由**对面**那份清单决定。
-    // 从前它们看的是本机装没装模型，于是手机连上桌面端之后三枚全是灰的。
-    const { calls } = remoteReader({ ready: { upscale: true, decensor: false, dlssnr: true } });
+    // 第 17 项：连上远端之后，阅读器那两枚开关「能不能按」由**对面**那份清单决定。
+    // 从前它们看的是本机装没装模型，于是手机连上桌面端之后两枚全是灰的。
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: false } });
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
     expect(await screen.findByRole('button', { name: '开启超分' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '开启 DLSSNR' })).toBeInTheDocument();
     // 对面没装的这一档不出现（本机也没装模型，两边都不给）。
-    expect(screen.queryByRole('button', { name: '开启去码' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '开启 DLSSNR' })).toBeNull();
 
     // 而且「连上远端」本身不等于「开始处理」：一档都没开的时候，一页都不许交给对面。
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
@@ -1938,9 +1968,9 @@ describe('reader route', () => {
 
   it('rides out a capability probe that failed once instead of greying the switches', async () => {
     // 「设备连上之后频繁断开又重连」：一次探测失败（对面刚起、网络抖一下）就被当成断开，
-    // 三枚开关全打回灰、用户刚打开的那一档还会被自动关掉。所以失败要重试，且**不**先把
+    // 两枚开关全打回灰、用户刚打开的那一档还会被自动关掉。所以失败要重试，且**不**先把
     // 上一次的答案抹掉。
-    const { calls } = remoteReader({ ready: { upscale: true, decensor: true, dlssnr: true }, probeFailures: 1 });
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, probeFailures: 1 });
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
 
@@ -1950,9 +1980,9 @@ describe('reader route', () => {
   });
 
   it('hands the remote machine only the services that are on, in the order they must run', async () => {
-    // 第 17 项：一次处理做哪几档，由阅读器里开着的开关决定；顺序固定「去码 → 超分 →
-    // DLSSNR」，模型/倍数/层参数一概不发（对面按自己的设置跑）。
-    const { calls } = remoteReader({ ready: { upscale: true, decensor: true, dlssnr: true } });
+    // 第 17 项：一次处理做哪几档，由阅读器里开着的开关决定；顺序固定「超分 → DLSSNR」，
+    // 模型/倍数/层参数一概不发（对面按自己的设置跑）。
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true } });
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await screen.findByRole('button', { name: '开启超分' });
@@ -1961,20 +1991,21 @@ describe('reader route', () => {
       .filter(([command]) => command === 'remote_compute_process')
       .map(([, args]) => (args?.input as { params: { chain: string[] } }).params.chain);
 
-    fireEvent.click(screen.getByRole('button', { name: '开启去码' }));
-    await waitFor(() => expect(chains().length).toBeGreaterThan(0));
-    // 只开了一档就只做这一档——不是「远端一律跑全套」。
-    expect(chains()).toEqual(chains().map(() => ['decensor']));
+    // 一档都没开：一页都不许交给对面。
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(chains()).toEqual([]);
 
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
-    await waitFor(() => expect(chains()).toContainEqual(['decensor', 'upscale']));
+    await waitFor(() => expect(chains().length).toBeGreaterThan(0));
+    // 只开了一档就只做这一档——不是「远端一律跑全套」。
+    expect(chains()).toEqual(chains().map(() => ['upscale']));
 
     fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
-    await waitFor(() => expect(chains()).toContainEqual(['decensor', 'upscale', 'dlssnr']));
+    await waitFor(() => expect(chains()).toContainEqual(['upscale', 'dlssnr']));
 
-    // 每一串都是这三档按同一个顺序取出的子序列——倒过来（先超分再去码）等于把干净像素
-    // 这一步白扔，重复一档则是白跑一遍。
-    const order = ['decensor', 'upscale', 'dlssnr'];
+    // 每一串都是这两档按同一个顺序取出的子序列——倒过来等于把超分这一步白扔，
+    // 重复一档则是白跑一遍。
+    const order = ['upscale', 'dlssnr'];
     for (const chain of chains()) {
       expect(chain.length).toBeGreaterThan(0);
       expect(chain).toEqual(order.filter((service) => chain.includes(service)));

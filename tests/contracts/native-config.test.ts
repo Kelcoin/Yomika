@@ -35,18 +35,16 @@ describe('native shell configuration', () => {
       .join('\n');
     const registered = handlers.split(',').map((item) => item.trim()).filter(Boolean);
     for (const command of [
-      'inference_install_decensor_bundle',
       'compute_submit_reader_page',
-      'compute_submit_decensor_page',
       'model_release_download_bundle',
       'dlssnr_catalog',
       'dlssnr_download_variant',
     ]) {
       expect(registered).toContain(command);
     }
-    // 这两条是「让宿主进程自己开模型算这一页」的入口（8-g③-ii 删掉）。算力都该走
-    // worker：留着它们就等于留了一条绕开隔离的路，而前端早就不叫它们了（8-g②）。
-    for (const gone of ['inference_upscale_page', 'inference_decensor_page']) {
+    // 这条是「让宿主进程自己开模型算这一页」的入口（8-g③-ii 删掉）。算力都该走
+    // worker：留着它就等于留了一条绕开隔离的路，而前端早就不叫它了（8-g②）。
+    for (const gone of ['inference_upscale_page']) {
       expect(registered).not.toContain(gone);
     }
   });
@@ -63,7 +61,7 @@ describe('native shell configuration', () => {
     const offenders: string[] = [];
     for (const entry of files) {
       const source = readFileSync(resolve(root, entry), 'utf8');
-      for (const gone of ['inference_upscale_page', 'inference_decensor_page']) {
+      for (const gone of ['inference_upscale_page']) {
         if (source.includes(gone)) {
           offenders.push(`${entry}: ${gone}`);
         }
@@ -930,8 +928,8 @@ describe('native shell configuration', () => {
       '(**self).release_cached_models()',
     );
     const pipeline = read('../../src-tauri/worker/src/pipeline.rs');
-    expect(pipeline, '两处缓存的数要加起来').toContain(
-      'self.upscale.release_cached_session() + self.decensor.release_cached_engines()',
+    expect(pipeline, '缓存的数要加起来').toContain(
+      'self.upscale.release_cached_session()',
     );
     expect(pipeline, '空缓存答 0 与幂等也要有判据').toContain(
       'fn an_engine_with_nothing_cached_hands_back_zero_and_says_so_twice()',
@@ -940,8 +938,6 @@ describe('native shell configuration', () => {
     expect(upscale, '丢的是会话本身，不是「忘了它」').toContain(
       'u32::from(slot.take().is_some())',
     );
-    const decensor = read('../../src-tauri/worker/src/decensor.rs');
-    expect(decensor, '三个会话位都要交').toContain('for slot in [&self.bar, &self.mosaic]');
     const protocol = read('../../src-tauri/worker/src/protocol.rs');
     expect(protocol, '两半加起来才是宿主看到的数').toContain('let count = workspaces + models;');
     expect(protocol, '引擎要同时能被执行器和会话主线程用').toContain('let engine = Arc::new(engine);');
@@ -1287,8 +1283,8 @@ describe('native shell configuration', () => {
     expect(driver, '压机器之前也要问出档案身份：即使 --reader-url 是点名给的（纯另一条来路上只有它知道）').toContain(
       "if (readerUrl === 'auto' || loadPages > 0) discovered = await discoverArchive();",
     );
-    expect(driver, '空载那一趟必须真空：超分/去码开着的话，比的就是「本来就有的负载」').toContain(
-      "const saved = await repository.save({ ...snapshot, upscaleBackend: 'off', upscaleAutoEnable: false, decensorModel: '' });",
+    expect(driver, '空载那一趟必须真空：超分开着的话，比的就是「本来就有的负载」').toContain(
+      "const saved = await repository.save({ ...snapshot, upscaleBackend: 'off', upscaleAutoEnable: false",
     );
     expect(driver, '等 worker 起来要连 stopped 一起等：只看 starting 会在进程还没起时放行，把真话读成从没起来').toContain(
       "workerNow.kind === 'starting' || workerNow.kind === 'stopped'",
@@ -1928,7 +1924,7 @@ describe('native shell configuration', () => {
     expect(probe, '光杆开关自己就是真，不占下一条').toContain('      args[key.slice(2)] = true;');
     expect(probe, '关偏好那一整块要有条件，不能在打包构建里照跑').toContain('if (!noQuiet) {');
     expect(probe, '被关掉的那几栏要连同整份快照一起交回 Node').toContain(
-      '    return { before: turnedOff, after: { upscaleBackend: saved.value.upscaleBackend, decensorModel: saved.value.decensorModel }, snapshot };',
+      '    return { before: turnedOff, after: { upscaleBackend: saved.value.upscaleBackend',
     );
     expect(probe, '还原要用整份快照，不是把四栏写回原值').toContain(
       '    const saved = await repository.save(${JSON.stringify(quietSnapshot)});',

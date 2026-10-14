@@ -51,7 +51,8 @@ mod tagcount;
 mod tray_menu;
 
 use cache::{
-    cache_clear_images, cache_evict, cache_invalidate_archive, cache_read_image, cache_stats,
+    cache_clear_images, cache_evict, cache_invalidate_archive, cache_purge_reader_renditions,
+    cache_read_image, cache_stats,
 };
 use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
@@ -103,7 +104,7 @@ use dedup::{
 use inference::{
     inference_cancel, inference_cancel_page, inference_checkpoint, inference_clear_cache,
     inference_get_job, inference_import_model_path,
-    inference_install_decensor_bundle, inference_install_model, inference_list_models,
+    inference_install_model, inference_list_models,
     inference_pause, inference_release_sessions, inference_probe, inference_resume, inference_start,
     inference_validate_model,
 };
@@ -127,7 +128,7 @@ use compute_center::{
 use compute::commands::{
     compute_artifact_acquire, compute_artifact_release, compute_cancel, compute_drop_generation,
     compute_job_artifacts, compute_job_get, compute_job_progress, compute_jobs, compute_promote,
-    compute_retry_worker, compute_submit, compute_submit_decensor_page, compute_submit_reader_page,
+    compute_retry_worker, compute_submit, compute_submit_reader_page,
     compute_worker_status,
 };
 use tauri::Manager;
@@ -427,6 +428,7 @@ pub fn run() {
             cache_evict,
             cache_clear_images,
             cache_invalidate_archive,
+            cache_purge_reader_renditions,
             cache_read_image,
             cache_stats,
                     list_servers,
@@ -521,8 +523,6 @@ pub fn run() {
             compute_submit,
             // 阅读器那条来路：身份（settingsId / sourceRevision / 管线）由宿主铸。
             compute_submit_reader_page,
-            // 去码那条来路：宿主只摆三份模型与这一页，检测与修补都在 worker（docs/94）。
-            compute_submit_decensor_page,
             compute_job_get,
             compute_jobs,
             compute_worker_status,
@@ -545,7 +545,6 @@ pub fn run() {
             inference_validate_model,
             inference_install_model,
             inference_import_model_path,
-            inference_install_decensor_bundle,
             inference_list_models,
             inference_clear_cache,
             app_release_latest,

@@ -42,6 +42,30 @@ pub const CANCELLED: &str = "dlssnr: cancelled";
 /// 一次参数才会重算。所以调用方要把它当「这次没处理」：原图交回、不写产物缓存。
 pub const PASSTHROUGH: &str = "dlssnr: passthrough";
 
+/// 评估什么都没写出来（产物整幅透明）时返回的错误串。
+///
+/// 与 [`PASSTHROUGH`] 是同一类结局——「这一页没算过」——但成因完全不同，所以分开报：
+/// 真机产物缓存里抓到过一例 **3000×4000 全透明**的产物（242,617 字节，2026-10-12
+/// 13:39:58，键是 `dlssnr:v3:…`）。用户那一页从此只剩背景：产物是真的、能解码、
+/// `naturalWidth/Height` 都对，只是每一像素的 alpha 都是 0，而它每次都从缓存里被端回来。
+///
+/// 为什么不能交出去：DLSSNR 的输入是不透明的页面，输出整幅透明只可能是这一页**没被
+/// 写出来**（上传没生效、UAV 没落盘、feature 空转都会长成这个样子），它不是「滤镜算
+/// 得保守」。以前只挡了「与输入逐像素相同」那一种，全透明与输入不同，于是被当成产物
+/// 收下、写进缓存、每次翻到都端出来。判据是 alpha 全 0：不透明页面过一遍 DLSSNR 不该
+/// 变成看不见的东西，而「看不见」正是用户看到的那一页。
+pub const BLANK: &str = "dlssnr: blank";
+
+/// 这条错误是不是「这一页没算过」——调用方该原图交回、且**不写产物缓存**。
+///
+/// 两个成因（原样交回 [`PASSTHROUGH`]、什么都没写出来 [`BLANK`]）在调用方眼里是同一条
+/// 结局，判据集中在这里：worker 的两条路（静态页与动图）都问它。分散成两处 `==` 比较，
+/// 迟早只剩一处——2026-10-14 补 `BLANK` 时正是这么发现的：只挡了原样交回，全透明那一种
+/// 谁都没拦。
+pub fn is_not_computed(error: &str) -> bool {
+    error == PASSTHROUGH || error == BLANK
+}
+
 /// 测试用：让下一次 `record_page` 在记完上传之后报一次取消。
 ///
 /// 真实的「层间取消」要另一个线程掐着时间置 flag（`apply_with_dll_bucket` 开头就有
@@ -83,6 +107,45 @@ fn take_forced_passthrough() -> bool {
         }
     }
     false
+}
+
+/// 测试用：把接下来 `times` 次评估伪装成「什么都没写出来」（产物整幅透明）。
+///
+/// 真机上撞见这条路径同样要看运气（本机是在用户的产物缓存里抓到的那一例 3000×4000
+/// 全透明产物），所以注入：`run` 的「重试一次」与「两次都空就如实报 [`BLANK`]」两条
+/// 路都得走到。
+#[cfg(test)]
+static FORCE_BLANK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn force_blank(times: usize) {
+    FORCE_BLANK.store(times, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn take_forced_blank() -> bool {
+    use std::sync::atomic::Ordering;
+    let mut left = FORCE_BLANK.load(Ordering::SeqCst);
+    while left > 0 {
+        match FORCE_BLANK.compare_exchange(
+            left,
+            left - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(now) => left = now,
+        }
+    }
+    false
+}
+
+/// 产物是不是「整幅看不见」：每个像素的 alpha 都是 0。
+///
+/// 只看 alpha，不看 RGB：用户看到的是「那一页只剩背景」，而不是「那一页变黑了」。
+/// 抽成纯函数是为了能不碰 GPU 就守住这条判据（见本文件末尾的用例）。
+fn is_blank(image: &DlssnrImage) -> bool {
+    !image.rgba.is_empty() && image.rgba.chunks_exact(4).all(|pixel| pixel[3] == 0)
 }
 
 /// 把一张图跑一遍 DLSSNR。
@@ -192,6 +255,10 @@ pub fn context_counts(data_dir: &Path, dll: &Path) -> Result<(u64, u64), String>
 /// 就一直停在未处理的样子。所以这里再看一眼：与输入逐像素相同就**再评估一次**（一次
 /// 评估本来就是翻页路径上的开销，重评不至于让这一次翻页变得难等），第二次仍然相同就
 /// 如实报 [`PASSTHROUGH`]，由调用方决定「原图交回、不写缓存」。
+///
+/// **整幅透明**（[`BLANK`]）走同一条路，判据也一样：先再评估一次，两次都空就如实报错。
+/// 这一条是 2026-10-14 补的——在那之前只挡了「与输入逐像素相同」，而全透明与输入不同，
+/// 于是被当产物收下并写进缓存，用户那一页（3000×4000）此后每次翻到都只剩背景。
 fn run(
     context: &mut GpuContext,
     image: &DlssnrImage,
@@ -200,10 +267,15 @@ fn run(
     forced: Option<(u32, u32)>,
 ) -> Result<DlssnrImage, String> {
     let first = evaluate(context, image, settings, cancel, forced)?;
-    if first.rgba != image.rgba {
+    if first.rgba != image.rgba && !is_blank(&first) {
         return Ok(first);
     }
     let second = evaluate(context, image, settings, cancel, forced)?;
+    // 先判空：一份整幅透明的产物同时也不等于输入，两个判据会同时成立，报哪一个得说清楚
+    // ——「没写出来」比「原样交回」更贴近当时的实际。
+    if is_blank(&second) {
+        return Err(BLANK.to_string());
+    }
     if second.rgba == image.rgba {
         return Err(PASSTHROUGH.to_string());
     }
@@ -288,6 +360,9 @@ fn evaluate(
     let rgba = if take_forced_passthrough() {
         // 伪装成「网络原样交回」（见 `force_passthrough`）：重试与如实报错两条路都靠它覆盖。
         image.rgba.clone()
+    } else if take_forced_blank() {
+        // 伪装成「什么都没写出来」（见 `force_blank`）：产物整幅透明，RGB 与 alpha 都是 0。
+        vec![0u8; rgba.len()]
     } else {
         rgba
     };
@@ -456,6 +531,50 @@ fn fill_evaluate_parameters(
 #[cfg(test)]
 mod acceptance_tests {
     use super::*;
+
+    /// 判据：整幅看不见 = 这一页没被写出来。
+    ///
+    /// 这是用户那一页（3000×4000）消失的直接原因：真机产物缓存里那一份 242,617 字节的
+    /// `dlssnr:v3` 产物 alpha 全 0、亮度 0，而它每次都从缓存里被端回来。纯函数、不碰 GPU
+    /// ——判据要在一台没有 DLSSNR 片段的机器上也守得住。
+    #[test]
+    fn a_fully_transparent_product_is_blank_and_a_visible_one_is_not() {
+        let invisible = DlssnrImage::new(2, 2, vec![0; 2 * 2 * 4]).unwrap();
+        assert!(is_blank(&invisible), "全 0 的 RGBA 是空产物");
+
+        // RGB 有内容但 alpha 全 0：用户看到的同样是「只剩背景」，照样算空。
+        let mut ghost = Vec::new();
+        for _ in 0..4 {
+            ghost.extend_from_slice(&[255, 128, 64, 0]);
+        }
+        assert!(
+            is_blank(&DlssnrImage::new(2, 2, ghost).unwrap()),
+            "看不见的产物也是空产物"
+        );
+
+        // 一个不透明像素就不算空：别把「大部分透明」的合法产物也拦掉。
+        let mut mostly = vec![0u8; 3 * 4];
+        mostly.extend_from_slice(&[10, 20, 30, 255]);
+        assert!(
+            !is_blank(&DlssnrImage::new(2, 2, mostly).unwrap()),
+            "有内容就不算空"
+        );
+    }
+
+    /// 「这一页没算过」的判据必须把两种成因都算进去，且不能把别的错误卷进来。
+    ///
+    /// worker 两条路（静态页、动图）都问 [`is_not_computed`]：漏掉 `BLANK` 就回到用户
+    /// 那一页只剩背景的状态，把 `CANCELLED` 卷进来则会把「切页」当成「没算过」——取消要
+    /// 让任务作废，不是原图交回。
+    #[test]
+    fn not_computed_covers_both_reasons_and_nothing_else() {
+        assert!(is_not_computed(PASSTHROUGH), "原样交回算没算过");
+        assert!(is_not_computed(BLANK), "什么都没写出来也算没算过");
+        assert!(!is_not_computed(CANCELLED), "取消不是「没算过」");
+        assert!(!is_not_computed("dlssnr: 别的错"), "别的错误不该被当成没算过");
+        assert!(!is_not_computed(""), "空串不该被当成没算过");
+    }
+
     #[test]
     fn a_disabled_neural_pass_does_not_require_a_dll_or_gpu_context() {
         let dir = tempfile::tempdir().unwrap();

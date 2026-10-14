@@ -203,12 +203,6 @@ pub struct SubmitRequest {
     /// 或者数据目录被人动过，派发前准备**必须当场发现**，而不是拿别的页去算一遍再交出
     /// 一张看着正常的图（见 `prepare_run`）。
     pub source: Option<SourceFile>,
-    /// 去码阶段要摆进只读输入根的东西：检测器 + 两份修补模型的磁盘路径。
-    ///
-    /// 与 `source` 同一个道理：那是**宿主自己**才有的位置，渲染进程给不了。`prepare_run`
-    /// 把它读出来、按内容寻址摆进输入根，再换成阶段上那份 `DecensorGrant`——调用方（包括
-    /// 命令层）从头到尾说不出任何输入根里的文件名。
-    pub inpaint: Option<super::decensor::InpaintPreparation>,
 }
 
 /// 宿主解析出来的一份源图：位置 + 它自称的那一份哈希与长度。
@@ -2140,31 +2134,9 @@ impl Supervisor {
             // 不会写错，但会让「阶段自带声明就不动它」这条规矩在这里留一个例外——而例外正是
             // 下次改这一栏时会被踩空的地方。
             if stage.model.is_some()
-                || stage.decensor.is_some()
                 || stage.dlssnr.is_some()
                 || stage.builtin.is_some()
             {
-                continue;
-            }
-            // 去码那条路不走模型目录：它的三件套（检测器 + 两份修补模型）在**这一台机器**上，
-            // 由宿主自己摆进输入根。摆在派发前而不是提交时，是为了让「这一页用的是这三份」
-            // 与「磁盘上真的是这三份」在同一个地方对账（`stage_inpaint`）。
-            if stage.stage_id == super::decensor::DECENSOR_STAGE_ID {
-                let Some(preparation) = template.inpaint.as_ref() else {
-                    return Err(StageFailure {
-                        code: INPUT_INVALID_CODE,
-                        detail: "这条去码阶段没有三件套：宿主没有说清这一页用哪三份模型"
-                            .to_string(),
-                    });
-                };
-                stage.decensor = Some(
-                    super::decensor::stage_inpaint(&config.inputs_root, preparation).map_err(
-                        |error| StageFailure {
-                            code: error.code,
-                            detail: error.message,
-                        },
-                    )?,
-                );
                 continue;
             }
             if let Some(models) = config.models.as_ref() {
@@ -3014,7 +2986,7 @@ mod tests {
             input: RunInput { input_id: "page".into(), content_hash: "a".repeat(64), byte_length: 1, relative_path: None },
             pipeline: vec![serde_json::from_value(serde_json::json!({ "stageId": "stage-a", "modelSpecId": "echo", "enginePolicy": "cpu" })).unwrap()],
             output_grant_id: "grant-1".into(), deadline_ms: 1000,
-            source: None, inpaint: None,
+            source: None,
         };
         let mut scheduler = Scheduler::new(1);
         let submitted = scheduler.submit(template.key.clone(), Priority::Foreground, 0).unwrap();

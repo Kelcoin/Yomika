@@ -133,23 +133,6 @@ impl Sandbox {
             .join(format!("{content_hash}.bin"))
     }
 
-    /// 一份**形状齐全**的去码包，放在 `models/aletheia-lens/` 下（与真安装同一套布局）。
-    ///
-    /// `bundle_in` 只认那四件文件在不在，回声引擎又不会去解它们，所以这条字节来路不需要
-    /// 337 MB 的真素材就能闭环。目录名得是真的——`resolve_installed_bundle` 按 id 找包。
-    fn install_fake_bundle(&self) {
-        const FILES: [&str; 4] = [
-            "mrcnn/weights.onnx",
-            "deepcreampy/bar.onnx",
-            "deepcreampy/mosaic.onnx",
-            "esrgan/4x-Fatal-Pixels.onnx",
-        ];
-        for relative in FILES {
-            let path = self.root.join("models/aletheia-lens").join(relative);
-            std::fs::create_dir_all(path.parent().expect("包内目录")).expect("建包内目录");
-            std::fs::write(&path, b"never-opened").expect("写包内文件");
-        }
-    }
 }
 
 impl Drop for Sandbox {
@@ -410,35 +393,6 @@ fn the_centers_upscale_op_goes_through_the_worker() {
         echo_field(&line, "granted="),
         format!("{}/{page_hash}.png", &page_hash[..2]),
         "引擎手边的不是这一页：{line}"
-    );
-    assert_eq!(jobs.len(), 1, "该只有一件任务：{jobs:?}");
-    assert_eq!(jobs[0].state, JobState::Completed, "任务没算完就算出了结果");
-}
-
-/// 算力中心的去码来路：三件套由宿主查（那是磁盘上的事），检测与补像素在 worker。
-#[test]
-fn the_centers_decensor_op_goes_through_the_worker() {
-    let sandbox = Sandbox::new("center-decensor");
-    sandbox.install_fake_bundle();
-    let manager = ComputeManager::start(config(&sandbox), no_events()).expect("起计算编排");
-
-    let page = page_png();
-    let params = ProcessParams {
-        chain: Vec::new(),
-        op: "decensor".into(),
-        model_id: Some("aletheia-lens".into()),
-        scale: None,
-        dlssnr: None,
-    };
-    let bytes = process(Some(&manager), &sandbox.root, &sandbox.root, &params, &page, &|| false)
-        .expect("回声引擎这一轮不该失败");
-    let jobs = manager.all_jobs();
-    manager.shutdown();
-
-    let line = String::from_utf8(bytes).expect("回声产物是一行 UTF-8 文本");
-    assert!(
-        line.starts_with("echo stage=decensor "),
-        "算力中心没把这一页交给 worker：{line}"
     );
     assert_eq!(jobs.len(), 1, "该只有一件任务：{jobs:?}");
     assert_eq!(jobs[0].state, JobState::Completed, "任务没算完就算出了结果");

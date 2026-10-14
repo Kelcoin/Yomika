@@ -23,8 +23,6 @@ import {
   type ComputeSubmitted,
   type ComputeWorkerStatus,
   type ComputedImageLease,
-  type DecensorPagePayload,
-  type DecensorPageSubmitted,
   type ReaderPagePayload,
 } from '../domain/compute';
 import type { CommandResult } from '../domain/result';
@@ -68,19 +66,6 @@ export class NativeComputeRepository {
    * 的只有三件事：位置、模型、世代。 */
   async submitReaderPage(payload: ReaderPagePayload): Promise<CommandResult<ComputeSubmitted>> {
     return invokeCommand('compute_submit_reader_page', { payload }, ComputeSubmittedSchema);
-  }
-
-  /** 去码那一页，补完可以接着放大（一条链，docs/95）。身份由宿主铸。
-   *
-   * 差别在**谁看像素**：这一页的检测由 worker 做（docs/94），宿主只负责把这一页、检测器和
-   * 两份修补模型摆进输入根。所以答案不再可空——一个框都没有是 worker 的成功结论，它照样交
-   * 出一件产物；「原页就是答案」这件事由产物自己说（它与源页逐点相同）。
-   *
-   * `upscaleModelId` 写上的话，放大是**同一件任务的第二阶段**：链的第二阶段吃第一阶段的
-   * 产物，而那份产物只有内容寻址的落点、没有按修订号登记的缓存行，出了这件任务就没人能按
-   * 身份把它找回来。 */
-  async submitDecensorPage(payload: DecensorPagePayload): Promise<CommandResult<DecensorPageSubmitted>> {
-    return invokeCommand('compute_submit_decensor_page', { payload }, ComputeSubmittedSchema);
   }
 
   /** 查一个任务现在是什么状态。断掉订阅之后也还能查：`null` = 超出保留窗口。 */

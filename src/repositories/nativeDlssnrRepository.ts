@@ -173,15 +173,14 @@ export class NativeDlssnrRepository {
 
   /** 拿缓存里的一页跑一遍，回 PNG 字节。
    *
-   * `source` 说从哪一版开始：原图，或者本地那两步（去码 / 超分）的产物。起点是按
-   * 「产出它的模型」存的，所以读去码/超分产物时要把那两个模型 id 一并给出——原生
-   * 那侧据此算出同一个 revision，才不会读到别的模型写下的图。 */
+   * `source` 说从哪一版开始：原图，或者本地超分那一步的产物。起点是按「产出它的模型」
+   * 存的，所以读超分产物时要把那个模型 id 一并给出——原生那侧据此算出同一个 revision，
+   * 才不会读到别的模型写下的图。 */
   applyPage(input: {
     scopeId: string;
     archiveId: string;
     pageIndex: number;
-    source?: 'reader-page' | 'decensored' | 'enhanced';
-    decensorModel?: string;
+    source?: 'reader-page' | 'enhanced';
     upscaleModel?: string;
     settings: { passes: DlssnrPass[] };
     taskId?: string;

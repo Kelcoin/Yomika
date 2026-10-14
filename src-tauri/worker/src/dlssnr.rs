@@ -1,6 +1,6 @@
 //! DLSSNR 引擎（docs/71 §11 Task 8 第 2 条、docs/106）：解授权 → 落片段 → 跑一层参数 → 编码写回。
 //!
-//! 与 [`crate::upscale`]、[`crate::decensor`] 是同一族执行体、同一套边界：
+//! 与 [`crate::upscale`] 是同一族执行体、同一套边界：
 //!
 //! 1. 读哪张图由执行器决定（`run.input`，它已经按声明复核过长度与 hash）；
 //! 2. 用哪份片段、哪套参数由 `stage.dlssnr` 授权，worker 自己再解析一次、再复核一次
@@ -43,13 +43,13 @@ use crate::stage_io::{
 /// 片段装不起来、或者 NGX 跑不起来。它是**环境**的问题，不是这一页的问题：同一份授权在
 /// 别的机器上可能就跑得动（片段被换过、显卡运行库坏了、驱动换过要重启）。
 ///
-/// 与去码那边同一个码、同一个理由：前端那张码表里已经有 `COMPUTE_INTERNAL`，而这里要说
+/// 同一个码、同一个理由：前端那张码表里已经有 `COMPUTE_INTERNAL`，而这里要说
 /// 的东西（NGX 的原文）本来就在消息里。
 const DLSSNR_FAILED_CODE: &str = "COMPUTE_INTERNAL";
 
 /// DLSSNR 产物报告里的引擎名。
 ///
-/// 与超分/去码的 `onnx` 分开：那一个是「一份 ONNX 图」，而这里跑的是 NGX 的片段——
+/// 与超分的 `onnx` 分开：那一个是「一份 ONNX 图」，而这里跑的是 NGX 的片段——
 /// 用户在设置页看到的「谁算的」必须分得开。前端按 `engine.id` 显示，未知的 id 它也照显。
 ///
 /// 字面量住在协议里：宿主**也**要认它（它拿握手报的 `BuildInfo.engines` 决定 DLSSNR
@@ -115,7 +115,7 @@ impl DlssnrEngine {
         }
     }
 
-    /// 解析并复核一份授权文件（与去码那边同一句话、同一层责任）。
+    /// 解析并复核一份授权文件（与超分那边同一句话、同一层责任）。
     ///
     /// 复核失败用的是 `inputs::verify_file` 自己的错误码与消息——「宿主说的和盘上的不是
     /// 一份」这件事必须原样透传，不许在这里换一句话说。
@@ -271,9 +271,9 @@ impl Engine for DlssnrEngine {
             .dlssnr
             .as_ref()
             .ok_or_else(|| StageError::input_invalid("这一阶段没有 DLSSNR 授权：不知道用哪个片段、哪套参数"))?;
-        if stage.model.is_some() || stage.decensor.is_some() {
-            // 三样同时出现只有一个含义：有一个阶段被拼错了。协议层也拒（三样恰有一份），
-            // 这里再拦一次是因为「拼错的请求」不该只靠一层校验（与去码那边同一条理由）。
+        if stage.model.is_some() {
+            // 两样同时出现只有一个含义：有一个阶段被拼错了。协议层也拒（三样恰有一份），
+            // 这里再拦一次是因为「拼错的请求」不该只靠一层校验。
             return Err(StageError::input_invalid(
                 "这一阶段同时带了别的授权：不知道该走哪条路",
             ));
@@ -339,7 +339,12 @@ impl Engine for DlssnrEngine {
                 }
                 Ok(None) => self.hand_back(&request, &source),
                 Err(error) if error == filter::CANCELLED => Err(StageError::cancelled()),
-                Err(error) if error == filter::PASSTHROUGH => self.hand_back(&request, &source),
+                // 「没算过」有两种成因：网络把输入原样交回，或者它什么都没写出来（产物
+                // 整幅透明）。处置是同一条——原图交回、不写产物缓存、报告说 passthrough。
+                // 判据问 `filter::is_not_computed`，别在这里再写一次比较。
+                Err(error) if filter::is_not_computed(&error) => {
+                    self.hand_back(&request, &source)
+                }
                 Err(error) => Err(StageError::failed(
                     DLSSNR_FAILED_CODE,
                     format!("DLSSNR 在这一页上没跑成：{error}"),
@@ -362,7 +367,10 @@ impl Engine for DlssnrEngine {
         let processed = match filter::apply_with_token(&data_dir, &image, &settings, request.cancel) {
             Ok(processed) => processed,
             Err(error) if error == filter::CANCELLED => return Err(StageError::cancelled()),
-            Err(error) if error == filter::PASSTHROUGH => return self.hand_back(&request, &source),
+            // 与动图那条同源：原样交回与「什么都没写出来」都算这一页没算过。
+            Err(error) if filter::is_not_computed(&error) => {
+                return self.hand_back(&request, &source)
+            }
             Err(error) => {
                 return Err(StageError::failed(
                     DLSSNR_FAILED_CODE,
@@ -493,7 +501,6 @@ mod tests {
             layers: None,
             settings_id: Some("dlssnr-default".to_string()),
             model,
-            decensor: None,
             dlssnr,
             builtin: None,
             min_input_edge: None,
@@ -519,7 +526,7 @@ mod tests {
     }
 
     /// 没有授权就拒：不许当成「没什么可处理的，原样交回去」——那是一份看起来成功的产物，
-    /// 而它什么都没做（与去码、超分那边同一条判据）。
+    /// 而它什么都没做（与超分那边同一条判据）。
     #[test]
     fn a_stage_without_a_dlssnr_grant_is_refused() {
         let root = root("yomika-dlssnr-unit-none");

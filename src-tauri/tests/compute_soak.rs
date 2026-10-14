@@ -246,7 +246,6 @@ fn request_with_policy(
             stage_id: "stage-a".to_string(),
             model_spec_id: model_id.to_string(),
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -268,7 +267,6 @@ fn request_with_policy(
                 byte_length,
             }
         }),
-        inpaint: None,
     }
 }
 

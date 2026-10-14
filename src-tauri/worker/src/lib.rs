@@ -19,7 +19,6 @@
 //! 退出语义（§6.1）：父进程关闭管道（EOF）就退出。执行器线程是**分离**的——重任务
 //! 没法被安全打断，宿主按 §6.5 超时杀进程，而不是等 worker 自己体面收尾。
 
-pub mod decensor;
 #[cfg(windows)]
 pub mod dlssnr;
 pub mod engine;

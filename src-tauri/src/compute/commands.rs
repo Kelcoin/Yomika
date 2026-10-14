@@ -15,7 +15,6 @@ use serde::Deserialize;
 use std::time::Instant;
 use tauri::{Manager, State};
 
-use super::decensor::{self, DecensorPageRequest};
 use super::leases::{self, ComputedImageLease, LeaseSpec, LeaseView};
 use super::manager::{
     ArtifactRecord, ComputeManager, JobProgress, SourceFile, SubmitRequest, WorkerStatus,
@@ -86,11 +85,7 @@ pub struct SourcePage {
     pub scope_id: String,
     pub archive_id: String,
     pub page_index: i64,
-    /// 哪一版。目前只认 `reader-page`（缺省也是它）：`enhanced` 是产物不是输入；`decensored`
-    /// 现在**也不是**输入——去码本身已经搬进 worker 了（8-b/8-c），缺的是产物怎么被读回来：
-    /// compute 的产物只落内容寻址的 blob（`compute::artifacts::publish_blob`，它不写
-    /// `cache_entries` 行），而按修订号取起点的那一侧查的是 SQLite。两条路接上之前，这道门
-    /// 取不到 `decensored` 这一版（详见 `docs/92`）。
+    /// 哪一版。目前只认 `reader-page`（缺省也是它）：`enhanced` 是产物不是输入。
     #[serde(default)]
     pub rendition: Option<String>,
 }
@@ -218,10 +213,6 @@ fn plan(payload: SubmitPayload, source: Option<SourceFile>) -> Result<SubmitRequ
         // 解析源文件与模型授权要算哈希、可能复制几十 MB（`manager::prepare_run`）。
         // 这里只带位置：真读字节、真算哈希都留给派发前那一侧。
         source,
-        // 去码的三件套（掩膜 + 两份模型）**故意**不在这条通用入口上：它是宿主自己规划的
-        // 任务，不是渲染进程填一份 JSON 就能提交的东西（`compute::decensor`）。前端要是
-        // 能在这里塞一段掩膜，协议帧上限与「谁指名输入根文件」两条就同时被绕开了。
-        inpaint: None,
     })
 }
 
@@ -445,8 +436,7 @@ pub async fn compute_submit_reader_page(
     ))
 }
 
-/// 提交的源图目前只认这一版：`enhanced` 是产物不是输入；`decensored` 也不是——去码已经搬进
-/// worker，但 compute 的产物没有按修订号登记的缓存行，这道门还取不到它（`docs/92`）。
+/// 提交的源图目前只认这一版：`enhanced` 是产物不是输入。
 const READER_PAGE_RENDITION: &str = "reader-page";
 
 /// 一份缓存身份换成宿主解析出来的位置。
@@ -482,112 +472,6 @@ fn source_identity(page: &SourcePage) -> Result<crate::cache::CacheImageIdentity
         rendition,
         page.page_index,
     ))
-}
-
-/// 阅读器开着去码时提交「这一页」用的输入：与超分那道门**同一份字段**。
-///
-/// 少的是倍率与输出缩放（修补不改尺寸：进多少像素出多少像素），一处都不多——尤其是
-/// **没有**掩膜或者框这类字段。补哪里不是渲染进程说得出的东西，也不是宿主说得出的东西：
-/// 那一页要补的框由 worker 拿这一页的像素自己算（docs/94）。渲染进程手里只有一份 JSON，
-/// 而一页的掩膜是几十万字节，它连传都传不进来。
-///
-/// `upscaleModelId` 是唯一一个多出来的字段，形状与超分那道门的 `modelId` 相同：补完这一页
-/// 之后接着放大的那个模型。它必须写在**同一条请求**里，因为链的第二阶段吃的是第一阶段的
-/// 产物——那份产物只有内容寻址的落点、没有按修订号登记的缓存行，出了这件任务就没人能按身份
-/// 把它找回来（docs/94 欠账②）。
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DecensorPagePayload {
-    pub scope_id: String,
-    pub archive_id: String,
-    pub page_index: i64,
-    /// 去码包的 id（设置页里看到的那个），不是路径。
-    pub model_id: String,
-    /// 补完之后接着放大的超分模型 id；不写就是只去码。
-    #[serde(default)]
-    pub upscale_model_id: Option<String>,
-    pub generation: u64,
-    pub priority: String,
-    pub deadline_ms: u64,
-}
-
-impl DecensorPagePayload {
-    fn into_request(self) -> Result<DecensorPageRequest, String> {
-        check_text("scopeId", &self.scope_id, MAX_ID_BYTES)?;
-        check_text("archiveId", &self.archive_id, MAX_ID_BYTES)?;
-        check_text("modelId", &self.model_id, MAX_ID_BYTES)?;
-        // 只写空白由规划器当成「没指名」（它自己会 trim），这里只管长度这一条上限。
-        if let Some(model_id) = &self.upscale_model_id {
-            check_text("upscaleModelId", model_id, MAX_ID_BYTES)?;
-        }
-        if self.deadline_ms > MAX_DEADLINE_MS {
-            return Err(format!(
-                "deadlineMs 上限 {MAX_DEADLINE_MS}，收到 {}",
-                self.deadline_ms
-            ));
-        }
-        Ok(DecensorPageRequest {
-            scope_id: self.scope_id,
-            archive_id: self.archive_id,
-            page_index: self.page_index,
-            model_id: self.model_id,
-            upscale_model_id: self.upscale_model_id,
-            generation: self.generation,
-            priority: parse_priority(&self.priority)?,
-            deadline_ms: self.deadline_ms,
-        })
-    }
-}
-
-/// 去码那条门：**检测与修补都在 worker**（docs/94）。
-///
-/// 与 `compute_submit_reader_page` 唯一的形状差别已经没有了：两条门现在都只查包、查位置、
-/// 铸身份，然后派发一件任务。8-c 那一版在提交前先看这一页的像素（检测器那时还住宿主），于是
-/// 失败面多出一类「读不出来 / 字节不是索引说的那一份」，还能给出 `success(null)` 这个
-/// 「原页就是答案」的答案——检测搬走之后这两样都跟着走了：掩膜是 worker 拿这一页算的，
-/// 「有没有要补的框」只有它知道，命令层无从提前回答。
-#[tauri::command]
-pub async fn compute_submit_decensor_page(
-    app: tauri::AppHandle,
-    state: State<'_, ComputeHandle>,
-    payload: DecensorPagePayload,
-) -> Result<CommandResult<Submitted>, String> {
-    let Some(manager) = state.get() else {
-        return Ok(unavailable());
-    };
-    let request = match payload.into_request() {
-        Ok(request) => request,
-        Err(message) => return Ok(bad(message)),
-    };
-    let data_dir = match crate::data_paths::data_dir(&app) {
-        Ok(dir) => dir,
-        Err(error) => {
-            return Ok(CommandResult::failure(
-                "COMPUTE_INTERNAL",
-                format!("找不到数据目录：{error}"),
-                true,
-            ))
-        }
-    };
-    let database = app.state::<crate::db::Database>();
-    match decensor::prepare_decensor_page(database.inner(), &data_dir, &request) {
-        Ok((job, source)) => {
-            // 去码那条路的身份也是计划算的：第一步 `decensored_revision(包指纹)`，接上超分
-            // 才有第二步 `enhanced_revision(...)`。`into_request` 同样要消费 `job`。
-            let renditions = renditions::decensor_renditions(&job);
-            Ok(enqueue_recorded(
-                manager,
-                state.renditions(),
-                decensor::into_request(job, source),
-                renditions,
-            ))
-        }
-        Err(error) => Ok(CommandResult::failure(
-            error.code,
-            error.message,
-            error.retryable,
-        )),
-    }
 }
 
 /// 按 id 取一件任务的快照。
@@ -963,7 +847,6 @@ mod tests {
                 // 也没声明模型要求的最小边长。
                 model: None,
                 builtin: None,
-                decensor: None,
                 dlssnr: None,
                 min_input_edge: None,
                 output_scale: None,
@@ -1071,12 +954,11 @@ mod tests {
         assert_eq!(explicit, identity);
     }
 
-    /// `enhanced` 是产物不是输入；`decensored` 是「去码搬进 worker 了，但产物取不回来」
-    /// （docs/92）。现在就把它们放进来的话，宿主会去查一个永远不会有人写的键，然后报
-    /// 「这一页还没落盘」——把「尚不支持」说成「你还没打开它」，用户会一直等。
+    /// `enhanced` 是产物不是输入。现在就把它们放进来的话，宿主会去查一个永远不会有人写的键，
+    /// 然后报「这一页还没落盘」——把「尚不支持」说成「你还没打开它」，用户会一直等。
     #[test]
     fn only_the_reader_page_rendition_can_be_asked_for() {
-        for refused in ["enhanced", "decensored", "dlssnr", "cover"] {
+        for refused in ["enhanced", "dlssnr", "cover"] {
             let message = source_identity(&SourcePage {
                 scope_id: "scope-a".to_string(),
                 archive_id: "archive-a".to_string(),
@@ -1276,7 +1158,7 @@ mod tests {
 
         // 像发布那一侧那样真落一份盘：摘要是文件自己的，路径由摘要推出来。
         let staged = root.join("staged.png");
-        let bytes = b"a-page-that-was-de-censored".repeat(32);
+        let bytes = b"a-page-that-was-upscaled".repeat(32);
         std::fs::write(&staged, &bytes).expect("写 staging 文件");
         let expected = crate::compute::artifacts::hash_file(&staged)
             .expect("算得出摘要")
@@ -1285,18 +1167,18 @@ mod tests {
             .expect("发布得进内容寻址存储");
 
         let source = crate::cache::CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 4);
-        let identity = renditions::decensored_identity(&source, "decensored-rev-1");
+        let identity = renditions::enhanced_identity(&source, "enhanced-rev-1");
         let index = renditions::RenditionIndex::new();
         index.record(
             "job-1",
             vec![renditions::StageRendition {
-                stage_id: decensor::DECENSOR_STAGE_ID.to_string(),
+                stage_id: super::reader::UPSCALE_STAGE_ID.to_string(),
                 identity: identity.clone(),
             }],
         );
         let record = ArtifactRecord {
             job_id: "job-1".to_string(),
-            stage_id: decensor::DECENSOR_STAGE_ID.to_string(),
+            stage_id: super::reader::UPSCALE_STAGE_ID.to_string(),
             artifact_id: "artifact-1".to_string(),
             staging_name: "staged.png".to_string(),
             path: published.path.clone(),

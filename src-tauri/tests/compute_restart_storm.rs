@@ -155,7 +155,6 @@ fn request(input_id: &str, page: u32) -> SubmitRequest {
             stage_id: "stage-a".to_string(),
             model_spec_id: "echo".to_string(),
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -169,7 +168,6 @@ fn request(input_id: &str, page: u32) -> SubmitRequest {
         output_grant_id: "grant-1".to_string(),
         deadline_ms: 0,
         source: None::<SourceFile>,
-        inpaint: None,
     }
 }
 

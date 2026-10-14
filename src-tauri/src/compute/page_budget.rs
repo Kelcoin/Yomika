@@ -1,7 +1,7 @@
 //! 一页装不下，就在**派发前**说清楚（docs/71 §11 Task 9 ①、§12.4 ③）。
 //!
 //! 为什么要有这一层：worker 自己也会拿 `budgets.max_pixels` 门一次（`dlssnr.rs` 里
-//! 「页面 W×H 超出这次预算的 N 像素」、`upscale.rs` 与 `decensor.rs` 同形状），但那时它
+//! 「页面 W×H 超出这次预算的 N 像素」、`upscale.rs` 同形状），但那时它
 //! 已经把图读完、把模型装好——DLSSNR 那一路还多装了一份 165 MB 的片段、建了 NGX 上下文。
 //! 拒绝是拒绝了，代价是几十秒的 GPU 时间。而「这一页到底多大」在派发前是**量得出来的**：
 //! 读一页图的头就够，不必把像素解出来（一页 25 MP 是 100 MB RGBA，派发前那一步挂在
@@ -79,7 +79,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// 一个只属于这一次用例的落地目录（与 `compute::decensor` 那几条的 temp 用法一致）。
+    /// 一个只属于这一次用例的落地目录。
     fn scratch(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

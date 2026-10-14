@@ -152,6 +152,38 @@ describe('shelf snapshots', () => {
     expect((readRouteCache<{ favoritesIds?: string[] }>('state:watchlist:default') ?? {}).favoritesIds).toBeUndefined();
   });
 
+  it('does not draw an archive the server list has but this device never recorded', async () => {
+    // 用户报的「收藏夹里是我根本没加入收藏夹的东西」：LANraragi 的 🔖 Favorites 是共享
+    // 状态——网页端、别的设备、旧版本都能往里加，而本机没有对应记录（或本机已删成墓碑）。
+    // 2026-10-13 真机数据：分类 15 个 id、本机 8 条活行，其中 13 张卡只来自分类。
+    // 所以收藏夹只画本机那张表；分类仍然只是本机推送的镜像（`favoritesMirror`）。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'SET_1785040778', archives: ['server-only', 'mine'] } };
+      if (command === 'list_watchlist') {
+        return { ok: true, value: [{ scopeId: 's', archiveId: 'mine', addedAt: '2026-10-11T08:23:20Z', updatedAt: '2026-10-11T08:23:20Z', deviceId: 'device', deleted: false, revision: 1 }] };
+      }
+      if (command === 'list_archives_by_ids') {
+        return { ok: true, value: [
+          { serverId: 's', archiveId: 'mine', title: '本机记着的收藏', pageCount: 8, updatedAt: '2026-10-11T08:23:20Z' },
+          { serverId: 's', archiveId: 'server-only', title: '服务器上那条', pageCount: 9, updatedAt: '2026-10-11T08:23:20Z' },
+        ] };
+      }
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      if (command === 'find_missing_archives') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: `unused ${command}`, retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/watchlist']}><PreferencesProvider><ToastProvider>
+      <WorkspaceRoutes />
+    </ToastProvider></PreferencesProvider></MemoryRouter>);
+
+    expect(await screen.findByText('本机记着的收藏')).toBeInTheDocument();
+    // 只取本机记着的那一条：并集那条路会带上 `server-only`。
+    expect(adapter.mock.calls.find(([command]) => command === 'list_archives_by_ids')).toEqual(['list_archives_by_ids', { serverId: 's', archiveIds: ['mine'] }]);
+    expect(screen.queryByText('服务器上那条')).toBeNull();
+  });
+
   it('ignores an empty favorites id list that was persisted before the fix', async () => {
     // 旧版本会把空名单一起写进快照（`[]` 为真），于是「恢复」这条路会带着一份
     // 「已知、但是空的」名单回来：本机那份待看明明就在同一个快照里，页面却是空的。

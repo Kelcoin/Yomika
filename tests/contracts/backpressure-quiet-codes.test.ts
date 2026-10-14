@@ -15,7 +15,11 @@ import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../
  * 这条判据走**真的** `logError` 与真的 `invokeCommand`，只用官方的测试 sink
  * （`setErrorLogSinkForTests`）接收落盘的那几条，不去 mock 模块——`src/bridge/invoke.ts`
  * 在 `tests/setup.ts` 预加载 `ReaderRoute` 时就求过值了，测试文件里的 `vi.mock` 那时已经
- * 晚了（setup.ts 里那段注释记的正是这个坑）。 */
+ * 晚了（setup.ts 里那段注释记的正是这个坑）。
+ *
+ * 第二类安静码是本体更新检查（`APP_RELEASE_CHECK_FAILED` / `APP_RELEASE_UNREACHABLE`）：
+ * 用户的原话是「无视检测版本更新失败的日志」。GitHub 的 404 / 403 rate limit、离线、镜像
+ * 挂了都会走到这里，界面上只说「这次查不出来」，而它每次启动都刷两条。 */
 describe('backpressure codes stay out of the error log', () => {
   const records: ErrorLogRecord[] = [];
 
@@ -47,6 +51,27 @@ describe('backpressure codes stay out of the error log', () => {
       expect(result.ok).toBe(false);
       expect(result.ok === false && result.error.code).toBe(code);
       expect(result.ok === false && result.error.retryable).toBe(true);
+      expect(records).toEqual([]);
+    });
+  }
+
+  // 本体更新检查那一类：照样把失败交回去（`update-notice` 靠它决定显示什么），但不落盘。
+  for (const code of ['APP_RELEASE_CHECK_FAILED', 'APP_RELEASE_UNREACHABLE']) {
+    it(`keeps ${code} out of the log while the update notice still sees the failure`, async () => {
+      setInvokeAdapterForTests(async () => ({
+        ok: false as const,
+        error: {
+          code,
+          message: '查不到最新版本：HTTP status client error (403 rate limit exceeded) for url (https://api.github.com/repos/Kelcoin/Yomika/releases/latest)',
+          retryable: true,
+        },
+      }));
+
+      const result = await invokeCommand('app_release_latest', {}, z.unknown());
+      await flushErrorLog();
+
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.error.code).toBe(code);
       expect(records).toEqual([]);
     });
   }

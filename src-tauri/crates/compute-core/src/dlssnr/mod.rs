@@ -382,6 +382,18 @@ pub fn dll_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("dlssnr").join("nvngx_dlssnr.dll")
 }
 
+/// 动图产物计划器（`animation::plan`）的版本。
+///
+/// 为什么要单独一个数：产物是按「起点那一版 + 这一份 DLL + 这一套参数」认版的，而
+/// **预算与降采样算法**不在这三样里。上一版把一页 720p / 240 帧的动图原样算成 150 MB
+/// 交回，前端解不完就是一片空白（2026-10-13 真机现场：`dlssnr` 产物 150,024,993 字节、
+/// 240 帧）。预算一改，「同一份输入该产出哪一份字节」就变了，老产物必须落空重算——
+/// 否则用户翻回那一页，端上来的还是那份把阅读器噎住的旧产物。
+///
+/// 改了 `animation::plan` 的预算或算法就把这个数 +1；`animation.rs` 里有一条断言盯着
+/// 「这个数说的是这一版计划器」。
+pub const ANIMATION_PLAN_REVISION: u32 = 1;
+
 /// DLSSNR 产物该记在哪一版：这一份 DLL（按**内容**认）+ 这一套参数 + 起点那一版的
 /// revision。
 ///
@@ -389,8 +401,10 @@ pub fn dll_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// 所以「磁盘上这一页是哪一份 DLL 用哪一套参数跑出来的」只能由知道这两件事的这里回答。
 /// 任何一项变了就是另一版，旧产物不许顶上来。
 ///
-/// 版本前缀是 `v3`：v2 的产物里混着「评估把输入原样交回、却被当成产物存下来」的行
-/// （真机缓存里抓到三例：内容与起点页逐像素相同，并且已经被阅读器读走显示过，见
+/// 版本前缀是 `v4`：v3 的产物里混着「按旧预算逐帧原样跑出来的动图」（720p / 240 帧
+/// ≈ 150 MB，见 [`ANIMATION_PLAN_REVISION`]），它们与这一版该产出的字节不是同一份东西，
+/// 所以 v3 的产物一律不再认。v2 的产物里混着「评估把输入原样交回、却被当成产物存下来」
+/// 的行（真机缓存里抓到三例：内容与起点页逐像素相同，并且已经被阅读器读走显示过，见
 /// `filter::PASSTHROUGH`）。产物行本身不带代码版本，事后分不出哪一行是这种，所以 v2
 /// 的产物一律不再认，让它们按新前缀重算——按需，翻到哪页算哪页。v1 认的是「字节数 +
 /// 修改时间」，复制、解包、同步、恢复备份都能让一份完全不同的 DLL 在这两项上与原来
@@ -403,7 +417,7 @@ pub fn output_revision(
     settings: &DlssnrSettings,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dlssnr-out:v3\0");
+    hasher.update(b"dlssnr-out:v4\0");
     hasher.update(dll_identity(data_dir).as_bytes());
     hasher.update(b"\0");
     hasher.update(source_revision.unwrap_or("reader-page").as_bytes());
@@ -411,7 +425,11 @@ pub fn output_revision(
     // `settings` 传进来之前已经 `normalized()` 过（层数与数值都收过范围），所以
     // 「默认」与「显式写出默认值」在这里是同一串。
     hasher.update(serde_json::to_string(settings).unwrap_or_default().as_bytes());
-    format!("dlssnr:v3:{}", hasher.finalize().to_hex())
+    hasher.update(b"\0");
+    // 动图那一条路产出的是**多大的一份字节**由计划器决定，所以计划器的版本也是这一版
+    // 身份的一部分（见 [`ANIMATION_PLAN_REVISION`]）。
+    hasher.update(&ANIMATION_PLAN_REVISION.to_le_bytes());
+    format!("dlssnr:v4:{}", hasher.finalize().to_hex())
 }
 
 /// 「这一份 DLL 是哪一份」——按**内容**认（SHA-256 + 字节数）。
@@ -1639,6 +1657,54 @@ mod tests {
             ),
         }
         filter::force_passthrough(0);
+    }
+
+    /// 评估什么都没写出来（产物整幅透明）与原样交回是同一类结局，处置也一样：重试一次，
+    /// 连着两次就如实报 [`filter::BLANK`]，绝不能把整幅透明的图当产物交出去。
+    ///
+    /// 这条判据来自真机：用户那一页 3000×4000 的产物是 242,617 字节、alpha 全 0
+    /// （2026-10-12 13:39:58，键 `dlssnr:v3:…`）。以前只挡了「与输入逐像素相同」，
+    /// 全透明与输入不同，于是被当产物收下、写进缓存，那一页此后每次翻到都只剩背景。
+    #[cfg(feature = "dlssnr")]
+    #[test]
+    fn a_blank_evaluation_is_retried_then_reported_as_blank() {
+        let _gpu = gpu_test_lock();
+        let Some(dll) = test_dll() else {
+            println!("跳过：没有找到 nvngx_dlssnr.dll");
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
+        std::fs::create_dir_all(&dir).expect("数据目录");
+        let settings = DlssnrSettings::default().normalized();
+        let page = synthetic_image(600, 800);
+        let invisible = |image: &filter::DlssnrImage| {
+            image
+                .rgba
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] == 0)
+                .count()
+        };
+
+        // 一次空：重试应当把它救回来，交出来的必须一个看不见的像素都没有。
+        filter::force_blank(1);
+        let recovered =
+            filter::apply_with_dll(&dir, &dll, &page, &settings).expect("重试之后应当给出真的产物");
+        assert_eq!(
+            invisible(&recovered),
+            0,
+            "重试之后产物里还有看不见的像素：这一次评估没被重试"
+        );
+
+        // 连着两次空：如实报出去，不能拿一张全透明的图当产物。
+        filter::force_blank(2);
+        match filter::apply_with_dll(&dir, &dll, &page, &settings) {
+            Err(error) => assert_eq!(error, filter::BLANK, "两次都空之后该报「没写出来」"),
+            Ok(output) => panic!(
+                "两次都空之后还是给了一个结果（看不见的像素 {} 个）",
+                invisible(&output)
+            ),
+        }
+        filter::force_blank(0);
     }
 
     /// 每一层都真的拿自己那份参数评估过。

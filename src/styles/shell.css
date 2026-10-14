@@ -26,7 +26,9 @@ body::-webkit-scrollbar,
     "titlebar titlebar"
     "sidebar main";
   grid-template-columns: 248px minmax(0, 1fr);
-  height: 100dvh;
+  /* 只写变量：`100vh` 兜底与 `dvh` 的取舍都在 base.css 的 `--viewport-height` 里
+     （直接并排写两行会被 CSS 压缩器当成「后一行覆盖前一行」删掉兜底）。 */
+  height: var(--viewport-height);
   overflow: hidden;
   /* 侧栏折叠的动画。它只在 toggle 时触发：两条轨道是固定值加 `minmax(0, 1fr)`，
      窗口改尺寸不会改变这里的计算值，所以拖动窗口时它不会参与。 */
@@ -766,6 +768,7 @@ body::-webkit-scrollbar,
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */
 .error-log-list {
   display: grid;
+  max-height: min(52vh, 460px);
   max-height: min(52dvh, 460px);
   margin: 0;
   padding: 0;
@@ -2330,6 +2333,7 @@ body::-webkit-scrollbar,
 
 .tag-suggest-panel {
   z-index: var(--z-menu);
+  max-height: min(360px, calc(100vh - 24px));
   max-height: min(360px, calc(100dvh - 24px));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3625,6 +3629,7 @@ body::-webkit-scrollbar,
   top: 50%;
   left: 50%;
   width: min(calc(100% - 32px), 520px);
+  max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   padding: var(--space-6);
   overflow: auto;
@@ -4153,9 +4158,14 @@ body::-webkit-scrollbar,
    是 `overflow-x: auto`，另一轴的 computed 值随之变成 `auto`，于是命中链上所有
    祖先的 touch-action 取交集之后只剩 `pan-x`——手指落在导轨里（卡片上、卡片间的
    缝隙里都算）时纵向拖拽既不被浏览器当滚动，也不会交给 `.workspace`，读起来就是
-   「触点落在组件内/档案卡片内无法滚动」。写成 `pan-x pan-y` 之后浏览器按手势主
-   方向自行择一：横向还是滑导轨，纵向交给页面滚动容器。 */
-.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: pan-x pan-y; }
+   「触点落在组件内/档案卡片内无法滚动」。
+   后来写成 `pan-x pan-y`：纵向是通了，可顺手把双指缩放一起禁掉了。现在按参考实现
+   （Readoshi：滚轮与触摸**分开对待**，触摸这一路整个交给浏览器）写成 `auto`——两个
+   轴都归浏览器按手势主方向择一，只把横向 overscroll 收住，免得「继续往右划」被当成
+   返回手势。逐设备的取值由 `src/lib/horizontalScroller.ts` 的
+   `getTouchScrollStyle()` / `getMouseScrollStyle()` 以行内样式落上去（行内赢过这里），
+   这一条是首帧与没有脚本时的兜底，两边必须一致。 */
+.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: auto; }
 .archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -4290,6 +4300,7 @@ body::-webkit-scrollbar,
 /* 对话框里的空态比整页的小一号：320px 的整页空态会把「扫描结果」这个弹窗撑成一屏，
    而这里要说的只是一句「还没有」。 */
 .dedup-history-dialog .empty-state { min-height: 180px; padding: var(--space-5) var(--space-4); }
+.dedup-history-list { display: grid; gap: var(--space-2); max-height: 46vh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list { display: grid; gap: var(--space-2); max-height: 46dvh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
@@ -4405,6 +4416,7 @@ body::-webkit-scrollbar,
    自己已经有了），只把宽度和高度算好。 */.archive-overview-dialog { width: min(960px, 94vw); }
 .archive-overview-dialog .reader-overview {
   width: 100%;
+  max-height: min(76vh, 720px);
   max-height: min(76dvh, 720px);
   padding: 0;
   border: 0;
@@ -4425,6 +4437,7 @@ body::-webkit-scrollbar,
   font-family: var(--font-body);
 }
 .dedup-relations-search:focus { border-color: var(--focus-ring); box-shadow: var(--focus-shadow); outline: none; }
+/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46vh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 /* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46dvh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-relation-pair { display: grid; grid-template-columns: 34px 34px minmax(0, 1fr); align-items: center; gap: var(--space-2); min-width: 0; }
@@ -4618,7 +4631,7 @@ body::-webkit-scrollbar,
        这里只能减掉底栏那一行：全局 box-sizing: border-box 之下 padding 已经算在
        height 里，再减一次 safe-top，整个工作区就比可用高度矮了一个 safe-top，
        底下露出 body 的深色底——也就是底栏上方那条黑带。 */
-    height: calc(100dvh - (64px + var(--safe-bottom)));
+    height: calc(var(--viewport-height) - (64px + var(--safe-bottom)));
     padding-top: var(--safe-top);
   }
 
@@ -4891,6 +4904,28 @@ body::-webkit-scrollbar,
     padding-bottom: calc(var(--safe-bottom) + 80px);
   }
 
+  /* 上面那条内边距只落在 `.workspace` 上，可首页 / 书架 / 档案库的尾巴长在列表自己
+     身上：实测（390×900、真触摸工装）滚到底之后最后一行的下缘仍落在底栏上缘之下——
+     首页 887 vs 824（盖住 63px）、档案库 35px、历史 40px、设置与书架 76px，
+     `reachedMax` 都是 true，也就是「滚得到底但读不到尾」。同一份内边距补到最内层的
+     列表上。如果哪天底栏不是浮动的，这两条要跟着上面的规则一起收掉。 */
+  .app-shell.is-floating-nav .library-shell-list,
+  .app-shell.is-floating-nav .route-cache-panel {
+    padding-bottom: calc(var(--safe-bottom) + 80px);
+  }
+
+  /* react-resizable-panels 会在 Group / Panel 上写**内联** `touch-action`
+     （`orientation="horizontal"` 时是 `pan-y`）。内联样式压过任何不带 `!important`
+     的规则，于是真手指落在首页 / 档案库 / 书架 / 本地档案里既横滑不动（横轨）
+     也捏不动（缩放），只剩竖向可用——`horizontalScroller.ts` 里那套「滚轮与触摸
+     分开对待」的规矩在 CSS 这一层就被抵消了。这里必须抢回来。
+     CDP 合成触摸看不见这一层（它忽略 touch-action），只能在计算值上守，见
+     `tests/design-system-contract.test.ts` 的对应条款。 */
+  .app-shell [data-group],
+  .app-shell [data-panel] {
+    touch-action: auto !important;
+  }
+
   /* ≤900 一切路由都是页面滚动：缓存面板的 height:100% 钳制必须全部放开，
      否则每个路由的溢出尾都会在面板处被吃掉（同桌面首页丢 44px 的问题）。 */.route-cache-panel {
     height: auto;
@@ -4939,7 +4974,6 @@ body::-webkit-scrollbar,
 .cache-swatch.is-reader-page { background: var(--state-success); }
 .cache-swatch.is-other { background: var(--ink-faint); }
 .cache-bar-slice.is-enhanced, .cache-swatch.is-enhanced { background: var(--brand-vermilion); opacity: 0.65; }
-.cache-bar-slice.is-decensored, .cache-swatch.is-decensored { background: var(--brand-cyan); opacity: 0.65; }
 .cache-bar-slice.is-inference, .cache-swatch.is-inference { background: var(--on-surface-variant); }
 
 .date-picker { position: relative; display: grid; gap: 6px; min-width: 0; }
@@ -5004,6 +5038,7 @@ body::-webkit-scrollbar,
   display: grid;
   gap: 2px;
   width: min(100%, 420px);
+  max-height: min(70vh, 520px);
   max-height: min(70dvh, 520px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -5026,6 +5061,7 @@ body::-webkit-scrollbar,
   flex-direction: column;
   gap: 2px;
   width: min(100%, 420px);
+  max-height: min(85vh, 760px);
   max-height: min(85dvh, 760px);
   overflow: hidden;
   padding: var(--space-4);
@@ -6507,7 +6543,7 @@ body::-webkit-scrollbar,
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
-/* 远端能提供哪些处理服务（超分 / 去码 / DLSSNR）：三枚小标签，这就是「远端可用服务」
+/* 远端能提供哪些处理服务（超分 / DLSSNR）：两枚小标签，这就是「远端可用服务」
     的全部面积——从前这一整块摆的是 op 选择、模型列表和放大倍数输入框，而那三样都由对面
     那份设置决定，摆在本机只是让人以为选了有用。能用的标签亮着（`is-ready`），不能用的
     压暗但仍显示：用户要知道对面有这一档、只是现在没装好。

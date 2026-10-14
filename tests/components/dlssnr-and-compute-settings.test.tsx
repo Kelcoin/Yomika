@@ -64,7 +64,7 @@ function computeStatus(overrides: Record<string, unknown> = {}) {
     port: 47_653,
     addresses: ['192.168.1.5'],
     token: 'abcdef0123456789abcdef0123456789',
-    capabilities: [capability('upscale', true, '超分'), capability('decensor', false, '去码'), capability('dlssnr', false, 'DLSS5')],
+    capabilities: [capability('upscale', true, '超分'), capability('dlssnr', false, 'DLSS5')],
     canStart: true,
     ...overrides,
   };
@@ -753,7 +753,7 @@ describe('compute center settings group', () => {
         ok: true,
         value: computeStatus({
           canStart: false,
-          capabilities: [capability('upscale', false, '超分'), capability('decensor', false, '去码'), capability('dlssnr', false, 'DLSS5')],
+          capabilities: [capability('upscale', false, '超分'), capability('dlssnr', false, 'DLSS5')],
         }),
       }),
     }));

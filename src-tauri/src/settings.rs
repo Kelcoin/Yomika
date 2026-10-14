@@ -24,7 +24,6 @@ const UPSCALE_AUTO_TAG_MODE_KEY: &str = "preferences.upscale_auto_tag_mode";
 const UPSCALE_AUTO_WHITELIST_KEY: &str = "preferences.upscale_auto_whitelist";
 const UPSCALE_AUTO_BLACKLIST_KEY: &str = "preferences.upscale_auto_blacklist";
 const UPSCALE_AUTO_THRESHOLD_KEY: &str = "preferences.upscale_auto_threshold_bytes";
-const DECENSOR_MODEL_KEY: &str = "preferences.decensor_model";
 const DOWNLOAD_DIRECTORY_KEY: &str = "preferences.download_directory";
 const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
@@ -146,11 +145,6 @@ pub struct PreferenceSnapshot {
     /// 自动开启的阈值：每页平均字节数（体积/页数），默认 500 KB。
     #[serde(default = "default_upscale_auto_threshold")]
     pub upscale_auto_threshold_bytes: u64,
-    /// Installed de-censoring bundle to run on reader pages. Empty means off:
-    /// there is no separate switch, because a bundle that is not chosen is the
-    /// only sense in which the feature can be off.
-    #[serde(default)]
-    pub decensor_model: String,
     #[serde(default)]
     pub download_directory: String,
     #[serde(default)]
@@ -228,7 +222,7 @@ pub struct PreferenceSnapshot {
     pub remote_compute_url: String,
     #[serde(default)]
     pub remote_compute_token: String,
-    /// 远端处理用的参数，JSON 对象。**只作用于远端**：不改本机自己的超分/去码/
+    /// 远端处理用的参数，JSON 对象。**只作用于远端**：不改本机自己的超分/
     /// DLSSNR 设置，也不去动远端那台机器上的设置。
     #[serde(default)]
     pub remote_compute_ops: String,
@@ -320,7 +314,6 @@ impl Default for PreferenceSnapshot {
             upscale_auto_whitelist: default_upscale_auto_whitelist(),
             upscale_auto_blacklist: default_upscale_auto_blacklist(),
             upscale_auto_threshold_bytes: default_upscale_auto_threshold(),
-            decensor_model: String::new(),
             download_directory: String::new(),
             eh_favorite_delete_sync: false,
             confirm_eh_favorite_delete: true,
@@ -379,7 +372,6 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         // 每页平均体积阈值：低于 64 KB 的封面图不值得判据，8 MB 以上整页
         // 都会超分失去意义。与设置页步进器的范围一致。
         || !(64 * 1024..=8 * 1024 * 1024).contains(&value.upscale_auto_threshold_bytes)
-        || value.decensor_model.len() > 128
         || value.download_directory.len() > 4096
         || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
@@ -489,7 +481,6 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             UPSCALE_AUTO_THRESHOLD_KEY,
             defaults.upscale_auto_threshold_bytes,
         )?,
-        decensor_model: map_value(&stored, DECENSOR_MODEL_KEY, defaults.decensor_model)?,
         download_directory: map_value(
             &stored,
             DOWNLOAD_DIRECTORY_KEY,
@@ -614,10 +605,6 @@ pub(crate) fn write_preference_keys(
         (
             UPSCALE_AUTO_THRESHOLD_KEY,
             serde_json::to_string(&value.upscale_auto_threshold_bytes),
-        ),
-        (
-            DECENSOR_MODEL_KEY,
-            serde_json::to_string(&value.decensor_model),
         ),
         (
             DOWNLOAD_DIRECTORY_KEY,
@@ -1005,7 +992,6 @@ mod tests {
             upscale_auto_threshold_bytes: 1024 * 1024,
             upscale_auto_whitelist: "category:manga".into(),
             upscale_auto_blacklist: "other:3d".into(),
-            decensor_model: "aletheia-lens".into(),
             download_directory: std::env::temp_dir().to_string_lossy().into_owned(),
             eh_favorite_delete_sync: true,
             confirm_eh_favorite_delete: false,

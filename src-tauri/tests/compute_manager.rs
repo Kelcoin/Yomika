@@ -134,7 +134,6 @@ fn request(input_id: &str, page: u32, deadline_ms: u64) -> SubmitRequest {
             // 这条 IT 走的是宿主默认的 echo 引擎（宿主此刻不传 `--engine`）：没有模型，
             // 也没有模型要求的最小边长。
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -150,7 +149,6 @@ fn request(input_id: &str, page: u32, deadline_ms: u64) -> SubmitRequest {
         // 这条 IT 走回声引擎，它不读图：源图留空（真超分引擎那条路见
         // `tests/compute_model_chain.rs`，那里宿主必须给出源文件）。
         source: None,
-        inpaint: None,
     }
 }
 
@@ -1463,7 +1461,7 @@ fn coalescing_a_new_subscriber_does_not_replace_the_dispatched_output_grant() {
 /// 一件任务的每一次快照都要带上一个**比上一次更大的**事件序号。
 ///
 /// `sequence` 是宿主交给界面的事件版本号，不是任务的身份（身份是 `job_id`）。阅读器里本地
-/// 那一档（去码/超分）拿它丢旧事件：`event.sequence <= lastSequence` 就 return，而起点正是
+/// 那一档（超分）拿它丢旧事件：`event.sequence <= lastSequence` 就 return，而起点正是
 /// **提交应答**里那份快照的序号（`src/lib/readerComputedPage.ts:247` 与 `:292`）。序号要是停在
 /// 任务出生时的那个值上，「排到队里 → 真的在跑 → 算完了」这几条事件会被一律当成旧事件丢掉：
 /// 界面永远停在「处理中」、不报错，而任务其实已经跑完、产物也已经发布到正式目录。

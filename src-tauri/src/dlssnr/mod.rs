@@ -155,18 +155,20 @@ mod tests {
     use super::*;
 
     /// 引擎只交出一行诊断（`animation::note_skip`），**落到哪个文件**是这一层的事：这条
-    /// 把整条链走一遍——超预算的动图 → 注入的日志口 → `<data>/logs/error.log`。
+    /// 把整条链走一遍——帧数超上限的动图 → 注入的日志口 → `<data>/logs/error.log`。
     ///
-    /// 超预算那份夹具不用真造上百 MB 像素：`shape()` 只读 GIF 固定头部那 4 个字节，把
-    /// 逻辑屏幕尺寸改大就能把「超预算」那道门推开（引擎那半也这么做，见
-    /// `compute-core/src/dlssnr/animation.rs` 的 `gif_with_patched_canvas`）。
+    /// 挑「帧数超上限」而不是「产物超预算」是因为后者要**真跑一遍滤镜**，而测试的临时
+    /// 数据目录里没有 NGX 片段（`CreateFeature` 会报 0xBAD0000B）；前者在解码之前就返回，
+    /// 一句 GPU 都不碰。帧数只由**结构**决定（`image_kind::gif_frame_count` 数 `0x2C`），
+    /// 所以夹具是现场拼的：1201 个图像描述符 + 结束符，帧数据本身是什么都不影响——
+    /// 判定在解码之前。
     #[test]
     fn the_engines_skip_notes_land_in_the_error_log() {
         let dir = tempfile::tempdir().expect("temp dir");
         install_skip_logger();
-        let mut source = include_bytes!("testdata/animated.gif").to_vec();
-        source[6..8].copy_from_slice(&60_000u16.to_le_bytes());
-        source[8..10].copy_from_slice(&60_000u16.to_le_bytes());
+        let source = gif_with_frames(1_201);
+        let shape = yomika_compute_core::dlssnr::animation::shape(&source).expect("夹具得读得出形状");
+        assert_eq!(shape.frames, 1_201, "夹具的帧数没数对：{shape:?}");
 
         let out = apply_dlssnr(
             dir.path(),
@@ -174,8 +176,8 @@ mod tests {
             &DlssnrSettings::default(),
             &crate::inference::cancel::CancelToken::none(),
         )
-        .expect("超预算不是错误");
-        assert_eq!(out, None, "超预算应当原样交回");
+        .expect("帧数超上限不是错误");
+        assert_eq!(out, None, "帧数超上限应当原样交回");
 
         let log = std::fs::read_to_string(dir.path().join("logs").join("error.log"))
             .expect("跳过要写进错误日志");
@@ -183,11 +185,39 @@ mod tests {
             log.contains("dlssnr/animation"),
             "日志要带上来源，否则查不下去：{log}"
         );
-        assert!(log.contains("总像素"), "日志要说清是被像素预算挡下的：{log}");
+        assert!(log.contains("帧数"), "日志要说清是被帧数上限挡下的：{log}");
         assert!(
-            log.contains("60000×60000"),
+            log.contains("1201 帧 64×64"),
             "日志要带上画布与帧数，否则查不下去：{log}"
         );
+        assert!(
+            log.contains("frames_limit=1200"),
+            "日志要带上上限本身，否则不知道该调哪个数：{log}"
+        );
+    }
+
+    /// 拼一份「结构上说得通、内容不必能解」的 GIF：只有帧数有意义。
+    ///
+    /// 逻辑屏幕 64×64（过 `MIN_EDGE`）、无全局色表、每帧一个图像描述符 + 一条空子块链。
+    /// 帧数据故意是空的——这一条要证明的是「判定发生在解码之前」。
+    fn gif_with_frames(frames: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GIF89a");
+        bytes.extend_from_slice(&64u16.to_le_bytes());
+        bytes.extend_from_slice(&64u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00]);
+        for _ in 0..frames {
+            bytes.push(0x2C);
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&64u16.to_le_bytes());
+            bytes.extend_from_slice(&64u16.to_le_bytes());
+            bytes.push(0x00);
+            bytes.push(0x02);
+            bytes.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]);
+        }
+        bytes.push(0x3B);
+        bytes
     }
 
     fn build_info(engines: &[&str]) -> yomika_compute_protocol::BuildInfo {

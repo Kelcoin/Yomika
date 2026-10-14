@@ -179,7 +179,6 @@ fn run_message_with_input(
             // echo 路径不读模型：这一栏只有真引擎（`--engine onnx`）才要用，真进程测试里
             // 有专门的用例给它带一份授权模型。
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -805,7 +804,6 @@ fn run_message_with_model(
                 content_hash: model.1.clone(),
                 byte_length: model.2,
             }),
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: Some(min_input_edge),

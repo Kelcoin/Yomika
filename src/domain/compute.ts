@@ -116,35 +116,6 @@ export const ReaderPagePayloadSchema = z
   .strict();
 export type ReaderPagePayload = z.infer<typeof ReaderPagePayloadSchema>;
 
-/**
- * 去码那一页的请求：与阅读器那道门**问的是同一件事**（哪一页 + 哪个模型包 + 哪一代），
- * 差别在宿主拿到它之后干什么。
- *
- * 这一道门现在是**一条链**（docs/95）：`modelId` 是第一步（修补），`upscaleModelId` 是可选的
- * 第二步（放大）。两阶段必须在**同一件任务**里，因为链的第二阶段吃第一阶段的产物——那份产物
- * 只有内容寻址的落点、没有按修订号登记的缓存行，出了这件任务就没人能按身份把它找回来。
- * 所以「补完再放大」不是两次提交，是一次提交里的两个阶段。
- *
- * 渲染进程**仍然不许**自己带检测集进来：哪些框要补是 worker 拿这一页的像素自己算的
- * （掩膜是几十万字节，协议一帧只收 64 KiB，它从来不过那条通道）。
- */
-export const DecensorPagePayloadSchema = z
-  .object({
-    scopeId: z.string().min(1),
-    archiveId: z.string().min(1),
-    pageIndex: z.number().int().nonnegative(),
-    /** 去码模型包的 id（整装整卸：四份文件齐了才算装上）。 */
-    modelId: z.string().min(1),
-    /** 补完这一页之后接着放大的超分模型 id；不写（或只写空白）= 只去码。 */
-    upscaleModelId: z.string().min(1).optional(),
-    generation: z.number().int().nonnegative(),
-    priority: ComputePrioritySchema,
-    /** 0 = 用宿主调度器的默认期限。上限由宿主把关。 */
-    deadlineMs: z.number().int().nonnegative(),
-  })
-  .strict();
-export type DecensorPagePayload = z.infer<typeof DecensorPagePayloadSchema>;
-
 /** 任务身份：同一身份的请求合并成一个 job（§8.1）。 */
 export const ComputeJobKeySchema = z.object({
   inputId: z.string(),
@@ -184,17 +155,6 @@ export const ComputeSubmittedSchema = z.object({
   evicted: z.string().nullable(),
 });
 export type ComputeSubmitted = z.infer<typeof ComputeSubmittedSchema>;
-
-/**
- * 去码那道门的答案：**就是一件任务**。
- *
- * 8-c 里这里曾经是 `ComputeSubmittedSchema | null`，`null` 的意思是「宿主检测过这一页，一个
- * 要补的框都没有，原页就是答案」。8-e 把检测搬进了 worker（docs/94）：宿主不再看这一页的
- * 像素，也就没有资格替 worker 说「不用补」——**一个框都没有已经是 worker 的成功结论**，它
- * 照样交出一件产物（原样编码的那一页）。所以这条通道被撤掉了：留着它，宿主哪天真的再答一次
- * `null`，调用方就会把「原页」和一个解码失败混成一件事。
- */
-export type DecensorPageSubmitted = ComputeSubmitted;
 
 export const ComputeJobProgressSchema = z.object({
   stageId: z.string(),

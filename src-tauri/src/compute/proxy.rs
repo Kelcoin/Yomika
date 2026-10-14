@@ -12,8 +12,8 @@
 //! 为什么不在宿主里算完再发：那正是这次要拆掉的东西（docs/71 §5.1 的 private commit
 //! 与 GPU 占用，宿主留在 WebView 的消息循环上）。第一次真跑模型那几秒也不该占着主进程。
 //!
-//! 这一层**不**碰产品语义：身份串（`inference::enhanced_revision` /
-//! `decensored_revision`）、交出去的倍率上限（`ENHANCED_OUTPUT_SCALE`）、什么时候退回宿主
+//! 这一层**不**碰产品语义：身份串（`inference::enhanced_revision`）、
+//! 交出去的倍率上限（`ENHANCED_OUTPUT_SCALE`）、什么时候退回宿主
 //! 内置引擎，全由调用方决定。这里只把「怎么用 worker 算这一页」收在一处：第二处调用时不许
 //! 各自实现一遍，算力中心就是那第二处。
 
@@ -33,7 +33,6 @@ use yomika_compute_core::dlssnr::DlssnrSettings;
 #[cfg(windows)]
 use yomika_compute_protocol::{DlssnrGrant, PASSTHROUGH_ENGINE_ID};
 
-use super::decensor::InpaintPreparation;
 use super::inputs;
 use super::manager::{ComputeManager, SubmitRequest};
 use super::scheduler::{JobKey, JobState, Priority, SubmitError};
@@ -57,7 +56,6 @@ const BACKEND_LABEL: &str = "cpu";
 /// 交出去的两条授权名：产物落账时的名字。一条字节来路一个，两件任务挨在一起的时候
 /// 才看得出哪件产物是哪条来路交的。
 const BYTE_UPSCALE_GRANT: &str = "byte-upscale";
-const BYTE_DECENSOR_GRANT: &str = "byte-decensor";
 #[cfg(windows)]
 const BYTE_DLSSNR_GRANT: &str = "byte-dlssnr";
 
@@ -72,7 +70,7 @@ pub struct UpscaleJob<'a> {
     /// 宿主算出来的身份串（`enhanced_revision`）：与旧缓存认的身份是**同一个**，
     /// 于是「缓存认得这一版」与「调度器认得这一版」不会各说各话。
     pub settings_id: &'a str,
-    /// 输入源图的修订。同一个页面但来路不同（原图 / 去码产物）就是不同的输入。
+    /// 输入源图的修订。同一个页面但来路不同（原图 / 放大产物）就是不同的输入。
     pub source_revision: &'a str,
     pub priority: Priority,
     /// 模型原生倍率比它大时缩下来（产品常数 `ENHANCED_OUTPUT_SCALE` 由调用方给）。
@@ -88,23 +86,6 @@ pub struct StageSpec<'a> {
     pub stage_id: &'a str,
     pub model_spec_id: &'a str,
     pub scale: u32,
-    pub page: &'a [u8],
-}
-
-/// 一件「让 worker 把这一页去码」的请求。
-pub struct DecensorJob<'a> {
-    /// 这一页是谁（与 `UpscaleJob::input_id` 同义）。
-    pub input_id: &'a str,
-    /// 宿主算出来的身份串（`decensored_revision`，包指纹那一版）。
-    pub settings_id: &'a str,
-    /// 输入源图的修订。同一页但来路不同就是不同的输入。
-    pub source_revision: &'a str,
-    pub priority: Priority,
-    /// 哪一份去码包（`models/<id>/…` 那个目录名）。
-    pub model_spec_id: &'a str,
-    /// 三件套的真实位置：宿主在这里把「用哪三份模型」说清楚（`manager::prepare_run` 拿它们
-    /// 直接摆进只读输入根）。检测集不在其中——谁看像素谁说了算，那是 worker 自己算的。
-    pub inpaint: InpaintPreparation,
     pub page: &'a [u8],
 }
 
@@ -147,7 +128,6 @@ pub fn upscale(
             // ——调用方不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。
             model: None,
             builtin: None,
-            decensor: None,
             dlssnr: None,
             min_input_edge: None,
             output_scale: job.output_scale,
@@ -160,62 +140,14 @@ pub fn upscale(
         output_grant_id: BYTE_UPSCALE_GRANT.to_string(),
         deadline_ms: PROXY_DEADLINE_MS,
         source: None,
-        // 超分这一档只有超分阶段；去码那一条在下面的 `decensor` 里（它一个阶段就够）。
-        inpaint: None,
-    };
-    run(manager, request, cancelled)
-}
-
-/// 让 worker 把这一页去码（检测与修补都在它那边），字节进字节出。
-///
-/// **只有一个阶段**：去码产物的身份是 `decensored_revision`（包指纹那一版），与链式那条路
-/// 的 `enhanced` 不是同一个东西。算力中心那条来路里没有「顺手再超分一下」这个说法。
-pub fn decensor(
-    manager: &ComputeManager,
-    job: DecensorJob<'_>,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<u8>, ProxyError> {
-    let staged = stage_page(manager, job.input_id, job.page)?;
-    let request = SubmitRequest {
-        key: JobKey {
-            input_id: job.input_id.to_string(),
-            settings_id: job.settings_id.to_string(),
-            source_revision: job.source_revision.to_string(),
-            backend: BACKEND_LABEL.to_string(),
-            generation: 1,
-        },
-        priority: job.priority,
-        input: staged,
-        pipeline: vec![PipelineStage {
-            stage_id: super::decensor::DECENSOR_STAGE_ID.to_string(),
-            model_spec_id: job.model_spec_id.to_string(),
-            // 去码阶段不认 `model`，它认的是「哪三份模型」：三件套由 `prepare_run` 从
-            // `inpaint` 那一栏摆进只读输入根（协议里这两条路互斥）。
-            model: None,
-            builtin: None,
-            decensor: None,
-            dlssnr: None,
-            min_input_edge: None,
-            output_scale: None,
-            // 去码在 worker 里只有 CPU 一条路（核心把检测定死在 `RuntimeId::Cpu`）。
-            engine_policy: EnginePolicy::Cpu,
-            scale: None,
-            tile: None,
-            layers: None,
-            settings_id: None,
-        }],
-        output_grant_id: BYTE_DECENSOR_GRANT.to_string(),
-        deadline_ms: PROXY_DEADLINE_MS,
-        source: None,
-        inpaint: Some(job.inpaint),
     };
     run(manager, request, cancelled)
 }
 
 /// 一件「让 worker 把这一页过一遍 DLSSNR」的请求。
 ///
-/// 与去码那条不同的地方在于**模型从哪来**：去码的三件套是宿主解析出来的磁盘路径，
-/// 交给 `prepare_run` 摆进输入根；这里的两样（片段 DLL 与参数文档）由这一层自己按
+/// 与放大那条不同的地方在于**模型从哪来**：放大那一档的模型由 `manager::prepare_run`
+/// 按模型目录摆进输入根；这里的两样（片段 DLL 与参数文档）由这一层自己按
 /// 内容摆——因为它们的来源不是「模型装了哪一版」，而是「这一份 DLL + 这一套参数」，
 /// 内容本身就是要交给 worker 的东西（NGX 只按固定文件名找片段，见 `worker/src/dlssnr.rs`）。
 // 下面这一整块（两件结构体、那条来路、两个摆盘 helper）都跟着目标门走：Android 上没有
@@ -227,7 +159,7 @@ pub struct DlssnrJob<'a> {
     /// 宿主算出来的身份串（`dlssnr::output_revision`）：与产物缓存认的身份是**同一个**，
     /// 于是「缓存认得这一版」与「调度器认得这一版」不会各说各话。
     pub settings_id: &'a str,
-    /// 输入源图的修订。同一页但来路不同（原图 / 去码产物）就是不同的输入。
+    /// 输入源图的修订。同一页但来路不同（原图 / 放大产物）就是不同的输入。
     pub source_revision: &'a str,
     pub priority: Priority,
     /// 这一档在账上叫什么（见 [`DLSSNR_STAGE_ID`]）。
@@ -274,7 +206,7 @@ pub fn dlssnr(
             settings_id: job.settings_id.to_string(),
             source_revision: job.source_revision.to_string(),
             // DLSSNR 只有 D3D12 一条路（没有 CPU 回退），但键上写的仍是宿主这一层看到的
-            // 后端标签：换后端那一天两处一起改（与超分/去码同一条口径）。
+            // 后端标签：换后端那一天两处一起改（与放大同一条口径）。
             backend: BACKEND_LABEL.to_string(),
             generation: 1,
         },
@@ -286,7 +218,6 @@ pub fn dlssnr(
             // 模型是「哪一份片段」，走 `dlssnr` 那一栏；`model` 是 ONNX 模型那条路。
             model: None,
             builtin: None,
-            decensor: None,
             dlssnr: Some(DlssnrGrant {
                 feature,
                 settings,
@@ -304,7 +235,6 @@ pub fn dlssnr(
         output_grant_id: BYTE_DLSSNR_GRANT.to_string(),
         deadline_ms: PROXY_DEADLINE_MS,
         source: None,
-        inpaint: None,
     };
     let finished = run_finished(manager, request, cancelled)?;
     Ok(DlssnrOutput {
@@ -417,7 +347,7 @@ fn run(
 
 /// 跑完之后宿主手里的两样东西：产物字节，以及 worker 对「谁算的」的交代。
 ///
-/// 只有 DLSSNR 那一档要后一件（`passthrough` = 这一页没算过）；超分/去码那两条路只
+/// 只有 DLSSNR 那一档要后一件（`passthrough` = 这一页没算过）；放大那条路只
 /// 要字节，所以它们照旧走 [`run`]。
 struct FinishedArtifact {
     bytes: Vec<u8>,

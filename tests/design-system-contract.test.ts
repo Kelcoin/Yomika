@@ -88,11 +88,15 @@ describe('design system contract', () => {
     const repository = read('src/repositories/nativeLibraryRepository.ts');
     const add = repository.slice(repository.indexOf('addArchiveToCategory('), repository.indexOf('removeArchiveFromCategory('));
     expect(add, '这条镜像写要作废书架快照').toMatch(/then\(invalidateShelves\)/);
-    // `[]` 在 JS 里为真：空分类既会把本机那份待看顶掉、又拿着空名单去取档案，整页空白。
+    // 收藏夹画的是**本机**那张表：服务器那条 🔖 Favorites 是共享状态（网页端、别的设备、
+    // 旧版本都能往里加），本机没有阳性记录的 id 画出来就是用户报的「我根本没加入收藏夹
+    // 的东西」（2026-10-13 真机：分类 15 个 id、本机 8 条活行，13 张卡只来自分类）。
+    // 分类仍然只是本机推送的镜像（`favoritesMirror`），书架不再读它、也不再把它的 id
+    // 存进快照——那正是「服务器名单当成本机收藏」的入口。
     const routes = read('src/app/routes.tsx');
-    expect(routes, '空分类要落回本机那份待看').toMatch(/favorites\.value\.archives\.length > 0/);
-    expect(routes, '快照不落空名单').toMatch(/favoritesIds && favoritesIds\.length > 0 \? \{ favoritesIds \}/);
-    expect(routes, '渲染时也把空名单当不知道').toMatch(/favoritesIds && favoritesIds\.length > 0 \? favoritesIds/);
+    expect(routes, '收藏夹不读服务器分类').not.toMatch(/readFavoritesCategory/);
+    expect(routes, '收藏夹不把分类并进书架').not.toMatch(/\.\.\.favoritesIds/);
+    expect(routes, '快照里不再存服务器那条分类的 id').not.toMatch(/favoritesIds/);
   });
   it('binds the supplied logo assets to native builds', () => {
     const config = JSON.parse(read('src-tauri/tauri.conf.json')) as { bundle?: { icon?: string[] } };
@@ -159,7 +163,7 @@ describe('design system contract', () => {
     // 底栏占位与底部安全区要减掉；顶部安全区不能减——box-sizing: border-box 下
     // padding-top 已经算在 height 里，减第二次就会在底栏上方留下一段 body 底色的
     // 空带（手机上就是底栏之上那条黑带）。
-    expect(compactMain).toMatch(/height:\s*calc\(100dvh - \(64px \+ var\(--safe-bottom\)\)\)/);
+    expect(compactMain).toMatch(/height:\s*calc\(var\(--viewport-height\) - \(64px \+ var\(--safe-bottom\)\)\)/);
     expect(compactMain).not.toMatch(/100dvh - \(64px \+ var\(--safe-bottom\) \+ var\(--safe-top\)\)/);
     expect(compactMain).toMatch(/padding-top:\s*var\(--safe-top\)/);
     expect(archiveList).toMatch(/background:\s*var\(--surface-panel\)/);
@@ -2278,15 +2282,22 @@ describe('design system contract', () => {
     // The shell is a fixed frame, so nothing should chain a gesture back to it.
     expect(ruleBody(base, 'html')).toMatch(/overscroll-behavior:\s*none/);
     expect(ruleBody(base, 'body')).toMatch(/overscroll-behavior:\s*none/);
-    // 横向导轨只属于自己的那一轴。导轨是 `overflow-x: auto`，另一轴的 computed
-    // 值会随之变成 `auto`，于是 touch-action 只写 `pan-x` 时整条命中链的交集把纵向
-    // 平移摘掉了：手指落在导轨里（卡片上、卡片之间的缝隙里都算）纵向拖拽根本滚不
-    // 动页面。这条断言钉住「横排导轨仍然把纵向留给页面」——删掉 pan-y 就转红。
+    // 横向导轨的手势归**浏览器**管：导轨是 `overflow-x: auto`，另一轴的 computed 值随
+    // 之变成 `auto`，所以 touch-action 只写 `pan-x` 时整条命中链的交集把纵向平移摘掉
+    // 了——手指落在导轨里（卡片上、卡片之间的缝隙里都算）纵向拖拽根本滚不动页面。
+    // 2026-10-14 起照参考项目（Readoshi）分档：滚轮由脚本接管（捕获 + preventDefault +
+    // 横向重映射），触摸整条交给浏览器，鼠标按下才换成抓手光标。分档按设备逐条内联在
+    // src/lib/horizontalScroller.ts 里；CSS 只是首帧/无脚本时的兜底，两处必须说同一件事。
+    // 这条断言钉住「别再把某一条轴从浏览器手里抢走」——把 CSS 或触摸档改回 pan-x 就转红。
     const railGrid = ruleBody(read('src/styles/shell.css'), '.archive-rail-grid');
     expect(railGrid).toMatch(/overflow-x:\s*auto/);
     const railTouch = railGrid.match(/touch-action:\s*([^;]+);/)?.[1]?.trim() ?? '';
-    expect(railTouch, '导轨必须把纵向平移让给页面滚动容器').toMatch(/\bpan-y\b/);
     expect(railTouch, '导轨不能整块吃掉手势').not.toMatch(/\bnone\b/);
+    expect(railTouch, '导轨的两条轴都留给浏览器；分档靠内联样式而不是这里的限制').toMatch(/\bauto\b/);
+    expect(railGrid, '导轨自己的横向过量滚动不该链给页面').toMatch(/overscroll-behavior-x:\s*contain/);
+    const horizontalScroller = read('src/lib/horizontalScroller.ts');
+    expect(horizontalScroller, '触摸这一档必须是「浏览器自己滚」').toMatch(/touchAction:\s*'auto'/);
+    expect(horizontalScroller, '鼠标这一档才是抓手').toMatch(/cursor:\s*'grab'/);
     // 浏览器自带的另一件「拖」：按住不放（手机上就是长按）再移动，会把 `<a href>` 拖成
     // 一条链接、把图片拖成一张图。挡掉图片之后 Blink 会退到最近的可拖祖先——外面那个
     // `<a>`，所以三类元素都要在同一条「不给拖」的规则里。debug_outputs/drag-out 工装用
@@ -2307,6 +2318,84 @@ describe('design system contract', () => {
     const metadata = read('src/components/MetadataEditRoute.tsx');
     expect(metadata).toMatch(/<label>标题<input value=\{title\} autoCapitalize="sentences"/);
     expect(read('src/components/LibraryWorkspace.tsx')).toMatch(/enterKeyHint="search"/);
+  });
+
+  it('defines the viewport height once, behind a fallback a minifier cannot drop', () => {
+    // `dvh` 要 WebView 108+。认不得它的环境里整条声明会被丢掉——`.app-shell{height:100dvh}`
+    // 一丢，高度就退回 `auto`，`.app-main{height:100%}` 跟着 auto，`.workspace{height:100%;
+    // overflow-y:auto}` 于是永不溢出：**整页一个滚动容器都不存在**，而 html/body 是
+    // `overflow:hidden`，900px 以下的内容既滚不到也拿不到——真机上读作「没法上下滚动」，
+    // 下半屏看上去像被什么东西盖住了。2026-10-14 的移动端复测把 dvh 声明整条删掉就复现了
+    // 这个形态（`scrollers: []`，`/library` 的 scrollHeight 4253 而 clientHeight 900）。
+    //
+    // 并排写两行（`height: 100vh;` 再 `height: 100dvh;`）**不够**：构建时压缩器知道目标
+    // 支持 `dvh`，会把前一行当冗余删掉——实测 `dist/assets/main-*.css` 里只剩
+    // `height:100dvh`，兜底根本没进包。所以视口高度只定义一份变量，升级写在 `@supports`
+    // 里（压缩器证明不了 `@supports` 里的声明冗余，兜底这才活得下来）。
+    const base = read('src/styles/base.css');
+    const fallback = base.indexOf('--viewport-height: 100vh');
+    const upgrade = base.indexOf('@supports (height: 1dvh)');
+    expect(fallback, 'base.css 必须在 @supports 之外先给出 vh 兜底').toBeGreaterThan(-1);
+    expect(upgrade, 'base.css 要用 @supports (height: 1dvh) 升到 dvh').toBeGreaterThan(fallback);
+    expect(base.slice(upgrade), '@supports 里要把变量升成 100dvh').toMatch(
+      /--viewport-height:\s*100dvh/
+    );
+    for (const path of ['src/styles/shell.css', 'src/styles/reader.css']) {
+      const css = read(path).replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '));
+      // 只钉**高度链**（`height` / `min-height`）：`max-height: calc(100dvh - 32px)` 那类
+      // 限高不进高度链，丢掉了只是少一层上限，不会让整页失去滚动容器。
+      for (const [index, line] of css.split('\n').entries()) {
+        if (!/^\s*(min-)?height\s*:/.test(line)) continue;
+        expect(line, `${path}:${index + 1} 的布局高度要读 --viewport-height，不写裸的 100dvh`).not.toMatch(/100dvh/);
+      }
+      expect(css, `${path} 的布局高度必须读 --viewport-height`).toMatch(/var\(--viewport-height\)/);
+    }
+    // 其余 `N dvh`（限高那一类）不进高度链：丢掉了只是元素少一层上限，不会让整页
+    // 失去滚动容器。这里仍要求一条 `vh` 双写，是给**源码**留的读法；要说明白的是：
+    // 限高那几处（`max-height: min(52dvh, 460px)` 之类，9 处）在产物里会被压缩器删掉
+    // 双写，所以它们在老 WebView 上实际没有兜底——这是已知缺口，记在 docs/163 §11，
+    // 不在这条用例的射程内（滚动链由上面 `--viewport-height` 那一段守）。
+    // 唯一的例外是 base.css 里那份变量升级——它由上面的 `@supports` 守着。
+    for (const path of ['src/styles/shell.css', 'src/styles/reader.css', 'src/styles/base.css']) {
+      // 先把注释挖成空白（保留换行，行号不变）：注释里提到 `100dvh` 不是声明。
+      const strippedCss = read(path).replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '));
+      const lines = strippedCss.split('\n').map((line) => line.replace(/\r$/, ''));
+      lines.forEach((line, index) => {
+        if (!line.includes('dvh')) return;
+        if (/--viewport-height\s*:/.test(line)) return;
+        // `@supports (height: 1dvh) {` 是条件本身，不是声明，它不需要 vh 兜底。
+        if (/^\s*@supports\b/.test(line)) return;
+        expect(lines[index - 1], `${path}:${index + 1} 的 dvh 前面要有 vh 兜底`).toBe(line.replace(/dvh/g, 'vh'));
+      });
+    }
+  });
+
+  it('takes the panel inline touch-action back on a coarse pointer', () => {
+    // react-resizable-panels 把 `touch-action` 写**内联**在 Group / Panel 上
+    // （`orientation="horizontal"` 时是 `pan-y`，见它的 dist：`touchAction: c ===
+    // "horizontal" ? "pan-y" : "pan-x"`）。内联样式压过任何不带 `!important` 的规则，
+    // 于是真手指落在首页 / 档案库 / 书架 / 本地档案里横滑不动（横轨）、也捏不动（缩放）。
+    // 这条钉住那份抢回来的声明；`horizontalScroller.ts` 那一套「滚轮与触摸分开对待」
+    // 在 CSS 这一层被抵消过，是 2026-10-14 实测发现的。
+    const shell = read('src/styles/shell.css');
+    expect(shell, '面板上的内联 touch-action 必须被 !important 抢回来')
+      .toMatch(/\.app-shell \[data-group\][^{]*\{[^}]*touch-action:\s*auto\s*!important/);
+    // 设备判据在仓库里只留一份：阅读器与横轨必须问同一句。
+    const scroller = read('src/lib/horizontalScroller.ts');
+    expect(scroller).toMatch(/COARSE_POINTER_QUERY = '\(hover: none\), \(pointer: coarse\)'/);
+    const reader = read('src/components/ReaderScreen.tsx');
+    expect(reader).toMatch(/useMediaQuery\(COARSE_POINTER_QUERY\)/);
+    expect(reader, '别再另写一份只有 hover: none 的判据').not.toMatch(/useMediaQuery\('\(hover: none\)'\)/);
+  });
+
+  it('keeps the floating nav off the last row of every list', () => {
+    // 实测（390×900、真触摸工装）：只给 `.workspace` 补内边距时，滚到底之后最后一行的
+    // 下缘仍压在浮动底栏的上缘之下——首页 63px、档案库 35px、历史 40px、设置与书架 76px，
+    // 而且 `reachedMax` 都是 true，也就是「滚得到底但读不到尾」。尾巴长在列表自己身上的
+    // 那几条路由（`.library-shell-list` / `.route-cache-panel`）也要有一份同样的内边距。
+    const shell = read('src/styles/shell.css');
+    expect(shell, '最内层的列表也要补出底栏的高度')
+      .toMatch(/\.app-shell\.is-floating-nav \.library-shell-list,[^}]*padding-bottom:\s*calc\(var\(--safe-bottom\) \+ 80px\)/);
   });
 
   it('gives small controls a finger-sized target only where a finger is used', () => {

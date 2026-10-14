@@ -400,62 +400,10 @@ describe('settings workspace', () => {
     expect(adapter.mock.calls.some(([command]) => command === 'prune_history')).toBe(false);
   });
 
-  it('loads models directly in advanced settings and toggles decensor', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
-      if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'inference_list_models') return { ok: true, value: [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor', components: [
-        { id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' },
-        { id: 'deepcreampy-bar', name: 'DeepCreamPy Bar', role: '条状遮挡修补', path: 'deepcreampy/bar.onnx' },
-        { id: 'deepcreampy-mosaic', name: 'DeepCreamPy Mosaic', role: '马赛克修补', path: 'deepcreampy/mosaic.onnx' },
-        { id: 'fatal-pixels', name: 'Fatal Pixels', role: '修复结果增强', path: 'esrgan/4x-Fatal-Pixels.onnx' },
-      ] }] };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    setInvokeAdapterForTests(adapter);
-    renderSettings('advanced');
-    // Every stage is a row naming the model it runs; the choices are one click
-    // away in that row's floating menu, which is what keeps the section one list
-    // instead of a column of filled-in forms.
-    await screen.findByRole('button', { name: '遮挡区域检测模型' });
-    // 读一次模型列表的调用数：启动时的更新检查也会读一次（它是另一个组件），
-    // 所以这里盯的不是「恰好一次」，而是「后面翻开关不会再去读」。
-    const modelListReads = adapter.mock.calls.filter(([command]) => command === 'inference_list_models').length;
-    for (const role of ['遮挡区域检测', '条状遮挡修补', '马赛克修补', '修复结果增强']) {
-      expect(screen.getByText(role)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: `${role}模型` })).toBeInTheDocument();
-    }
-    await user.click(screen.getByRole('button', { name: '遮挡区域检测模型' }));
-    expect(await screen.findByRole('button', { name: 'Mask R-CNN' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^下载/ })).toBeNull();
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('button', { name: 'Mask R-CNN' })).toBeNull();
-    // The feature switch lives in its row, flipped in place.
-    const toggle = screen.getByRole('switch', { name: '启用去码' });
-    expect(toggle).toBeEnabled();
-    expect(toggle).toHaveClass('switch-control');
-    expect(toggle).toHaveAttribute('aria-checked', 'false');
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute('aria-checked', 'true');
-    // Drain the autosave debounce inside this test: a pending 400ms timer would
-    // otherwise fire into the next test's adapter and count as its save.
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ decensorModel: 'aletheia-lens' }) }));
-    await user.keyboard('{Escape}');
-    // Model import keeps to its row: the picker button sits on the right of it
-    // and opens the native file dialog directly, with no second level to open
-    // and no hidden file input in the DOM.
-    expect(screen.getByRole('button', { name: '选择模型文件…' })).toBeInTheDocument();
-    expect(document.querySelector('input[type="file"]')).toBeNull();
-    expect(screen.queryByRole('dialog', { name: '模型导入' })).toBeNull();
-    expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(modelListReads);
-  });
-
   it('says the model list is still loading instead of claiming nothing is installed', async () => {
     localStorage.removeItem('yomika.advanced-models');
     localStorage.removeItem('yomika.advanced-upscale-catalog');
-    // 模型列表还没回来时，两个开关都只说「正在读取模型…」。以前卡片底部还有一行状态
+    // 模型列表还没回来时，开关只说「正在读取模型…」。以前卡片底部还有一行状态
     // 文字说同一件事（同一个结论在卡片里出现两遍），现在状态只在开关自己那一行上——
     // 而且不能反过来先报「尚未安装」：还没查完就先下结论是错的。
     const adapter = vi.fn(async (command: string) => {
@@ -470,7 +418,6 @@ describe('settings workspace', () => {
 
     const upscale = await screen.findByRole('switch', { name: '启用超分' });
     expect(upscale.closest('.settings-row')).toHaveTextContent('正在读取模型…');
-    expect(screen.getByRole('switch', { name: '启用去码' }).closest('.settings-row')).toHaveTextContent('正在读取模型…');
     expect(screen.queryByText(/尚未安装/)).toBeNull();
     expect(screen.queryByText(/正在读取已安装模型|正在读取模型索引/)).toBeNull();
   });
@@ -489,33 +436,6 @@ describe('settings workspace', () => {
     expect(upscale.closest('.settings-row')).toHaveTextContent('尚未安装可用的超分模型');
     expect(upscale).toBeDisabled();
     expect(adapter).toHaveBeenCalledWith('inference_list_models', {});
-  });
-
-  it('blocks an incomplete decensor bundle with a toast instead of enabling it', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'inference_list_models') return {
-        ok: true,
-        value: [{
-          id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor',
-          components: [{ id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' }],
-        }],
-      };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
-      return { ok: true, value: [] };
-    });
-    setInvokeAdapterForTests(adapter);
-    renderSettings('advanced');
-    const toggle = await screen.findByRole('switch', { name: '启用去码' });
-
-    expect(toggle).not.toBeDisabled();
-    await user.click(toggle);
-
-    expect(toggle).toHaveAttribute('aria-checked', 'false');
-    expect(await screen.findByRole('alert')).toHaveTextContent('去码模型不完整');
-    expect(adapter.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
   });
 
   it('hides the download action for an installed upscale model', async () => {
@@ -560,26 +480,26 @@ describe('settings workspace', () => {
   it('collapses model menu rows that share an id into one option', async () => {
     const user = userEvent.setup();
     // 后端按版本各出一条记录，选项的值是 id：两个版本照旧渲染成两行一模一样的
-    // 「Mask R-CNN」。同一 id 只能有一行。
-    const decensorRecord = (version: string) => ({
-      id: 'aletheia-lens', version, scale: null, kind: 'decensor',
-      components: [{ id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' }],
+    // 「waifu2x」。同一 id 只能有一行。
+    const upscaleRecord = (version: string) => ({
+      id: 'waifu2x-upconv7', version, scale: 2, kind: 'upscale',
+      components: [],
     });
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'inference_list_models') return {
         ok: true,
-        value: [decensorRecord('1'), decensorRecord('2')],
+        value: [upscaleRecord('1'), upscaleRecord('2')],
       };
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
 
-    await user.click(await screen.findByRole('button', { name: '遮挡区域检测模型' }));
-    const menu = screen.getByRole('dialog', { name: '遮挡区域检测模型' });
-    expect(within(menu).getAllByRole('button', { name: 'Mask R-CNN' })).toHaveLength(1);
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
+    const menu = screen.getByRole('dialog', { name: '超分模型' });
+    expect(within(menu).getAllByRole('button', { name: 'waifu2x' })).toHaveLength(1);
   });
 
   it('loads saved servers from the native repository', async () => {
@@ -749,7 +669,7 @@ describe('settings workspace', () => {
 
   it('loads, saves, and immediately applies ordinary preferences', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -779,7 +699,7 @@ describe('settings workspace', () => {
   });
 
   it('keeps reader defaults in the reading section and the cache cap in advanced', async () => {
-    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'dark', defaultLayout: 'double', defaultDirection: 'rtl', cacheMaxBytes: 4_294_967_296, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -805,7 +725,7 @@ describe('settings workspace', () => {
   });
 
   it('themes through custom CSS instead of a separate accent preference', async () => {
-    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'light', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -836,7 +756,7 @@ describe('settings workspace', () => {
 
   it('exposes reader preload, cover concurrency, and upscale settings', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'list_servers') return { ok: true, value: [] };
@@ -890,9 +810,9 @@ describe('settings workspace', () => {
 
   });
 
-  it('imports a decensor zip through the unified model input', async () => {
+  it('imports a model zip through the unified model input', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     let installed: unknown[] = [];
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
@@ -900,33 +820,34 @@ describe('settings workspace', () => {
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'inference_list_models') return { ok: true, value: installed };
       if (command === 'inference_import_model_path') {
-        installed = [{ id: 'aletheia-lens', version: '1', scale: null, kind: 'decensor', components: [
-          { id: 'mrcnn', name: 'Mask R-CNN', role: '遮挡区域检测', path: 'mrcnn/weights.onnx' },
-          { id: 'deepcreampy-bar', name: 'DeepCreamPy Bar', role: '条状遮挡修补', path: 'deepcreampy/bar.onnx' },
-          { id: 'deepcreampy-mosaic', name: 'DeepCreamPy Mosaic', role: '马赛克修补', path: 'deepcreampy/mosaic.onnx' },
-          { id: 'fatal-pixels', name: 'Fatal Pixels', role: '修复结果增强', path: 'esrgan/4x-Fatal-Pixels.onnx' },
-        ] }];
+        installed = [{ id: 'waifu2x-upconv7', version: '1', scale: 2, kind: 'upscale', components: [] }];
         return { ok: true, value: installed[0] };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
-    const toggle = await screen.findByRole('switch', { name: '启用去码' });
-    expect(toggle).not.toBeDisabled();
-    await user.click(toggle);
-    expect(await screen.findByRole('alert')).toHaveTextContent('去码模型不完整');
+    // 只有磁盘上的模型才认得出来：导入之前它就说没有可用的模型，而开关本身
+    // 只等「模型列表读回来了」（空表也算读回来），点下去只会被告知没装。
+    const toggle = await screen.findByRole('switch', { name: '启用超分' });
+    expect(screen.getByText('尚未安装可用的超分模型')).toBeInTheDocument();
+    expect(toggle).toBeEnabled();
     // The bundle now travels by disk path: Rust reads the file itself instead
     // of the front end shipping hundreds of MB of numbers across the bridge.
-    setModelPickerForTests(() => Promise.resolve('E:\models\bundle.zip'));
+    setModelPickerForTests(() => Promise.resolve('E:\\models\\bundle.zip'));
     await user.click(screen.getByRole('button', { name: '选择模型文件…' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_import_model_path', { input: { path: 'E:\models\bundle.zip' } }));
-    const enabledToggle = screen.getByRole('switch', { name: '启用去码' });
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_import_model_path', { input: { path: 'E:\\models\\bundle.zip' } }));
+    const enabledToggle = screen.getByRole('switch', { name: '启用超分' });
     await vi.waitFor(() => expect(enabledToggle).toBeEnabled());
+    expect(screen.getByText('用超分模型放大阅读画面')).toBeInTheDocument();
+    // 导入那一次刷新就够了：翻开关不该再去重读模型列表。
+    const modelListReads = adapter.mock.calls.filter(([command]) => command === 'inference_list_models').length;
     await user.click(enabledToggle);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...DEFAULT_PREFERENCES, ...loaded, decensorModel: 'aletheia-lens' },
+      input: expect.objectContaining({ upscaleModel: 'waifu2x-upconv7' }),
     }));
+    // 翻开关不去重读模型列表：导入那一次刷新就够了。
+    expect(adapter.mock.calls.filter(([command]) => command === 'inference_list_models')).toHaveLength(modelListReads);
   });
 
   it('downloads the model named by each model option', async () => {
@@ -949,10 +870,6 @@ describe('settings workspace', () => {
     await user.click(await screen.findByRole('button', { name: '下载waifu2x' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
     await user.keyboard('{Escape}');
-
-    await user.click(screen.getByRole('button', { name: '遮挡区域检测模型' }));
-    await user.click(await screen.findByRole('button', { name: '下载Mask R-CNN' }));
-    expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'aletheia-lens' });
   });
 
   it('offers hosted upscale models that are not on disk yet', async () => {
@@ -1156,7 +1073,6 @@ describe('settings workspace', () => {
             'page-thumbnail': { bytes: 2048, entries: 1 },
             'reader-page': { bytes: 4096, entries: 2 },
             enhanced: { bytes: 1024, entries: 1 },
-            decensored: { bytes: 1024, entries: 1 },
             inference: { bytes: 1024, entries: 1 },
             other: { bytes: 0, entries: 0 },
           },
@@ -1190,7 +1106,6 @@ describe('settings workspace', () => {
     expect(breakdown).toHaveTextContent(/页缩略图\s*2\s*KB/);
     expect(breakdown).toHaveTextContent(/阅读页\s*4\s*KB/);
     expect(breakdown).toHaveTextContent(/超分结果\s*1\s*KB/);
-    expect(breakdown).toHaveTextContent(/去码结果\s*1\s*KB/);
     expect(breakdown).toHaveTextContent(/推理缓存\s*1\s*KB/);
     await user.click(within(cacheMenu).getByRole('button', { name: '清空图片缓存' }));
     expect(adapter).toHaveBeenCalledWith('cache_clear_images', {});
@@ -1740,7 +1655,7 @@ describe('settings workspace', () => {
 
   it('applies a basic color scheme as soon as it is picked', async () => {
     const user = userEvent.setup();
-    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', decensorModel: '', customCss: '' };
+    const loaded = { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, prefetchPages: 1, coverConcurrency: 4, startupRoute: 'home', cardStyle: 'wide', upscaleBackend: 'off', upscaleModel: '', customCss: '' };
     setInvokeAdapterForTests(async (command: string, args) => {
       if (command === 'load_preferences') return { ok: true, value: loaded };
       if (command === 'save_preferences') return { ok: true, value: (args as { input: typeof loaded }).input };

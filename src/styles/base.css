@@ -2,7 +2,27 @@
   box-sizing: border-box;
 }
 
+/* The viewport height, defined once.
+ *
+ * `dvh` is the accurate unit on mobile — it follows the URL bar in and out — but it
+ * arrived in Chrome/WebView 108, and an older renderer drops the *whole declaration*.
+ * That silently collapses the height chain below it: `.app-shell` becomes content
+ * high, `.app-main` follows, `.workspace` never overflows, and because `html, body`
+ * are `overflow: hidden` nothing on the page can be scrolled at all. (Measured by
+ * serving the built CSS with every `dvh` declaration stripped: `/` reported
+ * `sh == ch == 1469` with no scroller anywhere.)
+ *
+ * A paired `height: 100vh; height: 100dvh` does NOT survive that: the CSS minifier
+ * knows the configured target supports `dvh` and deletes the fallback as redundant —
+ * the shipped CSS was left with `height: 100dvh` alone (checked in `dist/assets/*.css`).
+ * A `@supports` block cannot be proven redundant, so the fallback lives there and every
+ * layout rule reads this one variable. 变量写在 `html` 规则里（不是单独的 `:root`）：
+ * 契约用例禁止 base/shell/reader 在层外往 `:root` 加自定义属性（`:root` 上的变量属于
+ * 「设计令牌」那一档，用户 CSS 要能盖过它们，见 `tests/design-system-contract.test.ts`
+ * 的级联层用例）；视口高度是布局内部量，不是可换肤的令牌。
+ */
 html {
+  --viewport-height: 100vh;
   min-width: 320px;
   height: 100%;
   /* Nothing here scrolls, so no scroller should be able to hand a gesture back
@@ -14,6 +34,12 @@ html {
   letter-spacing: var(--tracking-normal);
   text-rendering: optimizeLegibility;
   overflow: hidden;
+}
+
+@supports (height: 1dvh) {
+  html {
+    --viewport-height: 100dvh;
+  }
 }
 
 body {

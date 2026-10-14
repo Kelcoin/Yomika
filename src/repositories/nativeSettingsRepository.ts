@@ -39,9 +39,6 @@ export const PreferenceSnapshotSchema = z.object({
   upscaleAutoBlacklist: z.string().max(2000).default('other:3d\ncategory:cosplay\ncategory:asian porn'),
   /** The auto-enable threshold in bytes per page. Default 500 KB. */
   upscaleAutoThresholdBytes: z.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512_000),
-  /** Installed de-censoring bundle to run on reader pages. Empty means off:
-   * a bundle that is not chosen is the only sense in which it can be off. */
-  decensorModel: z.string().max(128).default(''),
   downloadDirectory: z.string().max(4096).default(''),
   ehFavoriteDeleteSync: z.boolean().default(false),
   confirmEhFavoriteDelete: z.boolean().default(true),
@@ -86,7 +83,7 @@ export const PreferenceSnapshotSchema = z.object({
   /** 每层参数的 JSON 数组（形状见 dlssnr 的 PassSettings）。存字符串是为了让后端
    * 保持平台无关：非 Windows 的构建也能原样存住这份偏好。 */
   dlssnrPasses: z.string().max(4000).default(''),
-  /** 本机作为算力中心：局域网里让移动端借这台机器的超分/去码/DLSSNR。 */
+  /** 本机作为算力中心：局域网里让移动端借这台机器的超分/DLSSNR。 */
   computeCenterEnabled: z.boolean().default(false),
   computeCenterPort: z.number().int().min(1024).max(65535).default(47653),
   /** 算力中心的令牌：要能显示给用户抄到移动端上，所以明文存在本机设置里。 */
@@ -95,7 +92,7 @@ export const PreferenceSnapshotSchema = z.object({
   remoteComputeUrl: z.string().max(256).default(''),
   remoteComputeToken: z.string().max(128).default(''),
   /** 远端处理用的参数（JSON 对象）。只作用于远端那一侧的处理，不改本机自己的
-   * 超分/去码/DLSSNR 设置，也不去改远端机器上的设置。 */
+   * 超分/DLSSNR 设置，也不去改远端机器上的设置。 */
   remoteComputeOps: z.string().max(4000).default(''),
   /** 导入导出范围：手动带走的文件里装哪几类（记录与设置，外加可勾的凭据）。
    * 与同步范围无关，默认只勾记录与设置。 */
@@ -132,7 +129,6 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   upscaleAutoWhitelist: 'category:doujinshi\ncategory:manga',
   upscaleAutoBlacklist: 'other:3d\ncategory:cosplay\ncategory:asian porn',
   upscaleAutoThresholdBytes: 512_000,
-  decensorModel: '',
   downloadDirectory: '',
   ehFavoriteDeleteSync: false,
   confirmEhFavoriteDelete: true,

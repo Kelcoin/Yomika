@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { UnifiedImageCache, peekCachedImage, type CachedImageData, type ImageCacheRepository } from '../../src/lib/unifiedImageCache';
 import {
-  READER_DECENSOR_STAGE_ID,
   READER_UPSCALE_STAGE_ID,
   loadLocalRenditions,
   loadReaderComputedPage,
@@ -114,7 +113,6 @@ interface FakeBridge extends ReaderComputedPageBridge {
 function bridge(options: {
   artifacts?: ComputeArtifactRecord[];
   submit?: () => Promise<Result<ComputeSubmitted>>;
-  decensor?: () => Promise<Result<ComputeSubmitted>>;
   onCall?: (name: string) => void;
 } = {}): FakeBridge {
   const handlers = new Set<(event: ComputeJobSnapshot) => void>();
@@ -139,13 +137,6 @@ function bridge(options: {
           },
         });
     }),
-    // 这道门默认答「不许走」；要走去码那条路的用例自己给 `decensor`。
-    submitDecensorPage: vi.fn(async (): Promise<Result<ComputeSubmitted>> => (options.decensor
-      ? options.decensor()
-      : {
-        ok: false as const,
-        error: { code: 'COMPUTE_BAD_REQUEST' as const, message: '这条用例不走去码那道门', retryable: false },
-      })),
     cancel: vi.fn(async () => ({ ok: true as const, value: 'alreadyTerminal' as const })),
     jobArtifacts: vi.fn(async () => ({ ok: true as const, value: options.artifacts ?? [] })),
     acquireArtifact: vi.fn(async (_jobId: string, artifactId: string) => ({ ok: true as const, value: lease(artifactId) })),
@@ -271,11 +262,11 @@ describe('loadReaderComputedPage', () => {
     // 不是按「挑了三张里的第几张」。
     const b = bridge({
       artifacts: [
-        artifact({ stageId: 'decensor', artifactId: 'decensor-1' }),
+        artifact({ stageId: 'other-stage', artifactId: 'other-1' }),
         artifact({ artifactId: 'upscale-1' }),
         artifact({ artifactId: 'unverified-1', verified: false }),
         artifact({ artifactId: 'staging-only-1', cacheRelative: null }),
-        artifact({ stageId: 'decensor', artifactId: 'decensor-2' }),
+        artifact({ stageId: 'other-stage', artifactId: 'other-2' }),
       ],
     });
     const { cache } = readonlyCache();
@@ -593,100 +584,34 @@ describe('loadReaderComputedPage', () => {
     expect(b.listeners()).toBe(0);
   });
 
-  it('hands the first stage over as soon as it lands, then keeps waiting for the answer', async () => {
-    // 一条链（去码 → 超分）的意义就在这里：第一步的产物一出来就先上屏，用户不必盯着原图
-    // 等第二步跑完；而**返回值**只代表最后那一版（§9.1 ⑦：后面的阶段失败了，前面成功的
-    // 那一版留着）。
-    // 中间那一版的身份与答案那一版不同（`rendition: 'decensored'`）：两张图在同一张账上并存。
-    const decensored: ImageCacheIdentity = { ...IDENTITY, rendition: 'decensored' };
+  it('picks the artifact for the stage the reader declared, and nothing else', async () => {
+    // 阅读器这一版只声明一档（超分），列表里别的阶段（将来再多一档也走这条路）不该被认领。
     const b = bridge({
       artifacts: [
-        artifact({ stageId: READER_DECENSOR_STAGE_ID, artifactId: 'decensor-1' }),
+        artifact({ stageId: 'other-stage', artifactId: 'other-1' }),
         artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' }),
       ],
-    });
-    const { cache } = readonlyCache();
-    const ready: string[] = [];
-
-    const promise = loadReaderComputedPage({
-      repository: b,
-      cache,
-      stages: [
-        claim({ stageId: READER_DECENSOR_STAGE_ID, identity: decensored, onReady: (handle) => ready.push(handle.url) }),
-        claim(),
-      ],
-      submit: (repository) => repository.submitReaderPage(PAYLOAD),
-    });
-    await flush();
-    b.emit(snapshot({ running: { stage: READER_DECENSOR_STAGE_ID, index: 0 } }, 1));
-    // 第一阶段先到：`pick` 按声明次序认领，所以这一轮只会拿起去码那一张。
-    await vi.waitFor(() => expect(ready).toEqual(['yomika-image://assets/decensor-1']));
-
-    b.emit(snapshot('completed', 2));
-    const handle = await promise;
-
-    expect(handle?.url).toBe('yomika-image://assets/upscale-1');
-    // 认领次序就是声明次序：去码先上屏，答案后上屏。
-    expect(vi.mocked(b.acquireArtifact).mock.calls.map((call) => call[1])).toEqual([
-      'decensor-1',
-      'upscale-1',
-    ]);
-    expect(peekCachedImage(cache, decensored)?.url).toBe('yomika-image://assets/decensor-1');
-    cache.release(peekCachedImage(cache, decensored)!);
-    cache.release(handle!);
-  });
-
-  it('does not claim an intermediate stage nobody asked to display', async () => {
-    // 中间阶段没声明 `onReady` 就不认领：认领了没人还租借，等于拿宿主的 pin 去占缓存。
-    const b = bridge({
-      artifacts: [
-        artifact({ stageId: READER_DECENSOR_STAGE_ID, artifactId: 'decensor-1' }),
-        artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' }),
-      ],
+      submit: () => success(),
     });
     const { cache } = readonlyCache();
 
-    const handle = await loadReaderComputedPage({
-      repository: b,
-      cache,
-      stages: [claim({ stageId: READER_DECENSOR_STAGE_ID }), claim()],
-      submit: async () => ({
-        ok: true,
-        value: {
-          jobId: 'job-1',
-          subscriptionId: 3,
-          coalesced: false,
-          snapshot: snapshot('completed', 1),
-          evicted: null,
-        },
-      }),
-    });
+    const handle = await load(b, cache);
 
-    expect(handle?.url).toBe('yomika-image://assets/upscale-1');
     expect(b.acquireArtifact).toHaveBeenCalledTimes(1);
     expect(b.acquireArtifact).toHaveBeenCalledWith('job-1', 'upscale-1');
+    expect(handle?.url).toBe('yomika-image://assets/upscale-1');
     cache.release(handle!);
   });
 });
 
-const DECENSOR_MODEL = 'aletheia-lens';
 const UPSCALE_MODEL = 'realcugan-2x-conservative';
 
-const DECENSORED_IDENTITY: ImageCacheIdentity = { ...IDENTITY, rendition: 'decensored', modelId: DECENSOR_MODEL };
-const ENHANCED_FROM_DECENSORED: ImageCacheIdentity = { ...IDENTITY, source: 'decensored', decensorModelId: DECENSOR_MODEL };
 const ENHANCED_FROM_PAGE: ImageCacheIdentity = { ...IDENTITY, source: 'reader-page' };
 
 function success(jobId = 'job-1', state: ComputeJobState = 'completed', sequence = 1): Promise<Result<ComputeSubmitted>> {
   return Promise.resolve({
     ok: true as const,
     value: { jobId, subscriptionId: 3, coalesced: false, snapshot: snapshot(state, sequence), evicted: null },
-  });
-}
-
-function refused(code: 'COMPUTE_MODEL_UNAVAILABLE' | 'COMPUTE_BAD_REQUEST'): Promise<Result<ComputeSubmitted>> {
-  return Promise.resolve({
-    ok: false as const,
-    error: { code, message: '这一步在派发期就被拒了', retryable: false },
   });
 }
 
@@ -704,12 +629,8 @@ function local(
     pageIndex: 7,
     generation: 0,
     priority: 'foreground',
-    decensorModel: DECENSOR_MODEL,
     upscaleModel: UPSCALE_MODEL,
-    decensoredIdentity: DECENSORED_IDENTITY,
-    enhancedFromDecensoredIdentity: ENHANCED_FROM_DECENSORED,
     enhancedFromPageIdentity: ENHANCED_FROM_PAGE,
-    onDecensored: () => undefined,
     onEngine: () => undefined,
     onFailure: () => undefined,
     ...overrides,
@@ -717,133 +638,28 @@ function local(
 }
 
 describe('loadLocalRenditions', () => {
-  it('asks for both stages in one submission, and hands the first one up before the answer', async () => {
-    // 一条链 = 一次提交（链的第二阶段只能吃第一阶段的产物，见 `loadLocalRenditions` 的 doc）。
-    // 但「一次提交」与「用户先看到哪一版」是两件事：去码那一版一出来就先交出去。
-    const b = bridge({
-      artifacts: [
-        artifact({ stageId: READER_DECENSOR_STAGE_ID, artifactId: 'decensor-1' }),
-        artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' }),
-      ],
-      decensor: () => success(),
-    });
-    const { cache } = readonlyCache();
-    const ready: string[] = [];
-    const failures: string[] = [];
-
-    const renditions = await local(b, cache, {
-      onDecensored: (handle) => ready.push(handle.url),
-      onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
-    });
-
-    expect(vi.mocked(b.submitDecensorPage)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(b.submitDecensorPage).mock.calls[0]![0]).toMatchObject({
-      modelId: DECENSOR_MODEL,
-      upscaleModelId: UPSCALE_MODEL,
-    });
-    // 第二条命令一次都不该被碰到：链是这一档唯一的路。
-    expect(vi.mocked(b.submitReaderPage)).not.toHaveBeenCalled();
-    expect(ready).toEqual(['yomika-image://assets/decensor-1']);
-    // 中间那一版既走 `onDecensored` 上屏，**也**在返回值里：它是「去码这一步成了」的证据，
-    // 调用方靠它才不会把链式成功误报成「去码没跑成」（返回值的 `enhanced` 才是终点那一版）。
-    expect(renditions.censored?.url).toBe('yomika-image://assets/decensor-1');
-    expect(renditions.enhanced?.url).toBe('yomika-image://assets/upscale-1');
-    expect(failures).toEqual([]);
-
-    cache.release(renditions.enhanced!);
-    cache.release(renditions.censored!);
-  });
-
-  it('falls back to decensor-only when the named upscaler cannot run in the worker at all', async () => {
-    // 整件被拒时不能就这么算了：被拒的是**整件**任务，连已经跑得动的去码一起拿不到，那比
-    // 今天还差。所以退到只去码——保住已经能显示的那一版（§9.1 ⑦）。
-    let attempt = 0;
-    const b = bridge({
-      artifacts: [artifact({ stageId: READER_DECENSOR_STAGE_ID, artifactId: 'decensor-1' })],
-      decensor: () => {
-        attempt += 1;
-        return attempt === 1 ? refused('COMPUTE_MODEL_UNAVAILABLE') : success();
-      },
-    });
-    const { cache } = readonlyCache();
-    const failures: string[] = [];
-
-    const renditions = await local(b, cache, {
-      onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
-    });
-
-    expect(vi.mocked(b.submitDecensorPage)).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(b.submitDecensorPage).mock.calls[0]![0]).toMatchObject({ upscaleModelId: UPSCALE_MODEL });
-    expect(vi.mocked(b.submitDecensorPage).mock.calls[1]![0].upscaleModelId).toBeUndefined();
-    // 被拒过的模型不再排第二件任务：它进不了 worker，再试还是同一句话。
-    expect(vi.mocked(b.submitReaderPage)).not.toHaveBeenCalled();
-    expect(renditions.censored?.url).toBe('yomika-image://assets/decensor-1');
-    expect(renditions.enhanced).toBeUndefined();
-    // 账记在**超分**头上：只去码那一档随后跑成了，说明跑不了的就是点名的那个超分模型。
-    expect(failures).toEqual([`upscale:${UPSCALE_MODEL}:COMPUTE_MODEL_UNAVAILABLE`]);
-
-    cache.release(renditions.censored!);
-  });
-
-  it('blames the decensor when the chain was refused and the decensor-only retry failed too', async () => {
-    // 「拿不到模型」是一句笼统的话：去码模型包没装好也会让整条链在派发期就被拒。两档都没落地
-    // 时账得记在**第一阶段**头上——记在超分头上，用户会去查一个其实没问题的模型。
-    const b = bridge({
-      artifacts: [],
-      decensor: () => refused('COMPUTE_MODEL_UNAVAILABLE'),
-    });
-    const { cache } = readonlyCache();
-    const failures: string[] = [];
-
-    const renditions = await local(b, cache, {
-      onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
-    });
-
-    expect(vi.mocked(b.submitDecensorPage)).toHaveBeenCalledTimes(2);
-    expect(renditions.censored).toBeUndefined();
-    expect(renditions.enhanced).toBeUndefined();
-    expect(failures).toEqual([`decensor:${DECENSOR_MODEL}:COMPUTE_MODEL_UNAVAILABLE`]);
-  });
-
-  it('does not retry a decensor that ran and failed, but still upscales from the original page', async () => {
-    // 跑起来之后再失败是另一回事：那条路不再重试（重试由宿主/用户决定），但超分那一步与去码
-    // 本来互不依赖——今天「去码没成也从原图放大」这条行为必须留着。
+  it('submits the upscale stage once and hands back the artifact it adopted', async () => {
     const b = bridge({
       artifacts: [artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' })],
       submit: () => success(),
-      decensor: () => refused('COMPUTE_BAD_REQUEST'),
     });
     const { cache } = readonlyCache();
+    const failures: string[] = [];
 
-    const renditions = await local(b, cache);
+    const renditions = await local(b, cache, {
+      onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
+    });
 
-    expect(vi.mocked(b.submitDecensorPage)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(b.submitReaderPage)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(b.submitReaderPage).mock.calls[0]![0]).toMatchObject({ modelId: UPSCALE_MODEL });
-    expect(renditions.censored).toBeUndefined();
     expect(renditions.enhanced?.url).toBe('yomika-image://assets/upscale-1');
-
-    cache.release(renditions.enhanced!);
-  });
-
-  it('upscales from the original page when the decensor step is not turned on', async () => {
-    const b = bridge({
-      artifacts: [artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' })],
-      submit: () => success(),
-    });
-    const { cache } = readonlyCache();
-
-    const renditions = await local(b, cache, { decensorModel: undefined });
-
-    expect(vi.mocked(b.submitDecensorPage)).not.toHaveBeenCalled();
-    expect(vi.mocked(b.submitReaderPage)).toHaveBeenCalledTimes(1);
-    expect(renditions.enhanced?.url).toBe('yomika-image://assets/upscale-1');
+    expect(failures).toEqual([]);
 
     cache.release(renditions.enhanced!);
   });
 
   it('carries the chain diagnostics out so a page that fails silently can still be logged', async () => {
-    // 2026-10-13 真机：超分/去码「失败」时错误日志里一行都没有——这条链的 note（产物解不开、
+    // 2026-10-13 真机：超分「失败」时错误日志里一行都没有——这条链的 note（产物解不开、
     // 租借拿不到、摘不掉…）在 `loadLocalRenditions` 这一层被丢掉了，没人把它写进日志。
     // 这条把「话有没有传出来」钉住：把 `onDiagnostic` 那一行删掉，它立刻转红。
     setImageDecoderForTests(async () => {
@@ -855,7 +671,6 @@ describe('loadLocalRenditions', () => {
     const failures: string[] = [];
 
     const promise = local(b, cache, {
-      decensorModel: undefined,
       onDiagnostic: (message) => diagnostics.push(message),
       onFailure: (stage, model, failure) => failures.push(`${stage}:${model}:${failure.code}`),
     });

@@ -12,7 +12,7 @@ pub mod messages;
 pub use frame::{read_frame, write_frame, FrameError, MAX_FRAME_BYTES};
 pub use messages::{
     encode, parse, validate_message, ANIME4K_ENGINE_ID, ArtifactReady, ArtifactRef, Budgets,
-    BuildInfo, DecensorGrant, DlssnrGrant, DLSSNR_ENGINE_ID, EngineFallback, EnginePolicy,
+    BuildInfo, DlssnrGrant, DLSSNR_ENGINE_ID, EngineFallback, EnginePolicy,
     EngineReport, EpochOnly, Failed, GrantedFile, Hello, HelloAck, JobRef, Message, PipelineStage,
     Precision, Priority, ProtocolError, Run, RunInput, StageProgress, StageStarted,
     PASSTHROUGH_ENGINE_ID, PROTOCOL_MAJOR, SCRATCH_DIR_NAME, WORKER_RUNTIME_LABEL,

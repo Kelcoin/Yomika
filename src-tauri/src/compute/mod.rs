@@ -12,7 +12,6 @@ use std::sync::Arc;
 pub mod artifacts;
 pub mod asset_protocol;
 pub mod commands;
-pub mod decensor;
 pub mod inputs;
 pub mod job_object;
 pub mod leases;

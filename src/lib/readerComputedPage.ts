@@ -6,31 +6,23 @@ import type {
   ComputePriority,
   ComputeSubmitted,
   ComputedImageLease,
-  DecensorPagePayload,
   ReaderPagePayload,
 } from '../domain/compute';
 import type { CommandResult } from '../domain/result';
 import { decodeImageStrict } from './decodeImage';
 import { peekCachedImage, type ImageHandle, type UnifiedImageCache } from './unifiedImageCache';
 
-/** 阅读器那条超分阶段的 id（宿主 `src-tauri/src/compute/reader.rs` 的 `UPSCALE_STAGE_ID`）。 */
-export const READER_UPSCALE_STAGE_ID = 'upscale';
-
-/** 去码阶段的 id（宿主 `src-tauri/src/compute/decensor.rs` 的 `DECENSOR_STAGE_ID`）。
+/** 阅读器那条超分阶段的 id（宿主 `src-tauri/src/compute/reader.rs` 的 `UPSCALE_STAGE_ID`）。
  *
- * 与 `READER_UPSCALE_STAGE_ID` 一样，两个必须一起改：产物是按阶段登记的，拿错阶段的产物就
- * 等于把别的中间结果当成这一页。 */
-export const READER_DECENSOR_STAGE_ID = 'decensor';
+ * 产物是按阶段登记的，拿错阶段的产物就等于把别的中间结果当成这一页。 */
+export const READER_UPSCALE_STAGE_ID = 'upscale';
 
 /** 宿主的 compute 那道门（`NativeComputeRepository` 自然是它的实现）。
  *
- * 两道提交口并排摆着，因为它们是**两件不同的事**：阅读器那道门只要「哪一页 + 哪个模型」，
- * 去码那道门要的是「哪一页 + 哪个去码包 +（可选）补完再拿哪个模型放大」。这里不替调用方
- * 决定该走哪一道——`submit` 那个回调自己挑。 */
+ * 这道门只要「哪一页 + 哪个模型」。 */
 export interface ReaderComputedPageBridge {
   onJobChanged(handler: (event: ComputeJobSnapshot) => void): () => void;
   submitReaderPage(payload: ReaderPagePayload): Promise<CommandResult<ComputeSubmitted>>;
-  submitDecensorPage(payload: DecensorPagePayload): Promise<CommandResult<ComputeSubmitted>>;
   cancel(jobId: string, subscriptionId: number): Promise<CommandResult<ComputeCancelOutcome>>;
   jobArtifacts(jobId: string): Promise<CommandResult<ComputeArtifactRecord[]>>;
   acquireArtifact(jobId: string, artifactId: string): Promise<CommandResult<ComputedImageLease>>;
@@ -62,12 +54,12 @@ export const READER_ARTIFACT_UNDECODABLE = 'READER_ARTIFACT_UNDECODABLE';
 
 /** 一次请求里的一条阶段：要哪个阶段的产物、认领进哪张账、拿到之后交给谁。
  *
- * 一条链就是这样一个数组（去码 → 超分）。**数组最后一条是这次请求的答案**，前面几条是
+ * 一条链就是这样一个数组。**数组最后一条是这次请求的答案**，前面几条是
  * 路上能先拿到的中间版本（拿到了就 `onReady` 交出去，先上屏，请求还没结束）。
  *
  * 不设「最后一条」这种布尔字段：次序本身就是声明，少一个能被写错的状态。 */
 export interface ReaderComputedStageClaim {
-  /** 宿主的阶段 id（`READER_DECENSOR_STAGE_ID` / `READER_UPSCALE_STAGE_ID`）。 */
+  /** 宿主的阶段 id（`READER_UPSCALE_STAGE_ID`）。 */
   stageId: string;
   /** 这一阶段在阅读器里的身份：回来那个句柄按它记账、按它淘汰。 */
   identity: ImageCacheIdentity;
@@ -106,8 +98,8 @@ export interface LoadReaderComputedPageOptions {
  * - 任何一步失败都返回 `undefined`，阅读器照旧显示手上的那一版（与以前 `.catch(() => undefined)`
  *   同义）。取消不是失败，但也同样什么都不给。
  *
- * 链上多出来的一条：**中间阶段先上屏**。第一阶段（去码）的产物一出来就 `onReady` 交出去，
- * 请求继续等第二阶段。这正是 §9.1 ⑦ 要的「后面的阶段失败了，前面成功的那一版留着」——
+ * 链上多出来的一条：**中间阶段先上屏**。中间阶段的产物一出来就 `onReady` 交出去，
+ * 请求继续等最后那一条。这正是 §9.1 ⑦ 要的「后面的阶段失败了，前面成功的那一版留着」——
  * 返回值只代表答案那一版，但界面上已经有过一版能看的图。
  *
  * 租借的出口只有一个：`cache.adopt` 里那个 `release` 闭包。图被预算淘汰、翻页释放、阅读器
@@ -310,21 +302,11 @@ export async function loadReaderComputedPage(
   return handle;
 }
 
-/** 本地那一档（`job.engine === 'local'`）的完整编排：去码 → 超分，**一条链**，带降级阶梯。
+/** 本地那一档（`job.engine === 'local'`）的编排：超分单阶段，起点是原图。
  *
- * 为什么要走一条链：宿主那道去码门能一次收下两个阶段（`upscaleModelId`），是因为链的第二
- * 阶段只能吃第一阶段的产物——那份产物只有内容寻址的落点、没有按修订号登记的缓存行，出了
- * 这件任务就没人能按身份把它找回来。而「一次提交」与「用户先看到哪一版」是两件事：第一步
- * 的产物一出来就先上屏（`onDecensored`），请求继续等第二步；第二步没成，第一步那一版留着
- * （§9.1 ⑦）。
- *
- * 阶梯只在**派发期被拒**时往下走，跑起来之后再失败不重试：
- * 1. 有去码模型时：去码 [+ 超分] 一条链。整件被拒（`COMPUTE_MODEL_UNAVAILABLE`——比如
- *    点名的超分模型是编进宿主 shader 链的那种预设，worker 里没有它）时退到第 2 档：
- *    被拒的是**整件**任务，连已经能跑的去码一起拿不到，那比原来还差。
- * 2. 只去码：至少把跑得了的那一步拿到手。
- * 3. 超分单阶段、起点是原图：去码一步都没成时的兜底（今天的行为）。被
- *    `COMPUTE_MODEL_UNAVAILABLE` 拒过的模型不再试第二遍——它进不了 worker，再试还是同一句话。
+ * 「一次提交」与「用户先看到哪一版」是两件事：产物一出来就先上屏（§9.1 ⑦），请求只等这一
+ * 条。起点是原图还是别的产物由身份自己说（`enhancedFromPageIdentity` 的
+ * `source: 'reader-page'`）。
  */
 export interface LocalRenditionOptions {
   repository: ReaderComputedPageBridge;
@@ -335,151 +317,58 @@ export interface LocalRenditionOptions {
   pageIndex: number;
   generation: number;
   priority: ComputePriority;
-  /** 去码模型包的 id；没开去码就是 `undefined`。 */
-  decensorModel: string | undefined;
   /** 超分模型 id；没开超分就是 `undefined`。 */
   upscaleModel: string | undefined;
-  /** 去码那一版的身份（`rendition: 'decensored'`）。 */
-  decensoredIdentity: ImageCacheIdentity;
-  /** 终点那一版的身份，起点是去码产物（`rendition: 'enhanced'`, `source: 'decensored'`）。 */
-  enhancedFromDecensoredIdentity: ImageCacheIdentity;
   /** 终点那一版的身份，起点是原图（`rendition: 'enhanced'`, `source: 'reader-page'`）。 */
   enhancedFromPageIdentity: ImageCacheIdentity;
-  /** 第一阶段一拿到就叫一次：调用方负责把它认领进那一页（显示 + 记账）。 */
-  onDecensored: (handle: ImageHandle) => void;
   /** 某一阶段的引擎交代（`policy` + 真回退时的「想要谁/用了谁/为什么」）。 */
   onEngine: (model: string, engine: ReaderPageEngine) => void;
   /** 输掉的那一阶段的失败。给用户看的那条路。
    *
-   * 第一个参数是**哪一阶段**输的，不是「谁被点名了」：链式两阶段整件被拒时，两头的模型
-   * 都在任务里，只有「谁没落地」能说明该把这笔账记在谁头上——记错方向用户会去查错的模型。 */
-  onFailure: (stage: 'decensor' | 'upscale', model: string, failure: ReaderPageFailure) => void;
+   * 第一个参数是**哪一阶段**输的，不是「谁被点名了」：记错方向用户会去查错的模型。 */
+  onFailure: (stage: 'upscale', model: string, failure: ReaderPageFailure) => void;
   /** 一路上的诊断（拿不到租借、产物解不开、产物列表拿不到…）。默认丢掉，调用方接住才能进日志：
-   * 2026-10-13 的真机上「超分/去码失效」时错误日志里什么都没有，就是因为这条线没人接。 */
+   * 2026-10-13 的真机上「超分失效」时错误日志里什么都没有，就是因为这条线没人接。 */
   onDiagnostic?: (message: string, detail?: Record<string, unknown>) => void;
 }
 
-/** 本地这一档算出来的东西。两个都可以没有：算不成就是空对象，页面照旧显示手上的那一版。 */
+/** 本地这一档算出来的东西。没有就是没算成：页面照旧显示手上的那一版。 */
 export interface LocalRenditions {
-  censored?: ImageHandle;
   enhanced?: ImageHandle;
 }
 
 export async function loadLocalRenditions(options: LocalRenditionOptions): Promise<LocalRenditions> {
   const { repository, cache, signal, scopeId, archiveId, pageIndex, generation, priority } = options;
-  const { decensorModel, upscaleModel, onDecensored, onEngine, onFailure, onDiagnostic } = options;
+  const { upscaleModel, onEngine, onFailure, onDiagnostic } = options;
   const base = { scopeId, archiveId, pageIndex, generation, priority, deadlineMs: 0 };
+  if (upscaleModel === undefined) return {};
 
-  /** 运行期真正的答案在这里攒：`enhanced` 是终点那一版，`censored` 是路上的那一版。 */
-  let censored: ImageHandle | undefined;
+  /** 运行期真正的答案在这里攒：`enhanced` 是终点那一版。 */
   let enhanced: ImageHandle | undefined;
-  /** 最后一次尝试的失败码。判断「整件被拒」靠它，不是靠有没有图——跑起来了再失败是另一回事。 */
+  /** 最后一次尝试的失败码。跑起来了再失败是另一回事，这里只收「没算成」。 */
   let failure: ReaderPageFailure | undefined;
-  /** 那一次尝试里有没有点名要超分阶段（决定失败该记在谁头上）。 */
-  let upscaleAttempted = false;
-  /** 被 `COMPUTE_MODEL_UNAVAILABLE` 拒过的超分模型：它进不了 worker，别为它再排一件任务。 */
-  let refusedUpscaler = false;
 
-  const attempt = async (
-    stages: ReaderComputedStageClaim[],
-    submit: (bridge: ReaderComputedPageBridge) => Promise<CommandResult<ComputeSubmitted>>,
-    /** 这一次提交的答案是不是去码那一版（单阶段去码时才为真）。 */
-    answerIsDecensored: boolean,
-    upscaling: boolean,
-  ): Promise<void> => {
-    failure = undefined;
-    upscaleAttempted = upscaling;
-    const handle = await loadReaderComputedPage({
-      repository,
-      cache,
-      stages,
-      submit,
-      signal,
-      // `exactOptionalPropertyTypes` 下不能把 `undefined` 显式塞进可选字段：要么给函数，
-      // 要么这个键根本不在。少了这一条话就传不出去——那条链失败时日志里会一行都没有。
-      ...(onDiagnostic ? { onDiagnostic } : {}),
-      onFailure: (value) => { failure = value; },
-    });
-    if (handle === undefined) return;
-    if (answerIsDecensored) censored = handle;
-    else enhanced = handle;
-  };
-
-  const decensoredClaim = (model: string): ReaderComputedStageClaim => {
-    // 去码是中间阶段：一拿到就先上屏，同时**留在返回值里**。返回值里那一份不是给显示用的
-    // （显示走 `onDecensored`），而是「去码这一步成了」的证据：链式两阶段成功时中间那一版
-    // 也在这里，调用方就不会把它当成失败（提示与 dlssnr/remote 的起点都看这个字段）。
-    return {
-      stageId: READER_DECENSOR_STAGE_ID,
-      identity: options.decensoredIdentity,
-      onReady: (handle) => {
-        censored = handle;
-        onDecensored(handle);
-      },
-      onEngine: (engine) => onEngine(model, engine),
-    };
-  };
-  const upscaleClaim = (identity: ImageCacheIdentity): ReaderComputedStageClaim => ({
-    stageId: READER_UPSCALE_STAGE_ID,
-    identity,
-    onEngine: (engine) => onEngine(upscaleModel ?? '', engine),
+  const handle = await loadReaderComputedPage({
+    repository,
+    cache,
+    stages: [{
+      stageId: READER_UPSCALE_STAGE_ID,
+      identity: options.enhancedFromPageIdentity,
+      onEngine: (engine) => onEngine(upscaleModel, engine),
+    }],
+    submit: (bridge) => bridge.submitReaderPage({ ...base, modelId: upscaleModel }),
+    signal,
+    // `exactOptionalPropertyTypes` 下不能把 `undefined` 显式塞进可选字段：要么给函数，
+    // 要么这个键根本不在。少了这一条话就传不出去——那条链失败时日志里会一行都没有。
+    ...(onDiagnostic ? { onDiagnostic } : {}),
+    onFailure: (value) => { failure = value; },
   });
+  if (handle !== undefined) enhanced = handle;
 
-  if (decensorModel !== undefined) {
-    const upscaling = upscaleModel !== undefined;
-    await attempt(
-      upscaling
-        ? [decensoredClaim(decensorModel), upscaleClaim(options.enhancedFromDecensoredIdentity)]
-        : [decensoredClaim(decensorModel)],
-      (bridge) => bridge.submitDecensorPage({
-        ...base,
-        modelId: decensorModel,
-        ...(upscaling ? { upscaleModelId: upscaleModel } : {}),
-      }),
-      !upscaling,
-      upscaling,
-    );
-    if (upscaling && censored === undefined && enhanced === undefined && failure?.code === 'COMPUTE_MODEL_UNAVAILABLE') {
-      // 整件被拒：点名的超分模型进不了 worker。守住已经能跑的那一步——只去码。
-      refusedUpscaler = true;
-      const refusal = failure;
-      await attempt(
-        [decensoredClaim(decensorModel)],
-        (bridge) => bridge.submitDecensorPage({ ...base, modelId: decensorModel }),
-        true,
-        false,
-      );
-      // 账等这一步落定再记：只去码那一档跑成了，才说明跑不了的是点名的那个超分模型；
-      // 两档都没落地的情形留给下面那段——那句笼统的「拿不到模型」到底是谁的，只有
-      // 「第一阶段有没有产出」说得清，先记在超分头上会让用户去查错的模型。
-      if (censored !== undefined) onFailure('upscale', upscaleModel, refusal);
-    }
-  }
-
-  // 去码一步都没成（或压根没开），超分仍从原图开始——今天就是这个行为。
-  if (
-    enhanced === undefined
-    && censored === undefined
-    && upscaleModel !== undefined
-    && !refusedUpscaler
-  ) {
-    await attempt(
-      [upscaleClaim(options.enhancedFromPageIdentity)],
-      (bridge) => bridge.submitReaderPage({ ...base, modelId: upscaleModel }),
-      false,
-      true,
-    );
-  }
-  if (failure !== undefined) {
-    // 谁没落地就记谁的账。链式两阶段整件被拒时只记在超分头上会把用户指错方向——去码模型包
-    // 没装好也会让整条链在派发期就被拒；反过来，去码那一版已经在手上（链成了、只是第二步
-    // 没成）时这笔账才是超分的。
-    if (decensorModel !== undefined && censored === undefined) onFailure('decensor', decensorModel, failure);
-    else if (upscaleAttempted && upscaleModel !== undefined && enhanced === undefined) onFailure('upscale', upscaleModel, failure);
-  }
+  if (failure !== undefined && enhanced === undefined) onFailure('upscale', upscaleModel, failure);
 
   return {
-    ...(censored === undefined ? {} : { censored }),
     ...(enhanced === undefined ? {} : { enhanced }),
   };
 }
+

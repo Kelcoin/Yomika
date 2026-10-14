@@ -17,10 +17,7 @@
 //! [`onnx`]（ONNX 超分执行体 + 实测探针——**同一个模型只开一次会话**）、
 //! [`probe`]（实测结论的记账：同一个问题只真跑一次，键是内容指纹而不是路径）、
 //! [`fit`]（把模型输出缩到「交出去」的尺寸：宿主与 worker 共用这一份）、
-//! [`decensor`]（去码的几何与合成：一个检测框怎么变成一扇方窗口、结果怎么贴回页面
-//! ——与超分管道同样地不认识具体模型）、[`detect`]（Mask R-CNN 检测器：一页怎么变成
-//! 三份张量、框与掩膜怎么搬回页面坐标——**几何那一半不门 feature**，只有开会话的
-//! [`detect::DetectorEngine`] 门在 `ort` 后面）、[`image_kind`]（这是哪一类容器、动不动、
+//! [`image_kind`]（这是哪一类容器、动不动、
 //! 画布多大——只看头几个字节。宿主与 worker 共用这一份判定，否则同一张图会在一边是动图、
 //! 在另一边成了静态首帧）、[`anime4k`]（Anime4K 的内置 shader 链：解析器把钉住的 GLSL 解成
 //! 一条 pass 链，CPU 解释器是任何目标都能跑的参照执行体，GPU 那条路门在 feature 后面
@@ -42,8 +39,6 @@
 pub mod anime4k;
 pub mod cancel;
 pub mod cpu_scale;
-pub mod decensor;
-pub mod detect;
 // DLSSNR：引擎那一半门在 `dlssnr` feature 后面（没有垫片就没有那条路），元数据那一半
 // 不门——宿主只摘 feature、不摘答案。
 #[cfg(windows)]
@@ -53,10 +48,6 @@ pub mod error;
 pub mod fit;
 pub mod image_kind;
 pub mod inputs;
-// 修补执行体整个就是「一次模型运行」，所以和 onnx 一样门在 feature 后面；去码的
-// 几何与合成（`decensor`）不门，因为那一半是纯算术。
-#[cfg(feature = "ort")]
-pub mod inpaint;
 // 只有真的要把一次计算跑起来时才需要 ORT；没有这个 feature 时核心的其余部分照样
 // 编译（宿主默认构建与 Android 目标走的就是那条路，docs/71 §5.2）。
 #[cfg(feature = "ort")]

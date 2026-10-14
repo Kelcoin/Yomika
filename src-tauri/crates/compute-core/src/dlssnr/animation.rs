@@ -44,17 +44,55 @@ use crate::cancel::CancelToken;
 /// 现，结果 720×720 的 128 帧动图（66,355,200 像素）被判出界、原图静默交回，看上去
 /// 就像「开了 DLSSNR 但完全没生效」。
 pub const ANIMATION_PIXEL_BUDGET: u64 = 128_000_000;
-/// 一次动画处理接受的帧数上限。再长就不是「翻到的那张图」而是一段片子了。
-pub const ANIMATION_FRAME_LIMIT: u32 = 240;
+/// 容器头里声明的帧数上限，只用来挡住「这不是一页图，是一段片子」的文件。
+///
+/// 真正的帧数是靠帧步长降下来的（见 [`plan`]），所以这一档比原来（240）宽得多：
+/// 一页 1200 帧的动图现在会被降采样后照样交回，而不是静默保持原图。
+pub const ANIMATION_FRAME_LIMIT: u32 = 1200;
+/// 交回阅读器的**产物字节**上限。
+///
+/// 为什么必须有这一条：输入尺寸的限额只管「跑不跑得起」，管不了产物多大。实测
+/// 720×720×240 帧那一页——像素 124,416,000 落在像素预算之内，编出来的 APNG 却是
+/// **150,853,625 字节**：WebView2 拿它当 `<img>` 会一直解不完，页面上表现为整块空白
+/// （没有破图图标、没有 onError、胶囊停在「DLSSNR 处理中…」）。
+///
+/// 取 96 MiB 是为了**不把上一轮特意放行的那一档打回去**：720×720×128 帧那一页的产物
+/// 约 80MB（66,355,200 像素 × 实测 1.21 字节/像素），必须继续原样通过；而 150MB 那一档
+/// 必须被挡下来。真实可播边界没有量过——所以前端还有一道「解不开就退回本地那一版」的
+/// 兜底（见 `src/lib/readerComputedPage.ts` 的产物解码闸），不靠这个阈值兜住。
+pub const ANIMATION_PRODUCT_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
+/// 产物**解码后**的像素上限：Chromium 播 APNG 会把所有帧展开在内存里（RGBA 一像素
+/// 四字节），96M 像素 ≈ 384MB。
+///
+/// 同样卡在「上一轮放行的 128 帧 720p（66,355,200）要过」与「把阅读器刷白的 240 帧
+/// 720p（124,416,000）要降」之间。
+pub const ANIMATION_DECODE_PIXEL_BUDGET: u64 = 96_000_000;
 
 /// 与 `filter::MIN_EDGE` 同值：更小的图 DLSSNR 自己会拒，动画也不必开。
 const MIN_EDGE: u32 = 32;
 
-/// 一次处理的预算。默认取上面两个常量，测试可以调小来覆盖超限分支。
+/// 规划时按一像素多少字节估：实测 150,853,625 / 124,416,000 = 1.21，这里按 1.5 估，
+/// 留出 PNG 过滤器与内容差异的余量（宁可缩过头一点，也不要交出一份解不开的产物）。
+const BYTES_PER_PIXEL_NUM: u64 = 3;
+const BYTES_PER_PIXEL_DEN: u64 = 2;
+
+/// 帧步长最多降到这个倍数：再稀就不是动画了，宁可把画布缩下去。
+const MAX_STRIDE: u32 = 8;
+
+/// 步长收敛的下限：产物至少要留下这么多帧（短动图因此只缩画布、不抽帧）。
+const MIN_KEPT_FRAMES: u32 = 4;
+
+/// 一次处理的预算。默认取上面那几个常量，测试可以调小来覆盖降采样分支。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationLimits {
+    /// 真要跑 GPU 的像素（帧步长降完之后的）。
     pub pixels: u64,
+    /// 容器声明的帧数上限。
     pub frames: u32,
+    /// 产物字节上限。
+    pub product_bytes: u64,
+    /// 产物解码后的像素上限。
+    pub decode_pixels: u64,
 }
 
 impl Default for AnimationLimits {
@@ -62,22 +100,24 @@ impl Default for AnimationLimits {
         Self {
             pixels: ANIMATION_PIXEL_BUDGET,
             frames: ANIMATION_FRAME_LIMIT,
+            product_bytes: ANIMATION_PRODUCT_BUDGET_BYTES,
+            decode_pixels: ANIMATION_DECODE_PIXEL_BUDGET,
         }
     }
 }
 
 /// 容器头里说得出的话。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Shape {
-    frames: u32,
-    width: u32,
-    height: u32,
+pub struct Shape {
+    pub frames: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// 只读容器头：GIF / APNG / 动画 WebP 各自的帧数与画布尺寸。
 ///
 /// 读不出来、或者根本不是说得出帧数的容器，一律 `None`（调用方原样交回）。
-fn shape(bytes: &[u8]) -> Option<Shape> {
+pub fn shape(bytes: &[u8]) -> Option<Shape> {
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         // GIF 的逻辑屏幕尺寸就在固定头部里：宽、高各 2 字节小端。
         if bytes.len() < 13 {
@@ -197,8 +237,6 @@ pub(crate) enum AnimationVerdict {
     TooSmall,
     /// 帧数超上限。
     TooManyFrames,
-    /// 总像素超预算。
-    OverBudget,
 }
 
 /// 只读容器头就能给出的判断（一道门都不碰像素）。
@@ -212,11 +250,133 @@ fn decide(bytes: &[u8], limits: AnimationLimits) -> AnimationVerdict {
     if shape.frames > limits.frames {
         return AnimationVerdict::TooManyFrames;
     }
-    let pixels = u64::from(shape.width) * u64::from(shape.height) * u64::from(shape.frames);
-    if pixels > limits.pixels {
-        return AnimationVerdict::OverBudget;
-    }
+    // 总像素超预算**不再是**「原样交回」：降采样之后照样处理（见 [`plan`]）。上一版把
+    // 它当门，于是 720×720×240 帧那一页（124,416,000 像素，落在像素预算之内）原样跑完，
+    // 编出 150 MB 的 APNG 把阅读器噎成一片空白（2026-10-13 真机现场）。
     AnimationVerdict::Process
+}
+
+/// 这一份动图打算怎么处理：抽掉多少帧、缩到多大画布、要跑多少像素、产物大概多大。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    /// 每这么多帧留一帧。
+    pub stride: u32,
+    /// 抽帧从哪一帧开始对齐（见 [`offset_for`]）：保证**最后一帧**总被留下。
+    pub offset: u32,
+    /// 产物画布。
+    pub canvas: (u32, u32),
+    /// 产物的帧数（`ceil(frames / stride)`）。
+    pub kept_frames: u32,
+    /// 真要跑 GPU 的像素（`kept_frames × canvas`）。
+    pub pixels: u64,
+    /// 按 [`BYTES_PER_PIXEL_NUM`] 估的产物字节。
+    pub bytes: u64,
+}
+
+impl Plan {
+    /// 这一版会不会把输入缩小：**产物与原图不同**就是「缩了」（抽帧也算）。
+    pub fn shrank(&self, shape: Shape) -> bool {
+        self.stride > 1 || self.canvas != (shape.width, shape.height)
+    }
+
+    /// 日志里那句人话：丢了多少帧、画布从多少缩到多少、要跑多少像素、产物多大。
+    pub fn describe(&self, shape: Shape) -> String {
+        format!(
+            "{} 帧 {}×{}（{} 像素）→ 留 {} 帧 {}×{}（{} 像素，约 {} MB）",
+            shape.frames,
+            shape.width,
+            shape.height,
+            u64::from(shape.width) * u64::from(shape.height) * u64::from(shape.frames),
+            self.kept_frames,
+            self.canvas.0,
+            self.canvas.1,
+            self.pixels,
+            self.bytes / (1024 * 1024)
+        )
+    }
+}
+
+/// 按预算挑一个「跑得完、产物也播得动」的处置。
+///
+/// 为什么不能只把超预算的输入原样交回：720×720×240 帧那一页的输入**在像素预算之内**，
+/// 编出来的 APNG 却是 150 MB，WebView2 解不完就是一片空白（2026-10-13 真机现场）。所以
+/// 这里把「产物多大」也算进预算：先抽帧（帧步长 2、3…最多 [`MAX_STRIDE`]），还不行就把
+/// 画布按面积缩下去（每轮 7/8，最多缩到 1×1 为止），最后按 [`MIN_KEPT_FRAMES`] 保底。
+/// 抽掉的帧的延迟会累加到留下的那一帧上（见 `transcode`），所以时长不变。
+pub fn plan(shape: Shape, limits: AnimationLimits) -> Plan {
+    let bytes_for = |canvas: (u32, u32), kept: u32| -> u64 {
+        u64::from(canvas.0) * u64::from(canvas.1) * u64::from(kept) * BYTES_PER_PIXEL_NUM
+            / BYTES_PER_PIXEL_DEN
+    };
+    let fits = |canvas: (u32, u32), kept: u32| -> bool {
+        let pixels = u64::from(canvas.0) * u64::from(canvas.1) * u64::from(kept);
+        pixels <= limits.pixels
+            && pixels <= limits.decode_pixels
+            && bytes_for(canvas, kept) <= limits.product_bytes
+    };
+
+    let mut stride = 1;
+    loop {
+        let kept = kept_frames(shape.frames, stride);
+        if fits((shape.width, shape.height), kept) {
+            return Plan {
+                stride,
+                offset: offset_for(shape.frames, stride),
+                canvas: (shape.width, shape.height),
+                kept_frames: kept,
+                pixels: u64::from(shape.width) * u64::from(shape.height) * u64::from(kept),
+                bytes: bytes_for((shape.width, shape.height), kept),
+            };
+        }
+        if kept <= MIN_KEPT_FRAMES || stride >= MAX_STRIDE {
+            break;
+        }
+        stride += 1;
+    }
+
+    let mut canvas = (shape.width.max(1), shape.height.max(1));
+    loop {
+        let kept = kept_frames(shape.frames, stride);
+        if fits(canvas, kept) || (canvas.0 <= 1 && canvas.1 <= 1) {
+            break;
+        }
+        let next = ((canvas.0 * 7 / 8).max(1), (canvas.1 * 7 / 8).max(1));
+        if next == canvas {
+            break;
+        }
+        canvas = next;
+    }
+    let kept = kept_frames(shape.frames, stride);
+    Plan {
+        stride,
+        offset: offset_for(shape.frames, stride),
+        canvas,
+        kept_frames: kept,
+        pixels: u64::from(canvas.0) * u64::from(canvas.1) * u64::from(kept),
+        bytes: bytes_for(canvas, kept),
+    }
+}
+
+/// 抽帧之后留下几帧。
+///
+/// 这里就是纯粹的 `ceil(frames / stride)`：**下限不在这里**（[`MIN_KEPT_FRAMES`] 管的是
+/// 步长能涨到多大，见 `plan` 的循环）。两边各算一次「至少留几帧」的话，写进 acTL 的
+/// 帧数与选择规则真正留下的帧数就会对不上——`png` 写满 acTL 声明的帧数之后会把
+/// frame_control 置空，多写的帧变成普通 IDAT，整份文件不再是能播的 APNG。
+fn kept_frames(frames: u32, stride: u32) -> u32 {
+    frames.div_ceil(stride.max(1))
+}
+
+/// 抽帧从哪一帧开始对齐：让**最后一帧**总是被留下。
+///
+/// 不留最后一帧的话，它后面那些被抽掉的帧的延迟就没有地方累加（见 `transcode`），总时长
+/// 会短掉一点——用户看到的是「动图比原来快」。对齐到末尾之后，累加正好在最后一帧收尾，
+/// 总时长严格不变。
+fn offset_for(frames: u32, stride: u32) -> u32 {
+    if stride <= 1 {
+        return 0;
+    }
+    (stride - (frames.saturating_sub(1) % stride)) % stride
 }
 
 /// 逐帧过一遍 `process`，编回 APNG。
@@ -247,12 +407,14 @@ where
     let Some(shape) = shape(bytes) else {
         return Ok(None);
     };
+    // 这一版打算怎么处理：抽帧 / 缩画布都在这里定，下面只负责照着写。
+    let planned = plan(shape, limits);
 
     // 源声明的圈数直接丢掉（`_source_plays`）：产物一直是 `READER_PLAYS`。
     let (mut frames, _source_plays) = frames_of(bytes)?;
     let mut encoded = Vec::new();
     let mut writer = {
-        let mut encoder = png::Encoder::new(&mut encoded, shape.width, shape.height);
+        let mut encoder = png::Encoder::new(&mut encoded, planned.canvas.0, planned.canvas.1);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         // 与静态那条路同一档压缩：`image::codecs::png::PngEncoder::new` 的默认档是
@@ -262,14 +424,21 @@ where
         encoder.set_compression(png::Compression::Fast);
         encoder.set_filter(png::Filter::Adaptive);
         encoder
-            .set_animated(shape.frames, READER_PLAYS)
+            .set_animated(planned.kept_frames, READER_PLAYS)
             .map_err(|error| error.to_string())?;
         encoder.write_header().map_err(|error| error.to_string())?
     };
 
-    // 恰好写 shape.frames 帧：png 在写满 acTL 声明的帧数之后会把 frame_control
+    // 恰好写 planned.kept_frames 帧：png 在写满 acTL 声明的帧数之后会把 frame_control
     // 置空，再多写的帧就成了普通 IDAT，整份文件不再是能播的 APNG。
-    for _ in 0..shape.frames {
+    //
+    // 帧步长 > 1 时把**丢掉的帧的延迟累加到留下的那一帧**上：抽掉一半帧而延迟照旧，
+    // 动画会变成两倍速；累加之后时长不变，只是不再平滑（有意的取舍：先保证能播，再谈
+    // 顺不顺）。
+    let mut carried_delay = 0u16;
+    let mut written = 0u32;
+    let mut source_index = 0u32;
+    while written < planned.kept_frames {
         // 帧与帧之间才是取消点：一帧 DLSSNR 自己没法从中间停下。
         if cancel.cancelled() {
             return Err(super::filter::CANCELLED.to_string());
@@ -288,13 +457,26 @@ where
             return Ok(None);
         }
         let delay = frame_delay(&frame);
-        let processed = process(frame.into_buffer().into_raw(), shape.width, shape.height)?;
-        if processed.len() != shape.width as usize * shape.height as usize * 4 {
+        let keep = (source_index + planned.offset) % planned.stride == 0;
+        source_index += 1;
+        if !keep {
+            carried_delay = carried_delay.saturating_add(delay);
+            continue;
+        }
+        let canvas = planned.canvas;
+        let frame_bytes = if canvas == (shape.width, shape.height) {
+            frame.into_buffer().into_raw()
+        } else {
+            resize_frame(&frame.into_buffer(), canvas)?
+        };
+        let processed = process(frame_bytes, canvas.0, canvas.1)?;
+        if processed.len() != canvas.0 as usize * canvas.1 as usize * 4 {
             return Err("dlssnr: 动图某一帧的产物尺寸与画布对不上".to_string());
         }
         writer
-            .set_frame_delay(delay, 1000)
+            .set_frame_delay(carried_delay.saturating_add(delay), 1000)
             .map_err(|error| error.to_string())?;
+        carried_delay = 0;
         writer
             .set_dispose_op(png::DisposeOp::None)
             .map_err(|error| error.to_string())?;
@@ -302,7 +484,7 @@ where
             .set_blend_op(png::BlendOp::Source)
             .map_err(|error| error.to_string())?;
         writer
-            .set_frame_dimension(shape.width, shape.height)
+            .set_frame_dimension(canvas.0, canvas.1)
             .map_err(|error| error.to_string())?;
         writer
             .set_frame_position(0, 0)
@@ -310,9 +492,28 @@ where
         writer
             .write_image_data(&processed)
             .map_err(|error| error.to_string())?;
+        written += 1;
     }
     writer.finish().map_err(|error| error.to_string())?;
+    // 估得不准（PNG 压不动的那一页）：这一份交出去就是阅读器噎住，宁可不交。
+    if encoded.len() as u64 > limits.product_bytes {
+        return Err(format!(
+            "dlssnr: 动图产物 {} 字节超出上限 {}",
+            encoded.len(),
+            limits.product_bytes
+        ));
+    }
     Ok(Some(encoded))
+}
+
+/// 把一帧缩到计划好的画布。
+///
+/// 三角形过滤：缩图时它比最近邻干净，又不像 Lanczos 那样在漫画的线条上振铃（缩图是
+/// 「不得不」，不是「更好看」，所以取中间那一档）。
+fn resize_frame(frame: &image::RgbaImage, canvas: (u32, u32)) -> Result<Vec<u8>, String> {
+    let resized =
+        image::imageops::resize(frame, canvas.0, canvas.1, image::imageops::FilterType::Triangle);
+    Ok(resized.into_raw())
 }
 
 /// 一页动图走 DLSSNR：`Ok(None)` ＝ 不是能处理的动图（原样直出），`Ok(Some)` ＝
@@ -324,14 +525,22 @@ pub fn apply_dlssnr(
     cancel: &CancelToken,
 ) -> Result<Option<Vec<u8>>, String> {
     let limits = AnimationLimits::default();
-    // 被上限挡下来的两种情形要留一笔。调用方把原图当**成功**交回是刻意的（原图本
-    // 来就能看），代价是这个跳过在界面上与「处理过了」长得一模一样：用户翻到一页动
-    // 图，开着 DLSSNR，看到的还是原图，界面上没有任何一处说得出为什么。第一次发现
-    // 这件事是从缓存里把原文件翻出来数帧数——不该再有第二次。
+    // 被上限挡下来的情形要留一笔。调用方把原图当**成功**交回是刻意的（原图本来就
+    // 能看），代价是这个跳过在界面上与「处理过了」长得一模一样：用户翻到一页动图，
+    // 开着 DLSSNR，看到的还是原图，界面上没有任何一处说得出为什么。第一次发现这件事
+    // 是从缓存里把原文件翻出来数帧数——不该再有第二次。
     //
     // 该记哪几类、不该记哪几类见 `skip_note`。
     if let Some((message, detail)) = skip_note(decide(bytes, limits), limits) {
         note_skip(data_dir, message, &detail, bytes);
+    }
+    // 降采样过也要留一笔：产物比原图小是**我们的选择**，界面上同样没有地方解释得了。
+    // 与「跳过」分开记，因为两者的处置完全不同（一个没处理，一个处理了但缩了）。
+    if let Some(shape) = shape(bytes) {
+        let planned = plan(shape, limits);
+        if planned.shrank(shape) {
+            note_adapt(data_dir, &planned, shape, limits);
+        }
     }
     transcode(bytes, limits, cancel, |rgba, width, height| {
         let image = super::filter::DlssnrImage::new(width, height, rgba)?;
@@ -343,12 +552,12 @@ pub fn apply_dlssnr(
 
 /// 这一份动图该不该在错误日志里留一笔，留的话写什么。
 ///
-/// 只有**因为限额**被挡下来的两类值得记：`TooSmall`（每页都有的小图标）与
+/// 只有**因为限额**被挡下来的那一类值得记：`TooSmall`（每页都有的小图标）与
 /// `NotAnAnimation`（静图）在漫画库里满地都是，记了只会把日志淹掉，而「原样交回」
-/// 对它们本来就是正确答案，不是意外。反过来，被帧数/像素上限挡下来的动图**本该**
-/// 能处理，用户看到的却和「处理过了」一模一样，所以必须有个地方说得出为什么。
+/// 对它们本来就是正确答案，不是意外。反过来，被帧数上限挡下来的动图**本该**能处理，
+/// 用户看到的却和「处理过了」一模一样，所以必须有个地方说得出为什么。
 ///
-/// 抽成纯函数是为了能不碰 GPU 就守住「只记这两类」——真去 `apply_dlssnr` 一份能处理
+/// 抽成纯函数是为了能不碰 GPU 就守住「只记这几类」——真去 `apply_dlssnr` 一份能处理
 /// 的动图会把这个进程的 DLSSNR 上下文初始化到测试的临时目录上，而 feature 是进程级
 /// 的、只能对着一个数据目录初始化一次。
 fn skip_note(verdict: AnimationVerdict, limits: AnimationLimits) -> Option<(&'static str, String)> {
@@ -357,13 +566,23 @@ fn skip_note(verdict: AnimationVerdict, limits: AnimationLimits) -> Option<(&'st
             "动图帧数超出上限，本页保持原图",
             format!("frames_limit={}", limits.frames),
         )),
-        AnimationVerdict::OverBudget => Some((
-            "动图总像素超出预算，本页保持原图",
-            format!("pixel_budget={}", limits.pixels),
-        )),
         AnimationVerdict::Process
         | AnimationVerdict::NotAnAnimation
         | AnimationVerdict::TooSmall => None,
+    }
+}
+
+/// 把「这一页被降采样了」写进错误日志：产物尺寸、帧步长与四条预算都写清楚。
+fn note_adapt(data_dir: &Path, planned: &Plan, shape: Shape, limits: AnimationLimits) {
+    let message = format!("动图产物超出预算，已降采样后交回：{}", planned.describe(shape));
+    let detail = format!(
+        "stride={} product_budget={} decode_pixel_budget={} effort_pixel_budget={}",
+        planned.stride, limits.product_bytes, limits.decode_pixels, limits.pixels
+    );
+    if let Err(error) =
+        super::log_skip(data_dir, "warn", "dlssnr/animation", &message, Some(detail.as_str()))
+    {
+        eprintln!("yomika: 动图降采样的原因没能写进错误日志：{error}");
     }
 }
 
@@ -513,15 +732,6 @@ mod tests {
         encoder.encode_frames(built).expect("GIF 帧应当写得下去");
         drop(encoder);
         out
-    }
-
-    /// 把夹具 GIF 的**逻辑屏幕尺寸**改大。`shape()` 只读固定头部那 4 个字节，所以不
-    /// 用真造上百 MB 像素就能把「超预算」那道门推开。
-    fn gif_with_patched_canvas(width: u16, height: u16) -> Vec<u8> {
-        let mut bytes = GIF.to_vec();
-        bytes[6..8].copy_from_slice(&width.to_le_bytes());
-        bytes[8..10].copy_from_slice(&height.to_le_bytes());
-        bytes
     }
 
     /// 手写一份 APNG。`declared` 是写进 acTL 的帧数、`written` 是真正写出去的帧数：
@@ -698,42 +908,107 @@ mod tests {
         assert_eq!(decode_apng(&out).delays, vec![100, 250]);
     }
 
+    /// 超预算**不再**原样交回：降采样之后照样处理。上一版把它当门，于是 720×720 的
+    /// 240 帧动图（像素落在预算内、产物 150 MB）原样跑完，把阅读器噎成一片空白。
     #[test]
-    fn hands_the_bytes_back_when_the_animation_is_over_budget() {
-        let mut calls = 0;
+    fn an_animation_over_the_effort_budget_is_downsampled_instead_of_handed_back() {
+        let frames = 12u32;
+        let source_bytes = synthetic_gif(frames, SHAPE);
         let limits = AnimationLimits {
-            pixels: u64::from(SHAPE.0) * u64::from(SHAPE.1) * u64::from(FRAMES) - 1,
+            pixels: u64::from(SHAPE.0) * u64::from(SHAPE.1) * u64::from(frames) - 1,
             ..AnimationLimits::default()
         };
-        let out = transcode(GIF, limits, &CancelToken::none(), |rgba, _, _| {
-            calls += 1;
+        let source = shape(&source_bytes).expect("夹具读得出形状");
+        let planned = plan(source, limits);
+        assert!(planned.shrank(source), "这一档该被降采样：{planned:?}");
+        let mut seen = Vec::new();
+        let out = transcode(&source_bytes, limits, &CancelToken::none(), |rgba, width, height| {
+            seen.push((width, height));
             Ok(rgba)
         })
-        .expect("超预算不是错误");
-        assert_eq!(out, None, "超预算应当原样交回");
-        assert_eq!(calls, 0, "超预算不该解出一帧来");
+        .expect("超预算不是错误")
+        .expect("降采样之后要交回一份产物");
+        assert_eq!(
+            seen.len() as u32,
+            planned.kept_frames,
+            "跑过的帧数 = 计划留下的帧数"
+        );
+        assert!(
+            seen.iter().all(|(width, height)| (*width, *height) == planned.canvas),
+            "每一帧都按计划的画布跑：{seen:?}"
+        );
+        let source_total: u32 = (0..frames).map(|index| DELAYS[index as usize % DELAYS.len()]).sum();
+        let product_total: u32 = decode_apng(&out).delays.iter().sum();
+        assert_eq!(
+            product_total, source_total,
+            "抽掉的帧的延迟要累加到留下的那一帧上，总时长不变"
+        );
     }
 
-    /// 用户实测那份动图就长这样：720×720、128 帧。40MP 那一版预算把它判出界，
-    /// `transcode` 返回 `Ok(None)`、命令把原图当成功交回——界面上就是「开了 DLSSNR
-    /// 但对这张动图完全没生效」。
+    /// 用户实测那份动图就长这样：720×720、128 帧。这一档必须**原样**通过（不抽帧、
+    /// 不缩画布），否则上一轮特意放行的那一档又被打了回去。
     #[test]
-    fn the_default_budget_covers_a_720p_animation_of_128_frames() {
+    fn a_720p_animation_of_128_frames_still_goes_through_untouched() {
         let limits = AnimationLimits::default();
-        let pixels = 720u64 * 720 * 128;
+        let shape = Shape {
+            frames: 128,
+            width: 720,
+            height: 720,
+        };
+        let planned = plan(shape, limits);
+        assert!(!planned.shrank(shape), "这一档不该被降采样：{planned:?}");
         assert!(
-            pixels <= limits.pixels,
-            "720×720 的 128 帧是 {pixels} 像素，预算只有 {}：这一档必须落在里面",
-            limits.pixels
+            planned.bytes <= limits.product_bytes,
+            "产物估算也要落在字节预算里：{planned:?}"
         );
-        // 720p 那一档真正卡住的应当是**帧数**上限，不是像素预算。否则同尺寸的动图
-        // 会「128 帧能跑、240 帧悄悄跳过」，用户无从预期哪一张会生效。
+    }
+
+    /// 把阅读器刷白的那一页：720×720、240 帧。输入在**像素**预算之内，编出来的 APNG
+    /// 却是 150,853,625 字节，所以判据落在**产物字节**与解码像素上——降采样之后两者都
+    /// 要落在预算内，而且必须真的降了。
+    #[test]
+    fn the_page_that_blanked_the_reader_comes_out_inside_the_product_budget() {
+        let limits = AnimationLimits::default();
+        let shape = Shape {
+            frames: 240,
+            width: 720,
+            height: 720,
+        };
+        let planned = plan(shape, limits);
+        assert!(planned.shrank(shape), "这一档必须降采样：{planned:?}");
         assert!(
-            720u64 * 720 * u64::from(limits.frames) <= limits.pixels,
-            "帧数上限 {} 也得落在像素预算 {} 之内",
-            limits.frames,
-            limits.pixels
+            planned.bytes <= limits.product_bytes,
+            "降采样之后产物估算 {} 仍在字节预算 {} 之外",
+            planned.bytes,
+            limits.product_bytes
         );
+        assert!(
+            planned.pixels <= limits.decode_pixels,
+            "解码像素 {} 仍在预算 {} 之外",
+            planned.pixels,
+            limits.decode_pixels
+        );
+    }
+
+    /// 抽帧抽到底还是超字节预算（画布太大）时改缩画布：产物字节是硬约束，抽帧只能让
+    /// 它变小、不能保证变小到够。
+    #[test]
+    fn an_animation_whose_product_would_be_too_big_gets_a_smaller_canvas() {
+        let limits = AnimationLimits {
+            product_bytes: 4 * 1024 * 1024,
+            ..AnimationLimits::default()
+        };
+        let shape = Shape {
+            frames: 4,
+            width: 1024,
+            height: 1024,
+        };
+        let planned = plan(shape, limits);
+        assert!(
+            planned.canvas.0 < shape.width && planned.canvas.1 < shape.height,
+            "画布该缩下去：{planned:?}"
+        );
+        assert!(planned.bytes <= limits.product_bytes, "{planned:?}");
     }
 
     /// 记下这一层交出去的诊断。用静态 + 互斥锁而不是闭包：`SkipLogger` 是函数指针
@@ -761,35 +1036,36 @@ mod tests {
         }
     }
 
-    /// 被上限挡下来的动图要留一笔：调用方把原图当**成功**交回是刻意的（原图本来就能看），
-    /// 代价是这个跳过在界面上与「处理过了」长得一模一样。
+    /// 降采样要留一笔：产物比原图小是**我们的选择**，界面上没有地方解释得了。
     ///
-    /// 这一层不认识宿主的错误日志目录策略——诊断是**交出去**的（`set_skip_logger` 装的
-    /// 那个函数指针），所以这里只钉「有没有交出一行说清原因的诊断」；它落到
-    /// `<data>/logs/error.log` 那半由宿主守（`src-tauri/src/dlssnr/mod.rs`）。
+    /// 不跑 GPU：`plan` 与 `note_adapt` 都是纯函数 / 只写日志，而真去 `apply_dlssnr` 一份
+    /// 能处理的动图会把这个进程的 DLSSNR 上下文初始化到临时数据目录上（见
+    /// `a_processable_animation_is_not_worth_a_note`）。
     #[test]
-    fn an_animation_over_the_pixel_budget_leaves_a_note_in_the_error_log() {
+    fn a_downsampled_animation_leaves_a_note_that_says_what_it_gave_up() {
         notes::install();
         notes::take();
         let dir = tempfile::tempdir().expect("temp dir");
-        let source = gif_with_patched_canvas(60_000, 60_000);
-        let out = apply_dlssnr(
-            dir.path(),
-            &source,
-            &DlssnrSettings::default(),
-            &CancelToken::none(),
-        )
-        .expect("超预算不是错误");
-        assert_eq!(out, None, "超预算应当原样交回");
+        let limits = AnimationLimits::default();
+        let shape = Shape {
+            frames: 240,
+            width: 720,
+            height: 720,
+        };
+        let planned = plan(shape, limits);
+        assert!(planned.shrank(shape), "夹具本身得是需要降采样的那一类");
+        note_adapt(dir.path(), &planned, shape, limits);
 
         let notes = notes::take();
-        assert_eq!(notes.len(), 1, "超预算应当正好交出一笔：{notes:?}");
+        assert_eq!(notes.len(), 1, "降采样应当正好交出一笔：{notes:?}");
         let note = &notes[0];
-        assert!(note.contains("总像素"), "要说清是被像素预算挡下的：{note}");
+        assert!(note.contains("降采样"), "要说清是缩了而不是没处理：{note}");
+        assert!(note.contains("240 帧 720×720"), "要带上原样的形状：{note}");
         assert!(
-            note.contains("60000×60000"),
-            "要带上画布与帧数，否则查不下去：{note}"
+            note.contains(&format!("留 {} 帧", planned.kept_frames)),
+            "要带上留了多少帧：{note}"
         );
+        assert!(note.contains("stride="), "要带上抽帧步长：{note}");
     }
 
     /// 能处理的动图不该往日志里写东西——否则漫画库里那几百页正常动图会把日志淹掉。
@@ -813,9 +1089,20 @@ mod tests {
         // 另外两类直出也是满地都是的小东西，同样不许记。
         assert!(skip_note(AnimationVerdict::TooSmall, limits).is_none());
         assert!(skip_note(AnimationVerdict::NotAnAnimation, limits).is_none());
-        // 而被限额挡下来的两类必须记，否则用户没有任何地方能看出「为什么没生效」。
+        // 而被帧数上限挡下来的那一类必须记，否则用户没有任何地方能看出「为什么没生效」。
         assert!(skip_note(AnimationVerdict::TooManyFrames, limits).is_some());
-        assert!(skip_note(AnimationVerdict::OverBudget, limits).is_some());
+    }
+
+    /// 防锈：产物身份里带着计划器的版本（`dlssnr::ANIMATION_PLAN_REVISION`），改了
+    /// `plan` 的预算或算法就必须把它 +1——产物按「起点 + DLL + 参数 + 计划器版本」认版，
+    /// 不 +1 的话用户翻回那一页端上来的还是旧产物（150 MB 那一份正是这么来的）。
+    #[test]
+    fn the_plan_revision_names_the_planner_this_build_ships() {
+        assert_eq!(
+            crate::dlssnr::ANIMATION_PLAN_REVISION,
+            1,
+            "改了 plan 的预算或算法就要把它 +1（旧产物按旧版本号认版，不会自己落空）"
+        );
     }
 
     #[test]

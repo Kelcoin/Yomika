@@ -30,8 +30,7 @@ pub struct ProbeKey {
     /// 内容指纹（blake3 十六进制），不是路径。
     pub content_hash: String,
     pub byte_length: u64,
-    /// 探的是哪一类问题。超分与修补的输入张量形状根本不同（超分是 NCHW 的瓦片，
-    /// 修补是 `[1,256,256,3]` 的三路输入），所以这两条结论**不能**共用一条记账：
+    /// 探的是哪一类问题。超分与其它输入张量形状不同的执行体不能共用一条记账：
     /// 同一份模型文件被两类探针问过时，命中的必须是各自那一条。
     pub kind: ProbeKind,
     pub runtime: RuntimeId,
@@ -40,16 +39,10 @@ pub struct ProbeKey {
 }
 
 /// 探针问的是哪一类问题（见 [`ProbeKey::kind`]）。
-///
-/// 修补图没有倍率可言，所以 [`ProbeKind::Inpaint`] 那一侧的 `scale` 记 `1`、
-/// `min_input_edge` 记图自己要求的边长（`INPAINT_SIDE`）：这两个数仍然**是问题的一部分**
-/// ——换一张要求别的边长的修补图就是另一个问题——只是它们不再叫「倍率」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeKind {
     /// 超分：梯度瓦片按 `scale` 放大，问的是「这块图算得对不对」。
     Upscale,
-    /// 修补：问的是「这块被遮的图补得对不对」。
-    Inpaint,
 }
 
 /// 一次实测的结论，连带「这条结论花了多少次会话」。
@@ -164,15 +157,12 @@ mod tests {
         longer.byte_length = 2048;
         let mut wider_edge = key("aa", RuntimeId::DirectMl, 3);
         wider_edge.min_input_edge = 33;
-        let mut inpaint = key("aa", RuntimeId::DirectMl, 3);
-        inpaint.kind = ProbeKind::Inpaint;
         for other in [
             key("bb", RuntimeId::DirectMl, 3),
             key("aa", RuntimeId::Cpu, 3),
             key("aa", RuntimeId::DirectMl, 2),
             longer,
             wider_edge,
-            inpaint,
         ] {
             assert!(recall(&other).is_none(), "{other:?} 是另一个问题，不该命中");
         }

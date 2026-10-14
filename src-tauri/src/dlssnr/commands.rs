@@ -1,6 +1,6 @@
 //! DLSSNR 对前端与算力中心的入口（Tauri 命令）。
 //!
-//! 形状照 `inference.rs` 里超分/去码那几条命令：状态与检测是便宜的调用，真正跑
+//! 形状照 `inference.rs` 里超分那几条命令：状态与检测是便宜的调用，真正跑
 //! 图的那条走 `run_heavy`（全局只允许一件重活），返回二进制 PNG。
 
 use std::path::PathBuf;
@@ -218,8 +218,8 @@ fn probe_through_worker(
 /// 是一次真往返：问 manager，由它请 worker 交回，worker 把交回了几份报回来。没有会话、
 /// 有活正在跑或排队、或者 worker 没答上来，都回 0——而且**不会**为了交回把 worker 拉起来。
 ///
-/// 刻意**不**顺手做 `memory::trim_process_memory` 那件事：清空工作集会把 decensor 的
-/// ONNX（约 240MB）与那份 DLL（约 165MB）一起扫出去，下一页的第一张图要重新读盘。
+/// 刻意**不**顺手做 `memory::trim_process_memory` 那件事：清空工作集会把常驻的 ONNX
+/// 模型与那份 DLL（约 165MB）一起扫出去，下一页的第一张图要重新读盘。
 /// 这条命令只交回几个 GB 的提交内存，不动那些还在用的页。
 #[tauri::command(async)]
 pub fn dlssnr_release_workspaces(app: tauri::AppHandle) -> CommandResult<u32> {
@@ -312,14 +312,11 @@ pub struct DlssnrPageInput {
     pub scope_id: String,
     pub archive_id: String,
     pub page_index: i64,
-    /// 从哪一版开始跑：`reader-page`（原图）/ `decensored` / `enhanced`。
+    /// 从哪一版开始跑：`reader-page`（原图）/ `enhanced`（超分产物）。
     #[serde(default)]
     pub source: Option<String>,
-    /// 起点那一版是哪两个模型产出的。起点是按「产出它的模型」存的（去码产物按去码
-    /// 包的指纹，超分产物按超分模型的指纹），所以要算出同一个 revision 才读得到；
-    /// `reader-page` 起点不需要它们。
-    #[serde(default)]
-    pub decensor_model: Option<String>,
+    /// 起点那一版是哪个模型产出的。起点是按「产出它的模型」存的（超分产物按超分模型
+    /// 的指纹），所以要算出同一个 revision 才读得到；`reader-page` 起点不需要它。
     #[serde(default)]
     pub upscale_model: Option<String>,
     /// 层参数由前端给（设置页那份就是唯一真相）。
@@ -389,7 +386,6 @@ fn apply_cached_page(
     let revision = match crate::inference::source_revision(
         data_dir,
         rendition,
-        input.decensor_model.as_deref(),
         input.upscale_model.as_deref(),
     ) {
         Ok(revision) => revision,
@@ -456,7 +452,7 @@ fn apply_cached_page(
 
     let page = match page {
         Ok(Some(image)) => image,
-        // 可重试：上一步（去码/超分）可能还在跑，落地之后再问一次。
+        // 可重试：上一步（超分）可能还在跑，落地之后再问一次。
         Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
@@ -506,7 +502,7 @@ fn apply_cached_page(
         manager,
         crate::compute::proxy::DlssnrJob {
             // 内容寻址的那一半由 proxy 自己算（页、参数、片段），这里给的是「这是谁」：
-            // 同一页的原图与它的去码产物是不同的输入，所以前缀写清来路。
+            // 同一页的原图与它的超分产物是不同的输入，所以前缀写清来路。
             input_id: &format!("host:{}", blake3::hash(&page.bytes).to_hex()),
             settings_id: &settings_id,
             source_revision: &source_revision,
@@ -524,10 +520,12 @@ fn apply_cached_page(
     };
     drop(guard);
 
-    // 「原样交回」：worker 报的引擎名是 `passthrough`，说明这一页确实**没被算过**（动图
-    // 不适用，或者两次评估都与输入逐像素相同）。原图交回是看得见的诚实结果；**不写产物
-    // 缓存**——写进去就等于把「没处理过」固化下来，用户那一页会一直停在未处理的样子
-    // （真机缓存里抓到过三例——同样的键、同样的字节、还被阅读器读走显示过）。
+    // 「原样交回」：worker 报的引擎名是 `passthrough`，说明这一页确实**没被算过**。两种
+    // 成因都会走到这里：两次评估都与输入逐像素相同（`filter::PASSTHROUGH`），或者评估
+    // 什么都没写出来、产物整幅透明（`filter::BLANK`——用户那一页 3000×4000 只剩背景就是
+    // 这一种）。原图交回是看得见的诚实结果；**不写产物缓存**——写进去就等于把「没处理过」
+    // 固化下来，用户那一页会一直停在未处理的样子（真机缓存里抓到过：同样的键、同样的
+    // 字节、还被阅读器读走显示过，全透明那一份 242,617 字节）。
     //
     // 静帧多记一条日志：机制本身还没复现，下次撞上时能对上尺寸与参数。动图不记——它
     // 不适用是常态（帧太多、画布太大），每翻一页都记一条会把错误日志淹掉。
@@ -537,7 +535,9 @@ fn apply_cached_page(
                 data_dir,
                 "warn",
                 "dlssnr/passthrough",
-                &format!("这一页的评估两次都原样交回了输入，这次不写产物缓存：{width}×{height}"),
+                &format!(
+                    "这一页没有产出（评估原样交回了输入，或者什么都没写出来），这次不写产物缓存：{width}×{height}"
+                ),
                 Some(&settings.to_json()),
             ) {
                 eprintln!("yomika: DLSSNR 原样交回没能写进错误日志：{log_error}");
@@ -627,7 +627,6 @@ mod tests {
             source: None,
             settings,
             task_id: Some("reader-task".into()),
-            decensor_model: None,
             upscale_model: None,
             priority: None,
         }
@@ -724,7 +723,7 @@ mod tests {
         );
         assert_ne!(
             base,
-            crate::dlssnr::output_revision(dir.path(), Some("decensored:abc"), &settings),
+            crate::dlssnr::output_revision(dir.path(), Some("enhanced:abc"), &settings),
             "起点那一版变了就是另一版"
         );
 
@@ -867,7 +866,6 @@ mod tests {
             source: Some("nonsense".into()),
             settings: None,
             task_id: None,
-            decensor_model: None,
             upscale_model: None,
             priority: None,
         };
@@ -888,7 +886,6 @@ mod tests {
             source: None,
             settings: None,
             task_id: None,
-            decensor_model: None,
             upscale_model: None,
             priority: None,
         };
@@ -910,7 +907,6 @@ mod tests {
             source: None,
             settings: None,
             task_id: Some("reader-task".into()),
-            decensor_model: None,
             upscale_model: None,
             priority: None,
         };
@@ -1010,7 +1006,6 @@ mod tests {
             source: None,
             settings: None,
             task_id: None,
-            decensor_model: None,
             upscale_model: None,
             priority: None,
         };

@@ -104,7 +104,12 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  *   「现在没位置」——队列排满了、内存/显存处在软阈值上（`resource_policy::admission`
  *   的 `ForegroundOnly`）、或者 worker 手上正有一件。它们都会自己过去，而提交方要做的
  *   是**退让再问一次**（`readerCompute` 的让位重试），不是报故障。一份真实的设备日志里
- *   这三个码刷了 848 条，占整份日志的 92%——把正常状态记成错误，现场就被埋掉了。 */
+ *   这三个码刷了 848 条，占整份日志的 92%——把正常状态记成错误，现场就被埋掉了。
+ * - `APP_RELEASE_CHECK_FAILED` / `APP_RELEASE_UNREACHABLE`：本体更新检查没查到最新版本。
+ *   GitHub 那边 404（仓库还没有 release）或 403 rate limit、机器离线、镜像挂了都会走到
+ *   这里，而界面上本来就只说「这次查不出来，下次启动再问」。它每次启动都刷两条，用户
+ *   的原话是「无视检测版本更新失败的日志」——这不是本机的缺陷，不该占现场的位置。
+ *   （判定仍然照原样返回失败：`update-notice` 那份 UI 靠它决定显示什么。） */
 export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
   'LRR_NOT_FOUND',
   'INFERENCE_CANCELLED',
@@ -112,6 +117,8 @@ export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
   'COMPUTE_QUEUE_FULL',
   'COMPUTE_UNAVAILABLE',
   'COMPUTE_WORKER_BUSY',
+  'APP_RELEASE_CHECK_FAILED',
+  'APP_RELEASE_UNREACHABLE',
 ]);
 
 export interface DomainError {

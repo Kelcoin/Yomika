@@ -4,8 +4,8 @@
   place-items: center;
   width: 100%;
   min-width: 320px;
-  min-height: 100dvh;
-  height: 100dvh;
+  min-height: var(--viewport-height);
+  height: var(--viewport-height);
   overflow: clip;
   background: var(--reader-canvas);
   color: var(--reader-ink);
@@ -32,9 +32,11 @@
 .reader-page {
   display: block;
   width: min(100%, var(--reader-page-fit-width, 100%));
-  /* 兜底用 `100dvh` 而不是 `100%`：格子（`.reader-slot`）的高度是内容撑开的，
-     对它写百分比高度等于 auto，整条声明会被丢掉。 */
-  height: min(100dvh, var(--reader-page-fit-height, 100dvh));
+  /* 兜底用视口高度而不是 `100%`：格子（`.reader-slot`）的高度是内容撑开的，
+     对它写百分比高度等于 auto，整条声明会被丢掉。视口高度本身走
+     `--viewport-height`（base.css 里那对 `vh` 兜底 / `@supports` 的 `dvh`），
+     不在这里并排写两行——压缩器会把前一行当冗余删掉。 */
+  height: min(var(--viewport-height), var(--reader-page-fit-height, var(--viewport-height)));
   object-fit: contain;
   user-select: none;
 }
@@ -106,7 +108,7 @@
   position: relative;
 }
 
-/* 「去码 / 超分处理中」：这一页的图先照常画着，等本机把那一版算出来再换上去。
+/* 「超分 / DLSSNR 处理中」：这一页的图先照常画着，等本机把那一版算出来再换上去。
    算一页要好几秒（两个模型一起近二十秒），从前这段时间屏幕上没有任何动静——
    按下去像没反应，功能看起来就是坏的。胶囊只说在算，不拦任何操作：它
    pointer-events: none，翻页、缩放照旧。 */
@@ -701,6 +703,7 @@
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: var(--space-4);
   width: min(100%, 880px);
+  max-height: min(86vh, 760px);
   max-height: min(86dvh, 760px);
   /* M3 dialog: 24dp of padding inside a container that uses the extra-large
      corner (--radius-overlay), on the surface-container-high role.

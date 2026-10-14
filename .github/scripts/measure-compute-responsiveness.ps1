@@ -84,7 +84,11 @@ $manifest = 'src-tauri\Cargo.toml'
 $env:CARGO_TARGET_DIR = Join-Path $root 'debug_outputs\cargo-target'
 
 if (-not $FixtureManifest) {
-  $FixtureManifest = Join-Path $root 'src-tauri\resources\models\models-v1.manifest.json'
+  # 这里只要一份「这一跑用的是哪套素材」的指纹（下一行把它哈希进报告），不读里面的内容。
+  # 默认值原来指着 `resources/models/models-v1.manifest.json`——那是去码包（Aletheia-Lens）
+  # 的清单，2026-10-14 随去码整条链路一起删了，于是改成同样随包、而且还会长期存在的那份
+  # DLSSNR 变体清单。
+  $FixtureManifest = Join-Path $root 'src-tauri\resources\dlssnr\dlssnr-manifest.json'
 }
 if (-not (Test-Path $FixtureManifest)) { throw "素材清单不在：$FixtureManifest" }
 $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $FixtureManifest).Hash
@@ -236,7 +240,6 @@ if (-not $SkipSuites) {
   if ($Backend -in @('cpu', 'all')) {
     $commands += @{ name = 'core-cpu'; expect = 'cargo'; body = { cargo test --manifest-path $manifest -p yomika-compute-core --features cpu } }
     $commands += @{ name = 'chain-it'; expect = 'cargo'; body = { cargo test --manifest-path $manifest --test compute_model_chain } }
-    $commands += @{ name = 'decensor-it'; expect = 'cargo'; body = { cargo test --manifest-path $manifest --test compute_decensor_chain -- --nocapture --test-threads=1 } }
   }
   if ($Backend -in @('directml', 'all')) {
     $commands += @{ name = 'core-dml'; expect = 'cargo'; body = { cargo test --manifest-path $manifest -p yomika-compute-core --features directml } }

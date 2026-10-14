@@ -60,7 +60,7 @@ describe('native cache bridge', () => {
         'page-thumbnail': { bytes: 1024, entries: 0 },
         'reader-page': { bytes: 2048, entries: 1 },
         enhanced: { bytes: 0, entries: 0 },
-        decensored: { bytes: 0, entries: 0 },
+        dlssnr: { bytes: 0, entries: 0 },
         inference: { bytes: 0, entries: 0 },
         other: { bytes: 0, entries: 0 },
       },

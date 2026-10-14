@@ -3,7 +3,7 @@ import { CardProgressBar } from './CardProgressBar';
 
 /** 模型下载那一对控件：行尾的下载按钮与它下面贴边的那条进度条。
  *
- * 抽成独立模块是因为两个菜单都要用它们：模型菜单（超分/去码）与 DLSSNR 的组件菜单。
+ * 抽成独立模块是因为两个菜单都要用它们：超分模型菜单与 DLSSNR 的组件菜单。
  * 它们原先长在 `SettingsWorkspace.tsx` 里，而 `SettingsWorkspace` 又要 import
  * `DlssnrSettingsGroup`——后者回头 import 前者的这两个槽就成环了（运行时没问题，
  * 但依赖方向是错的：控件不该挂在工作区上）。 */

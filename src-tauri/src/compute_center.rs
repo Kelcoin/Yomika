@@ -1,4 +1,4 @@
-//! 算力中心：把桌面端的超分 / 去码 / DLSSNR 借给局域网里的移动端用。
+//! 算力中心：把桌面端的超分 / DLSSNR 借给局域网里的移动端用。
 //!
 //! 两个方向都在这一个模块里：
 //!
@@ -67,7 +67,7 @@ const PAIRING_CODE_TTL_SECONDS: u64 = 90;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
-    /// `upscale` / `decensor` / `dlssnr`。
+    /// `upscale` / `dlssnr`。
     pub id: String,
     pub label: String,
     /// 齐全到能直接跑。
@@ -396,7 +396,7 @@ pub fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
     Ok(devices)
 }
 
-/// 能力清单：三类各自查一遍「齐不齐」。
+/// 能力清单：两类各自查一遍「齐不齐」。
 ///
 /// `model_data` 是模型目录（`inference` 那一套的安装根），`data` 是数据目录（DLSSNR
 /// 的 DLL 与日志在那里）。
@@ -410,10 +410,6 @@ pub fn capabilities(
         .iter()
         .filter(|model| model.kind == "upscale")
         .collect();
-    let decensors: Vec<&crate::inference::RunnableModel> = runnable
-        .iter()
-        .filter(|model| model.kind == "decensor")
-        .collect();
 
     let mut capabilities = vec![
         Capability {
@@ -424,20 +420,6 @@ pub fn capabilities(
                 "还没有装好的超分模型".to_string()
             } else {
                 upscalers
-                    .iter()
-                    .map(|model| model.label.clone())
-                    .collect::<Vec<_>>()
-                    .join("、")
-            },
-        },
-        Capability {
-            id: "decensor".to_string(),
-            label: "去码".to_string(),
-            ready: !decensors.is_empty(),
-            detail: if decensors.is_empty() {
-                "去码模型包不完整（要四个文件都在）".to_string()
-            } else {
-                decensors
                     .iter()
                     .map(|model| model.label.clone())
                     .collect::<Vec<_>>()
@@ -491,17 +473,17 @@ fn dlssnr_capability(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessParams {
-    /// `upscale` / `decensor` / `dlssnr`。
+    /// `upscale` / `dlssnr`。
     pub op: String,
-    /// 这一页要做的**几档**，按顺序做（`["decensor","upscale"]` 就是先去码再超分）。
+    /// 这一页要做的**几档**，按顺序做（`["upscale","dlssnr"]` 就是先超分再去噪）。
     ///
     /// 空的就按 `op` 单做一档（老客户端与直接调用的来路照旧）。客户端只说「做什么」，
     /// **模型与参数一律不传**：那两样跟随这台服务端自己的设置（`model_id` 为空时
-    /// `resolve_upscaler` / `resolve_installed_bundle` 取的就是本机默认那一份，DLSSNR
-    /// 取 `DlssnrSettings::default()`）——这正是「远端处理固定跟随远端服务的设置」。
+    /// `resolve_upscaler` 取的就是本机默认那一份，DLSSNR 取
+    /// `DlssnrSettings::default()`）——这正是「远端处理固定跟随远端服务的设置」。
     #[serde(default)]
     pub chain: Vec<String>,
-    /// 模型 id（超分 / 去码用）。
+    /// 模型 id（超分用）。
     #[serde(default)]
     pub model_id: Option<String>,
     /// 放大倍数（模型为空时的最近邻路径用）。
@@ -521,7 +503,7 @@ impl ProcessParams {
 /// 一次处理：字节进、字节出。三个方向都收敛到这里。
 ///
 /// 三个方向**都不在宿主进程里算了**：`manager` 是算力编排的把手，装 ONNX 模型的那一档、
-/// 去码那一档、DLSSNR 那一档都必须经由它交给 worker。这不是可选的分流——Task 8 的出口就是
+/// DLSSNR 那一档都必须经由它交给 worker。这不是可选的分流——Task 8 的出口就是
 /// 「宿主进程里没有 ONNX Runtime，也没有 NGX 资源」，所以这里不能再留一条「引擎在宿主就地
 /// 跑」的兜底来路。宿主自己还能算的只剩两样：内置的 shader 链（Anime4K）与没有模型的最近邻，
 /// 它们本来也不用 ONNX Runtime。
@@ -539,7 +521,7 @@ pub fn process(
     if bytes.is_empty() {
         return Err("请求体是空的（要发图片字节）".to_string());
     }
-    // 要做哪几档：`chain` 说了算，没给就按 `op` 单做一档。改写上限是三道——三档都做一遍
+    // 要做哪几档：`chain` 说了算，没给就按 `op` 单做一档。改写上限是两道——两档都做一遍
     // 就是全部；重复的那一档没有第二次的意义（同样的模型吃同样的字节出来还是一样）。
     let steps: Vec<&str> = if params.chain.is_empty() {
         vec![params.op.as_str()]
@@ -547,7 +529,7 @@ pub fn process(
         let mut seen: Vec<&str> = Vec::new();
         for step in &params.chain {
             let step = step.as_str();
-            if !matches!(step, "upscale" | "decensor" | "dlssnr") {
+            if !matches!(step, "upscale" | "dlssnr") {
                 return Err(format!("不认识的处理方式：{step}"));
             }
             if !seen.contains(&step) {
@@ -570,7 +552,6 @@ pub fn process(
         }
         current = match step {
             "upscale" => upscale_bytes(manager, model_data, params, &current, cancelled)?,
-            "decensor" => decensor_bytes(manager, model_data, params, &current, cancelled)?,
             "dlssnr" => dlssnr_bytes(manager, data, params, &current, cancelled)?,
             other => return Err(format!("不认识的处理方式：{other}")),
         };
@@ -592,7 +573,7 @@ fn upscale_bytes(
     match &resolved {
         Some(crate::inference::ResolvedUpscaler::Onnx(_, manifest)) => {
             let manager = manager.ok_or_else(no_orchestration)?;
-            let settings_id = crate::inference::enhanced_revision(&resolved, None);
+            let settings_id = crate::inference::enhanced_revision(&resolved);
             let input_id = format!("remote:{}", blake3::hash(source).to_hex());
             crate::compute::proxy::upscale(
                 manager,
@@ -620,42 +601,6 @@ fn upscale_bytes(
         }
         _ => crate::inference::run_host_upscale_bytes(model_data, model_id, source, params.scale),
     }
-}
-
-/// 去码：装没装三件套由宿主查（那是磁盘上的事），检测与补像素在 worker。
-fn decensor_bytes(
-    manager: Option<&crate::compute::manager::ComputeManager>,
-    model_data: &Path,
-    params: &ProcessParams,
-    source: &[u8],
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<u8>, String> {
-    let model_id = params.model_id.as_deref().unwrap_or_default();
-    let Some((bundle, manifest)) = crate::inference::resolve_installed_bundle(model_data, model_id)
-    else {
-        return Err("No complete de-censoring bundle is installed under that id".to_string());
-    };
-    let manager = manager.ok_or_else(no_orchestration)?;
-    let settings_id = crate::inference::decensored_revision(&manifest.sha256);
-    let input_id = format!("remote:{}", blake3::hash(source).to_hex());
-    crate::compute::proxy::decensor(
-        manager,
-        crate::compute::proxy::DecensorJob {
-            input_id: &input_id,
-            settings_id: &settings_id,
-            source_revision: "remote-bytes",
-            priority: crate::compute::scheduler::Priority::Background,
-            model_spec_id: model_id,
-            inpaint: crate::compute::decensor::InpaintPreparation {
-                detector: bundle.detector,
-                bar: bundle.bar,
-                mosaic: bundle.mosaic,
-            },
-            page: source,
-        },
-        cancelled,
-    )
-    .map_err(proxy_failure)
 }
 
 /// 编排没起来时的说法：这条来路现在**只能**走 worker，宿主手里已经没有引擎了，
@@ -1119,7 +1064,7 @@ async fn handle_connection(
                     return write_json(&mut stream, 400, "Bad Request", &body).await;
                 }
             };
-            // 出错时回给人看的那一档：一串就写成 `decensor+upscale`，日志里能看出是哪一串。
+            // 出错时回给人看的那一档：一串就写成 `upscale+dlssnr`，日志里能看出是哪一串。
             let op = if params.chain.is_empty() {
                 params.op.clone()
             } else {
@@ -1293,7 +1238,7 @@ pub fn remote_process(
     params: &ProcessParams,
     bytes: Vec<u8>,
 ) -> Result<Vec<u8>, RemoteFailure> {
-    // 动图只有 DLSSNR 那条路认它（对面逐帧跑完编回 APNG）；超分 / 去码没有逐帧实现，
+    // 动图只有 DLSSNR 那条路认它（对面逐帧跑完编回 APNG）；超分没有逐帧实现，
     // 发过去只会被压成第一帧，所以照旧原样交回（前端把失败当可重试）。判定必须在下面
     // 那次「归一成 PNG」之前——归一化本身就已经把动图压成第一帧了。
     let animated = crate::cache::is_animated_image(&bytes);
@@ -1534,7 +1479,7 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
     let token = preferences(&app)
         .map(|snapshot| snapshot.compute_center_token)
         .unwrap_or_default();
-    // 这一台**能提供什么**（超分 / 去码 / DLSSNR）：本机那一档的设置页要照着它说
+    // 这一台**能提供什么**（超分 / DLSSNR）：本机那一档的设置页要照着它说
     // 「这台设备能对外做什么」，从前这里是空的，于是设置页那三个字一个都显示不出来。
     let local_capabilities = capabilities(
         &model_data,
@@ -1713,13 +1658,11 @@ pub struct RemoteProcessInput {
     pub scope_id: String,
     pub archive_id: String,
     pub page_index: i64,
-    /// 从哪一版开始发：`reader-page` / `decensored` / `enhanced`。
+    /// 从哪一版开始发：`reader-page` / `enhanced`。
     #[serde(default)]
     pub source: Option<String>,
-    /// 起点那一版是哪两个模型产出的（与 DLSSNR 那条路同一个规矩：起点按产出它的
+    /// 起点那一版是哪个模型产出的（与 DLSSNR 那条路同一个规矩：起点按产出它的
     /// 模型存，要算出同一个 revision 才读得到）。
-    #[serde(default)]
-    pub decensor_model: Option<String>,
     #[serde(default)]
     pub upscale_model: Option<String>,
     /// 前端给这次任务起的号：翻页之后就不必再发出去了。
@@ -1771,7 +1714,6 @@ fn remote_process_cached_page(
     let revision = match crate::inference::source_revision(
         data_dir,
         rendition,
-        input.decensor_model.as_deref(),
         input.upscale_model.as_deref(),
     ) {
         Ok(revision) => revision,
@@ -1984,24 +1926,6 @@ mod tests {
         assert!(error.contains("计算编排"), "{error}");
     }
 
-    /// 去码那条路也把动图原样交回，而且**早于**找模型包：这一页要不要动手与装没装三件套
-    /// 无关。这条判据原本在 `run_decensor_bytes` 里，现在上提到 `process`，于是三种处理
-    /// 方式里只剩 DLSSNR 自己去逐帧。这里连模型包都没有，仍然要原样回来。
-    #[test]
-    fn an_animated_page_is_handed_back_by_the_decensor_too() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let gif = animated_gif();
-        let params = ProcessParams {
-            chain: Vec::new(),
-            op: "decensor".into(),
-            model_id: Some("no-such-bundle".into()),
-            scale: None,
-            dlssnr: None,
-        };
-        let bytes = process(None, dir.path(), dir.path(), &params, &gif, &cancelled_never).expect("动图要当成功处理");
-        assert_eq!(bytes, gif, "原样回来，不是第一帧的 PNG");
-    }
-
     /// 一份「装好的 ONNX 超分模型」：清单 + 一个 onnx 文件。图从不被打开——这里的要点
     /// 只是让宿主认出「这一档归 worker」，而不是让哪个引擎去解它（所以字节是假的）。
     fn install_fake_onnx_upscaler(root: &std::path::Path, id: &str) {
@@ -2052,10 +1976,10 @@ mod tests {
         let refused = remote_capabilities(&base, "wrong-token").expect_err("该拒绝");
         assert!(refused.contains("401"), "{refused}");
 
-        // 令牌对：拿到三项能力（这台机器上什么都没装，所以都不 ready）。
+        // 令牌对：拿到两项能力（这台机器上什么都没装，所以都不 ready）。
         let capabilities = remote_capabilities(&base, "token-123").expect("能力清单");
         assert_eq!(capabilities.version, PROTOCOL_VERSION);
-        assert_eq!(capabilities.capabilities.len(), 3);
+        assert_eq!(capabilities.capabilities.len(), 2);
         assert!(capabilities.capabilities.iter().all(|item| !item.ready));
 
         // 处理一张 1×1 的图：没有模型时走最近邻，回的是 PNG。
@@ -2080,7 +2004,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let capabilities = capabilities(dir.path(), dir.path(), None);
         let ids: Vec<&str> = capabilities.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(ids, vec!["upscale", "decensor", "dlssnr"]);
+        assert_eq!(ids, vec!["upscale", "dlssnr"]);
         assert!(!capabilities[0].ready, "没有模型时超分不该是 ready");
         assert!(!capabilities[1].ready);
         assert!(capabilities[0].detail.contains("超分模型"));
@@ -2232,7 +2156,7 @@ mod tests {
 
     #[test]
     fn an_animated_page_is_handed_back_without_a_remote_round_trip() {
-        // 超分 / 去码没有逐帧实现：发过去之前那次「归一成 PNG」就已经把动图压成第一帧
+        // 超分没有逐帧实现：发过去之前那次「归一成 PNG」就已经把动图压成第一帧
         // 了，所以这里必须连试都不试（127.0.0.1:9 上没有任何东西在听）。
         let gif = animated_gif();
         let params = ProcessParams {

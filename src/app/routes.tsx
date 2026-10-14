@@ -394,9 +394,6 @@ interface ShelfSnapshot {
   serverId: string;
   scopeId: string;
   query: string;
-  /** The 🔖 Favorites category's ids, cached so a snapshot restore still shows
-   * the server favorites before the next category read. */
-  favoritesIds?: string[];
   /** The server's categories, cached for the same reason: the toolbar's filter
    * needs them, and asking for them is the one expensive read on this page. */
   categories?: Category[];
@@ -414,10 +411,8 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
-  /** The LANraragi 🔖 Favorites category's archive ids. 收藏夹 IS that
-   * category: when it exists the shelf renders it instead of the local
-   * watchlist, which only mirrors what this device hearted. */
-  const [favoritesIds, setFavoritesIds] = useState<string[] | undefined>(snapshot?.favoritesIds);
+  /** 收藏夹画的是**本机**那张表（`watchlist`），所以这里不再缓存服务器分类的 id：
+   * 那条分类是共享状态，本机没有记录的 id 画出来就是「我没加过的收藏」。 */
   /** 收藏与待看的顶栏与档案库同一套（分类筛选、排序方式、多选、显示模式）。
    * 历史没有：它的顺序就是那列时间线，按标题重排会把它读的东西弄丢。 */
   const showShelfToolbar = name !== 'history';
@@ -517,19 +512,17 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       setHasServer(true);
       setServerId(server.id);
       setScopeId(server.scopeId);
-      // 书架列表与收藏分类相互独立，并行拉；只有收藏夹需要那条分类——而且只要
-      // 那一条：`readFavoritesCategory` 一次两百毫秒，`listCategories` 在快照过期后
-      // 要为每条动态分类各跑一次不分页的全库搜索（1.5 万档案的库上 23 秒）。
-      // 顶栏的分类筛选要的是整份列表（原生那边有快照时就是一次读），所以只有
-      // 「这一页还没有分类」时才拉：拉过一次就跟着书架快照留住，刷新不再问。
+      // 书架列表与顶栏分类并行拉。**不读** 🔖 Favorites 那条分类：它是共享状态，
+      // 本机没有记录的那些（网页端/别的设备加的、或本机已删成墓碑的）画出来就是用户
+      // 报的「我根本没加入收藏夹的东西」（2026-10-13 真机：分类 15 个 id、本机 8 条活
+      // 行，13 张卡只来自分类）。分类仍然只是本机**推送**的镜像（`favoritesMirror`）。
       const needsCategories = showShelfToolbar && categoriesRef.current === undefined;
-      const [shelf, favorites, categoryResult] = await Promise.all([
+      const [shelf, categoryResult] = await Promise.all([
         name === 'history'
           ? repository.listHistory(server.scopeId)
           : name === 'toRead'
             ? repository.listReadingList(server.scopeId)
             : repository.listWatchlist(server.scopeId),
-        name === 'watchlist' ? repository.readFavoritesCategory(server.id) : Promise.resolve(undefined),
         needsCategories ? repository.listCategories(server.id) : Promise.resolve(undefined),
       ] as const);
       if (!active) return;
@@ -538,18 +531,11 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       const result = shelf;
       if (name === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setWatchlist(result.value as WatchlistRecord[]);
-      // 收藏夹 reads the LANraragi 🔖 Favorites category; the local table only
-      // stands in when the category does not exist (or the read failed).
-      // An **empty** category counts as "does not exist": `[]` is truthy, and
-      // taking it here would also replace the ids this page is about to fetch,
-      // so the whole shelf came up empty even though the local table had rows.
-      let shelfIds = name === 'history'
+      // 收藏夹只画本机记着的那些（`watchlist` 里没删的行）。从前这里取的是
+      // 「分类 ∪ 本机」的并集，于是分类里凡是本机没有阳性记录的 id 都会变成一张卡。
+      const shelfIds = name === 'history'
         ? (result.value as ReadingHistoryRecord[]).map((item) => item.archiveId)
         : (result.value as WatchlistRecord[]).filter((item) => !item.deleted).map((item) => item.archiveId);
-      if (name === 'watchlist' && favorites?.ok && favorites.value && favorites.value.archives.length > 0) {
-        setFavoritesIds(favorites.value.archives);
-        shelfIds = favorites.value.archives;
-      }
       const archiveResult = await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
@@ -566,8 +552,8 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   useEffect(() => {
     if (loading || error || !serverId || !scopeId) return;
     // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
-    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(name === 'watchlist' && favoritesIds && favoritesIds.length > 0 ? { favoritesIds } : {}), ...(categories ? { categories } : {}) } satisfies ShelfSnapshot, { persist: true });
-  }, [archives, cacheKey, categories, error, favoritesIds, history, loading, name, query, scopeId, serverId, watchlist]);
+    writeRouteCache(cacheKey, { history, watchlist, archives, serverId, scopeId, query, ...(categories ? { categories } : {}) } satisfies ShelfSnapshot, { persist: true });
+  }, [archives, cacheKey, categories, error, history, loading, name, query, scopeId, serverId, watchlist]);
   const [title, description] = workspaces[name];
   // Saved searches work on every shelf, not just the library.
   const [presets, setPresets] = useState<SearchPreset[]>([]);
@@ -585,15 +571,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const shelfArchives = useMemo(() => {
     // 历史与首页「继续阅读」共用同一份口径（顺序、解析、已读完过滤）；这里全都要。
     if (name === 'history') return historyShelfArchives(history, archiveById);
-    // 收藏夹 renders the server category's ids in the server's own order when
-    // they are known; otherwise it falls back to the local watchlist. An **empty**
-    // server list is treated as "not known": `[]` is truthy, and with it the page
-    // drew zero cards while the local shelf had entries (and skipped the local
-    // fallback entirely). The persisted snapshot can carry such a value too, so
-    // the check belongs here rather than only at the setter.
-    const ids = name === 'watchlist' && favoritesIds && favoritesIds.length > 0 ? favoritesIds : sortedWatchlist.map((item) => item.archiveId);
+    // 收藏夹画的就是本机那张表（`sortedWatchlist` 已经滤掉墓碑）。服务器那条
+    // 🔖 Favorites 分类**不并进来**：它是共享状态，本机没有记录的那些（网页端/别的
+    // 设备加的、或本机已删的）画出来就是用户报的「我根本没加入收藏夹的东西」。
+    // 分类仍然只是本机**推送**的镜像（`favoritesMirror`）。
+    const ids = sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
-  }, [archiveById, favoritesIds, history, name, sortedWatchlist]);
+  }, [archiveById, history, name, sortedWatchlist]);
   /** 书架自己的顺序按选择的排序方式重排。档案库那份排序是服务器做的（查询里带
    * sortBy/order），书架手上只有这几十条记录，所以在这里排。
    *

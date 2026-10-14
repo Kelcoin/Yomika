@@ -14,9 +14,9 @@ const InstalledModelSchema = z.object({
    * the model is listed but cannot be run — nothing records its scale. */
   scale: z.number().int().positive().nullable().default(null),
   /** What the model does. Read from the shape of the install on the native side,
-   * so a de-censoring bundle cannot be offered as an upscaler — picking one there
-   * silently produced plain nearest-neighbour output. */
-  kind: z.enum(['upscale', 'decensor']).default('upscale'),
+   * so a model cannot be offered as something it is not — picking the wrong one
+   * there silently produced plain nearest-neighbour output. */
+  kind: z.enum(['upscale']).default('upscale'),
   components: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), path: z.string() })).default([]),
 });
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
@@ -125,10 +125,6 @@ export class NativeInferenceRepository {
   importModelPath(path: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_import_model_path', { input: { path } }, InstalledModelResponse); }
   /** The models actually on disk, so the settings page can offer a choice
    * instead of asking for a model name to be typed from memory. */
-  /** Installs a de-censoring bundle by copying it out of a directory the user
-   * already has. The bundle is 337 MB, so it cannot be handed over as bytes the
-   * way an upscaling model is. */
-  installDecensorBundle(sourceDir: string): Promise<CommandResult<InstalledModel>> { return invokeCommand('inference_install_decensor_bundle', { sourceDir }, InstalledModelResponse); }
   listModels(): Promise<CommandResult<InstalledModel[]>> { return invokeCommand('inference_list_models', {}, z.array(InstalledModelResponse)); }
   /** 线上托管的超分模型目录。装在盘上的模型和它能选什么不是一回事：目录里的
    * 条目还没下载，设置页也要列出来——否则手机端永远没有 real-esrgan 可选。 */

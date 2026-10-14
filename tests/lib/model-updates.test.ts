@@ -48,18 +48,15 @@ describe('available model updates', () => {
     )).toEqual([]);
   });
 
-  it('ignores what the catalog cannot update: built-ins, decensors, records without a scale', () => {
+  it('ignores what the catalog cannot update: built-ins, records without a scale', () => {
     expect(availableModelUpdates(
       [
         // 内置的 Anime4K 不在托管目录里，没有可参照的目标版本。
         installed({ id: 'anime4k-hq', version: '2' }),
-        // 去码包是另一条线，目录里的超分条目管不到它。
-        installed({ id: 'realcugan-decensor', version: '1', kind: 'decensor' }),
         // 目录里有、但盘上这份没有 manifest：跑不起来，也不该提示更新。
         installed({ id: 'real-esrgan-x4', version: '1', scale: null }),
       ],
       [
-        catalog({ id: 'realcugan-decensor', version: '9' }),
         catalog({ id: 'real-esrgan-x4', version: '9' }),
       ],
     )).toEqual([]);

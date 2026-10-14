@@ -11,9 +11,9 @@ import type { CachedImageData, ImageCacheRepository } from './unifiedImageCache'
 import { UnifiedImageCache } from './unifiedImageCache';
 
 /** 阅读器那几版渲染：它们的失败**没有别的出口**——阅读器把每一页的错误都咽掉
- * （失败只体现为「这一页没换」），所以不在这里记一笔，用户报「去码/超分没反应」
+ * （失败只体现为「这一页没换」），所以不在这里记一笔，用户报「超分没反应」
  * 时错误日志里就什么都没有。封面、缩略图不记：那些的原生失败本来就由桥接记录。 */
-const READER_RENDITIONS: readonly string[] = ['reader-page', 'enhanced', 'decensored', 'dlssnr', 'remote'];
+const READER_RENDITIONS: readonly string[] = ['reader-page', 'enhanced', 'dlssnr', 'remote'];
 
 /** 阅读器这几版里由**原生那一步**产出的那些（DLSSNR / 远端）没算出来时抛的就是它。
  *
@@ -54,7 +54,6 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
     // 不认，免得显示一张与当前设置无关的图。
     if (
       identity.rendition === 'enhanced'
-      || identity.rendition === 'decensored'
       || identity.rendition === 'dlssnr'
       || identity.rendition === 'remote'
     ) return null;
@@ -99,27 +98,26 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   private async load(identity: ImageCacheIdentity, signal?: AbortSignal): Promise<CachedImageData> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     if (!identity.serverId) throw new Error('Image request is missing a server ID');
-    // `enhanced` 与 `decensored` 这两版**不从这里走**：它们现在整条都由 compute 那条链产出
+    // `enhanced` 这一版**不从这里走**：它现在整条都由 compute 那条链产出
     // （`loadLocalRenditions` 提交宿主任务、把产物认领进这张账），从这里再往外开一道
     // 「宿主在进程里跑模型」的旧门正是 8-g 要拆掉的东西。
     //
     // 这里点名拦一道不是因为不拦就危险（不拦会掉到下面那句 `Unsupported image request`），
-    // 而是因为那句话什么也没说：真出了这种事（谁又按这两版来读图），日志里要写清楚这两版
+    // 而是因为那句话什么也没说：真出了这种事（谁又按这一版来读图），日志里要写清楚这一版
     // 归谁管。
-    if (identity.rendition === 'enhanced' || identity.rendition === 'decensored') {
+    if (identity.rendition === 'enhanced') {
       throw new Error(`${identity.rendition} is produced by compute, not by the image cache`);
     }
     if (identity.rendition === 'dlssnr') {
-      // DLSSNR：起点由 `transform` 说明（本地去码/超分跑过就从它们的产物接着跑），
+      // DLSSNR：起点由 `transform` 说明（本地超分跑过就从它的产物接着跑），
       // 层参数也在里面——它同时是缓存键的一部分，改参数就拿不到旧结果。起点是按
-      // 「产出它的模型」存的，两个模型 id 一并送过去。
+      // 「产出它的模型」存的，模型 id 一并送过去。
       const { source, passes } = parseDlssnrTransform(identity.transform);
       const processed = await this.dlssnr.applyPage({
         scopeId: identity.scopeId,
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         source,
-        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
         ...(identity.priority ? { priority: identity.priority } : {}),
@@ -145,7 +143,6 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         source: remote.source,
-        ...(identity.decensorModelId ? { decensorModel: identity.decensorModelId } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
         // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
@@ -198,7 +195,7 @@ function parseDlssnrTransform(transform: string | undefined): { source: DlssnrSo
   try {
     const parsed = JSON.parse(transform) as { source?: DlssnrSource; passes?: string };
     return {
-      source: parsed.source === 'enhanced' || parsed.source === 'decensored' ? parsed.source : 'reader-page',
+      source: parsed.source === 'enhanced' ? parsed.source : 'reader-page',
       passes: typeof parsed.passes === 'string' ? parsed.passes : '',
     };
   } catch {
@@ -206,7 +203,7 @@ function parseDlssnrTransform(transform: string | undefined): { source: DlssnrSo
   }
 }
 
-export type DlssnrSource = 'reader-page' | 'decensored' | 'enhanced';
+export type DlssnrSource = 'reader-page' | 'enhanced';
 
 /** `remote` 那一版的全部处理参数（同样进缓存键）。
  *
@@ -232,7 +229,7 @@ function parseRemoteOpsTransform(transform: string | undefined): {
     const parsed = JSON.parse(transform) as { device?: unknown; source?: unknown; chain?: unknown };
     return {
       device: typeof parsed.device === 'string' ? parsed.device : '',
-      source: parsed.source === 'enhanced' || parsed.source === 'decensored' ? parsed.source : 'reader-page',
+      source: parsed.source === 'enhanced' ? parsed.source : 'reader-page',
       chain: Array.isArray(parsed.chain) ? parsed.chain.filter((step): step is string => typeof step === 'string') : fallback.chain,
     };
   } catch {

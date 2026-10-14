@@ -73,7 +73,6 @@ fn a_run_message_round_trips() {
             layers: None,
             settings_id: None,
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -269,149 +268,6 @@ fn a_min_input_edge_outside_the_range_is_rejected() {
         };
         assert_eq!(field, "minInputEdge");
     }
-}
-
-/// 一份完整的去码授权：检测器 + 两份修补模型（docs/94）。
-const DECENSOR: &str = r#""decensor": {
-      "detector": { "relativePath": "ab/weights.onnx", "contentHash": "d1", "byteLength": 254399754 },
-      "bar": { "relativePath": "ab/bar.onnx", "contentHash": "b1", "byteLength": 14646486 },
-      "mosaic": { "relativePath": "ab/mosaic.onnx", "contentHash": "m2", "byteLength": 14646626 }
-    }"#;
-
-/// 把三份文件按名字拼成 `decensor` 那一栏（内容由调用方给，好让每条负测试只改一处）。
-fn decensor_object(files: &[(&str, &str)]) -> String {
-    let body: Vec<String> = files
-        .iter()
-        .map(|(name, json)| format!(r#""{name}": {json}"#))
-        .collect();
-    format!(r#""decensor": {{ {} }}"#, body.join(", "))
-}
-
-#[test]
-fn a_decensor_grant_round_trips_with_all_three_files() {
-    let body = RUN.replacen(r#""tile": 512 }"#, &format!(r#""tile": 512, {DECENSOR} }}"#), 1);
-    let message = parse(body.as_bytes()).expect("带去码授权的一阶段");
-    let stage = plain_pipeline_stage(&message);
-    let grant = stage.decensor.as_ref().expect("去码授权");
-    assert_eq!(grant.bar.byte_length, 14_646_486);
-    assert_eq!(grant.mosaic.relative_path, "ab/mosaic.onnx");
-    assert_eq!(grant.detector.content_hash, "d1");
-    assert!(stage.model.is_none(), "去码阶段没有 model 那一栏");
-    assert_eq!(
-        parse(encode(&message).unwrap().as_bytes()).unwrap(),
-        message,
-        "去码授权也要能原样往返"
-    );
-}
-
-#[test]
-fn a_decensor_grant_missing_a_file_is_rejected() {
-    // 少一份就只能由 worker 猜「马赛克那个框拿横条模型糊一下行不行」，而那种替换
-    // 是沉默的质量谎话——所以缺栏在解析这一层就停住（docs/91）。
-    let files = [
-        (
-            "detector",
-            r#"{ "relativePath": "ab/weights.onnx", "contentHash": "d1", "byteLength": 4096 }"#,
-        ),
-        (
-            "bar",
-            r#"{ "relativePath": "ab/bar.onnx", "contentHash": "b1", "byteLength": 4096 }"#,
-        ),
-        (
-            "mosaic",
-            r#"{ "relativePath": "ab/mosaic.onnx", "contentHash": "m2", "byteLength": 4096 }"#,
-        ),
-    ];
-    for missing in ["detector", "bar", "mosaic"] {
-        let kept: Vec<(&str, &str)> = files
-            .iter()
-            .copied()
-            .filter(|(name, _)| *name != missing)
-            .collect();
-        let stage = format!(r#""tile": 512, {} }}"#, decensor_object(&kept));
-        let text = RUN.replacen(r#""tile": 512 }"#, &stage, 1);
-        let error = parse(text.as_bytes()).expect_err(missing);
-        assert!(
-            matches!(error, ProtocolError::Malformed { .. }),
-            "少一份 {missing} 应当被判成残缺，实际 {error:?}"
-        );
-    }
-}
-
-#[test]
-fn a_decensor_grant_the_worker_could_not_resolve_is_rejected() {
-    // 三份文件走的是与模型同一条只读通道，所以三份都要过同一条路径与长度护栏；
-    // 这里故意每份各错一处，用来证明护栏真的覆盖了三栏而不是只包了第一栏。
-    let good = [
-        (
-            "detector",
-            r#"{ "relativePath": "ab/weights.onnx", "contentHash": "d1", "byteLength": 4096 }"#,
-        ),
-        (
-            "bar",
-            r#"{ "relativePath": "ab/bar.onnx", "contentHash": "b1", "byteLength": 4096 }"#,
-        ),
-        (
-            "mosaic",
-            r#"{ "relativePath": "ab/mosaic.onnx", "contentHash": "m2", "byteLength": 4096 }"#,
-        ),
-    ];
-    for (name, broken, expected_field, why) in [
-        (
-            "detector",
-            r#"{ "relativePath": "C:/weights.onnx", "contentHash": "d1", "byteLength": 4096 }"#,
-            "decensor.detector.relativePath",
-            "盘符",
-        ),
-        (
-            "bar",
-            r#"{ "relativePath": "ab/bar.onnx", "contentHash": "b1", "byteLength": 0 }"#,
-            "decensor.bar.byteLength",
-            "长度 0",
-        ),
-        (
-            "mosaic",
-            r#"{ "relativePath": "ab/mosaic.onnx", "contentHash": "", "byteLength": 4096 }"#,
-            "decensor.mosaic.contentHash",
-            "空 hash",
-        ),
-    ] {
-        let files: Vec<(&str, &str)> = good
-            .iter()
-            .copied()
-            .map(|(field, json)| if field == name { (field, broken) } else { (field, json) })
-            .collect();
-        let stage = format!(r#""tile": 512, {} }}"#, decensor_object(&files));
-        let text = RUN.replacen(r#""tile": 512 }"#, &stage, 1);
-        let error = parse(text.as_bytes()).expect_err(why);
-        let ProtocolError::OutOfRange { field, .. } = &error else {
-            panic!("{why} 应当被判成越界，实际 {error:?}");
-        };
-        assert_eq!(field, expected_field, "{why}");
-    }
-}
-
-#[test]
-fn a_stage_with_both_a_model_and_a_decensor_grant_is_rejected() {
-    // 一次说不清的请求：这个阶段的输入是页面本身，引擎没法同时按「拿模型把图变形」
-    // 与「自己找框、自己把图补回来」两种解码方式来用它。收下它就会变成一个按实现细节
-    // 决定的行为，所以直接判越界（docs/91）。
-    let body = RUN.replacen(
-        r#""tile": 512 }"#,
-        &format!(
-            r#""tile": 512, "model": {{ "relativePath": "ab/abcd.onnx", "contentHash": "deadbeef", "byteLength": 4096 }}, {DECENSOR} }}"#
-        ),
-        1,
-    );
-    let error = parse(body.as_bytes()).expect_err("模型与去码授权同时出现");
-    let ProtocolError::OutOfRange { field, .. } = &error else {
-        panic!("应当被判成越界，实际 {error:?}");
-    };
-    // 这一栏报的是**规则**的名字（「四样里恰有一份」），不是被撞上的那两样的名字：
-    // 报 `decensor` 会让「模型 + DLSSNR」那一对看起来是另一条规则（DLSSNR 加入前
-    // 这里确实报的是 `decensor`，那时规则只覆盖两样；DLSSNR 加入之后是 `dlssnr`，
-    // 内置链加入之后是 `builtin`）。字面量跟着最新那一栏走，规则本身只有一条。
-    assert_eq!(field, "builtin");
 }
 
 #[test]
@@ -690,12 +546,11 @@ fn a_run_with_a_dlssnr_grant_round_trips() {
 #[test]
 fn a_stage_that_carries_two_kinds_of_grant_is_rejected() {
     // 一个阶段的输入是**页面本身**：同一页没法既按 DLSSNR 的一层参数重绘、又拿去当
-    // 超分/去码的输入。说不清的请求在协议层就该被挡下——worker 那边若靠猜，猜错的那
+    // 超分的输入。说不清的请求在协议层就该被挡下——worker 那边若靠猜，猜错的那
     // 一种会变成一张看起来对、其实没处理过的图。
     let dlssnr = r#""dlssnr": { "feature": { "relativePath": "ab/abcd.dll", "contentHash": "deadbeef", "byteLength": 165000000 }, "settings": { "relativePath": "cd/cdef.json", "contentHash": "cafebabe", "byteLength": 128 } }"#;
     for extra in [
         r#", "model": { "relativePath": "ab/abcd.onnx", "contentHash": "deadbeef", "byteLength": 1048576 }"#,
-        r#", "decensor": { "detector": { "relativePath": "ab/d.onnx", "contentHash": "aa", "byteLength": 1 }, "bar": { "relativePath": "ab/b.onnx", "contentHash": "bb", "byteLength": 1 }, "mosaic": { "relativePath": "ab/m.onnx", "contentHash": "cc", "byteLength": 1 } }"#,
     ] {
         let body = RUN.replacen(
             r#""tile": 512 }"#,
@@ -716,9 +571,9 @@ fn a_stage_that_carries_two_kinds_of_grant_is_rejected() {
     }
 }
 
-/// 内置链那一栏与另外三栏都互斥。
+/// 内置链那一栏与另外两栏都互斥。
 ///
-/// 它与「模型 + 去码」那种互斥不是同一件事：内置链交的是一句**身份**而不是文件，所以
+/// 它与「模型 + DLSSNR」那种互斥不是同一件事：内置链交的是一句**身份**而不是文件，所以
 /// 同乘的后果不是「多摆一份文件」，而是**这条阶段到底要不要文件**说不清——一条来路要
 /// 读模型、一条只在两边编着的着色器里跑。说不清的请求在协议层就该被挡下。
 #[test]
@@ -726,7 +581,6 @@ fn a_builtin_chain_cannot_ride_along_with_any_file_grant() {
     let builtin = r#", "builtin": { "chainId": "anime4k-hq", "version": "2-1", "scale": 2 }"#;
     for extra in [
         r#", "model": { "relativePath": "ab/abcd.onnx", "contentHash": "deadbeef", "byteLength": 4096 }"#,
-        r#", "decensor": { "detector": { "relativePath": "ab/d.onnx", "contentHash": "aa", "byteLength": 1 }, "bar": { "relativePath": "ab/b.onnx", "contentHash": "bb", "byteLength": 1 }, "mosaic": { "relativePath": "ab/m.onnx", "contentHash": "cc", "byteLength": 1 } }"#,
         r#", "dlssnr": { "feature": { "relativePath": "ab/abcd.dll", "contentHash": "deadbeef", "byteLength": 165000000 }, "settings": { "relativePath": "cd/cdef.json", "contentHash": "cafebabe", "byteLength": 128 } }"#,
     ] {
         let body = RUN.replacen(

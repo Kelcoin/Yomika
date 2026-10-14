@@ -70,7 +70,7 @@ const PairRequestSchema = z.object({ requestId: z.string() });
 const PairResultSchema = z.object({ token: z.string(), name: z.string() });
 
 /** 远端能提供的那几档；`id` 与对面 `/v2/capabilities` 里 `Capability.id` 同一套。 */
-export const REMOTE_SERVICE_IDS = ['upscale', 'decensor', 'dlssnr'] as const;
+export const REMOTE_SERVICE_IDS = ['upscale', 'dlssnr'] as const;
 
 export type RemoteService = (typeof REMOTE_SERVICE_IDS)[number];
 
@@ -179,8 +179,7 @@ export class NativeComputeCenterRepository {
     scopeId: string;
     archiveId: string;
     pageIndex: number;
-    source?: 'reader-page' | 'decensored' | 'enhanced';
-    decensorModel?: string;
+    source?: 'reader-page' | 'enhanced';
     upscaleModel?: string;
     taskId?: string;
     /** 远端有自己的队列（不占本机 GPU 那一件）：档位管的是远端任务之间谁先走。 */

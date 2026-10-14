@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, Eraser, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -13,6 +13,7 @@ import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowCo
 import { getPlatformCapabilities } from '../bridge/platform';
 import { decodeImage } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
+import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
@@ -255,10 +256,9 @@ interface ReaderScreenProps {
   info?: { cover?: string | undefined; tags?: string[] | undefined; sizeBytes?: number | undefined } | undefined;
   /** Marks the session as unrecorded; the caller skips progress writes. */
   incognito?: boolean;
-  /** Reader-side switches for the two derived renditions, so their effect can be
+  /** Reader-side switches for the derived renditions, so their effect can be
    * seen on the page in front of you instead of only in settings. */
   upscale?: EnhancementSwitch | undefined;
-  decensor?: EnhancementSwitch | undefined;
   dlssnr?: EnhancementSwitch | undefined;
   /** Bumped by the caller when what `loadPage` would return has changed — a
    * switch above, for instance. Every loaded page is dropped and the window
@@ -268,12 +268,12 @@ interface ReaderScreenProps {
    * its place in the same slot, so nothing about the view changes but the `src` —
    * which is what keeps the zoom from being thrown away mid-read. */
   derivedPages?: ReadonlyMap<number, string> | undefined;
-  /** Pages the caller is deriving right now (de-censor / upscale). On CPU a page
+  /** Pages the caller is deriving right now (upscale / DLSSNR). On CPU a page
    * takes seconds — a 1248×1416 with both models runs ~20 — and until now nothing
-   * on screen said so: press 「去码」, see nothing, and the feature reads as broken
-   * even though it is working. The pill is that missing sentence. */
+   * on screen said so: press a switch, see nothing, and the feature reads as
+   * broken even though it is working. The pill is that missing sentence. */
   derivingPages?: ReadonlySet<number> | undefined;
-  /** What to call the wait: `去码处理中…`, `超分处理中…`, both when both are on. */
+  /** What to call the wait: `超分处理中…`, `DLSSNR 处理中…`, …. */
   derivingLabel?: string | undefined;
   /** The pages actually on screen, so the caller can enhance those and not the
    * whole prefetch window. */
@@ -289,7 +289,7 @@ interface ReaderScreenProps {
  * its retries are actually spent. */
 /** 一页的图：换 `src` 之前先把新图解好。
  *
- * `<img>` 换 `src` 的那一帧，浏览器会先把旧图扔掉——旧图 → 空 → 新图。超分/去码算完正好
+ * `<img>` 换 `src` 的那一帧，浏览器会先把旧图扔掉——旧图 → 空 → 新图。超分/DLSSNR 算完正好
  * 是这个动作（同一页从原图换成处理过的图），中间那一帧空档在阅读器的深色底上就是用户看到
  * 的黑闪。所以这里保留正在显示的那一张，新图 `decode()` 完了再换（见 `lib/decodeImage`）。
  *
@@ -357,11 +357,18 @@ function readViewport() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, decensor, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
+export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
   const pageActive = usePageActive();
   const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
-  /** 手指点的设备：页码胶囊在手机上只走居中那一档（见下面量底缝的那一处）。 */
-  const coarsePointer = useMediaQuery('(hover: none)');
+  /** 手指点的设备：页码胶囊在手机上只走居中那一档（见下面量底缝的那一处）。
+   *
+   * 用的是 `horizontalScroller.ts` 里那一条（`(hover: none), (pointer: coarse)`），
+   * 不是光一个 `(hover: none)`：这条判据在仓库里只留一份，理由是 Readoshi 那边就是
+   * 这么写的（`ArchiveCard.jsx` 的 `getTouchScrollStyle` 用它分流滚轮与触摸），而两种
+   * 写法在真机上确实分得出设备——有的触屏设备 `hover: none` 不成立但 `pointer: coarse`
+   * 成立，反过来也有。分成两份写法时，横轨按一份分流、阅读器按另一份分流，同一台设备
+   * 就会在两处得到不同的结论。 */
+  const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const goBack = useReturnNavigation();
   const [viewport, setViewport] = useState(readViewport);
   // Built once. A different archive arrives as an unmount, not a prop change:
@@ -457,8 +464,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     visible: state.phase === 'chrome-visible',
     active: pageActive,
     suspended: thumbnailPanelOpen,
-    // 手指（`hover: none`）点哪条感应带就只亮哪条：触屏没有悬停，两条栏本来只能一起
-    // 亮一起灭。鼠标留着旧行为——桌面用悬停选边，点一下两条都出来也无所谓。
+    // 手指（`COARSE_POINTER_QUERY`，即 `(hover: none), (pointer: coarse)`）点哪条感应带
+    // 就只亮哪条：触屏没有悬停，两条栏本来只能一起亮一起灭。鼠标留着旧行为——桌面用
+    // 悬停选边，点一下两条都出来也无所谓。
     pinTappedBand: coarsePointer,
     onToggle: () => setState(toggleReaderChrome),
     onHide: () => setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current),
@@ -1193,7 +1201,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * heavier by a button (user report:「如果用户没有开启超分相关功能，则重新排布
    * 尽量让左右两侧视觉重心一致」). */
   const enhancementCount =
-    Number(Boolean(upscale?.configured)) + Number(Boolean(decensor?.configured)) + Number(Boolean(dlssnr?.configured));
+    Number(Boolean(upscale?.configured)) + Number(Boolean(dlssnr?.configured));
   const autoPlayJoinsProcessing = enhancementCount < 2;
   const autoPlayControl = (
     <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
@@ -1558,16 +1566,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                   title={upscale.configured ? '超分' : '超分：先在阅读设置里选择模型'}
                   onClick={upscale.toggle}
                 ><Sparkles aria-hidden="true" /></button>
-              )}
-              {decensor?.configured && (
-                <button
-                  type="button"
-                  disabled={!decensor.configured}
-                  aria-pressed={decensor.configured && decensor.active}
-                  aria-label={decensor.configured ? (decensor.active ? '关闭去码' : '开启去码') : '去码：未选择模型包'}
-                  title={decensor.configured ? '去码' : '去码：先在阅读设置里选择模型包'}
-                  onClick={decensor.toggle}
-                ><Eraser aria-hidden="true" /></button>
               )}
               {dlssnr?.configured && (
                 <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon /></button>

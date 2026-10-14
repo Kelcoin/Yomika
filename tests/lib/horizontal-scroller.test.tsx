@@ -1,6 +1,50 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { vi } from 'vitest';
-import { getHorizontalWheelDelta, useHorizontalScroller } from '../../src/lib/horizontalScroller';
+import {
+  COARSE_POINTER_QUERY,
+  getHorizontalWheelDelta,
+  getMouseScrollStyle,
+  getTouchScrollStyle,
+  useHorizontalScroller,
+} from '../../src/lib/horizontalScroller';
+
+/** jsdom 里没有 `matchMedia`：给导轨一个能改判的桩，用来验「按设备档挑样式」那一档。 */
+function stubCoarsePointer(initial: boolean) {
+  type Listener = () => void;
+  const listeners = new Set<Listener>();
+  let matches = initial;
+  const media = {
+    media: COARSE_POINTER_QUERY,
+    get matches() {
+      return matches;
+    },
+    addEventListener: (_type: string, listener: Listener) => {
+      listeners.add(listener);
+    },
+    removeEventListener: (_type: string, listener: Listener) => {
+      listeners.delete(listener);
+    },
+    addListener: (listener: Listener) => {
+      listeners.add(listener);
+    },
+    removeListener: (listener: Listener) => {
+      listeners.delete(listener);
+    },
+    onchange: null,
+    dispatchEvent: () => true,
+  } as unknown as MediaQueryList;
+  const previous = window.matchMedia;
+  (window as unknown as { matchMedia: (query: string) => MediaQueryList }).matchMedia = () => media;
+  return {
+    flip(next: boolean) {
+      matches = next;
+      listeners.forEach((listener) => listener());
+    },
+    restore() {
+      (window as unknown as { matchMedia: typeof previous }).matchMedia = previous;
+    },
+  };
+}
 
 function HorizontalScrollerHarness({ onOuterWheel }: { onOuterWheel: () => void }) {
   const scroller = useHorizontalScroller();
@@ -25,6 +69,36 @@ function setOverflow(element: HTMLElement, scrollWidth: number, clientWidth: num
 }
 
 describe('horizontal scroller', () => {
+  it('hands a touch device the browser’s own scrolling and a mouse a grab cursor', () => {
+    const touch = getTouchScrollStyle();
+    // 触摸这一路整个交给浏览器：两个轴都由它按手势主方向择一，所以**不能**是
+    // `pan-x` / `pan-x pan-y`——后者会把双指缩放一起禁掉，而缩放该由浏览器决定。
+    expect(touch.touchAction).toBe('auto');
+    expect(touch.overscrollBehaviorX).toBe('contain');
+    expect(touch.overscrollBehaviorY).toBe('auto');
+    expect(String(touch.touchAction)).not.toContain('pan');
+
+    expect(getMouseScrollStyle().cursor).toBe('grab');
+  });
+
+  it('puts the touch style on the rail where there is no hover, and follows a change', () => {
+    const pointer = stubCoarsePointer(true);
+    try {
+      render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
+      const rail = screen.getByTestId('rail');
+      expect(rail.style.touchAction).toBe('auto');
+      expect(rail.style.overscrollBehaviorX).toBe('contain');
+      expect(rail.style.cursor).toBe('');
+
+      // 插上鼠标 / 切回桌面模式：换那一套，而且要把触摸那套留下的键清掉。
+      pointer.flip(false);
+      expect(rail.style.cursor).toBe('grab');
+      expect(rail.style.touchAction).toBe('');
+    } finally {
+      pointer.restore();
+    }
+  });
+
   it('takes a wheel that is going sideways, and a vertical wheel over the cards', () => {
     expect(getHorizontalWheelDelta({ ctrlKey: false, shiftKey: false, deltaX: -90, deltaY: 30 }, 500, 200)).toBe(-90);
     // The plain vertical wheel moves the rail too — that is how a mouse asks a

@@ -331,16 +331,12 @@ pub fn install_model_archive(
 
 // Anime4K 的解析器与 CPU 解释器搬进了计算核心（docs/71 §11 Task 2）：worker 也要
 // 编进这一档，两边必须解同一份 GLSL。宿主的 `inference::anime4k::*` 路径原样保留，
-// 调用点（`inference.rs` 与阅读器/去码那几条规划）一行都不用改。
+// 调用点（`inference.rs` 与阅读器那几条规划）一行都不用改。
 pub use yomika_compute_core::anime4k;
 pub mod cancel;
-pub mod decensor;
-// 下面这两个模块（以及它们背后的核心层）只有测试用得上：`inpaint` 是几何那边点名
-// 要比对的类型，`onnx` 是真模型用例要开的引擎。产品构建里宿主一条 ONNX 会话都不开
-// （8-g③-iv），所以它们连编译都不该进来——`#[cfg(test)]` 就是这条边界，谁哪天在产品
+// 下面这个模块（以及它背后的核心层）只有测试用得上：`onnx` 是真模型用例要开的引擎。产品构建里宿主一条 ONNX 会话都不开
+// （8-g③-iv），所以它连编译都不该进来——`#[cfg(test)]` 就是这条边界，谁哪天在产品
 // 代码里用上它们，会以「找不到模块」当场红掉，而不是悄悄把运行库链回主进程。
-#[cfg(test)]
-pub mod inpaint;
 #[cfg(test)]
 pub mod onnx;
 pub mod session;
@@ -533,35 +529,6 @@ pub struct InstalledModelComponent {
     pub path: String,
 }
 
-fn decensor_components() -> Vec<InstalledModelComponent> {
-    vec![
-        InstalledModelComponent {
-            id: "mrcnn".into(),
-            name: "Mask R-CNN".into(),
-            role: "遮挡区域检测".into(),
-            path: "mrcnn/weights.onnx".into(),
-        },
-        InstalledModelComponent {
-            id: "deepcreampy-bar".into(),
-            name: "DeepCreamPy Bar".into(),
-            role: "条状遮挡修补".into(),
-            path: "deepcreampy/bar.onnx".into(),
-        },
-        InstalledModelComponent {
-            id: "deepcreampy-mosaic".into(),
-            name: "DeepCreamPy Mosaic".into(),
-            role: "马赛克修补".into(),
-            path: "deepcreampy/mosaic.onnx".into(),
-        },
-        InstalledModelComponent {
-            id: "fatal-pixels".into(),
-            name: "Fatal Pixels".into(),
-            role: "马赛克修补辅助超分".into(),
-            path: "esrgan/4x-Fatal-Pixels.onnx".into(),
-        },
-    ]
-}
-
 /// How much larger than the page an enhanced rendition is served.
 ///
 /// The models available are x4, and x4 is not what a reader needs: it is sixteen
@@ -609,7 +576,6 @@ pub async fn inference_release_sessions() -> crate::domain::result::CommandResul
 }
 
 pub const MODEL_KIND_UPSCALE: &str = "upscale";
-pub const MODEL_KIND_DECENSOR: &str = "decensor";
 
 // Inspect metadata only: never read ONNX weights to populate the settings list.
 fn model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
@@ -644,7 +610,7 @@ fn model_fingerprint(root: &std::path::Path) -> std::io::Result<String> {
     Ok(format!("v3-{:016x}", hash.finish()))
 }
 
-/// 指纹按根目录缓存：模型装好后内容不变，而逐页去码会让每个页面都走一遍
+/// 指纹按根目录缓存：模型装好后内容不变，而逐页超分会让每个页面都走一遍
 /// 目录遍历。失效信号用根目录自身的 mtime——安装、换版本必然动到它；
 /// 只在既有版本目录里原地替换权重文件的场景才会漏，而那不是任何入口的做法。
 /// 指纹缓存也必须是有界容器：键是模型根目录，正常只有几个，但路径来自安装与
@@ -740,16 +706,6 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
         if !safe_model_identity_segment(&id) || id.starts_with('.') {
             continue;
         }
-        if decensor::bundle_in(&model_dir.path()).is_some() {
-            found.push(InstalledModel {
-                id,
-                version: "local".into(),
-                scale: None,
-                kind: MODEL_KIND_DECENSOR.into(),
-                components: decensor_components(),
-            });
-            continue;
-        }
         let Ok(versions) = std::fs::read_dir(model_dir.path()) else {
             continue;
         };
@@ -766,39 +722,14 @@ pub fn installed_models_in(app_data_dir: &std::path::Path) -> Vec<InstalledModel
         for version in ids {
             let root = model_dir.path().join(&version);
             let scale = read_model_manifest(&root).map(|manifest| manifest.scale);
-            let kind = if decensor::bundle_in(&root).is_some() {
-                MODEL_KIND_DECENSOR
-            } else {
-                MODEL_KIND_UPSCALE
-            };
             found.push(InstalledModel {
                 id: id.clone(),
                 version,
                 scale,
-                kind: kind.to_string(),
-                components: if kind == MODEL_KIND_DECENSOR {
-                    decensor_components()
-                } else {
-                    Vec::new()
-                },
+                kind: MODEL_KIND_UPSCALE.into(),
+                components: Vec::new(),
             });
         }
-    }
-    // Accept a bundled de-censor install copied directly into models/. Older
-    // builds and manual installs use this layout instead of id/version nesting —
-    // but only when no proper install exists: when both are present the loose
-    // files are leftovers of the same bundle, and reporting both made every
-    // stage menu list each component twice.
-    if !found.iter().any(|model| model.kind == MODEL_KIND_DECENSOR)
-        && decensor::bundle_in(&models_dir).is_some()
-    {
-        found.push(InstalledModel {
-            id: "aletheia-lens".into(),
-            version: "1".into(),
-            scale: None,
-            kind: MODEL_KIND_DECENSOR.into(),
-            components: decensor_components(),
-        });
     }
     found.sort_by(|left, right| left.id.cmp(&right.id));
     if let Some(fp) = fingerprint {
@@ -913,54 +844,6 @@ pub fn inference_list_models(
     }
 }
 
-/// Installs a de-censoring bundle by copying one out of an existing Aletheia-Lens
-/// directory, since it is far too large to hand over as bytes. See
-/// `decensor::install_bundle_from` for why.
-#[tauri::command(async)]
-pub fn inference_install_decensor_bundle(
-    app: tauri::AppHandle,
-    source_dir: String,
-    version: Option<String>,
-) -> crate::domain::result::CommandResult<InstalledModel> {
-    const BUNDLE_ID: &str = "aletheia-lens";
-    let version = version
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "1".to_string());
-    let result = model_data_dir(&app)
-        .map_err(|error| InferenceError::InvalidInput(error.to_string()))
-        .and_then(|app_data_dir| {
-            let (staging, install) = model_install_roots(&app_data_dir, BUNDLE_ID, &version)?;
-            decensor::install_bundle_from(std::path::Path::new(&source_dir), &staging, &install)?;
-            Ok(install)
-        });
-    match result {
-        Ok(install) => crate::domain::result::CommandResult::success(InstalledModel {
-            id: BUNDLE_ID.to_string(),
-            version,
-            // A bundle has four ONNX files and no single scale of its own.
-            scale: None,
-            kind: if decensor::bundle_in(&install).is_some() {
-                MODEL_KIND_DECENSOR
-            } else {
-                MODEL_KIND_UPSCALE
-            }
-            .to_string(),
-            components: if decensor::bundle_in(&install).is_some() {
-                decensor_components()
-            } else {
-                Vec::new()
-            },
-        }),
-        Err(InferenceError::InvalidInput(message))
-        | Err(InferenceError::InvalidManifest(message)) => {
-            crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
-        }
-        Err(error) => {
-            crate::domain::result::CommandResult::failure("UNKNOWN", format!("{error:?}"), true)
-        }
-    }
-}
-
 #[tauri::command(async)]
 pub fn inference_install_model(
     app: tauri::AppHandle,
@@ -979,17 +862,8 @@ pub fn inference_install_model(
             id: input.manifest.id,
             version: input.manifest.version,
             scale: Some(input.manifest.scale),
-            kind: if decensor::bundle_in(&install).is_some() {
-                MODEL_KIND_DECENSOR
-            } else {
-                MODEL_KIND_UPSCALE
-            }
-            .to_string(),
-            components: if decensor::bundle_in(&install).is_some() {
-                decensor_components()
-            } else {
-                Vec::new()
-            },
+            kind: MODEL_KIND_UPSCALE.to_string(),
+            components: Vec::new(),
         }),
         Err(InferenceError::InvalidInput(message)) => {
             crate::domain::result::CommandResult::failure("INVALID_RESPONSE", message, false)
@@ -1016,93 +890,6 @@ pub fn inference_install_model(
             false,
         ),
     }
-}
-
-fn import_decensor_zip(
-    data: &std::path::Path,
-    bytes: &[u8],
-) -> Result<Option<InstalledModel>, InferenceError> {
-    use std::io::{Cursor, Read, Write};
-    let fail = |e: std::io::Error| InferenceError::InvalidInput(e.to_string());
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
-    let required = [
-        "mrcnn/weights.onnx",
-        "deepcreampy/bar.onnx",
-        "deepcreampy/mosaic.onnx",
-        "esrgan/4x-Fatal-Pixels.onnx",
-    ];
-    let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
-    let Some(first) = names.iter().find(|name| name.ends_with(required[0])) else {
-        return Ok(None);
-    };
-    let prefix = &first[..first.len() - required[0].len()];
-    if !required
-        .iter()
-        .all(|name| names.contains(&format!("{prefix}{name}")))
-    {
-        return Err(InferenceError::InvalidInput(
-            "去码包缺少检测或修补模型，请导入完整模型包".into(),
-        ));
-    }
-    use sha2::{Digest, Sha256};
-    let version = format!("{:x}", Sha256::digest(bytes))[..12].to_string();
-    let model = InstalledModel {
-        id: "aletheia-lens".into(),
-        version,
-        scale: None,
-        kind: MODEL_KIND_DECENSOR.into(),
-        components: decensor_components(),
-    };
-    let (staging, install) = model_install_roots(data, &model.id, &model.version)?;
-    if decensor::bundle_in(&install).is_some() {
-        return Ok(Some(model));
-    }
-    if staging.exists() || install.exists() {
-        return Err(InferenceError::InvalidInput(
-            "模型安装目录已存在，请检查未完成的安装".into(),
-        ));
-    }
-    let result = (|| {
-        let mut total = 0_u64;
-        for name in required {
-            for relative in [name.to_string(), format!("{name}.data")] {
-                let source = format!("{prefix}{relative}");
-                if !names.contains(&source) {
-                    continue;
-                }
-                let mut file = zip
-                    .by_name(&source)
-                    .map_err(|e| InferenceError::InvalidInput(e.to_string()))?;
-                if file.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
-                    return Err(InferenceError::InvalidInput("模型包不允许符号链接".into()));
-                }
-                total = total.saturating_add(file.size());
-                if total > MAX_MODEL_ARCHIVE_UNCOMPRESSED_BYTES {
-                    return Err(InferenceError::InvalidInput("模型包过大".into()));
-                }
-                // Destination is from a fixed allowlist, never a ZIP entry path.
-                let target = staging.join(&relative);
-                std::fs::create_dir_all(target.parent().unwrap()).map_err(fail)?;
-                let mut output = std::fs::File::create(target).map_err(fail)?;
-                let copied = std::io::copy(
-                    &mut file.by_ref().take(MAX_MODEL_ARCHIVE_UNCOMPRESSED_BYTES + 1),
-                    &mut output,
-                )
-                .map_err(fail)?;
-                if copied > MAX_MODEL_ARCHIVE_UNCOMPRESSED_BYTES {
-                    return Err(InferenceError::InvalidInput("模型包过大".into()));
-                }
-                output.flush().map_err(fail)?;
-            }
-        }
-        std::fs::rename(&staging, &install).map_err(fail)?;
-        Ok(Some(model))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
-    result
 }
 
 /// The model id a raw `.onnx` import lands under: the file's stem when it is a
@@ -1181,11 +968,6 @@ fn import_model_bytes(
     model_data_dir(app)
         .map_err(|e| InferenceError::InvalidInput(e.to_string()))
         .and_then(|data| {
-            if !filename.to_ascii_lowercase().ends_with(".onnx") {
-                if let Some(model) = import_decensor_zip(&data, &file)? {
-                    return Ok(model);
-                }
-            }
             let (manifest, archive) = if filename.to_ascii_lowercase().ends_with(".onnx") {
                 use sha2::{Digest, Sha256};
                 let hash = Sha256::digest(&file)
@@ -1363,14 +1145,10 @@ pub fn select_backend(supported: &[String], blacklist: &[String]) -> BackendId {
 #[allow(unused_imports)]
 pub use yomika_compute_core::cpu_scale::CpuRgbaOutput;
 
-/// 派生版本（去码 / 超分产物）的缓存 revision。
+/// 派生版本（超分产物）的缓存 revision。
 ///
 /// 模型换了就不能再服务旧产物：revision 是模型指纹，两条链（写的那一步与读的那
 /// 一步）各自算出同一个串——前端只知道模型 id，指纹要在这里查。
-fn decensor_fingerprint(models_data: &std::path::Path, model_id: &str) -> Option<String> {
-    resolve_installed_bundle(models_data, model_id).map(|(_bundle, manifest)| manifest.sha256)
-}
-
 fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
     match resolved {
         Some(ResolvedUpscaler::Onnx(_path, manifest)) => {
@@ -1383,8 +1161,7 @@ fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
     }
 }
 
-/// `enhanced` 的 revision：超分模型指纹，加上它读的是哪一版起点（原图 / 某一版
-/// 去码产物）。
+/// `enhanced` 的 revision：超分模型指纹。
 ///
 /// 从 docs/71 §11 Task 5 第 6 条起，这个串不再只是「模型 + 起点」：它还要说出
 /// **谁算的**（后端、运行库版本、精度）与**哪条流水线**算的，否则「同一份模型、
@@ -1395,17 +1172,10 @@ fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
 /// `pub(crate)`：`compute::reader` 铸任务身份时用的就是这一个函数——阅读器走 URL 那条路
 /// 与旧命令那条路必须算出**同一个** `settings_id`，否则同一页、同一份设置会被当成两件
 /// 任务各算一遍，缓存也永远命中不了。
-pub(crate) fn enhanced_revision(
-    resolved: &Option<ResolvedUpscaler>,
-    decensor: Option<&str>,
-) -> String {
-    let source_revision = match decensor {
-        Some(revision) => format!("decensored:{revision}"),
-        None => "reader-page".to_string(),
-    };
+pub(crate) fn enhanced_revision(resolved: &Option<ResolvedUpscaler>) -> String {
     derived_cache_revision(
         &upscaler_fingerprint(resolved),
-        &source_revision,
+        "reader-page",
         UPSCALE_PIPELINE_REVISION,
         declared_backend_label(),
     )
@@ -1452,10 +1222,9 @@ fn declared_backend_label() -> &'static str {
 
 /// 流水线口径的版本。修订号里没有别的字段能表达「同一份模型、同一份起点，但中间
 /// 多了一道处理」——阶段顺序、参数、后处理改了就把对应的这个 +1，旧产物当场作废。
-const DECENSOR_PIPELINE_REVISION: &str = "decensor:1";
 const UPSCALE_PIPELINE_REVISION: &str = "upscale:1";
 
-/// 派生图（去码 / 超分产物）的缓存修订号。
+/// 派生图（超分产物）的缓存修订号。
 ///
 /// `backend` 是一格**参数**，不在这里读 [`declared_backend_label`]：这一栏必须随声明的
 /// 后端变，而「它真的在变」只有从外面喂两个不同的值才断得出来（见
@@ -1478,19 +1247,7 @@ fn derived_cache_revision(
     })
 }
 
-/// `decensored` 那一版的 revision。写的那一步（`compute::proxy::decensor` 与阅读器
-/// 那条去码链）与读的那两步（`source_revision` 给起点取值、超分链拿它当 source）必须
-/// 算出同一个串，所以只留这一个入口。
-pub(crate) fn decensored_revision(fingerprint: &str) -> String {
-    derived_cache_revision(
-        fingerprint,
-        "reader-page",
-        DECENSOR_PIPELINE_REVISION,
-        declared_backend_label(),
-    )
-}
-
-/// 起点那一版的身份。`decensored` 要带上产出它的那一份去码模型的指纹。
+/// 起点那一版的身份。
 ///
 /// 传三个标量而不是整份命令输入：`compute::reader` 也要按同一把尺子算出「这一页的起点
 /// 是哪一行」。两边共用一个函数，才不会一边按别的 rendition 去查、另一边按这一版去写。
@@ -1499,20 +1256,16 @@ pub(crate) fn source_identity(
     archive_id: &str,
     page_index: i64,
     source_rendition: &str,
-    decensor_revision: Option<&str>,
 ) -> crate::cache::CacheImageIdentity {
-    let mut identity =
-        crate::cache::CacheImageIdentity::new(scope_id, archive_id, source_rendition, page_index);
-    identity.revision = decensor_revision.map(|value| value.to_string());
-    identity
+    crate::cache::CacheImageIdentity::new(scope_id, archive_id, source_rendition, page_index)
 }
 
 /// 读某一步的输入时，那一版是按什么 revision 存的。
 ///
 /// 链上每一步的输入都是说得出名字的一版，而一版是按**产出它的模型**存的：
-/// `decensored` 属于某一份去码包，`enhanced` 属于某个超分模型（外加它读的是哪一版
-/// 起点）。调用方手上只有模型 id，指纹要在这里查；查不到的模型包要当场说清楚，而不是
-/// 拿一个空的 revision 去读一份不知道是谁写的图。
+/// `enhanced` 属于某个超分模型。调用方手上只有模型 id，指纹要在这里查；
+/// 拿一个空的 revision 去读一份不知道是谁写的图是不可接受的。
+#[derive(Debug)]
 pub(crate) struct SourceRevisionError {
     pub code: &'static str,
     pub message: String,
@@ -1521,37 +1274,15 @@ pub(crate) struct SourceRevisionError {
 pub(crate) fn source_revision(
     models_data: &std::path::Path,
     rendition: &str,
-    decensor_model: Option<&str>,
     upscale_model: Option<&str>,
 ) -> Result<Option<String>, SourceRevisionError> {
-    let decensor_fingerprint_of =
-        |model_id: Option<&str>| -> Result<Option<String>, SourceRevisionError> {
-            let Some(model_id) = model_id.filter(|value| !value.is_empty()) else {
-                return Ok(None);
-            };
-            decensor_fingerprint(models_data, model_id)
-                .map(Some)
-                .ok_or_else(|| SourceRevisionError {
-                    code: "INFERENCE_UNAVAILABLE",
-                    message: format!("没有装这个去码模型包：{model_id}"),
-                })
-        };
     match rendition {
         "reader-page" => Ok(None),
-        "decensored" => match decensor_fingerprint_of(decensor_model)? {
-            Some(fingerprint) => Ok(Some(decensored_revision(&fingerprint))),
-            None => Err(SourceRevisionError {
-                code: "INVALID_RESPONSE",
-                message: "读去码产物要说明是哪一份去码模型包产出的".to_string(),
-            }),
-        },
         "enhanced" => {
             let upscale = upscale_model
                 .filter(|value| !value.is_empty())
                 .and_then(|id| resolve_upscaler(models_data, id));
-            let decensor =
-                decensor_fingerprint_of(decensor_model)?.map(|fingerprint| decensored_revision(&fingerprint));
-            Ok(Some(enhanced_revision(&upscale, decensor.as_deref())))
+            Ok(Some(enhanced_revision(&upscale)))
         }
         other => Err(SourceRevisionError {
             code: "INVALID_RESPONSE",
@@ -1596,7 +1327,6 @@ pub(crate) const CACHE_WRITE_FAILED: &str = "CACHE_WRITE_FAILED";
 
 /// 统一错误日志里 `source` 那一栏：哪一条命令的产物没落盘。
 pub(crate) const UPSCALE_CACHE_SOURCE: &str = "inference.upscale.cache";
-pub(crate) const DECENSOR_CACHE_SOURCE: &str = "inference.decensor.cache";
 
 /// 把派生结果写回缓存。
 ///
@@ -1661,7 +1391,7 @@ pub(crate) fn note_cache_write_failure(
 
 /// 派生结果的统一收尾：交给缓存，然后**无论成没成**都把这一页交出去。
 ///
-/// 超分 / 去码 / DLSSNR 三条命令的结尾都是这一句。成功体是**裸字节**
+/// 超分 / DLSSNR 几条命令的结尾都是这一句。成功体是**裸字节**
 /// （`domain::result::into_binary_response` 直接把 PNG 当 IPC 体发出去，没有可以挂字段
 /// 的信封），所以「这一次没缓存上」的结构化出口就是统一错误日志里那条
 /// `CACHE_WRITE_FAILED`：带完整缓存键，用户能在界面里看到，下次翻回同一页也能对账。
@@ -1683,7 +1413,7 @@ pub(crate) fn finish_derived(
 }
 
 
-/// 重活的优先级。前台＝用户正在看的那一页（超分/去码/DLSSNR 都算重活），后台＝
+/// 重活的优先级。前台＝用户正在看的那一页（超分/DLSSNR 都算重活），后台＝
 /// 阅读器为了「翻到就能看」而提前预扫的那一批。
 ///
 /// 计算编排那一侧另有一个 `compute::scheduler::Priority`，两处说的是**同一个
@@ -1718,8 +1448,7 @@ impl HeavyPriority {
 /// 两条碰**全局**重活队列的测试要互相排队：它是进程级的，并行跑会看到对方的许可。
 ///
 /// 放在模块作用域（而不是某一个测试模块里），是因为**别的模块**的测试也会走这条队列。
-/// 第 19 轮（8-e）之后去码那条门的第一步活不再跑在这条队列上（检测搬进了 worker），
-/// 但**这条锁还要留着**：本模块自己的五条重活队列测试之间就要串起来。
+/// **这条锁还要留着**：本模块自己的五条重活队列测试之间就要串起来。
 #[cfg(test)]
 pub(crate) fn heavy_queue_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1765,7 +1494,7 @@ impl HeavyQueueState {
     }
 
     /// 排队，回**要掐的任务号**（如果有）：只有「自己前台、正在跑的是后台、而且
-    /// 它报了号」才给。前台不抢前台——同一页的去码与超分是两步，后一步要等前一步
+    /// 它报了号」才给。前台不抢前台——同一页可能有两步，后一步要等前一步
     /// 的产物，掐掉就是自己把自己饿死。
     fn enqueue(
         &mut self,
@@ -1900,7 +1629,7 @@ impl Drop for HeavyPermit {
     }
 }
 
-/// 全局只允许一件重活：阅读器的超分/去码、DLSSNR、远端处理收到的请求都走这里。
+/// 全局只允许一件重活：阅读器的超分、DLSSNR、远端处理收到的请求都走这里。
 /// 不这么收，两张图同时进来就会各开一份模型，内存直接翻倍。
 ///
 /// **本机**那一件。发给远端的请求走 `run_remote`（另一条队列）。
@@ -1946,58 +1675,12 @@ async fn run_on<T: Send + 'static>(
     .map_err(|e| e.to_string())
 }
 
-/// The newest installed version of `model_id` that is a complete de-censoring
-/// bundle, with its manifest for the cache revision.
-/// `pub(crate)`：去码那条计算来路（`compute::decensor::plan_decensor_page`）要拿同一个包
-/// 指纹去铸 `decensored_revision`。身份只有一份算法，所以解析包的这一步也只有一份。
-pub(crate) fn resolve_installed_bundle(
-    app_data_dir: &std::path::Path,
-    model_id: &str,
-) -> Option<(decensor::DecensorBundle, ModelManifest)> {
-    installed_models_in(app_data_dir)
-        .into_iter()
-        .filter(|model| model.id == model_id && model.kind == MODEL_KIND_DECENSOR)
-        .find_map(|model| {
-            let base = app_data_dir.join("models");
-            let root = if model.id == "aletheia-lens" && decensor::bundle_in(&base).is_some() {
-                base
-            } else if model.version == "local" {
-                base.join(&model.id)
-            } else {
-                base.join(&model.id).join(&model.version)
-            };
-            let mut manifest = read_model_manifest(&root).unwrap_or(ModelManifest {
-                id: model.id,
-                version: model.version,
-                format: "onnx".into(),
-                scale: 1,
-                max_pixels: 64_000_000,
-                sha256: String::new(),
-                supported_backends: vec!["cpu".into()],
-                min_input_edge: default_min_input_edge(),
-            });
-            manifest.sha256 = cached_model_fingerprint(&root).ok()?;
-            decensor::bundle_in(&root).map(|bundle| (bundle, manifest))
-        })
-}
-
 /// 算力中心的能力清单用：本机上「模型包齐全、能直接跑」的模型。
 ///
 /// 只列齐全的——半份模型跑一半会留半张处理过的图，比直接说「没有」更糟。
 pub(crate) fn runnable_models(models_data: &std::path::Path) -> Vec<RunnableModel> {
     let mut runnable = Vec::new();
     for model in installed_models_in(models_data) {
-        if model.kind == MODEL_KIND_DECENSOR {
-            if resolve_installed_bundle(models_data, &model.id).is_some() {
-                runnable.push(RunnableModel {
-                    id: model.id.clone(),
-                    kind: "decensor".to_string(),
-                    label: format!("去码：{}", model.id),
-                    scale: None,
-                });
-            }
-            continue;
-        }
         match resolve_upscaler(models_data, &model.id) {
             Some(ResolvedUpscaler::Onnx(_, manifest)) => runnable.push(RunnableModel {
                 id: model.id.clone(),
@@ -2022,7 +1705,7 @@ pub(crate) fn runnable_models(models_data: &std::path::Path) -> Vec<RunnableMode
 #[serde(rename_all = "camelCase")]
 pub struct RunnableModel {
     pub id: String,
-    /// `upscale` 或 `decensor`。
+    /// `upscale`。
     pub kind: String,
     pub label: String,
     pub scale: Option<u32>,
@@ -2091,10 +1774,9 @@ pub(crate) fn run_host_upscale_bytes(
     Ok(encoded)
 }
 
-// 去码那条字节来路（`run_decensor_bytes` / `run_decensor_bytes_cancellable`）整条搬进了
-// `compute::proxy::decensor`：检测与修补都在 worker（docs/94），宿主只剩「用哪个包」
-// 这一步（`resolve_installed_bundle`）。搬运的理由与超分相同，而且更硬——去码要开的
-// 是宿主进程里最后一台 ONNX 会话（240 MB 的检测器），它留在这儿，宿主就永远摘不掉 ORT。
+// 这一档只剩超分：ONNX 那条路整条搬进了计算进程（worker），宿主只剩「用哪个包」这一步
+// （`resolve_installed_model` / `resolve_upscaler`）。搬运的理由很硬——超分要开的是宿主
+// 进程里最后一台 ONNX 会话，它留在这儿，宿主就永远摘不掉 ORT。
 
 /// 取消一个阅读器推理任务（切页、关开关、离开阅读器）。
 ///
@@ -2426,33 +2108,19 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let root = base.join("models/aletheia-lens/1");
-        for file in [
-            "mrcnn/weights.onnx",
-            "deepcreampy/bar.onnx",
-            "deepcreampy/mosaic.onnx",
-            "esrgan/4x-Fatal-Pixels.onnx",
-        ] {
-            let path = root.join(file);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"model").unwrap();
-        }
+        let root = base.join("models").join("realesr-general").join("2026.09.2");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(MODEL_MANIFEST_FILE),
+            serde_json::to_vec(&model_manifest(b"x")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("realesr-general-x4v3.onnx"), b"model").unwrap();
+
         let first = installed_models_in(&base);
-        assert_eq!(first[0].kind, MODEL_KIND_DECENSOR);
-        assert_eq!(
-            first[0]
-                .components
-                .iter()
-                .map(|component| component.id.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "mrcnn",
-                "deepcreampy-bar",
-                "deepcreampy-mosaic",
-                "fatal-pixels"
-            ]
-        );
-        assert!(resolve_installed_bundle(&base, "aletheia-lens").is_some());
+        assert_eq!(first[0].kind, MODEL_KIND_UPSCALE);
+        assert_eq!(first[0].id, "realesr-general");
+        assert_eq!(first[0].scale, Some(2));
         let index = base.join("model-index.json");
         let timestamp = std::fs::metadata(&index).unwrap().modified().unwrap();
         assert_eq!(first, installed_models_in(&base));
@@ -2461,45 +2129,12 @@ mod tests {
             std::fs::metadata(&index).unwrap().modified().unwrap()
         );
         let before = model_fingerprint(&base.join("models")).unwrap();
-        std::fs::write(root.join("deepcreampy/bar.onnx"), b"changed-model").unwrap();
+        std::fs::write(root.join("realesr-general-x4v3.onnx"), b"changed-model").unwrap();
         assert_ne!(before, model_fingerprint(&base.join("models")).unwrap());
-        std::fs::remove_file(root.join("mrcnn/weights.onnx")).unwrap();
-        assert!(resolve_installed_bundle(&base, "aletheia-lens").is_none());
+        std::fs::remove_file(root.join(MODEL_MANIFEST_FILE)).unwrap();
+        assert_eq!(installed_models_in(&base)[0].scale, None);
         std::fs::write(index, b"broken cache").unwrap();
         assert!(!installed_models_in(&base).is_empty());
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn model_bundle_zip_imports_wrapped_files_and_external_weights() {
-        use std::io::Write;
-        let base = std::env::temp_dir().join(format!(
-            "yomika-bundle-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for file in [
-            "mrcnn/weights.onnx",
-            "deepcreampy/bar.onnx",
-            "deepcreampy/mosaic.onnx",
-            "esrgan/4x-Fatal-Pixels.onnx",
-            "esrgan/4x-Fatal-Pixels.onnx.data",
-        ] {
-            zip.start_file(
-                format!("release/models/{file}"),
-                zip::write::SimpleFileOptions::default(),
-            )
-            .unwrap();
-            zip.write_all(b"model").unwrap();
-        }
-        let bytes = zip.finish().unwrap().into_inner();
-        let model = import_decensor_zip(&base, &bytes).unwrap().unwrap();
-        let (bundle, _) = resolve_installed_bundle(&base, &model.id).unwrap();
-        assert!(bundle.esrgan.with_extension("onnx.data").is_file());
-        assert_eq!(Some(model), import_decensor_zip(&base, &bytes).unwrap());
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -2612,23 +2247,18 @@ mod tests {
 
     #[test]
     fn a_derived_revision_names_its_source_and_its_engine() {
-        // 这一条钉的是两条链的**接缝**：去码那一步写下的 revision，与超分链把去码产物
-        // 当起点时算出来的 source 必须是同一个串，否则「去码 + 超分」这条链永远读不中
-        // 自己刚写下的那一版（不是错误，只是白算，所以它只会以「怎么每次都重跑」的样子
-        // 出现——正是这种静默的失配最该有测试看着）。
-        let fingerprint = "a".repeat(64);
-        let decensored = decensored_revision(&fingerprint);
-        assert!(decensored.starts_with("rev:v1:"), "形状：{decensored}");
+        // 这一条钉的是两个调用点的**接缝**：写入路径与命中路径各自算一次身份，必须算出
+        // 同一个串，否则链条永远读不中自己刚写下的那一版（不是错误，只是白算，所以它
+        // 只会以「怎么每次都重跑」的样子出现——正是这种静默的失配最该有测试看着）。
+        let reader_page = enhanced_revision(&None);
+        assert!(reader_page.starts_with("rev:v1:"), "形状：{reader_page}");
+        assert_eq!(reader_page, enhanced_revision(&None));
 
-        // 起点换一版，衍生物的修订号就得换一个。
-        let from_decensored = enhanced_revision(&None, Some(&decensored));
-        let from_reader_page = enhanced_revision(&None, None);
-        let from_another_decensor = enhanced_revision(&None, Some(&decensored_revision("b")));
-        assert_ne!(from_decensored, from_reader_page);
-        assert_ne!(from_decensored, from_another_decensor);
-
-        // 同一份东西算两次必须一样：命中路径与写入路径各自算一次。
-        assert_eq!(from_decensored, enhanced_revision(&None, Some(&decensored)));
+        // 起点那一步的身份：原图没有 revision；只有超分一条链了。
+        let models_data = std::path::Path::new("no-such-models-root");
+        assert_eq!(source_revision(models_data, "reader-page", None).unwrap(), None);
+        // 不认识的 rendition 是明确的错误，不是一个静默的空 revision。
+        assert!(source_revision(models_data, "nonsense", None).is_err());
 
         // 运行库那一栏现在是协议里的常量（宿主摘掉 ORT 之后就问不了自己的运行库了：
         // 那件事只有 worker 说得清，所以由它启动时证明），但内容仍必须是那条运行库的
@@ -2652,15 +2282,10 @@ mod tests {
         eprintln!("这台机器声明的后端 = {declared}（首选运行库，末位永远是 CPU）");
         if declared != "cpu" {
             assert_ne!(
-                from_reader_page,
+                reader_page,
                 derived_cache_revision(&model, "reader-page", UPSCALE_PIPELINE_REVISION, "cpu"),
                 "产品算出来的身份与 CPU 那一版相同：产品调用点把后端写成了常量，\
                  而这台机器声明的是「{declared}」"
-            );
-            assert_ne!(
-                decensored,
-                derived_cache_revision(&fingerprint, "reader-page", DECENSOR_PIPELINE_REVISION, "cpu"),
-                "去码那一版的产品身份也没跟着声明的后端走（声明的是「{declared}」）"
             );
         }
     }
@@ -3098,44 +2723,6 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_loose_bundle_never_shadows_a_proper_install() {
-        // Loose component folders sitting directly in models/ (an older layout,
-        // or a manual copy) make the models root itself look like a bundle. With
-        // a proper `aletheia-lens/1` install next to them the loose files are
-        // leftovers: reporting both listed every stage of the flow twice.
-        let base = std::env::temp_dir().join("yomika-loose-bundle");
-        let _ = std::fs::remove_dir_all(&base);
-        let models = base.join("models");
-        for path in [
-            models.join("mrcnn"),
-            models.join("deepcreampy"),
-            models.join("esrgan"),
-            models.join("aletheia-lens").join("1").join("mrcnn"),
-            models.join("aletheia-lens").join("1").join("deepcreampy"),
-            models.join("aletheia-lens").join("1").join("esrgan"),
-        ] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        std::fs::write(models.join("mrcnn").join("weights.onnx"), b"onnx").unwrap();
-        std::fs::write(models.join("deepcreampy").join("bar.onnx"), b"onnx").unwrap();
-        std::fs::write(models.join("deepcreampy").join("mosaic.onnx"), b"onnx").unwrap();
-        std::fs::write(models.join("esrgan").join("4x-Fatal-Pixels.onnx"), b"onnx").unwrap();
-        for path in ["mrcnn/weights.onnx", "deepcreampy/bar.onnx", "deepcreampy/mosaic.onnx", "esrgan/4x-Fatal-Pixels.onnx"] {
-            std::fs::write(models.join("aletheia-lens").join("1").join(path.replace('/', std::path::MAIN_SEPARATOR_STR)), b"onnx").unwrap();
-        }
-
-        let listed = installed_models_in(&base);
-        assert_eq!(listed.iter().filter(|model| model.kind == MODEL_KIND_DECENSOR).count(), 1);
-        // Without the proper install the loose layout is the bundle: it must
-        // still be listed, or a manual copy has nothing to run. Deleting it
-        // changes the fingerprint, so the cached index cannot answer.
-        std::fs::remove_dir_all(models.join("aletheia-lens")).unwrap();
-        let listed = installed_models_in(&base);
-        assert_eq!(listed.iter().filter(|model| model.kind == MODEL_KIND_DECENSOR).count(), 1);
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
     fn a_raw_import_takes_its_identity_from_the_file_name() {
         assert_eq!(imported_model_id("realesr-general-x4v3.onnx"), "realesr-general-x4v3");
         assert_eq!(imported_model_id(" 4x-Fatal-Pixels.ONNX "), "4x-Fatal-Pixels");
@@ -3452,11 +3039,11 @@ mod tests {
         assert!(state.next().is_none());
     }
 
-    /// 前台之间不互相抢：同一页的去码与超分是两步，后一步等前一步的产物。
+    /// 前台之间不互相抢：同一页可能有两步，后一步等前一步的产物。
     #[test]
     fn a_foreground_request_does_not_cancel_another_foreground_job() {
         let mut state = empty_heavy_queue();
-        state.start(HeavyPriority::Foreground, Some("page-1:decensor".into()));
+        state.start(HeavyPriority::Foreground, Some("page-1:upscale".into()));
         let (sender, _receiver) = tokio::sync::oneshot::channel();
         assert_eq!(
             state.enqueue(HeavyPriority::Foreground, Some("page-1:enhanced".into()), sender),
@@ -3655,7 +3242,7 @@ mod tests {
         let returned = finish_derived(
             &database,
             dir.path(),
-            DECENSOR_CACHE_SOURCE,
+            UPSCALE_CACHE_SOURCE,
             &identity,
             "image/png",
             png.clone(),
@@ -3667,7 +3254,7 @@ mod tests {
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields.len(), 5, "统一错误日志是制表符分隔的五栏：{line}");
         assert_eq!(fields[1], "warn");
-        assert_eq!(fields[2], DECENSOR_CACHE_SOURCE);
+        assert_eq!(fields[2], UPSCALE_CACHE_SOURCE);
         assert!(
             fields[3].starts_with(CACHE_WRITE_FAILED),
             "分类要在最前面：{line}"

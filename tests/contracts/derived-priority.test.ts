@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import type { DecensorPagePayload, ReaderPagePayload } from '../../src/domain/compute';
+import type { ReaderPagePayload } from '../../src/domain/compute';
 import { NativeComputeCenterRepository } from '../../src/repositories/nativeComputeCenterRepository';
 import { NativeComputeRepository } from '../../src/repositories/nativeComputeRepository';
 import { NativeDlssnrRepository } from '../../src/repositories/nativeDlssnrRepository';
@@ -38,9 +38,7 @@ describe('derived page priority bridge', () => {
       priority: 'foreground',
       deadlineMs: 0,
     };
-    const chained: DecensorPagePayload = { ...reader, upscaleModelId: 'up' };
     await compute.submitReaderPage(reader);
-    await compute.submitDecensorPage(chained);
     await new NativeDlssnrRepository().applyPage({ scopeId: 's', archiveId: 'a', pageIndex: 3, settings: { passes: [] }, taskId: 't', priority: 'foreground' });
     await new NativeComputeCenterRepository().remoteProcess({
       url: 'https://host',
@@ -55,12 +53,10 @@ describe('derived page priority bridge', () => {
 
     expect(adapter.mock.calls.map(([command]) => command)).toEqual([
       'compute_submit_reader_page',
-      'compute_submit_decensor_page',
       'dlssnr_apply_page',
       'remote_compute_process',
     ]);
     expect(adapter.mock.calls.map(([, request]) => priorityOf(request))).toEqual([
-      'foreground',
       'foreground',
       'foreground',
       'foreground',

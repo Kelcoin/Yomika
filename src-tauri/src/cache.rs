@@ -1,17 +1,30 @@
 use crate::{db::Database, domain::result::CommandResult};
 use rusqlite::OptionalExtension;
 
-/// `enhanced` is the upscaler output, `decensored` the de-censoring pipeline's and
-/// `dlssnr` the neural filter's, all keyed by what produced them in the identity
-/// revision so a model or DLL change cannot serve a stale image.
-const IMAGE_RENDITIONS: [&str; 6] = [
+/// `enhanced` is the upscaler output and `dlssnr` the neural filter's, both keyed by
+/// what produced them in the identity revision so a model or DLL change cannot serve
+/// a stale image.
+const IMAGE_RENDITIONS: [&str; 5] = [
     "cover",
     "page-thumbnail",
     "reader-page",
     "enhanced",
-    "decensored",
     "dlssnr",
 ];
+
+/// 几条 SQL 都要枚举「缓存里那些图片版本」。原先这些名字在每一处各写一遍，`dlssnr`
+/// 加进来时就漏了五处——真机上 2.84 GiB 的 DLSSNR 产物因此既清不掉（「清空缓存」对
+/// 它们一个文件都不删）、也统计不到（算进 `other`）、按档案作废还放过它们，直到把
+/// 4 GiB 的配额吃到 90% 让 LRU 去挤别人的封面。拼成一份，谁要枚举就引用它。
+const IMAGE_KIND_SQL: &str =
+    "'cover','page-thumbnail','reader-page','enhanced','dlssnr'";
+
+/// 一次阅读会话里才有的「成品」：超分与 DLSSNR 的产物。
+///
+/// 它们只在会话内有意义，而一份动图产物可以大到一百多兆——真机上 2.84 GiB 的 DLSSNR
+/// 产物是这么攒起来的。所以进出阅读器各清一次（[`purge_reader_renditions`]），别指望
+/// 配额与 LRU 兜底：那是「满了才动手」，而这里要的是「离开就动手」。
+pub const READER_SESSION_RENDITIONS: [&str; 2] = ["enhanced", "dlssnr"];
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 2 * 1_073_741_824;
 const CACHE_EVICTION_TRIGGER_PERCENT: u64 = 90;
 const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;
@@ -371,7 +384,7 @@ use yomika_compute_core::image_kind::PNG_SIGNATURE;
 /// 动图的循环次数统一成「一直播」（0），返回可以照原样送出去的字节。
 ///
 /// 为什么在字节层面做，而不是在解码 / 编码那几层：送给阅读器的图片字节有六七条来路
-/// （磁盘缓存命中、服务器刚取回、超分与去码把动图原样当成功交回、DLSSNR 的旧产物、
+/// （磁盘缓存命中、服务器刚取回、超分把动图原样当成功交回、DLSSNR 的旧产物、
 /// 帧数或预算超限时的原图、远端引擎的回声），它们唯一的共同必经之路是 IPC 出站
 /// （[`crate::domain::result::into_binary_response`]）。用户报「动图只播一遍」时每一条
 /// 路都要救——只有收在这里才不会漏。
@@ -943,7 +956,7 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
         "page-thumbnail",
         "reader-page",
         "enhanced",
-        "decensored",
+        "dlssnr",
         "inference",
         "other",
     ] {
@@ -955,7 +968,10 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
             },
         );
     }
-    let mut statement = connection.prepare("SELECT CASE WHEN kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored','inference') THEN kind ELSE 'other' END, COUNT(*) FROM cache_entries GROUP BY 1")
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT CASE WHEN kind IN ({IMAGE_KIND_SQL}) THEN kind ELSE 'other' END, COUNT(*) FROM cache_entries GROUP BY 1"
+        ))
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -971,7 +987,7 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
                 usize::try_from(entries).map_err(|_| "Invalid cache entry count".to_string())?;
         }
     }
-    let mut statement = connection.prepare("SELECT path, MAX(size), MIN(CASE kind WHEN 'cover' THEN 0 WHEN 'page-thumbnail' THEN 1 WHEN 'reader-page' THEN 2 WHEN 'enhanced' THEN 3 WHEN 'decensored' THEN 4 WHEN 'inference' THEN 5 ELSE 6 END) FROM cache_entries GROUP BY path")
+    let mut statement = connection.prepare("SELECT path, MAX(size), MIN(CASE kind WHEN 'cover' THEN 0 WHEN 'page-thumbnail' THEN 1 WHEN 'reader-page' THEN 2 WHEN 'enhanced' THEN 3 WHEN 'dlssnr' THEN 4 WHEN 'inference' THEN 5 ELSE 6 END) FROM cache_entries GROUP BY path")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
@@ -989,7 +1005,7 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
             1 => "page-thumbnail",
             2 => "reader-page",
             3 => "enhanced",
-            4 => "decensored",
+            4 => "dlssnr",
             5 => "inference",
             _ => "other",
         };
@@ -1143,7 +1159,10 @@ pub fn clear_image_cache(
     // 作废这一代：这一下之后才收尾的那份写入不许再挂行（见 CACHE_EPOCH 的注释）。
     bump_cache_epoch();
     let candidates = {
-        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0 GROUP BY path")
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT path,MAX(size) FROM cache_entries WHERE kind IN ({IMAGE_KIND_SQL}) AND pinned=0 GROUP BY path"
+            ))
             .map_err(|error| error.to_string())?;
         let values = statement
             .query_map([], |row| {
@@ -1161,7 +1180,9 @@ pub fn clear_image_cache(
     // 这些受保护路径问齐，省掉循环里每条一个 COUNT 的回查。
     let protected_paths: std::collections::HashSet<String> = {
         let mut statement = connection
-            .prepare("SELECT DISTINCT path FROM cache_entries WHERE NOT(kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0)")
+            .prepare(&format!(
+                "SELECT DISTINCT path FROM cache_entries WHERE NOT(kind IN ({IMAGE_KIND_SQL}) AND pinned=0)"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -1175,7 +1196,7 @@ pub fn clear_image_cache(
         } else {
             None
         };
-        match connection.execute("DELETE FROM cache_entries WHERE path=?1 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned=0", [&relative]) {
+        match connection.execute(&format!("DELETE FROM cache_entries WHERE path=?1 AND kind IN ({IMAGE_KIND_SQL}) AND pinned=0"), [&relative]) {
             Ok(count) => removed_entries += count,
             Err(error) => {
                 let _ = finish_isolated_file(isolated, true);
@@ -1190,7 +1211,9 @@ pub fn clear_image_cache(
     // `pinned > 0` 而不是 `pinned = 1`：这一列今天被迁移的 CHECK 限成 0/1，两者等价；
     // 写成「有主」的谓词，将来真上了多持有者的表也不会悄悄漏掉。
     let protected: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') AND pinned>0 GROUP BY path)",
+        &format!(
+            "SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries WHERE kind IN ({IMAGE_KIND_SQL}) AND pinned>0 GROUP BY path)"
+        ),
         [], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
     Ok(CacheClearResult {
@@ -1214,7 +1237,10 @@ pub fn invalidate_archive_cache(
     // 同 clear_image_cache：作废这一代，晚到的写入不再挂行。
     bump_cache_epoch();
     let candidates = {
-        let mut statement = connection.prepare("SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored') GROUP BY path")
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT path,MAX(size) FROM cache_entries WHERE source_scope=?1 AND source_archive=?2 AND kind IN ({IMAGE_KIND_SQL}) GROUP BY path"
+            ))
             .map_err(|error| error.to_string())?;
         let values = statement
             .query_map(rusqlite::params![scope_id, archive_id], |row| {
@@ -1231,7 +1257,9 @@ pub fn invalidate_archive_cache(
     // 同 clear_image_cache：受其它 scope/档案条目共用的路径一次问齐。
     let protected_paths: std::collections::HashSet<String> = {
         let mut statement = connection
-            .prepare("SELECT DISTINCT path FROM cache_entries WHERE NOT(source_scope=?1 AND source_archive=?2 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored'))")
+            .prepare(&format!(
+                "SELECT DISTINCT path FROM cache_entries WHERE NOT(source_scope=?1 AND source_archive=?2 AND kind IN ({IMAGE_KIND_SQL}))"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(rusqlite::params![scope_id, archive_id], |row| row.get::<_, String>(0))
@@ -1246,8 +1274,123 @@ pub fn invalidate_archive_cache(
             None
         };
         match connection.execute(
-            "DELETE FROM cache_entries WHERE path=?1 AND source_scope=?2 AND source_archive=?3 AND kind IN ('cover','page-thumbnail','reader-page','enhanced','decensored')",
+            &format!(
+                "DELETE FROM cache_entries WHERE path=?1 AND source_scope=?2 AND source_archive=?3 AND kind IN ({IMAGE_KIND_SQL})"
+            ),
             rusqlite::params![relative, scope_id, archive_id],
+        ) {
+            Ok(count) => removed_entries += count,
+            Err(error) => {
+                let _ = finish_isolated_file(isolated, true);
+                return Err(error.to_string());
+            }
+        }
+        if finish_isolated_file(isolated, false)? {
+            removed_files += 1;
+            bytes_freed = bytes_freed.saturating_add(u64::try_from(size).unwrap_or(0));
+        }
+    }
+    Ok(CacheInvalidateResult {
+        removed_entries,
+        removed_files,
+        bytes_freed,
+    })
+}
+
+/// 一次阅读会话的坐标。产物只在「这一本的这一次」里有意义，所以清理也按它划范围。
+///
+/// 不带范围地清会误伤：`RetainedPage` 允许同时挂着两本阅读器（`MAX_RETAINED_READERS = 2`），
+/// 进出 A 时把 B 的产物一起删了，B 的下一页就要重算；更糟的是开第三本触发淘汰时，
+/// 那次清理会删掉**正在读的那一本**的产物。
+#[derive(Debug, Clone)]
+pub struct ReaderSessionScope {
+    pub scope_id: String,
+    pub archive_id: String,
+}
+
+/// 清掉一次阅读会话的「成品」（[`READER_SESSION_RENDITIONS`]：超分与 DLSSNR 的产物）。
+///
+/// 与 `clear_image_cache` 的差别有三点：**只碰成品**（封面、缩略图、原页留着——它们下一
+/// 趟还要用，也不是这一趟算出来的）；**只看这一本**（见 [`ReaderSessionScope`]）；以及
+/// **不看 `pinned`**（被钉住的是原页那一类；产物不进置顶）。内容寻址意味着一个文件可能被
+/// 别的行共用，所以沿用同一条保护规则：还有别人引用就只删行、不删文件。
+///
+/// 还有一条时间条件：`created_at < CURRENT_TIMESTAMP`。调用方是 fire-and-forget 挂在阅读
+/// 器上的，而派生队列同一提交里就开始写产物了——不加这条，这次会话刚算出来的那几页会被
+/// 自己下一次清理顺手删掉（可见页靠内存句柄还活着，所以看不到，但缓存全变成未命中）。
+/// `created_at` 的默认值是 `CURRENT_TIMESTAMP`，所以这条只会命中「语句执行那一刻已经在
+/// 表里」的行：本次会话随后写的那些（同一秒或更晚）一律留着。
+///
+/// 为什么要有这条而不是只靠配额与 LRU：那是「满了才动手」，而用户要的是「离开就动手」。
+/// 真机上 2.84 GiB 的 DLSSNR 产物把 4 GiB 的配额吃到 90%，LRU 只好去挤别人的封面——
+/// 而那些产物只在这次阅读会话里有意义。
+pub fn purge_reader_renditions(
+    connection: &rusqlite::Connection,
+    app_data: &std::path::Path,
+    session: &ReaderSessionScope,
+) -> Result<CacheInvalidateResult, String> {
+    if !app_data.is_absolute() {
+        return Err("Invalid cache root".into());
+    }
+    // 与另外两条一样：作废这一代，晚到的写入不再挂行。
+    bump_cache_epoch();
+    let kinds = READER_SESSION_RENDITIONS
+        .iter()
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let candidates = {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT path,MAX(size) FROM cache_entries WHERE kind IN ({kinds}) \
+                 AND source_scope=?1 AND source_archive=?2 AND created_at < CURRENT_TIMESTAMP \
+                 GROUP BY path"
+            ))
+            .map_err(|error| error.to_string())?;
+        let values = statement
+            .query_map(
+                rusqlite::params![session.scope_id, session.archive_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        values
+    };
+    if candidates.is_empty() {
+        return Ok(CacheInvalidateResult {
+            removed_entries: 0,
+            removed_files: 0,
+            bytes_freed: 0,
+        });
+    }
+    let protected_paths: std::collections::HashSet<String> = {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT DISTINCT path FROM cache_entries WHERE NOT(kind IN ({kinds}))"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::HashSet<String>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let mut removed_entries = 0;
+    let mut removed_files = 0;
+    let mut bytes_freed = 0_u64;
+    for (relative, size) in candidates {
+        let isolated = if !protected_paths.contains(&relative) {
+            isolate_cache_file(app_data, &relative)?
+        } else {
+            None
+        };
+        match connection.execute(
+            &format!(
+                "DELETE FROM cache_entries WHERE path=?1 AND kind IN ({kinds}) \
+                 AND source_scope=?2 AND source_archive=?3 AND created_at < CURRENT_TIMESTAMP"
+            ),
+            rusqlite::params![&relative, &session.scope_id, &session.archive_id],
         ) {
             Ok(count) => removed_entries += count,
             Err(error) => {
@@ -1294,6 +1437,61 @@ pub fn cache_clear_images(
             sweep_orphans_quietly(&connection, &app_data);
             CommandResult::success(value)
         }
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// async：进/出阅读器都要走这条路，命令体同样是一次删文件循环。
+///
+/// 这里**不做孤儿清扫**：清扫的宽限期是一小时（留给「已落盘、还没挂行」的写入），对刚
+/// 写出来的孤儿本来就无效，而它要遍历整棵缓存树——进出阅读器各来一次不合适。
+/// 把命令的两个参数收成一次阅读会话的坐标。
+///
+/// 空着就是「没说是哪一本」。这条命令的语义是「清掉**这一本**这一次的成品」，范围空着
+/// 等于「清掉所有档案的成品」——两本阅读器可以同时挂在保留里（`MAX_RETAINED_READERS = 2`），
+/// 收下空范围就会把另一本还在读的产物删掉。宁可什么都不做，也不做一件错的事。
+fn reader_session_scope(
+    scope_id: String,
+    archive_id: String,
+) -> Result<ReaderSessionScope, String> {
+    if scope_id.is_empty() || archive_id.is_empty() {
+        return Err("这一条清理必须带上是哪一本（scope + archive）".into());
+    }
+    Ok(ReaderSessionScope {
+        scope_id,
+        archive_id,
+    })
+}
+
+/// async：同 `cache_clear_images`——同样是持着全局 DB 锁的删文件循环。
+#[tauri::command(async)]
+pub fn cache_purge_reader_renditions(
+    scope_id: String,
+    archive_id: String,
+    app: tauri::AppHandle,
+    database: tauri::State<'_, Database>,
+) -> CommandResult<CacheInvalidateResult> {
+    // 没有坐标就不清（理由见 `reader_session_scope`）。
+    let session = match reader_session_scope(scope_id, archive_id) {
+        Ok(value) => value,
+        Err(message) => return CommandResult::failure("COMPUTE_BAD_REQUEST", message, false),
+    };
+    let app_data = match crate::data_paths::data_dir(&app) {
+        Ok(value) => value,
+        Err(_) => {
+            return CommandResult::failure(
+                "PLATFORM_UNAVAILABLE",
+                "App data directory unavailable",
+                true,
+            )
+        }
+    };
+    let connection = match database.connection.lock() {
+        Ok(value) => value,
+        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+    };
+    match purge_reader_renditions(&connection, &app_data, &session) {
+        Ok(value) => CommandResult::success(value),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
 }
@@ -1802,6 +2000,44 @@ mod tests {
         );
     }
 
+    /// SQL 里那份 kind 名单必须与 [`IMAGE_RENDITIONS`] **一字不差**。
+    ///
+    /// 这两份东西各自手写：一份给校验用（`CacheImageIdentity::validate`），一份给 SQL 用
+    /// （统计、清空缓存、受保护路径、pin 求和、按档案作废）。2026-10-13 的真机症状正是它们
+    /// 走散了——`dlssnr` 进了能写的集合，却没进 SQL 名单，于是设置里「清空缓存」删不掉那
+    /// 2.97 GiB 的产物、统计里也看不见它们，用户以为清过了其实一份没少。判据钉「两份集合
+    /// 相等」：将来再加一种渲染而忘了改 SQL，这条会先红。
+    #[test]
+    fn the_sql_kind_list_is_exactly_the_set_a_cache_identity_may_use() {
+        let listed: std::collections::BTreeSet<String> = IMAGE_KIND_SQL
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\'').to_string())
+            .collect();
+        let writable: std::collections::BTreeSet<String> = IMAGE_RENDITIONS
+            .iter()
+            .map(|kind| kind.to_string())
+            .collect();
+        assert_eq!(listed, writable, "SQL 名单与 IMAGE_RENDITIONS 必须相等");
+        assert_eq!(
+            IMAGE_KIND_SQL.matches('\'').count(),
+            IMAGE_RENDITIONS.len() * 2,
+            "名单里每个 kind 都要带引号"
+        );
+        // 反过来也要成立：SQL 名单里的每一个都真的能通过身份校验——不然它清得掉、
+        // 却写不进去，清单与实际内容会对不上。
+        for kind in &listed {
+            let identity = CacheImageIdentity {
+                scope_id: "scope-a".into(),
+                archive_id: "archive-a".into(),
+                page_index: 1,
+                rendition: kind.clone(),
+                revision: None,
+                transform: None,
+            };
+            assert!(identity.validate().is_ok(), "{kind} 该被身份校验接受");
+        }
+    }
+
     #[test]
     fn quota_eviction_counts_shared_files_once_and_preserves_pinned_lru() {
         let connection = cache_db();
@@ -1845,7 +2081,7 @@ mod tests {
             .execute_batch(
                 "INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash) VALUES
           ('up','enhanced','cache/images/up.bin',120,'scope','up'),
-          ('de','decensored','cache/images/de.bin',30,'scope','de'),
+          ('nr','dlssnr','cache/images/nr.bin',30,'scope','nr'),
           ('old','inference','cache/inference/old.bin',10,'scope','old'),
           ('misc','image','cache/images/misc.bin',5,'scope','misc')",
             )
@@ -1853,7 +2089,7 @@ mod tests {
         let stats = read_cache_stats(&connection).unwrap();
         assert_eq!(stats.bytes, 165);
         assert_eq!(stats.by_rendition["enhanced"].bytes, 120);
-        assert_eq!(stats.by_rendition["decensored"].bytes, 30);
+        assert_eq!(stats.by_rendition["dlssnr"].bytes, 30);
         assert_eq!(stats.by_rendition["inference"].bytes, 10);
         assert_eq!(stats.by_rendition["other"].bytes, 5);
     }
@@ -1899,12 +2135,12 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("free.bin"), b"free").unwrap();
         std::fs::write(cache.join("enhanced.bin"), b"enhanced").unwrap();
-        std::fs::write(cache.join("decensored.bin"), b"decensored").unwrap();
+        std::fs::write(cache.join("dlssnr.bin"), b"dlssnr").unwrap();
         std::fs::write(cache.join("pinned.bin"), b"pinned").unwrap();
         connection.execute_batch("INSERT INTO cache_entries (key,kind,path,size,source_scope,source_archive,content_hash,pinned) VALUES
           ('free','cover','cache/images/free.bin',4,'scope','a','free',0),
           ('enhanced','enhanced','cache/images/enhanced.bin',8,'scope','a','enhanced',0),
-          ('decensored','decensored','cache/images/decensored.bin',9,'scope','a','decensored',0),
+          ('dlssnr','dlssnr','cache/images/dlssnr.bin',9,'scope','a','dlssnr',0),
           ('pin','reader-page','cache/images/pinned.bin',6,'scope','a','pin',1)").unwrap();
 
         let result = clear_image_cache(&connection, &app_data).unwrap();
@@ -1920,7 +2156,7 @@ mod tests {
         );
         assert!(!cache.join("free.bin").exists());
         assert!(!cache.join("enhanced.bin").exists());
-        assert!(!cache.join("decensored.bin").exists());
+        assert!(!cache.join("dlssnr.bin").exists());
         assert!(cache.join("pinned.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
     }
@@ -2079,6 +2315,146 @@ mod tests {
             )
             .unwrap();
         assert_eq!(distinct_paths, 1);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn a_purge_without_a_reader_scope_is_refused_before_it_touches_the_cache() {
+        // 空范围等于「清掉所有档案的成品」。前端有两条路会传空：进阅读器时 `scopeId`
+        // 还没从服务器列表里解出来，以及路由参数缺失。两者都不该变成「把另一本的产物
+        // 一起删掉」，所以这一层自己也要拒绝。
+        assert!(reader_session_scope(String::new(), "archive-a".into()).is_err());
+        assert!(reader_session_scope("scope-a".into(), String::new()).is_err());
+        assert!(reader_session_scope(String::new(), String::new()).is_err());
+        let session = reader_session_scope("scope-a".into(), "archive-a".into()).unwrap();
+        assert_eq!(session.scope_id, "scope-a");
+        assert_eq!(session.archive_id, "archive-a");
+    }
+
+    /// 把这几类行的写入时间往前挪一小时，让它们变成「上一趟留下的」。
+    ///
+    /// 清理只认 `created_at < CURRENT_TIMESTAMP`（见 `purge_reader_renditions` 的文档），
+    /// 而 `created_at` 的默认值就是语句执行那一刻——测试里 `store_image_cache` 与
+    /// `purge_reader_renditions` 之间没有真实的时间流逝，不挪时间就一条都删不掉。
+    /// 真机上这条条件挡的是「本次会话刚算出来的那几页被自己的清理顺手带走」：
+    /// `React.StrictMode` 会把进入阅读器时的那次清理跑两遍，两遍之间落下的产物被第二遍
+    /// 删掉，用户看到的就是「图片消失」。
+    fn age_entries(connection: &rusqlite::Connection, kinds: &[&str]) {
+        for kind in kinds {
+            let changed = connection
+                .execute(
+                    "UPDATE cache_entries SET created_at = datetime('now', '-1 hour') WHERE kind = ?1",
+                    [kind],
+                )
+                .unwrap();
+            assert!(changed > 0, "{kind} 一行都没挪到");
+        }
+    }
+
+    #[test]
+    fn purging_a_reader_session_removes_that_archive_s_products_and_keeps_everything_else() {
+        // 用户的口径：超分 / DLSSNR 的产物「只在这次阅读会话里有意义，离开就清掉」。
+        // 这条判据同时钉住四件事：
+        //   ①这一趟算出来的成品真的走了；
+        //   ②原页与封面**没被顺手带走**（下一趟还要用，也不是这一趟算出来的）；
+        //   ③**别的档案 / 别的服务器**的产物没被带走——两本阅读器可以同时挂在保留里
+        //     （`MAX_RETAINED_READERS = 2`），从前那条清理不带范围，进出一本会把另一本
+        //     还在读的产物一起删掉；
+        //   ④这一秒里刚落下的行留着（见 `age_entries`）。
+        let connection = cache_db();
+        let app_data = temp_app_data("purge-reader");
+        let page = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 3);
+        let cover = CacheImageIdentity::new("scope-a", "archive-a", "cover", 0);
+        let enhanced = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 3);
+        let dlssnr = CacheImageIdentity::new("scope-a", "archive-a", "dlssnr", 3);
+        let other_archive = CacheImageIdentity::new("scope-a", "archive-b", "enhanced", 3);
+        let other_scope = CacheImageIdentity::new("scope-b", "archive-a", "enhanced", 3);
+        let this_second = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 9);
+        store_image_cache(&connection, &app_data, &page, "image/jpeg", b"the-page").unwrap();
+        store_image_cache(&connection, &app_data, &cover, "image/jpeg", b"the-cover").unwrap();
+        store_image_cache(&connection, &app_data, &enhanced, "image/png", b"upscaled-page").unwrap();
+        store_image_cache(&connection, &app_data, &dlssnr, "image/png", b"dlssnr-page").unwrap();
+        store_image_cache(&connection, &app_data, &other_archive, "image/png", b"other-archive")
+            .unwrap();
+        store_image_cache(&connection, &app_data, &other_scope, "image/png", b"other-scope")
+            .unwrap();
+
+        // 统计里也得看得见它：从前 `dlssnr` 不在任何一张 kind 名单里，2.84 GiB 的产物
+        // 被报成 `other`，用户在设置里既看不到也删不掉。
+        let before = read_cache_stats(&connection).unwrap();
+        assert_eq!(before.by_rendition["dlssnr"].entries, 1);
+        assert_eq!(before.by_rendition["enhanced"].entries, 3);
+
+        age_entries(&connection, &["enhanced", "dlssnr"]);
+        // 挪完时间之后才落下的这一行是「这一趟」的：清理不该碰它。
+        store_image_cache(&connection, &app_data, &this_second, "image/png", b"just-written")
+            .unwrap();
+
+        let session = ReaderSessionScope {
+            scope_id: "scope-a".into(),
+            archive_id: "archive-a".into(),
+        };
+        let result = purge_reader_renditions(&connection, &app_data, &session).unwrap();
+        assert_eq!(result.removed_entries, 2, "只该删这一本的两件成品");
+        assert_eq!(result.removed_files, 2);
+        assert!(load_image_cache(&connection, &app_data, &enhanced)
+            .unwrap()
+            .is_none());
+        assert!(load_image_cache(&connection, &app_data, &dlssnr)
+            .unwrap()
+            .is_none());
+        assert!(load_image_cache(&connection, &app_data, &page)
+            .unwrap()
+            .is_some(), "原页留着");
+        assert!(load_image_cache(&connection, &app_data, &cover)
+            .unwrap()
+            .is_some(), "封面留着");
+        assert!(load_image_cache(&connection, &app_data, &other_archive)
+            .unwrap()
+            .is_some(), "别的档案的产物留着");
+        assert!(load_image_cache(&connection, &app_data, &other_scope)
+            .unwrap()
+            .is_some(), "别的服务器的产物留着");
+        assert!(load_image_cache(&connection, &app_data, &this_second)
+            .unwrap()
+            .is_some(), "这一秒刚写的留着");
+        let after = read_cache_stats(&connection).unwrap();
+        assert_eq!(after.by_rendition["dlssnr"].entries, 0);
+        assert_eq!(after.by_rendition["reader-page"].entries, 1);
+        assert_eq!(after.by_rendition["enhanced"].entries, 3, "别的档案、别的服务器、以及这一秒刚写的都还在");
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn a_product_that_shares_its_bytes_with_a_page_is_only_forgotten() {
+        // 内容寻址：产物与别人的页字节相同时**共用同一个文件**。这时只能删行——
+        // 真删文件会把原页一起弄丢，而原页下一趟还要用（这是 `path_sharing` 那张
+        // 迁移表的由来）。
+        let connection = cache_db();
+        let app_data = temp_app_data("purge-shared");
+        let page = CacheImageIdentity::new("scope-a", "archive-a", "reader-page", 1);
+        let dlssnr = CacheImageIdentity::new("scope-a", "archive-a", "dlssnr", 1);
+        store_image_cache(&connection, &app_data, &page, "image/png", b"identical-bytes").unwrap();
+        store_image_cache(&connection, &app_data, &dlssnr, "image/png", b"identical-bytes").unwrap();
+        let shared: i64 = connection
+            .query_row("SELECT COUNT(DISTINCT path) FROM cache_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(shared, 1, "两份字节相同，本来就该共用一份文件");
+
+        age_entries(&connection, &["dlssnr"]);
+        let session = ReaderSessionScope {
+            scope_id: "scope-a".into(),
+            archive_id: "archive-a".into(),
+        };
+        let result = purge_reader_renditions(&connection, &app_data, &session).unwrap();
+        assert_eq!(result.removed_entries, 1);
+        assert_eq!(result.removed_files, 0, "还有别人引用，文件不能删");
+        assert_eq!(result.bytes_freed, 0);
+        assert!(load_image_cache(&connection, &app_data, &page)
+            .unwrap()
+            .is_some());
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
@@ -2277,8 +2653,8 @@ mod tests {
         std::fs::create_dir_all(published.parent().expect("有父目录")).expect("建目录");
         std::fs::write(&published, &payload).expect("产物已经在盘上了");
         let identity = {
-            let mut identity = CacheImageIdentity::new("scope-a", "archive-a", "decensored", 7);
-            identity.revision = Some("rev:decensored:abc".to_string());
+            let mut identity = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 7);
+            identity.revision = Some("rev:enhanced:abc".to_string());
             identity
         };
         // 挂行之前：文件在、索引里没有。这正是 compute 产物今天的样子，也是这道缝的起点。

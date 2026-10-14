@@ -1,7 +1,7 @@
 //! 两个引擎共用的一点点 IO 与错误词汇：认图的尺寸、编码 PNG、把核心的错误翻成协议
 //! 的话、把回退交代拼出来。
 //!
-//! 这几件从 `upscale.rs` 里搬出来的（Task 8-b 接去码那一阶段时）：去码要用的正是这几
+//! 这几件从 `upscale.rs` 里搬出来的：超分要用的正是这几
 //! 件东西，而「同一张图进、同一张图出」只有在**两边真的是同一个函数**时才是被保证的
 //! ——各写一份迟早会漂。这一条与宿主里「错一句话就换了一条口径」是同一个道理。
 
@@ -26,8 +26,8 @@ pub const GPU_OUTPUT_INVALID_CODE: &str = "GPU_OUTPUT_INVALID";
 /// 两边构建必须一致（内置链是编进二进制的，没有「下载一下」这条出路）。
 pub const MODEL_UNAVAILABLE_CODE: &str = "COMPUTE_MODEL_UNAVAILABLE";
 
-/// 引擎自报的 id：宿主的诊断与缓存修订都按它认这一条路径。超分与去码共用一条
-/// `--engine onnx`（它们是同一份构建里同一族的 ONNX 执行体），所以这个 id 也共用。
+/// 引擎自报的 id：宿主的诊断与缓存修订都按它认这一条路径。超分走的那条
+/// `--engine onnx`（一份 ONNX 执行体）报的就是这个 id。
 pub const ENGINE_ID: &str = "onnx";
 
 /// 「这一页没算」自报的 id：动图被原样交回时用它（见 `pipeline.rs`）。

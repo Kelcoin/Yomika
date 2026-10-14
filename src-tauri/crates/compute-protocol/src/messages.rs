@@ -262,31 +262,6 @@ pub struct GrantedFile {
     pub byte_length: u64,
 }
 
-/// 一个去码阶段要用的**三份模型**：检测器 + 两份修补模型（docs/91、docs/94）。
-///
-/// 为什么没有检测集：掩膜是**这一页的像素**算出来的，而算它的正是这份检测器。8-b/8-c
-/// 曾让宿主先检测、把掩膜当文件交过来，那时检测器还住在宿主；Task 8 的出口条件要求宿主
-/// 不留 ORT 资源（那份 Mask R-CNN 就是宿主里最大的一个会话），于是检测整段搬进 worker，
-/// 掩膜这一项也从协议上消失——它从来没进过帧（一页的掩膜动辄几十万字节，帧上限
-/// 64 KiB），只是不再需要有人把它摆进输入根。
-///
-/// 为什么三份都给、而且都不是 `Option`：同一个阶段里的框允许横条与马赛克混着出现，
-/// 而模型**按框**选，worker 只开真正用到的那一份会话。产品的去码包本来就是四份图整装
-/// 整卸（`inference::decensor::bundle_in` 少一份就返回 `None`），所以「给几份」不是运行期
-/// 要做出的决定；写成必填，worker 就不必猜「马赛克那个框能不能用横条模型糊一下」——
-/// 那种替换是沉默的质量谎话。检测器也在里面，是因为没有它这个阶段根本不知道补哪里。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DecensorGrant {
-    /// 找框的检测器（mrcnn/weights.onnx）。它总是跑在 CPU 上（`inference::detect` 的实测：
-    /// 同一张图在 DirectML 上会给出不同的框）。
-    pub detector: GrantedFile,
-    /// 横条修补模型（deepcreampy/bar.onnx）。
-    pub bar: GrantedFile,
-    /// 马赛克修补模型（deepcreampy/mosaic.onnx）。
-    pub mosaic: GrantedFile,
-}
-
 /// 一个 DLSSNR 阶段要用的**两样东西**：片段 DLL 的字节，与那一套参数（docs/106）。
 ///
 /// 为什么片段也走授权通道、而不是让 worker 去数据目录里找：Task 8 的出口条件要求
@@ -348,12 +323,8 @@ pub struct PipelineStage {
     /// 只读授权之后填在这里。不填 = 这一阶段不需要模型（echo 引擎这类）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<GrantedFile>,
-    /// 这一阶段是**去码（检测 + 修补）**阶段时要填的三份模型。与 `model` 互斥：
-    /// 一次请求只能是要么「拿这张模型把图变形」，要么「自己找框、自己把图补回来」。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decensor: Option<DecensorGrant>,
-    /// 这一阶段是 **DLSSNR** 阶段时要填的两样东西。与前两者相互排斥：这一阶段的输入
-    /// 是页面本身，同一页没法既按 DLSSNR 的一层参数重绘、又拿去当超分/去码的输入。
+    /// 这一阶段是 **DLSSNR** 阶段时要填的两样东西。与 `model` 相互排斥：这一阶段的输入
+    /// 是页面本身，同一页没法既按 DLSSNR 的一层参数重绘、又拿去当超分的输入。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dlssnr: Option<DlssnrGrant>,
     /// 这一阶段要跑**宿主内置的超分链**（Anime4K）时要填的声明。与前四样相互排斥：
@@ -886,24 +857,18 @@ impl PipelineStage {
             granted_file("model", model)?;
         }
         // 两样都给 = 一次说不清的请求：这个阶段的输入是页面本身，引擎没法同时按
-        // 「拿模型把图变形」和「自己找框、自己把图补回来」两种解码方式来用它（docs/91）。
-        // DLSSNR 加入之后这条判的是**四样里恰有一份**：多一份就必有一份是摆设，
+        // 「拿模型把图变形」和「按 DLSSNR 的一层参数重绘」两种解码方式来用它。
+        // 这条判的是**三样里恰有一份**：多一份就必有一份是摆设，
         // 而「哪一份是摆设」worker 只能猜——猜错的那一种会变成一张看起来对、其实
         // 没按用户要求处理过的图（DLSSNR 的输入要求与超分模型正好不兼容）。
         let grants = u8::from(self.model.is_some())
-            + u8::from(self.decensor.is_some())
             + u8::from(self.dlssnr.is_some())
             + u8::from(self.builtin.is_some());
         if grants > 1 {
             return Err(out_of_range(
                 "builtin",
-                "a stage carries exactly one of a model, a decensor grant, a dlssnr grant, or a builtin chain grant",
+                "a stage carries exactly one of a model, a dlssnr grant, or a builtin chain grant",
             ));
-        }
-        if let Some(decensor) = &self.decensor {
-            granted_file("decensor.detector", &decensor.detector)?;
-            granted_file("decensor.bar", &decensor.bar)?;
-            granted_file("decensor.mosaic", &decensor.mosaic)?;
         }
         if let Some(dlssnr) = &self.dlssnr {
             granted_file("dlssnr.feature", &dlssnr.feature)?;

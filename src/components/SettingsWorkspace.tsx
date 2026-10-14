@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Languages, ArrowDownWideNarrow, 
-  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, Brush, CalendarClock, Copy,
-  CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, Grid2x2, HardDrive,
+  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy,
+  CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
-  Paintbrush, Palette, PanelBottom, Pencil, Plus, RefreshCw, Rocket, RotateCcw, Save, Scale, Scan, ShieldCheck, X, Check,
+  Paintbrush, Palette, PanelBottom, Pencil, Plus, RefreshCw, Rocket, RotateCcw, Save, Scale, ShieldCheck, X, Check,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
 } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
@@ -145,7 +145,6 @@ const CACHE_RENDITIONS = [
   ['page-thumbnail', '页缩略图'],
   ['reader-page', '阅读页'],
   ['enhanced', '超分结果'],
-  ['decensored', '去码结果'],
   ['inference', '推理缓存'],
   ['other', '其他'],
 ] as const;
@@ -175,7 +174,6 @@ function formatCacheBytes(value: number): string {
 
 /** Keep the selector compact: version and scale are implementation metadata. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
-  if (model.kind === 'decensor') return { value: model.id, label: model.id === 'aletheia-lens' ? 'Aletheia Lens' : model.id.replaceAll('-', ' ') };
   // 行名的兜底：目录拿不到时（离线）也要有个像样的名字，而不是把 id 里的连字符
   // 换成空格。在线时目录里的 label 优先，这里只取它们的前半段以保持一致。
   const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', 'realcugan-2x-conservative': 'Real-CUGAN 2x 通用', 'realcugan-2x-denoise3x': 'Real-CUGAN 2x 漫画', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K', 'imported-model': '导入的模型' };
@@ -209,29 +207,6 @@ const BOTTOM_NAV_OPTIONS = [
 
 type BottomNavItemKey = (typeof BOTTOM_NAV_OPTIONS)[number]['key'];
 
-const DECENSOR_COMPONENT_IDS = ['mrcnn', 'deepcreampy-bar', 'deepcreampy-mosaic', 'fatal-pixels'] as const;const DECENSOR_STAGE_META: Record<(typeof DECENSOR_COMPONENT_IDS)[number], { role: string; name: string; icon: ReactNode }> = {
-  mrcnn: { role: '遮挡区域检测', name: 'Mask R-CNN', icon: <Scan /> },
-  'deepcreampy-bar': { role: '条状遮挡修补', name: 'DeepCreamPy Bar', icon: <Brush /> },
-  'deepcreampy-mosaic': { role: '马赛克修补', name: 'DeepCreamPy Mosaic', icon: <Grid2x2 /> },
-  'fatal-pixels': { role: '修复结果增强', name: 'Fatal Pixels', icon: <WandSparkles /> },
-};
-
-function decensorStageOptions(models: InstalledModel[] | undefined, componentId: string) {
-  return (models ?? [])
-    .filter((model) => model.kind === 'decensor' && model.components.some((component) => component.id === componentId))
-    .map((model) => {
-      const component = model.components.find((item) => item.id === componentId);
-      // 组件名即流程角色，版本号（多为 "1"）只会读成「点 1」，不再拼接。
-      return { value: model.id, label: component?.name ?? model.id };
-    });
-}
-
-function hasCompleteDecensorBundle(model: InstalledModel | undefined): boolean {
-  if (!model || model.kind !== 'decensor') return false;
-  const installed = new Set(model.components.map((component) => component.id));
-  return DECENSOR_COMPONENT_IDS.every((id) => installed.has(id));
-}
-
 /** Settings are split by workflow so everyday controls stay separate from
  * visual preferences, synchronization, and model tooling. */
 const settingsSections = [
@@ -240,7 +215,7 @@ const settingsSections = [
   { id: 'settings-appearance', label: '样式', hint: '主题、配色与自定义 CSS', icon: <Palette /> },
   { id: 'settings-eh', label: 'E-Hentai', hint: '账户登录与 Cookie 管理', icon: <EhMark plate={false} /> },
   { id: 'settings-sync', label: '同步', hint: 'WebDAV 同步与数据迁移', icon: <RefreshCw /> },
-  { id: 'settings-advanced', label: '高级', hint: '超分与去码模型', icon: <Sparkles /> },
+  { id: 'settings-advanced', label: '高级', hint: '超分与模型管理', icon: <Sparkles /> },
   { id: 'settings-tools', label: '工具', hint: '上传、导入与查重工作台', icon: <Blocks /> },
   { id: 'settings-about', label: '关于', hint: '版本信息与项目来源', icon: <Info /> },
 ] as const;
@@ -363,19 +338,13 @@ export function SettingsWorkspace() {
   /** The hosted catalog. `undefined` = not fetched yet, `[]` = fetch failed. */
   const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[] | undefined>(() => readAdvancedCache<UpscaleCatalogModel>('yomika.advanced-upscale-catalog'));
   const [modelsVerified, setModelsVerified] = useState(false);
-  // A model with no recorded scale cannot be run, so it is not a choice; nor is a
-  // de-censoring bundle, which is not an upscaler. One row per id: see firstPerId.
+  // A model with no recorded scale cannot be run, so it is not a choice. One row
+  // per id: see firstPerId.
   const runnableModels = firstPerId(installedModels?.filter((model) => model.scale && model.kind === 'upscale') ?? []);
   /** One switch each, derived from what is stored rather than stored separately:
    * a second boolean would be one more thing to keep in step with the model it
-   * points at. Off is the backend being off, and no bundle chosen. */
+   * points at. Off is the backend being off, and no model chosen. */
   const upscaleOn = preferenceDraft.upscaleBackend !== 'off' && Boolean(runnableModels.length);
-  const decensorOn = preferenceDraft.decensorModel !== '' && hasCompleteDecensorBundle(
-    installedModels?.find((model) => model.id === preferenceDraft.decensorModel),
-  );
-  const decensorBundles = firstPerId(installedModels?.filter((model) => model.kind === 'decensor') ?? []);
-  const selectedDecensorBundle = decensorBundles.find((model) => model.id === (preferenceDraft.decensorModel || decensorBundles[0]?.id)) ?? decensorBundles[0];
-  const decensorReady = hasCompleteDecensorBundle(selectedDecensorBundle);
   const upscaleReady = Boolean(runnableModels.length);
   /** 目录里还没装上盘的那些：列出来才有下载按钮。只列已安装的模型，手机端
    * 就永远等不到 real-esrgan —— 既没有导入入口，也没有下载入口。已安装的排
@@ -1610,7 +1579,7 @@ export function SettingsWorkspace() {
                 />
               </div>
             )}
-            {/* 高级区拆成三组：超分、去码各自独立，模型导入单独置底。 */}
+            {/* 高级区的模型导入单独置底。 */}
             {/* 算力中心两组：本机对外提供算力 + 把一页交给远端算。两边的设置互不
                 影响；「作为算力中心」那一组在能力齐全前是关着的（后端也会拦一次）。 */}
             {selectedSettingsSection === 'settings-advanced' && (
@@ -1697,58 +1666,13 @@ export function SettingsWorkspace() {
             )}
             {selectedSettingsSection === 'settings-advanced' && (
               <div className="settings-group">
-                <SettingsSwitch
-                  icon={<Eraser />}
-                  label="启用去码"
-                  hint={installedModels === undefined ? '正在读取模型…' : decensorReady ? '按流程逐级修补遮挡' : '去码模型不完整，无法启用'}
-                  checked={decensorOn}
-                  disabled={!modelsVerified}
-                  onToggle={() => {
-                    if (decensorOn) { editPreferences({ decensorModel: '' }); return; }
-                    if (!decensorReady) { showToast('去码模型不完整，无法启用', 'error'); return; }
-                    editPreferences({ decensorModel: decensorBundles?.[0]?.id ?? '' });
-                  }}
-                />
-                <div role="group" aria-label="去码流程模型">
-                  {DECENSOR_COMPONENT_IDS.map((id) => {
-                    const component = selectedDecensorBundle?.components.find((item) => item.id === id);
-                    const stageOptions = decensorStageOptions(decensorBundles, id);
-                    const fallback = { value: 'aletheia-lens', label: DECENSOR_STAGE_META[id].name };
-                    const role = component?.role ?? DECENSOR_STAGE_META[id].role;
-                    return <SettingsChoice
-                      key={id}
-                      icon={DECENSOR_STAGE_META[id].icon}
-                      label={role}
-                      ariaLabel={`${role}模型`}
-                      value={preferenceDraft.decensorModel || stageOptions[0]?.value || fallback.value}
-                      options={stageOptions.length ? stageOptions : [fallback]}
-                      onChange={(value) => { if (value) editPreferences({ decensorModel: value }); }}
-                      optionAction={(option) => <ModelDownloadButton
-                        option={option}
-                        installed={Boolean(decensorBundles?.some((model) => model.id === option.value && hasCompleteDecensorBundle(model)))}
-                        pending={modelPending}
-                        className="select-option-download"
-                        onDownload={() => void downloadModel(option.value, option.label)}
-                      />}
-                      optionStatus={(option) => <ModelDownloadSlot
-                        open={pendingModel?.id === option.value}
-                        label={pendingModel?.label ?? option.label}
-                        progress={modelDownload}
-                      />}
-                    />;
-                  })}
-                </div>
-              </div>
-            )}
-            {selectedSettingsSection === 'settings-advanced' && (
-              <div className="settings-group">
                 {/* 单按钮的设置不值得一个二级菜单：导入动作就在行右侧。
                     按钮里画一个"档案盒 + 上传箭头"的专属图标——这行的语义
                     （导入模型包）是 Upload 箭头说不完整的。 */}
                 <SettingsRow
                   icon={<Upload />}
                   label="模型导入"
-                  hint="导入超分、去码模型或 DLSSNR DLL"
+                  hint="导入超分模型或 DLSSNR DLL"
                   control={
                     <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

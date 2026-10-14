@@ -35,8 +35,8 @@ pub const READER_UPSCALE_GRANT_ID: &str = "reader-upscale";
 /// 静默变成 CPU；auto 可显式回退并展示原因」）。`platform_preference` 只说「想用哪个」，
 /// 能不能用由 worker 那一侧的实测探针决定：探针不过就退 CPU，并把原因写进
 /// `EngineReport::fallback`。所以这里问 `Auto` 是**问**，不是承诺。
-/// `pub(super)` 而不是私有：去码那条路（[`super::decensor`]）问的是同一件事——这台机器想用
-/// 哪个运行库。两处各写一份，就会出现「超分走显卡、去码走 CPU」这种没人下过的决定。
+/// `pub(super)` 而不是私有：宿主里别的算路（`super::proxy`）问的是同一件事——这台机器想用
+/// 哪个运行库。
 pub(super) fn engine_policy() -> EnginePolicy {
     let preferred = platform_preference()
         .first()
@@ -56,8 +56,6 @@ pub(super) fn engine_policy_label() -> &'static str {
 
 /// 这一版的提交只认这一个起点：`reader-page`。
 ///
-/// `decensored` 要等去码也搬进 worker 才谈得上——那时它的指纹、它的产物落点、以及「这一行
-/// 是谁写的」才都在同一侧（docs/71 §11 Task 8）。现在放行会指向一条没人写过的缓存行。
 const READER_PAGE_RENDITION: &str = "reader-page";
 
 /// 阅读器这一页要算的是什么。全是**渲染进程知道、宿主算不出**的东西。
@@ -132,9 +130,8 @@ impl ReaderPlanError {
 
 /// 指名一个**能在 worker 里跑**的超分模型：查得到就交回（模型, 倍数），查不到就说清为什么。
 ///
-/// 抽成函数是因为链上有第二个调用点：去码之后再放大（`compute::decensor`）也要按**同一把
-/// 尺子**判「这个模型能不能进 worker」。两处各写一份，就会出现「同一份设置单独超分能跑、
-/// 接在去码后面就不能跑」这种没人下过的决定。
+/// 抽成函数是因为有不止一个调用点：`super::proxy` 那条来路也要按**同一把尺子**判
+/// 「这个模型能不能进 worker」。两处各写一份，就会出现两条路各有一套判据这种没人下过的决定。
 pub(super) fn resolve_worker_upscaler(
     models_data: &Path,
     model_id: &str,
@@ -194,7 +191,7 @@ pub fn plan_reader_page(
             "{}:{}:{}",
             request.scope_id, request.archive_id, request.page_index
         ),
-        settings_id: enhanced_revision(&Some(resolved), None),
+        settings_id: enhanced_revision(&Some(resolved)),
         source_revision: READER_PAGE_RENDITION.to_string(),
         backend: engine_policy_label().to_string(),
         source_identity: source_identity(
@@ -202,7 +199,6 @@ pub fn plan_reader_page(
             &request.archive_id,
             request.page_index,
             READER_PAGE_RENDITION,
-            None,
         ),
         model_spec_id: model_id.to_string(),
         scale,
@@ -247,7 +243,6 @@ pub fn into_request(job: ReaderPageJob, source: SourceFile) -> SubmitRequest {
             // （`builtin`）同样在那一侧填：这一层只说「要哪一档」。
             model: None,
             builtin: None,
-            decensor: None,
             dlssnr: None,
             min_input_edge: None,
             output_scale: job.output_scale,
@@ -260,8 +255,6 @@ pub fn into_request(job: ReaderPageJob, source: SourceFile) -> SubmitRequest {
         output_grant_id: READER_UPSCALE_GRANT_ID.to_string(),
         deadline_ms: job.deadline_ms,
         source: Some(source),
-        // 超分没有检测集：去码那条路见 `compute::decensor`。
-        inpaint: None,
     }
 }
 
@@ -343,7 +336,7 @@ mod tests {
         assert_eq!(job.input_id, "scope-a:archive-a:11");
         assert_eq!(
             job.settings_id,
-            enhanced_revision(&resolve_upscaler(&root, "realesr"), None),
+            enhanced_revision(&resolve_upscaler(&root, "realesr")),
             "任务身份与旧命令（inference_upscale_page）必须是同一个串"
         );
         assert_eq!(job.source_revision, "reader-page");
@@ -426,7 +419,7 @@ mod tests {
         assert_eq!(job.scale, 2, "倍率由预设自己说了算");
         assert_eq!(
             job.settings_id,
-            enhanced_revision(&resolve_upscaler(&root, "anime4k-hq"), None),
+            enhanced_revision(&resolve_upscaler(&root, "anime4k-hq")),
             "身份仍旧只有一份算法：内置链也不例外"
         );
 

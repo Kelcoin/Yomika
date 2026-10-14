@@ -180,7 +180,6 @@ fn request(model_id: &str, source: Option<&Path>) -> SubmitRequest {
             model_spec_id: model_id.to_string(),
             // 模型授权与最小边长都留给宿主填：调用方不许指名模型文件。
             model: None,
-            decensor: None,
             dlssnr: None,
             builtin: None,
             min_input_edge: None,
@@ -203,8 +202,6 @@ fn request(model_id: &str, source: Option<&Path>) -> SubmitRequest {
                 byte_length,
             }
         }),
-        // 超分那条路没有检测集：去码那条见 `tests/compute_decensor_chain.rs`。
-        inpaint: None,
     }
 }
 
@@ -746,7 +743,7 @@ fn bundled_model(id: &str) -> Vec<u8> {
 }
 
 /// 两段一条链：第二阶段的输入是第一阶段交出来的那一份（`docs/71` §9.1 那条来路，
-/// 产品里由 `compute::decensor` 铸、这里按同一形状手写一份）。
+/// 产品里由 `compute::reader` 铸、这里按同一形状手写一份）。
 fn chained_request(first_model: &str, second_model: &str, page: &Path) -> SubmitRequest {
     let mut chained = request(first_model, Some(page));
     let mut second = chained.pipeline.first().expect("第一阶段").clone();

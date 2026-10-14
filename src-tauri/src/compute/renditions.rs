@@ -8,7 +8,7 @@
 //! 这个模块补的就是那一步：**把计划里已经算好的修订号，变成索引里那一行的身份**。
 //!
 //! 三件事分得很清楚：
-//! ① [`decensored_identity`] / [`enhanced_identity`]：身份怎么铸（口径与旧命令同一份算法）；
+//! ① [`enhanced_identity`]：身份怎么铸（口径与旧命令同一份算法）；
 //! ② [`RenditionIndex`]：这件任务会产出哪几版（提交时记下，取产物时按 `stage_id` 认领）；
 //! ③ [`adopt_artifact`]：把一份**已经核验过**的产物挂成它在索引里的那一行。
 //!
@@ -22,12 +22,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::cache::{self, CacheImageIdentity};
 
-use super::decensor::{DecensorPageJob, DECENSOR_STAGE_ID};
 use super::manager::ArtifactRecord;
 use super::reader::{ReaderPageJob, UPSCALE_STAGE_ID};
-
-/// 去码那一版在缓存里的名字。与 `cache::IMAGE_RENDITIONS` 里那一档**逐字相同**。
-pub const DECENSORED_RENDITION: &str = "decensored";
 
 /// 放大那一版在缓存里的名字。旧命令、前端过滤器与这里用的是同一个串。
 pub const ENHANCED_RENDITION: &str = "enhanced";
@@ -48,17 +44,8 @@ pub struct StageRendition {
     pub identity: CacheImageIdentity,
 }
 
-/// 去码那一版的身份。
-///
-/// `revision` 是 [`super::decensor::DecensorPageJob::decensored_revision`]：计划里用
-/// `inference::decensored_revision(包指纹)` 算出来的那一串。这里**不重算**——重算就得再要一份
-/// 包指纹，而那份指纹只活在计划里；口径与旧命令同出一处才不会有第二份说法。
-pub fn decensored_identity(source: &CacheImageIdentity, revision: &str) -> CacheImageIdentity {
-    page_rendition(source, DECENSORED_RENDITION, revision.to_string())
-}
-
-/// 放大那一版的身份：`revision` 必须是 `enhanced_revision` 算出来的那串（[`DecensorPageJob`]
-/// 与 [`ReaderPageJob`] 都已经把它算好放在 `settings_id` 里）。
+/// 放大那一版的身份：`revision` 必须是 `enhanced_revision` 算出来的那串（[`ReaderPageJob`]
+/// 已经把它算好放在 `settings_id` 里）。
 ///
 /// 这里不重算：重算就有第二份入参（模型解析结果），两份口径迟早会分家；调用方手上那个串
 /// 就是它准备交给缓存的那一版，身份与它逐字一致才不会有「交出去的图」与「登记的版」错位。
@@ -80,22 +67,6 @@ fn page_rendition(
     );
     identity.revision = Some(revision);
     identity
-}
-
-/// 去码那条路会产出哪几版，**按管线顺序**：第一步是 `decensored`，接上超分才有第二步
-/// `enhanced`。
-pub fn decensor_renditions(job: &DecensorPageJob) -> Vec<StageRendition> {
-    let mut renditions = vec![StageRendition {
-        stage_id: DECENSOR_STAGE_ID.to_string(),
-        identity: decensored_identity(&job.source_identity, &job.decensored_revision),
-    }];
-    if let Some(upscale) = &job.upscale {
-        renditions.push(StageRendition {
-            stage_id: UPSCALE_STAGE_ID.to_string(),
-            identity: enhanced_identity(&job.source_identity, &upscale.settings_id),
-        });
-    }
-    renditions
 }
 
 /// 阅读器那条超分路会产出哪一版：一件产物，就是 `enhanced` 那一版。
@@ -228,7 +199,7 @@ mod tests {
     fn record(relative: Option<&str>, verified: bool) -> ArtifactRecord {
         ArtifactRecord {
             job_id: "job-1".to_string(),
-            stage_id: DECENSOR_STAGE_ID.to_string(),
+            stage_id: UPSCALE_STAGE_ID.to_string(),
             artifact_id: "artifact-1".to_string(),
             staging_name: "staged.png".to_string(),
             path: PathBuf::from("C:/staging/staged.png"),
@@ -287,28 +258,28 @@ mod tests {
         let index = RenditionIndex::new();
         let entry = |stage_id: &str| StageRendition {
             stage_id: stage_id.to_string(),
-            identity: decensored_identity(&source(), "rev-1"),
+            identity: enhanced_identity(&source(), "rev-1"),
         };
         for number in 0..=MAX_INDEXED_JOBS {
-            index.record(&format!("job-{number}"), vec![entry(DECENSOR_STAGE_ID)]);
+            index.record(&format!("job-{number}"), vec![entry(UPSCALE_STAGE_ID)]);
         }
 
         assert!(
-            index.find("job-0", DECENSOR_STAGE_ID).is_none(),
+            index.find("job-0", UPSCALE_STAGE_ID).is_none(),
             "第 {MAX_INDEXED_JOBS} 件之后，最早那件就该被忘掉"
         );
         assert!(
             index
-                .find(&format!("job-{MAX_INDEXED_JOBS}"), DECENSOR_STAGE_ID)
+                .find(&format!("job-{MAX_INDEXED_JOBS}"), UPSCALE_STAGE_ID)
                 .is_some(),
             "刚记下的那件还在"
         );
 
         // 同一个 job_id 再记一次是覆盖，不是又占一格（调度器合并同一件任务时身份是一样的）。
-        index.record("job-1", vec![entry(UPSCALE_STAGE_ID)]);
-        assert!(index.find("job-1", UPSCALE_STAGE_ID).is_some());
+        index.record("job-1", vec![entry("other-stage")]);
+        assert!(index.find("job-1", "other-stage").is_some());
         assert!(
-            index.find("job-1", DECENSOR_STAGE_ID).is_none(),
+            index.find("job-1", UPSCALE_STAGE_ID).is_none(),
             "覆盖之后旧的那一版不该还留着"
         );
     }
@@ -319,14 +290,14 @@ mod tests {
         index.record(
             "job-1",
             vec![StageRendition {
-                stage_id: DECENSOR_STAGE_ID.to_string(),
-                identity: decensored_identity(&source(), "rev-1"),
+                stage_id: UPSCALE_STAGE_ID.to_string(),
+                identity: enhanced_identity(&source(), "rev-1"),
             }],
         );
 
         assert!(index.forget("job-1"));
         assert!(!index.forget("job-1"), "忘两次只有第一次算数");
-        assert!(index.find("job-1", DECENSOR_STAGE_ID).is_none());
+        assert!(index.find("job-1", UPSCALE_STAGE_ID).is_none());
     }
 
     /// 没核验过的产物**绝不**能挂成页面的某一版：登记等于告诉全宿主「这一版算好了」，
@@ -338,8 +309,8 @@ mod tests {
         index.record(
             "job-1",
             vec![StageRendition {
-                stage_id: DECENSOR_STAGE_ID.to_string(),
-                identity: decensored_identity(&source(), "rev-1"),
+                stage_id: UPSCALE_STAGE_ID.to_string(),
+                identity: enhanced_identity(&source(), "rev-1"),
             }],
         );
 
@@ -382,8 +353,8 @@ mod tests {
         index.record(
             "job-1",
             vec![StageRendition {
-                stage_id: DECENSOR_STAGE_ID.to_string(),
-                identity: decensored_identity(&source(), "rev-1"),
+                stage_id: UPSCALE_STAGE_ID.to_string(),
+                identity: enhanced_identity(&source(), "rev-1"),
             }],
         );
 

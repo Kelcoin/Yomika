@@ -88,7 +88,10 @@ fn a_page_identity_follows_the_dll_that_would_run_it() {
     let settings = DlssnrSettings::default();
 
     let none = output_revision(dir.path(), None, &settings);
-    assert!(none.starts_with("dlssnr:v3:"), "{none}");
+    // v4 起产物身份里还带着动图计划器的版本（`dlssnr::ANIMATION_PLAN_REVISION`）：
+    // 改了预算或抽帧算法就得 +1，否则用户翻回那一页端上来的还是旧产物——150 MB 那一份
+    // 正是这么留在缓存里、把阅读器刷成空白的。
+    assert!(none.starts_with("dlssnr:v4:"), "{none}");
     assert_eq!(none, output_revision(dir.path(), None, &settings), "同输入同输出");
     assert_eq!(
         none,

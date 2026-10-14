@@ -12,6 +12,7 @@ import { ToastProvider } from '../components/Toast';
 import { UpdateNotice } from '../components/UpdateNotice';
 import { ComputeWorkerToasts } from '../components/ComputeWorkerToasts';
 import { PairingCodeNotice } from '../components/PairingCodeNotice';
+import { RenderGuard } from '../components/RenderGuard';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -86,8 +87,11 @@ export function App() {
       stopTagTranslationUpdates();
     };
   }, []);
+  // 最外层接住渲染期抛错：窗口背景是透明的（tauri.conf 的 #0B0B0F00），一次没人接住的
+  // 渲染错误会把整棵树卸载成「窗口还在、里面什么都没有」，看起来就是窗口消失了。
   return (
-    <PreferencesProvider>
+    <RenderGuard>
+      <PreferencesProvider>
       <SplashFrame />
       <StartupRoute />
       <ToastProvider>
@@ -106,6 +110,7 @@ export function App() {
             （阅读器里、任何路由上都要弹得出来）。 */}
         <PairingCodeNotice />
       </ToastProvider>
-    </PreferencesProvider>
+      </PreferencesProvider>
+    </RenderGuard>
   );
 }

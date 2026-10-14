@@ -17,7 +17,7 @@ const preferences = {
   startupRoute: 'home' as const,
   cardStyle: 'wide' as const,
   upscaleBackend: 'off' as const,
-  upscaleModel: '', decensorModel: '',
+  upscaleModel: '',
   upscaleAutoEnable: false,
   upscaleAutoTagMode: 'whitelist' as const,
   upscaleAutoThresholdBytes: 512_000,

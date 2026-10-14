@@ -352,18 +352,6 @@ fn download_asset_with_fallback_progress<F: FnMut(u64, Option<u64>)>(
     ))
 }
 
-fn aletheia_direct_url(asset: &ReleaseAsset) -> Option<String> {
-    // The upstream project publishes the ONNX files as flat Release assets;
-    // Yomika's manifest keeps their installed subdirectories separately.
-    let name = asset.remote_name();
-    if name.is_empty() || name.contains('/') || name.contains('\\') {
-        return None;
-    }
-    Some(format!(
-        "https://github.com/Cec1c/Aletheia-Lens/releases/download/models-v1/{name}"
-    ))
-}
-
 /// The standalone repository that carries the model releases. Its body keeps
 /// the current `manifest.json` and its Release holds the flat model assets;
 /// the main application repository carries no model files.
@@ -380,32 +368,6 @@ fn manifest_urls(owner_repo: &str, tag: &str) -> Vec<String> {
         urls.push(url);
     }
     urls
-}
-
-fn fetch_manifest_with_fallback(
-    owner_repo: &str,
-    tag: &str,
-) -> Result<ModelReleaseManifest, String> {
-    let mut errors = Vec::new();
-    for url in manifest_urls(owner_repo, tag) {
-        match reqwest::blocking::get(&url).and_then(|response| response.error_for_status()) {
-            Ok(response) => match response.json::<ModelReleaseManifest>() {
-                Ok(manifest) => {
-                    if let Err(error) = validate_manifest(&manifest) {
-                        errors.push(format!("{url}: {error}"));
-                    } else {
-                        return Ok(manifest);
-                    }
-                }
-                Err(error) => errors.push(format!("{url}: {error}")),
-            },
-            Err(error) => errors.push(format!("{url}: {error}")),
-        }
-    }
-    Err(format!(
-        "all model manifest sources failed: {}",
-        errors.join("; ")
-    ))
 }
 
 pub fn asset_url(prefix: &str, owner_repo: &str, tag: &str, path: &str) -> String {
@@ -920,7 +882,7 @@ fn download_default(
 ) -> crate::domain::result::CommandResult<()> {
     let requested = model_id
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "aletheia-lens".into());
+        .unwrap_or_else(|| "waifu2x-upconv7".into());
     let result = crate::inference::model_data_dir(app)
         .map_err(|e| e.to_string())
         .and_then(|data| match requested.as_str() {
@@ -928,52 +890,6 @@ fn download_default(
             // exposed through the same button so the UI has one download flow,
             // but it never performs a network request or writes outside data/.
             "waifu2x-upconv7" => crate::bundled_models::prepare(&data).map_err(|e| e.to_string()),
-            "aletheia-lens" => {
-                let manifest = fetch_manifest_with_fallback(MODEL_RELEASE_REPO, MODEL_RELEASE_TAG)?;
-                let root = data.join("models").join("aletheia-lens").join("1");
-                if crate::inference::decensor::bundle_in(&root).is_some() {
-                    return Ok(());
-                }
-                if root.exists() {
-                    return Err("去码模型安装目录已存在但不完整，请重新导入完整模型包".into());
-                }
-                let staging = root.with_file_name(".1.installing");
-                let _ = std::fs::remove_dir_all(&staging);
-                std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-                let result = (|| {
-                    for asset in &manifest.assets {
-                        let target = staging.join(
-                            asset
-                                .path
-                                .replace('/', &std::path::MAIN_SEPARATOR.to_string()),
-                        );
-                        if let Some(parent) = target.parent() {
-                            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                        }
-                        let mut configured_asset = asset.clone();
-                        configured_asset.direct_url = configured_asset
-                            .direct_url
-                            .clone()
-                            .or_else(|| aletheia_direct_url(asset));
-                        download_asset_with_fallback(
-                            MODEL_RELEASE_REPO,
-                            &manifest.tag,
-                            &configured_asset,
-                            &target,
-                        )?;
-                    }
-                    std::fs::write(
-                        staging.join("release-manifest.json"),
-                        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    install_staging_dir(&staging, &root)
-                })();
-                if result.is_err() {
-                    let _ = std::fs::remove_dir_all(&staging);
-                }
-                result
-            }
             // Anything else is a hosted upscaler: the settings list offers the
             // catalog's models, and downloading one is an ordinary install.
             other => install_hosted_upscale_model(app, &data, other),
