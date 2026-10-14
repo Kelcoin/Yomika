@@ -598,7 +598,8 @@ describe('reader screen', () => {
 
       slid = true; // 胶囊滑到位了，压在画面上——只有第二趟测量才会看到这一幕
       await wait(300);
-      expect(pageIndicator()?.getAttribute('data-placement')).toBe('hidden');
+      expect(pageIndicator()?.getAttribute('data-placement')).toBe('corner');
+      expect(pageIndicator()?.getAttribute('data-visible')).toBe('false');
     } finally {
       media.restore();
     }

@@ -455,7 +455,7 @@
   transform: translateX(-50%);
 }
 
-/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-placement='hidden'] { opacity: 0; }
+/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-visible='false'] { opacity: 0; }
 
 /* The toolbar owns the bottom strip while it is up, so the pill steps above it
    instead of overlapping the controls. It reads the bar's own height token, so
@@ -944,3 +944,6 @@
     backdrop-filter: none;
   }
 }
+
+/* Candidate occupies no layout space; its mounted decoded node is promoted. */
+.reader-page.is-candidate { position: absolute; visibility: hidden; pointer-events: none; }

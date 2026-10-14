@@ -50,3 +50,14 @@ export function decodeImageStrict(url: string): Promise<void> {
     image.src = url;
   });
 }
+
+/** Decode the mounted candidate itself: promoting it never changes its src. */
+export function decodeImageElementStrict(image: HTMLImageElement): Promise<void> {
+  if (testDecoder) return testDecoder(image.src);
+  if (typeof image.decode === 'function') return image.decode();
+  if (image.complete) return image.naturalWidth > 0 ? Promise.resolve() : Promise.reject(new Error(`图片加载不出来：${image.src}`));
+  return new Promise((resolve, reject) => {
+    image.addEventListener('load', () => resolve(), { once: true });
+    image.addEventListener('error', () => reject(new Error(`图片加载不出来：${image.src}`)), { once: true });
+  });
+}

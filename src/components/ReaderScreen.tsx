@@ -1,6 +1,6 @@
 import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
@@ -11,7 +11,7 @@ import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { getPlatformCapabilities } from '../bridge/platform';
-import { decodeImageStrict } from '../lib/decodeImage';
+import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
@@ -305,51 +305,62 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
   onFailed: (index: number, url: string) => void;
 }) {
   const [shown, setShown] = useState(source);
+  const candidateRef = useRef<HTMLImageElement>(null);
   const displayedFailed = useRef(false);
+  const handover = useRef<{ url: string; image: HTMLImageElement }>();
+  const callbacks = useRef({ onMeasured, onDisplayed, onFailed });
+  callbacks.current = { onMeasured, onDisplayed, onFailed };
   useEffect(() => {
-    if (source === shown) return;
+    const candidate = candidateRef.current;
+    if (source === shown || !candidate) return;
     let active = true;
-    void decodeImageStrict(source).then(() => {
+    void decodeImageElementStrict(candidate).then(() => {
       if (!active) return;
       displayedFailed.current = false;
+      handover.current = { url: source, image: candidate };
       setShown(source);
     }, (error) => {
       if (!active) return;
       logError('reader/page-image', '替换图片解码失败', { page: index + 1, url: source, error: String(error), recovery: displayedFailed.current });
-      // A healthy displayed page survives a bad candidate. A broken displayed
-      // page needs recovery; if that also fails, surface the page retry.
-      if (displayedFailed.current) onFailed(index, source);
+      if (displayedFailed.current) callbacks.current.onFailed(index, source);
     });
     return () => { active = false; };
-  }, [source, shown, index, onFailed]);
-  return (
-    <img
+  }, [source, shown, index]);
+  // Handle release belongs after the DOM commit that makes the candidate visible.
+  useLayoutEffect(() => {
+    const next = handover.current;
+    if (!next || next.url !== shown) return;
+    handover.current = undefined;
+    callbacks.current.onMeasured(index, next.image);
+    callbacks.current.onDisplayed?.(index, next.url);
+  }, [shown, index]);
+  return <>{(source === shown ? [shown] : [shown, source]).map((url) => {
+    const candidate = url !== shown;
+    return <img
+      key={url}
+      ref={candidate ? candidateRef : undefined}
       draggable={false}
-      className="reader-page"
-      alt={`第 ${index + 1} 页`}
-      src={shown}
+      className={`reader-page${candidate ? ' is-candidate' : ''}`}
+      aria-hidden={candidate || undefined}
+      alt={candidate ? '' : `第 ${index + 1} 页`}
+      src={url}
       decoding="async"
       style={size ? { '--reader-page-fit-width': `${size.width}px`, '--reader-page-fit-height': `${size.height}px` } as CSSProperties : undefined}
       onLoad={(event) => {
+        if (candidate) return;
         onMeasured(index, event.currentTarget);
-        onDisplayed?.(index, shown);
+        onDisplayed?.(index, url);
       }}
       onError={(event) => {
+        if (candidate) return;
         displayedFailed.current = true;
-        // 图片加载失败曾是**完全静默**的：算出来的那一版取图地址打不开时，页面上只剩一个
-        // 破图，`onLoad` 不响、`naturalWidth` 是 0，日志里连一行都没有（2026-10-13 现场）。
-        // 这里至少把「哪一页、哪个地址」写进 error.log。
         const image = event.currentTarget;
-        logError('reader/page-image', '阅读器的图片没加载出来', {
-          page: index + 1,
-          url: shown,
-          naturalWidth: image.naturalWidth,
-          complete: image.complete,
-        });
-        onFailed(index, shown);
+        logError('reader/page-image', '阅读器的图片没加载出来', { page: index + 1, url, naturalWidth: image.naturalWidth, complete: image.complete });
+        onFailed(index, url);
       }}
-    />
-  );
+    />;
+  })}</>;
+
 });
 
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
@@ -1640,13 +1651,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       {pages.length > 0 && (() => {
         // Overlapping artwork + flash expired → the pill goes quiet until the
         // next page turn; letterbox placements stay persistent as before.
-        const placement = effectiveLayout === 'webtoon' || zoom.scale > 1 || (indicatorOverlaps && !indicatorFlash)
-          ? 'hidden'
-          : indicatorPlacement;
+        const hidden = effectiveLayout === 'webtoon' || zoom.scale > 1 || (indicatorOverlaps && !indicatorFlash);
         return (
           <div
             className={`reader-page-indicator${bottomPresence.mounted ? ' is-raised' : ''}${bottomPresence.leaving ? ' is-leaving' : ''}`}
-            data-placement={placement}
+            data-placement={indicatorPlacement}
+            data-visible={!hidden}
             aria-hidden="true"
           >{pageIndicator}</div>
         );

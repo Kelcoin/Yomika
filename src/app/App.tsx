@@ -44,6 +44,8 @@ const MAX_RETAINED_READERS = 2;
 export function App() {
   const location = useLocation();
   const { pathname } = location;
+  const foregroundPath = useRef(pathname);
+  foregroundPath.current = pathname;
   const reading = pathname.startsWith('/reader/');
   const workspaceLocation = useRef<typeof location | undefined>(reading ? undefined : location);
   if (!reading) workspaceLocation.current = location;
@@ -78,8 +80,9 @@ export function App() {
     document.addEventListener('visibilitychange', updateLifecycle);
     // 启动稳定后把懒加载的页面取回来：不然切到那些页面时 Suspense 会把整页换成
     // 加载动画，闪一下（chunk 只在第一次进入时缺）。
-    preloadLazyPages();
+    const stopPreload = preloadLazyPages(() => foregroundPath.current);
     return () => {
+      stopPreload();
       stopErrorLogging();
       stopPressFeedback();
       document.removeEventListener('contextmenu', suppressNativeMenu);

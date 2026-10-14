@@ -9,7 +9,7 @@
 //! 测（`menu_origin`）。
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::domain::result::CommandResult;
 
@@ -109,6 +109,7 @@ pub fn show_at(app: &AppHandle, cursor: PhysicalPosition<f64>) {
         let (x, y) = menu_origin((cursor.x, cursor.y), size, bounds);
         let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
     }
+    let _ = app.emit_to(MENU_WINDOW, "tray-menu-opening", ());
     let _ = window.show();
     // 取焦点有两个用处：Esc 与方向键要能进到页面里，而且失焦就是「点到别处了」。
     let _ = window.set_focus();
@@ -126,6 +127,7 @@ pub fn hide(app: &AppHandle) {
 #[serde(rename_all = "camelCase")]
 pub struct TrayMenuState {
     theme: String,
+    custom_css: String,
 }
 
 /// async：它要读一次库（主题）。同步命令体是在 WebView2 的 UI 线程上就地跑的，而全局
@@ -133,15 +135,14 @@ pub struct TrayMenuState {
 /// 不变量测试盯着这一条（`tray_menu.rs` 已经进了它的文件清单）。
 #[tauri::command(async)]
 pub fn tray_menu_state(app: AppHandle) -> CommandResult<TrayMenuState> {
-    let theme = app
+    let preferences = app
         .try_state::<crate::db::Database>()
         .and_then(|database| {
             let connection = database.connection.lock().ok()?;
             crate::settings::load_preferences_from(&connection).ok()
         })
-        .map(|snapshot| snapshot.theme)
-        .unwrap_or_else(|| "system".to_string());
-    CommandResult::success(TrayMenuState { theme })
+        .unwrap_or_default();
+    CommandResult::success(TrayMenuState { theme: preferences.theme, custom_css: preferences.custom_css })
 }
 
 /// 选了哪一条。窗口先藏起来再做动作——`quit` 之后这个窗口已经不在了。

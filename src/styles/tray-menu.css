@@ -81,3 +81,5 @@ body {
   background: var(--surface-container-highest);
   outline: none;
 }
+
+.tray-menu[data-ready="false"] { visibility: hidden; }

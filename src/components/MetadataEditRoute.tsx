@@ -145,7 +145,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">
       <header className="metadata-edit-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-        <div className="metadata-edit-heading"><h1 id="metadata-edit-title">编辑元数据</h1><p title={title}>{title || '未命名档案'}</p></div>
+        <div className="metadata-edit-heading"><h1 id="metadata-edit-title">编辑元数据</h1></div>
       </header>
       <form className="metadata-edit-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {/* 标题与简介是这里仅有的两段散文，所以只有它们要回自动大写与拼写检查。 */}

@@ -778,6 +778,7 @@ describe('library workspace', () => {
     fireEvent(list, back);
     expect(back.defaultPrevented).toBe(true);
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
 
     fireEvent.touchEnd(list);
   });
@@ -1073,4 +1074,47 @@ describe('library cover flashes between pages', () => {
     expect(view.container.querySelectorAll('.archive-row-thumb img')).toHaveLength(2);
     expect(view.container.querySelectorAll('.archive-row-thumb.is-skeleton')).toHaveLength(0);
   });
+});
+
+
+it('does not claim a horizontal pull and cancels a long pull without refreshing', () => {
+  const onRefresh = vi.fn();
+  renderWorkspace({ archives, onRefresh });
+  const list = screen.getByRole('list', { name: '档案' });
+  scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+  fireEvent.touchStart(list, { touches: [{ clientY: 10, clientX: 10 }] });
+  const sideways = createEvent.touchMove(list, { touches: [{ clientY: 40, clientX: 170 }] });
+  fireEvent(list, sideways);
+  expect(sideways.defaultPrevented).toBe(false);
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(0px)' });
+  fireEvent.touchCancel(list);
+  fireEvent.touchStart(list, { touches: [{ clientY: 10, clientX: 10 }] });
+  fireEvent.touchMove(list, { touches: [{ clientY: 210, clientX: 10 }] });
+  fireEvent.touchCancel(list);
+  expect(onRefresh).not.toHaveBeenCalled();
+  expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
+});
+
+
+it('bounces negatively on the first bottom touch and never refreshes on release or return', () => {
+  const onRefresh = vi.fn();
+  renderWorkspace({ archives, onRefresh });
+  const list = screen.getByRole('list', { name: '档案' });
+  const pull = list.querySelector('.archive-list-pull');
+  scrollable(list, { scrollTop: 3200, clientHeight: 800, scrollHeight: 4000 });
+  fireEvent.touchStart(list, { touches: [{ clientY: 200, clientX: 0 }] });
+  fireEvent.touchMove(list, { touches: [{ clientY: 60, clientX: 0 }] });
+  expect(pull).toHaveStyle({ transform: 'translateY(-70px)' });
+  expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
+  fireEvent.touchEnd(list);
+  expect(onRefresh).not.toHaveBeenCalled();
+  expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  fireEvent.touchStart(list, { touches: [{ clientY: 200, clientX: 0 }] });
+  fireEvent.touchMove(list, { touches: [{ clientY: 100, clientX: 0 }] });
+  fireEvent.touchMove(list, { touches: [{ clientY: 60, clientX: 0 }] });
+  expect(pull).toHaveStyle({ transform: 'translateY(-70px)' });
+  fireEvent.touchMove(list, { touches: [{ clientY: 200, clientX: 0 }] });
+  expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  fireEvent.touchEnd(list);
+  expect(onRefresh).not.toHaveBeenCalled();
 });

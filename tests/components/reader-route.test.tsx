@@ -1419,8 +1419,7 @@ describe('reader route', () => {
     fireEvent.click(reader);
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
-    const first = screen.getByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(first).toHaveAttribute('src', 'blob:enhanced-0'));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
     expect(await screen.findByText(/没有用 directml 算/)).toBeInTheDocument();
     expect(screen.getByText(/实际用的是 cpu/)).toBeInTheDocument();
 
@@ -1481,13 +1480,13 @@ describe('reader route', () => {
     hostFailCode = null;
     const submits = hostCommands.filter((command) => command === 'compute_submit_reader_page').length;
     fireEvent.keyDown(reader, { key: 'ArrowLeft' });
-    const first = await screen.findByRole('img', { name: '第 1 页' });
+    await screen.findByRole('img', { name: '第 1 页' });
     // 先量「有没有再问一次」：这一页失败之后要是被记成「试过了」，翻回去不重问，它就永远
     // 停在原图——那不是「可用的一版」，是这一次阅读里再也拿不到结果。
     await waitFor(() => expect(
       hostCommands.filter((command) => command === 'compute_submit_reader_page').length,
     ).toBeGreaterThan(submits));
-    await waitFor(() => expect(first).toHaveAttribute('src', 'blob:enhanced-0'));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
   it('does not ask again for a page the host says can never run', async () => {
@@ -1580,7 +1579,7 @@ describe('reader route', () => {
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
-    expect(await screen.findByText('超分处理中…')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('超分处理中…')).toBeInTheDocument());
     await act(async () => { releaseUpscale?.(); });
     await waitFor(() => expect(screen.queryByText('超分处理中…')).not.toBeInTheDocument());
   });
@@ -1634,7 +1633,8 @@ describe('reader route', () => {
     fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
 
     const image = screen.getByRole('img', { name: '第 1 页' });
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(image).toHaveAttribute('src', 'blob:reader-page-0');
   });
 
   it('auto-disables DLSS5 when this machine cannot actually run it', async () => {
@@ -1729,7 +1729,8 @@ describe('reader route', () => {
     await waitFor(() => expect(releaseUpscale).toBeDefined());
     expect(image).toHaveAttribute('src', 'blob:reader-page-0');
     await act(async () => { releaseUpscale?.({ url: 'blob:enhanced-0', bytes: 1 }); });
-    await waitFor(() => expect(image).toHaveAttribute('src', 'blob:enhanced-0'));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(image).toHaveAttribute('src', 'blob:reader-page-0');
     const adopted = adopt.mock.results[0]!.value as ImageHandle;
     // 算出来的那一版起点是原图，不是别的阶段留下的产物。
     expect(adopt).toHaveBeenCalledWith(

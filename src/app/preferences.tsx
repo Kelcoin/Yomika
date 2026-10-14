@@ -1,3 +1,4 @@
+import { applyCustomCss, LAST_CUSTOM_CSS_KEY } from '../lib/customCss';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { CommandResult } from '../domain/result';
@@ -71,33 +72,6 @@ function applyPreferences(preferences: PreferenceSnapshot) {
   writeNavMirror(preferences);
 }
 
-const CUSTOM_CSS_ELEMENT_ID = 'yomika-custom-css';
-/** Mirror of the last applied custom CSS. Preferences arrive through IPC, so
- * without this mirror the first frames of every launch painted the default
- * scheme and then flipped — the mirror applies synchronously at import time. */
-const LAST_CUSTOM_CSS_KEY = 'yomika.last-custom-css';
-
-/** 自定义样式走 **adoptedStyleSheets**（CSSOM），不走 `<style>` 元素：Tauri 启动时
- * 给 CSP 的 style-src 注入 nonce，`'unsafe-inline'` 随之失效，运行时创建的
- * `<style>` 会被 CSP 全部拒绝（自定义样式因此整体失效过一次）。构造样式表不是
- * 内联样式，CSP 不检查，且在文档样式中排最后——恰好保证覆盖应用令牌。
- * 回退：环境没有 adoptedStyleSheets（旧 jsdom）时仍走 `<style>` 元素。 */
-function applyCustomCssSheet(css: string): boolean {
-  if (typeof CSSStyleSheet === 'undefined' || !('replaceSync' in CSSStyleSheet.prototype)) return false;
-  if (!('adoptedStyleSheets' in document)) return false;
-  const existing = (window as { __yomikaCustomSheet?: CSSStyleSheet }).__yomikaCustomSheet;
-  if (existing) {
-    existing.replaceSync(css);
-    return true;
-  }
-  if (!css.trim()) return true;
-  const sheet = new CSSStyleSheet();
-  sheet.replaceSync(css);
-  (window as { __yomikaCustomSheet?: CSSStyleSheet }).__yomikaCustomSheet = sheet;
-  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-  return true;
-}
-
 /** 底栏的形态也走镜像：悬浮还是贴底、显示哪几项，都是偏好里的一行，而偏好是 IPC 回来
  * 的——不镜像的话每次启动都会先画一版贴底栏，等偏好到了再换成悬浮的（明明开着悬浮，
  * 启动瞬间却闪一下固定栏）。写与读都在本地存储里，与自定义 CSS 那条镜像同一个理由。
@@ -156,25 +130,7 @@ try {
  * the design tokens without the app having to know what it contains. It is also
  * the only theming surface: the accent-colour preference that used to sit beside
  * it said less than `--brand-vermilion: …` does here. */
-function applyCustomCss(css: string) {
-  if (typeof document === 'undefined') return;
-  try {
-    if (window.localStorage.getItem(LAST_CUSTOM_CSS_KEY) !== css) window.localStorage.setItem(LAST_CUSTOM_CSS_KEY, css);
-  } catch { /* storage can be unavailable */ }
-  if (applyCustomCssSheet(css)) {
-    document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.remove();
-    return;
-  }
-  const existing = document.getElementById(CUSTOM_CSS_ELEMENT_ID);
-  if (!css.trim()) {
-    existing?.remove();
-    return;
-  }
-  const element = existing ?? document.createElement('style');
-  element.id = CUSTOM_CSS_ELEMENT_ID;
-  element.textContent = css;
-  if (!existing) document.head.append(element);
-}
+
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   // 首帧就用镜像里的底栏形态：`.is-floating-nav` 与底栏的 `is-floating` 都读它，

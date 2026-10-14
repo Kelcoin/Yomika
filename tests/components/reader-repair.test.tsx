@@ -64,3 +64,54 @@ it('offers original retry when a broken derived page cannot recover to the origi
   await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:fresh-original'));
   expect(releasePage).toHaveBeenCalledWith(0);
 });
+
+
+it('promotes the actual decoded candidate node in both directions without changing the healthy node src', async () => {
+  let finish: (() => void) | undefined;
+  setImageDecoderForTests(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const props = { archiveId: 'nodes', title: 'Nodes', pages: ['blob:plain'], layout: 'single' as const };
+  const displayed = vi.fn((_index: number, url: string) => {
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', url);
+    expect(document.querySelector(`img[src="${url}"]`)).not.toHaveClass('is-candidate');
+  });
+  const view = render(<MemoryRouter><ReaderScreen {...props} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  const original = screen.getByRole('img', { name: '第 1 页' });
+  view.rerender(<MemoryRouter><ReaderScreen {...props} derivedPages={new Map([[0, 'blob:derived']])} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  const candidate = document.querySelector('img[src="blob:derived"]');
+  expect(candidate).not.toBeNull();
+  expect(original).toHaveAttribute('src', 'blob:plain');
+  expect(displayed).not.toHaveBeenCalled();
+  await act(async () => { finish?.(); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toBe(candidate);
+  expect(displayed).toHaveBeenCalledWith(0, 'blob:derived');
+  view.rerender(<MemoryRouter><ReaderScreen {...props} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  const plainCandidate = document.querySelector('img[src="blob:plain"]');
+  expect(candidate).toHaveAttribute('src', 'blob:derived');
+  await act(async () => { finish?.(); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toBe(plainCandidate);
+});
+
+it('keeps indicator placement when continuous layout hides it', async () => {
+  render(<MemoryRouter><ReaderScreen archiveId="hidden-placement" title="Hidden" pages={['blob:plain']} layout="webtoon" /></MemoryRouter>);
+  expect(document.querySelector('.reader-page-indicator')).toHaveAttribute('data-placement', 'corner');
+  expect(document.querySelector('.reader-page-indicator')).toHaveAttribute('data-visible', 'false');
+  await act(async () => {});
+});
+
+
+it('ignores an obsolete decoded candidate and keeps a healthy image when the newest candidate fails', async () => {
+  const pending = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  setImageDecoderForTests((url) => new Promise<void>((resolve, reject) => { pending.set(url, { resolve, reject }); }));
+  const props = { archiveId: 'candidate-race', title: 'Race', pages: ['blob:plain'], layout: 'single' as const };
+  const displayed = vi.fn();
+  const view = render(<MemoryRouter><ReaderScreen {...props} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  const original = screen.getByRole('img', { name: '第 1 页' });
+  view.rerender(<MemoryRouter><ReaderScreen {...props} derivedPages={new Map([[0, 'blob:a']])} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  view.rerender(<MemoryRouter><ReaderScreen {...props} derivedPages={new Map([[0, 'blob:b']])} onDerivedDisplayed={displayed} /></MemoryRouter>);
+  await act(async () => { pending.get('blob:a')?.resolve(); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toBe(original);
+  expect(displayed).not.toHaveBeenCalled();
+  await act(async () => { pending.get('blob:b')?.reject(new Error('broken')); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toBe(original);
+  expect(screen.queryByRole('button', { name: '重试加载' })).not.toBeInTheDocument();
+});

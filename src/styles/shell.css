@@ -2162,7 +2162,7 @@ body::-webkit-scrollbar,
   min-height: max-content;
   height: auto;
   margin: 0 auto;
-  padding: var(--space-5);
+  padding: var(--space-3) var(--space-5) var(--space-5);
   font-family: var(--font-body);
 }
 .metadata-edit-loading {
@@ -2176,13 +2176,13 @@ body::-webkit-scrollbar,
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  margin-bottom: var(--space-5);
-  padding-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--outline-variant);
 }
 .metadata-edit-heading { min-width: 0; display: grid; gap: var(--space-1); }
 .metadata-edit-heading p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--on-surface-variant); }
-.metadata-edit-header h1 { margin: 0; font-size: var(--text-title); }
+.metadata-edit-header h1 { margin: 0; font-size: var(--text-lg); }
 .metadata-edit-header h1 { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; white-space: normal; }
 .metadata-edit-form,
 .metadata-edit-form label { display: grid; gap: var(--space-2); color: var(--ink-secondary); font-weight: var(--weight-semibold); }
@@ -3366,8 +3366,8 @@ body::-webkit-scrollbar,
    a creator worth searching by, so it is a grid whose second column animates from
    nothing — the heading used to be swapped for a different label outright. */.archive-recommendations-tabs {
   display: inline-grid;
-  grid-template-columns: auto 0fr;
-  gap: 2px;
+  grid-template-columns: auto;
+  gap: 0;
   padding: 2px;
   border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
   border-radius: var(--radius-control);
@@ -3376,6 +3376,7 @@ body::-webkit-scrollbar,
 }
 
 .archive-recommendations-tabs.has-creator {
+  gap: 2px;
   grid-template-columns: auto 1fr;
 }
 
@@ -3401,6 +3402,8 @@ body::-webkit-scrollbar,
    padding, so the padding has to go with it */
 /* （折叠时那 32px 的左右留白本身就是 min-content：不一起收掉，格子里会留着一条
    32px 的空白，按钮的 0 宽内容盒子照样把标签拆成三行）。 */
+.archive-recommendations-tabs:not(.has-creator) .archive-recommendations-tab-creator { display: none; }
+
 .archive-recommendations-tabs .archive-recommendations-tab-creator {
   min-width: 0;
   padding-inline: 0;
@@ -4861,7 +4864,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     max-width: calc(100% - 2 * var(--space-4));
     gap: var(--space-1);
     min-height: 64px;
-    padding: var(--space-1) var(--space-2);
+    padding: var(--space-1);
     border: 1px solid var(--outline-variant);
     border-radius: var(--radius-pill);
     box-shadow: var(--shadow-menu);
@@ -6681,3 +6684,10 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
+
+@media (max-width: 900px) {
+  .compact-nav.is-floating .nav-link { min-height: 56px; border-radius: 28px; }
+}
+
+/* Edit forms already provide their own compact header spacing. */
+.workspace:has(.metadata-edit-page) { padding-top: calc(var(--safe-top) + var(--space-3)); }

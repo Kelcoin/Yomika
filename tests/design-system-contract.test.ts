@@ -2219,9 +2219,9 @@ describe('design system contract', () => {
     expect(workspace).toMatch(/if \(travel < PULL_CLAIM_PX\) return;/);
     expect(workspace).toMatch(/overscrollClaimed\.current = true;[\s\S]{0,400}event\.preventDefault\(\);/);
     // 位置直接写 DOM：每一像素走一次 setState 会让整棵虚拟化列表每帧重渲染一遍，
-    // 真机上就是「过滚刷新非常非常卡」。state 只在从静止跨进这一档时变一次。
+    // 真机上就是「过滚刷新非常非常卡」。state 只在静止/位移边界变化，回零必须同步隐藏图标。
     expect(workspace).toMatch(/pull\.style\.transform = `translateY\(\$\{offset\}px\)`;/);
-    expect(workspace).toMatch(/setOverscroll\(\(current\) => current === 0 && offset !== 0 \? offset : current\);/);
+    expect(workspace).toMatch(/setOverscroll\(\(current\) => offset === 0 \? 0 : current === 0 \? offset : current\);/);
   });
 
   it('keeps toast text at WCAG AA contrast in light and dark themes', () => {
@@ -3020,4 +3020,13 @@ describe('the destructive confirmation morphs in place', () => {
     expect(optOut, '这两条动画必须有自己那一档「少动效」的出口，而且只该有一条').toHaveLength(1);
     expect(optOut[0]).toMatch(/\.settings-menu-reset\.is-armed > \.settings-menu-reset-cancel \{\s*animation:\s*none/);
   });
+});
+
+
+it('grants tray reopening only event listening permissions to the tray window', () => {
+  const capabilities = readdirSync(resolve(root, 'src-tauri/capabilities')).filter((name) => name.endsWith('.json')).map((name) => JSON.parse(read(`src-tauri/capabilities/${name}`)) as { windows?: string[]; permissions: string[] });
+  const tray = capabilities.filter((capability) => capability.windows?.includes('tray-menu'));
+  expect(tray).toHaveLength(1);
+  expect(tray[0]?.windows).toEqual(['tray-menu']);
+  expect(tray[0]?.permissions).toEqual(['core:event:allow-listen', 'core:event:allow-unlisten']);
 });

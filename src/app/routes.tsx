@@ -14,14 +14,8 @@ import { pickServer } from '../domain/server';
 import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
 import { MorePagesRoute } from '../components/MorePagesRoute';
 
-/** 每个懒加载页面一个加载器：`lazy()` 用它，启动后的预热也用它。
- *
- * 切页时那一闪是 Suspense 的兜底：chunk 还没到，整页被换成加载动画，到了再换回来。
- * chunk 只在第一次进入某个页面时缺，所以那一闪是偶发的（一次会话里每个页面各一次）。
- * 启动后尽快把它们一次性取回来：chunk 一旦在内存里，那次挂起就只剩一个微任务加一次
- * 调度，提交兜底和渲染真内容落进同一帧，屏幕上看不见；真正看得见的只有取字节的等待。
- * （`lazy()` 的 payload 第一次渲染总要挂起一次，所以「预热过就完全不挂起」并不成立，
- * 但那一轮短到画不出来。） */
+/** Navigation and startup share the same import loaders. Startup runs bounded
+ * batches; main shells stay eager, while tools/editors/readers only warm code. */
 export const lazyPages = {
   reader: () => import('../components/ReaderRoute'),
   settings: () => import('../components/SettingsWorkspace'),
@@ -45,22 +39,23 @@ const EhRouteWorkspace = lazy(() => lazyPages.eh().then((module) => ({ default: 
 const MetadataEditRoute = lazy(() => lazyPages.metadataEdit().then((module) => ({ default: module.MetadataEditRoute })));
 const DeduplicationWorkspace = lazy(() => lazyPages.deduplication().then((module) => ({ default: module.DeduplicationWorkspace })));
 
-/** 把上面这些页面取回来。失败不管：真的进那个页面时 Suspense 照旧兜底。
- *
- * 主路径是「让出一轮宏任务就取」，不是等空闲：这个函数是首帧渲染完之后才从 effect 里
- * 调的（`App.tsx` 的 `[]`），再让一轮已经不会跟首屏抢主线程；而空闲回调要等主线程真的
- * 静下来，首屏那几个骨架动画和封面解码足够把它推到用户点完之后——那一次切页仍旧只有
- * 兜底可看，也就是用户报的「启动后第一次切页还是闪」。
- *
- * 空闲回调留着当兜底：标签页被挂起、或主线程长时间被占住时，宏任务可能被拖到很久以后，
- * `timeout` 至少保证它最终还是会发生。 */
-export function preloadLazyPages(): void {
-  if (typeof window === 'undefined') return;
-  const load = () => { for (const page of Object.values(lazyPages)) void page().catch(() => {}); };
-  window.setTimeout(load, 0);
-  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(load, { timeout: 2000 });
-  else window.setTimeout(load, 1200);
+/** Code warming never mounts a route or invokes its effects. */
+export function preloadLazyPages(getForegroundPath: () => string = () => '/'): () => void {
+  let stopped = false;
+  const allowed = (path: string) => !stopped && typeof document !== 'undefined'
+    && document.visibilityState !== 'hidden' && !getForegroundPath().startsWith('/reader/')
+    && !getForegroundPath().startsWith(path);
+  const stop = scheduleStartupWarmup([
+    // Common leaves first; main shells including home/library/more are already eager.
+    lazyPages.settings, lazyPages.localArchives,
+    ...(['toRead', 'history', 'watchlist'] as const).map(name => () => warmShelfSnapshot(name,
+      () => allowed(name === 'toRead' ? '/to-read' : `/${name}`))),
+    ...Object.entries(lazyPages).filter(([key]) => key !== 'settings' && key !== 'localArchives').map(([, load]) => load),
+  ]);
+  return () => { stopped = true; stop(); };
 }
+import { scheduleStartupWarmup } from './startupWarmup';
+import { shelfRead, warmShelfSnapshot } from './shelfWarmup';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
@@ -363,10 +358,10 @@ function HomeWorkspace() {
         // LANraragi for a beat before the shelves replaced it.
         <ServerRequiredPrompt />
       )}
-      {connected && homeServer && <>
-      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer.scopeId} serverId={homeServer.id} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer.scopeId} serverId={homeServer.id} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer.scopeId} serverId={homeServer.id} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={() => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); }} onArchiveContextMenu={openContextMenu} />
+      {(servers === undefined || connected) && <>
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={homeServer ? () => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); } : undefined} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}
       {recentError && <p className="form-error" role="alert">{recentError}</p>}
@@ -387,6 +382,8 @@ const repository = new NativeLibraryRepository();
 const stateImageCache = getNativeImageCache();
 
 interface ShelfSnapshot {
+  /** Startup mirror-only preparation still needs the normal foreground existence check. */
+  needsForegroundVerification?: boolean;
   favoritesSource?: 'remote';
   favoritesCategoryPresent?: boolean;
   history: ReadingHistoryRecord[];
@@ -413,6 +410,8 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
     if (name !== 'watchlist') return readRouteCache<ShelfSnapshot>(cacheKey);
     return undefined; // Favorites provenance is checked after resolving the server.
   })()).current;
+  const verifiedSnapshot = useRef(!snapshot?.needsForegroundVerification);
+  const [verificationPending, setVerificationPending] = useState(Boolean(snapshot?.needsForegroundVerification));
   const [favoritesCategoryPresent, setFavoritesCategoryPresent] = useState<boolean>();
   const [hasFavoriteSnapshot, setHasFavoriteSnapshot] = useState(Boolean(snapshot && name === 'watchlist'));
   const canShowStale = name === 'watchlist' && hasFavoriteSnapshot;
@@ -506,13 +505,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
     if (!pageActive) return;
-    if (snapshot && reloadToken === 0 && name !== 'watchlist') return;
+    if (snapshot && verifiedSnapshot.current && reloadToken === 0 && name !== 'watchlist') return;
     let active = true;
     if (name === 'watchlist') {
       setLoading(true); setHasFavoriteSnapshot(false); setArchives([]); setWatchlist([]); setCategories(undefined); setError(undefined);
     }
     void (async () => {
-      const servers = await repository.listServers();
+      const servers = await shelfRead('servers', () => repository.listServers());
       if (!active) return;
       if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
       const server = pickServer(servers.value, serverParam);
@@ -537,10 +536,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       const needsCategories = showShelfToolbar && (name === 'watchlist' || categoriesRef.current === undefined);
       const [shelf, categoryResult] = await Promise.all([
         name === 'history'
-          ? repository.listHistory(server.scopeId)
+          ? shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId))
           : name === 'toRead'
-            ? repository.listReadingList(server.scopeId)
-            : repository.readFavoritesCategory(server.id),
+            ? shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId))
+            : shelfRead(`favorites:${server.id}`, () => repository.readFavoritesCategory(server.id)),
         needsCategories ? repository.listCategories(server.id) : Promise.resolve(undefined),
       ] as const);
       if (!active) return;
@@ -552,7 +551,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
         : name === 'watchlist' ? favoriteIds : (shelf.value as WatchlistRecord[]).filter(item => !item.deleted).map(item => item.archiveId);
       const archiveResult = name === 'watchlist'
         ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds) }
-        : await repository.listArchivesByIds(server.id, [...new Set(shelfIds)]);
+        : await shelfRead(`archives:${server.id}:${JSON.stringify([...new Set(shelfIds)])}`, () => repository.listArchivesByIds(server.id, [...new Set(shelfIds)]));
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
       else {
@@ -580,17 +579,19 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       // Same reason as the home rails: the mirror does not hear about deletions,
       // so a shelf would keep offering archives the server no longer has.
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
-      if (!active || missing.size === 0) return;
-      setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
+      if (!active) return;
+      if (missing.size > 0) setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
+      verifiedSnapshot.current = true;
+      setVerificationPending(false);
     })().catch(error => { if (active) { setError(String(error)); setLoading(false); } }).finally(() => { if (active) setPulling(false); });
     return () => { active = false; };
   }, [name, pageActive, reloadToken, serverParam, snapshot]);
   useEffect(() => {
-    if (name === 'watchlist' || loading || error || !serverId || !scopeId) return;
+    if (name === 'watchlist' || loading || verificationPending || error || !serverId || !scopeId) return;
     // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
     const value = { history, watchlist, archives, serverId, scopeId, query, ...(categories ? { categories } : {}) } satisfies ShelfSnapshot;
     writeRouteCache(cacheKey, value, { persist: true });
-  }, [archives, cacheKey, categories, error, favoriteFallbackKey, history, loading, name, query, scopeId, serverId, watchlist]);
+  }, [archives, cacheKey, categories, error, favoriteFallbackKey, history, loading, name, query, scopeId, serverId, watchlist, verificationPending]);
   const [title, description] = workspaces[name];
   // Saved searches work on every shelf, not just the library.
   const [presets, setPresets] = useState<SearchPreset[]>([]);
@@ -721,41 +722,19 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           above an empty state was most of what the page showed. 收藏与待看现在有
           档案库那条顶栏（分类筛选、排序方式、多选、显示模式）；历史没有，它的顺序
           就是那列时间线，重排会把它读的东西弄丢。 */}
-      {loading && hasServer !== false && (
-        /* 这一页已经是 ShelfShell 的列表栏（`.library-shell-list`，16px 侧内边距就在
-           那儿）。从前书架是独立页面，页面里自己套了一层 `.library-shell` +
-           `.library-shell-list` 来供那 16px——现在两侧都供，卡片会被推进去 32px，
-           列表也比那一栏窄一圈。 */
-        <LibraryWorkspace
-          archives={[]}
-          listLoading
-          showDetail={false}
-          detailBasePath={detailBasePath}
-          heading={null}
-          /* 加载中不给顶栏：它要的多选回调这时候还没有（`selection` 用的是空列表），
-             工具栏会先画一套、数据到了再换一套。 */
-          showToolbar={false}
-          cardStyle={shelfCardStyle}
-          searchQuery={query}
-          onSearchQueryChange={setQuery}
-          searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
-          {...(name === 'history' ? { timelineByArchiveId: new Map<string, ShelfTimelineEntry>() } : {})}
-        />
-      )}
       {error && <p className="form-error" role="alert">{canShowStale ? `离线缓存：显示上次收藏快照，可能已过期。${error}` : error}</p>}
       {/* 已知没有服务器时不等 loading：这次拉取的结果只会再确认一遍这个事实，
           而它落地之前用户看到的就是这一页该给的引导（`!loading` 那版会让骨架
           先转一帧）。 */}
       {!error && hasServer === false && <ServerRequiredPrompt />}
-      {!loading && (!error || canShowStale) && hasServer && shelfArchives.length === 0 && (
-        <EmptyState icon={FolderHeart} title={name === 'watchlist' && favoritesCategoryPresent === false ? '服务器尚未创建 🔖 Favorites 分类' : `暂无${title}`} description={name === 'watchlist' && favoritesCategoryPresent === false ? '请先在 LANraragi 中创建名为 🔖 Favorites 的静态分类，之后才能添加收藏。' : description} />
-      )}
-      {!loading && (!error || canShowStale) && hasServer && shelfArchives.length > 0 && (
+      {hasServer && (!error || canShowStale) && (
         // Same list and card system as the library, and the same search bar, so
         // the only difference is what it searches. The 16px side padding comes
         // from the ShelfShell panel; this page adds none of its own.
         <LibraryWorkspace
           archives={visibleArchives}
+          listLoading={loading}
+          emptyContent={<EmptyState icon={FolderHeart} title={name === 'watchlist' && favoritesCategoryPresent === false ? '服务器尚未创建 🔖 Favorites 分类' : `暂无${title}`} description={name === 'watchlist' && favoritesCategoryPresent === false ? '请先在 LANraragi 中创建名为 🔖 Favorites 的静态分类，之后才能添加收藏。' : description} />}
           heading={null}
           showToolbar={showShelfToolbar}
           showDetail={false}

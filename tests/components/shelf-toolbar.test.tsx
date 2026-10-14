@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -44,6 +44,20 @@ function makeAdapter() {
     return { ok: true, value: [] };
   });
 }
+
+it.each([false, true])('keeps the pending-reading frame across delayed %s results', async populated => {
+  let finish!: (value: Awaited<ReturnType<ReturnType<typeof makeAdapter>>>) => void;
+  const delayed = new Promise<Awaited<ReturnType<ReturnType<typeof makeAdapter>>>>(resolve => { finish = resolve; });
+  const original = makeAdapter();
+  const adapter = vi.fn(async (command: string) => command === 'list_reading_list' ? delayed : original(command));
+  renderShelf('/to-read', adapter);
+  const toolbar = screen.getByRole('toolbar', { name: '档案库工具' });
+  expect(within(toolbar).getByRole('button', { name: '多选' })).toBeDisabled();
+  expect(screen.queryByText('暂无待看档案')).toBeNull();
+  await act(async () => finish({ ok: true, value: populated ? watchlist : [] }));
+  await screen.findByText(populated ? 'Archive 0' : '暂无待看档案');
+  expect(screen.getByRole('toolbar', { name: '档案库工具' })).toBe(toolbar);
+});
 
 function renderShelf(path: string, adapter: ReturnType<typeof makeAdapter>) {
   setInvokeAdapterForTests(adapter);

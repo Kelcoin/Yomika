@@ -226,6 +226,7 @@ interface LibraryWorkspaceProps {
   /** True while the first page is still in flight. Without it an empty list is
    * indistinguishable from a library that genuinely has nothing in it. */
   listLoading?: boolean | undefined;
+  emptyContent?: ReactNode;
   onLoadMore?: (() => void) | undefined;
   isFavorite?: boolean | undefined;
   onToggleFavorite?: (() => Promise<void>) | undefined;
@@ -306,7 +307,7 @@ function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): 
   return collapsed ? previous.current : { items, totalSize };
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -389,6 +390,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const overscrollDirection = useRef<1 | -1 | undefined>(undefined);
   /** The end a touch started on, so the finger may not pull the other way. */
   const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
+  const overscrollStartX = useRef<number | undefined>(undefined);
   const overscrollStartY = useRef<number | undefined>(undefined);
   /** 这一次触摸有没有越过认定距离。没越过之前一个 preventDefault 都不发，手势还
    * 是浏览器的（见 touchMove）。 */
@@ -419,6 +421,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollClaimed.current = false;
     overscrollEdge.current = undefined;
     overscrollStartY.current = undefined;
+    overscrollStartX.current = undefined;
     paintPull(0);
     setOverscroll(0);
     setOverscrollGesture(null);
@@ -441,7 +444,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
     overscrollRef.current = offset;
     paintPull(offset);
-    setOverscroll((current) => current === 0 && offset !== 0 ? offset : current);
+    setOverscroll((current) => offset === 0 ? 0 : current === 0 ? offset : current);
   }, [paintPull]);
 
   /** The gesture is over: the list springs back either way, and a release past
@@ -527,7 +530,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     };
 
     const touchStart = (event: TouchEvent) => {
-      if (!owns(event.target)) return;
+      if (overscrollRef.current !== 0 || overscrollSettleTimer.current !== undefined || overscrollClaimed.current) cancelOverscroll();
+      if (!owns(event.target) || event.touches.length !== 1) return;
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable], [role="slider"]')) return;
+      for (let node = target as HTMLElement | null; node && node !== host && node !== scrollRef.current; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') return;
+      }
       // The end the finger lands on is the only one it may pull past; anywhere
       // else the scroller needs the finger for its own scrolling.
       const position = gestureScroller(event.target, host) ?? host;
@@ -535,6 +545,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         ? 'top'
         : position.scrollTop + position.clientHeight >= position.scrollHeight - 1 ? 'bottom' : undefined;
       overscrollEdge.current = edge;
+      overscrollStartX.current = event.touches[0]?.clientX ?? 0;
       overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
     };
 
@@ -542,14 +553,17 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       const edge = overscrollEdge.current;
       const start = overscrollStartY.current;
       if (!edge || start === undefined) return;
+      if (event.touches.length !== 1) { cancelOverscroll(); return; }
       const y = event.touches[0]?.clientY ?? start;
+      const dx = (event.touches[0]?.clientX ?? 0) - (overscrollStartX.current ?? 0);
+      if (!overscrollClaimed.current && Math.abs(dx) > Math.abs(y - start)) { cancelOverscroll(); return; }
       const direction = edge === 'top' ? 1 : -1;
       const travel = (y - start) * direction;
       if (overscrollClaimed.current) {
         // 已经认领过：手指往回走就把列表送回原位，但这一档仍归下拉——浏览器那次
         // 手势已经在 preventDefault 里交出来了，中途还回去只会两套滚动打架。
         event.preventDefault();
-        applyOverscroll(Math.max(0, travel));
+        applyOverscroll(direction * Math.max(0, travel));
         return;
       }
       if (travel < 0) {
@@ -571,7 +585,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       event.preventDefault();
       overscrollDirection.current = direction;
       setOverscrollGesture('touch');
-      applyOverscroll(travel);
+      applyOverscroll(direction * travel);
     };
 
     const touchEnd = () => {
@@ -579,19 +593,23 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       overscrollStartY.current = undefined;
       overscrollClaimed.current = false;
       if (overscrollRef.current !== 0) releaseOverscroll();
+      else cancelOverscroll();
     };
 
+    const visibility = () => { if (document.visibilityState !== 'visible') cancelOverscroll(); };
+    document.addEventListener('visibilitychange', visibility);
     host.addEventListener('wheel', wheel, { passive: true });
     host.addEventListener('touchstart', touchStart, { passive: true });
     host.addEventListener('touchmove', touchMove, { passive: false });
     host.addEventListener('touchend', touchEnd, { passive: true });
-    host.addEventListener('touchcancel', touchEnd, { passive: true });
+    host.addEventListener('touchcancel', cancelOverscroll, { passive: true });
     return () => {
+      document.removeEventListener('visibilitychange', visibility);
       host.removeEventListener('wheel', wheel);
       host.removeEventListener('touchstart', touchStart);
       host.removeEventListener('touchmove', touchMove);
       host.removeEventListener('touchend', touchEnd);
-      host.removeEventListener('touchcancel', touchEnd);
+      host.removeEventListener('touchcancel', cancelOverscroll);
       cancelOverscroll();
     };
   }, [scrollHostElement, pageActive, compact, applyOverscroll, cancelOverscroll, releaseOverscroll]);
@@ -1033,7 +1051,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         )}
       </div>}
       {showToolbar && <div className="library-toolbar" role="toolbar" aria-label="档案库工具">
-        {showSearch && displayCategories.length > 0 && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
+        {showSearch && (!categoriesLoading || displayCategories.length > 0) && <SelectField name="categoryFilter" aria-label="分类筛选" value={categoryFilter} options={[{ value: '', label: '全部分类' }, ...displayCategories.map((category) => ({ value: category.id, label: getCategoryDisplayName(category.name) })), { value: UNTAGGED_FILTER_ID, label: '无标签' }]} onChange={updateCategoryFilter} />}
         {showSearch && displayCategories.length === 0 && categoriesLoading && <span className="skeleton-line select-placeholder" role="status" aria-label="正在读取分类" />}
         {/* The direction lives in the field itself: it shows which way the list
             is sorted, and choosing the mode already selected flips it — a
@@ -1176,7 +1194,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               {/* An in-flight request is not an empty library. These shared one
                   branch, so arriving at the library flashed 暂无档案库 before the
                   first page landed. */}
-              {filteredArchives.length === 0 && !listLoading && <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />}
+              {filteredArchives.length === 0 && !listLoading && (emptyContent && !searchQuery && !categoryFilter ? emptyContent : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
               {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} timeline={Boolean(timelineByArchiveId)} exiting={!listLoading} /></div>}
               {displayMode === 'thumbnail' ? (
                 <div className="archive-list-inner" style={{ height: shownThumbnailRows.totalSize }}>

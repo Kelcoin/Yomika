@@ -1,3 +1,4 @@
+import { useEdgeBounce } from '../lib/useEdgeBounce';
 import {
   Archive,
   Bookmark,
@@ -136,6 +137,9 @@ export function AppShell({ children }: AppShellProps) {
     try { return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch { return false; }
   });
   const workspaceRef = useRef<HTMLElement>(null);
+  useEdgeBounce(workspaceRef, pathname);
+  const topButtonRef = useRef<HTMLButtonElement>(null);
+  const [topPosition, setTopPosition] = useState<{ placement: string; bottom: number; right: number }>();
   const [showScrollTop, setShowScrollTop] = useState(false);
   // The floating compact bar answers scrolling the way the scroll-to-top disc
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
@@ -193,6 +197,44 @@ export function AppShell({ children }: AppShellProps) {
     setShowScrollTop(false);
     return () => document.removeEventListener('scroll', handleScroll, true);
   }, [pathname, floatingNav]);
+
+  useEffect(() => {
+    const nav = document.querySelector<HTMLElement>('.compact-nav');
+    const button = topButtonRef.current;
+    if (!nav || !button || !floatingNav) { setTopPosition(undefined); return; }
+    const measure = () => {
+      const bar = nav.getBoundingClientRect();
+      if (getComputedStyle(nav).display === 'none' || bar.width <= 0) { setTopPosition(undefined); return; }
+      const disc = button.getBoundingClientRect();
+      const tokens = getComputedStyle(document.documentElement);
+      const safeRight = parseFloat(tokens.getPropertyValue('--safe-right')) || 0;
+      const safeBottom = parseFloat(tokens.getPropertyValue('--safe-bottom')) || 0;
+      const width = disc.width || 44;
+      const height = disc.height || 44;
+      const beside = !compactNavHidden && bar.right + 12 + width <= window.innerWidth - 16 - safeRight;
+      const bottom = compactNavHidden ? 16 + safeBottom : beside
+        ? window.innerHeight - (bar.top + bar.height / 2) - height / 2
+        : window.innerHeight - bar.top + 12;
+      const right = beside ? window.innerWidth - bar.right - 12 - width : 16 + safeRight;
+      setTopPosition((current) => current?.placement === (beside ? 'beside' : 'above') && current.bottom === bottom && current.right === right
+        ? current : { placement: beside ? 'beside' : 'above', bottom, right });
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(nav); observer?.observe(button); observer?.observe(document.documentElement);
+    const insets = new MutationObserver(measure);
+    insets.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
+    const settled = (event: Event) => { if (event.target === nav) measure(); };
+    nav.addEventListener('transitionend', settled);
+    nav.addEventListener('transitioncancel', settled);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect(); insets.disconnect();
+      nav.removeEventListener('transitionend', settled);
+      nav.removeEventListener('transitioncancel', settled);
+      window.removeEventListener('resize', measure);
+    };
+  }, [floatingNav, compactNavHidden, preferences.bottomNavItems]);
 
   // Dead zones around and inside the workspace — the collapsed sidebar strip,
   // the title bar, a rail whose horizontal scroll has run out — have no scroll
@@ -283,7 +325,7 @@ export function AppShell({ children }: AppShellProps) {
         >
           {children}
         </main>
-        <button className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
+        <button ref={topButtonRef} data-placement={topPosition?.placement} style={topPosition ? { bottom: topPosition.bottom, right: topPosition.right } : undefined} className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
           workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
           document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => !region.closest('[hidden]') && region.scrollTo({ top: 0, behavior: 'smooth' }));
           setShowScrollTop(false);

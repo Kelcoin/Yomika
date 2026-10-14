@@ -1,3 +1,6 @@
+import { listen } from '@tauri-apps/api/event';
+import { applyCustomCss } from '../lib/customCss';
+import { upgradeCssThemePreset } from '../lib/cssThemePresets';
 /** 托盘右键菜单的两条条目。
  *
  * 它是主窗之外的第二个文档（`tray-menu.html`），所以只挂菜单本身、不挂应用外壳。
@@ -17,16 +20,21 @@ export const TRAY_ITEMS: ReadonlyArray<{ action: TrayAction; label: string }> = 
   { action: 'quit', label: '退出' },
 ];
 
-const TrayMenuStateSchema = z.object({ theme: z.string() });
+const TrayMenuStateSchema = z.object({ theme: z.string(), customCss: z.string().default('') });
 
 export function TrayMenu() {
   const [ready, setReady] = useState(false);
   const root = useRef<HTMLDivElement>(null);
 
+  const themeRequest = useRef(0);
   const applyTheme = useCallback(async () => {
+    const generation = ++themeRequest.current;
     const result = await invokeCommand('tray_menu_state', {}, TrayMenuStateSchema);
+    if (generation !== themeRequest.current) return;
+    setReady(true);
     if (!result.ok) return;
-    const { theme } = result.value;
+    const { theme, customCss } = result.value;
+    applyCustomCss(upgradeCssThemePreset(customCss));
     // 主窗是按 data-theme 上色的（system 时交给 prefers-color-scheme）。独立窗口跟着走，
     // 才不会和主窗一个亮一个暗。
     if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
@@ -34,11 +42,16 @@ export function TrayMenu() {
   }, []);
 
   useEffect(() => {
-    void applyTheme().finally(() => setReady(true));
+    void applyTheme();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen('tray-menu-opening', () => { setReady(false); void applyTheme(); }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    }).catch(() => undefined);
     // 窗口是常驻的，每次再弹出来都可能赶上主窗刚改过主题。
     const onVisibility = () => { if (document.visibilityState === 'visible') void applyTheme(); };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
+    return () => { disposed = true; unlisten?.(); themeRequest.current += 1; document.removeEventListener('visibilitychange', onVisibility); };
   }, [applyTheme]);
 
   const focusItem = useCallback((index: number) => {
@@ -75,7 +88,7 @@ export function TrayMenu() {
   }, [focusItem, ready]);
 
   return (
-    <div className="tray-menu" role="menu" ref={root}>
+    <div className="tray-menu" data-ready={ready} role="menu" ref={root}>
       {TRAY_ITEMS.map((item) => (
         <button
           className="tray-menu-item"

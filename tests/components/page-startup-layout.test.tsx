@@ -1,0 +1,55 @@
+import { act, render, screen } from '@testing-library/react';
+import { afterEach, expect, it } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { WorkspaceRoutes } from '../../src/app/routes';
+import { PreferencesProvider } from '../../src/app/preferences';
+import { ToastProvider } from '../../src/components/Toast';
+import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { invalidateRouteCache } from '../../src/lib/routeCache';
+import { resetServerPresenceForTests } from '../../src/lib/serverPresence';
+import { warmShelfSnapshot } from '../../src/app/shelfWarmup';
+
+afterEach(() => { resetInvokeAdapterForTests(); invalidateRouteCache(); });
+it('reserves home shelf headings before the server round trip without suggesting an empty setup', async () => {
+  invalidateRouteCache();
+  resetServerPresenceForTests();
+  let finish!: (value: unknown) => void;
+  const servers = new Promise(resolve => { finish = resolve; });
+  setInvokeAdapterForTests(async command => command === 'list_servers' ? servers : { ok: true, value: [] });
+  const view = render(<MemoryRouter><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+  expect(screen.getByText('继续阅读')).toBeInTheDocument();
+  expect(screen.getByText('待看档案')).toBeInTheDocument();
+  expect(screen.getByText('随机漫游')).toBeInTheDocument();
+  expect(screen.queryByText('添加你的 LANraragi')).toBeNull();
+  await act(async () => finish({ ok: true, value: [] }));
+  expect(await screen.findByText('添加你的 LANraragi')).toBeInTheDocument();
+  view.unmount();
+});
+it('verifies a warmed local shelf on entry while retaining its visible frame', async () => {
+  invalidateRouteCache();
+  let finish!: (value: unknown) => void;
+  const check = new Promise(resolve => { finish = resolve; });
+  const calls: string[] = [];
+  setInvokeAdapterForTests(async command => {
+    calls.push(command);
+    if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+    if (command === 'list_reading_list') return { ok: true, value: [{ scopeId: 's', archiveId: 'a', addedAt: '2026-01-01', updatedAt: '2026-01-01', deviceId: 'd', revision: 1, deleted: false }] };
+    if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 's', archiveId: 'a', title: 'Warmed stale archive', pageCount: 4, updatedAt: '2026-01-01' }] };
+    if (command === 'verify_archives_exist') return check;
+    return { ok: true, value: [] };
+  });
+  await warmShelfSnapshot('toRead', () => true);
+  expect(calls).not.toContain('list_categories');
+  const view = render(<MemoryRouter initialEntries={['/to-read']}><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+  const toolbar = screen.getByRole('toolbar', { name: '档案库工具' });
+  expect(screen.getByText('Warmed stale archive')).toBeInTheDocument();
+  await act(async () => { await Promise.resolve(); });
+  expect(calls).toContain('verify_archives_exist');
+  expect(screen.getByText('Warmed stale archive')).toBeInTheDocument();
+  expect(view.container.querySelector('.archive-list-skeleton-layer')).toBeNull();
+  await act(async () => finish({ ok: true, value: ['a'] }));
+  expect(await screen.findByText('暂无待看档案')).toBeInTheDocument();
+  expect(screen.queryByText('Warmed stale archive')).toBeNull();
+  expect(screen.getByRole('toolbar', { name: '档案库工具' })).toBe(toolbar);
+  view.unmount();
+});

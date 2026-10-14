@@ -1,4 +1,5 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { emitTauriEvent } from '../tauriEvents';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -83,4 +84,30 @@ describe('tray menu', () => {
     await userEvent.keyboard('{Escape}');
     expect(commands).toContain('tray_menu_dismiss');
   });
+});
+
+
+it('refreshes custom CSS and ignores a late older theme response', async () => {
+  const pending: Array<(result: unknown) => void> = [];
+  setInvokeAdapterForTests(() => new Promise((resolve) => { pending.push(resolve); }));
+  render(<TrayMenu />);
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  fireEvent(document, new Event('visibilitychange'));
+  await act(async () => { pending[1]?.({ ok: true, value: { theme: 'dark', customCss: ':root { --primary: #123456; }' } }); });
+  expect(document.documentElement.dataset.theme).toBe('dark');
+  expect(document.getElementById('yomika-custom-css')?.textContent).toContain('#123456');
+  await act(async () => { pending[0]?.({ ok: true, value: { theme: 'light', customCss: '' } }); });
+  expect(document.documentElement.dataset.theme).toBe('dark');
+  expect(document.getElementById('yomika-custom-css')?.textContent).toContain('#123456');
+});
+
+
+it('refreshes theme on every native tray reopening even without a visibility change', async () => {
+  const theme = { current: 'light' };
+  setInvokeAdapterForTests(async () => ({ ok: true, value: { theme: theme.current, customCss: '' } }));
+  render(<TrayMenu />);
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe('light'));
+  theme.current = 'dark';
+  act(() => emitTauriEvent('tray-menu-opening', null));
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe('dark'));
 });
