@@ -32,7 +32,7 @@ body::-webkit-scrollbar,
   overflow: hidden;
   /* 侧栏折叠的动画。它只在 toggle 时触发：两条轨道是固定值加 `minmax(0, 1fr)`，
      窗口改尺寸不会改变这里的计算值，所以拖动窗口时它不会参与。 */
-  transition: grid-template-columns var(--motion-standard);
+  transition: grid-template-columns var(--motion-standard), gap var(--motion-standard);
 }
 
 /* The app-drawn title bar (Windows): a themed drag surface with the brand
@@ -636,6 +636,11 @@ body::-webkit-scrollbar,
   }
 
   .loading-indicator-arc { animation: none; }
+
+  /* 阅读器那一条弧（reader.css 里那套「液态」伸缩）选择器更具体，得同样用
+     !important 才关得掉；整枚标记的呼吸由上面那条 `animation-name` 接管。 */
+  .reader-screen-loading .loading-indicator-arc,
+  .reader-page-status .loading-indicator-arc { animation: none !important; }
 }
 
 /* One line of status: the inline counterpart to .empty-state, for a list, panel
@@ -2180,10 +2185,24 @@ body::-webkit-scrollbar,
   padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--outline-variant);
 }
-.metadata-edit-heading { min-width: 0; display: grid; gap: var(--space-1); }
-.metadata-edit-heading p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--on-surface-variant); }
-.metadata-edit-header h1 { margin: 0; font-size: var(--text-lg); }
-.metadata-edit-header h1 { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; white-space: normal; }
+/* 这个标题在本页是**看得见**的：1030 行那条 `.workspace-heading h1,
+   .metadata-edit-header h1` 是给「标题只是结构、页面上不画字」的页面准备的，这里
+   把它撤回来。同一条选择器原先写了三遍（隐藏、字号、撤销隐藏），合并成一条——上一
+   次只改到其中一条的字号，看代码的人得把三条都读一遍才知道最后是什么。
+   `.metadata-edit-heading` 里现在只剩一个 `<h1>`（原来那个 `<p>` 连同它的规则一起
+   删了），所以 grid + gap 没有第二个子元素可用，只留 `min-width: 0`——它在这条 flex
+   行里真正承重的是「允许收缩」，不是排版。 */.metadata-edit-heading { min-width: 0; }
+.metadata-edit-header h1 {
+  margin: 0;
+  font-size: var(--text-lg);
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: normal;
+}
 .metadata-edit-form,
 .metadata-edit-form label { display: grid; gap: var(--space-2); color: var(--ink-secondary); font-weight: var(--weight-semibold); }
 .metadata-edit-form input,
@@ -3366,8 +3385,9 @@ body::-webkit-scrollbar,
    a creator worth searching by, so it is a grid whose second column animates from
    nothing — the heading used to be swapped for a different label outright. */.archive-recommendations-tabs {
   display: inline-grid;
-  grid-template-columns: auto;
+  grid-template-columns: auto minmax(0, 0fr);
   gap: 0;
+  max-width: 100%;
   padding: 2px;
   border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
   border-radius: var(--radius-control);
@@ -3377,7 +3397,7 @@ body::-webkit-scrollbar,
 
 .archive-recommendations-tabs.has-creator {
   gap: 2px;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
 .archive-recommendations-tabs button {
@@ -3402,10 +3422,20 @@ body::-webkit-scrollbar,
    padding, so the padding has to go with it */
 /* （折叠时那 32px 的左右留白本身就是 min-content：不一起收掉，格子里会留着一条
    32px 的空白，按钮的 0 宽内容盒子照样把标签拆成三行）。 */
-.archive-recommendations-tabs:not(.has-creator) .archive-recommendations-tab-creator { display: none; }
+.archive-recommendations-creator-track {
+  min-width: 0;
+  overflow-x: clip;
+  overflow-y: visible;
+}
+.archive-recommendations-tabs:not(.has-creator) .archive-recommendations-creator-track {
+  pointer-events: none;
+}
 
 .archive-recommendations-tabs .archive-recommendations-tab-creator {
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  text-overflow: ellipsis;
   padding-inline: 0;
   overflow: hidden;
   opacity: 0;
@@ -6691,3 +6721,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* Edit forms already provide their own compact header spacing. */
 .workspace:has(.metadata-edit-page) { padding-top: calc(var(--safe-top) + var(--space-3)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .archive-recommendations-tabs,
+  .archive-recommendations-tabs .archive-recommendations-tab-creator { transition: none; }
+}

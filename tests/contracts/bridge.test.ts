@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
   invokeCommand,
+  invokeBinaryCommand,
   resetInvokeAdapterForTests,
   setInvokeAdapterForTests,
 } from '../../src/bridge/invoke';
@@ -89,4 +90,32 @@ describe('typed invoke bridge', () => {
       },
     });
   });
+});
+
+it('returns network failures unchanged without logging them, including binary commands', async () => {
+  const written: ErrorLogRecord[] = [];
+  setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
+  const failure = { ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } };
+  setInvokeAdapterForTests(async () => failure);
+  expect(await invokeCommand('probe', {}, z.string())).toEqual(failure);
+  expect(await invokeBinaryCommand('image', {})).toEqual(failure);
+  setInvokeAdapterForTests(async () => { throw new TypeError('Failed to fetch'); });
+  expect(await invokeCommand('probe', {}, z.string())).toMatchObject({ ok: false });
+  expect(await invokeBinaryCommand('image', {})).toMatchObject({ ok: false });
+  await flushErrorLog();
+  expect(written).toHaveLength(0);
+});
+
+it('retains remote protocol and engine diagnostics carried by REMOTE_UNAVAILABLE', async () => {
+  const written: ErrorLogRecord[] = [];
+  setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
+  for (const message of ['capabilities JSON malformed', 'pairing JSON malformed', 'processing response was not an image', 'remote engine failed: GPU_OUTPUT_INVALID']) {
+    const failure = { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message, retryable: true } };
+    setInvokeAdapterForTests(async () => failure);
+    expect(await invokeCommand('remote', {}, z.string())).toEqual(failure);
+    expect(await invokeBinaryCommand('remote_image', {})).toEqual(failure);
+  }
+  await flushErrorLog();
+  expect(written).toHaveLength(8);
+  expect(written.every((record) => record.message.startsWith('REMOTE_UNAVAILABLE:'))).toBe(true);
 });

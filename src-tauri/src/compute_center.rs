@@ -1157,22 +1157,22 @@ fn host_name() -> String {
 // ---------------------------------------------------------------------------
 
 /// 连一次远端，拿它的能力清单（移动端「连接」按钮走它）。
-pub fn remote_capabilities(url: &str, token: &str) -> Result<RemoteCapabilities, String> {
-    let base = normalize_base(url)?;
-    let response = blocking_client()?
+pub fn remote_capabilities(url: &str, token: &str) -> Result<RemoteCapabilities, RemoteFailure> {
+    let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
+    let response = blocking_client().map_err(RemoteFailure::protocol)?
         .get(format!("{base}/v2/capabilities"))
         .header("x-yomika-token", token)
         .timeout(std::time::Duration::from_secs(8))
         .send()
-        .map_err(|error| format!("连不上 {base}：{error}"))?;
+        .map_err(RemoteFailure::request)?;
     let status = response.status();
-    let body = response.text().unwrap_or_default();
+    let body = response.text().map_err(RemoteFailure::request)?;
     if !status.is_success() {
-        return Err(describe_error(status.as_u16(), &body));
+        return Err(RemoteFailure::response(status.as_u16(), &body));
     }
-    let capabilities: RemoteCapabilities = serde_json::from_str(&body).map_err(|error| format!("对面回的不是能力清单：{error}"))?;
+    let capabilities: RemoteCapabilities = serde_json::from_str(&body).map_err(|error| RemoteFailure::invalid_response(format!("对面回的不是能力清单：{error}")))?;
     if capabilities.service != SERVICE_NAME || capabilities.version != PROTOCOL_VERSION {
-        return Err("远端配对协议版本不匹配".into());
+        return Err(RemoteFailure { code: "COMPUTE_PROTOCOL_MISMATCH", message: "远端配对协议版本不匹配".into(), retryable: false });
     }
     Ok(capabilities)
 }
@@ -1195,36 +1195,36 @@ pub struct PairResult {
 ///
 /// 名字为空时退回 `host_name()`——桌面端 UA 里没有机型，前端会刻意交空串，而
 /// `COMPUTERNAME` 正是那边最像名字的东西。
-pub fn request_pairing(url: &str, name: Option<String>, kind: Option<String>) -> Result<PairRequest, String> {
-    let base = normalize_base(url)?;
-    let response = blocking_client()?
+pub fn request_pairing(url: &str, name: Option<String>, kind: Option<String>) -> Result<PairRequest, RemoteFailure> {
+    let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
+    let response = blocking_client().map_err(RemoteFailure::protocol)?
         .post(format!("{base}/v2/pair/request"))
         .json(&serde_json::json!({
             "name": name.filter(|value| !value.trim().is_empty()).unwrap_or_else(host_name),
             "kind": kind,
         }))
         .timeout(std::time::Duration::from_secs(8))
-        .send().map_err(|error| format!("连不上 {base}：{error}"))?;
+        .send().map_err(RemoteFailure::request)?;
     let status = response.status();
-    let body = response.text().unwrap_or_default();
-    if !status.is_success() { return Err(describe_error(status.as_u16(), &body)); }
-    serde_json::from_str(&body).map_err(|error| format!("配对响应无效：{error}"))
+    let body = response.text().map_err(RemoteFailure::request)?;
+    if !status.is_success() { return Err(RemoteFailure::response(status.as_u16(), &body)); }
+    serde_json::from_str(&body).map_err(|error| RemoteFailure::invalid_response(format!("配对响应无效：{error}")))
 }
 
-pub fn confirm_pairing(url: &str, request_id: &str, code: &str) -> Result<PairResult, String> {
+pub fn confirm_pairing(url: &str, request_id: &str, code: &str) -> Result<PairResult, RemoteFailure> {
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("请输入六位数字配对码".into());
+        return Err(RemoteFailure { code: "INVALID_INPUT", message: "请输入六位数字配对码".into(), retryable: false });
     }
-    let base = normalize_base(url)?;
-    let response = blocking_client()?
+    let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
+    let response = blocking_client().map_err(RemoteFailure::protocol)?
         .post(format!("{base}/v2/pair/confirm"))
         .json(&serde_json::json!({ "requestId": request_id, "code": code }))
         .timeout(std::time::Duration::from_secs(8))
-        .send().map_err(|error| format!("连不上 {base}：{error}"))?;
+        .send().map_err(RemoteFailure::request)?;
     let status = response.status();
-    let body = response.text().unwrap_or_default();
-    if !status.is_success() { return Err(describe_error(status.as_u16(), &body)); }
-    serde_json::from_str(&body).map_err(|error| format!("配对响应无效：{error}"))
+    let body = response.text().map_err(RemoteFailure::request)?;
+    if !status.is_success() { return Err(RemoteFailure::response(status.as_u16(), &body)); }
+    serde_json::from_str(&body).map_err(|error| RemoteFailure::invalid_response(format!("配对响应无效：{error}")))
 }
 
 /// 把一段图片字节发给远端处理，取回 PNG 字节。
@@ -1272,7 +1272,7 @@ pub fn remote_process(
         png
     };
     let response = blocking_client()
-        .map_err(RemoteFailure::transport)?
+        .map_err(RemoteFailure::protocol)?
         .post(format!("{base}/v2/process"))
         .header("x-yomika-token", token)
         .header("x-yomika-params", encoded)
@@ -1287,7 +1287,7 @@ pub fn remote_process(
                     PROCESS_TIMEOUT.as_secs()
                 ))
             } else {
-                RemoteFailure::transport(format!("发给 {base} 失败：{error}"))
+                RemoteFailure::request(error)
             }
         })?;
     let status = response.status();
@@ -1299,15 +1299,10 @@ pub fn remote_process(
         .to_string();
     let body = response
         .bytes()
-        .map_err(|error| RemoteFailure::transport(format!("读回包失败：{error}")))?
+        .map_err(RemoteFailure::request)?
         .to_vec();
     if !status.is_success() {
-        return Err(RemoteFailure {
-            code: "REMOTE_UNAVAILABLE",
-            message: describe_error(status.as_u16(), &String::from_utf8_lossy(&body)),
-            // 5xx 是那边的事，重试有意义；4xx 是我们发错了（令牌、参数）。
-            retryable: status.is_server_error(),
-        });
+        return Err(RemoteFailure::response(status.as_u16(), &String::from_utf8_lossy(&body)));
     }
     if !content_type.starts_with("image/") {
         return Err(RemoteFailure::protocol(format!(
@@ -1336,10 +1331,26 @@ impl RemoteFailure {
 
     fn transport(message: String) -> Self {
         Self {
-            code: "REMOTE_UNAVAILABLE",
+            code: "NETWORK",
             message,
             retryable: true,
         }
+    }
+
+    fn request(error: reqwest::Error) -> Self {
+        if error.is_timeout() { Self::timeout(error.to_string()) }
+        else if error.is_builder() || error.is_decode() || error.is_redirect() {
+            Self::protocol(error.to_string())
+        } else { Self::transport(error.to_string()) }
+    }
+
+    fn invalid_response(message: String) -> Self {
+        Self { code: "INVALID_RESPONSE", message, retryable: false }
+    }
+
+    fn response(status: u16, body: &str) -> Self {
+        // A received server error can be an engine/protocol defect, not a link failure.
+        Self { code: "REMOTE_UNAVAILABLE", message: describe_error(status, body), retryable: status >= 500 }
     }
 
     fn protocol(message: String) -> Self {
@@ -1616,7 +1627,7 @@ pub async fn remote_compute_capabilities(
         Ok(Ok(capabilities)) => CommandResult::success(capabilities),
         // 连不上就是「这个地址这一刻没有服务」：`NETWORK_ERROR` 不在前端的错误码表里，
         // 发出去整条错误会被桥当成无效响应，真正的信息反而看不到。
-        Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+        Ok(Err(error)) => CommandResult::failure(error.code, error.message, error.retryable),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
 }
@@ -1634,7 +1645,7 @@ pub async fn compute_discover() -> CommandResult<Vec<DiscoveredDevice>> {
 pub async fn compute_pair_request(url: String, name: Option<String>, kind: Option<String>) -> CommandResult<PairRequest> {
     match tauri::async_runtime::spawn_blocking(move || request_pairing(&url, name, kind)).await {
         Ok(Ok(result)) => CommandResult::success(result),
-        Ok(Err(error)) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
+        Ok(Err(error)) => CommandResult::failure(error.code, error.message, error.retryable),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
 }
@@ -1643,7 +1654,7 @@ pub async fn compute_pair_request(url: String, name: Option<String>, kind: Optio
 pub async fn compute_pair_confirm(url: String, request_id: String, code: String) -> CommandResult<PairResult> {
     match tauri::async_runtime::spawn_blocking(move || confirm_pairing(&url, &request_id, &code)).await {
         Ok(Ok(result)) => CommandResult::success(result),
-        Ok(Err(error)) => CommandResult::failure("UNAUTHORIZED", error, false),
+        Ok(Err(error)) => CommandResult::failure(error.code, error.message, error.retryable),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
     }
 }
@@ -1757,6 +1768,52 @@ fn remote_process_cached_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote_failure_stub(status: u16, content_type: &str, body: &str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (url, worker)
+    }
+
+    #[test]
+    fn remote_failure_transport_is_distinct_from_protocol_and_engine_answers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert_eq!(remote_capabilities(&url, "token").unwrap_err().code, "NETWORK");
+        assert_eq!(request_pairing(&url, None, None).unwrap_err().code, "NETWORK");
+        assert_eq!(confirm_pairing(&url, "id", "123456").unwrap_err().code, "NETWORK");
+        assert_eq!(RemoteFailure::timeout("timed out".into()).code, "REMOTE_TIMEOUT");
+        assert_eq!(RemoteFailure::protocol("decode failed".into()).code, "REMOTE_UNAVAILABLE");
+
+        let (url, worker) = remote_failure_stub(200, "application/json", "{broken");
+        assert_eq!(remote_capabilities(&url, "token").unwrap_err().code, "INVALID_RESPONSE");
+        worker.join().unwrap();
+        let (url, worker) = remote_failure_stub(200, "application/json", "{broken");
+        assert_eq!(request_pairing(&url, None, None).unwrap_err().code, "INVALID_RESPONSE");
+        worker.join().unwrap();
+        let (url, worker) = remote_failure_stub(200, "application/json", "{broken");
+        assert_eq!(confirm_pairing(&url, "id", "123456").unwrap_err().code, "INVALID_RESPONSE");
+        worker.join().unwrap();
+
+        let params = ProcessParams { chain: Vec::new(), op: "upscale".into(), model_id: None, scale: Some(2), dlssnr: None };
+        let (url, worker) = remote_failure_stub(200, "text/plain", "not an image");
+        assert_eq!(remote_process(&url, "token", &params, one_pixel_png()).unwrap_err().code, "REMOTE_UNAVAILABLE");
+        worker.join().unwrap();
+        let (url, worker) = remote_failure_stub(500, "application/json", &error_body("GPU_OUTPUT_INVALID", "broken engine"));
+        let error = remote_process(&url, "token", &params, one_pixel_png()).unwrap_err();
+        assert_eq!(error.code, "REMOTE_UNAVAILABLE");
+        assert!(error.message.contains("broken engine"));
+        worker.join().unwrap();
+    }
 
     #[test]
     fn pairing_codes_expire_and_cannot_be_replayed() {
@@ -1974,7 +2031,7 @@ mod tests {
 
         // 令牌不对：对面要明确拒绝，而不是给一份空清单。
         let refused = remote_capabilities(&base, "wrong-token").expect_err("该拒绝");
-        assert!(refused.contains("401"), "{refused}");
+        assert!(refused.message.contains("401"), "{}", refused.message);
 
         // 令牌对：拿到两项能力（这台机器上什么都没装，所以都不 ready）。
         let capabilities = remote_capabilities(&base, "token-123").expect("能力清单");
@@ -1996,7 +2053,8 @@ mod tests {
         center.stop();
         // 关掉之后就该连不上了（端口没人听）。
         let after_stop = remote_capabilities(&base, "token-123").expect_err("服务已停");
-        assert!(!after_stop.is_empty());
+        assert!(!after_stop.message.is_empty());
+        assert_eq!(after_stop.code, "NETWORK");
     }
 
     #[test]
@@ -2185,7 +2243,7 @@ mod tests {
         };
         let refused = remote_process("http://127.0.0.1:9/", "token", &params, gif.clone())
             .expect_err("op 是 dlssnr 的动图要真的发出去，不该在本地就交回来");
-        assert_eq!(refused.code, "REMOTE_UNAVAILABLE", "{}", refused.message);
+        assert_eq!(refused.code, "NETWORK", "{}", refused.message);
 
         // 对面**收到**的是 GIF 本身，不是归一化后的 PNG：这一版的服务端已经没有本进程里的
         // DLSSNR 了（`server_for` 不起编排），所以它会以 5xx 明说「计算编排还没起来」——回包

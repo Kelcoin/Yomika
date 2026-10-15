@@ -50,7 +50,7 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
       // 「现在就是这样」的码（档案已经不在服务器上、这一页的推理被取消）——它们照样
       // 按失败返回，但不进日志，免得把真正的现场埋掉。
       if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
-        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, error: parsed.data.error });
       }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
@@ -65,7 +65,7 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
     });
     return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
   } catch (error) {
-    logError(`bridge/${name}`, 'Native command failed', { request, error: error instanceof Error ? error.message : String(error) });
+    logError(`bridge/${name}`, 'Native command failed', { request, error, errorMessage: error instanceof Error ? error.message : String(error) });
     return err('UNKNOWN', 'Native command failed', true);
   }
 }
@@ -91,7 +91,7 @@ export async function invokeBinaryCommand<TRequest extends Record<string, unknow
     }
     if (!parsed.data.ok) {
       if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
-        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, retryable: parsed.data.error.retryable });
+        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, error: parsed.data.error });
       }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
@@ -101,7 +101,7 @@ export async function invokeBinaryCommand<TRequest extends Record<string, unknow
     logError(`bridge/${name}`, 'Native command answer did not match its schema', { request });
     return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
   } catch (error) {
-    logError(`bridge/${name}`, 'Native command failed', { request, error: error instanceof Error ? error.message : String(error) });
+    logError(`bridge/${name}`, 'Native command failed', { request, error, errorMessage: error instanceof Error ? error.message : String(error) });
     return err('UNKNOWN', 'Native command failed', true);
   }
 }

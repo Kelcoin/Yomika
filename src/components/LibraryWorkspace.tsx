@@ -392,6 +392,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
   const overscrollStartX = useRef<number | undefined>(undefined);
   const overscrollStartY = useRef<number | undefined>(undefined);
+  /** 起手那一刻**真正会滚**的那一层，以及它的滚动位置。认定距离里那 12px 是浏览器的，
+   * 真机上这段里页面已经滚了一点点；认领时要把这一段放回去（见 touchMove），否则那点
+   * 真实滚动就留在页面上——用户 2026-10-15 报的「顶部搜索框滚出视口」正是它。 */
+  const overscrollScroller = useRef<HTMLElement | undefined>(undefined);
+  const overscrollStartScrollTop = useRef<number | undefined>(undefined);
+  /** 认领那一刻记下的滚动位置：之后它要是变了，说明浏览器在这段里自己滚了（真机上
+   * preventDefault 有时已经拦不住），那这次过滚就让位，不能两套滚动叠着走。 */
+  const overscrollClaimedScrollTop = useRef<number | undefined>(undefined);
   /** 这一次触摸有没有越过认定距离。没越过之前一个 preventDefault 都不发，手势还
    * 是浏览器的（见 touchMove）。 */
   const overscrollClaimed = useRef(false);
@@ -405,6 +413,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   /** 把位置画到 DOM 上。React 只管 state 里那一份静止值，所以手势里被直接改掉的
    * 属性要自己收回：否则抬手之后 React 认为「还是 0，不用动」，屏上留着拖到一半
    * 的那一帧。 */
+  const pullFrame = useRef<number | undefined>(undefined);
+  const pullQueued = useRef(false);
+  const pendingPull = useRef(0);
   const paintPull = useCallback((offset: number) => {
     const pull = pullRef.current;
     if (pull) pull.style.transform = `translateY(${offset}px)`;
@@ -415,6 +426,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   }, []);
 
   const resetOverscroll = useCallback(() => {
+    if (pullFrame.current !== undefined) window.cancelAnimationFrame(pullFrame.current);
+    pullFrame.current = undefined;
+    pullQueued.current = false;
     overscrollTravel.current = 0;
     overscrollRef.current = 0;
     overscrollDirection.current = undefined;
@@ -422,6 +436,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollEdge.current = undefined;
     overscrollStartY.current = undefined;
     overscrollStartX.current = undefined;
+    overscrollScroller.current = undefined;
+    overscrollStartScrollTop.current = undefined;
+    overscrollClaimedScrollTop.current = undefined;
     paintPull(0);
     setOverscroll(0);
     setOverscrollGesture(null);
@@ -442,9 +459,18 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const applyOverscroll = useCallback((travel: number) => {
     overscrollTravel.current = travel;
     const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
+    const previous = overscrollRef.current;
     overscrollRef.current = offset;
-    paintPull(offset);
-    setOverscroll((current) => offset === 0 ? 0 : current === 0 ? offset : current);
+    pendingPull.current = offset;
+    if (!pullQueued.current) {
+      pullQueued.current = true;
+      pullFrame.current = window.requestAnimationFrame(() => {
+        pullQueued.current = false;
+        pullFrame.current = undefined;
+        paintPull(pendingPull.current);
+      });
+    }
+    if (Math.sign(previous) !== Math.sign(offset)) setOverscroll(Math.sign(offset));
   }, [paintPull]);
 
   /** The gesture is over: the list springs back either way, and a release past
@@ -536,7 +562,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable], [role="slider"]')) return;
       for (let node = target as HTMLElement | null; node && node !== host && node !== scrollRef.current; node = node.parentElement) {
         const style = getComputedStyle(node);
-        if (style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') return;
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight > node.clientHeight + 1 && !node.matches('.archive-rail-grid, [data-horizontal-scroll]')) return;
       }
       // The end the finger lands on is the only one it may pull past; anywhere
       // else the scroller needs the finger for its own scrolling.
@@ -547,6 +573,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       overscrollEdge.current = edge;
       overscrollStartX.current = event.touches[0]?.clientX ?? 0;
       overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
+      // 记住起手那一刻真正会滚的那一层与它的位置：认定距离里那 12px 是浏览器的，
+      // 真机上这段里页面已经滚了一点点（见 touchMove 的认领分支）。
+      overscrollScroller.current = position;
+      overscrollStartScrollTop.current = position.scrollTop;
     };
 
     const touchMove = (event: TouchEvent) => {
@@ -560,6 +590,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       const direction = edge === 'top' ? 1 : -1;
       const travel = (y - start) * direction;
       if (overscrollClaimed.current) {
+        // 认领之后那一层要是还在动，说明浏览器并没有真把这次手势交出来（真机上
+        // preventDefault 有时已经拦不住已经在跑的那次滚动）。两套滚动不能叠着走：
+        // 列表一边被 translate 顶下去、页面一边在滚，用户看到的就是「顶栏滚出视口 +
+        // 卡片与顶栏之间一大段空隙」（2026-10-15 报的档案库那一处）。这一刻让位，
+        // 把列表放回原位，剩下的交给浏览器。
+        const scroller = overscrollScroller.current;
+        if (scroller && overscrollClaimedScrollTop.current !== undefined && scroller.scrollTop !== overscrollClaimedScrollTop.current) {
+          cancelOverscroll();
+          return;
+        }
         // 已经认领过：手指往回走就把列表送回原位，但这一档仍归下拉——浏览器那次
         // 手势已经在 preventDefault 里交出来了，中途还回去只会两套滚动打架。
         event.preventDefault();
@@ -578,6 +618,15 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       // 的，页面照滚；等手指真的往外走够 12px 再认领，那时它还没开始自己的滚动。
       if (travel < PULL_CLAIM_PX) return;
       overscrollClaimed.current = true;
+      // 认定距离那 12px 是**浏览器的**：真机上这段里页面已经滚了一点点。认领的这一刻
+      // 把滚动位置放回起手时那一个，否则这一小段真实滚动就留在页面上——「顶部搜索框
+      // 滚出视口」的一半原因在这里（另一半是列表被顶下去，看起来像一段空隙）。
+      const scroller = overscrollScroller.current;
+      const startScrollTop = overscrollStartScrollTop.current;
+      if (scroller && startScrollTop !== undefined && scroller.scrollTop !== startScrollTop) {
+        scroller.scrollTop = startScrollTop;
+      }
+      overscrollClaimedScrollTop.current = scroller ? scroller.scrollTop : undefined;
       // The pull owns the gesture from here, and it has to say so on the move
       // that starts it: once a touch browser has begun its own scroll it stops
       // honouring preventDefault for the rest of the gesture, and the content
@@ -1189,7 +1238,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               className="archive-list-pull"
               ref={pullRef}
               data-overscroll={overscrollGesture ?? undefined}
-              style={{ transform: `translateY(${overscroll}px)` }}
+              style={{ transform: 'translateY(0px)' }}
             >
               {/* An in-flight request is not an empty library. These shared one
                   branch, so arriving at the library flashed 暂无档案库 before the

@@ -1454,29 +1454,35 @@ describe('reader screen', () => {
     expect(again.querySelector('.reader-toolbar-turn')).not.toBeNull();
   });
 
-  it('takes the page pill along with the bar instead of letting it slide across', async () => {
+  it('hides the page pill while the bar is up instead of lifting it over the bar', async () => {
     const user = userEvent.setup();
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    // 栏出来之前胶囊是在的——这是判据的下限：不然「栏在时不可见」可以靠永远不可见蒙过去。
+    expect(pageIndicator()).toHaveAttribute('data-visible', 'true');
+
     await user.click(reader);
     const pill = pageIndicator() as HTMLElement;
-    expect(pill).toHaveClass('is-raised');
+    // 2026-10-15 用户要求：底栏一出现，页码就让位。原来是把胶囊抬到栏顶
+    // （`is-raised`），那只是把重叠换了个高度——两块小台面同时抢同一块地方。
+    expect(pill).toHaveAttribute('data-visible', 'false');
+    expect(pill).not.toHaveClass('is-raised');
 
-    // 收起。退场这 260ms 里栏还挂在树上淡出，胶囊比它高一层——它这时必须认领
-    // `is-leaving`（样式里跟着栏一起淡出、落位推迟到栏摘掉那一刻），否则它会从栏顶
-    // 滑到屏幕底，一路横穿整条栏（user report:「底栏消失时看起来会有两层底栏」）。
+    // 收起。退场这 260ms 里栏还挂在树上淡出，胶囊比它高一层——它这时必须继续安静，
+    // 并认领 `is-leaving`（样式里跟着栏一起淡出），否则它会从栏顶滑到屏幕底，
+    // 一路横穿整条栏（user report:「底栏消失时看起来会有两层底栏」）。
     await user.click(reader);
     const leavingPill = pageIndicator() as HTMLElement;
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+    expect(leavingPill).toHaveAttribute('data-visible', 'false');
     expect(leavingPill).toHaveClass('is-leaving');
-    expect(leavingPill).toHaveClass('is-raised');
 
     // 窗口过去之后栏摘掉，胶囊也交还标记——它此时已经在落点上了，可以正常淡入。
     await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });
     expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
     const rested = pageIndicator() as HTMLElement;
     expect(rested).not.toHaveClass('is-leaving');
-    expect(rested).not.toHaveClass('is-raised');
+    expect(rested).toHaveAttribute('data-visible', 'true');
   });
 
   it('still shows the turn cue when React renders the screen twice', async () => {

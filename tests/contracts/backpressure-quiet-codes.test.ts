@@ -98,6 +98,13 @@ describe('backpressure codes stay out of the error log', () => {
     expect(records).toHaveLength(1);
     expect(records[0]?.source).toBe('bridge/compute_submit_reader_page');
     expect(records[0]?.message).toBe('COMPUTE_MODEL_UNAVAILABLE: 这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）');
-    expect(records[0]?.detail).toBe('{"request":{"archiveId":"a:12"},"retryable":false}');
+    expect(JSON.parse(records[0]!.detail!)).toEqual({
+      request: { archiveId: 'a:12' },
+      error: {
+        code: 'COMPUTE_MODEL_UNAVAILABLE',
+        message: '这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）',
+        retryable: false,
+      },
+    });
   });
 });

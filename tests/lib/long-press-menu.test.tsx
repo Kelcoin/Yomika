@@ -135,3 +135,16 @@ describe('press and hold', () => {
     expect(calls).toEqual([]);
   });
 });
+
+it('does not open or activate a card after dragging', async () => {
+  const open = vi.fn();
+  const activate = vi.fn();
+  const card = render(<div onClick={activate}><Harness open={open} /></div>).getByRole('button');
+  fireEvent(card, pointer('pointerdown', { clientX: 10, clientY: 10, pointerType: 'touch' }));
+  fireEvent(card, pointer('pointermove', { clientX: 10, clientY: 80, pointerType: 'touch' }));
+  await vi.advanceTimersByTimeAsync(450);
+  fireEvent(card, pointer('pointerup', { clientX: 10, clientY: 80, pointerType: 'touch' }));
+  fireEvent.click(card);
+  expect(open).not.toHaveBeenCalled();
+  expect(activate).not.toHaveBeenCalled();
+});

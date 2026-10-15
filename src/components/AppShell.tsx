@@ -140,6 +140,8 @@ export function AppShell({ children }: AppShellProps) {
   useEdgeBounce(workspaceRef, pathname);
   const topButtonRef = useRef<HTMLButtonElement>(null);
   const [topPosition, setTopPosition] = useState<{ placement: string; bottom: number; right: number }>();
+  /** 底栏收起时圆盘留在哪：见 `measure()` 里那段「收起期间不许挪」。 */
+  const parkedTopPositionRef = useRef<{ placement: string; bottom: number; right: number }>();
   const [showScrollTop, setShowScrollTop] = useState(false);
   // The floating compact bar answers scrolling the way the scroll-to-top disc
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
@@ -205,6 +207,14 @@ export function AppShell({ children }: AppShellProps) {
     const measure = () => {
       const bar = nav.getBoundingClientRect();
       if (getComputedStyle(nav).display === 'none' || bar.width <= 0) { setTopPosition(undefined); return; }
+      // 底栏收起与圆盘淡出是同一次滚动的两个结果（都在 `handleScroll` 里），而两种停法
+      // 的落点差着几百像素：贴着胶囊（`beside`）vs 贴屏幕右下角（`above`）。照常重算的
+      // 话，用户看到的就是「淡出到一半往右瞬移再消失」。底栏一收起，圆盘就留在它刚才待
+      // 的地方——此刻它自己也在淡出，没人看得见；等滚回来时底栏已经先回来，那时再重算。
+      if (compactNavHidden) {
+        const parked = parkedTopPositionRef.current;
+        if (parked) { setTopPosition(parked); return; }
+      }
       const disc = button.getBoundingClientRect();
       const tokens = getComputedStyle(document.documentElement);
       const safeRight = parseFloat(tokens.getPropertyValue('--safe-right')) || 0;
@@ -216,8 +226,10 @@ export function AppShell({ children }: AppShellProps) {
         ? window.innerHeight - (bar.top + bar.height / 2) - height / 2
         : window.innerHeight - bar.top + 12;
       const right = beside ? window.innerWidth - bar.right - 12 - width : 16 + safeRight;
-      setTopPosition((current) => current?.placement === (beside ? 'beside' : 'above') && current.bottom === bottom && current.right === right
-        ? current : { placement: beside ? 'beside' : 'above', bottom, right });
+      const next = { placement: beside ? 'beside' : 'above', bottom, right };
+      parkedTopPositionRef.current = next;
+      setTopPosition((current) => current?.placement === next.placement && current.bottom === next.bottom && current.right === next.right
+        ? current : next);
     };
     measure();
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);

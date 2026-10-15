@@ -660,6 +660,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} disabled={!hasSimilar && hasCreator} onClick={() => setTab('similar')}>推荐</button>
       {/* In the DOM from the start, collapsed to nothing: the segment grows out of
           the strip rather than popping in and shoving the heading sideways. */}
+      <span className="archive-recommendations-creator-track">
       <button
         type="button"
         role="tab"
@@ -670,6 +671,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         className={`archive-recommendations-tab-creator${activeTab === 'creator' ? ' is-active' : ''}`}
         onClick={() => setTab('creator')}
       >{creatorLabel}</button>
+      </span>
     </div>
   );
 

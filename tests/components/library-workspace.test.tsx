@@ -43,6 +43,9 @@ function scrollable(element: HTMLElement, metrics: { scrollTop: number; clientHe
   element.style.overflowY = 'auto';
 }
 
+beforeEach(() => { vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { callback(0); return 1; }); });
+afterEach(() => vi.restoreAllMocks());
+
 describe('library workspace', () => {
   it('fades the first-load skeleton over the arriving cards', async () => {
     const view = renderWorkspace({ archives: [], listLoading: true });
@@ -783,6 +786,50 @@ describe('library workspace', () => {
     fireEvent.touchEnd(list);
   });
 
+  it('puts back the scroll the browser took before the pull owned the gesture', () => {
+    // 认定距离那 12px 是**浏览器的**：真机上这段里页面已经滚了一点点。认领的那一刻要把
+    // 滚动位置放回起手时那一个，否则这一段真实滚动就留在页面上——用户 2026-10-15 报的
+    // 「顶部搜索框等顶部组件直接滚出视口」正是它的一半（另一半是列表被顶下去，看着像空隙）。
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
+    // 浏览器先滚了 24px：这段还没被 preventDefault 拦住。
+    list.scrollTop = 24;
+    const claimed = createEvent.touchMove(list, { touches: [{ clientY: 170 }] });
+    fireEvent(list, claimed);
+    expect(claimed.defaultPrevented).toBe(true);
+    expect(list.scrollTop).toBe(0);
+    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    fireEvent.touchEnd(list);
+  });
+
+  it('lets the browser keep the gesture when the scroller moves under a claimed pull', () => {
+    // 真机上 preventDefault 有时已经拦不住浏览器那次滚动：认领之后那一层还在动。两套滚动
+    // 不能叠着走——列表一边被顶下去、页面一边在滚，用户看到的就是「顶栏滚出视口 + 卡片与
+    // 顶栏之间一大段空隙」。这一刻过滚让位，列表回原位，剩下的交给浏览器。
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
+    fireEvent(list, createEvent.touchMove(list, { touches: [{ clientY: 170 }] }));
+    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+
+    list.scrollTop = 24;
+    const drift = createEvent.touchMove(list, { touches: [{ clientY: 200 }] });
+    fireEvent(list, drift);
+    expect(drift.defaultPrevented).toBe(false);
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    fireEvent.touchEnd(list);
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
   it('does not re-render the list for every touch point of a pull', () => {
     // 「过滚刷新非常非常卡」的那一半：位置如果走 state，每个触点都要重渲染整棵
     // 虚拟化列表（一份几千节点的树）。位置直接写 DOM，state 只在从静止跨进这一档
@@ -1117,4 +1164,29 @@ it('bounces negatively on the first bottom touch and never refreshes on release 
   expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   fireEvent.touchEnd(list);
   expect(onRefresh).not.toHaveBeenCalled();
+});
+
+it('pulls vertically from an archive card inside a non-scrolling overflow wrapper', () => {
+  renderWorkspace({ archives: [archives[0]!] });
+  const list = document.querySelector('.archive-list') as HTMLElement;
+  scrollable(list, { scrollTop: 0, clientHeight: 400, scrollHeight: 1000 });
+  const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+  card.style.overflowX = 'auto';
+  card.style.overflowY = 'auto';
+  fireEvent.touchStart(card, { touches: [{ clientY: 10, clientX: 0 }] });
+  fireEvent.touchMove(card, { touches: [{ clientY: 110, clientX: 0 }] });
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(50px)' });
+});
+it('limits library drag DOM writes to one paint per frame', () => {
+  renderWorkspace({ archives: [archives[0]!] });
+  const list = document.querySelector('.archive-list') as HTMLElement;
+  scrollable(list, { scrollTop: 0, clientHeight: 400, scrollHeight: 1000 });
+  const frames: FrameRequestCallback[] = [];
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });
+  fireEvent.touchStart(list, { touches: [{ clientY: 10, clientX: 0 }] });
+  for (let y = 30; y <= 110; y += 10) fireEvent.touchMove(list, { touches: [{ clientY: y, clientX: 0 }] });
+  expect(frames).toHaveLength(1);
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(0px)' });
+  act(() => frames.shift()!(0));
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(50px)' });
 });

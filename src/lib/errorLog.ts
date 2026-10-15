@@ -1,3 +1,4 @@
+import { QUIET_ERROR_CODES } from '../domain/errors';
 import { redactSensitive } from './redaction';
 
 /** 一次运行里的错误记录。
@@ -85,9 +86,26 @@ function describe(context: unknown): string | undefined {
   }
 }
 
+/** Keep transport failures precise: a decoder mentioning a network is still a bug. */
+export function isExpectedError(value: unknown, depth = 0): boolean {
+  if (depth > 3 || value == null) return false;
+  if (typeof value === 'string') {
+    const code = value.match(/^([A-Z][A-Z0-9_]+)(?=[:：\s]|$)/)?.[1];
+    return code !== undefined && QUIET_ERROR_CODES.has(code);
+  }
+  if (typeof value !== 'object') return false;
+  const error = value as { code?: unknown; name?: unknown; message?: unknown; error?: unknown; cause?: unknown };
+  if (typeof error.code === 'string' && QUIET_ERROR_CODES.has(error.code)) return true;
+  if (error.name === 'AbortError' || error.name === 'NetworkError' || error.name === 'TimeoutError') return true;
+  if (error.name === 'TypeError' && typeof error.message === 'string' && /^(Failed to fetch|Load failed|Network request failed|Failed to execute 'fetch' on 'Window': Failed to fetch)\.?$/.test(error.message)) return true;
+  return isExpectedError(error.error, depth + 1) || isExpectedError(error.cause, depth + 1);
+}
+
 export function logError(source: string, message: unknown, context?: unknown, level: ErrorLogRecord['level'] = 'error'): void {
-  if (!sinkAvailable) return;
-  const safeMessage = flat(String(message ?? ''), MAX_MESSAGE_CHARS);
+  if (!sinkAvailable || isExpectedError(message) || isExpectedError(context)) return;
+  const structured = message && typeof message === 'object' ? message as { code?: unknown; message?: unknown } : undefined;
+  const text = structured && 'message' in structured ? `${structured.code ? `${structured.code}: ` : ''}${String(structured.message)}` : String(message ?? '');
+  const safeMessage = flat(text, MAX_MESSAGE_CHARS);
   if (!safeMessage) return;
   const detail = describe(context);
   const record: ErrorLogRecord = {
@@ -109,6 +127,7 @@ export function logWarn(source: string, message: unknown, context?: unknown): vo
 /** 没人接住的错误也要留下现场：抛到 window 上的异常和没 catch 的 promise。 */
 export function installErrorLogging(): () => void {
   const onError = (event: ErrorEvent): void => {
+    if (isExpectedError(event.error)) return;
     logError('window', event.message || 'Uncaught error', {
       file: event.filename,
       line: event.lineno,
@@ -119,7 +138,7 @@ export function installErrorLogging(): () => void {
   const onRejection = (event: PromiseRejectionEvent): void => {
     const reason = event.reason as { message?: unknown; stack?: unknown } | undefined;
     const message = reason && typeof reason === 'object' && 'message' in reason ? String(reason.message) : String(reason ?? 'Unhandled rejection');
-    logError('promise', message, { stack: reason && typeof reason === 'object' ? reason.stack : undefined });
+    logError('promise', message, { error: event.reason, stack: reason && typeof reason === 'object' ? reason.stack : undefined });
   };
   window.addEventListener('error', onError);
   window.addEventListener('unhandledrejection', onRejection);

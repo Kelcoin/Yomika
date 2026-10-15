@@ -576,11 +576,42 @@ fn reconcile_missing_archive_status(
     Ok(true)
 }
 
+#[derive(Debug)]
+struct ReaderRequestError {
+    code: &'static str,
+    message: String,
+}
+
+impl ReaderRequestError {
+    fn configuration(message: String) -> Self { Self { code: "UNKNOWN", message } }
+    fn transport(error: reqwest::Error) -> Self {
+        let code = if error.is_timeout() { "REMOTE_TIMEOUT" }
+            else if error.is_builder() || error.is_decode() || error.is_redirect() { "REMOTE_UNAVAILABLE" }
+            else { "NETWORK" };
+        Self { code, message: error.to_string() }
+    }
+}
+
+impl std::fmt::Display for ReaderRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.message.fmt(formatter) }
+}
+impl From<ReaderRequestError> for String {
+    fn from(error: ReaderRequestError) -> Self { error.message }
+}
+
+fn reader_response_failure<T>(error: reqwest::Error) -> CommandResult<T> {
+    // This is only for raw bytes/text reads, before any JSON/image decoding.
+    // reqwest also marks an interrupted Content-Length transfer as is_decode(),
+    // so that flag cannot distinguish transport from malformed application JSON.
+    let code = if error.is_timeout() { "REMOTE_TIMEOUT" } else { "NETWORK" };
+    CommandResult::failure(code, error.to_string(), true)
+}
+
 async fn reader_request(
     method: reqwest::Method,
     url: String,
     api_key: String,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, ReaderRequestError> {
     reader_request_with_timeout(method, url, api_key, 10).await
 }
 
@@ -589,8 +620,8 @@ async fn reader_request_with_timeout(
     url: String,
     api_key: String,
     timeout_seconds: u64,
-) -> Result<reqwest::Response, String> {
-    lanraragi_client()?
+) -> Result<reqwest::Response, ReaderRequestError> {
+    lanraragi_client().map_err(ReaderRequestError::configuration)?
         .request(method, url)
         .timeout(std::time::Duration::from_secs(timeout_seconds))
         .header(
@@ -599,7 +630,7 @@ async fn reader_request_with_timeout(
         )
         .send()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(ReaderRequestError::transport)
 }
 
 /// 共享的 LANraragi HTTP 客户端：进程内一份，连接池跨请求复用，
@@ -743,7 +774,7 @@ async fn push_reading_progress_once(
     let url = progress_push_url(base_url, archive_id, page_index);
     let response = match reader_request(reqwest::Method::PUT, url, api_key.to_string()).await {
         Ok(response) => response,
-        Err(error) => return ProgressPushOutcome::Failed(error),
+        Err(error) => return ProgressPushOutcome::Failed(error.message),
     };
     let status = response.status();
     if status.is_success() {
@@ -910,7 +941,7 @@ pub async fn list_categories(
     .await
     {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1062,7 +1093,7 @@ pub async fn add_archive_to_category(
     );
     let response = match reader_request(reqwest::Method::PUT, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1140,7 +1171,7 @@ pub async fn remove_archive_from_category(
     );
     let response = match reader_request(reqwest::Method::DELETE, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1233,7 +1264,7 @@ pub async fn update_archive_metadata(
     }
     let response = match reader_request(reqwest::Method::PUT, url.to_string(), api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1296,7 +1327,7 @@ pub async fn list_metadata_plugins(
     let url = format!("{}/api/plugins/metadata", base_url.trim_end_matches('/'));
     let response = match reader_request(reqwest::Method::GET, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1361,7 +1392,7 @@ pub async fn use_metadata_plugin(
         .append_pair("arg", &arg);
     let response = match reader_request(reqwest::Method::POST, url.to_string(), api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -1412,7 +1443,7 @@ pub async fn load_archive_metadata(
     );
     let response = match reader_request(reqwest::Method::GET, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     let status = response.status();
     if matches!(
@@ -2264,6 +2295,18 @@ mod archive_download_tests {
             true,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn remote_failure_reader_transport_preserves_an_explicit_network_code() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let error = reader_request(reqwest::Method::GET, url, String::new()).await.unwrap_err();
+        assert_eq!(error.code, "NETWORK");
+        let builder_error = Client::new().get("not a valid URL").build().unwrap_err();
+        assert_eq!(ReaderRequestError::transport(builder_error).code, "REMOTE_UNAVAILABLE");
+        assert_eq!(ReaderRequestError::configuration("TLS configuration failed".into()).code, "UNKNOWN");
     }
 
     #[test]
@@ -3402,7 +3445,7 @@ pub async fn delete_archive(
     );
     let response = match reader_request(reqwest::Method::DELETE, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -3624,7 +3667,7 @@ pub async fn load_reader_manifest(
     );
     let response = match reader_request(reqwest::Method::GET, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -3636,11 +3679,7 @@ pub async fn load_reader_manifest(
     let pages = match parse_reader_file_list(&match response.text().await {
         Ok(body) => body,
         Err(error) => {
-            return Ok(CommandResult::failure(
-                "REMOTE_UNAVAILABLE",
-                error.to_string(),
-                true,
-            ))
+            return Ok(reader_response_failure(error))
         }
     }) {
         Ok(pages) => pages,
@@ -3738,7 +3777,7 @@ async fn load_reader_page_bytes(
     url.query_pairs_mut().append_pair("path", &path);
     let response = match reader_request(reqwest::Method::GET, url.to_string(), api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if !response.status().is_success() {
         return Ok(CommandResult::failure(
@@ -3770,11 +3809,7 @@ async fn load_reader_page_bytes(
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
-        Err(error) => Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            error.to_string(),
-            true,
-        )),
+        Err(error) => Ok(reader_response_failure(error)),
     }
 }
 
@@ -3849,18 +3884,18 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             match reader_request(reqwest::Method::GET, url.clone(), api_key.clone()).await {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true))
+                    return Ok(CommandResult::failure(error.code, error.message, true))
                 }
             };
         if candidate.status().as_u16() != 202 {
             response = Some(candidate);
             break;
         }
-        let job_id = candidate
-            .bytes()
-            .await
-            .ok()
-            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+        let job_body = match candidate.bytes().await {
+            Ok(body) => body,
+            Err(error) => return Ok(reader_response_failure(error)),
+        };
+        let job_id = serde_json::from_slice::<serde_json::Value>(&job_body).ok()
             .and_then(|value| {
                 let job = value.get("job").cloned().unwrap_or(value);
                 job.as_i64()
@@ -3877,18 +3912,17 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                 let status =
                     match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
                         Ok(value) => value,
-                        Err(_) => continue,
+                        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
                     };
-                let state = status
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("state")
-                            .and_then(|state| state.as_str())
-                            .map(str::to_owned)
-                    });
+                let body = match status.bytes().await {
+                    Ok(body) => body,
+                    Err(error) => return Ok(reader_response_failure(error)),
+                };
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+                };
+                let state = payload.get("state").and_then(|state| state.as_str()).map(str::to_owned);
                 if state.as_deref() == Some("finished") {
                     finished = true;
                     break;
@@ -3958,11 +3992,7 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             }
             Ok(CommandResult::success(bytes.to_vec()))
         }
-        Err(error) => Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            error.to_string(),
-            true,
-        )),
+        Err(error) => Ok(reader_response_failure(error)),
     }
 }
 
@@ -4063,14 +4093,14 @@ async fn fetch_page_thumbnail(
     let response =
         match reader_request(reqwest::Method::GET, thumbnail_url.clone(), api_key.clone()).await {
             Ok(response) => response,
-            Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+            Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
         };
     let response = if response.status().as_u16() == 202 {
-        let job_id = response
-            .bytes()
-            .await
-            .ok()
-            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+        let job_body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => return Ok(reader_response_failure(error)),
+        };
+        let job_id = serde_json::from_slice::<serde_json::Value>(&job_body).ok()
             .and_then(|value| {
                 let job = value.get("job").cloned().unwrap_or(value);
                 job.as_i64()
@@ -4085,18 +4115,17 @@ async fn fetch_page_thumbnail(
                 let status =
                     match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
                         Ok(value) => value,
-                        Err(_) => continue,
+                        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
                     };
-                let state = status
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("state")
-                            .and_then(|state| state.as_str())
-                            .map(str::to_owned)
-                    });
+                let body = match status.bytes().await {
+                    Ok(body) => body,
+                    Err(error) => return Ok(reader_response_failure(error)),
+                };
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+                };
+                let state = payload.get("state").and_then(|state| state.as_str()).map(str::to_owned);
                 if matches!(state.as_deref(), Some("finished")) {
                     finished = true;
                     break;
@@ -4119,7 +4148,7 @@ async fn fetch_page_thumbnail(
             }
             match reader_request(reqwest::Method::GET, thumbnail_url, api_key).await {
                 Ok(value) => value,
-                Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+                Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
             }
         } else {
             return Ok(CommandResult::failure(
@@ -4156,11 +4185,7 @@ async fn fetch_page_thumbnail(
             "LANraragi thumbnail response is not an image",
             true,
         )),
-        Err(error) => Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            error.to_string(),
-            true,
-        )),
+        Err(error) => Ok(reader_response_failure(error)),
     }
 }
 
@@ -4955,7 +4980,7 @@ async fn fetch_search_page(
         .map_err(|error| ("INVALID_INPUT", error, false))?;
     let response = reader_request(reqwest::Method::GET, url, api_key.to_string())
         .await
-        .map_err(|error| ("REMOTE_UNAVAILABLE", error, true))?;
+        .map_err(|error| (error.code, error.message, true))?;
     if let Some(failure) = search_status_failure(response.status()) {
         return Err(failure);
     }
@@ -5198,7 +5223,7 @@ pub async fn probe_new_archives(
     };
     let response = match reader_request(reqwest::Method::GET, url, api_key).await {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if let Some((code, message, retryable)) = search_status_failure(response.status()) {
         return Ok(CommandResult::failure(code, message, retryable));
@@ -5510,7 +5535,7 @@ pub async fn search_random_archives(
     .await
     {
         Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
     if let Some((code, message, retryable)) = search_status_failure(response.status()) {
         return Ok(CommandResult::failure(code, message, retryable));
@@ -5896,7 +5921,7 @@ pub async fn save_server(
         Ok(response) => response,
         Err(error) => {
             return Ok(CommandResult::failure(
-                "REMOTE_UNAVAILABLE",
+                error.code,
                 format!("无法连接 LANraragi：{error}"),
                 true,
             ))
@@ -7823,7 +7848,7 @@ pub async fn download_url(
     let response =
         match reader_request(reqwest::Method::POST, request_url.to_string(), api_key).await {
             Ok(response) => response,
-            Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+            Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
         };
     let status = response.status();
     let wire: DownloadUrlWire = match response.json().await {
@@ -7914,6 +7939,33 @@ mod tests {
             }
         });
         (url, task)
+    }
+
+    #[tokio::test]
+    async fn reader_body_failures_separate_truncated_transport_from_invalid_content() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 0).await.unwrap();
+        server.await.unwrap();
+        assert!(matches!(&result, CommandResult::Failure { error, .. } if error.code == "NETWORK"), "{result:?}");
+
+        let (url, server) = test_http_server(vec![(200, "not an image".into())]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 0).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Failure { error, .. } if error.code == "INVALID_RESPONSE"));
+
+        let (url, server) = test_http_server(vec![(202, r#"{"job":1}"#.into()), (200, "{broken".into())]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Failure { error, .. } if error.code == "INVALID_RESPONSE"));
     }
 
     #[tokio::test]

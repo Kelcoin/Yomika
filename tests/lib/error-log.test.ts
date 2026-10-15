@@ -62,3 +62,29 @@ describe('error log', () => {
     expect(written.map((record) => record.message)).not.toContain('after stop');
   });
 });
+
+it('drops expected outcomes but preserves unknown network-related bugs', async () => {
+  const written = collect();
+  for (const code of ['COMPUTE_QUEUE_FULL', 'CANCELLED', 'ABORTED', 'NETWORK', 'REMOTE_TIMEOUT']) {
+    logError('reader', 'operation failed', { error: { code, message: 'try again' } });
+    logError('reader', { code, message: 'try again' });
+  }
+  logError('image', new DOMException('stopped', 'AbortError'));
+  logError('promise', new TypeError('Failed to fetch'));
+  logError('reader', 'network decoder invariant failed');
+  logError('reader', { code: 'GPU_OUTPUT_INVALID', message: 'bad output' });
+  await flushErrorLog();
+  expect(written).toHaveLength(2);
+});
+it('preserves rejection codes and names for filtering', async () => {
+  const written = collect();
+  const uninstall = installErrorLogging();
+  for (const reason of [{ code: 'COMPUTE_QUEUE_FULL', message: 'busy' }, new DOMException('stop', 'AbortError'), new TypeError('Failed to fetch')]) {
+    const event = new Event('unhandledrejection');
+    Object.defineProperty(event, 'reason', { value: reason });
+    window.dispatchEvent(event);
+  }
+  uninstall();
+  await flushErrorLog();
+  expect(written).toHaveLength(0);
+});

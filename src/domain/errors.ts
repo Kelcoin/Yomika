@@ -111,6 +111,10 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  *   的原话是「无视检测版本更新失败的日志」——这不是本机的缺陷，不该占现场的位置。
  *   （判定仍然照原样返回失败：`update-notice` 那份 UI 靠它决定显示什么。） */
 export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
+  'QUEUE_FULL', 'CANCELLED', 'CANCELED', 'ABORTED', 'ABORT_ERR',
+  'NETWORK', 'REMOTE_TIMEOUT', 'REMOTE_RATE_LIMIT',
+  'EH_UNAVAILABLE', 'EH_LOGIN_WINDOW_CLOSED',
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ERR_NETWORK', 'ERR_CANCELED',
   'LRR_NOT_FOUND',
   'INFERENCE_CANCELLED',
   'COMPUTE_CANCELLED',

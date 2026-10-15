@@ -161,7 +161,7 @@ export function useComputedPage(options: UseComputedPageOptions): ComputedPageSt
     setState((previous) => ({ status: 'queued', ...(previous.url === undefined ? {} : { url: previous.url }) }));
 
     const fail = (code: string, message: string) => {
-      diagnosticRef.current?.(`compute page ${key}: ${code}`, { message });
+      diagnosticRef.current?.(`compute page ${key}: ${code}`, { code, message });
       setState((previous) => ({
         status: 'failed',
         error: { code, message },
@@ -276,7 +276,7 @@ export function useComputedPage(options: UseComputedPageOptions): ComputedPageSt
       // 只记第一次：让位本身是正常状态，但「这一页等过」值得留一条线索——一条，不是每
       // 六百毫秒一条。
       if (deferrals === 1) {
-        diagnosticRef.current?.(`compute page ${key}: 让位`, { message: '计算队列现在没有位置，等一会儿再问一次' });
+        diagnosticRef.current?.(`compute page ${key}: 让位`, { code: 'COMPUTE_QUEUE_FULL', message: '计算队列现在没有位置，等一会儿再问一次' });
       }
       setState((previous) => ({ status: 'queued', ...(previous.url === undefined ? {} : { url: previous.url }) }));
       retryTimer = window.setTimeout(() => {

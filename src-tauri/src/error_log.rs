@@ -400,12 +400,28 @@ fn error_log_write(app: &tauri::AppHandle, entry: &ErrorLogEntry) -> CommandResu
     error_log_write_all(app, std::slice::from_ref(entry))
 }
 
+// Only explicit outcome codes are quiet. Never suppress arbitrary messages
+// containing words such as "network": schema/engine faults need diagnostics.
+fn expected_outcome(message: &str) -> bool {
+    let code = message.trim_start().split(|ch: char| ch == ':' || ch == '：' || ch.is_whitespace()).next().unwrap_or("");
+    matches!(code,
+        "LRR_NOT_FOUND" | "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
+        "COMPUTE_QUEUE_FULL" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_BUSY" |
+        "APP_RELEASE_CHECK_FAILED" | "APP_RELEASE_UNREACHABLE" |
+        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" |
+        "NETWORK" | "REMOTE_TIMEOUT" | "REMOTE_RATE_LIMIT" |
+        "EH_UNAVAILABLE" | "EH_LOGIN_WINDOW_CLOSED" |
+        "ECONNRESET" | "ECONNREFUSED" | "ETIMEDOUT" | "ENOTFOUND" | "ERR_NETWORK" | "ERR_CANCELED")
+}
+
 fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> CommandResult<()> {
+    let entries = entries.iter().filter(|entry| !expected_outcome(&entry.message)).collect::<Vec<_>>();
+    if entries.is_empty() { return CommandResult::success(()); }
     let path = match log_path(app) {
         Ok(path) => path,
         Err(_) => return CommandResult::failure("UNKNOWN", "Error log write failed", true),
     };
-    let lines = entries.iter().map(text_line).collect::<Vec<_>>();
+    let lines = entries.iter().map(|entry| text_line(entry)).collect::<Vec<_>>();
     match append_lines(&path, &lines) {
         Ok(()) => CommandResult::success(()),
         Err(_) => CommandResult::failure("UNKNOWN", "Error log write failed", true),
@@ -424,7 +440,7 @@ pub(crate) fn record_at_data_dir(
     message: &str,
     detail: Option<&str>,
 ) -> Result<(), String> {
-    if message.trim().is_empty() {
+    if message.trim().is_empty() || expected_outcome(message) {
         return Ok(());
     }
     let directory = data_dir.join("logs");
@@ -516,6 +532,19 @@ async fn write_export(_app: &tauri::AppHandle, path: &str, contents: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_outcomes_never_create_a_log_file() {
+        let dir = std::env::temp_dir().join(format!("yomika-quiet-outcomes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for message in ["COMPUTE_QUEUE_FULL: busy", "INFERENCE_CANCELLED：stopped", "NETWORK: offline", "ABORTED"] {
+            record_at_data_dir(&dir, "error", "test", message, None).expect("quiet outcome");
+        }
+        assert!(!dir.exists());
+        for message in ["REMOTE_UNAVAILABLE: protocol or engine failure", "GPU_OUTPUT_INVALID: corrupt", "network decoder invariant failed", "INVALID_RESPONSE: network response malformed"] {
+            assert!(!expected_outcome(message));
+        }
+    }
 
     #[test]
     fn the_crash_file_keeps_only_its_tail() {

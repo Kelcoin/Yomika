@@ -24,12 +24,12 @@ const SLOP_PX = 10;
  * 450 毫秒之后手指下面什么都不会变，所以手机还欠一次「按住了」的确认：震动就发在这
  * 一处（三个调用点共用它），见 `haptics.ts`。桌面上它自己会跳过。
  */
-const holds = new WeakMap<EventTarget, { timer: number | undefined; x: number; y: number; held: boolean }>();
+const holds = new WeakMap<EventTarget, { timer: number | undefined; x: number; y: number; held: boolean; suppressUntil: number }>();
 
 function holdOf(element: EventTarget) {
   let hold = holds.get(element);
   if (!hold) {
-    hold = { timer: undefined, x: 0, y: 0, held: false };
+    hold = { timer: undefined, x: 0, y: 0, held: false, suppressUntil: 0 };
     holds.set(element, hold);
   }
   return hold;
@@ -52,6 +52,7 @@ export function longPressHandlers(open: (at: { x: number; y: number }) => void) 
       hold.x = event.clientX;
       hold.y = event.clientY;
       hold.held = false;
+      hold.suppressUntil = 0;
       cancel(hold);
       hold.timer = window.setTimeout(() => {
         hold.timer = undefined;
@@ -64,15 +65,23 @@ export function longPressHandlers(open: (at: { x: number; y: number }) => void) 
     onPointerMove: (event: ReactPointerEvent<HTMLElement>) => {
       const hold = holds.get(event.currentTarget);
       if (!hold || hold.timer === undefined) return;
-      if (Math.abs(event.clientX - hold.x) > SLOP_PX || Math.abs(event.clientY - hold.y) > SLOP_PX) cancel(hold);
+      if (Math.abs(event.clientX - hold.x) > SLOP_PX || Math.abs(event.clientY - hold.y) > SLOP_PX) {
+        cancel(hold);
+        hold.held = true; // A drag must not turn into an archive activation on lift.
+      }
     },
-    onPointerUp: (event: ReactPointerEvent<HTMLElement>) => cancel(holdOf(event.currentTarget)),
+    onPointerUp: (event: ReactPointerEvent<HTMLElement>) => {
+      const hold = holdOf(event.currentTarget);
+      cancel(hold);
+      if (hold.held) hold.suppressUntil = Date.now() + 300;
+    },
     onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => cancel(holdOf(event.currentTarget)),
     onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => cancel(holdOf(event.currentTarget)),
     onClickCapture: (event: ReactMouseEvent<HTMLElement>) => {
       const hold = holds.get(event.currentTarget);
       if (!hold?.held) return;
       hold.held = false;
+      if (hold.suppressUntil && Date.now() > hold.suppressUntil) return;
       event.preventDefault();
       event.stopPropagation();
     },

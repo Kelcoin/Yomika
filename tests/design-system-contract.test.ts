@@ -671,6 +671,9 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     const button = ruleBody(shell, '.archive-recommendations-tabs button');
     expect(button).toMatch(/white-space:\s*nowrap/);
+    expect(ruleBody(shell, '.archive-recommendations-tabs')).toMatch(/grid-template-columns:\s*auto minmax\(0, 0fr\)/);
+    expect(ruleBody(shell, '.archive-recommendations-tabs.has-creator')).toMatch(/grid-template-columns:\s*auto minmax\(0, 1fr\)/);
+    expect(shell).not.toMatch(/archive-recommendations-tabs:not\(\.has-creator\) \.archive-recommendations-tab-creator\s*\{\s*display:\s*none/);
     const collapsed = ruleBody(shell, '.archive-recommendations-tabs .archive-recommendations-tab-creator');
     expect(collapsed).toMatch(/padding-inline:\s*0/);
     // 长出来的时候留白要还回去，否则两个标签会挤在一起。
@@ -1388,8 +1391,12 @@ describe('design system contract', () => {
     expect(panel).toMatch(/border-radius:\s*var\(--radius-overlay\)/);
     expect(panel).toMatch(/padding:\s*var\(--space-6\)/);
 
-    // 页码胶囊压在底栏上，读的是底栏自己的高度令牌，改一边不会让两边错位。
-    expect(ruleBody(reader, '.reader-page-indicator.is-raised')).toMatch(/bottom:\s*calc\(var\(--reader-toolbar-height\)/);
+    // 底栏在的时候胶囊让位（2026-10-15 用户要求：底栏一出现，页码就隐藏）。原来那条
+    // `.is-raised` 把胶囊抬到栏顶，只是把重叠换了个高度：两块小台面在同一段时间里抢同一
+    // 块地方，看起来仍是「底栏上面还挂着一块东西」。现在整段「栏在（含退场那 260ms）」
+    // 都并进 `data-visible='false'` 那一条，胶囊位置一次都不动——所以这里断言的是「那条
+    // 抬高规则已经不在」（源码里安静条件包含栏在/退场那一条见下面 `indicatorScreen` 处）。
+    expect(reader).not.toMatch(/\.reader-page-indicator\.is-raised/);
 
     // 手机这一档高度必须落在**两条栏和胶囊共同的祖先**上。自定义属性是继承的：写进
     // `.reader-toolbar` 就只有栏的后代看得见，而胶囊是 `.reader-screen` 的直接子节点、
@@ -1401,13 +1408,12 @@ describe('design system contract', () => {
     expect(phone).toMatch(/\.reader-screen\s*\{[^}]*--reader-toolbar-height:\s*112px/);
     expect(phone).not.toMatch(/\.reader-toolbar\s*\{[^}]*--reader-toolbar-height/);
 
-    // 栏退场的那 260ms 里它还在树上淡出：胶囊这时跟着一起淡出，落位（`bottom`）推迟到
-    // 栏被摘掉那一刻（0s 过渡 + `--duration-exit` 延迟）才发生，即在没人看得见的时候
-    // 落回屏幕上。入场不需要对称规则——栏用 `--motion-slow`(480ms) 升上来、胶囊只用
-    // 220ms，胶囊永远跑在栏前面。
+    // 栏退场的那 260ms 里它还在树上淡出：胶囊这时跟着一起淡出（`is-leaving` 就是这一档）。
+    // 它不再有「落位」要推迟——胶囊在栏在/退场期间根本不移动，所以这里只断言淡出，并断言
+    // 那条为「从栏顶滑到屏幕底、横穿整条栏」写的 `bottom` 过渡已经不在（它服务的动作没了）。
     const leavingPill = ruleBody(reader, '.reader-page-indicator.is-leaving');
     expect(leavingPill).toMatch(/opacity:\s*0/);
-    expect(leavingPill).toMatch(/bottom\s+0s\s+var\(--duration-exit\)/);
+    expect(leavingPill).not.toMatch(/bottom\s+0s/);
 
     // 胶囊的落点：桌面可以借右下角那半格，手机永远居中。竖着占满屏幕的页在桌面上会把
     // 胶囊推进右边缝里，可手指也在那里，而且手机上那半格本来就没宽到能放一条「2 / 100」；
@@ -1424,6 +1430,13 @@ describe('design system contract', () => {
     expect(indicatorScreen, '还没解码的页不能拿来量底缝').toMatch(/if \(image\.naturalWidth === 0\) continue;/);
     expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout, pages\.length, viewport\.width, viewport\.height, visibleIndexes, zoom\.scale\]\);/);
     expect(indicatorScreen, '退场窗口里胶囊要认领 is-leaving').toMatch(/bottomPresence\.leaving \? ' is-leaving' : ''/);
+    // 2026-10-15 用户要求：底栏一出现，页码就隐藏。这一条钉的是**安静条件的组成**——
+    // 少了 `mounted` 就退回「胶囊压在栏上」，少了 `leaving` 就会在栏淡出的 260ms 里
+    // 提前冒出来（栏还在树上）。两处都在同一行，所以一条正则就够。
+    expect(indicatorScreen, '栏在或退场时胶囊都安静（不是抬到栏顶）').toMatch(
+      /const quiet = [^;]*bottomPresence\.mounted \|\| bottomPresence\.leaving;/,
+    );
+    expect(indicatorScreen, '胶囊不再用 is-raised 抬到栏顶').not.toMatch(/' is-raised'/);
 
     // 同一枚「是不是手指」的判据还管着两条栏怎么亮：触屏没有悬停，`hoverChrome` 永远是
     // `undefined`，两条栏只能跟着同一个 `visible` 同亮同灭——手指点在顶栏感应带上，底栏
@@ -2217,11 +2230,18 @@ describe('design system contract', () => {
     // 认定距离之前一个字都不说，手指转向滚动那一侧就把这次手势整个还回去。
     expect(workspace).toMatch(/const PULL_CLAIM_PX = 12;/);
     expect(workspace).toMatch(/if \(travel < PULL_CLAIM_PX\) return;/);
-    expect(workspace).toMatch(/overscrollClaimed\.current = true;[\s\S]{0,400}event\.preventDefault\(\);/);
+    expect(workspace).toMatch(/overscrollClaimed\.current = true;[\s\S]{0,1200}event\.preventDefault\(\);/);
+    // 认定距离那 12px 是浏览器的：真机上这段里页面已经滚了一点点。认领时要把这一段放回去，
+    // 并且认领之后那一层要是还在动就让位——两套滚动叠着走就是用户 2026-10-15 报的
+    // 「顶部搜索框滚出视口 + 卡片与顶栏之间一大段空隙」（档案库那一处）。
+    expect(workspace, '认领时把浏览器先滚掉的那一点放回去').toMatch(/scroller\.scrollTop = startScrollTop;/);
+    expect(workspace, '认领后那一层还在动就让位').toMatch(
+      /scroller\.scrollTop !== overscrollClaimedScrollTop\.current\) \{[\s\S]{0,120}cancelOverscroll\(\);/,
+    );
     // 位置直接写 DOM：每一像素走一次 setState 会让整棵虚拟化列表每帧重渲染一遍，
     // 真机上就是「过滚刷新非常非常卡」。state 只在静止/位移边界变化，回零必须同步隐藏图标。
     expect(workspace).toMatch(/pull\.style\.transform = `translateY\(\$\{offset\}px\)`;/);
-    expect(workspace).toMatch(/setOverscroll\(\(current\) => offset === 0 \? 0 : current === 0 \? offset : current\);/);
+    expect(workspace).toContain('if (Math.sign(previous) !== Math.sign(offset)) setOverscroll(Math.sign(offset))');
   });
 
   it('keeps toast text at WCAG AA contrast in light and dark themes', () => {
@@ -2693,6 +2713,46 @@ describe('design system contract', () => {
     expect(block).toMatch(/\.loading-indicator-arc\s*\{\s*animation:\s*none/);
   });
 
+  it('strips the reader loading mark back to a liquid drop', () => {
+    // 2026-10-15 用户要求：阅读器的加载动画「去掉其背景部分，并令其更具液态感」。
+    // 「背景」就是 M3 那圈淡轨道（`.loading-indicator-track`）：阅读器这两块容器本来就是
+    // 纯色画布，淡圈既不是页面也不是台面，只是噪声。去掉之后只留一段会伸缩的弧，并把
+    // 等速的伸缩换成「一滴水拉长—回缩—滑走」。改动只落在阅读器那两个容器上：全应用那
+    // 一个 M3 指示器（`.loading-indicator`）保持原样，别处的加载圈不受影响。
+    const reader = read('src/styles/reader.css');
+    // 轨道是「两条选择器合一条规则」写的（整页加载 + 单页加载），所以按整条规则断，
+    // 不能用 `ruleBody`（它找的是「选择器紧跟 `{`」，分组里第一条后面是逗号）。
+    expect(reader, '阅读器的加载标记不能有那圈淡轨道').toMatch(
+      /\.reader-screen-loading \.loading-indicator-track,\s*\n\s*\.reader-page-status \.loading-indicator-track \{ display: none; \}/,
+    );
+    // 液态那两套动画都落在阅读器的选择器上，而且用的是既有令牌（不新造令牌）。
+    expect(ruleBody(reader, '.reader-page-status .loading-indicator-arc'), '阅读器的弧要走液态那套伸缩').toMatch(
+      /animation:\s*reader-loading-drop\s+var\(--duration-pulse\)\s+var\(--ease-pulse\)/,
+    );
+    expect(ruleBody(reader, '.reader-page-status .loading-indicator svg'), '阅读器的整枚标记要带缓动地流动').toMatch(
+      /animation:\s*reader-loading-flow\s+var\(--duration-pulse\)\s+var\(--ease-pulse\)/,
+    );
+    expect(ruleBody(reader, '@keyframes reader-loading-drop'), '液态伸缩的 keyframes 必须在').toMatch(/stroke-dasharray/);
+    expect(ruleBody(reader, '@keyframes reader-loading-flow'), '流动的 keyframes 必须在').toMatch(/rotate\(360deg\)/);
+    // 全应用那一个 M3 指示器不能被顺手改掉：轨道与 dash 那套 keyframes 还在 shell.css 里。
+    const shell = read('src/styles/shell.css');
+    expect(ruleBody(shell, '.loading-indicator-track'), '全应用的 M3 轨道不能被顺手删掉').toMatch(/stroke:\s*color-mix/);
+    expect(ruleBody(shell, '@keyframes loading-indicator-dash'), '全应用的 M3 dash 不能被顺手删掉').toMatch(/stroke-dasharray/);
+    // 减弱动效下那套液态动画必须被关掉：阅读器的选择器比通杀块具体，不写 !important
+    // 压不过它（上面那条 clause 只钉了不带容器前缀的 `.loading-indicator-arc`）。
+    const marker = '@keyframes loading-indicator-breathe';
+    const start = shell.indexOf('@media (prefers-reduced-motion: reduce)', shell.indexOf(marker));
+    const open = shell.indexOf('{', start);
+    let depth = 0;
+    let end = -1;
+    for (let index = open; index < shell.length; index += 1) {
+      if (shell[index] === '{') depth += 1;
+      else if (shell[index] === '}' && (depth -= 1) === 0) { end = index; break; }
+    }
+    const block = shell.slice(open + 1, end);
+    expect(block, '减弱动效下阅读器的弧也要停（!important，压过容器前缀那条更具体的选择器）').toMatch(/\.reader-page-status \.loading-indicator-arc[\s\S]*?animation:\s*none\s*!important/);
+  });
+
   it('decodes every fetched image off the main thread', () => {
     // `decoding="async"` 不是装饰：默认的 `auto` 允许浏览器在"下一帧就要画它"时**在主线程上
     // 同步解**那张图。这个应用里的图是几百万像素的漫画页与封面，而这一刻屏幕上往往正转着
@@ -3029,4 +3089,40 @@ it('grants tray reopening only event listening permissions to the tray window', 
   expect(tray).toHaveLength(1);
   expect(tray[0]?.windows).toEqual(['tray-menu']);
   expect(tray[0]?.permissions).toEqual(['core:event:allow-listen', 'core:event:allow-unlisten']);
+});
+
+it('keeps the generated capability snapshot in step with the hand-written ones', () => {
+  // `src-tauri/gen/schemas/capabilities.json` 是 tauri 构建时生成的快照，但它入库之后
+  // 没有任何东西看着它：手写的 `src-tauri/capabilities/*.json` 改了、生成物没跟着变，
+  // 要等下一次跑 `tauri build` 才暴露——而交付轮恰好是**先提交再构建**，中间这段空窗
+  // 里没人能发现漂移。这条判据把两份东西钉在一起：标识、窗口、权限逐项相等，生成物里
+  // 也不许留着已经删掉的条目（那种漂移只会在下次构建时把权限悄悄还回来）。
+  const written = readdirSync(resolve(root, 'src-tauri/capabilities'))
+    .filter((name) => name.endsWith('.json'))
+    .map(
+      (name) =>
+        JSON.parse(read(`src-tauri/capabilities/${name}`)) as {
+          identifier: string;
+          description?: string;
+          windows?: string[];
+          permissions: string[];
+        },
+    );
+  const generated = JSON.parse(read('src-tauri/gen/schemas/capabilities.json')) as Record<
+    string,
+    { identifier: string; description?: string; local?: boolean; windows?: string[]; permissions: string[] }
+  >;
+
+  expect(
+    Object.keys(generated).sort(),
+    '生成物里多出来的条目，说明有 capability 被删掉却没重新生成',
+  ).toEqual(written.map((capability) => capability.identifier).sort());
+  for (const capability of written) {
+    const snapshot = generated[capability.identifier];
+    expect(snapshot, `${capability.identifier} 没出现在生成物里`).toBeDefined();
+    expect(snapshot?.description).toBe(capability.description);
+    expect(snapshot?.windows).toEqual(capability.windows);
+    expect(snapshot?.permissions).toEqual(capability.permissions);
+    expect(snapshot?.local, '生成器给每条 capability 补的 local: true').toBe(true);
+  }
 });

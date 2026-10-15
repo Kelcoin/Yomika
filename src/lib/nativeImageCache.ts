@@ -83,6 +83,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       // 取消不是失败：切页、退出阅读器都会走到这里。
       if (READER_RENDITIONS.includes(identity.rendition) && !/abort/i.test(message)) {
         logError(`image/${identity.rendition}`, message, {
+          error,
           scopeId: identity.scopeId,
           archiveId: identity.archiveId,
           pageIndex: identity.pageIndex,
@@ -132,7 +133,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       // 等于把它写进日志）；处理参数在 `transform` 里，键就跟着它走。
       const remote = parseRemoteOpsTransform(identity.transform);
       const loaded = await this.settings.load();
-      if (!loaded.ok) throw new Error(loaded.error.message);
+      if (!loaded.ok) throw new RenditionError(loaded.error.code, loaded.error.message);
       const processed = await this.compute.remoteProcess({
         url: loaded.value.remoteComputeUrl,
         token: loaded.value.remoteComputeToken,
@@ -161,7 +162,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
           ? await this.library.loadReaderPage(identity.serverId, identity.archiveId, identity.pageIndex, identity.sourcePath)
           : undefined;
     if (!result) throw new Error('Unsupported image request');
-    if (!result.ok) throw new Error(result.error.message);
+    if (!result.ok) throw new RenditionError(result.error.code, result.error.message);
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const bytes = new Uint8Array(result.value);
     return { bytes, mime: detectImageMime(bytes) };

@@ -446,7 +446,8 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: var(--tracking-wide);
   pointer-events: none;
-  transition: opacity var(--motion-standard), bottom var(--motion-standard);
+  /* 只有透明度会动：胶囊不再因为底栏而换位置（见下面 `.is-leaving` 那条注释）。 */
+  transition: opacity var(--motion-standard);
 }
 
 /* Width-filling image: there is real room below it — take the centre slot. */.reader-page-indicator[data-placement='bottom'] {
@@ -457,18 +458,58 @@
 
 /* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-visible='false'] { opacity: 0; }
 
-/* The toolbar owns the bottom strip while it is up, so the pill steps above it
-   instead of overlapping the controls. It reads the bar's own height token, so
-   changing the bar cannot leave the pill sitting on it. */.reader-page-indicator.is-raised { bottom: calc(var(--reader-toolbar-height) + var(--space-2) + var(--safe-bottom)); }
+/* 底栏在的时候胶囊不再「抬到栏顶」了（2026-10-15 用户要求：底栏一出现，页码就隐藏）。
+   原来那条 `.is-raised { bottom: calc(var(--reader-toolbar-height) + …) }` 只是把重叠换成
+   另一个高度：两块小台面在同一段时间里抢同一块地方，看起来仍是「底栏上面还挂着一块
+   东西」。现在由 `ReaderScreen` 把「栏在（含退场那 260ms）」并进 `data-visible='false'`
+   那一条，胶囊整段淡出、栏摘掉后按基准那条 `--motion-standard` 淡回，位置一次都不动
+   ——所以这里没有对应的规则。留这条注释是为了下次有人想把它加回来时先看到理由。 */
 
-/* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时不能从栏顶往屏幕底滑：它比栏高一层
-   （`--z-reader-chrome` 3 > 栏的 2），那一路正好横穿栏的表面，看起来就是「两层底栏」。
-   所以它跟着栏一起淡出，并且**在没人看得见的时候**落回屏幕上——`bottom` 的过渡延迟到
-   栏被摘掉那一刻（0s + `--duration-exit` 延迟）才走，栏摘掉（`is-leaving` 同时消失，
-   胶囊已在落点）之后再按基准那条 `--motion-standard` 淡入。 */
+/* 阅读器里的等待标记（2026-10-15 用户要求：去掉背景部分、更具液态感）。
+ *
+ * 一、M3 那圈淡轨道在这里是多余的：阅读器这两块容器本来就是纯色画布，淡圈既不是
+ *     页面也不是台面，只是噪声，去掉。
+ * 二、弧的伸缩改成「一滴水拉长—回缩—滑走」：弧长先慢后快地涨落，整枚标记的转速带
+ *     缓动并叠一点点呼吸（静止像水滴、动起来像流动），而不是原来那种等速地转。
+ *
+ * 只落在阅读器的两个容器上（整页加载与单页加载），全应用那一个 M3 指示器不动。
+ * 减弱动效那一档在 shell.css 的通杀块里被压成呼吸，形状动画由那边一条 `!important`
+ * 关掉——这些选择器比通杀块具体，不写 !important 会压不过它。 */
+.reader-screen-loading .loading-indicator-track,
+.reader-page-status .loading-indicator-track { display: none; }
+
+.reader-screen-loading .loading-indicator svg,
+.reader-page-status .loading-indicator svg {
+  animation: reader-loading-flow var(--duration-pulse) var(--ease-pulse) infinite;
+}
+
+.reader-screen-loading .loading-indicator-arc,
+.reader-page-status .loading-indicator-arc {
+  animation: reader-loading-drop var(--duration-pulse) var(--ease-pulse) infinite;
+}
+
+/* 2πr ≈ 125.7（r=20），所以每一帧的 dasharray 之和都取 126，和 M3 那套同尺。 */
+@keyframes reader-loading-flow {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(200deg) scale(1.05); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+@keyframes reader-loading-drop {
+  0% { stroke-dasharray: 2 124; stroke-dashoffset: 0; }
+  30% { stroke-dasharray: 74 52; stroke-dashoffset: -10; }
+  55% { stroke-dasharray: 122 4; stroke-dashoffset: -48; }
+  80% { stroke-dasharray: 44 82; stroke-dashoffset: -104; }
+  100% { stroke-dasharray: 2 124; stroke-dashoffset: -126; }
+}
+
+/* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
+   档）。它**不再有落位要推迟**：胶囊在「栏在 + 退场」整段里根本不移动（2026-10-15 改成
+   隐藏，见上面那条注释），原来那条 `bottom 0s var(--duration-exit)` 是为了让它别从栏顶
+   滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。 */
 .reader-page-indicator.is-leaving {
   opacity: 0;
-  transition: opacity var(--duration-exit) var(--ease-exit), bottom 0s var(--duration-exit);
+  transition: opacity var(--duration-exit) var(--ease-exit);
 }
 
 /* M3 subtitle role in an app bar: on-surface-variant. */

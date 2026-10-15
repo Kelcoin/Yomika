@@ -1651,12 +1651,19 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       {pages.length > 0 && (() => {
         // Overlapping artwork + flash expired → the pill goes quiet until the
         // next page turn; letterbox placements stay persistent as before.
-        const hidden = effectiveLayout === 'webtoon' || zoom.scale > 1 || (indicatorOverlaps && !indicatorFlash);
+        //
+        // 底栏在的时候也安静下来（2026-10-15 用户要求：底栏一出现，页码就让位）。
+        // 原来是把胶囊抬到栏顶（`.is-raised`）——那只是把重叠换了个高度：两块小台面
+        // 在同一段时间里抢同一块地方，用户看到的仍是「底栏上面还挂着一块东西」。
+        // 现在整段「栏在（含退场那 260ms）」都算安静，栏摘掉之后按原来那条
+        // `--motion-standard` 淡回来。`is-leaving` 留着：它管的是退场那一刻的落位
+        // 时序，与胶囊现在动不动位置无关。
+        const quiet = effectiveLayout === 'webtoon' || zoom.scale > 1 || (indicatorOverlaps && !indicatorFlash) || bottomPresence.mounted || bottomPresence.leaving;
         return (
           <div
-            className={`reader-page-indicator${bottomPresence.mounted ? ' is-raised' : ''}${bottomPresence.leaving ? ' is-leaving' : ''}`}
+            className={`reader-page-indicator${bottomPresence.leaving ? ' is-leaving' : ''}`}
             data-placement={indicatorPlacement}
-            data-visible={!hidden}
+            data-visible={!quiet}
             aria-hidden="true"
           >{pageIndicator}</div>
         );
