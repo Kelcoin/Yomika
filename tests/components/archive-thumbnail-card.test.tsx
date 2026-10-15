@@ -107,4 +107,46 @@ describe('ArchiveProgressBar', () => {
       fake.restore();
     }
   });
+
+  it('leaves a card with no reading position bare, even in the 全部档案 mode', () => {
+    // 用户报的「全部档案卡片都显示有进度条，哪怕没阅读过」：`all` 档原来只按档位放行，
+    // 没读过的卡（`page` 是 null/undefined）也被画上一条 0% 的空条。
+    const { container, rerender } = render(<ArchiveProgressBar page={null} pageCount={100} visibility="all" />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+
+    rerender(<ArchiveProgressBar page={undefined} pageCount={100} visibility="all" />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+
+    // 「读过 0 页」不算读过：页号是 1 起算的。
+    rerender(<ArchiveProgressBar page={0} pageCount={100} visibility="all" />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+
+    // 至少读过一页才有进度可说，比例仍按页号算。
+    rerender(<ArchiveProgressBar page={1} pageCount={100} visibility="all" />);
+    const bar = container.querySelector('.archive-card-progress');
+    expect(bar).not.toBeNull();
+    expect(bar?.getAttribute('aria-valuenow')).toBe('1');
+
+    // 「不显示」这一档什么都不画。
+    rerender(<ArchiveProgressBar page={50} pageCount={100} visibility="none" />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+  });
+
+  it('draws the bar only where 仅历史记录 covers, and everywhere under 全部档案', () => {
+    // 用户的原话：「仅历史记录是指仅在首页历史记录组件和历史记录页面内显示进度条，全部是指
+    // 所有有进度的不管在什么页面都显示进度条」。没有 PreferencesContext 时档位取默认值
+    // （`history`），正好用来量这条位置口径：位置由调用方的 `scope` 说，不由组件猜路由。
+    const { container, rerender } = render(<ArchiveProgressBar page={50} pageCount={100} scope="history" />);
+    expect(container.querySelector('.archive-card-progress')).not.toBeNull();
+
+    // 档案库、待看、随机漫游、推荐这些位置在「仅历史记录」档下一条都不画。
+    rerender(<ArchiveProgressBar page={50} pageCount={100} />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+    rerender(<ArchiveProgressBar page={50} pageCount={100} scope="elsewhere" />);
+    expect(container.querySelector('.archive-card-progress')).toBeNull();
+
+    // 「全部档案」照旧：哪儿有进度就在哪儿画。
+    rerender(<ArchiveProgressBar page={50} pageCount={100} visibility="all" scope="elsewhere" />);
+    expect(container.querySelector('.archive-card-progress')).not.toBeNull();
+  });
 });

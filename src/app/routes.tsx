@@ -359,7 +359,7 @@ function HomeWorkspace() {
         <ServerRequiredPrompt />
       )}
       {(servers === undefined || connected) && <>
-      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} progressScope="history" loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
       <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
       <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={homeServer ? () => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); } : undefined} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
@@ -746,6 +746,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           onSearchQueryChange={setQuery}
           searchScope={{ label: `搜索${title}`, placeholder: `在${title}中搜索…` }}
           readingProgressByArchiveId={progressByArchiveId}
+          progressScope={name === 'history' ? 'history' : 'elsewhere'}
           onArchiveContextMenu={openContextMenu}
           presets={presets}
           onApplyPreset={(preset) => setQuery(preset.query)}

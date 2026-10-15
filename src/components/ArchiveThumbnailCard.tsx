@@ -20,20 +20,29 @@ const imageCache = getNativeImageCache();
  * line, which carries different facts in each place. The tag slot picks and
  * colours its own tags from the raw list, so a caller cannot pass a differently
  * ordered or differently coloured set by accident. */
-export function ArchiveProgressBar({ page, pageCount, visibility, cornerAware = false }: { page?: number | null | undefined; pageCount: number; visibility?: 'none' | 'history' | 'all' | undefined; cornerAware?: boolean }) {
+export function ArchiveProgressBar({ page, pageCount, visibility, scope = 'elsewhere', cornerAware = false }: { page?: number | null | undefined; pageCount: number; visibility?: 'none' | 'history' | 'all' | undefined; /** 这张卡长在哪儿：`history` 只给首页那一排（继续阅读，历史派生出来的）与历史记录页面这两处，别处一律 `elsewhere`。 */ scope?: 'history' | 'elsewhere' | undefined; cornerAware?: boolean }) {
   const preferredVisibility = useProgressBarVisibility();
   const mode = visibility ?? preferredVisibility ?? 'history';
   /** 钩子不能排在早退之后：mode 或 page 一变，钩子数量就跟着变。测量那一半在
    * `CardProgressBar` 里（它自己是个组件，没渲染就没有钩子），这里只剩这一个。 */
-  const visible = mode !== 'none' && !(mode === 'history' && page == null);
+  // 「有进度」本身要先成立：`page` 是 1 起算的页号，没有记录时是 null/undefined。
+  // 原来只有 `history` 档挡了空值，`all` 档会给没读过的卡画一条 0% 的空条——用户报的
+  // 「全部档案卡片都显示有进度条，哪怕没阅读过」。至少读过一页（`page >= 1`）才叫进度。
+  const read = typeof page === 'number' && page >= 1;
+  // 档位说的不只是「画不画」，还有「在哪儿画」：用户的原话是「仅历史记录是指仅在首页
+  // 历史记录组件和历史记录页面内显示进度条，全部是指所有有进度的不管在什么页面都显示」。
+  // 所以 `仅历史记录` 要配上「这里算不算那两处」，由调用方用 `scope` 讲清楚——在这里猜
+  // 路由（读 location、看组件树）都试过，猜错一次就是「改了设置没反应」这类毛病。
+  const allowed = mode === 'all' || (mode === 'history' && scope === 'history');
+  const visible = allowed && read;
   if (!visible) return null;
-  const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round(((page ?? 0) / pageCount) * 100))) : 0;
+  const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round((page / pageCount) * 100))) : 0;
   return <CardProgressBar percent={percent} label="阅读进度" cornerAware={cornerAware} />;
 }
 
-export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined }) {
+export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility, progressScope }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined }) {
   return <div className="archive-thumb-card-body">
-    <ArchiveProgressBar page={progressPage} pageCount={pageCount} visibility={progressVisibility} />
+    <ArchiveProgressBar page={progressPage} pageCount={pageCount} visibility={progressVisibility} scope={progressScope} />
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
@@ -100,7 +109,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
   </div>;
 }
 
-export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage, progressVisibility, detailBasePath = '/library' }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined; progressVisibility?: 'none' | 'history' | 'all' | undefined; /** Which page owns the detail this card opens. A rail on the home page keeps
+export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = false, onOpen, onContextMenu, progressPage, progressVisibility, progressScope, detailBasePath = '/library' }: { archive: ArchiveRecord; scopeId: string; serverId: string; favorite?: boolean; onOpen?: () => void; onContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; progressPage?: number | null | undefined; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; /** Which page owns the detail this card opens. A rail on the home page keeps
  * the detail on the home page — opening a card from there must not navigate
  * into the library and leave it showing that archive afterwards. */ detailBasePath?: string | undefined }) {
   const [aspectRatio, setAspectRatio] = useState<number>();
@@ -140,24 +149,25 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       favorite={favorite}
       progressPage={progressPage}
       progressVisibility={progressVisibility}
+      progressScope={progressScope}
       pageCount={archive.pageCount}
       meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
     />
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined }) {
+export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
+  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string }) {
+function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string }) {
   const scroller = useHorizontalScroller();
   const [railWidth, setRailWidth] = useState(0);
   useEffect(() => {
@@ -182,7 +192,7 @@ function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progr
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       {archives.length === 0 && loading
         ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
-        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} detailBasePath={detailBasePath} />)}
+        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} />)}
     </div>
   </section>;
 }

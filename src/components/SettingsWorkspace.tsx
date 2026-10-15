@@ -1342,7 +1342,10 @@ export function SettingsWorkspace() {
                     /* 单账户：只维护一个 WebDAV 账户。 */
                     [sync.activeAccount].map((account) => (
                       <div className="settings-menu-account" key={account.id}>
-                        <Waypoints className="settings-menu-account-glyph" aria-hidden="true" />
+                        {/* 这里原本还画着一枚 `<Waypoints>`：菜单标题的图标槽里已经有一枚
+                            同样的图标，两枚隔着一行对上（用户 2026-10-15 报的「同步界面上下的
+                            LOGO 是重复的」）。一屏里同一枚图形只画一次——标题那枚是「这一屏
+                            是什么」的路标，行里这枚只是装饰，去掉装饰那枚。 */}
                         <div className="settings-menu-account-copy">
                           <strong>{account.label}</strong>
                           {/* 端点/域名很长：一行放不下就省略号截断，完整的悬停可读。 */}

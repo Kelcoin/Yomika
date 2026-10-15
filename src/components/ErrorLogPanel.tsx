@@ -5,6 +5,7 @@ import { writeClipboardText } from '../bridge/clipboard';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { pickSavePath } from '../bridge/filePicker';
 import { flushErrorLog } from '../lib/errorLog';
+import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { NativeErrorLogRepository, type ErrorLogEntry } from '../repositories/nativeErrorLogRepository';
 import { NativeAppInfoRepository, type AppBuildInfo } from '../repositories/nativeAppInfoRepository';
 import { useToast } from './Toast';
@@ -27,6 +28,12 @@ function formatEntryTime(value: string): string {
 
 /** 与原生侧 `read_buckets` 拼的是同一个前缀。 */
 const LAST_RUN_PREFIX = '上次运行 · ';
+
+/** 收起时元素要在树上多留这么久，把出场动画播完（见 `useDelayedUnmount`）。
+ *
+ *  必须与 CSS 里 `.error-log-reveal.is-leaving` 那条动画的时长同值（`--duration-exit`）：
+ *  短了会看见元素被掐断，长了会让「收起即不在文档里」这条迟到得没道理。 */
+const REVEAL_EXIT_MS = 260;
 
 /** 一条记录的文本形态：列表里的「复制这条」与导出用的是同一份写法。 */
 function entryText(entry: ErrorLogEntry): string {
@@ -147,6 +154,49 @@ function entryKey(entry: ErrorLogEntry): string {
   return [entry.at, entry.level, entry.source, entry.message].join('\u0000');
 }
 
+/** 一条记录。
+ *
+ * 单独成一个组件是因为「收起也要有动画」要**按条**调 `useDelayedUnmount`，而 hook 不能
+ * 在 `entries.map()` 里调。展开时它照旧挂在树上，收起时多留 `REVEAL_EXIT_MS` 把出场动画
+ * 播完再摘——用户报的「只有展开有动画，收起没有」就是条件渲染把节点当场摘掉造成的。 */
+function ErrorLogEntryRow({ entry, open, onToggle, onCopy }: {
+  entry: ErrorLogEntry;
+  open: boolean;
+  onToggle: () => void;
+  onCopy: () => void;
+}) {
+  const { detail, stack } = splitDetail(entry);
+  const reveal = useDelayedUnmount(open, REVEAL_EXIT_MS);
+  return <li className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
+    <div className="error-log-entry-head">
+      <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={onToggle}>
+        <span className="error-log-entry-title" title={entry.message}>{entry.message}</span>
+        <span className="error-log-entry-meta">
+          <span className="error-log-time">{formatEntryTime(entry.at)}</span>
+          <span className="error-log-source" title={entry.source}>{entry.source}</span>
+        </span>
+        <ChevronDown className={`error-log-caret${open ? ' is-open' : ''}`} aria-hidden="true" />
+      </button>
+      <button className="error-log-icon" type="button" aria-label="复制这条记录" title="复制这条记录" onClick={onCopy}>
+        <Copy aria-hidden="true" />
+      </button>
+    </div>
+    {reveal.mounted && (
+      // 正在收的那一段对读屏已经不算「在页面上」了：`aria-hidden` 立刻生效，摘除只晚一拍。
+      <div className={`error-log-reveal${reveal.leaving ? ' is-leaving' : ''}`} aria-hidden={reveal.leaving || undefined}>
+        <div className="error-log-entry-body">
+          <h4>错误详情</h4>
+          <pre className="error-log-code">{detail ?? entry.message}</pre>
+          {stack && <>
+            <h4>堆栈跟踪</h4>
+            <pre className="error-log-code">{stack}</pre>
+          </>}
+        </div>
+      </div>
+    )}
+  </li>;
+}
+
 /** 错误日志的数据与动作：本次与上次两轮运行里，应用自己记下的失败。
  *
  * 原生侧留两轮（见 `src-tauri/src/error_log.rs`）：本轮在启动时把上一轮翻过去，所以
@@ -230,6 +280,9 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
   const { entries, build, platform, exporting, reload, exportLog, copyLog, clearLog } = state;
   const { showToast } = useToast();
   const [factsOpen, setFactsOpen] = useState(false);
+  // 「相关信息」收起时也要把出场动画播完：只按布尔值渲染的话，节点在点击那一下就被摘掉，
+  // 收起这一半永远看不见（用户报的「只有展开有动画，收起没有」）。
+  const factsReveal = useDelayedUnmount(factsOpen, REVEAL_EXIT_MS);
   const [openEntry, setOpenEntry] = useState<string>();
   const [confirmClear, setConfirmClear] = useState(false);
   const facts = useMemo(() => appInfoLines(build, platform), [build, platform]);
@@ -282,8 +335,8 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
           void writeClipboardText(factsText).then(() => showToast('相关信息已复制', 'success'), () => showToast('复制失败', 'error'));
         }}><Copy aria-hidden="true" /></button>
       </div>
-      {factsOpen && (
-        <div className="error-log-reveal">
+      {factsReveal.mounted && (
+        <div className={`error-log-reveal${factsReveal.leaving ? ' is-leaving' : ''}`} aria-hidden={factsReveal.leaving || undefined}>
           <div className="error-log-facts-body">
             {facts.sections.map((section) => (
               <div key={section.title} className="error-log-facts-section">
@@ -311,35 +364,13 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
             展开按 `entryKey` 记而不是序号：轮询每两秒把列表换一份，序号会串到隔壁那条上。 */}
         {entries.map((entry) => {
           const key = entryKey(entry);
-          const open = openEntry === key;
-          const { detail, stack } = splitDetail(entry);
-          return <li key={key} className={`error-log-entry is-${entry.level === 'warn' ? 'warn' : 'error'}${open ? ' is-open' : ''}`}>
-            <div className="error-log-entry-head">
-              <button className="error-log-entry-toggle" type="button" aria-expanded={open} onClick={() => setOpenEntry(open ? undefined : key)}>
-                <span className="error-log-entry-title" title={entry.message}>{entry.message}</span>
-                <span className="error-log-entry-meta">
-                  <span className="error-log-time">{formatEntryTime(entry.at)}</span>
-                  <span className="error-log-source" title={entry.source}>{entry.source}</span>
-                </span>
-                <ChevronDown className={`error-log-caret${open ? ' is-open' : ''}`} aria-hidden="true" />
-              </button>
-              <button className="error-log-icon" type="button" aria-label="复制这条记录" title="复制这条记录" onClick={() => void copyEntry(entry)}>
-                <Copy aria-hidden="true" />
-              </button>
-            </div>
-            {open && (
-              <div className="error-log-reveal">
-                <div className="error-log-entry-body">
-                  <h4>错误详情</h4>
-                  <pre className="error-log-code">{detail ?? entry.message}</pre>
-                  {stack && <>
-                    <h4>堆栈跟踪</h4>
-                    <pre className="error-log-code">{stack}</pre>
-                  </>}
-                </div>
-              </div>
-            )}
-          </li>;
+          return <ErrorLogEntryRow
+            key={key}
+            entry={entry}
+            open={openEntry === key}
+            onToggle={() => setOpenEntry(openEntry === key ? undefined : key)}
+            onCopy={() => void copyEntry(entry)}
+          />;
         })}
       </ul>
     </div>}

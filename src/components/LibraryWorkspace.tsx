@@ -239,6 +239,9 @@ interface LibraryWorkspaceProps {
   categoryFilter?: string | undefined;
   onCategoryFilterChange?: ((value: string) => void) | undefined;
   readingProgressByArchiveId?: ReadonlyMap<string, number> | undefined;
+  /** 进度条的位置口径：`history` 只给历史记录页面（首页那一排由它自己的 rail 传），
+   *  别的书架/档案库一律 `elsewhere`——「仅历史记录」档只在那两处画条。 */
+  progressScope?: 'history' | 'elsewhere' | undefined;
   showDetail?: boolean | undefined;
   /** 列表里没有详情栏时（书架、档案库 Shell 的左栏），点卡片就是一次导航：
    * 落到哪个前缀由调用方决定——书架要留在书架上（`/history/:id`），而不是把
@@ -307,7 +310,7 @@ function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): 
   return collapsed ? previous.current : { items, totalSize };
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -995,6 +998,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           title={archive.title}
           tags={archive.tags}
           progressPage={readingProgressByArchiveId?.get(archive.archiveId)}
+          progressScope={progressScope}
           pageCount={archive.pageCount}
           meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
         />
@@ -1024,7 +1028,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             卡片自己的 overflow: hidden + border-radius 把横条两端削成与卡片下缘
             一致的圆角，而这只有横条横跨整张卡时才成立（放在 .archive-row-copy 里
             它只能贴到文案栏的底边，两端是直角，右侧还差一个卡片内边距）。 */}
-        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} cornerAware />
+        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} scope={progressScope} cornerAware />
       </button>
     )}
     {/* The timeline belongs to the list rail, so it sits outside the clickable

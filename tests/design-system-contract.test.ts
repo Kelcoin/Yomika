@@ -591,21 +591,24 @@ describe('design system contract', () => {
     expect(read('src/components/MetadataTagRows.tsx')).toMatch(/Math\.max\(originalWidth, translatedWidth\) \+ 34/);
   });
 
-  it('lays the second-level menu title on the row gutter with the source icon on its left', () => {
+  it('centers the second-level menu title while the preset list keeps its gutter', () => {
     const shell = read('src/styles/shell.css');
     const title = ruleBody(shell, '.settings-choice-title');
-    // 用户报的「头重脚轻」量出来是：居中 20px/700 的标题块 33px、下面第一行 44px，
-    // 头/行重量比 0.80，而内容区只占面板 24% 高（上下各一大段空）。现在标题落到条目行
-    // 的那条视觉栏上（`--space-3` 内缩 + 32px 图标槽 = 设备行的设备图标那一格），
-    // 字号收到 `--text-md`、层级交给字重与颜色说。探针实测：标题文字与设备名同一个 x
-    // （420px 面板上都是 72），标题块 44px = 行高，重量比 1.00，面板高 101 → 118。
-    expect(title).toMatch(/justify-content:\s*flex-start/);
+    // 2026-10-15 用户报「所有设置页面二级菜单的标题都不居中了」：2026-10-14 那轮为了让
+    // 「标题文字与设备名同一个 x」把它改成了 flex-start + 12px 内缩，居中就是那次丢的。
+    // 现在标题的内容块（图标 + 文字）在面板内容区里居中；字号/字重保留那一轮压下来的
+    // `--text-md`/`--weight-semibold`（当时那版居中标题是 20px/700，量出来头重脚轻）。
+    expect(title).toMatch(/justify-content:\s*center/);
+    expect(title, '居中不能被左侧内缩推偏').not.toMatch(/padding-inline-start/);
     expect(title).toMatch(/display:\s*flex/);
-    expect(title).toMatch(/padding-inline-start:\s*var\(--space-3\)/);
     expect(title).toMatch(/font-size:\s*var\(--text-md\)/);
     expect(title).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
     expect(title).toMatch(/gap:\s*var\(--space-3\)/);
-    // 32px 的图标槽与设备行里那枚 `.settings-device-icon` 同宽，文字起点才对得上。
+    // 搜索预设那条标题不跟着居中：它下面是一列预设，标题与行文字左对齐读起来才是一组。
+    const preset = ruleBody(shell, '.search-preset-title');
+    expect(preset).toMatch(/justify-content:\s*flex-start/);
+    expect(preset).toMatch(/padding-inline-start:\s*var\(--space-3\)/);
+    // 32px 的图标槽仍由标题行自己出：标题块的高度与图标尺寸都跟着它。
     expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*32px/);
     expect(shell).toMatch(/\.settings-choice-icon svg \{\s*width:\s*18px;\s*height:\s*18px/);
     const settings = read('src/components/SettingsWorkspace.tsx');
@@ -1622,7 +1625,7 @@ describe('design system contract', () => {
     const source = read('src/components/LibraryWorkspace.tsx');
     // 横条是卡片（那个 button）的直接子元素：只有横跨整张卡，卡片自己的
     // overflow: hidden + border-radius 才能把两端削成与下缘一致的圆角。
-    expect(source).toMatch(/<ArchiveProgressBar page=\{readingProgressByArchiveId\?\.get\(archive\.archiveId\)\} pageCount=\{archive\.pageCount\} cornerAware \/>\s*<\/button>/);
+    expect(source).toMatch(/<ArchiveProgressBar page=\{readingProgressByArchiveId\?\.get\(archive\.archiveId\)\} pageCount=\{archive\.pageCount\} scope=\{progressScope\} cornerAware \/>\s*<\/button>/);
     expect(source).not.toMatch(/<span className="archive-row-copy">\s*<ArchiveProgressBar/);
     expect(shell).not.toMatch(/\.archive-row-copy > \.archive-card-progress\s*\{/);
     const bar = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
@@ -3053,11 +3056,33 @@ describe('the destructive confirmation morphs in place', () => {
   const shell = read('src/styles/shell.css');
   const plain = shell.replace(/\/\*[\s\S]*?\*\//g, '');
 
-  it('opens the pair out to its own full row so both labels fit', () => {
-    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时它跟另外两颗动作平分一行').toMatch(/flex:\s*1 1 0/);
-    expect(ruleBody(shell, '.settings-menu-reset.is-armed'), '变形后占满整行，两枚各分一半').toMatch(/flex:\s*1 1 100%/);
-    expect(ruleBody(shell, '.settings-menu-account-actions'), '变形时整行让位，别把「立即同步」挤扁').toMatch(/flex-wrap:\s*wrap/);
-    expect(ruleBody(shell, '.settings-menu-reset > .secondary-action')).toMatch(/flex:\s*1 1 0/);
+  it('splits the account row into three equal columns, and the pair into two when armed', () => {
+    // 2026-10-15 用户报「部分按钮的宽度不一致了」：真浏览器里量到的是 130 / 130 / 96——
+    // 三项的 flex 都是 `1 1 0px`、`min-width` 都是 0，第三项就是不长到另两项的宽度
+    // （把三项都改成内联 `flex: 1 1 0`、把它的 basis 改成 `0%`、`width: 0`、去掉内层
+    // 按钮的 flex，读数一动不动）。同一行换成 grid 三等分后立刻是 119 / 119 / 119，
+    // 所以判据钉在「排法是三等分」上，而不是钉在那份算不准的 flex 上。
+    expect(ruleBody(shell, '.settings-menu-account-actions'), '三等分整行').toMatch(/display:\s*grid/);
+    expect(ruleBody(shell, '.settings-menu-account-actions')).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时只有常驻那一颗，占满第三列').toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时不能是两列，否则常驻那颗只拿到半格').not.toMatch(/repeat\(2/);
+    expect(ruleBody(shell, '.settings-menu-reset.is-armed'), '变形后跨满三列，两枚各分一半').toMatch(/grid-column:\s*1\s*\/\s*-1/);
+    expect(ruleBody(shell, '.settings-menu-reset.is-armed')).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    // 三等分把每颗压到 96px（390px 宽的手机）：4 个汉字 + 17px 图标 + 两侧 16px 内边距
+    // 量出来 103，会被 overflow:hidden 裁掉——所以这一行的内边距与图标间距各收一档，
+    // 360px 上再收一档图标与间距（真浏览器实测：390 与 360 下 scrollWidth == clientWidth）。
+    expect(shell, '这一行的内边距与图标间距各收一档').toMatch(/\.settings-menu-account-actions > \.primary-action,[\s\S]{0,260}?padding-inline:\s*var\(--space-2\)/);
+    expect(shell, '360px 上再收图标与间距').toMatch(/@media \(max-width: 380px\)[\s\S]{0,420}?\.settings-menu-reset > \.secondary-action svg \{ width: 15px/);
+  });
+
+  it('draws the account glyph once, on the menu title, and not again in the row', () => {
+    // 用户报「同步界面上下的 LOGO 是重复的」：标题的图标槽里已经有一枚 `<Waypoints>`，
+    // 账户行里又画了一枚同样的图形。一屏里同一枚图形只画一次——行里那枚去掉了，
+    // 连它那条样式也一起删（留着就是死规则）。
+    expect(read('src/components/SettingsWorkspace.tsx'), '行里不再画第二枚').not.toMatch(/settings-menu-account-glyph/);
+    expect(read('src/styles/shell.css'), '样式也不留死规则').not.toMatch(/settings-menu-account-glyph/);
+    // 行首那一列本来是给图标的：去掉之后网格只剩一列，名称才不会被挤进图标宽里。
+    expect(ruleBody(read('src/styles/shell.css'), '.settings-menu-account')).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   });
 
   it('animates the morph instead of snapping between two button sets', () => {
@@ -3125,4 +3150,31 @@ it('keeps the generated capability snapshot in step with the hand-written ones',
     expect(snapshot?.permissions).toEqual(capability.permissions);
     expect(snapshot?.local, '生成器给每条 capability 补的 local: true').toBe(true);
   }
+});
+
+it('keeps 仅历史记录 scoped to the two places the setting means', () => {
+  // 用户的原话：「仅历史记录是指仅在首页历史记录组件和历史记录页面内显示进度条，全部是指
+  // 所有有进度的不管在什么页面都显示进度条」。位置由调用方声明（`progressScope`），组件不
+  // 猜路由——这一条钉住那两处真的声明了，免得以后改动丢掉它们，设置又变成「改了没反应」。
+  const routes = read('src/app/routes.tsx');
+  // 首页那一排：继续阅读是历史派生出来的。这一处 rail 写成一行，按行找最稳
+  // （属性里就有 `>`，正则跨不过去）。
+  const continueRail = routes.split(/\r?\n/).find((line) => line.includes('title="继续阅读"')) ?? '';
+  expect(continueRail, '首页那一排没有声明位置').toContain('progressScope="history"');
+  // 历史记录页面：书架的列表只有 name === 'history' 才算历史那两处之一。
+  const shelfStart = routes.indexOf('readingProgressByArchiveId={progressByArchiveId}');
+  expect(shelfStart, '书架的列表没接进度').toBeGreaterThan(-1);
+  expect(routes.slice(shelfStart, shelfStart + 200), '书架没有声明位置').toContain(
+    "progressScope={name === 'history' ? 'history' : 'elsewhere'}",
+  );
+
+  const card = read('src/components/ArchiveThumbnailCard.tsx');
+  expect(card, '档位决定画不画、位置决定在哪儿画').toMatch(
+    /const allowed = mode === 'all' \|\| \(mode === 'history' && scope === 'history'\);/,
+  );
+  expect(card, '「有进度」仍要先成立').toMatch(/const read = typeof page === 'number' && page >= 1;/);
+
+  const workspace = read('src/components/LibraryWorkspace.tsx');
+  expect(workspace, '档案库列表里两处进度条都要带上位置').toMatch(/scope=\{progressScope\} cornerAware/);
+  expect(workspace).toMatch(/progressScope=\{progressScope\}/);
 });

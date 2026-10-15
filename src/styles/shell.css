@@ -829,12 +829,18 @@ body::-webkit-scrollbar,
 
 /* 新长出来的那一段（一条记录的详情、相关信息、第一次读回来的列表）自己走一段
    0fr → 1fr 的网格行进场：面板的高度变化是「长出来」，不是硬跳一截。
-   **只做进场**：收起要动画就得把内容一直挂在 DOM 里（测试与读屏都按「收起即不在
-   文档里」判），而这一段内容只在展开时才该存在。 */
+   收起也要有动画（用户报的「只有展开有动画，收起没有」）：节点由 `useDelayedUnmount`
+   多留一拍（`--duration-exit`，见 ErrorLogPanel 的 `REVEAL_EXIT_MS`），这一拍里挂上
+   `.is-leaving` 往回播同一条网格行——播完才摘掉，所以「收起即不在文档里」仍然成立，
+   只是迟了一个出场时长。 */
 .error-log-reveal {
   display: grid;
   grid-template-rows: 1fr;
   animation: error-log-reveal var(--motion-standard) backwards;
+}
+
+.error-log-reveal.is-leaving {
+  animation: error-log-collapse var(--duration-exit) var(--ease-exit) forwards;
 }
 
 /* 列表自己就是滚动容器（`overflow: auto`）：别让这条通配把它的滚动压没。 */
@@ -847,7 +853,15 @@ body::-webkit-scrollbar,
   from { grid-template-rows: 0fr; opacity: 0; }
 }
 
-@media (prefers-reduced-motion: reduce) { .error-log-reveal { animation: none; } }
+@keyframes error-log-collapse {
+  to { grid-template-rows: 0fr; opacity: 0; }
+}
+
+/* 两条都要停：`.error-log-reveal.is-leaving` 比上面那条通配更具体，媒体查询不改变
+   优先级，只写 `.error-log-reveal` 的话收起那半截在「减少动态效果」下照样会播。 */
+@media (prefers-reduced-motion: reduce) {
+  .error-log-reveal, .error-log-reveal.is-leaving { animation: none; }
+}
 
 /* 展开的那一段：错误详情 + 堆栈跟踪，各一个框。**这里必须自己声明字体**：`<pre>` 在
    UA 样式表里有 `font-family: monospace`，继承不到 `html` 上那一族——上一轮把写死的
@@ -1210,8 +1224,7 @@ body::-webkit-scrollbar,
   padding: var(--space-2) var(--space-4);
 }
 
-.settings-row-icon,
-.settings-menu-account-glyph {
+.settings-row-icon {
   display: grid;
   place-items: center;
   width: 24px;
@@ -3974,34 +3987,58 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   margin-block-start: var(--space-3);
 }
 
-/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 各占一份宽度，谁也不折行。
-   `wrap` 只为「重置远端」那一下变形留着：它变成两枚胶囊时要占满整行，否则在窄面板里
-   两枚都挤成一行放不下四个字。未变形时三项的 `flex-basis` 是 0，收缩而不会换行。 */.settings-menu-account-actions {
-  display: flex;
-  flex-wrap: wrap;
+/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 **三等分整行**，谁也不折行。
+   为什么不是 `flex: 1 1 0`：2026-10-15 在真浏览器里量过，三项算出来的 flex 都是
+   `1 1 0px`、`min-width` 都是 0，可这一行量出来是 130 / 130 / 96——第三项
+   （`.settings-menu-reset` 那枚常驻按钮）就是不肯长到另两项的宽度；把三项都改成内联
+   `flex: 1 1 0`、把它的 basis 改成 `0%`、`width: 0`、`min-width: 0`、去掉内层按钮的
+   flex，读数一动不动。同一行换成 `grid-template-columns: repeat(3, minmax(0, 1fr))`
+   立刻是 119 / 119 / 119。所以用 grid：三等分由排法本身给出，不依赖浏览器怎么算那份
+   基准尺寸。 */
+.settings-menu-account-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
+/* 三等分之后，窄面板（390px 宽的手机）每颗只剩 96px（列宽 98 减两侧边框）：4 个汉字
+   + 17px 图标 + 4px 间距 + 两侧 16px 内边距量出来是 103，会被 overflow:hidden 裁掉。
+   这一行的内边距收一档（16→8）、图标间距收一档（8→4），需要 90 ≤ 96 才写得下——
+   只收这一行，其它按钮仍是 16。 */
 .settings-menu-account-actions > .primary-action,
-.settings-menu-account-actions > .secondary-action {
-  flex: 1 1 0;
+.settings-menu-account-actions > .secondary-action,
+.settings-menu-reset > .secondary-action {
   min-width: 0;
+  padding-inline: var(--space-2);
+  gap: var(--space-1);
+}
+
+/* 360px 宽的手机上三颗只剩 86px（列宽 88 减边框），上面那 90 还差 4px：这一档只把
+   图标与间距再各收一点（17→15、4→2），字号与内边距不动。 */
+@media (max-width: 380px) {
+  .settings-menu-account-actions > .primary-action svg,
+  .settings-menu-account-actions > .secondary-action svg,
+  .settings-menu-reset > .secondary-action svg { width: 15px; height: 15px; }
+
+  .settings-menu-account-actions > .primary-action,
+  .settings-menu-account-actions > .secondary-action,
+  .settings-menu-reset > .secondary-action { gap: 2px; }
 }
 
 /* 破坏性动作的「原地变形」：一颗常驻按钮 + 一条件件长出来的对手方。
-   变形时这一组占满整行，两枚胶囊各分一半——它们要写得下「确认重置」四个字。 */
+   未变形时它只装着那一颗按钮——**一列**，那颗按钮占满第三列（119 而不是 55：
+   2026-10-15 第一版给这里写死了两列，常驻那颗只拿到半格，宽度又跟旁边两颗不一样）。
+   变形时这一组跨满三列，两枚胶囊各分一半——它们要写得下「确认重置」四个字。 */
 .settings-menu-reset {
-  display: flex;
-  flex: 1 1 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: var(--space-2);
 }
 
-.settings-menu-reset.is-armed { flex: 1 1 100%; }
-
-.settings-menu-reset > .secondary-action {
-  flex: 1 1 0;
-  min-width: 0;
+.settings-menu-reset.is-armed {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* 变形的那一帧：那颗按钮轻轻张开（同一个节点换了图标与标签），对手方从左边淡入。
@@ -5174,23 +5211,38 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    来就是用户报的「头重脚轻」。现在标题落到 `--text-md`/`--weight-semibold`，把「比
    正文重」交给字重与颜色（`--on-surface`）说，不靠字号；标题块 44px = 行高，重量比
    1.0，一行标题正好是一行的高度。 */
-.search-preset-title,
-.settings-choice-title {
+/* 二级菜单的标题**居中**：图标 + 文字作为一个整体落在面板内容区的正中。
+   2026-10-14 那轮为了「标题与行文字起点对齐」把它改成过 `flex-start` + 12px 缩进，
+   2026-10-15 用户明确要求「设置页面二级菜单的标题都要居中」，这里改回来。
+   搜索预设那条标题不跟着走：它下面是一列预设，标题跟行起点左对齐读起来才是一组。
+   两处共用的字号/字重保留 2026-10-14 压下来的 `--text-md`/`--weight-semibold`
+   （当时 20px/700 被指「头重脚轻」——头比行还轻、四周留白又厚）。 */
+.search-preset-title {
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: var(--space-3);
   /* 标题行里可能钉着菜单自己的动作（层参数说明的问号），它相对这一行定位。 */
   position: relative;
-  /* 图标槽那份内缩只给标题，不给这一行本身：`.settings-choice-action` 钉在行右端，
+  /* 图标槽那份内缩只给这条标题，不给标题行本身：`.settings-choice-action` 钉在行右端，
      整行内缩会让它跟着挪。 */
   padding-inline-start: var(--space-3);
   margin: 0 0 var(--space-2);
   color: var(--on-surface);
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
-  /* 32px 的图标槽 + gap，标题与设备行的文字起点对齐：两个数都由这一行自己出，
-     锚点漂了就一起漂。 */
+}
+
+.settings-choice-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  position: relative;
+  margin: 0 0 var(--space-2);
+  color: var(--on-surface);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
 }
 
 .settings-choice-icon {
@@ -5406,29 +5458,23 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   overflow-wrap: anywhere;
 }
 
-/* Account rows inside a menu: the same three-column anatomy as a settings row,
-   with the sync action sitting where the value would. 行间距为零：动作那一层的
-   间隔由它自己的 margin 出（见 .settings-menu-account > .sync-collapsible），
-   收起时才不会白占一道缝。 */.settings-menu-account {
+/* Account rows inside a menu: 名称那一行 + 动作/表单那一层，两层都铺满整宽。
+   2026-10-15 之前这里还有第三样东西——行首那枚和标题图标槽一模一样的 `<Waypoints>`
+   （用户报的「同步界面上下的 LOGO 是重复的」），去掉之后网格只剩一列：`auto` 那一列
+   本来是给图标的，留着会让名称挤在图标宽里、长端点把面板顶宽。
+   行间距为零：动作那一层的间隔由它自己的 margin 出（见
+   .settings-menu-account > .sync-collapsible），收起时才不会白占一道缝。 */
+.settings-menu-account {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 0 var(--space-3);
+  gap: 0;
   min-height: 56px;
   padding: var(--space-2);
   /* 同心圆角，和同面板的其它行一致；这个规则本身透明，但用户设备行会画出悬停
      填充，所以半径仍按面板算（28 − 16 = 12）。 */
   border-radius: var(--radius-card);
 }
-
-.settings-menu-account-glyph {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  color: var(--on-surface-variant);
-}
-
-.settings-menu-account-glyph svg { width: 20px; height: 20px; }
 
 .settings-menu-account-copy {
   display: grid;

@@ -188,6 +188,39 @@ describe('error log panel', () => {
     expect(copied).toContain('提交: abcdef123456');
   });
 
+  /** 收起也要有动画（用户报的「错误日志菜单只有展开有动画，收起没有」）。
+   *
+   *  条件是节点在收起后多留一拍：直接条件渲染会在点击那一下把子树摘掉，CSS 里那条出场
+   *  动画永远来不及播。这里按「留在树上 + `is-leaving` + 对读屏已隐藏 + 一拍之后真的摘」
+   *  四件事对账，jsdom 里没有排版，动画本身仍按源码对账（下一条）。 */
+  it('keeps a folded region mounted for the exit beat before it leaves the document', async () => {
+    const user = userEvent.setup();
+    serve([windowEntry]);
+    renderPanel();
+
+    const toggle = await screen.findByRole('button', { name: /Uncaught Error: boom/ });
+    await user.click(toggle);
+    expect(screen.getByText('错误详情')).toBeInTheDocument();
+
+    await user.click(toggle);
+    const leaving = document.querySelector('.error-log-reveal.is-leaving');
+    expect(leaving).not.toBeNull();
+    // 正在收的那一段对读屏已经不算「在页面上」了，摘除只晚一拍。
+    expect(leaving?.getAttribute('aria-hidden')).toBe('true');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+    await waitFor(() => expect(document.querySelector('.error-log-reveal.is-leaving')).toBeNull(), { timeout: 2_000 });
+    expect(screen.queryByText('错误详情')).not.toBeInTheDocument();
+
+    // 「相关信息」走同一条路：折起来的那半拍也挂在树上。
+    const facts = await screen.findByRole('button', { name: '相关信息' });
+    await user.click(facts);
+    expect(screen.getByText('编译信息')).toBeInTheDocument();
+    await user.click(facts);
+    expect(document.querySelector('.error-log-facts .error-log-reveal.is-leaving')).not.toBeNull();
+    await waitFor(() => expect(document.querySelector('.error-log-facts .error-log-reveal')).toBeNull(), { timeout: 2_000 });
+  });
+
   /** 面板的高度变化要能读出「长出来」这件事：jsdom 里没有排版，动画只能按源码对账。
    *  （用户报的「错误日志页面的高度变化没有动画」。） */
   it('grows every expandable region instead of jumping', () => {
@@ -198,14 +231,21 @@ describe('error log panel', () => {
     expect(reveal).toContain('grid-template-rows: 1fr');
     expect(reveal).toMatch(/animation: error-log-reveal var\(--motion-standard\)/);
     expect(css).toMatch(/@keyframes error-log-reveal \{\s*from \{ grid-template-rows: 0fr;/);
+    // 收起是同一个网格行往回走：节点靠 `useDelayedUnmount` 多留 `--duration-exit` 才摘。
+    expect(css).toMatch(/\.error-log-reveal\.is-leaving \{[^}]*animation: error-log-collapse var\(--duration-exit\) var\(--ease-exit\) forwards;/);
+    expect(css).toMatch(/@keyframes error-log-collapse \{\s*to \{ grid-template-rows: 0fr;/);
     // 剪掉滚动：不然 0fr 那一格还是会被内容撑开。
     expect(css).toMatch(/\.error-log-reveal > :not\(\.error-log-list\) \{[^}]*overflow: hidden;/);
     // 列表自己是滚动容器，别被上面那条压掉。
     expect(css).toMatch(/\.error-log-reveal > :not\(\.error-log-list\)/);
-    expect(css).toMatch(/prefers-reduced-motion[^}]*\{[^}]*\.error-log-reveal \{ animation: none; \}/);
+    // 减少动态效果时两条都要停：`.is-leaving` 比通配更具体，只写前者收起那半截照样会播。
+    expect(css).toMatch(/prefers-reduced-motion[^}]*\{[^}]*\.error-log-reveal, \.error-log-reveal\.is-leaving \{ animation: none; \}/);
 
     // 三处会改高度的内容都住在 reveal 里：列表、一条记录的详情、相关信息。
     const source = read('src/components/ErrorLogPanel.tsx');
-    expect(source.match(/className="error-log-reveal"/g) ?? []).toHaveLength(3);
+    // 列表那一块是静态类名；另外两处是可收起的，类名要按 `leaving` 拼，所以是模板串。
+    expect(source.match(/className="error-log-reveal"/g) ?? []).toHaveLength(1);
+    expect(source.match(/className=\{`error-log-reveal\$\{/g) ?? []).toHaveLength(2);
+    expect(source.match(/useDelayedUnmount\(/g) ?? []).toHaveLength(2);
   });
 });

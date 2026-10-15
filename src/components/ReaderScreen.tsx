@@ -13,6 +13,7 @@ import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowCo
 import { getPlatformCapabilities } from '../bridge/platform';
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
+import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
@@ -42,29 +43,6 @@ const CHROME_AUTO_HIDE_MS = 4_500;
 const INDICATOR_FLASH_MS = 1_800;
 /** 两条栏的出场时长，与 `--duration-exit` 同一个数：CSS 动画播完才把元素摘掉。 */
 const CHROME_EXIT_MS = 260;
-
-/** 一条栏的「淡出之后才摘」。
- *
- * 入场是一条 CSS 动画（挂上去就播），出场要先把元素留在树上把动画播完。这件事原来
- * 交给 `motion` 的 `AnimatePresence`，而它为两条淡入淡出把整个动画运行时拉进了阅读器
- * 这一个 chunk（`ReaderRoute-*.js` 实测含 `motion` 的 visualElement / MotionConfig，
- * 约 55KB gzip）。这里只要一个布尔值和一次定时器。 */
-function useDelayedUnmount(visible: boolean, ms: number): { mounted: boolean; leaving: boolean } {
-  const [state, setState] = useState({ mounted: visible, leaving: false });
-  useEffect(() => {
-    if (visible) {
-      setState((current) => current.mounted && !current.leaving ? current : { mounted: true, leaving: false });
-      return undefined;
-    }
-    setState((current) => current.mounted && !current.leaving ? { mounted: true, leaving: true } : current);
-    const timer = window.setTimeout(
-      () => setState((current) => current.mounted || current.leaving ? { mounted: false, leaving: false } : current),
-      ms,
-    );
-    return () => window.clearTimeout(timer);
-  }, [visible, ms]);
-  return state;
-}
 
 /** 一根盒子：左/上角在视口里的位置 + 尺寸。量不到（还没布局）时按视口兜底，感应带总得
  * 有个数可用。 */

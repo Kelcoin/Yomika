@@ -507,6 +507,9 @@ describe('library workspace', () => {
       archives: archives.slice(0, 1),
       cardStyle: 'wide',
       readingProgressByArchiveId: new Map([['archive-0', 40]]),
+      // 这一条量的是横条贴在哪儿，不是档位：默认档（仅历史记录）下档案库本来就不画条，
+      // 所以把这张卡放在「历史那两处」的位置上，让横条真的渲染出来。
+      progressScope: 'history',
     });
 
     const card = screen.getByRole('button', { name: /^Archive 0\b/ });
