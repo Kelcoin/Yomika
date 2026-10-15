@@ -108,6 +108,30 @@ it('leaves the top button where it was when the floating bar parks instead of sl
   expect(button.style.right).toBe(parked.right);
 });
 
+it('keeps the top button parked even when the collapsed bar measures nothing', () => {
+  // 收起期间底栏量出 0 宽（换合成层，或者将来某天改成 display:none）。那时该做的是**停在
+  // 原地**，而不是把按钮撤掉：撤掉同样会闪一下，只是闪的方向不同。这一段排在「量不到底栏
+  // 就隐藏圆盘」之前，判据就是这条顺序。
+  let navWidth = 200;
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const nav = this.classList.contains('compact-nav');
+    return { left: nav ? 100 : 0, right: nav ? 100 + navWidth : 44, top: nav ? 700 : 0, bottom: nav ? 764 : 44, width: nav ? navWidth : 44, height: nav ? 64 : 44 } as DOMRect;
+  });
+  const host = renderShell();
+  const button = screen.getByRole('button', { name: '返回顶部' });
+  const nav = screen.getByRole('navigation', { name: '移动导航' });
+  expect(button).toHaveAttribute('data-placement', 'beside');
+  const parked = { right: button.style.right, bottom: button.style.bottom };
+  host.scrollTop = 120;
+  fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  navWidth = 0;
+  fireEvent(window, new Event('resize'));
+  expect(screen.getByRole('button', { name: '返回顶部' })).toBe(button);
+  expect(button.style.right).toBe(parked.right);
+  expect(button.style.bottom).toBe(parked.bottom);
+});
+
 it('coalesces card drags into one frame and leaves sideways rails native', () => {
   const frames: FrameRequestCallback[] = [];
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });

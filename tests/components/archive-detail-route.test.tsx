@@ -458,6 +458,19 @@ describe('archive detail route', () => {
     await vi.waitFor(() => expect(within(rail).getByRole('tab', { name: '同作者' })).toBeEnabled());
     // The strip carries the class the width animation keys off.
     expect(document.querySelector('.archive-recommendations-tabs.has-creator')).not.toBeNull();
+    // tablist 的直接子节点只能是自己就是 tab 的、或者标了 presentation/none 的纯包装：
+    // 中间夹一个没有角色的通用节点，读屏就可能不再把创建者那个 tab 算作这条 tablist 的
+    // 页签（testing-library 不看归属，所以光靠 getByRole 发现不了）。宽度动画那个 span
+    // 就是这种包装，它必须自己声明没有语义。
+    const tablist = rail.querySelector('.archive-recommendations-tabs');
+    expect(tablist).not.toBeNull();
+    for (const child of Array.from(tablist!.children)) {
+      expect(
+        ['tab', 'presentation', 'none'],
+        `tablist 的子节点 ${child.className || child.tagName} 缺少角色：包装节点要写 role="presentation"`,
+      ).toContain(child.getAttribute('role'));
+    }
+    expect(tablist!.querySelector('.archive-recommendations-tab-creator')).not.toBeNull();
   });
 
   it('requests page thumbnails only when they approach the viewport', async () => {

@@ -205,16 +205,20 @@ export function AppShell({ children }: AppShellProps) {
     const button = topButtonRef.current;
     if (!nav || !button || !floatingNav) { setTopPosition(undefined); return; }
     const measure = () => {
-      const bar = nav.getBoundingClientRect();
-      if (getComputedStyle(nav).display === 'none' || bar.width <= 0) { setTopPosition(undefined); return; }
       // 底栏收起与圆盘淡出是同一次滚动的两个结果（都在 `handleScroll` 里），而两种停法
       // 的落点差着几百像素：贴着胶囊（`beside`）vs 贴屏幕右下角（`above`）。照常重算的
       // 话，用户看到的就是「淡出到一半往右瞬移再消失」。底栏一收起，圆盘就留在它刚才待
       // 的地方——此刻它自己也在淡出，没人看得见；等滚回来时底栏已经先回来，那时再重算。
+      //
+      // 这一段必须排在「量不到底栏就把圆盘藏起来」之前：底栏收起时它可能量出 0 宽（动画
+      // 期间换合成层，或者将来某天改成 display:none），那时该做的是**停在原地**，而不是
+      // 把按钮直接撤掉——撤掉同样会闪，只是闪的方向不同。
       if (compactNavHidden) {
         const parked = parkedTopPositionRef.current;
         if (parked) { setTopPosition(parked); return; }
       }
+      const bar = nav.getBoundingClientRect();
+      if (getComputedStyle(nav).display === 'none' || bar.width <= 0) { setTopPosition(undefined); return; }
       const disc = button.getBoundingClientRect();
       const tokens = getComputedStyle(document.documentElement);
       const safeRight = parseFloat(tokens.getPropertyValue('--safe-right')) || 0;

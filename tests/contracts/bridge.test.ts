@@ -92,7 +92,7 @@ describe('typed invoke bridge', () => {
   });
 });
 
-it('returns network failures unchanged without logging them, including binary commands', async () => {
+it('returns network failures unchanged and writes them, including binary commands', async () => {
   const written: ErrorLogRecord[] = [];
   setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
   const failure = { ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } };
@@ -103,7 +103,10 @@ it('returns network failures unchanged without logging them, including binary co
   expect(await invokeCommand('probe', {}, z.string())).toMatchObject({ ok: false });
   expect(await invokeBinaryCommand('image', {})).toMatchObject({ ok: false });
   await flushErrorLog();
-  expect(written).toHaveLength(0);
+  // 「连不上服务器」要留下现场（2026-10-15 复核）：两条 NETWORK 各写一条，界面照旧拿到
+  // 原样的失败。静音名单只收「设计上会自己过去」的退让，不收传输故障。抛出来的 TypeError
+  // 没有码，桥不替它编一个，所以不写。
+  expect(written.map((record) => record.message)).toEqual(['NETWORK: offline', 'NETWORK: offline']);
 });
 
 it('retains remote protocol and engine diagnostics carried by REMOTE_UNAVAILABLE', async () => {

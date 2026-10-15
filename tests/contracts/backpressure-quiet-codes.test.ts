@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -75,6 +78,47 @@ describe('backpressure codes stay out of the error log', () => {
       expect(records).toEqual([]);
     });
   }
+
+  // 反例之二：「连不上服务器」不是「现在就是这样」。2026-10-15 的独立复核指出，把
+  // `NETWORK` / `REMOTE_TIMEOUT` 这一族也静音，会让「服务器地址写错」「DNS/代理/TLS
+  // 不通」「缩略图正文被截断」这类最常见的误配置在日志里一个字都不留——界面上照常报错，
+  // 丢掉的恰恰是要查的那个现场。判据是「再试一次还会不会这样」。
+  //
+  // 这一组只能用 `DomainErrorCodeSchema` 里登记过的码：没登记的码会让桥把**整条**错误
+  // 信封判成 `INVALID_RESPONSE`，日志里留下的是「Native command returned an invalid
+  // response」，真正的理由反而看不见（`src/domain/errors.ts:60-65` 记的就是这个坑）。
+  for (const code of ['NETWORK', 'REMOTE_TIMEOUT', 'REMOTE_RATE_LIMIT', 'REMOTE_UNAVAILABLE', 'EH_UNAVAILABLE']) {
+    it(`still writes a ${code} failure: 连不上是要查的现场，不是正常状态`, async () => {
+      setInvokeAdapterForTests(async () => ({
+        ok: false as const,
+        error: { code, message: '无法连接 LANraragi：error sending request for url (http://192.168.50.9:3000/api/info)', retryable: true },
+      }));
+
+      const result = await invokeCommand('save_server', {}, z.unknown());
+      await flushErrorLog();
+
+      expect(result.ok).toBe(false);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.source).toBe('bridge/save_server');
+      expect(records[0]?.message).toBe(`${code}: 无法连接 LANraragi：error sending request for url (http://192.168.50.9:3000/api/info)`);
+    });
+  }
+
+  it('keeps the bridge list and the native log filter on exactly the same codes', () => {
+    // 两侧名单是各写一份的（`src/domain/errors.ts` 的 `QUIET_ERROR_CODES` 与
+    // `src-tauri/src/error_log.rs` 的 `expected_outcome`，后者按消息第一个词判）。
+    // 只改一边就会出现「TS 侧不记、Rust 侧记」（或反过来），而两边各自看起来都对。
+    const tsSource = readFileSync(resolve(__dirname, '../../src/domain/errors.ts'), 'utf8');
+    const tsList = tsSource.match(/QUIET_ERROR_CODES[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/)?.[1] ?? '';
+    const tsCodes = [...tsList.matchAll(/'([A-Z][A-Z0-9_]*)'/g)].map((match) => match[1]!).sort();
+
+    const rustSource = readFileSync(resolve(__dirname, '../../src-tauri/src/error_log.rs'), 'utf8');
+    const rustFn = rustSource.match(/fn expected_outcome\(message: &str\) -> bool \{([\s\S]*?)\n\}/)?.[1] ?? '';
+    const rustCodes = [...rustFn.matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((match) => match[1]!).sort();
+
+    expect(tsCodes.length).toBeGreaterThan(10);
+    expect(rustCodes).toEqual(tsCodes);
+  });
 
   it('still writes a submit rejection that is a real answer', async () => {
     // 反例：指名了一个这台机器上没有的模型是**真的没成**（`COMPUTE_MODEL_UNAVAILABLE`），

@@ -77,6 +77,12 @@ export function longPressHandlers(open: (at: { x: number; y: number }) => void) 
     },
     onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => cancel(holdOf(event.currentTarget)),
     onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => cancel(holdOf(event.currentTarget)),
+    // 这一段的职责只有一件：**长按之后紧接着合成出来的那一次 click 不能再去触发别的动作**
+    // （菜单已经开了）。所以抑制窗口**之内**照样吞掉点击，窗口过了才放行——不是「窗口内
+    // 放行」（8182ca3 的提交说明把方向写反了，代码与测试才是准的）。
+    //
+    // 300 ms 是经典合成点击延迟的量级：留这个窗口是为了让「按住→松手」那一下的 click 落在
+    // 窗口里，而把 `held` 清掉是为了不让这个标志一直挂着、吃掉很久之后一次无关的点击。
     onClickCapture: (event: ReactMouseEvent<HTMLElement>) => {
       const hold = holds.get(event.currentTarget);
       if (!hold?.held) return;

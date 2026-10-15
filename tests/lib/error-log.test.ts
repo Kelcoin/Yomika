@@ -65,7 +65,8 @@ describe('error log', () => {
 
 it('drops expected outcomes but preserves unknown network-related bugs', async () => {
   const written = collect();
-  for (const code of ['COMPUTE_QUEUE_FULL', 'CANCELLED', 'ABORTED', 'NETWORK', 'REMOTE_TIMEOUT']) {
+  // 名单里的：设计上会自己过去的退让，以及用户自己关掉的登录窗口。
+  for (const code of ['COMPUTE_QUEUE_FULL', 'CANCELLED', 'ABORTED', 'EH_LOGIN_WINDOW_CLOSED']) {
     logError('reader', 'operation failed', { error: { code, message: 'try again' } });
     logError('reader', { code, message: 'try again' });
   }
@@ -73,8 +74,22 @@ it('drops expected outcomes but preserves unknown network-related bugs', async (
   logError('promise', new TypeError('Failed to fetch'));
   logError('reader', 'network decoder invariant failed');
   logError('reader', { code: 'GPU_OUTPUT_INVALID', message: 'bad output' });
+  // 不在名单里的「连不上服务器」：地址写错、DNS/代理不通、正文截断都落到这几个码上，
+  // 它是要查的现场，必须留下（2026-10-15 复核；两边名单一致由
+  // tests/contracts/backpressure-quiet-codes.test.ts 钉住）。
+  for (const code of ['NETWORK', 'REMOTE_TIMEOUT']) {
+    logError('reader', 'operation failed', { error: { code, message: 'try again' } });
+    logError('reader', { code, message: 'try again' });
+  }
   await flushErrorLog();
-  expect(written).toHaveLength(2);
+  expect(written.map((record) => record.message).sort()).toEqual([
+    'GPU_OUTPUT_INVALID: bad output',
+    'NETWORK: try again',
+    'REMOTE_TIMEOUT: try again',
+    'network decoder invariant failed',
+    'operation failed',
+    'operation failed',
+  ]);
 });
 it('preserves rejection codes and names for filtering', async () => {
   const written = collect();

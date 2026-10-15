@@ -402,16 +402,21 @@ fn error_log_write(app: &tauri::AppHandle, entry: &ErrorLogEntry) -> CommandResu
 
 // Only explicit outcome codes are quiet. Never suppress arbitrary messages
 // containing words such as "network": schema/engine faults need diagnostics.
+//
+// 「连不上服务器」这一类**不在**名单里（2026-10-15 的独立复核指出）：服务器地址写错、
+// TLS/代理/DNS 不通、正文被截断，最终都落到同一个 `NETWORK` 上，静音它等于用户报
+// 「连不上」时日志里一个字都没有。名单只收**设计上就会自己过去**的退让（队列满/忙/取消）
+// 与**用户自己点名要静音**的那一类（本体更新检查）。两侧名单（这里与
+// `src/domain/errors.ts` 的 `QUIET_ERROR_CODES`）由
+// `tests/contracts/backpressure-quiet-codes.test.ts` 钉住一致。
 fn expected_outcome(message: &str) -> bool {
     let code = message.trim_start().split(|ch: char| ch == ':' || ch == '：' || ch.is_whitespace()).next().unwrap_or("");
     matches!(code,
-        "LRR_NOT_FOUND" | "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
+        "LRR_NOT_FOUND" | "EH_LOGIN_WINDOW_CLOSED" |
+        "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
         "COMPUTE_QUEUE_FULL" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_BUSY" |
         "APP_RELEASE_CHECK_FAILED" | "APP_RELEASE_UNREACHABLE" |
-        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" |
-        "NETWORK" | "REMOTE_TIMEOUT" | "REMOTE_RATE_LIMIT" |
-        "EH_UNAVAILABLE" | "EH_LOGIN_WINDOW_CLOSED" |
-        "ECONNRESET" | "ECONNREFUSED" | "ETIMEDOUT" | "ENOTFOUND" | "ERR_NETWORK" | "ERR_CANCELED")
+        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" | "ERR_CANCELED")
 }
 
 fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> CommandResult<()> {
@@ -537,11 +542,16 @@ mod tests {
     fn expected_outcomes_never_create_a_log_file() {
         let dir = std::env::temp_dir().join(format!("yomika-quiet-outcomes-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        for message in ["COMPUTE_QUEUE_FULL: busy", "INFERENCE_CANCELLED：stopped", "NETWORK: offline", "ABORTED"] {
+        for message in ["COMPUTE_QUEUE_FULL: busy", "INFERENCE_CANCELLED：stopped", "ABORTED", "EH_LOGIN_WINDOW_CLOSED: user closed it"] {
             record_at_data_dir(&dir, "error", "test", message, None).expect("quiet outcome");
         }
         assert!(!dir.exists());
-        for message in ["REMOTE_UNAVAILABLE: protocol or engine failure", "GPU_OUTPUT_INVALID: corrupt", "network decoder invariant failed", "INVALID_RESPONSE: network response malformed"] {
+        for message in ["REMOTE_UNAVAILABLE: protocol or engine failure", "GPU_OUTPUT_INVALID: corrupt", "network decoder invariant failed", "INVALID_RESPONSE: network response malformed",
+            // 「连不上服务器」必须留下现场：地址写错、DNS/代理不通、正文被截断最终都落到
+            // 这几个码上，静音它们等于用户报「连不上」时日志里一个字都没有。
+            "NETWORK: offline", "REMOTE_TIMEOUT: slow server", "REMOTE_RATE_LIMIT: 429",
+            "ENOTFOUND: dns", "ECONNRESET: reset", "ECONNREFUSED: refused", "ETIMEDOUT: timed out",
+            "EH_UNAVAILABLE: blocked", "ERR_NETWORK: fetch failed"] {
             assert!(!expected_outcome(message));
         }
     }

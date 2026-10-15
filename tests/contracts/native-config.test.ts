@@ -2211,9 +2211,12 @@ describe('native shell configuration', () => {
     );
 
     expect(menu, '长按才发这一下，而且是三个调用点共用的那一处').toContain("        hapticFeedback('medium');");
-    const holdTimer = menu.match(/hold\.timer = window\.setTimeout\(\(\) => \{([\s\S]*?)\}, HOLD_MS\)/)?.[1] ?? '';
-    expect(holdTimer, '和打开菜单同一个定时器里：按住了就一定有反馈').toMatch(
-      /hapticFeedback\('medium'\);\s*open\(\{ x: hold\.x, y: hold\.y \}\);/,
+    // 精确到两行相邻，但先把行尾归一：这份源文件在工作区里是 CRLF，而 `git show` 拿到的是
+    // LF（仓库按 LF 存），所以写死 "\n" 的断言在任何 CRLF 检出上都会失败——8182ca3 那一轮
+    // 正是踩了这个坑才把它放宽成正则（复核说「放宽没有必要」是按 git show 的字节判的，
+    // 那个判断本身不成立）。归一之后既钉住「两行紧挨着、顺序如此」，又不依赖行尾。
+    expect(menu.replace(/\r\n/g, '\n'), '和打开菜单同一个定时器里：按住了就一定有反馈').toContain(
+      "        hapticFeedback('medium');\n        open({ x: hold.x, y: hold.y });",
     );
     expect(haptics, '只有手机有马达，判据就是 UA').toContain('/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)');
     expect(haptics, '发射即忘：反馈拿不到不该把长按弄失败').toContain('.catch(() => {});');

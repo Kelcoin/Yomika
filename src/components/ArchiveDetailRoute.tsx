@@ -659,8 +659,11 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     <div className={`archive-recommendations-tabs${hasCreator ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组">
       <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} disabled={!hasSimilar && hasCreator} onClick={() => setTab('similar')}>推荐</button>
       {/* In the DOM from the start, collapsed to nothing: the segment grows out of
-          the strip rather than popping in and shoving the heading sideways. */}
-      <span className="archive-recommendations-creator-track">
+          the strip rather than popping in and shoving the heading sideways.
+          `role="presentation"` 不是装饰：这个 span 是 tablist 的直接子节点，不加这一条
+          就等于把创建者那个 `role="tab"` 塞进一个通用节点底下——读屏可能不再把它当这条
+          tablist 的页签（testing-library 不看归属，所以测试一直是绿的）。 */}
+      <span className="archive-recommendations-creator-track" role="presentation">
       <button
         type="button"
         role="tab"
