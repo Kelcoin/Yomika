@@ -1,6 +1,7 @@
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { z } from 'zod';
 import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
 import { RetainedPage, usePageActive } from './RetainedPage';
@@ -56,7 +57,7 @@ export function preloadLazyPages(getForegroundPath: () => string = () => '/'): (
 }
 import { scheduleStartupWarmup } from './startupWarmup';
 import { shelfRead, warmShelfSnapshot } from './shelfWarmup';
-import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { CategorySchema, NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
 import { useArchiveSelection } from '../components/useArchiveSelection';
@@ -74,6 +75,8 @@ import { useCardStyle, usePreferences } from './preferences';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
+import { ArchiveRecordSchema, ReadingHistoryRecordSchema, ServerRecordSchema, WatchlistRecordSchema } from '../domain/library';
+import { DomainErrorSchema } from '../domain/errors';
 import type { SearchPreset, Category } from '../repositories/nativeLibraryRepository';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
 
@@ -122,9 +125,24 @@ interface HomeSnapshot {
   randomArchives: ArchiveRecord[];
 }
 
+const HomeSnapshotSchema = z.object({
+  servers: z.discriminatedUnion('ok', [
+    z.object({ ok: z.literal(true), value: ServerRecordSchema.array() }),
+    z.object({ ok: z.literal(false), error: DomainErrorSchema }),
+  ]),
+  history: ReadingHistoryRecordSchema.array(),
+  readingList: WatchlistRecordSchema.array(),
+  archives: ArchiveRecordSchema.array(),
+  randomArchives: ArchiveRecordSchema.array(),
+});
+
 function HomeWorkspace() {
+  const pageActive = usePageActive();
   const { preferences } = usePreferences();
-  const snapshot = readRouteCache<HomeSnapshot>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS);
+  const [snapshot] = useState(() => {
+    const parsed = HomeSnapshotSchema.safeParse(readRouteCache<unknown>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS));
+    return parsed.success ? parsed.data : undefined;
+  });
   const [servers, setServers] = useState<Awaited<ReturnType<NativeLibraryRepository['listServers']>> | undefined>(
     // 快照之外还认会话里读到过的那个答案：这次运行已经问过「有没有服务器」的话，
     // 第一帧就能直接给引导，而不是先空一帧（见 src/lib/serverPresence.ts）。
@@ -143,6 +161,9 @@ function HomeWorkspace() {
    * 服务器只是书架数据变了（翻一页就写一次阅读进度、加收藏、删档案都会广播失效）
    * 就不重抽——随机漫游「自己刷新」正是从那儿来的。 */
   const randomServerRef = useRef<string | undefined>(undefined);
+  const randomRequestRef = useRef(0);
+  const randomOwnerRef = useRef(snapshot?.servers.ok ? pickServer(snapshot.servers.value, null)?.id : undefined);
+  useEffect(() => () => { randomRequestRef.current += 1; }, []);
   /** Re-reads the shelves. Bumping the attempt re-runs the load effect, which is
    * also how the snapshot gets refreshed on demand. */
   const reloadShelves = useCallback(() => setServerLoadAttempt((attempt) => attempt + 1), []);
@@ -155,6 +176,8 @@ function HomeWorkspace() {
     serverId: string,
     context: { showFinished: boolean; progress: ReadonlyMap<string, number> },
   ) => {
+    const request = ++randomRequestRef.current;
+    const ownsRequest = () => randomRequestRef.current === request && randomOwnerRef.current === serverId;
     setRandomLoading(true);
     // 记在这台服务器名下：下一次刷新（失效广播、换服务器）据此判断要不要重抽。
     randomServerRef.current = serverId;
@@ -167,6 +190,7 @@ function HomeWorkspace() {
     const collected = new Map<string, ArchiveRecord>();
     for (let draw = 0; draw < 3 && collected.size < needed; draw += 1) {
       const random = await repository.searchRandomArchives(serverId, 24);
+      if (!ownsRequest()) return;
       if (!random.ok) break;
       for (const archive of random.value) {
         if (accepted(archive)) collected.set(archive.archiveId, archive);
@@ -177,6 +201,7 @@ function HomeWorkspace() {
       // Server could not answer. Sample the newest page from the local mirror
       // rather than reading the whole index to pick that many cards.
       const page = await repository.listArchivesPage(serverId, 0, 60, { sortBy: 'added', order: 'desc' });
+      if (!ownsRequest()) return;
       if (page.ok) {
         const eligible = page.value.items.filter(accepted);
         setRandomArchives(eligible.length > 0 ? pickRandomSample(eligible, needed) : []);
@@ -192,16 +217,24 @@ function HomeWorkspace() {
   useEffect(() => {
     // A fresh snapshot is already on screen; re-resolving the shelves would cost
     // a round trip and draw a different random set for no reason.
-    if (restoredFromSnapshot.current) {
-      restoredFromSnapshot.current = false;
-      return;
-    }
+    if (!pageActive) return;
+    restoredFromSnapshot.current = false;
     let active = true;
     void (async () => {
       setRecentLoading(true);
       setRecentError(undefined);
       const result = await repository.listServers();
       if (!active) return;
+      const nextRandomOwner = result.ok ? pickServer(result.value, null)?.id : undefined;
+      if (randomOwnerRef.current !== nextRandomOwner) {
+        // Shelf re-reads on the same server keep their draw; server changes
+        // retire both remote draws and their pending local fallback.
+        randomRequestRef.current += 1;
+        randomOwnerRef.current = nextRandomOwner;
+        randomServerRef.current = undefined;
+        setRandomArchives([]);
+        setRandomLoading(Boolean(nextRandomOwner));
+      }
       setServers(result);
       if (!result.ok) {
         setRecentLoading(false);
@@ -261,7 +294,7 @@ function HomeWorkspace() {
       setRandomArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })();
     return () => { active = false; };
-  }, [loadRandom, serverLoadAttempt]);
+  }, [loadRandom, serverLoadAttempt, pageActive]);
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
@@ -325,7 +358,7 @@ function HomeWorkspace() {
     writeRouteCache(HOME_SNAPSHOT_KEY, { servers, history, readingList, archives, randomArchives } satisfies HomeSnapshot, { persist: true });
   }, [archives, history, randomArchives, readingList, servers]);
   return (
-    <div className="workspace-home">
+    <div className="workspace-home" data-bounce-surface="">
       {connectionError ? (
         // 与 ServerRequiredPrompt 同一层壳：位置归 `.first-run-page` 管，两个状态才落
         // 在同一个高度上。
@@ -397,7 +430,35 @@ interface ShelfSnapshot {
   categories?: Category[];
 }
 
+const ShelfSnapshotSchema = z.object({
+  needsForegroundVerification: z.boolean().optional(),
+  favoritesSource: z.literal('remote').optional(),
+  favoritesCategoryPresent: z.boolean().optional(),
+  history: ReadingHistoryRecordSchema.array(),
+  // Remote Favorites uses membership placeholders without local timestamps.
+  watchlist: WatchlistRecordSchema.extend({ addedAt: z.string(), updatedAt: z.string(), deviceId: z.string() }).array(),
+  archives: ArchiveRecordSchema.array(),
+  serverId: z.string().min(1),
+  scopeId: z.string().min(1),
+  query: z.string(),
+  categories: CategorySchema.array().optional(),
+});
+
+function readShelfSnapshot(key: string, maxAgeMs?: number) {
+  const parsed = ShelfSnapshotSchema.safeParse(readRouteCache<unknown>(key, maxAgeMs));
+  if (!parsed.success) return undefined;
+  const value = parsed.data;
+  return value.archives.every(archive => archive.serverId === value.serverId)
+    && value.history.every(item => item.scopeId === value.scopeId)
+    && value.watchlist.every(item => item.scopeId === value.scopeId) ? value : undefined;
+}
+
 function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist' | 'toRead'; detailBasePath: string }) {
+  const [searchParams] = useSearchParams();
+  return <StateWorkspaceContent key={JSON.stringify([name, searchParams.get('server')])} name={name} detailBasePath={detailBasePath} />;
+}
+
+function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'watchlist' | 'toRead'; detailBasePath: string }) {
   const pageActive = usePageActive();
   const { showToast } = useToast();
   const [searchParams] = useSearchParams();
@@ -406,10 +467,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   // across them would paint one server's records under the other's shelf.
   const cacheKey = `state:${name}:${serverParam ?? 'default'}`;
   const favoriteFallbackKey = `favorites:last:${serverParam ?? 'default'}`;
-  const snapshot = useRef((() => {
-    if (name !== 'watchlist') return readRouteCache<ShelfSnapshot>(cacheKey);
+  const [snapshot] = useState(() => {
+    if (name !== 'watchlist') {
+      const cached = readShelfSnapshot(cacheKey);
+      return !serverParam || cached?.serverId === serverParam ? cached : undefined;
+    }
     return undefined; // Favorites provenance is checked after resolving the server.
-  })()).current;
+  });
   const verifiedSnapshot = useRef(!snapshot?.needsForegroundVerification);
   const [verificationPending, setVerificationPending] = useState(Boolean(snapshot?.needsForegroundVerification));
   const [favoritesCategoryPresent, setFavoritesCategoryPresent] = useState<boolean>();
@@ -433,6 +497,11 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   categoriesRef.current = categories;
   const [serverId, setServerId] = useState<string | undefined>(snapshot?.serverId);
   const [scopeId, setScopeId] = useState<string | undefined>(snapshot?.scopeId);
+  const loadedShelfServer = useRef(snapshot?.serverId);
+  const shelfIdentity = JSON.stringify([name, serverParam, serverId, scopeId]);
+  const shelfOwner = useRef({ identity: shelfIdentity });
+  if (shelfOwner.current.identity !== shelfIdentity) shelfOwner.current = { identity: shelfIdentity };
+  const currentShelfOwner = shelfOwner.current;
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(!snapshot);
   /** 初值不再无条件写 `true`：会话里已经读到过「一台服务器都没有」时，第一帧就该
@@ -466,10 +535,13 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   }, []);
   /** 历史的多选清理：清掉的是记录，档案留在书架上（历史页）也留在服务器上。 */
   const [clearingHistory, setClearingHistory] = useState(false);
+  useEffect(() => { setClearingHistory(false); }, [shelfIdentity]);
   async function clearHistoryRecords() {
     const ids = [...selection.props.selectedArchiveIds];
     if (!scopeId || ids.length === 0) return;
+    const owner = shelfOwner.current;
     const result = await repository.deleteHistoryRecords(scopeId, ids);
+    if (shelfOwner.current !== owner) return;
     if (!result.ok) {
       showToast(result.error.message, 'error');
       throw new Error(result.error.message);
@@ -480,11 +552,12 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   }
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onMembershipChange: (archiveId, list, next) => {
+      if (shelfOwner.current !== currentShelfOwner) return;
       if (!next && ((name === 'toRead' && list === 'reading') || (name === 'watchlist' && list === 'favorites'))) {
         removeShelfArchives([archiveId]);
       }
     },
-    onDeleted: (archiveId) => removeShelfArchives([archiveId]),
+    onDeleted: (archiveId) => { if (shelfOwner.current === currentShelfOwner) removeShelfArchives([archiveId]); },
   });
   useEffect(() => {
     const handleInvalidation = (event: Event) => {
@@ -520,9 +593,20 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       // 之后才出现的服务器）之后，这一页的提示会一直挂着——装载重跑了、书架也读回
       // 来了，结论却没人撤销。
       setHasServer(true);
+      const changedServer = loadedShelfServer.current !== server.id;
+      loadedShelfServer.current = server.id;
+      if (changedServer) {
+        setCategoryFilter('');
+        setHistory([]);
+        setWatchlist([]);
+        setArchives([]);
+        setCategories(undefined);
+        categoriesRef.current = undefined;
+        setLoading(true);
+      }
       if (name === 'watchlist') {
-        const cached = readRouteCache<ShelfSnapshot>(`favorites:last:${server.id}`, Infinity)
-          ?? readRouteCache<ShelfSnapshot>(favoriteFallbackKey, Infinity);
+        const cached = readShelfSnapshot(`favorites:last:${server.id}`, Infinity)
+          ?? readShelfSnapshot(favoriteFallbackKey, Infinity);
         const valid = cached?.favoritesSource === 'remote' && cached.serverId === server.id
           && cached.scopeId === server.scopeId && cached.archives.every(archive => archive.serverId === server.id);
         setHasFavoriteSnapshot(Boolean(valid));
@@ -533,7 +617,7 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
       }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      const needsCategories = showShelfToolbar && (name === 'watchlist' || categoriesRef.current === undefined);
+      const needsCategories = showShelfToolbar && (changedServer || name === 'watchlist' || categoriesRef.current === undefined);
       const [shelf, categoryResult] = await Promise.all([
         name === 'history'
           ? shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId))
@@ -597,6 +681,9 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
   const [presets, setPresets] = useState<SearchPreset[]>([]);
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const [presetEditTarget, setPresetEditTarget] = useState<SearchPreset>();
+  const presetIdentity = `${serverParam ?? 'default'}:${serverId ?? ''}:${scopeId ?? ''}`;
+  const presetOwner = useRef({ identity: presetIdentity });
+  if (presetOwner.current.identity !== presetIdentity) presetOwner.current = { identity: presetIdentity };
   const activeWatchlist = useMemo(() => watchlist.filter((item) => !item.deleted), [watchlist]);
   /** Most recently added first. The shelves had a sort control offering "title"
    * or "recent"; recency is the only order that says anything about a shelf, so
@@ -681,13 +768,16 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
     return ids;
   }, [archiveById, history, name]);
   useEffect(() => {
-    if (!scopeId) return undefined;
+    setPresets([]);
+    setPresetDialogOpen(false);
+    setPresetEditTarget(undefined);
+    if (!scopeId || (serverParam && serverId !== serverParam)) return undefined;
     let active = true;
     void repository.listSearchPresets(scopeId).then((result) => {
       if (active && result.ok) setPresets(result.value);
     });
     return () => { active = false; };
-  }, [scopeId]);
+  }, [scopeId, serverId, serverParam]);
 
   const loadThumbnail = useCallback(async (archive: ArchiveRecord, signal?: AbortSignal) => {
     if (!scopeId || !serverId) return undefined;
@@ -754,7 +844,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
           onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
           onDeletePreset={(preset) => {
             if (!scopeId) return;
+            const owner = presetOwner.current;
             void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
+              if (presetOwner.current !== owner) return;
+              if (!result.ok) { showToast(result.error.message, 'error'); return; }
               if (result.ok) setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
             });
           }}
@@ -799,9 +892,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
         label="预设名称"
         confirmLabel={presetEditTarget ? '保存名称' : '保存预设'}
         validate={(value) => (value.trim() ? undefined : '请填写预设名称')}
-        onConfirm={(value) => {
-          if (!scopeId) return;
-          void repository.saveSearchPreset({
+        onConfirm={async (value) => {
+          if (!scopeId) throw new Error('尚未连接服务器，请稍后重试');
+          const owner = presetOwner.current;
+          const result = await repository.saveSearchPreset({
             scopeId,
             presetId: presetEditTarget?.presetId ?? `preset-${Date.now()}`,
             name: value.trim(),
@@ -809,11 +903,10 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
             sortBy: 'added',
             sortOrder: 'desc',
             categoryId: null,
-          }).then((result) => {
-            if (!result.ok) return;
-            setPresetEditTarget(undefined);
-            setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
           });
+          if (presetOwner.current !== owner) return;
+          if (!result.ok) throw new Error(result.error.message);
+          setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
         }}
       />
     </div>
@@ -842,7 +935,7 @@ export function WorkspaceRoutes() {
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedPage key={key} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
+    <RetainedPage key={key} active={routeKey === key} motionSurface flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
       <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
         <Routes location={saved}>
           <Route path="/" element={<HomeShell><HomeWorkspace /></HomeShell>} />

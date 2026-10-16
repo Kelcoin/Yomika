@@ -171,7 +171,10 @@ export function AppShell({ children }: AppShellProps) {
       if (!region) return;
       if (region !== workspaceRef.current && !region.matches('[data-scroll-region]')) return;
       const current = region.scrollTop;
-      const before = previous.get(region) ?? current;
+      const before = previous.get(region) ?? 0;
+      // Ignore tiny reversals from touch noise / elastic settling. Accumulate
+      // against the last accepted sample so slow intentional scrolling works.
+      if (current > 8 && Math.abs(current - before) < 6) return;
       previous.set(region, current);
       if (current <= 8 || current >= before) {
         setShowScrollTop(false);
@@ -225,10 +228,15 @@ export function AppShell({ children }: AppShellProps) {
       const safeBottom = parseFloat(tokens.getPropertyValue('--safe-bottom')) || 0;
       const width = disc.width || 44;
       const height = disc.height || 44;
+      // Use the stable layout dock rather than the bar's animated visual rect.
+      const dockBottom = parseFloat(getComputedStyle(nav).bottom);
+      const barTop = Number.isFinite(dockBottom) ? window.innerHeight - dockBottom - (nav.offsetHeight || bar.height) : bar.top;
+      const travel = (nav.offsetHeight || bar.height) + (Number.isFinite(dockBottom) ? dockBottom : 12 + safeBottom);
+      button.style.setProperty('--compact-nav-travel', `${travel}px`);
       const beside = !compactNavHidden && bar.right + 12 + width <= window.innerWidth - 16 - safeRight;
       const bottom = compactNavHidden ? 16 + safeBottom : beside
-        ? window.innerHeight - (bar.top + bar.height / 2) - height / 2
-        : window.innerHeight - bar.top + 12;
+        ? window.innerHeight - (barTop + bar.height / 2) - height / 2
+        : window.innerHeight - barTop + 12;
       const right = beside ? window.innerWidth - bar.right - 12 - width : 16 + safeRight;
       const next = { placement: beside ? 'beside' : 'above', bottom, right };
       parkedTopPositionRef.current = next;
@@ -341,7 +349,7 @@ export function AppShell({ children }: AppShellProps) {
         >
           {children}
         </main>
-        <button ref={topButtonRef} data-placement={topPosition?.placement} style={topPosition ? { bottom: topPosition.bottom, right: topPosition.right } : undefined} className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
+        <button ref={topButtonRef} data-placement={topPosition?.placement} data-nav-hidden={compactNavHidden || undefined} style={topPosition ? { bottom: topPosition.bottom, right: topPosition.right } : undefined} className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
           workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
           document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => !region.closest('[hidden]') && region.scrollTo({ top: 0, behavior: 'smooth' }));
           setShowScrollTop(false);

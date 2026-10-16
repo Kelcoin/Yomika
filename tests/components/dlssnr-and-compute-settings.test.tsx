@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { App } from '../../src/app/App';
+import { RetainedPage } from '../../src/app/RetainedPage';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetFilePickerForTests, setModelPickerForTests } from '../../src/bridge/filePicker';
 import { DEFAULT_PREFERENCES, type PreferenceSnapshot } from '../../src/repositories/nativeSettingsRepository';
@@ -143,6 +144,41 @@ describe('local DLL import verification', () => {
 });
 
 describe('DLSS5 settings group', () => {
+  it.each(['page', 'group'] as const)('retires nested layer editing when the %s hides', async (kind) => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    function Owner({ shown }: { shown: boolean }) {
+      return <RetainedPage active={kind === 'page' ? shown : true}><ToastProvider>
+        <DlssnrSettingsGroup visible={kind === 'group' ? shown : true} preferences={DEFAULT_PREFERENCES} editPreferences={vi.fn()} />
+      </ToastProvider></RetainedPage>;
+    }
+    const view = render(<Owner shown />);
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: '层数' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'DLSSNR 层数' })).getByRole('button', { name: '第 1 层' }));
+    await user.click(within(await screen.findByRole('dialog', { name: '第 1 层' })).getByRole('button', { name: '参数说明' }));
+    expect(await screen.findByRole('note', { name: '层参数说明' })).toBeInTheDocument();
+    view.rerender(<Owner shown={false} />);
+    expect(screen.queryByRole('dialog', { hidden: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('note', { hidden: true })).not.toBeInTheDocument();
+    view.rerender(<Owner shown />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole('region', { name: 'DLSSNR' })).getByRole('button', { name: '层数' }));
+    expect(screen.getByRole('dialog', { name: 'DLSSNR 层数' })).toBeInTheDocument();
+    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+  });
+
+  it('ignores a malformed cached variant list while refreshing the actual catalog', async () => {
+    localStorage.setItem('yomika.dlssnr-status', JSON.stringify(dlssnrStatus()));
+    localStorage.setItem('yomika.dlssnr-catalog', JSON.stringify({ tag: 'old', variants: [null] }));
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }),
+      dlssnr_catalog: () => ({ ok: true, value: DLSSNR_CATALOG }),
+    }));
+    renderDlssnr();
+    expect(await screen.findByRole('button', { name: 'DLSSNR 组件' })).toBeInTheDocument();
+  });
+
   it('does not render, and does not ask for a status, while the group is hidden', async () => {
     // 平台门控在调用点（设置页把它绑在 `platform === 'windows'` 上），所以这一条盯的是
     // 隐藏时的行为：连 status 都不问——省一次往返，也不会闪一行「正在检测」。
@@ -732,6 +768,12 @@ describe('DLSS5 settings group', () => {
     // 问号下面——不然它会盖住标题行。
     await waitFor(() => expect(bubble).toHaveStyle({ width: '320px' }));
     expect(bubble).toHaveStyle({ right: `${window.innerWidth - 900}px`, top: '156px' });
+    const width = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(320);
+    const height = vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(220);
+    try {
+      fireEvent(window, new Event('resize'));
+      expect(bubble).toHaveStyle({ width: '296px', right: '12px', top: '12px', maxHeight: '100px' });
+    } finally { width.mockRestore(); height.mockRestore(); }
   });
 
   it('applies a 3DCG preset over the current layer settings', async () => {

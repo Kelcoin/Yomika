@@ -302,13 +302,14 @@ impl Engine for UpscaleEngine {
         let source = std::fs::read(input.path())
             .map_err(|error| StageError::input_invalid(format!("读不到这一阶段的输入：{error}")))?;
         let (probe_width, probe_height) = probe_dimensions(&source)?;
-        let allowed_source = (request.run.budgets.max_pixels / u64::from(scale).pow(2)).max(1);
+        let delivery_scale = stage.output_scale.unwrap_or(scale).min(scale).max(1);
+        let allowed_source = (request.run.budgets.max_pixels / u64::from(delivery_scale).pow(2)).max(1);
         let source_pixels = u64::from(probe_width).saturating_mul(u64::from(probe_height));
         if source_pixels > allowed_source {
             return Err(StageError::failed(
                 RESOURCE_LIMIT_CODE,
                 format!(
-                    "源图 {probe_width}×{probe_height} 超出这次预算：x{scale} 之后放不进 {} 像素",
+                    "源图 {probe_width}×{probe_height} 超出这次预算：交付 x{delivery_scale} 之后放不进 {} 像素",
                     request.run.budgets.max_pixels
                 ),
             ));
@@ -383,6 +384,7 @@ impl Engine for UpscaleEngine {
         let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
         let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
         let options = UpscaleOptions {
+            output_scale: Some(delivery_scale),
             tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
             tile_sleep_ms: 0,
             tile_padding: padding,

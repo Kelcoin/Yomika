@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { RotateCcw, ServerCrash } from 'lucide-react';
+import { z } from 'zod';
 
 import { usePageActive } from '../app/RetainedPage';
-import type { ArchiveRecord } from '../domain/library';
+import { ArchiveRecordSchema, type ArchiveRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
-import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { CategorySchema, NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { EmptyState } from './EmptyState';
 import { LibraryWorkspace } from './LibraryWorkspace';
 import { ServerRequiredPrompt } from './ServerRequiredPrompt';
@@ -20,13 +22,8 @@ import { readKnownServerPresence } from '../lib/serverPresence';
 /** 分类镜像一次性读取：注水只发生在挂载和换服务器时。原先这读写在
  * 组件体里无条件执行，搜索每敲一键、卡片每次悬停都要 parse 一遍。 */
 function readPersistedCategories(serverParam: string | null) {
-  try {
-    const raw = window.localStorage.getItem(`yomika:library-categories:${serverParam ?? 'default'}`);
-    const parsed = raw ? JSON.parse(raw) as import('../repositories/nativeLibraryRepository').Category[] : undefined;
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
+  const parsed = readStorageSnapshot(`yomika:library-categories:${serverParam ?? 'default'}`, CategorySchema.array());
+  return parsed?.length ? parsed : undefined;
 }
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
@@ -83,7 +80,41 @@ interface LibrarySnapshot {
   categoryFilter: string;
 }
 
+const LibrarySnapshotSchema = z.object({
+  archives: ArchiveRecordSchema.array(),
+  fetchedCount: z.number().int().nonnegative().optional(),
+  categories: CategorySchema.array(),
+  selectedArchiveId: z.string().optional(),
+  totalArchives: z.number().int().nonnegative(),
+  hasMoreArchives: z.boolean(),
+  searchQuery: z.string(),
+  sortMode: z.enum(['title', 'added']),
+  sortOrder: z.enum(['asc', 'desc']),
+  categoryFilter: z.string(),
+});
+
 export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: boolean } = {}) {
+  const [searchParams] = useSearchParams();
+  const requestedServer = searchParams.get('server');
+  const workspace = useRef({ requestedServer, serverId: undefined as string | undefined, defaultServerId: undefined as string | undefined, version: 0 });
+  if (workspace.current.requestedServer !== requestedServer) {
+    const nextServerId = requestedServer ?? workspace.current.defaultServerId;
+    if (!nextServerId || nextServerId !== workspace.current.serverId) {
+      workspace.current.version++;
+      workspace.current.serverId = undefined;
+    }
+    workspace.current.requestedServer = requestedServer;
+  }
+  const version = workspace.current.version;
+  const onServerResolved = useCallback((id: string, isDefault: boolean) => {
+    if (workspace.current.version !== version) return;
+    workspace.current.serverId = id;
+    if (isDefault) workspace.current.defaultServerId = id;
+  }, [version]);
+  return <LibraryRouteWorkspaceContent key={version} showDetail={showDetail} onServerResolved={onServerResolved} />;
+}
+
+function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDetail: boolean; onServerResolved: (id: string, isDefault: boolean) => void }) {
   const { showToast } = useToast();
   const [urlSearchParams] = useSearchParams();
   const requestedQuery = urlSearchParams.has('q') ? (urlSearchParams.get('q') ?? '').trim() : undefined;
@@ -96,7 +127,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   // so it also survives a restart: the first frame after launch shows the last
   // list instead of skeletons, and the refresh below quietly corrects it. Even an
   // old page can be shown immediately, provided it belongs to the active query.
-  const snapshot = readRouteCache<LibrarySnapshot>(librarySnapshotKey(serverParam), Infinity);
+  const snapshot = useMemo(() => {
+    const parsed = LibrarySnapshotSchema.safeParse(readRouteCache<unknown>(librarySnapshotKey(serverParam), Infinity));
+    return parsed.success ? parsed.data : undefined;
+  }, [serverParam]);
   const cachedPage = requestedQuery === undefined || requestedQuery === snapshot?.searchQuery ? snapshot : undefined;
   const [archives, setArchives] = useState<ArchiveRecord[]>(cachedPage?.archives ?? []);
   /** 这一轮后台刷新才第一次出现的档案：交给列表给它们播一段入场动画。
@@ -192,6 +226,8 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   /** Set when the dialog was opened from a preset's rename action. */
   const [presetEditTarget, setPresetEditTarget] = useState<import('../repositories/nativeLibraryRepository').SearchPreset>();
+  const libraryRequest = useRef(0);
+  const loadedServer = useRef<string>();
   /** Card style lives in preferences: the shelves render the same cards, and as
    * component state the choice reset on every navigation. */
   const { cardStyle, setCardStyle } = useCardStyle();
@@ -214,8 +250,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     inReadingList: (archiveId) => readingList.some((item) => item.archiveId === archiveId && !item.deleted),
     categories: assignableCategories(categories),
     onAddCategory: (archive, categoryId) => {
-      if (!serverId) return;
+      if (!serverId || archive.serverId !== serverId || favoriteOwner.current.identity !== favoriteIdentity) return;
+      const owner = favoriteOwner.current;
       void repository.addArchiveToCategory(serverId, categoryId, archive.archiveId).then((result) => {
+        if (favoriteOwner.current !== owner) return;
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         showToast('分类已更新', 'success');
         // Patch the list in place rather than re-reading it: only static
@@ -228,8 +266,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       });
     },
     onToggleReadingList: (archive, next) => {
-      if (!scopeId) return;
+      if (!scopeId || archive.serverId !== serverId || favoriteOwner.current.identity !== favoriteIdentity) return;
+      const owner = favoriteOwner.current;
       void repository.setReadingList(scopeId, archive.archiveId, next).then((result) => {
+        if (favoriteOwner.current !== owner) return;
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         setReadingList((current) => [...current.filter((item) => item.archiveId !== archive.archiveId), result.value]);
         showToast(next ? '已加入待看' : '已移出待看', 'success');
@@ -239,6 +279,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   const selection = useArchiveSelection({
     archives,
     scopeId,
+    serverId,
     onRemoved: removeArchives,
   });
   const detailRequest = useRef(0);
@@ -307,6 +348,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
   }, []);
 
   const loadLibrary = useCallback(async () => {
+    const request = ++libraryRequest.current;
     // 屏幕上已经有答案时（列表还在，或那张解释为什么没有列表的错误页），重读是就地的：
     // 不进骨架、也不抹掉错误页——自动同步收尾、整库失效广播、错误页上的「重试」都要
     // 走这里。骨架只留给一无所知的那一次首读。清错误则只在真有行可看时才做；屏幕上是
@@ -316,6 +358,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     if (screenHasAnswer && initialArchivesLoaded.current) setError(undefined);
     setNeedsCredentials(false);
     const servers = await repository.listServers();
+    if (request !== libraryRequest.current) return;
     if (!servers.ok) {
       setError(servers.error.message);
       setLoading(false);
@@ -323,12 +366,25 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     }
     const server = pickServer(servers.value, serverParam);
     if (!server) {
+      loadedServer.current = undefined;
       setServerId(undefined);
+      setScopeId(undefined);
+      setPresets([]);
+      setPresetDialogOpen(false);
       setHasServer(false);
       setLoading(false);
       return;
     }
     setHasServer(true);
+    onServerResolved(server.id, !serverParam);
+    if (loadedServer.current !== server.id) {
+      loadedServer.current = server.id;
+      setPresets([]);
+      setReadingList([]);
+      setReadingHistory([]);
+      setPresetDialogOpen(false);
+      setPresetEditTarget(undefined);
+    }
     setServerId(server.id);
     setScopeId(server.scopeId);
     // Categories are loaded once, by the effect below: it holds the TTL gate and
@@ -339,13 +395,14 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       repository.listHistory(server.scopeId),
       repository.listReadingList(server.scopeId),
     ]);
+    if (request !== libraryRequest.current) return;
     if (historyResult.ok) setReadingHistory(historyResult.value);
     if (readingListResult.ok) setReadingList(readingListResult.value);
     void repository.listSearchPresets(server.scopeId).then((result) => {
-      if (result.ok) setPresets(result.value);
+      if (request === libraryRequest.current && result.ok) setPresets(result.value);
     });
     setLoading(false);
-  }, [serverParam]);
+  }, [onServerResolved, serverParam]);
 
   // One page of the list. LANraragi is the source of truth: it owns ordering,
   // filtering and paging, so an archive added on the server shows up the moment
@@ -444,6 +501,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
   useEffect(() => {
     void loadLibrary();
+    return () => { libraryRequest.current++; };
   }, [loadLibrary]);
 
   // 启用服务器切换以全量失效广播（prefix 为空）：档案库就地整页重读（解析到
@@ -619,22 +677,20 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
     //
     // 缓存已在屏（快照恢复或上一轮结果还在）时静默刷新：下拉保持显示，绝不
     // 因刷新回到骨架；骨架只在分类一无所知时出现。
-    if (categoriesOnScreen.current) {
-      void repository.listCategories(serverId).then((categoryResult) => {
-        if (categoryResult.ok) {
-          categoriesOnScreen.current = true;
-          setCategories(categoryResult.value);
-        } else setCategoryError(categoryResult.error.message);
-      });
-      return;
-    }
-    setCategoriesLoading(true);
+    let active = true;
+    const owner = favoriteOwner.current;
+    if (!categoriesOnScreen.current) setCategoriesLoading(true);
     void repository.listCategories(serverId).then((categoryResult) => {
+      if (!active || favoriteOwner.current !== owner) return;
       if (categoryResult.ok) {
         categoriesOnScreen.current = true;
         setCategories(categoryResult.value);
+        setCategoryError(undefined);
       } else setCategoryError(categoryResult.error.message);
-    }).finally(() => setCategoriesLoading(false));
+    }).finally(() => {
+      if (active && favoriteOwner.current === owner) setCategoriesLoading(false);
+    });
+    return () => { active = false; };
   }, [reloadToken, serverId]);
 
   useEffect(() => {
@@ -769,9 +825,13 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
         onReleaseThumbnail={releaseThumbnail}
         onUpdateMetadata={async (input) => {
           if (!serverId || !selectedArchiveId) return { ok: false, error: { message: '档案未选择' } };
+          const request = detailRequest.current;
+          const owner = favoriteOwner.current;
+          const isCurrent = () => request === detailRequest.current && favoriteOwner.current === owner;
           const result = await repository.updateArchiveMetadata(serverId, selectedArchiveId, input);
-          if (!result.ok) return result;
+          if (!result.ok || !isCurrent()) return result;
           const refreshed = await repository.loadArchiveMetadata(serverId, selectedArchiveId);
+          if (!isCurrent()) return result;
           if (refreshed.ok) setMetadata(refreshed.value);
           setMetadataMessage('元数据已更新');
           return result;
@@ -799,7 +859,9 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
       onEditPreset={(preset) => { setPresetEditTarget(preset); setPresetDialogOpen(true); }}
       onDeletePreset={(preset) => {
         if (!scopeId) return;
+        const identity = favoriteIdentity;
         void repository.deleteSearchPreset(scopeId, preset.presetId).then((result) => {
+          if (favoriteOwner.current.identity !== identity) return;
           if (!result.ok) { showToast(result.error.message, 'error'); return; }
           setPresets((current) => current.filter((item) => item.presetId !== preset.presetId));
         });
@@ -825,9 +887,10 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
           if (searchQuery.trim() && !isCommittableSearchQuery(searchQuery)) return '搜索框里的标签还不完整，补完后再存为预设';
           return undefined;
         }}
-        onConfirm={(name) => {
-          if (!scopeId) return;
-          void repository.saveSearchPreset({
+        onConfirm={async (name) => {
+          if (!scopeId) throw new Error('尚未连接服务器，请稍后重试');
+          const identity = favoriteIdentity;
+          const result = await repository.saveSearchPreset({
             scopeId,
             presetId: presetEditTarget?.presetId ?? `preset-${Date.now()}`,
             name,
@@ -835,12 +898,11 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
             sortBy: presetEditTarget?.sortBy ?? sortMode,
             sortOrder: presetEditTarget?.sortOrder ?? sortOrder,
             categoryId: presetEditTarget ? (presetEditTarget.categoryId ?? null) : (categoryFilter || null),
-          }).then((result) => {
-            if (!result.ok) { showToast(result.error.message, 'error'); return; }
-            setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
-            showToast(presetEditTarget ? '预设已重命名' : '预设已保存', 'success');
-            setPresetEditTarget(undefined);
           });
+          if (favoriteOwner.current.identity !== identity) return;
+          if (!result.ok) throw new Error(result.error.message);
+          setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
+          showToast(presetEditTarget ? '预设已重命名' : '预设已保存', 'success');
         }}
       />
     </>

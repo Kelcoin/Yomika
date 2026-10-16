@@ -422,6 +422,7 @@ pub fn run() {
             read_text_file,
             system_insets,
             set_system_bar_style,
+            commands::platform::set_status_bar_visible,
             // 长按的触感确认：手机上有马达才震，其余平台是空操作（见 `commands::platform`）。
             haptic_feedback,
             load_preferences,

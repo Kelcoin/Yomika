@@ -13,7 +13,7 @@ import {
 } from '../repositories/nativeComputeCenterRepository';
 
 /** 屏上这份配对码：对面报的来历，加上本机自己数的倒计时。 */
-type Shown = PairingCodePayload & { secondsLeft: number };
+type Shown = PairingCodePayload & { secondsLeft: number; expiresAt: number };
 
 /** 有人请求配对时，本机要显示六位码。
  *
@@ -33,7 +33,7 @@ export function PairingCodeNotice() {
     let unlisten: (() => void) | undefined;
     void listen(COMPUTE_CENTER_PAIRING_CODE_EVENT, (event) => {
       const parsed = PairingCodeNoticeSchema.safeParse(event.payload);
-      if (parsed.success) setShown({ ...parsed.data, secondsLeft: parsed.data.expiresInSeconds });
+      if (active && parsed.success) setShown({ ...parsed.data, secondsLeft: parsed.data.expiresInSeconds, expiresAt: Date.now() + parsed.data.expiresInSeconds * 1000 });
     })
       .then((detach) => { if (active) unlisten = detach; else detach(); })
       .catch(() => { /* 不在壳里（网页调试）就没有这条事件 */ });
@@ -42,16 +42,18 @@ export function PairingCodeNotice() {
 
   useEffect(() => {
     if (!shown) return;
-    if (shown.secondsLeft <= 0) {
-      setShown(undefined);
-      return;
-    }
-    // 每一跳都重排下一个 timer：事件再来一次时倒计时跟着这份码重来，不必先清旧的。
-    const timer = window.setTimeout(() => {
-      setShown((current) => (current && current.code === shown.code ? { ...current, secondsLeft: current.secondsLeft - 1 } : current));
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [shown]);
+    // Timers are throttled while the WebView is backgrounded. Count wall time,
+    // not timer callbacks, so returning to the app never presents an expired code.
+    const update = () => setShown((current) => {
+      if (!current) return current;
+      const secondsLeft = Math.max(0, Math.ceil((current.expiresAt - Date.now()) / 1000));
+      return secondsLeft > 0 ? { ...current, secondsLeft } : undefined;
+    });
+    update();
+    const timer = window.setInterval(update, 1000);
+    document.addEventListener('visibilitychange', update);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', update); };
+  }, [shown?.expiresAt]);
 
   const close = useCallback(() => setShown(undefined), []);
   // 开着的时候返回手势先关这一层，不该把页面带走（手机上的返回走的是 webview 历史）。

@@ -67,6 +67,15 @@ describe('pairing code notice', () => {
     expect(screen.queryByText('远端配对')).toBeNull();
   });
 
+  it('expires against wall time after returning from a throttled background', async () => {
+    vi.useFakeTimers();
+    renderNotice();
+    await deliver({ code: '001422', name: 'Device', address: '192.168.1.9', expiresInSeconds: 90 });
+    vi.setSystemTime(Date.now() + 100_000);
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(screen.queryByText('远端配对')).not.toBeInTheDocument();
+  });
+
   it('closes on the confirm button so the dialog does not sit over the reader', async () => {
     const user = userEvent.setup();
     renderNotice();

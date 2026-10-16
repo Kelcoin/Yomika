@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Clock3, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import { z } from 'zod';
 import type { EhComment } from '../services/ehClient';
-import { NativeEhRepository } from '../repositories/nativeEhRepository';
+import { EhCommentSchema, NativeEhRepository } from '../repositories/nativeEhRepository';
+import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { presentEhError } from '../services/ehClient';
 import { useToast } from './Toast';
 import { StatusLine } from './StatusLine';
@@ -11,6 +13,7 @@ const COMMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const COMMENT_CACHE_STORAGE_PREFIX = 'yomika.eh.comments.v1:';
 type CommentsResult = Awaited<ReturnType<NativeEhRepository['getComments']>>;
 type CommentsCacheEntry = { comments: EhComment[]; cachedAt: number };
+const CommentsCacheSchema = z.object({ comments: EhCommentSchema.array(), cachedAt: z.number().finite() });
 const commentsCache = new Map<string, CommentsCacheEntry>();
 const commentsInflight = new Map<string, Promise<CommentsResult>>();
 
@@ -18,11 +21,11 @@ function commentsCacheKey(accountId: string, galleryId: string, token: string): 
   return `${accountId}\u0000${galleryId}\u0000${token}`;
 }
 
-function loadComments(accountId: string, galleryId: string, token: string): Promise<CommentsResult> {
+function loadComments(accountId: string, galleryId: string, token: string, force = false): Promise<CommentsResult> {
   const key = commentsCacheKey(accountId, galleryId, token);
   const cached = commentsCache.get(key) ?? readPersistedComments(key);
   if (cached && !commentsCache.has(key)) commentsCache.set(key, cached);
-  if (cached && Date.now() - cached.cachedAt < COMMENT_CACHE_TTL_MS) {
+  if (!force && cached && Date.now() - cached.cachedAt < COMMENT_CACHE_TTL_MS) {
     return Promise.resolve({ ok: true, value: cached.comments });
   }
   const existing = commentsInflight.get(key);
@@ -53,13 +56,7 @@ function invalidateComments(accountId: string, galleryId: string, token: string)
 }
 
 function readPersistedComments(key: string): CommentsCacheEntry | undefined {
-  try {
-    const raw = window.localStorage.getItem(`${COMMENT_CACHE_STORAGE_PREFIX}${key}`);
-    if (!raw) return undefined;
-    const value = JSON.parse(raw) as Partial<CommentsCacheEntry>;
-    if (!Array.isArray(value.comments) || typeof value.cachedAt !== 'number') return undefined;
-    return { comments: value.comments as EhComment[], cachedAt: value.cachedAt };
-  } catch { return undefined; }
+  return readStorageSnapshot(`${COMMENT_CACHE_STORAGE_PREFIX}${key}`, CommentsCacheSchema);
 }
 
 function writePersistedComments(key: string, entry: CommentsCacheEntry): void {
@@ -85,7 +82,15 @@ function renderCommentBody(body: string) {
     : <span key={index}>{part}</span>);
 }
 
-export function EhComments({ accountId, galleryId, token, prefetch = false }: { accountId: string; galleryId: string; token: string; prefetch?: boolean }) {
+type EhCommentsProps = { accountId: string; galleryId: string; token: string; prefetch?: boolean };
+
+export function EhComments(props: EhCommentsProps) {
+  // Archive routes can reuse this component for another gallery. Drafts and
+  // pending mutations belong to the original gallery, never the next one.
+  return <EhCommentsPanel key={commentsCacheKey(props.accountId, props.galleryId, props.token)} {...props} />;
+}
+
+function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCommentsProps) {
   const { showToast } = useToast();
   const [comments, setComments] = useState<EhComment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,14 +98,15 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
   const [reload, setReload] = useState(0);
   const [body, setBody] = useState('');
   const [posting, setPosting] = useState(false);
-  const [votingId, setVotingId] = useState<string>();
+  const [votingIds, setVotingIds] = useState<ReadonlySet<string>>(new Set());
+  const pendingVotes = useRef(new Set<string>());
   const refresh = useCallback(() => setReload((value) => value + 1), []);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(undefined);
-    void loadComments(accountId, galleryId, token).then((result) => {
+    void loadComments(accountId, galleryId, token, reload > 0).then((result) => {
       if (!active) return;
       if (result.ok) setComments(result.value);
       else setError(presentEhError(result.error.code, result.error.message));
@@ -114,15 +120,18 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
   }, [error, showToast]);
 
   const vote = async (comment: EhComment, value: 1 | -1) => {
+    if (pendingVotes.current.has(comment.id)) return;
+    pendingVotes.current.add(comment.id);
     // Clicking the direction already voted sends the vote again — E-Hentai
     // toggles it off, so the row flips back to an unvoted state.
     const cancelling = comment.myVote === value;
-    setVotingId(comment.id);
+    setVotingIds(new Set(pendingVotes.current));
     setError(undefined);
     // The API answers with the comment's new score, so the row updates in
     // place instead of refetching the whole list.
     const result = await repository.voteComment(accountId, galleryId, token, comment.id, value);
-    setVotingId(undefined);
+    pendingVotes.current.delete(comment.id);
+    setVotingIds(new Set(pendingVotes.current));
     if (result.ok) {
       const nextVote = cancelling ? 0 : value;
       setComments((current) => current.map((item) => (
@@ -133,7 +142,11 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
       // Keep the persisted snapshot in step with the in-place update.
       const key = commentsCacheKey(accountId, galleryId, token);
       const cached = commentsCache.get(key);
-      if (cached) writePersistedComments(key, { comments: comments.map((item) => (item.id === comment.id ? { ...item, score: result.value, myVote: nextVote } : item)), cachedAt: cached.cachedAt });
+      if (cached) {
+        const updated = { comments: cached.comments.map((item) => item.id === comment.id ? { ...item, score: result.value, myVote: nextVote } : item), cachedAt: cached.cachedAt };
+        commentsCache.set(key, updated);
+        writePersistedComments(key, updated);
+      }
     }
     else setError(presentEhError(result.error.code, result.error.message));
   };
@@ -177,8 +190,8 @@ export function EhComments({ accountId, galleryId, token, prefetch = false }: { 
                 {/* Both buttons stay live and identical in shape; the cast
                     direction is announced by the solid fill and aria-pressed,
                     and clicking it again cancels the vote. */}
-                <button type="button" className="is-up" disabled={votingId === comment.id} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button>
-                <button type="button" className="is-down" disabled={votingId === comment.id} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button>
+                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button>
+                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button>
               </span>
             )}
           </div>

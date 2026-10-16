@@ -1,6 +1,7 @@
-import { CloudDownload, FolderOpen, Play, Plus, Trash2, Upload } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { CloudDownload, FolderOpen, Play, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { usePageActive } from '../app/RetainedPage';
 
 import { onFileDrop } from '../bridge/fileDrop';
 import { pickArchiveFiles } from '../bridge/filePicker';
@@ -32,6 +33,7 @@ function statusLabel(status: UploadQueueItem['status']): string {
  * only source of a real filesystem path, which is what the uploader needs.
  */
 export function UploadPanel() {
+  const pageActive = usePageActive();
   const { showToast } = useToast();
   const [searchParams] = useSearchParams();
   const serverParam = searchParams.get('server');
@@ -41,9 +43,12 @@ export function UploadPanel() {
   const [dragging, setDragging] = useState(false);
   const [picking, setPicking] = useState(false);
   const [running, setRunning] = useState(false);
+  const pickingRef = useRef(false);
+  const runningRef = useRef(false);
 
   const parsedUrls = useMemo(() => parseUploadUrls(urlText), [urlText]);
   const queued = items.filter((item) => item.status === 'queued');
+  const failed = items.filter((item) => item.status === 'failed');
 
   function addPaths(paths: readonly string[]) {
     const { accepted, rejected } = partitionUploadPaths(paths);
@@ -51,17 +56,25 @@ export function UploadPanel() {
     if (rejected.length) showToast(`已忽略 ${rejected.length} 个不支持的文件`, 'info');
   }
 
-  useEffect(() => onFileDrop({
-    onEnter: () => setDragging(true),
-    onLeave: () => setDragging(false),
-    onDrop: (paths) => { setDragging(false); setMode('local'); addPaths(paths); },
-  }), []);
+  useEffect(() => {
+    if (!pageActive) { setDragging(false); return; }
+    return onFileDrop({
+      onEnter: () => setDragging(true),
+      onLeave: () => setDragging(false),
+      onDrop: (paths) => { setDragging(false); setMode('local'); addPaths(paths); },
+    });
+  }, [pageActive]);
 
   async function pick() {
+    if (pickingRef.current) return;
+    pickingRef.current = true;
     setPicking(true);
     try {
       addPaths(await pickArchiveFiles());
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '无法打开文件选择器，请重试', 'error');
     } finally {
+      pickingRef.current = false;
       setPicking(false);
     }
   }
@@ -79,9 +92,13 @@ export function UploadPanel() {
   }
 
   function markItem(id: string, status: UploadQueueItem['status'], message?: string) {
-    setItems((current) => current.map((item) => (item.id === id
-      ? { ...item, status, ...(message === undefined ? {} : { message }) }
-      : item)));
+    setItems((current) => current.map((item) => {
+      if (item.id !== id) return item;
+      const next = { ...item, status };
+      if (message === undefined) delete next.message;
+      else next.message = message;
+      return next;
+    }));
   }
 
   /** A failed item keeps its reason on its own row *and* says so once, out loud.
@@ -92,8 +109,9 @@ export function UploadPanel() {
     showToast(`${item.label}：${reason}`, 'error');
   }
 
-  async function run() {
-    if (running || queued.length === 0) return;
+  async function run(batch = queued) {
+    if (runningRef.current || batch.length === 0) return;
+    runningRef.current = true;
     setRunning(true);
     try {
       const servers = await repository.listServers();
@@ -104,21 +122,22 @@ export function UploadPanel() {
       }
       // One at a time: LANraragi extracts on receipt, and a parallel burst of
       // whole archives is the one way a client can knock it over.
-      for (const item of queued) {
+      for (const item of batch) {
         markItem(item.id, 'running');
         if (item.kind === 'url') {
           const queuedJob = await repository.downloadUrl(server.id, item.source);
           if (queuedJob.ok) markItem(item.id, 'done', `服务器作业 #${queuedJob.value.job}`);
-          else markItem(item.id, 'failed', queuedJob.error.message);
+          else fail(item, queuedJob.error.message);
           continue;
         }
         const task = await repository.createTask({ kind: 'download', label: `上传 ${item.label}` });
-        if (!task.ok) { markItem(item.id, 'failed', task.error.message); continue; }
+        if (!task.ok) { fail(item, task.error.message); continue; }
         const uploaded = await repository.uploadArchive({ serverId: server.id, taskId: task.value.id, filePath: item.source });
         if (uploaded.ok) markItem(item.id, 'done', '已上传');
-        else markItem(item.id, 'failed', uploaded.error.message);
+        else fail(item, uploaded.error.message);
       }
     } finally {
+      runningRef.current = false;
       setRunning(false);
     }
   }
@@ -168,6 +187,9 @@ export function UploadPanel() {
         <div className="upload-queue-heading">
           <h3>队列（{items.length}）</h3>
           <div className="upload-queue-actions">
+            {failed.length > 0 && <button className="secondary-action" type="button" disabled={running} onClick={() => void run(failed)}>
+              <RotateCcw aria-hidden="true" />重试失败项
+            </button>}
             <button className="primary-action" type="button" disabled={running || queued.length === 0} aria-busy={running} onClick={() => void run()}>
               <Play aria-hidden="true" />{running ? '处理中…' : '开始处理'}
             </button>

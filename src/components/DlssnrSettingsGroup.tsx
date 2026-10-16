@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 import { listen } from '@tauri-apps/api/event';
 import { CircleHelp, Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2, Wand } from 'lucide-react';
 
@@ -17,12 +18,15 @@ import {
   DEFAULT_DLSSNR_PASS,
   MAX_DLSSNR_PASSES,
   NativeDlssnrRepository,
+  DlssnrStatusSchema,
+  DlssnrCatalogSchema,
   parseDlssnrPasses,
   serializeDlssnrPasses,
   type DlssnrCatalog,
   type DlssnrPass,
   type DlssnrStatus,
 } from '../repositories/nativeDlssnrRepository';
+import { readStorageSnapshot } from '../lib/storageSnapshot';
 
 /** 风格：NGX 认的 0–2（默认 / 自然 / 电影三档；OptiScaler 把 0 叫 Standard——同一个
  *  档位，就是模型自带的默认外观）。 */
@@ -160,23 +164,12 @@ interface Props {
 
 /** DLSSNR 设置组：组件、开关与 1–5 层参数。 */
 export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: Props) {
+  const pageActive = usePageActive();
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeDlssnrRepository(), []);
-  const [status, setStatus] = useState<DlssnrStatus | undefined>(() => {
-    try {
-      const cached = localStorage.getItem('yomika.dlssnr-status');
-      return cached ? (JSON.parse(cached) as DlssnrStatus) : undefined;
-    } catch { return undefined; }
-  });
-  const [verified, setVerified] = useState(() => {
-    try { return localStorage.getItem('yomika.dlssnr-status') !== null; } catch { return false; }
-  });
-  const [catalog, setCatalog] = useState<DlssnrCatalog | undefined>(() => {
-    try {
-      const cached = localStorage.getItem('yomika.dlssnr-catalog');
-      return cached ? (JSON.parse(cached) as DlssnrCatalog) : undefined;
-    } catch { return undefined; }
-  });
+  const [status, setStatus] = useState<DlssnrStatus | undefined>(() => readStorageSnapshot('yomika.dlssnr-status', DlssnrStatusSchema));
+  const [verified, setVerified] = useState(() => Boolean(status));
+  const [catalog, setCatalog] = useState<DlssnrCatalog | undefined>(() => readStorageSnapshot('yomika.dlssnr-catalog', DlssnrCatalogSchema));
   const [catalogError, setCatalogError] = useState<string>();
   /** 正在下载的那一条变体 id（同一时刻只有一条：后端那条下载路径也只跑一件）。 */
   const [downloading, setDownloading] = useState<string>();
@@ -195,6 +188,19 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const helpToggleRef = useRef<HTMLButtonElement | null>(null);
   const [helpAnchor, setHelpAnchor] = useState<HelpAnchor>();
   const helpTimer = useRef<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!pageActive || !visible) {
+      window.clearTimeout(helpTimer.current);
+      setLayerMenu(false);
+      setPresetMenu(false);
+      setVariantMenu(false);
+      setSelectedLayer(undefined);
+      setDraftPass(undefined);
+      setHelpPinned(false);
+      setHelpHover(false);
+      setHelpAnchor(undefined);
+    }
+  }, [pageActive, visible]);
   const holdHelp = useCallback(() => {
     window.clearTimeout(helpTimer.current);
     setHelpHover(true);
@@ -213,18 +219,36 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       // 上沿仍从问号按钮的下沿算起，否则气泡会盖住标题行。首帧量不到面板时退回固定宽度。
       const panelRect = helpToggleRef.current?.closest('.settings-choice-panel')?.getBoundingClientRect();
       const measured = panelRect && panelRect.width > 0 ? panelRect : undefined;
+      const viewport = window.visualViewport;
+      const left = (viewport?.offsetLeft ?? 0) + HELP_MARGIN;
+      const top = (viewport?.offsetTop ?? 0) + HELP_MARGIN;
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      const bottom = Math.max(top, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - HELP_MARGIN);
+      const width = Math.min(measured ? Math.max(measured.width, HELP_MIN_WIDTH) : HELP_FALLBACK_WIDTH, Math.max(0, viewportWidth - HELP_MARGIN * 2));
+      const x = Math.max(left, Math.min((measured?.right ?? rect.right) - width, left + viewportWidth - HELP_MARGIN * 2 - width));
+      const belowTop = Math.max(top, Math.min(rect.bottom + HELP_GAP, bottom));
+      const aboveBottom = Math.max(top, Math.min(rect.top - HELP_GAP, bottom));
+      const below = bottom - belowTop;
+      const above = aboveBottom - top;
+      const flip = below < HELP_MIN_HEIGHT && above > below;
       setHelpAnchor({
-        top: rect.bottom + HELP_GAP,
-        right: Math.max(HELP_MARGIN, window.innerWidth - (measured ? measured.right : rect.right)),
-        width: measured
-          ? Math.min(Math.max(measured.width, HELP_MIN_WIDTH), window.innerWidth - HELP_MARGIN * 2)
-          : HELP_FALLBACK_WIDTH,
-        height: Math.max(HELP_MIN_HEIGHT, window.innerHeight - rect.bottom - HELP_GAP - HELP_MARGIN),
+        top: flip ? top : belowTop,
+        right: window.innerWidth - x - width,
+        width,
+        height: flip ? above : below,
       });
     };
     measure();
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    window.visualViewport?.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('scroll', measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      window.visualViewport?.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('scroll', measure);
+    };
   }, [helpOpen]);
 
   const refresh = useCallback(async () => {

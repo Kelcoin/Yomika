@@ -1,10 +1,11 @@
 import { usePageActive } from '../app/RetainedPage';
 import { CircleDot, Database, ListTodo, LibraryBig, RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
 import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
+import { pickServer } from '../domain/server';
 
 const repository = new NativeLibraryRepository();
 const syncRepository = new NativeSyncRepository();
@@ -38,27 +39,30 @@ export function StatusBar() {
   const [taskCount, setTaskCount] = useState(0);
   const [syncConfigured, setSyncConfigured] = useState(false);
   const [cacheBytes, setCacheBytes] = useState<number>();
+  const countedServer = useRef<string>();
 
   useEffect(() => {
     if (!pageActive) return;
     let active = true;
+    let pending = false;
     const refresh = () => {
-      if (document.visibilityState === 'hidden') return;
-      void Promise.allSettled([repository.listServers(), repository.checkServerStatus(), repository.listTasks(), syncRepository.listAccounts()]).then(([serversState, statusState, tasksState, syncState]) => {
+      if (!active || pending || document.visibilityState === 'hidden') return;
+      pending = true;
+      void Promise.allSettled([repository.listServers(), repository.checkServerStatus(), repository.listTasks(), syncRepository.listAccounts()]).then(async ([serversState, statusState, tasksState, syncState]) => {
         if (!active) return;
         const servers = serversState.status === 'fulfilled' ? serversState.value : undefined;
         const statuses = statusState.status === 'fulfilled' ? statusState.value : undefined;
         const tasks = tasksState.status === 'fulfilled' ? tasksState.value : undefined;
         const syncAccounts = syncState.status === 'fulfilled' ? syncState.value : undefined;
-        const configuredServer = servers?.ok ? servers.value[0] : undefined;
-        const serverStatus = statuses?.ok ? statuses.value[0] : undefined;
+        const configuredServer = servers?.ok ? pickServer(servers.value, undefined) : undefined;
+        const serverStatus = statuses?.ok ? statuses.value.find((status) => status.serverId === configuredServer?.id) : undefined;
         if (serverStatus?.online) {
           setServerConnection('online');
           setServerName(serverStatus.name || configuredServer?.name);
         } else if (configuredServer) {
           setServerConnection('offline');
           setServerName(configuredServer.name);
-        } else {
+        } else if (servers?.ok) {
           setServerConnection('none');
           setServerName(undefined);
         }
@@ -71,11 +75,15 @@ export function StatusBar() {
         // LibraryWorkspace rendered last: the watchlist shelf (five rows)
         // overwrote the library's ten-thousand with its own size.
         if (configuredServer) {
-          void repository.listArchivesPage(configuredServer.id, 0, 1).then((page) => {
-            if (active && page.ok) setArchiveTotal(page.value.total);
-          }).catch(() => {});
+          if (countedServer.current !== configuredServer.id) setArchiveTotal(undefined);
+          countedServer.current = configuredServer.id;
+          const page = await repository.listArchivesPage(configuredServer.id, 0, 1);
+          if (active && page.ok) setArchiveTotal(page.value.total);
+        } else if (servers?.ok) {
+          countedServer.current = undefined;
+          setArchiveTotal(undefined);
         }
-      });
+      }).catch(() => {}).finally(() => { pending = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, 15_000);
@@ -90,11 +98,13 @@ export function StatusBar() {
   useEffect(() => {
     if (!pageActive) return;
     let active = true;
+    let reading = false;
     const refresh = () => {
-      if (document.visibilityState === 'hidden') return;
+      if (!active || reading || document.visibilityState === 'hidden') return;
+      reading = true;
       void cacheRepository.stats().then((result) => {
         if (active && result.ok) setCacheBytes(result.value.bytes);
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => { reading = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, 10_000);

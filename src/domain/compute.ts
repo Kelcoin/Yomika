@@ -135,6 +135,7 @@ export const ComputeJobStateSchema = z.union([
 export type ComputeJobState = z.infer<typeof ComputeJobStateSchema>;
 
 export const ComputeJobSnapshotSchema = z.object({
+  failureMessage: z.string().optional(),
   jobId: z.string(),
   key: ComputeJobKeySchema,
   priority: ComputePrioritySchema,

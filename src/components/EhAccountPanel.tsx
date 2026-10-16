@@ -6,6 +6,7 @@ import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '
 import { EhMark } from './EhMark';
 import { useToast } from './Toast';
 import { StatusLine } from './StatusLine';
+import { ehAccountRevision, subscribeEhAccountsChanged } from '../lib/ehAccountChanges';
 
 /** What the account is called anywhere it is shown: the username when one has
  * been recorded, otherwise the generic 「E 站用户」 — the member id is not a
@@ -54,7 +55,9 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
   /** 原地编辑态：正在改名的账户与草稿值。Enter 或失焦提交，Esc 取消。 */
   const [editingAccountId, setEditingAccountId] = useState<string>();
   const [usernameDraft, setUsernameDraft] = useState('');
+  useEffect(() => subscribeEhAccountsChanged(() => { setEditingAccountId(undefined); setUsernameDraft(''); }), []);
   const [savingUsername, setSavingUsername] = useState(false);
+  const usernameSavePending = useRef(false);
   const browserAbortRef = useRef<AbortController>();
   /** 移动端：登录页已经在应用内打开了（这时界面就是那个页面）。 */
   const [inAppPending, setInAppPending] = useState(false);
@@ -136,8 +139,10 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
    * string, ready to paste wherever a `Cookie:` header is asked for. */
   async function exportCookie(account: EhAccount) {
     if (!onReadCookie) return;
+    const revision = ehAccountRevision();
     try {
       const cookie = await onReadCookie(account.id);
+      if (revision !== ehAccountRevision()) return;
       if (!cookie) {
         showToast('未能读取 Cookie', 'error');
         return;
@@ -145,12 +150,13 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
       await writeClipboardText(formatEhCookieHeader(cookie));
       showToast('Cookie 已复制到剪贴板', 'success');
     } catch {
-      showToast('复制 Cookie 失败', 'error');
+      if (revision === ehAccountRevision()) showToast('复制 Cookie 失败', 'error');
     }
   }
 
   /** 原地提交：Enter 或失焦时调用；空名视为取消（回到原显示）。 */
   async function commitUsername() {
+    if (usernameSavePending.current) return;
     const accountId = editingAccountId;
     if (!accountId || !onEditUsername) return;
     const name = usernameDraft.trim();
@@ -161,19 +167,24 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
       setEditingAccountId(undefined);
       return;
     }
+    usernameSavePending.current = true;
     setSavingUsername(true);
+    const revision = ehAccountRevision();
     try {
       await onEditUsername(accountId, name);
+      if (revision !== ehAccountRevision()) return;
       showToast('账户名已更新', 'success');
       setEditingAccountId(undefined);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : '保存失败', 'error');
+      if (revision === ehAccountRevision()) showToast(error instanceof Error ? error.message : '保存失败', 'error');
     } finally {
+      usernameSavePending.current = false;
       setSavingUsername(false);
     }
   }
 
   function startEditing(account: EhAccount) {
+    if (usernameSavePending.current) return;
     // 草稿只带已记录的显示名；「E 站用户」回退不是用户的真名，不带。
     setUsernameDraft(account.username ?? account.usernameHint ?? '');
     setEditingAccountId(account.id);
@@ -278,6 +289,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
                       autoFocus
                       onChange={(event) => setUsernameDraft(event.target.value)}
                       onKeyDown={(event) => {
+                        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                         if (event.key === 'Enter') { event.preventDefault(); void commitUsername(); }
                         else if (event.key === 'Escape') { setEditingAccountId(undefined); }
                       }}
@@ -287,7 +299,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
                     accountDisplayName(account)
                   )}
                   {onEditUsername && editingAccountId !== account.id && (
-                    <button type="button" className="eh-name-edit" aria-label={`编辑 ${accountDisplayName(account)} 的账户名`} title="编辑账户名" onClick={() => startEditing(account)}>
+                    <button type="button" className="eh-name-edit" disabled={savingUsername} aria-label={`编辑 ${accountDisplayName(account)} 的账户名`} title="编辑账户名" onClick={() => startEditing(account)}>
                       <Pencil aria-hidden="true" />
                     </button>
                   )}

@@ -1,5 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -18,75 +19,83 @@ const EAGER_PREVIEWS = 6;
  * the scroll position and the selection it had just made. Same panel as the
  * reader's, but the page previews arrive as they scroll into view, because
  * unlike the reader there is no reading session already holding them. */
-export function ArchiveOverviewDialog({ archive, scopeId, serverId, onClose }: {
+interface ArchiveOverviewDialogProps {
   archive: ArchiveRecord;
   scopeId: string;
   serverId: string;
   onClose: () => void;
-}) {
+}
+
+export function ArchiveOverviewDialog(props: ArchiveOverviewDialogProps) {
+  const pageActive = usePageActive();
+  const closeRef = useRef(props.onClose);
+  closeRef.current = props.onClose;
+  useLayoutEffect(() => { if (!pageActive) closeRef.current(); }, [pageActive]);
+  if (!pageActive) return null;
+  return <ArchiveOverviewContent key={JSON.stringify([props.scopeId, props.serverId, props.archive.archiveId])} {...props} />;
+}
+
+function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: ArchiveOverviewDialogProps) {
   // 挂载即打开；返回手势先关这一层（见 overlayBackGuard）。
   useOverlayBackGuard(true, onClose);
   const [cover, setCover] = useState<string>();
   const [previews, setPreviews] = useState<ReadonlyMap<number, string>>(() => new Map());
-  const mounted = useRef(true);
-  const handles = useRef<ImageHandle[]>([]);
-  const pending = useRef(new Set<number>());
-  const observerRef = useRef<IntersectionObserver>();
-
-  const loadPreview = useCallback(async (pageIndex: number) => {
-    if (pending.current.has(pageIndex)) return;
-    pending.current.add(pageIndex);
-    try {
-      const handle = await imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, pageIndex, rendition: 'page-thumbnail' });
-      if (!mounted.current) { imageCache.release(handle); return; }
-      handles.current.push(handle);
-      setPreviews((current) => new Map(current).set(pageIndex, handle.url));
-    } catch {
-      // 取不到的那一页留个页码占位：档案概览不该因为缺一张缩略图而空掉。
-    }
-  }, [archive.archiveId, scopeId, serverId]);
+  const tiles = useRef(new Map<number, HTMLElement>());
+  const registerPreview = useRef<(index: number, node: HTMLElement) => void>();
 
   useEffect(() => {
-    mounted.current = true;
-    void imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 })
-      .then((handle) => {
-        if (!mounted.current) { imageCache.release(handle); return; }
-        handles.current.push(handle);
-        setCover(handle.url);
-      })
-      .catch(() => undefined);
-    return () => {
-      mounted.current = false;
-      handles.current.forEach((handle) => imageCache.release(handle));
-      handles.current = [];
+    // 每次 effect 都拥有自己的租约，避免 StrictMode 重挂或换档案后接受上一轮图片。
+    let active = true;
+    const handles: ImageHandle[] = [];
+    const pending = new Set<number>();
+    setCover(undefined);
+    setPreviews(new Map());
+    const loadPreview = async (pageIndex: number) => {
+      if (pending.has(pageIndex)) return;
+      pending.add(pageIndex);
+      try {
+        const handle = await imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, pageIndex, rendition: 'page-thumbnail' });
+        if (!active) { imageCache.release(handle); return; }
+        handles.push(handle);
+        setPreviews((current) => new Map(current).set(pageIndex, handle.url));
+      } catch {
+        // 缺失预览留页码占位。
+      }
     };
-  }, [archive.archiveId, scopeId, serverId]);
-
-  useEffect(() => {
-    if (typeof IntersectionObserver === 'undefined') {
-      // No observer (a test environment): the first page or two are what the
-      // panel opens on, and the rest stay as numbered tiles.
-      for (let index = 0; index < Math.min(EAGER_PREVIEWS, archive.pageCount); index += 1) void loadPreview(index);
-      return undefined;
-    }
-    const observer = new IntersectionObserver((entries) => {
+    const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
+        if (!entry.isIntersecting || !active) continue;
+        observer?.unobserve(entry.target);
         const index = Number((entry.target as HTMLElement).dataset.pageIndex);
         if (Number.isInteger(index)) void loadPreview(index);
       }
     }, { rootMargin: '240px' });
-    observerRef.current = observer;
-    return () => { observer.disconnect(); observerRef.current = undefined; };
-  }, [archive.pageCount, loadPreview]);
+    registerPreview.current = (index, node) => {
+      if (index < EAGER_PREVIEWS) void loadPreview(index);
+      else observer?.observe(node);
+    };
+    tiles.current.forEach((node, index) => registerPreview.current?.(index, node));
+    void imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 })
+      .then((handle) => {
+        if (!active) { imageCache.release(handle); return; }
+        handles.push(handle);
+        setCover(handle.url);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      observer?.disconnect();
+      registerPreview.current = undefined;
+      handles.forEach((handle) => imageCache.release(handle));
+    };
+  }, [archive.archiveId, scopeId, serverId]);
 
   const registerTile = useCallback((index: number, node: HTMLElement | null) => {
-    if (!node) return;
+    if (!node) { tiles.current.delete(index); return; }
+    tiles.current.set(index, node);
     node.dataset.pageIndex = String(index);
-    if (index < EAGER_PREVIEWS) { void loadPreview(index); return; }
-    observerRef.current?.observe(node);
-  }, [loadPreview]);
+    registerPreview.current?.(index, node);
+  }, []);
 
   return <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
     <Dialog.Portal>

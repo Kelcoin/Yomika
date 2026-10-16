@@ -365,8 +365,10 @@ describe('design system contract', () => {
     const preset = read('src/components/SearchPresetField.tsx');
 
     expect(read('src/components/OverlayLayer.tsx')).toMatch(/createPortal\(children, document\.body\)/);
-    expect(controls).toMatch(/<OverlayLayer>\s*<div className="settings-choice-overlay"/);
-    expect(preset).toMatch(/<OverlayLayer>\s*<div className="search-preset-overlay"/);
+    // `<div` 与 `className` 之间允许换行：属性一多就会被折成多行，那是排版不是形状，
+    // 条款只该钉「浮层是 OverlayLayer 的直接子节点」这件事。
+    expect(controls).toMatch(/<OverlayLayer>\s*<div\s+className="settings-choice-overlay"/);
+    expect(preset).toMatch(/<OverlayLayer>\s*<div\s+className="search-preset-overlay"/);
     // 浮层挂出去以后，面板里的点击不再算「在 field 里」，外点关闭必须放过它，
     // 否则指针一按下按钮就被卸载，click 永远到不了按钮。
     expect(preset).toContain("if (target?.closest?.('.search-preset-overlay')) return;");
@@ -1448,9 +1450,8 @@ describe('design system contract', () => {
     // `visible` 强势（`topChromeVisible = hoverChrome === 'top'`），三个收起入口都必须
     // 把意见清掉，否则那条栏再也摘不下来。
     expect(indicatorScreen, '手指才按落点钉一侧').toMatch(/pinTappedBand: coarsePointer,/);
-    expect(indicatorScreen, '唤出时按落点选边').toMatch(/setHover\(pinTappedBand \? side : undefined\)/);
-    expect(indicatorScreen, '开着时点另一条感应带要换过去，不是两条都亮').toMatch(/if \(pinTappedBand && side !== null && side !== hoverChromeRef\.current\)/);
-    expect(indicatorScreen, '自动收起明确隐藏两侧，不回落到默认同时显示').toMatch(/setHover\(null\);[\s\S]{0,60}callbacksRef\.current\.onHide\(\)/);
+    expect(indicatorScreen, '触屏两侧独立记忆，可依次唤出').toContain('const [tappedBands, setTappedBands]');
+    expect(indicatorScreen, '自动收起清除两侧的唤出状态').toMatch(/setTappedBands\(\{ top: false, bottom: false \}\);\s*callbacksRef\.current\.onHide\(\)/);
     expect(indicatorScreen, 'Escape 收起也要清意见').toMatch(/setHover\(undefined\);[\s\S]{0,40}setState\(toggleReaderChrome\)/);
 
     // 底栏的「动」有三件事必须同时在场，少一件它就成了静止的一块：
@@ -2231,7 +2232,8 @@ describe('design system contract', () => {
     // 一个 touchmove 就 preventDefault 等于把整段手势从浏览器手里抢走：手机上起手
     // 那几像素常常先往下抖一下，这一抖冒领之后页面再也滚不动，只剩过滚刷新能用。
     // 认定距离之前一个字都不说，手指转向滚动那一侧就把这次手势整个还回去。
-    expect(workspace).toMatch(/const PULL_CLAIM_PX = 12;/);
+    expect(workspace).toMatch(/const PULL_CLAIM_PX = EDGE_CLAIM_PX;/);
+    expect(read('src/lib/motion.ts')).toMatch(/EDGE_CLAIM_PX = 4;/);
     expect(workspace).toMatch(/if \(travel < PULL_CLAIM_PX\) return;/);
     expect(workspace).toMatch(/overscrollClaimed\.current = true;[\s\S]{0,1200}event\.preventDefault\(\);/);
     // 认定距离那 12px 是浏览器的：真机上这段里页面已经滚了一点点。认领时要把这一段放回去，

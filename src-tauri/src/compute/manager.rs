@@ -467,7 +467,10 @@ impl Shared {
         // 出了锁再回调：回调里做什么都不影响状态锁。
         let snapshots: Vec<JobSnapshot> = self.with_state(|state| {
             ids.iter()
-                .filter_map(|job_id| state.scheduler.touch(job_id))
+                  .filter_map(|job_id| state.scheduler.touch(job_id).map(|mut snapshot| {
+                      snapshot.failure_message = state.failure_notes.get(job_id).cloned();
+                      snapshot
+                  }))
                 .collect()
         });
         for snapshot in &snapshots {
@@ -626,18 +629,30 @@ impl ComputeManager {
 
     pub fn job(&self, job_id: &str) -> Option<JobSnapshot> {
         self.shared
-            .with_state(|state| state.scheduler.snapshot(job_id))
+            .with_state(|state| state.scheduler.snapshot(job_id).map(|mut snapshot| {
+                snapshot.failure_message = state.failure_notes.get(job_id).cloned();
+                snapshot
+            }))
     }
 
     /// 断订阅之后按 id 批量恢复（§11 Task 4 ⑥）。
     pub fn jobs(&self, job_ids: &[String]) -> Vec<JobSnapshot> {
-        self.shared
-            .with_state(|state| state.scheduler.snapshots(job_ids))
+        self.shared.with_state(|state| {
+            state.scheduler.snapshots(job_ids).into_iter().map(|mut snapshot| {
+                snapshot.failure_message = state.failure_notes.get(&snapshot.job_id).cloned();
+                snapshot
+            }).collect()
+        })
     }
 
     /// 全部还留着的快照（含终态）。worker 换代之后界面靠它把状态对齐。
     pub fn all_jobs(&self) -> Vec<JobSnapshot> {
-        self.shared.with_state(|state| state.scheduler.all())
+        self.shared.with_state(|state| {
+            state.scheduler.all().into_iter().map(|mut snapshot| {
+                snapshot.failure_message = state.failure_notes.get(&snapshot.job_id).cloned();
+                snapshot
+            }).collect()
+        })
     }
 
     pub fn job_artifacts(&self, job_id: &str) -> Vec<ArtifactRecord> {
@@ -2122,10 +2137,11 @@ impl Supervisor {
                             });
                         }
                         // 同一笔预算的另一端：源图自己装得下，**乘上倍率**就未必了。worker
-                        // 一直在判这一条（`upscale.rs` 拿 `max_pixels / scale²` 反推源图上限
+                        // 一直在判这一条（`upscale.rs` 拿 `max_pixels / delivery_scale²` 反推源图上限
                         // 就是），但判的时候图已经读进来、模型也装好了——同样的几十秒 GPU
                         // 时间，宿主这里只花一次乘法。
                         //
+                        // 每一阶以交付倍率接到下一阶，worker 逐块缩小后才拼接整帧。
                         // 为什么取的是**乘积**而不是某一个阶段的倍率：链是一阶一阶接的
                         // （`worker/src/executor.rs` 的 `previous`），第二阶段的输入就是第一
                         // 阶段交出来的那张图，所以两阶 x2 是 x16 而不是 x4。按乘积判，与 worker
@@ -2133,7 +2149,7 @@ impl Supervisor {
                         let scales: Vec<u32> = template
                             .pipeline
                             .iter()
-                            .filter_map(|stage| stage.scale)
+                            .filter_map(|stage| stage.scale.map(|scale| stage.output_scale.unwrap_or(scale).min(scale)))
                             .collect();
                         let projected =
                             resource_policy::chain_output_pixels(pixels.count(), &scales);
@@ -2242,6 +2258,7 @@ impl Supervisor {
             failure.code, failure.detail
         );
         self.shared.with_state(|state| {
+            state.remember_failure_note(job_id, &failure.detail);
             let epoch = state.scheduler.epoch();
             state.scheduler.apply_worker_event(
                 epoch,

@@ -31,6 +31,20 @@ fn gradient(width: u32, height: u32) -> Vec<u8> {
 }
 
 #[test]
+fn capped_output_does_not_allocate_a_full_native_scale_frame() {
+    let source = gradient(70, 50);
+    let engine = NearestNeighbourEngine { scale: 4, max_pixels: 1_000_000 };
+    let output = upscale_rgba(&engine, &source, 70, 50, UpscaleOptions {
+        tile_size: 16, output_scale: Some(2), max_pixels: 70 * 50 * 4,
+        ..Default::default()
+    }).expect("x2 output fits although a full x4 frame exceeds the budget");
+    assert_eq!((output.width, output.height, output.rgba.len()), (140, 100, 140 * 100 * 4));
+    let expected = cpu_scale_rgba(&source, 70, 50, 2, 1_000_000).unwrap();
+    // Lanczos filtering can round by a few channel values; seams must not add a larger error.
+    assert!(output.rgba.iter().zip(expected.rgba).all(|(a,b)| a.abs_diff(b) <= 2));
+}
+
+#[test]
 fn tiles_cover_the_image_exactly_once() {
     let tiles = plan_tiles(300, 200, 128, 8);
     assert_eq!(tiles.len(), 6, "3 columns x 2 rows");

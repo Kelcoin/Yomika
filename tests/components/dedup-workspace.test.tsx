@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -6,9 +6,109 @@ import { DeduplicationWorkspace } from '../../src/components/DeduplicationWorksp
 import { ToastProvider } from '../../src/components/Toast';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { translateRawTag } from '../../src/lib/tags';
+import { RetainedPage } from '../../src/app/RetainedPage';
 
 afterEach(resetInvokeAdapterForTests);
 describe('duplicate deletion confirmation', () => {
+  it('does not reopen an old overview lookup after leaving and returning', async () => {
+    const record = { serverId: 's', archiveId: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' };
+    let finish: ((value: unknown) => void) | undefined;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
+      if (command === 'list_archive_identities') return { ok: true, value: [record] };
+      if (command === 'dedup_list_non_duplicates') return { ok: true, value: [{ pairKey: 'a|b', leftArchiveId: 'a', rightArchiveId: 'b', tombstoned: false }] };
+      if (command === 'list_archives_by_ids') return new Promise((resolve) => { finish = resolve; });
+      return { ok: true, value: [] };
+    });
+    const content = <MemoryRouter><ToastProvider><DeduplicationWorkspace /></ToastProvider></MemoryRouter>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '不重复关系' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Archive A' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    await act(async () => { finish!({ ok: true, value: [record] }); });
+    expect(screen.queryByRole('dialog', { name: 'Archive A' })).not.toBeInTheDocument();
+  });
+
+  it.each(['history', 'relations', 'smart', 'delete'] as const)('retires the %s dialog when its retained page hides', async (kind) => {
+    const base = scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ], 'filename');
+    setInvokeAdapterForTests(async (command, payload) => {
+      if (command === 'dedup_list_sessions' || command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
+      return base(command, payload);
+    });
+    const content = <ToastProvider><DeduplicationWorkspace /></ToastProvider>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    if (kind === 'smart' || kind === 'delete') {
+      fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+      const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+      if (kind === 'delete') fireEvent.click(card);
+    }
+    fireEvent.click(screen.getByRole('button', { name: { history: '扫描结果', relations: '不重复关系', smart: '智能选择', delete: '执行所选' }[kind] }));
+    await screen.findByRole('dialog');
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    expect(screen.queryByRole('dialog', { hidden: true })).not.toBeInTheDocument();
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('loads a resumed scan result even after its completed progress stops polling', async () => {
+    const session = { sessionId: 'resumed', scopeId: 'scope', algorithmVersion: 'v1', status: 'running', checkpoint: 0, archiveCount: 2 };
+    const pairs = [{ leftArchiveId: 'a', rightArchiveId: 'b', source: 'image' }];
+    let polls = 0;
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, tagTranslationEnabled: false } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
+      if (command === 'list_archive_identities' || command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
+      if (command === 'dedup_list_sessions') return { ok: true, value: [{ ...session, pairCount: 1, createdAt: 'now', updatedAt: 'now' }] };
+      if (command === 'dedup_scan_progress') return { ok: true, value: { ...session, status: ++polls > 1 ? 'completed' : 'running', stage: polls > 1 ? 'completed' : 'covers', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs } };
+      if (command === 'dedup_load_result') return new Promise((resolve) => { finish = resolve; });
+      throw new Error(command);
+    });
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(finish).toBeDefined());
+    // Let React process the completed progress before the result IPC returns.
+    await act(async () => {});
+    await act(async () => { finish({ ok: true, value: { session: { ...session, status: 'completed' }, archives: [], pairs, selectedArchiveIds: [], outcomes: [] } }); });
+    expect(await screen.findByRole('checkbox', { name: '选择 a' })).toBeInTheDocument();
+  });
+
+  it('lets a second tap undo a selection while its save is still pending', async () => {
+    const user = userEvent.setup();
+    const fixture = scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]);
+    const saves: Array<{ ids: string[]; finish: (value: unknown) => void }> = [];
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'dedup_save_selection') return new Promise((finish) => {
+        saves.push({ ids: args?.selectedArchiveIds as string[], finish });
+      });
+      return fixture(command, args);
+    });
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '开始扫描' }));
+    const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    fireEvent.click(card);
+    expect(card).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(card);
+    expect(card).toHaveAttribute('aria-checked', 'false');
+    await waitFor(() => expect(saves).toHaveLength(1));
+    await act(async () => { saves[0]!.finish({ ok: true, value: null }); });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]!.ids).toEqual([]);
+    await act(async () => { saves[1]!.finish({ ok: true, value: null }); });
+    expect(card).toHaveAttribute('aria-checked', 'false');
+  });
+
   it('confirms favorite synchronization and reports failed archive outcomes', async () => {
     const user = userEvent.setup();
     const pair = { leftArchiveId:'a',rightArchiveId:'b',source:'filename' };
@@ -128,10 +228,7 @@ describe('duplicate deletion confirmation', () => {
     // loadResult 与真实后端一样回放持久化的选择：scanChunk 写什么就回什么。
     let selectedArchiveIds: string[] = [];
     const adapter = vi.fn(async (command: string, payload?: { input?: { selectedArchiveIds?: string[] }; selectedArchiveIds?: string[] }) => {
-      // 这个夹子里测的是卡片上的判定胶囊与标签行，不是翻译：把翻译关掉，标签行上就
-      // 一定是档案自己的标签。开着的话标签文本取决于翻译词典有没有下下来（词典走
-      // 网络），同一套断言会时对时错。判定胶囊（无修正/有码/无汉语）不受影响——
-      // 它们是本地按标签判定出来的。
+      // 这里没有 PreferencesProvider；卡片标签按当前词典显示，断言用同一份显示名。
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false, tagTranslationEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
       if (command === 'list_archive_identities') return { ok: true, value: records };
@@ -193,8 +290,8 @@ describe('duplicate deletion confirmation', () => {
     expect(card.querySelector('.archive-thumb-card-media')).not.toBeNull();
     // 胶囊读取的是可见行（测量行是 aria-hidden 的副本，按文本查会重复命中）。
     const visibleChips = [...card.querySelectorAll('.dedup-member-tags .archive-row-tag-line')].map((line) => line.textContent).join('|');
-    expect(visibleChips).toContain('mosaic censorship');
-    expect(visibleChips).toContain('chinese');
+    expect(visibleChips).toContain(translateRawTag('other:mosaic censorship'));
+    expect(visibleChips).toContain(translateRawTag('language:chinese'));
     expect(visibleChips).toContain('有码');
     expect(card.querySelector('.dedup-member-meta')?.textContent).toBe('2.5 MB24页');
     const otherCard = screen.getByRole('checkbox', { name: '选择 Archive B' });

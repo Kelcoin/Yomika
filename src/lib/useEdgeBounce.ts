@@ -1,4 +1,5 @@
 import { useEffect, type RefObject } from 'react';
+import { EDGE_CLAIM_PX, EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from './motion';
 
 /** Excessive sibling surfaces degrade to native scrolling rather than blocking input. */
 const MAX_BOUNCE_SURFACES = 16;
@@ -16,12 +17,12 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     let frame: number | undefined;
     let queued = false;
     let pendingOffset = 0;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     let surfaces: Array<{ element: HTMLElement; top: string; position: string; transition: string; translate: string; safe: boolean; relative: boolean; baseTop: number }> = [];
     const paint = (offset: number, settling = false) => {
-      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       for (const surface of surfaces) {
         const property = surface.safe ? 'translate' : 'top';
-        surface.element.style.transition = settling && !reduced ? `${property} 200ms cubic-bezier(.2, .8, .2, 1)` : 'none';
+        if (settling) surface.element.style.transition = reduced ? 'none' : `${property} ${EDGE_SETTLE_MS}ms ${EDGE_SETTLE_EASING}`;
         if (surface.safe) surface.element.style.translate = `0 ${offset}px`;
         else surface.element.style.top = `${surface.baseTop + offset}px`;
       }
@@ -32,7 +33,12 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       queued = true;
       frame = window.requestAnimationFrame(() => { queued = false; frame = undefined; paint(pendingOffset); });
     };
-    const observer = new MutationObserver(() => reset());
+    const observer = new MutationObserver((records) => {
+      // Portal-only page surfaces may update cards/images while the finger is
+      // down. That does not change their containing-block contract. Unknown
+      // surfaces still reset before any newly inserted fixed child can paint.
+      if (records.some((record) => record.target === host || surfaces.some((surface) => !surface.element.hasAttribute('data-bounce-surface') && surface.element.contains(record.target)))) reset();
+    });
     const reset = () => {
       observer.disconnect();
       if (frame !== undefined) window.cancelAnimationFrame(frame);
@@ -66,7 +72,7 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
         if (node === root) break;
       }
       if (!scroller) return;
-      const edge = scroller.scrollTop <= 0 ? 1 : scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1 ? -1 : undefined;
+      const edge = scroller.scrollTop <= 1 ? 1 : scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1 ? -1 : undefined;
 
       host = scroller;
       const touch = event.touches[0]!;
@@ -89,45 +95,45 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       if (claimed && (!event.cancelable || host.scrollTop !== claimedScrollTop)) { reset(); return; }
       const travel = dy * start.edge;
       if (!claimed) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < EDGE_CLAIM_PX) return;
         if (Math.abs(dx) > Math.abs(dy) || travel < 0) { reset(); return; }
-        if (travel < 12) return;
+        if (travel < EDGE_CLAIM_PX) return;
         if (!event.cancelable) { reset(); return; }
-        if (host.children.length > MAX_BOUNCE_SURFACES) { reset(); return; }
+        const children = Array.from(host.children).filter((element): element is HTMLElement => element instanceof HTMLElement && !element.hidden);
+        if (children.length > MAX_BOUNCE_SURFACES) { reset(); return; }
         claimed = true;
         claimedScrollTop = host.scrollTop;
         host.dataset.edgeBounce = 'dragging';
         // A menu/dialog inserted during drag or settling must never inherit a
         // translated containing block, even for one displayed frame.
         observer.observe(host, { childList: true, subtree: true });
-        // Structural visual contract: only leaf surfaces may translate. Content
-        // containers always use relative top, so even hidden/future fixed children
-        // remain viewport anchored without inspecting their descendants. The
-        // childList observer invalidates a translated leaf before it gains children.
+        // Structural visual contract: leaves and explicitly portal-only route
+        // surfaces may translate. Unknown containers keep fixed-safe relative
+        // top; the observer invalidates a leaf before it gains children.
         // Read only the bounded set of direct surfaces, never the content tree.
         surfaces = [];
-        for (const element of host.children) {
-          if (!(element instanceof HTMLElement) || element.hidden) continue;
+        for (const element of children) {
           const style = getComputedStyle(element);
           if (style.position === 'fixed') continue;
-          const safe = element.childElementCount === 0 && (!style.translate || style.translate === 'none');
+          const safe = (element.childElementCount === 0 || element.hasAttribute('data-bounce-surface')) && (!style.translate || style.translate === 'none');
           surfaces.push({ element, top: element.style.top, position: element.style.position, transition: element.style.transition, translate: element.style.translate, safe, relative: style.position === 'static' || !style.position, baseTop: parseFloat(style.top) || 0 });
         }
         for (const surface of surfaces) {
+          surface.element.style.transition = 'none';
           if (!surface.safe && surface.relative) surface.element.style.position = 'relative';
         }
       }
       if (event.cancelable) event.preventDefault();
-      schedulePaint(start.edge * Math.min(80, Math.max(0, travel) * 0.5));
+      schedulePaint(start.edge * rubberBand(Math.max(0, travel)));
     };
     const touchEnd = () => {
       if (!host || !claimed) { reset(); return; }
-      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       if (frame !== undefined) window.cancelAnimationFrame(frame);
       frame = undefined; queued = false;
       host.dataset.edgeBounce = 'settling';
       paint(0, true);
       start = undefined; claimed = false;
-      settle = window.setTimeout(reset, reduced ? 0 : 200);
+      settle = window.setTimeout(reset, reduced ? 0 : EDGE_SETTLE_MS);
     };
     const visibility = () => { if (document.visibilityState !== 'visible') reset(); };
     root.addEventListener('touchstart', touchStart, { passive: true });

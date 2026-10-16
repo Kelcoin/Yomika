@@ -183,6 +183,7 @@ mod tests {
 
     fn snapshot() -> JobSnapshot {
         JobSnapshot {
+            failure_message: None,
             job_id: "job-1".to_string(),
             key: JobKey {
                 input_id: "archive-a:12".to_string(),

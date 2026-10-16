@@ -23,6 +23,7 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import app.tauri.annotation.Command
@@ -62,6 +63,11 @@ class SystemBarStyleArgs {
   var dark: Boolean = false
   /** 窗口底色（`#rrggbb`）：页面画上来之前露出来的就是它，跟主题一致才不会闪一下白。 */
   var background: String = "#0D0D0D"
+}
+
+@InvokeArg
+class StatusBarVisibilityArgs {
+  var visible: Boolean = true
 }
 
 @InvokeArg
@@ -139,6 +145,19 @@ fun applySystemBarAppearance(activity: Activity, dark: Boolean, background: Stri
  */
 @TauriPlugin
 class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
+  @Command
+  fun setStatusBarVisible(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(StatusBarVisibilityArgs::class.java)
+      val controller = WindowInsetsControllerCompat(hostActivity.window, hostActivity.window.decorView)
+      controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      if (args.visible) controller.show(WindowInsetsCompat.Type.statusBars())
+      else controller.hide(WindowInsetsCompat.Type.statusBars())
+      invoke.resolve()
+    } catch (error: Throwable) {
+      invoke.reject(error.message ?: "切换状态栏失败")
+    }
+  }
   private companion object {
     /** 读 Cookie 的三个域，与 Rust 侧 `COOKIE_ORIGINS` 同一份名单。 */
     val COOKIE_URLS = listOf(

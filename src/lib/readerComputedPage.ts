@@ -242,8 +242,8 @@ export async function loadReaderComputedPage(
     lastSequence = event.sequence;
     const state = event.state;
     if (typeof state === 'object' && 'failed' in state) {
-      note('阅读器算图：任务失败', { code: state.failed.code });
-      failed({ code: state.failed.code });
+      note('阅读器算图：任务失败', { code: state.failed.code, message: event.failureMessage, jobId: event.jobId, inputId: event.key.inputId });
+      failed({ code: state.failed.code, ...(event.failureMessage ? { message: event.failureMessage } : {}) });
       finish(undefined);
       return;
     }
@@ -286,8 +286,8 @@ export async function loadReaderComputedPage(
     lastSequence = Math.max(lastSequence, snapshot.sequence);
     const state = snapshot.state;
     if (typeof state === 'object' && 'failed' in state) {
-      note('阅读器算图：任务失败', { code: state.failed.code });
-      failed({ code: state.failed.code });
+      note('阅读器算图：任务失败', { code: state.failed.code, message: snapshot.failureMessage, jobId: snapshot.jobId, inputId: snapshot.key.inputId });
+      failed({ code: state.failed.code, ...(snapshot.failureMessage ? { message: snapshot.failureMessage } : {}) });
       finish(undefined);
     } else if (state === 'cancelled') {
       finish(undefined);

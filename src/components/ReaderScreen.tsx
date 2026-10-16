@@ -10,7 +10,7 @@ import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
-import { getPlatformCapabilities } from '../bridge/platform';
+import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform';
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
@@ -150,6 +150,11 @@ export function useReaderChrome({ rootRef, visible, active, suspended = false, p
   }, [box]);
 
   const [keepAliveToken, setKeepAliveToken] = useState(0);
+  const [tappedBands, setTappedBands] = useState({ top: false, bottom: false });
+  useEffect(() => {
+    if (!visible || !active) setTappedBands(current => current.top || current.bottom ? { top: false, bottom: false } : current);
+    if (!active) setHover(null);
+  }, [visible, active, setHover]);
   const keepAlive = useCallback((event: ChromePointerEvent) => {
     event.stopPropagation();
     setKeepAliveToken((value) => value + 1);
@@ -161,49 +166,55 @@ export function useReaderChrome({ rootRef, visible, active, suspended = false, p
   callbacksRef.current = { onToggle, onHide };
 
   useEffect(() => {
-    if (!active || !visible || suspended) return undefined;
+    if (!active || (!visible && !hoverChrome) || suspended) return undefined;
     const timer = window.setTimeout(() => {
       // 钉住的那一侧比 `visible` 强势（见下面 topChromeVisible 的算法），自动收起时
       // 不把意见清掉，被钉住的那条栏就再也摘不下来。
       setHover(null);
+      setTappedBands({ top: false, bottom: false });
       callbacksRef.current.onHide();
     }, CHROME_AUTO_HIDE_MS);
     return () => window.clearTimeout(timer);
-  }, [active, keepAliveToken, setHover, suspended, visible]);
+  }, [active, keepAliveToken, setHover, suspended, visible, hoverChrome]);
 
   const handleCanvasClick = useCallback((event: ChromePointerEvent) => {
     const side = hoverTarget(event);
+    if (pinTappedBand) {
+      if (!visible && side === null) return;
+      const next = side === null ? { top: false, bottom: false }
+        : { ...(visible ? tappedBands : { top: false, bottom: false }), [side]: !visible || !tappedBands[side] };
+      setTappedBands(next);
+      setHover(undefined);
+      setKeepAliveToken((value) => value + 1);
+      if (visible !== (next.top || next.bottom)) callbacksRef.current.onToggle();
+      return;
+    }
     if (!visible) {
       // 栏藏着时只有点在上下感应带里才算唤出，画面中部留给翻页。
       if (side === null) return;
-      // 唤出时把落点那一侧钉住：触屏没有悬停，`hoverChrome` 永远是 `undefined`，两条栏
-      // 就只能跟着同一个 `visible` 同亮同灭——手指点在顶栏感应带上，底栏也一起冒出来
-      // （用户报的「点一侧触发两侧」）。只有两条栏都在的实现这么干，加载态那层只有顶栏
-      // 一条，点哪儿都该把它叫出来。
-      setHover(pinTappedBand ? side : undefined);
+      setHover(undefined);
       setKeepAliveToken((value) => value + 1);
       callbacksRef.current.onToggle();
       return;
     }
-    // 已经开着：点另一条感应带就把那条换上来（用户的「点一侧触发那一侧」在开着的时候
-    // 同样成立），落在中部、或落在当前这一条上，才是收起。
-    if (pinTappedBand && side !== null && side !== hoverChromeRef.current) {
-      setHover(side);
-      setKeepAliveToken((value) => value + 1);
-      return;
-    }
     setHover(null);
     callbacksRef.current.onToggle();
-  }, [hoverTarget, pinTappedBand, setHover, visible]);
+  }, [hoverTarget, pinTappedBand, setHover, visible, tappedBands]);
 
   const clearHover = useCallback(() => setHover(null), [setHover]);
 
   // `undefined` 是「指针还没给过意见」（听权威可见性），`null` 是「指针已经在画面中部 /
   // 离开了画布」（两条栏都收）——两者不能合并。
-  const topChromeVisible = hoverChrome === undefined ? visible : hoverChrome === 'top';
-  const bottomChromeVisible = hoverChrome === undefined ? visible : hoverChrome === 'bottom';
+  const hasTappedBand = tappedBands.top || tappedBands.bottom;
+  const topChromeVisible = active && (pinTappedBand && visible && hasTappedBand ? tappedBands.top : hoverChrome === undefined ? visible : hoverChrome === 'top');
+  const bottomChromeVisible = active && (pinTappedBand && visible && hasTappedBand ? tappedBands.bottom : hoverChrome === undefined ? visible : hoverChrome === 'bottom');
   const topPresence = useDelayedUnmount(topChromeVisible, CHROME_EXIT_MS);
   const bottomPresence = useDelayedUnmount(bottomChromeVisible, CHROME_EXIT_MS);
+  useEffect(() => {
+    if (!active) return;
+    void setStatusBarVisible(topPresence.mounted);
+  }, [active, topPresence.mounted]);
+  useEffect(() => active ? () => { void setStatusBarVisible(true); } : undefined, [active]);
 
   return { topChromeVisible, bottomChromeVisible, topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive, clearHover };
 }
@@ -343,7 +354,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
 
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
   // 同一个 M3 指示器，全应用只此一个（它自己的深色画布由 .reader-page-status 上色）。
-  if (!failed) return <div className="reader-page-status"><LoadingIndicator /></div>;
+  if (!failed) return <div className="reader-page-status"><LoadingIndicator variant="reader" /></div>;
   return (
     <div className="reader-page-status is-failed">
       <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={(event) => { event.stopPropagation(); onRetry(); }}>
@@ -450,12 +461,20 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const reportedPageRef = useRef(-1);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTapRef = useRef<number>(0);
+  const touchZoomAt = useRef(-Infinity);
+  const touchEndAt = useRef(-Infinity);
   const dragPagedRef = useRef(false);
   /** Set on release when the pointer travelled far enough to be a drag, so the
    * click that follows can be ignored. */
   const gestureMovedRef = useRef(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
+  useLayoutEffect(() => {
+    if (!pageActive) {
+      setThumbnailPanelOpen(false);
+      setThumbnails(new Map());
+    }
+  }, [pageActive]);
   // 缩略面板是阅读器里的一层：返回手势先收掉它，而不是直接把阅读页带走
   // （返回手势走 webview 历史，见 `lib/overlayBackGuard`）。
   useOverlayBackGuard(thumbnailPanelOpen, () => setThumbnailPanelOpen(false));
@@ -826,7 +845,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // image. Load the small page-thumbnail rendition instead, one at a time so a
   // long archive cannot burst hundreds of requests.
   useEffect(() => {
-    if (!thumbnailPanelOpen || !loadPageThumbnail) return undefined;
+    if (!pageActive || !thumbnailPanelOpen || !loadPageThumbnail) return undefined;
     let active = true;
     void (async () => {
       for (let index = 0; index < pages.length; index += 1) {
@@ -837,7 +856,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       }
     })();
     return () => { active = false; };
-  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen]);
+  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen, pageActive]);
 
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
@@ -890,6 +909,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target;
+    if (target instanceof Element) {
+      if (target.closest('input, textarea, select, [contenteditable], [role="slider"]')) return;
+      // Space on a focused toolbar button belongs to that button. Letting it
+      // bubble into the canvas used to turn a page before activating the control.
+      if (event.key !== 'Escape' && target.closest('button, a, [role="button"]')) return;
+    }
     if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
       event.preventDefault();
       move('next');
@@ -1038,7 +1065,25 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [trackDrag]);
 
   const handleTouchEnd = useCallback((event: TouchEvent) => {
+    touchEndAt.current = Date.now();
     if (pinchStart.current || panStart.current) {
+      const start = touchStartRef.current;
+      const end = event.changedTouches[0];
+      const tap = !pinchStart.current && start && end && event.touches.length === 0
+        && Math.hypot(end.clientX - start.x, end.clientY - start.y) < 10;
+      if (tap) {
+        const now = Date.now();
+        if (lastTapRef.current > 0 && now - lastTapRef.current < 300) {
+          const point = viewportPoint(end.clientX, end.clientY);
+          setZoom((current) => doubleTapZoomAt(current, point.x, point.y));
+          touchZoomAt.current = now;
+          lastTapRef.current = 0;
+        } else lastTapRef.current = now;
+        panStart.current = undefined;
+        touchStartRef.current = null;
+        setPanning(false);
+        return;
+      }
       pinchStart.current = undefined;
       touchStartRef.current = null;
       const remaining = event.touches[0];
@@ -1070,6 +1115,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (layoutRef.current !== 'webtoon') {
         const point = viewportPoint(touch.clientX, touch.clientY);
         setZoom((current) => doubleTapZoomAt(current, point.x, point.y));
+        touchZoomAt.current = now;
       }
       return;
     }
@@ -1089,6 +1135,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const pointerStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
   const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (Date.now() - touchEndAt.current < 600) return;
     if (sliding.current) return;
     // 面板那一层（蒙版 + 面板体）是自己的，不是画布：落在它上面的按下不开始画布手势。
     // `.reader-overview` 只匹配面板体，蒙版得自己列出来。
@@ -1109,7 +1156,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // 画布手势：hover 判定只认指针坐标（蒙版挡不住一个 mouseMove），曾经因此能从蒙版
     // 上把底栏划出来、顺带把亮着的顶栏撤掉。面板自己内部的滚动/点击不受影响。
     if (thumbnailPanelOpen) return;
-    if (!event.buttons) setHover(hoverTarget(event));
+    if (!event.buttons && !window.matchMedia?.(COARSE_POINTER_QUERY).matches) setHover(hoverTarget(event));
     if (panStart.current && event.buttons === 1) { dragZoom(event.clientX, event.clientY); return; }
     const start = pointerStartRef.current;
     if (!start || event.buttons !== 1) return;
@@ -1436,6 +1483,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       // 靠 `stopPropagation` 挡住了自己那一半，可它碰到控件就早退，底栏又根本没铺它，
       // 所以这一句必须落在画布这一层——两条栏都盖在 `.reader-chrome` 里。
       onDoubleClick={(event) => {
+        if (Date.now() - touchZoomAt.current < 600) return;
         const target = event.target;
         if (target instanceof Element && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
         if (effectiveLayout === 'webtoon') return;
@@ -1450,7 +1498,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           // 捕获画布上的按下是为了拖拽翻页。可是一旦抓住，Chromium 会把随后的 click
           // 改派给被捕获的 <main>——蒙版自己的 onClick 就永远收不到，面板的「点空白
           // 关闭」因此失效。面板那一层不参与画布手势，也就不该被捕获；输入框同理。
-          if (event.pointerType === 'mouse' && event.button === 0 && !(event.target as Element).closest('button, a, input, .reader-overview, .reader-overview-backdrop')) event.currentTarget.setPointerCapture?.(event.pointerId);
+          if (event.pointerType === 'mouse' && event.button === 0 && !(event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) event.currentTarget.setPointerCapture?.(event.pointerId);
         }}
         onPointerCancel={cancelGesture}
         onPointerUp={(event) => { if (event.pointerType === 'mouse') handleMouseUp(event); }}

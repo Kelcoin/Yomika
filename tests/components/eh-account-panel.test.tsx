@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { EhAccountPanel } from '../../src/components/EhAccountPanel';
 import { ToastProvider } from '../../src/components/Toast';
@@ -156,6 +156,24 @@ describe('EhAccountPanel', () => {
     await user.type(input, '被改了');
     await user.keyboard('{Escape}');
     expect(onEditUsername).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending rename from submitting twice or switching to another account', async () => {
+    const user = userEvent.setup();
+    let finish!: () => void;
+    const onEditUsername = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<EhAccountPanel accounts={sampleAccounts} onEditUsername={onEditUsername} />);
+    await user.click(screen.getAllByRole('button', { name: /编辑 .* 的账户名/ })[0]!);
+    const input = screen.getByRole('textbox', { name: '账户名' });
+    fireEvent.change(input, { target: { value: 'New name' } });
+    act(() => {
+      fireEvent.keyDown(input, { key: 'Enter' });
+      fireEvent.blur(input);
+    });
+    expect(onEditUsername).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /编辑 .* 的账户名/ })).toBeDisabled();
+    await act(async () => { finish(); });
+    expect(screen.queryByRole('textbox', { name: '账户名' })).toBeNull();
   });
 
   it('treats an unchanged or empty commit as a cancel', async () => {

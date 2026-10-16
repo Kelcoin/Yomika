@@ -31,6 +31,8 @@ import { loadLocalRenditions, loadReaderComputedPage, READER_UPSCALE_STAGE_ID, t
 import type { ImageCacheIdentity } from '../domain/cache';
 import { imageResidentBytes, type ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
+import { useMediaQuery } from '../lib/useMediaQuery';
+import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { shouldAutoEnableUpscale } from '../lib/autoUpscale';
 
 const repository = new NativeLibraryRepository();
@@ -151,6 +153,7 @@ const DERIVED_TIER_ORDER: Record<DerivedTier, number> = { visible: 0, neighbour:
 function ReaderRouteChromeShell({ className, title, goBack, children }: { className: string; title: string; goBack: () => void; children: ReactNode }) {
   // 保留页在后台时不走表，和阅读态同一个理由。
   const pageActive = usePageActive();
+  const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const rootRef = useRef<HTMLElement>(null);
   const [chromeVisible, setChromeVisible] = useState(false);
   const { topPresence, hoverTarget, setHover, handleCanvasClick, keepAlive, clearHover } = useReaderChrome({
@@ -169,7 +172,7 @@ function ReaderRouteChromeShell({ className, title, goBack, children }: { classN
       ref={rootRef}
       onClick={handleCanvasClick}
       // 与阅读态同一条判定：指针落进上/下感应带（或栏本身）才唤出，画面中部不动它。
-      onMouseMove={(event) => setHover(hoverTarget(event))}
+      onMouseMove={(event) => { if (!coarsePointer) setHover(hoverTarget(event)); }}
       onMouseLeave={clearHover}
     >
       {topPresence.mounted && (
@@ -1370,7 +1373,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   if (pages.length === 0) {
     return (
       <ReaderRouteChromeShell className="reader-screen-loading" title={title} goBack={goBack}>
-        <LoadingIndicator label="正在加载页面" size="lg" />
+        <LoadingIndicator label="正在加载页面" size="lg" variant="reader" />
       </ReaderRouteChromeShell>
     );
   }

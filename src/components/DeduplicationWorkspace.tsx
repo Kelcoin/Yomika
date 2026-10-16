@@ -1,5 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 import { Ban, Check, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, SquareCheckBig, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
@@ -178,6 +179,7 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
  * 勾选组内档案 = 执行时删除；手动触碰过的组受智能选择保护；
  * 已标记的对立刻从视图移除，下次扫描也不再命中。 */
 export function DeduplicationWorkspace() {
+  const pageActive = usePageActive();
   const { showToast } = useToast();
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [server, setServer] = useState<ServerRecord>();
@@ -215,9 +217,23 @@ export function DeduplicationWorkspace() {
   useOverlayBackGuard(historyOpen, () => setHistoryOpen(false));
   const [sessions, setSessions] = useState<DedupSessionSummary[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  useLayoutEffect(() => {
+    if (!pageActive) {
+      setRelationsOpen(false);
+      setHistoryOpen(false);
+      setSmartSelectPending(false);
+      setDeleteSession(undefined);
+      setOverviewArchiveId(undefined);
+      setOverviewArchive(undefined);
+    }
+  }, [pageActive]);
   /** 有效不重复关系的条数（含导入的），显示在统计栏。 */
   const [relationCount, setRelationCount] = useState(0);
   const scanGeneration = useRef(0);
+  useEffect(() => () => { scanGeneration.current += 1; }, []);
+  const selectionWrites = useRef<Promise<void>>(Promise.resolve());
+  const selectionRevision = useRef(0);
+  const confirmedSelection = useRef<{ sessionId: string; ids: string[] }>();
   /** 结果区宽度：列数与「不满行居中」的卡片宽度都按它算。 */
   const groupsRef = useRef<HTMLDivElement>(null);
   const [groupsWidth, setGroupsWidth] = useState(0);
@@ -342,9 +358,28 @@ export function DeduplicationWorkspace() {
    * 与卡片都不会因为改选择而重建。 */
   async function applySelection(nextSelected: string[]) {
     if (!result) return;
-    const response = await dedup.saveSelection(result.session.sessionId, nextSelected);
-    if (!response.ok) { showToast(response.error.message, 'error'); return; }
-    setResult((current) => current ? { ...current, selectedArchiveIds: nextSelected } : current);
+    const targetSession = result.session.sessionId;
+    const revision = ++selectionRevision.current;
+    if (confirmedSelection.current?.sessionId !== targetSession) {
+      confirmedSelection.current = { sessionId: targetSession, ids: result.selectedArchiveIds };
+    }
+    const confirmed = confirmedSelection.current;
+    // 先呈现手势结果，按顺序落库。IPC 延迟不能吞掉第二次点击或倒序覆盖选择。
+    selectedRef.current = new Set(nextSelected);
+    setResult((current) => current?.session.sessionId === targetSession ? { ...current, selectedArchiveIds: nextSelected } : current);
+    const write = selectionWrites.current.then(async () => {
+      const response = await dedup.saveSelection(targetSession, nextSelected);
+      if (response.ok) {
+        confirmed.ids = nextSelected;
+      } else {
+        showToast(response.error.message, 'error');
+        if (revision === selectionRevision.current) {
+          setResult((current) => current?.session.sessionId === targetSession ? { ...current, selectedArchiveIds: confirmed.ids } : current);
+        }
+      }
+    });
+    selectionWrites.current = write.catch(() => undefined);
+    await write;
   }
 
   useEffect(() => {
@@ -373,7 +408,7 @@ export function DeduplicationWorkspace() {
   // 扫描是一次长命令，后端把最新进度放进登记表：这里轮询它画进度条。没有
   // 这一步，界面上除了按钮变成「扫描中…」什么都看不到——这正是「点了没反应」。
   useEffect(() => {
-    if (!busy || !sessionId) return;
+    if (!busy || !sessionId || progress?.status !== 'running') return;
     let active = true;
     const timer = window.setInterval(() => {
       void dedup.scanProgress(sessionId).then((response) => {
@@ -382,15 +417,19 @@ export function DeduplicationWorkspace() {
         // 状态一旦离开 running 就收工：页面重挂载后接管的会话没有本组件的
         // promise 可等，不收工就会把「取消扫描」永久留在界面上。
         if (response.value.status !== 'running') {
+          const generation = scanGeneration.current;
           setBusy(false);
           void dedup.loadResult(sessionId).then((loaded) => {
-            if (active && loaded.ok) setResult((current) => current ?? loaded.value);
+            // 停止轮询会清理本 effect；结果读取属于扫描本身，不能被这次清理丢掉。
+            if (generation !== scanGeneration.current) return;
+            if (loaded.ok) setResult((current) => current?.session.sessionId === sessionId ? current : loaded.value);
+            else showToast(loaded.error.message, 'error');
           });
         }
       });
     }, 400);
     return () => { active = false; window.clearInterval(timer); };
-  }, [busy, sessionId]);
+  }, [busy, sessionId, progress?.status]);
 
   // 页面重挂载时接管仍在跑的会话：扫描在后端继续，进度条与取消按钮不能丢。
   useEffect(() => {
@@ -462,7 +501,7 @@ export function DeduplicationWorkspace() {
       ownerGroupKeys.forEach((key) => next.delete(key));
       return next;
     });
-    const next = new Set(result.selectedArchiveIds);
+    const next = new Set(selectedRef.current);
     if (checked) next.add(archiveId); else next.delete(archiveId);
     await applySelection(normalizeDuplicateSelection(groups, [...next]));
   }
@@ -475,7 +514,7 @@ export function DeduplicationWorkspace() {
     else nextGroupKeys.add(key);
     setSelectedGroupKeys(nextGroupKeys);
     // 整组选择与单档案删除勾选互斥。
-    const nextSelected = new Set(selected);
+    const nextSelected = new Set(selectedRef.current);
     group.forEach((item) => nextSelected.delete(item.archiveId));
     await applySelection([...nextSelected]);
   }
@@ -489,7 +528,7 @@ export function DeduplicationWorkspace() {
     const nextKeys = allSelected ? new Set<string>() : new Set(keys);
     setManuallyTouchedGroupKeys((current) => new Set([...current, ...keys]));
     setSelectedGroupKeys(nextKeys);
-    const nextSelected = new Set(selected);
+    const nextSelected = new Set(selectedRef.current);
     groups.flat().forEach((item) => nextSelected.delete(item.archiveId));
     await applySelection([...nextSelected]);
   }
@@ -501,7 +540,7 @@ export function DeduplicationWorkspace() {
     if (keys.every((key) => selectedGroupKeys.has(key))) keys.forEach((key) => nextGroupKeys.delete(key));
     else keys.forEach((key) => nextGroupKeys.add(key));
     setSelectedGroupKeys(nextGroupKeys);
-    const nextSelected = new Set(selected);
+    const nextSelected = new Set(selectedRef.current);
     chain.flat().forEach((item) => nextSelected.delete(item.archiveId));
     await applySelection([...nextSelected]);
   }
@@ -536,6 +575,7 @@ export function DeduplicationWorkspace() {
     if (!result || !server) return;
     setBusy(true);
     setDeleteSession(undefined);
+    await selectionWrites.current;
     // 整组选择 → 组内全部两两组合标记为不重复。
     const markedGroups = groups.filter((group) => selectedGroupKeys.has(groupKeyOf(group)));
     // 一批一次 IPC：原先按 C(m,2) 逐对串行往返，一组五人就是十次。
@@ -692,13 +732,14 @@ export function DeduplicationWorkspace() {
   }
 
   useEffect(() => {
-    if (!overviewArchiveId || !server) { setOverviewArchive(undefined); return; }
+    if (!pageActive || !overviewArchiveId || !server) { setOverviewArchive(undefined); return; }
     let active = true;
+    setOverviewArchive(undefined);
     void library.listArchivesByIds(server.id, [overviewArchiveId]).then((response) => {
-      setOverviewArchive(active && response.ok ? response.value[0] : undefined);
+      if (active) setOverviewArchive(response.ok ? response.value[0] : undefined);
     });
     return () => { active = false; };
-  }, [overviewArchiveId, server]);
+  }, [overviewArchiveId, server, pageActive]);
 
   const visibleRelations = useMemo(() => {
     const query = relationsQuery.trim().toLowerCase();

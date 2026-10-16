@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { usePageActive } from '../app/RetainedPage';
 import { Languages, ArrowDownWideNarrow, 
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive,
@@ -15,6 +16,7 @@ import { ErrorLogPanel, useErrorLog } from './ErrorLogPanel';
 import { accountDisplayName } from './EhAccountPanel';
 import { useToast } from './Toast';
 import { YomikaMark } from './YomikaMark';
+import { AboutDetails } from './AboutDetails';
 import { EhMark } from './EhMark';
 import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -61,19 +63,13 @@ import { COLOR_SCHEMES, CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
 import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { NativeInferenceRepository, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
+import { NativeInferenceRepository, InstalledModelSchema, UpscaleCatalogSchema, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
+import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { readTextFromFile, saveTextToFile } from '../bridge/textFile';
-
-function readAdvancedCache<T>(key: string): T[] | undefined {
-  try {
-    const value = JSON.parse(localStorage.getItem(key) ?? 'null');
-    return Array.isArray(value) ? value as T[] : undefined;
-  } catch { return undefined; }
-}
 
 function writeAdvancedCache(key: string, value: unknown[]): void {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
@@ -152,7 +148,6 @@ const CACHE_RENDITIONS = [
  * drift from the shipped version the way a hand-written string would. */
 const APP_VERSION = __APP_VERSION__;
 const APP_AUTHOR = __APP_AUTHOR__;
-const APP_LICENSE = __APP_LICENSE__;
 /** Shown on the About page and opened in the browser; trimmed for display. */
 const APP_REPOSITORY = __APP_REPOSITORY__;
 const APP_REPOSITORY_DISPLAY = APP_REPOSITORY.replace(/^https?:\/\//, '').replace(/\/$/, '');
@@ -230,6 +225,7 @@ function sectionLabel(id: string): string {
 }
 
 export function SettingsWorkspace() {
+  const pageActive = usePageActive();
   const location = useLocation();
   const { showToast } = useToast();
   const preferenceState = usePreferences();
@@ -262,7 +258,7 @@ export function SettingsWorkspace() {
   // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
   // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
   // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
-  useOverlayBackGuard(compact && compactDrilled, () => setCompactDrilled(false));
+  useOverlayBackGuard(pageActive && compact && compactDrilled, () => setCompactDrilled(false));
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
@@ -335,9 +331,9 @@ export function SettingsWorkspace() {
   const activeScheme = COLOR_SCHEMES.find((scheme) => scheme.css !== '' && scheme.css === preferenceDraft.customCss);
   const customValue = activeScheme ? activeScheme.label : preferenceDraft.customCss ? '高级自定义' : '默认';
 
-  const [installedModels, setInstalledModels] = useState<InstalledModel[] | undefined>(() => readAdvancedCache<InstalledModel>('yomika.advanced-models'));
+  const [installedModels, setInstalledModels] = useState<InstalledModel[] | undefined>(() => readStorageSnapshot('yomika.advanced-models', InstalledModelSchema.array()));
   /** The hosted catalog. `undefined` = not fetched yet, `[]` = fetch failed. */
-  const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[] | undefined>(() => readAdvancedCache<UpscaleCatalogModel>('yomika.advanced-upscale-catalog'));
+  const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[] | undefined>(() => readStorageSnapshot('yomika.advanced-upscale-catalog', UpscaleCatalogSchema.shape.models));
   const [modelsVerified, setModelsVerified] = useState(false);
   // A model with no recorded scale cannot be run, so it is not a choice. One row
   // per id: see firstPerId.
@@ -1776,8 +1772,7 @@ export function SettingsWorkspace() {
           {APP_AUTHOR && <SettingsRow icon={<User />} label="开发者" value={APP_AUTHOR} trailing="none" />}
           {/* Absent until the project declares one in package.json. Better a
               missing row than a licence the app made up on its behalf. */}
-          {APP_LICENSE && <SettingsRow icon={<Scale />} label="开源协议" value={APP_LICENSE} trailing="none" />}
-          <SettingsRow icon={<Blocks />} label="构建于" value="Tauri 2 · React 18 · SQLite" trailing="none" />
+          <AboutDetails />
           <SettingsRow icon={<BookOpenText />} label="LANraragi 文档" hint="在浏览器中打开 LANraragi 的使用文档" trailing="nav" onClick={() => void openAboutLink('https://sugoi.gitbook.io/lanraragi')} />
           {/* 错误日志是这一组里的一行（行上是状态，点开才是记录）：必须留在组框里，
               挂到框外面它就没有容器了。 */}

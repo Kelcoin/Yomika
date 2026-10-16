@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -55,6 +55,41 @@ function renderPanel() {
 }
 
 describe('error log panel', () => {
+  it('preserves structured compute diagnostics in the expanded details', async () => {
+    serve([{ at: windowEntry.at, level: 'error', source: 'reader/compute', message: '阅读器算图：任务失败',
+      detail: JSON.stringify({ code: 'COMPUTE_RESOURCE_LIMIT', message: '源图超出交付像素预算', jobId: 'job-42', inputId: 'archive:2' }) }]);
+    renderPanel();
+    await userEvent.click(await screen.findByRole('button', { name: /阅读器算图：任务失败/ }));
+    const details = screen.getByText(/COMPUTE_RESOURCE_LIMIT/);
+    expect(details).toHaveTextContent('源图超出交付像素预算');
+    expect(details).toHaveTextContent('job-42');
+    expect(details).toHaveTextContent('archive:2');
+  });
+
+  it('keeps extra JSON context alongside the formatted location and stack', async () => {
+    serve([{ ...windowEntry, detail: JSON.stringify({ file: 'reader.ts', line: 8, stack: 'Error: compute failed', code: 'COMPUTE_RESOURCE_LIMIT', stage: { id: 'upscale' } }) }]);
+    renderPanel();
+    await userEvent.click(await screen.findByRole('button', { name: /Uncaught Error: boom/ }));
+    expect(screen.getByText(/reader\.ts:8/)).toHaveTextContent('COMPUTE_RESOURCE_LIMIT');
+    expect(screen.getByText(/reader\.ts:8/)).toHaveTextContent('upscale');
+    expect(screen.getByText('Error: compute failed')).toBeInTheDocument();
+  });
+
+  it('does not restore cleared entries from an older pending refresh', async () => {
+    let finishRead!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'error_log_read') return new Promise((resolve) => { finishRead = resolve; });
+      if (command === 'error_log_clear') return { ok: true, value: 1 };
+      return { ok: true, value: undefined };
+    });
+    const { result } = renderHook(() => useErrorLog());
+    await waitFor(() => expect(finishRead).toBeDefined());
+    await act(async () => { await result.current.clearLog(); });
+    expect(result.current.entries).toEqual([]);
+    await act(async () => { finishRead({ ok: true, value: [windowEntry] }); });
+    expect(result.current.entries).toEqual([]);
+  });
+
   it('folds each entry to a title line and expands it into 错误详情 and 堆栈跟踪', async () => {
     const user = userEvent.setup();
     serve([windowEntry]);

@@ -1,9 +1,11 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
+import { RetainedPage } from '../../src/app/RetainedPage';
+import { LocalArchivesWorkspace } from '../../src/components/LocalArchivesWorkspace';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { UNTAGGED_FILTER_ID, categoryTagLabel } from '../../src/lib/tags';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
@@ -45,6 +47,71 @@ function renderPage() {
 }
 
 describe('local archives workspace', () => {
+  it('does not navigate back to an old detail when deletion finishes after leaving', async () => {
+    let finishDelete: ((value: unknown) => void) | undefined;
+    let leave: (() => void) | undefined;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'delete_local_archives') return new Promise((resolve) => { finishDelete = resolve; });
+      return { ok: true, value: [] };
+    });
+    function Owner() {
+      const location = useLocation();
+      const navigate = useNavigate();
+      leave = () => navigate('/elsewhere');
+      return <><output data-testid="current-location">{location.pathname}</output>
+        <RetainedPage active={location.pathname === '/downloads'}><LocalArchivesWorkspace /></RetainedPage></>;
+    }
+    render(<MemoryRouter initialEntries={[`/downloads?path=${encodeURIComponent(localFile.path)}`]}><Owner /></MemoryRouter>);
+    await screen.findAllByText('测试档案');
+    fireEvent.click(screen.getByRole('button', { name: '多选' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试档案' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除所选' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(finishDelete).toBeDefined());
+    act(() => { leave!(); });
+    expect(screen.getByTestId('current-location')).toHaveTextContent('/elsewhere');
+    await act(async () => { finishDelete!({ ok: true, value: 1 }); });
+    expect(screen.getByTestId('current-location')).toHaveTextContent('/elsewhere');
+  });
+
+  it('closes local deletion confirmation when its retained page hides', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      return { ok: true, value: [] };
+    });
+    const content = <LocalArchivesWorkspace />;
+    const view = render(<MemoryRouter><RetainedPage active>{content}</RetainedPage></MemoryRouter>);
+    await screen.findByText('测试档案');
+    fireEvent.click(screen.getByRole('button', { name: '多选' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试档案' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除所选' }));
+    expect(screen.getByRole('dialog', { name: '删除本地档案' })).toBeInTheDocument();
+    view.rerender(<MemoryRouter><RetainedPage active={false}>{content}</RetainedPage></MemoryRouter>);
+    expect(screen.queryByRole('dialog', { hidden: true })).not.toBeInTheDocument();
+    view.rerender(<MemoryRouter><RetainedPage active>{content}</RetainedPage></MemoryRouter>);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('stops the initial spinner after a task-list failure and allows retrying', async () => {
+    const user = userEvent.setup();
+    let failTasks = true;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_tasks') return failTasks
+        ? { ok: false, error: { code: 'LOCAL_DATABASE', message: '读取下载任务失败', retryable: true } }
+        : { ok: true, value: [] };
+      if (command === 'list_local_archives' || command === 'list_search_presets') return { ok: true, value: [] };
+      throw new Error(command);
+    });
+    renderPage();
+    expect(await screen.findByText('读取下载任务失败')).toBeInTheDocument();
+    expect(screen.queryByText('正在读取本地档案…')).not.toBeInTheDocument();
+    failTasks = false;
+    await user.click(screen.getByRole('button', { name: '重试读取下载任务' }));
+    await waitFor(() => expect(screen.queryByText('读取下载任务失败')).not.toBeInTheDocument());
+    expect(screen.getByText('还没有下载过档案')).toBeInTheDocument();
+  });
+
   it('lists the files in the download directory and filters them by name', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {

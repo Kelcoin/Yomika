@@ -269,9 +269,10 @@ export function subscribeTagTranslationService(listener: () => void): () => void
   return tagTranslationService.subscribe(listener);
 }
 
-export function useTagTranslations(): void {
-  const [, setRevision] = useState(0);
+export function useTagTranslations(): number {
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
     return subscribeTagTranslations(() => setRevision((value) => value + 1));
   }, []);
+  return revision;
 }

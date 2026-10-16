@@ -7,11 +7,13 @@ import { SettingsMenu } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
 import { deviceDisplayName, deviceKind } from '../lib/deviceIdentity';
+import { readStorageSnapshot } from '../lib/storageSnapshot';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import {
   COMPUTE_CENTER_PAIRING_CHANGED_EVENT,
   DEFAULT_REMOTE_OPS,
   NativeComputeCenterRepository,
+  ComputeCenterStatusSchema,
   parseRemoteOps,
   serializeRemoteOps,
   type ComputeCenterStatus,
@@ -96,11 +98,15 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const [requestId, setRequestId] = useState('');
   const [code, setCode] = useState('');
   const [pairBusy, setPairBusy] = useState(false);
+  const pairPending = useRef(false);
   const [localPairMenu, setLocalPairMenu] = useState(false);
   const [selectedClient, setSelectedClient] = useState<string>();
   const [portMenu, setPortMenu] = useState(false);
   const [portDraft, setPortDraft] = useState(preferences.computeCenterPort);
   const [verified, setVerified] = useState(false);
+  const [statusError, setStatusError] = useState<string>();
+  const [refreshingStatus, setRefreshingStatus] = useState(false);
+  const statusRequest = useRef(0);
 
   const remoteOps = useMemo(() => parseRemoteOps(preferences.remoteComputeOps), [preferences.remoteComputeOps]);
   /** 「本机对外提供算力」这一组什么时候在：手机上没有这一档（它只连别人），而且**远端算力
@@ -121,25 +127,36 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const updateRemoteOps = (patch: Partial<typeof remoteOps>) =>
     editPreferences({ remoteComputeOps: serializeRemoteOps({ ...remoteOps, ...patch }) });
 
+  const publishStatus = useCallback((next: ComputeCenterStatus) => {
+    // A mutation is authoritative over any status read already in flight.
+    statusRequest.current += 1;
+    setRefreshingStatus(false);
+    setStatusError(undefined);
+    setStatus(next);
+    setVerified(true);
+    cacheDisplayStatus(next);
+  }, []);
+
   const refresh = useCallback(async () => {
+    const request = ++statusRequest.current;
+    setRefreshingStatus(true);
     const result = await repository.status();
+    if (request !== statusRequest.current) return;
+    setRefreshingStatus(false);
     if (result.ok) {
-      setStatus(result.value);
-      setVerified(true);
-      cacheDisplayStatus(result.value);
-    }
-  }, [repository]);
+      publishStatus(result.value);
+    } else setStatusError(result.error.message);
+  }, [repository, publishStatus]);
 
   useEffect(() => {
-    try {
-      const cached = localStorage.getItem('yomika.compute-center-status');
-      if (cached) {
-        const display = { ...(JSON.parse(cached) as ComputeCenterStatus), token: '' };
-        setStatus(display);
-        localStorage.setItem('yomika.compute-center-status', JSON.stringify(display));
-      }
-    } catch { /* stale or unavailable cache */ }
+    const cached = readStorageSnapshot('yomika.compute-center-status', ComputeCenterStatusSchema);
+    if (cached) {
+      const display = { ...cached, token: '' };
+      setStatus(display);
+      cacheDisplayStatus(display);
+    }
     void refresh();
+    return () => { statusRequest.current += 1; };
   }, [refresh]);
 
   // 设备是在**对面**配对的：它直接打本机 HTTP 服务的 /v2/pair/confirm，那条路不经过
@@ -186,9 +203,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
       showToast(result.error.message, 'error');
       return;
     }
-    setStatus(result.value);
-    setVerified(true);
-    cacheDisplayStatus(result.value);
+    publishStatus(result.value);
     editPreferences({
       computeCenterEnabled: next,
       computeCenterToken: result.value.token,
@@ -200,8 +215,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   async function revokeClient(id: string) {
     const result = await repository.revokePairing(id);
     if (!result.ok) { showToast(result.error.message, 'error'); return; }
-    setStatus(result.value);
-    cacheDisplayStatus(result.value);
+    publishStatus(result.value);
     setSelectedClient(undefined);
     showToast('配对已撤销', 'success');
   }
@@ -212,8 +226,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
     const result = await repository.configure({ enabled: true, port: portDraft });
     setBusy(false);
     if (!result.ok) { showToast(result.error.message, 'error'); void refresh(); return; }
-    setStatus(result.value);
-    cacheDisplayStatus(result.value);
+    publishStatus(result.value);
     editPreferences({ computeCenterPort: result.value.port });
     setPortMenu(false);
   }
@@ -244,27 +257,35 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   }
 
   async function scanDevices() {
+    if (pairPending.current) return;
+    pairPending.current = true;
     setPairBusy(true);
     const result = await repository.discover();
+    pairPending.current = false;
     setPairBusy(false);
     if (result.ok) setDevices(result.value);
     else showToast(result.error.message, 'error');
   }
 
   async function startPairing() {
-    if (!address.trim()) return;
+    if (!address.trim() || pairPending.current) return;
+    pairPending.current = true;
     setPairBusy(true);
     // 报上**这一台**的名字与类型：对面的列表就是靠它显示「是哪台设备」。名字在
     // Android 上只有 UA 里有（后端 `host_name()` 认不出机型，只能回「Yomika」）。
     const result = await repository.requestPair(address.trim(), deviceDisplayName(), deviceKind());
+    pairPending.current = false;
     setPairBusy(false);
     if (result.ok) setRequestId(result.value.requestId);
     else showToast(result.error.message, 'error');
   }
 
   async function finishPairing() {
+    if (pairPending.current) return;
+    pairPending.current = true;
     setPairBusy(true);
     const result = await repository.confirmPair(address.trim(), requestId, code.trim());
+    pairPending.current = false;
     setPairBusy(false);
     if (!result.ok) { showToast(result.error.message, 'error'); return; }
     // 只留这一台：配对成功后上一台的令牌在服务器侧当场失效（Rust 那边整表替换），本地清单
@@ -287,6 +308,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
 
   return (
     <>
+      {statusError && <div className="settings-group">
+        <p className="form-error" role="alert">{statusError}</p>
+        <button className="secondary-action" type="button" disabled={refreshingStatus} onClick={() => void refresh()}><RefreshCw aria-hidden="true" />重新读取服务状态</button>
+      </div>}
       {/* 本机节点与远端客户端互斥，避免一台设备同时显示两套连接入口；手机上一律不显示
           本机这一档（见 `showLocalServing`）。 */}
       {showLocalServing && <div className="settings-group" role="region" aria-label="本机远程后处理服务">
@@ -382,13 +407,14 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新服务</button>
           </div>
         </SettingsMenu>}
-        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { setPairMenu(false); setRequestId(''); }}>
+        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { if (pairPending.current) return; setPairMenu(false); setRequestId(''); setCode(''); }}>
           <div className="settings-choice-list">
             {unpairedDevices.map((device) => <div className="settings-choice-option" key={device.address}>
               <button
                 className="settings-choice-option-main settings-device-option"
                 type="button"
                 aria-pressed={address === device.address}
+                disabled={pairBusy}
                 onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}
               >
                 <DeviceRowBody name={device.name} address={device.address} />
@@ -404,6 +430,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             <input
               className="settings-address-input"
               aria-label="设备地址"
+              disabled={pairBusy}
               placeholder="192.168.1.5:47653"
               value={address}
               onChange={(event) => { setAddress(event.target.value); setRequestId(''); setCode(''); }}
@@ -414,6 +441,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             <input
               className="settings-code-input"
               aria-label="配对码"
+              disabled={pairBusy}
               inputMode="numeric"
               maxLength={6}
               placeholder="远端屏幕上显示的六位数字"

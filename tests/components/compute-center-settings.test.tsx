@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -120,6 +120,42 @@ describe('device identity', () => {
 });
 
 describe('compute center paired clients', () => {
+  it('does not restore a revoked client when an older status refresh finishes', async () => {
+    let reads = 0;
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_status: () => ++reads === 1
+        ? { ok: true, value: computeStatus({ running: true, pairedClients: CLIENTS }) }
+        : pending,
+      compute_center_revoke_pairing: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: [] }) }),
+    }));
+    renderComputeCenter();
+    const panel = await openManagedPairings();
+    await user().click(within(panel).getByRole('button', { name: /Pixel 7 Pro/ }));
+    await user().click(screen.getByRole('button', { name: '撤销配对' }));
+    expect(await screen.findByText('暂无已配对设备')).toBeInTheDocument();
+    await act(async () => finish({ ok: true, value: computeStatus({ running: true, pairedClients: CLIENTS }) }));
+    expect(screen.getByText('暂无已配对设备')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Pixel 7 Pro/ })).not.toBeInTheDocument();
+  });
+
+  it('offers a retry when the initial local service status cannot be read', async () => {
+    let reads = 0;
+    setInvokeAdapterForTests(adapterFor({
+      compute_center_status: () => ++reads === 1
+        ? { ok: false, error: { code: 'LOCAL_DATABASE', message: '服务状态暂不可用', retryable: true } }
+        : { ok: true, value: computeStatus() },
+    }));
+    renderComputeCenter();
+    const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('服务状态暂不可用');
+    expect(within(group).getByRole('switch')).toBeDisabled();
+    await user().click(screen.getByRole('button', { name: '重新读取服务状态' }));
+    await waitFor(() => expect(within(group).getByRole('switch')).toBeEnabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('lists every paired client by name and address with an icon that follows its kind', async () => {
     setInvokeAdapterForTests(adapterFor({
       compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: CLIENTS }) }),
@@ -214,6 +250,24 @@ describe('compute center settings menus', () => {
 });
 
 describe('one paired device at a time', () => {
+  it('keeps the pairing address stable while requesting its code', async () => {
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(adapterFor({
+      compute_pair_request: () => new Promise((resolve) => { finish = resolve; }),
+    }));
+    renderComputeCenter();
+    await user().click(await screen.findByRole('button', { name: '添加设备' }));
+    const dialog = await screen.findByRole('dialog', { name: '添加设备' });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: '重新搜索' })).toBeEnabled());
+    await user().type(within(dialog).getByLabelText('设备地址'), '192.168.1.5:47653');
+    await user().click(within(dialog).getByRole('button', { name: '配对' }));
+    expect(within(dialog).getByLabelText('设备地址')).toBeDisabled();
+    await user().keyboard('{Escape}');
+    expect(screen.getByRole('dialog', { name: '添加设备' })).toBeInTheDocument();
+    await act(async () => { finish({ ok: true, value: { requestId: 'req-stable' } }); });
+    expect(await screen.findByLabelText('配对码')).toBeEnabled();
+  });
+
   /** 配第二台时把这一台换掉：这台机器是它自己的算力来源，没有「轮流用几台」这回事。 */
   it('replaces the paired device instead of appending a second one', async () => {
     const written: Partial<PreferenceSnapshot>[] = [];

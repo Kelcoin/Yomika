@@ -203,7 +203,7 @@
        that also appears inside the dedup workspace's themed dialog, so it
        follows the theme (see .reader-overview in reader.css).
        Custom colour schemes recolor the app, not this canvas. --------------- */
-    --reader-canvas: #050506;
+    --reader-canvas: #000000;
     --reader-surface-raised: #26272c;
     --reader-ink: #f4f1f8;
     --reader-muted: #aaa5b1;
@@ -405,6 +405,9 @@
        different speeds (the multi-select bar did exactly that). */
     --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
     --motion-fast: 140ms var(--ease-standard);
+    --motion-dock: 280ms cubic-bezier(.22, 1, .36, 1);
+    --motion-bounce: 360ms cubic-bezier(.22, 1, .36, 1);
+    --motion-page: 180ms cubic-bezier(.2, .8, .2, 1);
     --motion-standard: var(--duration-standard) var(--ease-standard);
     --motion-slow: 480ms var(--ease-standard);
     /* Durations on their own, because a transition that has to delay a discrete

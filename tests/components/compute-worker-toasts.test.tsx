@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ComputeWorkerToasts } from '../../src/components/ComputeWorkerToasts';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -24,9 +24,24 @@ function renderBridge() {
 
 afterEach(() => {
   resetInvokeAdapterForTests();
+  vi.useRealTimers();
 });
 
 describe('compute worker toasts', () => {
+  it('waits for a slow status read before submitting another poll', async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const adapter = vi.fn(async () => pending);
+    setInvokeAdapterForTests(adapter);
+    renderBridge();
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(adapter).toHaveBeenCalledTimes(1);
+    await act(async () => { finish({ ok: true, value: { kind: 'stopped' } }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(adapter).toHaveBeenCalledTimes(2);
+  });
+
   it('only calls it a restart after this session has actually seen a ready worker', async () => {
     const commands: string[] = [];
     const current = { status: { kind: 'stopped' } as unknown };

@@ -252,6 +252,9 @@ pub struct UpscaleOptions {
     /// thermal-throttling through a long chapter.
     pub tile_sleep_ms: u64,
     pub max_pixels: usize,
+    /// Assemble directly at the requested delivery scale, keeping native-scale
+    /// output only for the current padded tile.
+    pub output_scale: Option<u32>,
     /// 取消牌：每块之间查一次。切页之后没必要把剩下的几百块跑完——全局只允许
     /// 一件重活，跑完的那些块用户根本看不到。
     pub cancel: Option<CancelToken>,
@@ -264,6 +267,7 @@ impl Default for UpscaleOptions {
             tile_padding: DEFAULT_TILE_PADDING,
             tile_sleep_ms: 0,
             max_pixels: 64_000_000,
+            output_scale: None,
             cancel: None,
         }
     }
@@ -296,7 +300,8 @@ pub fn upscale_rgba(
     height: u32,
     options: UpscaleOptions,
 ) -> Result<UpscaledImage, ComputeError> {
-    let scale = engine.scale();
+    let native_scale = engine.scale();
+    let scale = options.output_scale.unwrap_or(native_scale).min(native_scale);
     if width == 0 || height == 0 || scale == 0 || source.len() != width as usize * height as usize * 4
     {
         return Err(ComputeError::InvalidInput(
@@ -342,6 +347,16 @@ pub fn upscale_rgba(
             tile.padded_height,
         );
         let upscaled = engine.upscale_tile(&input, tile.padded_width, tile.padded_height)?;
+        let expected_len = (tile.padded_width as usize).checked_mul(tile.padded_height as usize)
+            .and_then(|n| n.checked_mul(native_scale as usize * native_scale as usize))
+            .and_then(|n| n.checked_mul(4));
+        if expected_len != Some(upscaled.len()) {
+            return Err(ComputeError::InvalidInput("engine tile output dimensions do not match".into()));
+        }
+        let upscaled = if scale < native_scale {
+            crate::fit::fit_rgba_scale(upscaled, tile.padded_width * native_scale,
+                tile.padded_height * native_scale, tile.padded_width, tile.padded_height, scale).0
+        } else { upscaled };
         blit_tile(&mut destination, output_width, tile, scale, &upscaled)?;
         if options.tile_sleep_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(options.tile_sleep_ms));

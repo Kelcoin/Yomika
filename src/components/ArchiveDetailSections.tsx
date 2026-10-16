@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { FocusScope } from '@radix-ui/react-focus-scope';
+import { OverlayLayer } from './OverlayLayer';
 
 import { myTagChipStyle, normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { usePageActive } from '../app/RetainedPage';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
 import { TagSearchLink } from './TagSearchLink';
@@ -76,6 +79,7 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
     let active = true;
     const controller = new AbortController();
     let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
+    setCover(undefined);
     setLoading(true);
     void getNativeImageCache().load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal })
       .then((value) => {
@@ -97,15 +101,12 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
 /** 封面那一格，点开是全屏大图。预览覆盖层跟着它一起走（Esc 也归它关），调用方
  * 不用再管。 */
 export function ArchiveDetailCover({ title, cover, loading = false }: { title: string; cover?: string | undefined; loading?: boolean }) {
+  const pageActive = usePageActive();
   const [previewOpen, setPreviewOpen] = useState(false);
+  useLayoutEffect(() => { if (!pageActive) setPreviewOpen(false); }, [pageActive]);
+  useEffect(() => { setPreviewOpen(false); }, [cover, title]);
   // 返回手势先关预览这一层（见 overlayBackGuard）。
   useOverlayBackGuard(previewOpen, () => setPreviewOpen(false));
-  useEffect(() => {
-    if (!previewOpen) return undefined;
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreviewOpen(false); };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [previewOpen]);
   return <>
     <div className="archive-detail-route-cover">
       {cover
@@ -113,9 +114,13 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
         : <div className={`archive-detail-cover-placeholder${loading ? ' is-skeleton' : ''}`} aria-label={loading ? '正在加载封面' : '暂无封面'} />}
     </div>
     {previewOpen && cover && (
-      <div className="archive-cover-preview" role="dialog" aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setPreviewOpen(false)}>
+      <OverlayLayer>
+      <FocusScope asChild trapped loop><div className="archive-cover-preview" role="dialog" tabIndex={-1} aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setPreviewOpen(false)} onKeyDown={(event) => {
+        if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setPreviewOpen(false); }
+      }}>
         <img src={cover} alt={`${title} 封面大图`} decoding="async" />
-      </div>
+      </div></FocusScope>
+      </OverlayLayer>
     )}
   </>;
 }

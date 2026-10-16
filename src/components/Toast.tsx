@@ -78,15 +78,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     timers.current.set(id, window.setTimeout(() => closeToast(id), duration));
   }, [closeToast]);
   const clearToasts = useCallback((type?: ToastType) => {
-    setItems((current) => {
-      const removed = current.filter((item) => !type || item.type === type);
-      for (const item of removed) {
-        const timer = timers.current.get(item.id);
-        if (timer) window.clearTimeout(timer);
-        timers.current.delete(item.id);
-      }
-      return current.filter((item) => type && item.type !== type);
-    });
+    const removed = itemsRef.current.filter((item) => !type || item.type === type);
+    for (const item of removed) {
+      const timer = timers.current.get(item.id);
+      if (timer) window.clearTimeout(timer);
+      timers.current.delete(item.id);
+    }
+    // Keep deduplication in sync even if a retry emits the same message before
+    // React commits the removal in this event.
+    itemsRef.current = itemsRef.current.filter((item) => type && item.type !== type);
+    setItems(itemsRef.current);
   }, []);
   useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
   const value = useMemo(() => ({ showToast, clearToasts }), [clearToasts, showToast]);

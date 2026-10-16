@@ -136,7 +136,8 @@ textarea,
 .select-trigger:active:not(:disabled) { transform: translateY(1px); }
 .select-trigger:focus-visible { outline: none; box-shadow: var(--focus-shadow); }
 
-.select-trigger > svg { width: 17px; height: 17px; margin-left: auto; color: var(--ink-secondary); }
+.select-trigger > svg { flex: none; width: 17px; height: 17px; margin-left: auto; color: var(--ink-secondary); }
+.select-trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Anything the field shows at its right before the chevron — the sort direction
    arrow. It takes the auto margin, so the chevron keeps its 4px beside it. */.select-trailing { display: grid; margin-left: auto; color: var(--ink-secondary); }
@@ -179,6 +180,8 @@ textarea,
 .select-option:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .select-option-main { display: flex; align-items: center; justify-content: space-between; flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 0 10px; border-radius: var(--radius-control); background: transparent; color: inherit; text-align: left; }
 .select-option-main svg { width: 16px; height: 16px; color: var(--brand-vermilion); }
+.select-option-main > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-option-main:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .select-option-trailing { display: grid; flex: 0 0 28px; place-items: center; color: var(--ink-secondary); }
 .select-option-trailing svg { width: 15px; height: 15px; }
 .select-option-download { display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; margin-right: 2px; border-radius: var(--radius-control); background: transparent; color: var(--ink-secondary); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast); }

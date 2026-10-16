@@ -101,7 +101,7 @@ const DownloadUrlResultSchema = z.object({
   job: z.number().int().positive(),
   url: z.string().min(1),
 });
-const CategorySchema = z.object({
+export const CategorySchema = z.object({
   id: z.string().length(14),
   name: z.string(),
   pinned: z.boolean(),

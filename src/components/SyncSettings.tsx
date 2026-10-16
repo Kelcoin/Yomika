@@ -1,5 +1,5 @@
 import { PlugZap, Save, X } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { ServerRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
@@ -55,6 +55,8 @@ export function useSyncSettings(enabled = true) {
   const [saving, setSaving] = useState(false);
   const [scopeSaving, setScopeSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const formOperation = useRef(false);
   const [syncingId, setSyncingId] = useState<string>();
   /** 表单开着时指向被编辑的账户；'new' 是新增；undefined 表示收起。 */
   const [formTarget, setFormTarget] = useState<'new' | SyncAccount>();
@@ -64,6 +66,14 @@ export function useSyncSettings(enabled = true) {
   const [scopeDraft, setScopeDraft] = useState<SyncScopeCategory[]>([...DEFAULT_SYNC_SCOPE]);
   /** 编辑时的口令：打开表单时从凭据库读一次，聚焦输入框才显示明文。 */
   const [credentialDraft, setCredentialDraft] = useState('');
+  const credentialRequest = useRef(0);
+  const credentialEdited = useRef(false);
+  const clearCredentialDraft = () => {
+    credentialRequest.current += 1;
+    credentialEdited.current = false;
+    setCredentialDraft('');
+  };
+  useEffect(() => () => { credentialRequest.current += 1; }, []);
   const [revealCredential, setRevealCredential] = useState(false);
   /** 重置远端是破坏性的，所以按钮点两下：第一次只把它变成「确认重置」。 */
   const [resetAccount, setResetAccount] = useState<SyncAccount>();
@@ -169,11 +179,14 @@ export function useSyncSettings(enabled = true) {
     if (enabled) return;
     setFormTarget(undefined);
     setRevealCredential(false);
-    setCredentialDraft('');
+    clearCredentialDraft();
   }, [enabled]);
 
   async function saveAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (formOperation.current) return;
+    formOperation.current = true;
+    const generation = credentialRequest.current;
     const formElement = event.currentTarget;
     setSaving(true);
     setError(undefined);
@@ -194,24 +207,30 @@ export function useSyncSettings(enabled = true) {
     };
     try {
       const saved = await syncRepository.saveAccount(input);
+      if (generation !== credentialRequest.current) return;
       if (!saved.ok) {
         setError(saved.error.message);
         return;
       }
       // 保存这套＝启用这套，另一套转为待命：整体重读一遍最稳妥。
       await reloadAccounts();
+      if (generation !== credentialRequest.current) return;
       formElement.reset();
       setFormTarget(undefined);
+      clearCredentialDraft();
       setMessage(`${saved.value.kind === 's3' ? '对象存储' : 'WebDAV'} 账户已保存并启用`);
     } finally {
+      formOperation.current = false;
       setSaving(false);
     }
   }
 
   /** 「测试」：把表单里现在的字段原样送去探一次，不写库、不动远端。 */
   async function testAccount() {
-    const form = document.querySelector<HTMLFormElement>('.settings-choice-panel form.sync-form');
-    if (!form) return;
+    const form = formRef.current;
+    if (!form || formOperation.current) return;
+    formOperation.current = true;
+    const generation = credentialRequest.current;
     const data = new FormData(form);
     const label = String(data.get('label') ?? '').trim();
     const editing = typeof formTarget === 'object' ? formTarget : undefined;
@@ -228,9 +247,11 @@ export function useSyncSettings(enabled = true) {
         username: String(data.get('username') ?? '').trim(),
         credential: String(data.get('credential') ?? ''),
       });
+      if (generation !== credentialRequest.current) return;
       if (result.ok) setMessage(result.value);
       else setError(result.error.message);
     } finally {
+      formOperation.current = false;
       setTesting(false);
     }
   }
@@ -261,18 +282,20 @@ export function useSyncSettings(enabled = true) {
 
   /** 把已存凭据读回表单（读不到就留空：留空保存＝不改凭据，原生侧就是这么理解的）。 */
   function loadCredential(account: SyncAccount) {
+    const request = ++credentialRequest.current;
     void syncRepository.accountCredential(account.id).then((result) => {
-      if (result.ok) setCredentialDraft((current) => (current === '' ? result.value : current));
+      if (request === credentialRequest.current && !credentialEdited.current && result.ok) setCredentialDraft(result.value);
     });
   }
 
   /** 打开表单：带上传入账户的类型，并把已存口令读回来（读不到就留空，
    * 留空保存＝不改口令，原生侧就是这么理解的）。范围不在这里，它有自己的行。 */
   function openForm(account?: SyncAccount) {
+    if (formOperation.current) return;
     setError(undefined);
     setMessage(undefined);
     setKindDraft(account?.kind ?? 'webdav');
-    setCredentialDraft('');
+    clearCredentialDraft();
     setRevealCredential(false);
     setFormTarget(account ?? 'new');
     if (!account) return;
@@ -282,11 +305,11 @@ export function useSyncSettings(enabled = true) {
   /** 表单里换类型：立刻换成那一套账户——有就填它自己的值，没有就清空。
    * 两套账户分开存，切过去绝不能还留着另一套的地址、用户名或凭据。 */
   function switchKind(kind: SyncAccountKind) {
-    if (kind === kindDraft) return;
+    if (formOperation.current || kind === kindDraft) return;
     setError(undefined);
     setMessage(undefined);
     setKindDraft(kind);
-    setCredentialDraft('');
+    clearCredentialDraft();
     setRevealCredential(false);
     const stored = accounts.find((account) => account.kind === kind);
     setFormTarget(stored ?? 'new');
@@ -320,6 +343,7 @@ export function useSyncSettings(enabled = true) {
     message,
     saving,
     testing,
+    formRef,
     testAccount,
     syncingId,
     saveAccount,
@@ -339,11 +363,11 @@ export function useSyncSettings(enabled = true) {
       void saveScope(next);
     },
     credentialDraft,
-    setCredentialDraft,
+    setCredentialDraft: (value: string) => { credentialEdited.current = true; setCredentialDraft(value); },
     revealCredential,
     setRevealCredential,
     startEdit: openForm,
-    closeForm: () => { setFormTarget(undefined); setRevealCredential(false); setCredentialDraft(''); },
+    closeForm: () => { if (formOperation.current) return; setFormTarget(undefined); setRevealCredential(false); clearCredentialDraft(); },
   };
 }
 
@@ -382,6 +406,7 @@ export function SyncAccountForm({ sync }: { sync: SyncSettingsState }) {
   return (
     <form
       className="sync-form"
+      ref={sync.formRef}
       key={account ? account.id : 'new'}
       onSubmit={sync.saveAccount}
     >
@@ -394,6 +419,7 @@ export function SyncAccountForm({ sync }: { sync: SyncSettingsState }) {
             <button
               key={kind.id}
               type="button"
+              disabled={sync.saving || sync.testing}
               className={`settings-menu-mode-button${sync.kindDraft === kind.id ? ' is-active' : ''}`}
               aria-pressed={sync.kindDraft === kind.id}
               title={kind.hint}
@@ -410,22 +436,23 @@ export function SyncAccountForm({ sync }: { sync: SyncSettingsState }) {
             : '两套账户分开保存，只有一套生效。'}
         </p>
       </fieldset>
-      <label>名称<input name="label" required autoComplete="off" placeholder="家里的 NAS" defaultValue={account?.label ?? ''} /></label>
+      <label>名称<input name="label" disabled={sync.saving || sync.testing} required autoComplete="off" placeholder="家里的 NAS" defaultValue={account?.label ?? ''} /></label>
       {sync.kindDraft === 's3' ? (
         <>
-          <label>端点<input name="baseUrl" required type="url" inputMode="url" autoComplete="off" spellCheck={false} placeholder="https://<账号>.r2.cloudflarestorage.com" defaultValue={account?.baseUrl ?? ''} /></label>
-          <label>存储桶<input name="bucket" required autoComplete="off" spellCheck={false} placeholder="yomika" defaultValue={account?.bucket ?? ''} /></label>
-          <label>Access Key ID<input name="username" required autoComplete="off" spellCheck={false} defaultValue={account?.username ?? ''} /></label>
+          <label>端点<input name="baseUrl" disabled={sync.saving || sync.testing} required type="url" inputMode="url" autoComplete="off" spellCheck={false} placeholder="https://<账号>.r2.cloudflarestorage.com" defaultValue={account?.baseUrl ?? ''} /></label>
+          <label>存储桶<input name="bucket" disabled={sync.saving || sync.testing} required autoComplete="off" spellCheck={false} placeholder="yomika" defaultValue={account?.bucket ?? ''} /></label>
+          <label>Access Key ID<input name="username" disabled={sync.saving || sync.testing} required autoComplete="off" spellCheck={false} defaultValue={account?.username ?? ''} /></label>
         </>
       ) : (
         <>
-          <label>WebDAV 地址<input name="baseUrl" required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" defaultValue={account?.baseUrl ?? ''} /></label>
-          <label>用户名<input name="username" autoComplete="username" spellCheck={false} defaultValue={account?.username ?? ''} /></label>
+          <label>WebDAV 地址<input name="baseUrl" disabled={sync.saving || sync.testing} required type="url" inputMode="url" autoComplete="url" spellCheck={false} placeholder="https://dav.example.com/Yomika" defaultValue={account?.baseUrl ?? ''} /></label>
+          <label>用户名<input name="username" disabled={sync.saving || sync.testing} autoComplete="username" spellCheck={false} defaultValue={account?.username ?? ''} /></label>
         </>
       )}
       {/* 编辑时凭据已回填；聚焦时显示明文，方便核对。留空保存＝不改凭据。 */}
       <label>{sync.kindDraft === 's3' ? 'Secret Access Key' : '密码或 Token'}<input
         name="credential"
+        disabled={sync.saving || sync.testing}
         required={account === undefined}
         type={sync.revealCredential ? 'text' : 'password'}
         autoComplete="off"

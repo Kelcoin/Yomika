@@ -58,11 +58,12 @@ describe('metadata editor tags', () => {
     // MetadataEditRoute，测试文件里的 vi.mock 那时已经晚了。
     installTagTranslations({ female: { glasses: '眼镜' } });
     const { adapter, input } = await renderEditor('');
+    fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'gla' } });
     const option = await screen.findByRole('option');
     // 候选行显示的也是标签本身，不是 `female:glasses$`（那是库检索的精确查询写法）。
     expect(option).toHaveTextContent('female:glasses');
-    fireEvent.mouseDown(option);
+    fireEvent.click(option);
 
     // 直接提表单：jsdom 不会因为点了 submit 按钮就替我们发 submit 事件。
     fireEvent.submit(document.querySelector('form.metadata-edit-form')!);
@@ -82,6 +83,31 @@ describe('metadata editor tags', () => {
     fireEvent.submit(document.querySelector('form.metadata-edit-form')!);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('update_archive_metadata', expect.objectContaining({
       metadata: expect.objectContaining({ tags: 'artist:somebody, female:glasses' }),
+    })));
+  });
+
+  it('saves a pending draft using the same tag identity as the chips', async () => {
+    const { adapter, input } = await renderEditor('artist:somebody');
+    fireEvent.change(input, { target: { value: 'Artist: somebody$, female:glasses' } });
+    fireEvent.submit(document.querySelector('form.metadata-edit-form')!);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('update_archive_metadata', expect.objectContaining({
+      metadata: expect.objectContaining({ tags: 'artist:somebody, female:glasses' }),
+    })));
+    expect(input).toHaveValue('');
+  });
+
+  it('commits the suggested tag once rather than also adding the unfinished token', async () => {
+    installTagTranslations({ female: { glasses: '眼镜' } });
+    const { adapter, input } = await renderEditor('');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'gla' } });
+    await screen.findByRole('option');
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    expect(input).toHaveValue('gla');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.submit(document.querySelector('form.metadata-edit-form')!);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('update_archive_metadata', expect.objectContaining({
+      metadata: expect.objectContaining({ tags: 'female:glasses' }),
     })));
   });
 });

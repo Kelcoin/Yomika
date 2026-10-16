@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { FocusScope } from '@radix-ui/react-focus-scope';
 import { Minus, Plus } from 'lucide-react';
 
 import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow } from './SettingsRow';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { usePageActive } from '../app/RetainedPage';
 
 /** 设置行背后那套「一行 + 浮层菜单」的控件：选择、数字步进。
  *
@@ -28,8 +30,12 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
  * 它钉在标题行右端，因为标题行是这一屏里唯一一条横跨整个面板、又只属于菜单的
  * 条带。放进内容区就得为它单开一行，而那行会跟着内容一起滚走。 */
 export function SettingsMenu({ title, icon, action, onClose, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; children: ReactNode }) {
+  const pageActive = usePageActive();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useLayoutEffect(() => { if (!pageActive) closeRef.current(); }, [pageActive]);
   // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
-  useOverlayBackGuard(true, onClose);
+  useOverlayBackGuard(pageActive, onClose);
   /** 「点外面关闭」判定的是按下的落点，不是那次 click 的落点。
    *
    * 面板里的 textarea 自带右下角的缩放柄：按下在面板里，松开时指针已经在面板外。浏览器
@@ -42,10 +48,12 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
    * `stopPropagation` 也不会让遮罩看不到这一次按下。 */
   const pressOutsideRef = useRef(true);
   useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    if (!pageActive) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) onClose(); };
     document.addEventListener('keydown', close);
     return () => document.removeEventListener('keydown', close);
-  }, [onClose]);
+  }, [onClose, pageActive]);
+  if (!pageActive) return null;
   return (
     <OverlayLayer>
       <div className="settings-choice-overlay"
@@ -53,13 +61,17 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
         onPointerDownCapture={(event) => { pressOutsideRef.current = event.target === event.currentTarget; }}
         onClick={() => { if (pressOutsideRef.current) onClose(); }}
       >
-        <div
+        <FocusScope asChild trapped loop><div
           className="settings-choice-panel"
           role="dialog"
           aria-modal="true"
           aria-label={title}
           onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+              event.preventDefault(); event.stopPropagation(); onClose();
+            }
+          }}
         >
           <h2 className="settings-choice-title">
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
@@ -67,7 +79,7 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
             {action && <span className="settings-choice-action">{action}</span>}
           </h2>
           <div className="settings-menu-body">{children}</div>
-        </div>
+        </div></FocusScope>
       </div>
     </OverlayLayer>
   );

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -25,6 +25,120 @@ function renderEhRoute() {
 }
 
 describe('EH route workspace', () => {
+  it('ignores malformed cached health and completes the fresh account load', async () => {
+    window.localStorage.setItem('yomika.eh.health.v1', JSON.stringify({
+      'eh-a': { checkedAt: 1, username: 'Broken cache', assets: { gp: 42, credits: '', hath: '' } },
+    }));
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [accounts[0]] };
+      if (command === 'check_eh_login_health') return { ok: true, value: { loggedIn: true, username: 'Fresh name', assets: { gp: '42', credits: '', hath: '' }, exhentaiAccess: true } };
+      return { ok: true, value: null };
+    });
+    renderEhRoute();
+    expect(await screen.findByText('Fresh name')).toBeInTheDocument();
+    expect(screen.getByText(/GP 42/)).toBeInTheDocument();
+  });
+
+  it.each(['rename', 'export'] as const)('discards a pending %s result after logout and reimport', async (operation) => {
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [accounts[0]] };
+      if (command === 'check_eh_login_health') return { ok: false, error: { code: 'EH_NETWORK', message: 'offline', retryable: true } };
+      if (command === 'set_eh_username_hint' || command === 'read_eh_account_cookie') return pending;
+      if (command === 'save_eh_account') return { ok: true, value: { ...accounts[0], usernameHint: 'New session' } };
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    const user = userEvent.setup();
+    renderEhRoute();
+    if (operation === 'rename') {
+      await user.click(await screen.findByRole('button', { name: /编辑 .* 的账户名/ }));
+      await user.type(screen.getByRole('textbox', { name: '账户名' }), 'Old draft{Enter}');
+    } else await user.click(await screen.findByRole('button', { name: '导出 Cookie' }));
+    await user.click(screen.getByRole('button', { name: '退出登录' }));
+    await user.click(await screen.findByRole('tab', { name: 'Cookie 导入' }));
+    await user.type(screen.getByLabelText('Cookie'), 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
+    await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
+    await act(async () => finish({ ok: true, value: operation === 'rename' ? null : 'ipb_member_id=1; ipb_pass_hash=old' }));
+    expect(await screen.findByText('New session')).toBeInTheDocument();
+    expect(screen.queryByText('账户名已更新')).not.toBeInTheDocument();
+    expect(adapter.mock.calls.map(([command]) => command)).not.toContain('write_clipboard_text');
+  });
+
+  it('does not apply an old login probe to the same account after logout and reimport', async () => {
+    let finishHealth!: (value: unknown) => void;
+    const health = new Promise((resolve) => { finishHealth = resolve; });
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [accounts[0]] };
+      if (command === 'check_eh_login_health') return health;
+      if (command === 'save_eh_account') return { ok: true, value: { ...accounts[0], usernameHint: 'New session' } };
+      return { ok: true, value: null };
+    });
+    const user = userEvent.setup();
+    renderEhRoute();
+    await user.click(await screen.findByRole('button', { name: '退出登录' }));
+    await user.click(await screen.findByRole('tab', { name: 'Cookie 导入' }));
+    await user.type(screen.getByLabelText('Cookie'), 'ipb_member_id=42; ipb_pass_hash=a1b2c3d4e5f60718293a4b5c6d7e8f90');
+    await user.click(screen.getByRole('button', { name: '保存 Cookie' }));
+    expect(await screen.findByText('New session')).toBeInTheDocument();
+    await act(async () => finishHealth({ ok: true, value: { loggedIn: true, username: 'Old session', assets: { gp: '999', credits: '', hath: '' }, exhentaiAccess: false } }));
+    expect(screen.queryByText(/GP 999/)).not.toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem('yomika.eh.health.v1') ?? '{}')).toEqual({});
+  });
+
+  it('shows an account read failure with retry instead of an empty login form', async () => {
+    let reads = 0;
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_eh_accounts') return ++reads === 1
+        ? { ok: false, error: { code: 'LOCAL_DATABASE', message: '账户读取失败', retryable: true } }
+        : { ok: true, value: [{ ...accounts[0], usernameHint: 'Saved account' }] };
+      return { ok: true, value: null };
+    });
+    const user = userEvent.setup();
+    renderEhRoute();
+    expect(await screen.findByRole('alert')).toHaveTextContent('账户读取失败');
+    expect(screen.queryByRole('button', { name: '登录 E-Hentai' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新读取账户' }));
+    expect(await screen.findByText('Saved account')).toBeInTheDocument();
+  });
+
+  it('keeps a manually edited name when the startup health probe finishes later', async () => {
+    let finishHealth!: (value: unknown) => void;
+    const health = new Promise((resolve) => { finishHealth = resolve; });
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [accounts[0]] };
+      if (command === 'check_eh_login_health') return health;
+      if (command === 'set_eh_username_hint') return { ok: true, value: null };
+      return { ok: true, value: null };
+    });
+    const user = userEvent.setup();
+    renderEhRoute();
+    await user.click(await screen.findByRole('button', { name: /编辑 .* 的账户名/ }));
+    await user.type(screen.getByRole('textbox', { name: '账户名' }), 'My name{Enter}');
+    expect(await screen.findByText('My name')).toBeInTheDocument();
+    await act(async () => finishHealth({ ok: true, value: { loggedIn: true, username: 'Remote name', assets: { gp: '42', credits: '', hath: '' }, exhentaiAccess: true } }));
+    expect(screen.getByText('My name')).toBeInTheDocument();
+    expect(screen.getByText(/GP 42/)).toBeInTheDocument();
+    expect(screen.queryByText('Remote name')).not.toBeInTheDocument();
+  });
+
+  it('preserves a saved display name instead of a cached or freshly probed name', async () => {
+    window.localStorage.setItem('yomika.eh.health.v1', JSON.stringify({
+      'eh-a': { checkedAt: Date.now(), username: 'Old cached name', assets: { gp: '', credits: '', hath: '' } },
+    }));
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [{ ...accounts[0], usernameHint: 'My name' }] };
+      if (command === 'check_eh_login_health') return { ok: true, value: { loggedIn: true, username: 'Remote name', assets: { gp: '42', credits: '', hath: '' }, exhentaiAccess: true } };
+      return { ok: true, value: null };
+    });
+    renderEhRoute();
+    expect(await screen.findByText(/GP 42/)).toBeInTheDocument();
+    expect(screen.getByText('My name')).toBeInTheDocument();
+    expect(screen.queryByText('Remote name')).not.toBeInTheDocument();
+    expect(screen.queryByText('Old cached name')).not.toBeInTheDocument();
+  });
+
   it('derives the account from a pasted cookie instead of asking for ids', async () => {
     const hash = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
     const saved = { id: 'eh-1234', label: 'E-Hentai 1234', host: 'exhentai.org', cookieRef: 'keyring://eh-1234', isActive: true, status: 'unverified', createdAt: '2026-08-28', updatedAt: '2026-08-28' };

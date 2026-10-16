@@ -88,8 +88,15 @@ export function ComputeWorkerToasts({ pollMs = POLL_MS }: { pollMs?: number }) {
       // 没有要跑的东西就没有 worker，下一次提交会把它按需叫起来。
       lastKey = '';
     };
-    void tick();
-    const timer = window.setInterval(() => { void tick(); }, pollMs);
+    let pending = false;
+    const poll = async () => {
+      if (disposed || pending) return;
+      pending = true;
+      try { await tick(); }
+      finally { pending = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, pollMs);
     return () => {
       disposed = true;
       window.clearInterval(timer);

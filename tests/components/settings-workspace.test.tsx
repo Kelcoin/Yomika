@@ -4,6 +4,10 @@ import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
+import { RetainedPage } from '../../src/app/RetainedPage';
+import { SettingsWorkspace } from '../../src/components/SettingsWorkspace';
+import { ConfirmDialog } from '../../src/components/ConfirmDialog';
+import { PreferencesProvider } from '../../src/app/preferences';
 import * as platformBridge from '../../src/bridge/platform';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetFilePickerForTests, setDirectoryPickerForTests, setModelPickerForTests, setSavePickerForTests, setTextFilePickerForTests } from '../../src/bridge/filePicker';
@@ -54,6 +58,24 @@ const DATA_EXPORT_TEXT = JSON.stringify({
 });
 
 describe('settings workspace', () => {
+  it.each([
+    ['yomika.advanced-models', [null]],
+    ['yomika.advanced-upscale-catalog', [null]],
+    ['yomika.compute-center-status', { running: true }],
+  ])('ignores a malformed %s snapshot before rendering advanced settings', async (key, value) => {
+    for (const cacheKey of ['yomika.advanced-models', 'yomika.advanced-upscale-catalog', 'yomika.compute-center-status']) localStorage.removeItem(cacheKey);
+    localStorage.setItem(key as string, JSON.stringify(value));
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'model_release_list_upscalers') return { ok: true, value: { tag: 'v1', models: [] } };
+      if (command === 'compute_center_status') return { ok: true, value: { running: false, port: 47653, addresses: [], token: '', capabilities: [], canStart: true } };
+      return { ok: true, value: [] };
+    });
+    renderSettings('advanced');
+    expect(await screen.findByRole('switch', { name: '启用超分' })).toBeInTheDocument();
+    expect(screen.queryByText('界面这一块渲染出错了，已记入错误日志。')).not.toBeInTheDocument();
+  });
+
   it('shows and saves background startup controls only on Windows', async () => {
     const user = userEvent.setup();
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => false } });
@@ -1674,6 +1696,35 @@ describe('settings workspace', () => {
     } finally {
       window.matchMedia = original;
       resetOverlayBackGuardForTests();
+    }
+  });
+
+  it('retires a hidden compact settings guard before another page opens a dialog', async () => {
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({ matches: query === COMPACT_WIDTH_QUERY, media: query,
+      onchange: null, addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      setInvokeAdapterForTests(async (command) => command === 'load_preferences'
+        ? { ok: true, value: DEFAULT_PREFERENCES } : { ok: true, value: [] });
+      function Owner({ active, dialog = false }: { active: boolean; dialog?: boolean }) {
+        return <MemoryRouter><PreferencesProvider><RetainedPage active={active}><SettingsWorkspace /></RetainedPage>
+          {dialog && <ConfirmDialog title="Other page" description="A separate page" onConfirm={async () => {}} onClose={() => {}} />}
+        </PreferencesProvider></MemoryRouter>;
+      }
+      const view = render(<Owner active />);
+      fireEvent.click(await screen.findByRole('button', { name: /通用/ }));
+      expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
+      act(() => { window.history.pushState({}, '', '/other-page'); });
+      view.rerender(<Owner active={false} />);
+      view.rerender(<Owner active={false} dialog />);
+      expect(window.history.state?.yomikaOverlay).toBe(1);
+      view.unmount();
+      await settle();
+    } finally {
+      window.matchMedia = original;
+      resetOverlayBackGuardForTests();
+      window.history.replaceState({}, '', '/');
     }
   });
 

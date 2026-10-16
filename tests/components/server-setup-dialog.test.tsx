@@ -1,10 +1,11 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
 import { ServerSetupDialog } from '../../src/components/ServerSetupDialog';
 import { ToastProvider } from '../../src/components/Toast';
 import { ok } from '../../src/domain/result';
+import { RetainedPage } from '../../src/app/RetainedPage';
 
 const homeServer = {
   name: 'Home',
@@ -14,6 +15,26 @@ const homeServer = {
 };
 
 describe('server setup dialog', () => {
+  it('retires a pending server form on page leave without closing the next form', async () => {
+    let finish!: (value: ReturnType<typeof ok<import('../../src/domain/server').ServerIdentity>>) => void;
+    const save = vi.fn(() => new Promise<ReturnType<typeof ok<import('../../src/domain/server').ServerIdentity>>>((resolve) => { finish = resolve; }));
+    const content = <ServerSetupDialog onSave={save} />;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    fireEvent.click(screen.getByRole('button', { name: '添加服务器' }));
+    fireEvent.change(screen.getByLabelText('服务器地址'), { target: { value: 'https://example.com' } });
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'old-key' } });
+    fireEvent.submit(document.querySelector('.server-form')!);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    expect(screen.queryByRole('dialog', { hidden: true })).not.toBeInTheDocument();
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    fireEvent.click(screen.getByRole('button', { name: '添加服务器' }));
+    expect(screen.getByLabelText('API Key')).toHaveValue('');
+    await act(async () => { finish(ok({ name: 'Saved', baseUrl: 'https://example.com', scopeId: 'scope' })); });
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存服务器' })).toBeEnabled();
+  });
+
   it('does not submit when the API key is empty', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async ({ identity }: Parameters<NonNullable<React.ComponentProps<typeof ServerSetupDialog>['onSave']>>[0]) => ok(identity));

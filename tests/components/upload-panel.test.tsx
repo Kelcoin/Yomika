@@ -4,6 +4,8 @@ import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
+import { RetainedPage } from '../../src/app/RetainedPage';
+import { UploadPanel } from '../../src/components/UploadPanel';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetFilePickerForTests, setArchiveFilesPickerForTests } from '../../src/bridge/filePicker';
 import { resetFileDropForTests, setFileDropForTests, type FileDropHandlers } from '../../src/bridge/fileDrop';
@@ -36,6 +38,62 @@ function renderUpload() {
 }
 
 describe('archive upload', () => {
+  it('recovers from a failed file picker and permits another selection', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(baseAdapter(() => undefined));
+    let attempts = 0;
+    setArchiveFilesPickerForTests(async () => {
+      if (++attempts === 1) throw new Error('文件选择器暂不可用');
+      return ['C:/library/recovered.cbz'];
+    });
+    renderUpload();
+    await user.click(await screen.findByRole('button', { name: '选择文件' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('文件选择器暂不可用');
+    await user.click(screen.getByRole('button', { name: '选择文件' }));
+    expect(await screen.findByText('recovered.cbz')).toBeInTheDocument();
+  });
+
+  it('retries failed uploads without resubmitting successful items or retaining the old error', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    let finishRetry!: (value: unknown) => void;
+    const adapter = baseAdapter((command, args) => {
+      if (command !== 'download_url') return undefined;
+      if (args?.url === 'https://example.com/ok') return { ok: true, value: { job: 1, url: args.url } };
+      if (++attempts === 1) return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '暂时无法下载', retryable: true } };
+      return new Promise((resolve) => { finishRetry = resolve; });
+    });
+    setInvokeAdapterForTests(adapter);
+    renderUpload();
+    await user.click(await screen.findByRole('tab', { name: '从互联网添加' }));
+    await user.type(screen.getByLabelText('要下载的链接（一行一个）'), 'https://example.com/ok\nhttps://example.com/retry');
+    await user.click(screen.getByRole('button', { name: '加入队列' }));
+    await user.click(screen.getByRole('button', { name: '开始处理' }));
+    const queue = within(screen.getByRole('list'));
+    expect(await queue.findByText('暂时无法下载')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重试失败项' }));
+    await vi.waitFor(() => expect(finishRetry).toBeDefined());
+    expect(queue.queryByText('暂时无法下载')).not.toBeInTheDocument();
+    expect(queue.getByText('处理中')).toBeInTheDocument();
+    finishRetry({ ok: true, value: { job: 2, url: 'https://example.com/retry' } });
+    expect(await queue.findByText('服务器作业 #2')).toBeInTheDocument();
+    expect(adapter.mock.calls.filter(([command, args]) => command === 'download_url' && args?.url === 'https://example.com/ok')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: '重试失败项' })).not.toBeInTheDocument();
+  });
+
+  it('only listens for window file drops while the upload page is visible', () => {
+    const unsubscribe = vi.fn();
+    const subscribe = vi.fn(() => unsubscribe);
+    setFileDropForTests(subscribe);
+    const view = (active: boolean) => <MemoryRouter><RetainedPage active={active}><UploadPanel /></RetainedPage></MemoryRouter>;
+    const { rerender } = render(view(false));
+    expect(subscribe).not.toHaveBeenCalled();
+    rerender(view(true));
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    rerender(view(false));
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('queues picked files and uploads them one at a time', async () => {
     const user = userEvent.setup();
     const adapter = baseAdapter((command) => {

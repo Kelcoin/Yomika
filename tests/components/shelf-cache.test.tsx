@@ -15,6 +15,74 @@ afterEach(() => {
 });
 
 describe('shelf snapshots', () => {
+  it.each([['history', 'history'], ['to-read', 'toRead']])('rejects a valid-shaped A snapshot stored under the B key on %s', async (path, name) => {
+    writeRouteCache(`state:${name}:B`, { serverId: 'A', scopeId: 'A', history: [], watchlist: [], archives: [], query: '' });
+    const adapter = vi.fn(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'B', scopeId: 'B', name: 'B', baseUrl: 'https://b.example.com' }] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={[`/${path}?server=B`]}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('list_servers', {}));
+    await waitFor(() => expect(readRouteCache<{ serverId: string }>(`state:${name}:B`)?.serverId).toBe('B'));
+  });
+
+  it.each([['history', 'state:history:default', '暂无历史'], ['to-read', 'state:toRead:default', '暂无待看档案'], ['watchlist', 'favorites:last:default', '暂无收藏夹']])('recovers from a malformed startup snapshot on %s', async (path, key, emptyTitle) => {
+    writeRouteCache(key, { favoritesSource: 'remote', serverId: 's', scopeId: 's', history: [], watchlist: [], archives: {}, query: '' });
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'SET_1613080290', archives: [] } };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: true, value: [] };
+    });
+    expect(() => render(<MemoryRouter initialEntries={[`/${path}`]}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>)).not.toThrow();
+    await screen.findByRole('heading', { name: emptyTitle });
+  });
+
+  it('reloads categories when the enabled default server changes', async () => {
+    let chosen = 'A';
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: chosen, scopeId: chosen, name: chosen, baseUrl: 'https://example.com' }] };
+      if (command === 'list_reading_list') return { ok: true, value: [{ scopeId: chosen, archiveId: 'shared', addedAt: 'now', updatedAt: 'now', deviceId: 'test', revision: 1, deleted: false }] };
+      if (command === 'list_categories') return { ok: true, value: [{ id: chosen === 'A' ? 'SET_1613080290' : 'SET_1613080291', name: `${chosen} category`, search: null, pinned: false, archives: ['shared'] }] };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: chosen, archiveId: 'shared', title: `${chosen} archive`, pageCount: 1, updatedAt: 'now' }] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter initialEntries={['/to-read']}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    await screen.findByRole('button', { name: /^A archive\b/ });
+    expect(screen.getByRole('combobox', { name: '分类筛选' })).toHaveTextContent('A category');
+    fireEvent.change(screen.getByRole('combobox', { name: '分类筛选' }), { target: { value: 'SET_1613080290' } });
+    chosen = 'B';
+    act(() => invalidateRouteCache('state:'));
+    await screen.findByRole('button', { name: /^B archive\b/ });
+    expect(screen.getByRole('combobox', { name: '分类筛选' })).toHaveTextContent('B category');
+    expect(screen.getByRole('combobox', { name: '分类筛选' })).not.toHaveTextContent('A category');
+  });
+
+  it.each([['history', 'history'], ['to-read', 'toRead']])('does not retain a cached A shelf when switching server on %s', async (path, name) => {
+    const makeArchive = (serverId: string) => ({ serverId, archiveId: 'shared', title: `${serverId} cached shelf`, pageCount: 3, updatedAt: 'now' });
+    const makeHistory = (scopeId: string) => ({ scopeId, archiveId: 'shared', pageIndex: 0, visitedAt: 'now', deviceId: 'test', revision: 1 });
+    const makeReading = (scopeId: string) => ({ scopeId, archiveId: 'shared', addedAt: 'now', updatedAt: 'now', deviceId: 'test', revision: 1, deleted: false });
+    writeRouteCache(`state:${name}:A`, { serverId: 'A', scopeId: 'A', history: [makeHistory('A')], watchlist: [makeReading('A')], archives: [makeArchive('A')], query: '', categories: [] });
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: ['A', 'B'].map(id => ({ id, scopeId: id, name: id, baseUrl: `https://${id}.example.com` })) };
+      if (command === 'list_reading_history') return { ok: true, value: [makeHistory(String(args?.scopeId))] };
+      if (command === 'list_reading_list') return { ok: true, value: [makeReading(String(args?.scopeId))] };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [makeArchive(String(args?.serverId))] };
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2147483648 } };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={[`/${path}?server=A`]}><PreferencesProvider><Link to={`/${path}?server=B`}>Switch server</Link><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    await screen.findByRole('button', { name: /^A cached shelf\b/ });
+    fireEvent.click(screen.getByText('Switch server'));
+    await screen.findByRole('button', { name: /^B cached shelf\b/ });
+    expect(screen.queryByRole('button', { name: /^A cached shelf\b/ })).not.toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('list_archives_by_ids', { serverId: 'B', archiveIds: ['shared'] });
+  });
+
   it('retains an expired verified remote snapshot with an offline explanation', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
     writeRouteCache('favorites:last:default', {

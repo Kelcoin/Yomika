@@ -1,4 +1,4 @@
-import { ArrowLeft, BookOpen, LoaderCircle, Play, Save, Trash2 } from 'lucide-react';
+import { ArrowLeft, BookOpen, LoaderCircle, Play, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -34,10 +34,17 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const [plugin, setPlugin] = useState('');
   const [plugins, setPlugins] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(true);
+  const [ready, setReady] = useState(false);
+  const [reload, setReload] = useState(0);
+  const [pluginReload, setPluginReload] = useState(0);
+  const [pluginError, setPluginError] = useState<string>();
   const [busy, setBusy] = useState<'save' | 'plugin' | 'delete' | ''>('');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
+  const editorIdentity = `${serverParam ?? 'default'}:${archiveId}`;
+  const editorOwner = useRef({ identity: editorIdentity, version: 0, busy: false });
+  if (editorOwner.current.identity !== editorIdentity) editorOwner.current = { identity: editorIdentity, version: 0, busy: false };
 
   // Both reach the toast as well as the page. This panel is embedded in settings,
   // where every neighbouring control reports that way, and an error rendered only
@@ -51,22 +58,42 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
 
   useEffect(() => {
     let active = true;
+    const owner = editorOwner.current;
+    owner.version++;
+    owner.busy = false;
+    setBusy('');
+    setLoading(true);
+    setReady(false);
+    setServerId(undefined);
+    setError(undefined);
+    setMessage(undefined);
+    setTitle(''); setTags(''); setTagDraft(''); setSummary('');
+    setDeleteOpen(false);
     void (async () => {
       const servers = await repository.listServers();
       const server = servers.ok ? pickServer(servers.value, serverParam) : undefined;
       if (!active) return;
       if (!server) { setError(servers.ok ? '尚未配置服务器' : servers.error.message); setLoading(false); return; }
       setServerId(server.id);
-      const [metadata, pluginResult] = await Promise.all([
-        repository.loadArchiveMetadata(server.id, archiveId),
-        repository.listMetadataPlugins(server.id),
-      ]);
+      const metadata = await repository.loadArchiveMetadata(server.id, archiveId);
       if (!active) return;
       if (metadata.ok) {
         setTitle(metadata.value.title);
         setTags(metadata.value.tags);
         setSummary(metadata.value.summary ?? '');
+        setReady(true);
       } else setError(metadata.error.message);
+      setLoading(false);
+    })();
+    return () => { active = false; owner.version++; };
+  }, [archiveId, serverParam, reload]);
+
+  useEffect(() => {
+    let active = true;
+    setPlugins([]); setPlugin(''); setPluginError(undefined);
+    if (!serverId) return;
+    void repository.listMetadataPlugins(serverId).then(pluginResult => {
+      if (!active) return;
       if (pluginResult.ok) {
         const pluginSource = Array.isArray(pluginResult.value) ? pluginResult.value : (pluginResult.value && typeof pluginResult.value === 'object' && Array.isArray((pluginResult.value as { data?: unknown }).data) ? (pluginResult.value as { data: unknown[] }).data : []);
         const normalized = pluginSource.flatMap((item, index) => {
@@ -78,11 +105,10 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
         setPlugins(normalized);
         const preferred = normalized.find((item) => /e[\s_-]?hentai/i.test(`${item.id} ${item.name}`));
         setPlugin(preferred?.id ?? normalized[0]?.id ?? '');
-      }
-      setLoading(false);
-    })();
+      } else setPluginError(pluginResult.error.message);
+    });
     return () => { active = false; };
-  }, [archiveId, serverParam]);
+  }, [archiveId, serverId, pluginReload]);
 
   const tagList = useMemo(() => parseArchiveTagString(tags), [tags]);
   const setTagList = (next: readonly string[]) => {
@@ -99,7 +125,9 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
       seen.add(identity);
       unique.push(trimmed);
     }
-    setTags(unique.join(', '));
+    const serialized = unique.join(', ');
+    setTags(serialized);
+    return serialized;
   };
   const commitTagDraft = (raw: string) => {
     const additions = parseArchiveTagString(raw);
@@ -108,9 +136,20 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     setTagDraft('');
   };
   const save = async () => {
-    if (!serverId || busy) return;
+    if (!serverId || !ready || editorOwner.current.busy) return;
+    const owner = editorOwner.current;
+    const version = owner.version;
+    owner.busy = true;
+    // Commit text still in the input before serializing the payload. Without
+    // this, pressing Save immediately after typing a tag silently drops it.
+    const pendingTags = parseArchiveTagString(tagDraft);
+    const nextTags = pendingTags.length > 0
+      ? setTagList([...tagList, ...pendingTags])
+      : tags;
+    if (pendingTags.length > 0) setTagDraft('');
     setBusy('save'); setError(undefined);
-    const result = await repository.updateArchiveMetadata(serverId, archiveId, { title, tags, summary });
+    const result = await repository.updateArchiveMetadata(serverId, archiveId, { title, tags: nextTags, summary });
+    if (editorOwner.current !== owner || owner.version !== version) return;
     if (result.ok) {
       setMessage('元数据已更新');
       // The detail page paints from a snapshot of this metadata, and the
@@ -119,12 +158,16 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
       invalidateRouteCache('recommendations:');
     } else setError(result.error.message);
     setBusy('');
+    owner.busy = false;
   };
   const runPlugin = async () => {
-    if (!plugin || busy) return;
+    if (!serverId || !ready || !plugin || editorOwner.current.busy) return;
+    const owner = editorOwner.current;
+    const version = owner.version;
+    owner.busy = true;
     setBusy('plugin'); setError(undefined);
-    if (!serverId) return;
     const result = await repository.useMetadataPlugin(serverId, archiveId, plugin, title);
+    if (editorOwner.current !== owner || owner.version !== version) return;
     if (result.ok) {
       const data = result.value?.data && typeof result.value.data === 'object' ? result.value.data : result.value;
       if (data && typeof data === 'object') {
@@ -136,18 +179,20 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
       setMessage('插件结果已载入，保存后生效');
     } else setError(result.error.message);
     setBusy('');
+    owner.busy = false;
   };
 
   // 整页等待用全应用同一个标记：之前这里引的是不存在的 .spin 类，图标根本不会转。
   if (loading) return <main className="metadata-edit-page metadata-edit-loading"><LoadingIndicator size="lg" label="正在载入元数据" /></main>;
-  if (error && !serverId) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button></main>;
+  if (error && !ready) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><button className="primary-action" type="button" onClick={() => setReload(value => value + 1)}><RotateCcw aria-hidden="true" />重试载入元数据</button><button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button></main>;
   return (
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">
       <header className="metadata-edit-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
         <div className="metadata-edit-heading"><h1 id="metadata-edit-title">编辑元数据</h1></div>
       </header>
-      <form className="metadata-edit-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <form className="metadata-edit-form" aria-busy={Boolean(busy)} onSubmit={(event) => { event.preventDefault(); void save(); }}>
+        <fieldset className="metadata-edit-fields" disabled={Boolean(busy)}>
         {/* 标题与简介是这里仅有的两段散文，所以只有它们要回自动大写与拼写检查。 */}
         <label>标题<input value={title} autoCapitalize="sentences" spellCheck onChange={(event) => setTitle(event.target.value)} /></label>
         {/* One list, not two. There used to be a raw comma-separated textarea and
@@ -174,6 +219,10 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
               autoComplete="off"
               onChange={(event) => setTagDraft(event.target.value)}
               onKeyDown={(event) => {
+                // Enter/backspace are composition controls while an IME is
+                // active; treating them as tag commands corrupts Chinese input.
+                const composing = event.nativeEvent.isComposing || event.keyCode === 229;
+                if (composing) return;
                 if (event.key === 'Enter') { event.preventDefault(); commitTagDraft(tagDraft); }
                 else if (event.key === 'Backspace' && !tagDraft && tagList.length > 0) {
                   setTagList(tagList.slice(0, -1));
@@ -184,11 +233,12 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
                 not have to be typed from memory. */}
             {/* `exact={false}`：这里写进去的是标签本身。库检索那边要的是 `$` 结尾的精确
                 查询，元数据里带上它就等于存了一条别人认不出来的标签。 */}
-            <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} exact={false} onSelect={(tag) => commitTagDraft(tag)} />
+            {!busy && <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} exact={false} onSelect={(tag) => commitTagDraft(tag)} />}
           </label>
         </div>
         <label>简介<textarea value={summary} autoCapitalize="sentences" spellCheck onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
         {plugins.length > 0 && <div className="metadata-plugin-row"><SelectField name="metadataPlugin" aria-label="元数据插件" value={plugin} onChange={setPlugin} options={plugins.map((item) => ({ value: item.id, label: item.name }))} /><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
+        {pluginError && <div><StatusLine tone="error">插件列表读取失败：{pluginError}</StatusLine><button className="secondary-action" type="button" onClick={() => setPluginReload(value => value + 1)}><RotateCcw aria-hidden="true" />重新读取插件</button></div>}
       {/* Same as the sync panel: a save landing or failing is an event, and the
           toast is where events are reported. */}
         <div className="metadata-edit-actions">
@@ -196,6 +246,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
           <Link className="secondary-action" to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}><BookOpen aria-hidden="true" />阅读</Link>
           <button className="secondary-action metadata-delete-action" type="button" disabled={!!busy} onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" />删除</button>
         </div>
+        </fieldset>
       </form>
       {deleteOpen && serverId && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate('/library', { replace: true })} />}
     </main>

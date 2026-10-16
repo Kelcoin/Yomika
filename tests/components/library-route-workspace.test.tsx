@@ -32,6 +32,37 @@ function servedPage(items: unknown[]) {
 }
 
 describe('library route workspace', () => {
+  it('ignores a malformed persisted library page after restart', async () => {
+    writeRouteCache('library:workspace:default', { archives: [null], categories: [null] }, { persist: true });
+    simulateRouteCacheRestartForTests();
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Recovered Archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' }]);
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderLibrary();
+    expect(await screen.findByRole('button', { name: /^Recovered Archive\b/ })).toBeInTheDocument();
+  });
+
+  it('ignores malformed persisted categories and loads current server categories', async () => {
+    localStorage.setItem('yomika:library-categories:default', '[null]');
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'fresh', title: 'Current Archive', pageCount: 2, updatedAt: '2026-08-27T00:00:00Z' }]);
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    try {
+      renderLibrary();
+      expect(await screen.findByRole('button', { name: /^Current Archive\b/ })).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem('yomika:library-categories:default');
+    }
+  });
+
   it('shows an old in-memory page while revalidating it', async () => {
     const now = Date.now();
     writeRouteCache('library:workspace:default', {

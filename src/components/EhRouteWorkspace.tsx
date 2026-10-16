@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { z } from 'zod';
 
 import { EhWorkspace } from './EhWorkspace';
 import { accountDisplayName } from './EhAccountPanel';
@@ -7,10 +8,16 @@ import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { ehAccountIdFor, ehHostFor, formatEhCookieHeader, parseEhCookie } from '../lib/ehCookie';
 import { presentEhError, presentEhLoginError } from '../services/ehClient';
-import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
+import { EhAccountStatusSchema, type EhAccount, type EhAccountStatus, type SaveEhAccountInput } from '../domain/eh';
 
 const EH_HEALTH_CACHE_KEY = 'yomika.eh.health.v1';
 type EhHealthCache = Record<string, { checkedAt: number; username: string | null; assets: NonNullable<EhAccount['assets']>; exhentaiAccess?: boolean | null | undefined }>;
+const EhHealthCacheSchema = z.record(z.string(), z.object({
+  checkedAt: z.number(),
+  username: z.string().nullable(),
+  assets: EhAccountStatusSchema.shape.assets,
+  exhentaiAccess: z.boolean().nullable().optional(),
+}));
 const EMPTY_HEALTH_ASSETS: NonNullable<EhAccount['assets']> = { gp: '', credits: '', hath: '' };
 
 function mergeHealthAssets(previous: EhAccount['assets'], next: NonNullable<EhAccount['assets']>) {
@@ -32,6 +39,20 @@ function hasHealthAssets(assets: EhAccount['assets']) {
   return Boolean(assets?.gp.trim() || assets?.credits.trim() || assets?.hath.trim());
 }
 
+function applyHealth(account: EhAccount, health: EhAccountStatus): EhAccount {
+  // A probe can fill a missing name, but the user's saved display name wins.
+  const username = account.usernameHint || account.username || health.username;
+  return {
+    ...account,
+    status: health.loggedIn ? 'verified' : 'error',
+    username,
+    usernameHint: account.usernameHint || username,
+    assets: mergeHealthAssets(account.assets, health.assets),
+    exhentaiAccess: health.exhentaiAccess,
+    host: health.exhentaiAccess ? 'exhentai.org' : account.host,
+  };
+}
+
 function hydrateHealth(account: EhAccount, health: EhHealthCache[string] | undefined): EhAccount {
   if (!health) return account;
   const assets = mergeHealthAssets(account.assets, health.assets ?? EMPTY_HEALTH_ASSETS);
@@ -48,7 +69,7 @@ function hydrateHealth(account: EhAccount, health: EhHealthCache[string] | undef
   return {
     ...account,
     status: account.status === 'error' ? 'verified' : account.status,
-    username: account.username ?? health.username ?? undefined,
+    username: account.usernameHint || account.username || health.username || undefined,
     usernameHint: account.usernameHint ?? health.username ?? undefined,
     assets,
     exhentaiAccess,
@@ -59,7 +80,8 @@ function hydrateHealth(account: EhAccount, health: EhHealthCache[string] | undef
 function readHealthCache(): EhHealthCache {
   try {
     const value = JSON.parse(window.localStorage.getItem(EH_HEALTH_CACHE_KEY) ?? '{}') as unknown;
-    return value && typeof value === 'object' ? value as EhHealthCache : {};
+    const parsed = EhHealthCacheSchema.safeParse(value);
+    return parsed.success ? parsed.data : {};
   } catch { return {}; }
 }
 
@@ -92,6 +114,17 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
   const { showToast } = useToast();
   const [accounts, setAccounts] = useState<EhAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
+  const [accountsError, setAccountsError] = useState<string>();
+  const [accountsReload, setAccountsReload] = useState(0);
+  // Credentials can be replaced under the same account ID. Responses from the
+  // previous login must not update the new session or repopulate its cache.
+  const accountVersions = useRef(new Map<string, number>());
+  const invalidateAccount = (id: string) => {
+    accountVersions.current.set(id, (accountVersions.current.get(id) ?? 0) + 1);
+    const cache = readHealthCache();
+    delete cache[id];
+    writeHealthCache(cache);
+  };
   const [savingAccount, setSavingAccount] = useState(false);
   /** 手机上不能另开 webview 窗口（会把应用自己的界面顶掉，关掉时应用跟着没了），
    * 所以登录页改成应用内浮层。平台是异步命令，先按「桌面」画——按错的那一瞬间只影响
@@ -127,6 +160,7 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         showToast(presentEhError(saved.error.code, saved.error.message), 'error');
         return;
       }
+      invalidateAccount(saved.value.id);
       setAccounts((current) => [...current.filter((account) => account.id !== saved.value.id), { ...saved.value, status: 'verified' }]);
       showToast('E-Hentai 登录成功', 'success');
     });
@@ -144,73 +178,59 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
 
   useEffect(() => {
     let active = true;
+    const versions = new Map(accountVersions.current);
+    const unchanged = (id: string) => (versions.get(id) ?? 0) === (accountVersions.current.get(id) ?? 0);
     void ehRepository.listAccounts().then(async (result) => {
       if (!active) return;
       if (result.ok) {
         const cached = readHealthCache();
-        const hydrated = result.value.map((account) => hydrateHealth(account, cached[account.id]));
-        setAccounts(hydrated);
+        const hydrated = result.value.filter((account) => unchanged(account.id)).map((account) => hydrateHealth(account, cached[account.id]));
+        setAccounts((current) => [...hydrated, ...current.filter((account) => !unchanged(account.id))]);
         setAccountsLoading(false);
         const refreshed = await Promise.all(hydrated.map(async (account) => {
           const health = await ehRepository.checkLoginHealth(account.id);
-          if (!health.ok) return account;
+          if (!active || !unchanged(account.id) || !health.ok) return undefined;
           const assets = mergeHealthAssets(account.assets, health.value.assets);
           // `null` means the Ex probe was blocked or unavailable, not a negative
           // result. Keeping an old false here made a one-time failed probe look
           // like a permanent "EXHENTAI 不可访问" verdict on every visit.
           const exhentaiAccess = health.value.exhentaiAccess;
-          const next = {
-            ...account,
-            status: health.value.loggedIn ? 'verified' as const : 'error' as const,
-            username: health.value.username ?? account.username,
-            usernameHint: health.value.username ?? account.usernameHint,
-            assets,
-            exhentaiAccess,
-            host: exhentaiAccess ? 'exhentai.org' as const : account.host,
-          };
+          const next = applyHealth(account, health.value);
           if (health.value.loggedIn) {
             const latest = readHealthCache();
             latest[account.id] = { checkedAt: Date.now(), username: next.username ?? null, assets, exhentaiAccess };
             writeHealthCache(latest);
           }
-          return next;
+          return { id: account.id, health: health.value };
         }));
         if (active) setAccounts((current) => current.map((account) => {
-          const update = refreshed.find((item) => item.id === account.id);
-          return update ? { ...update, isActive: account.isActive } : account;
+          const update = refreshed.find((item) => item?.id === account.id);
+          return update && unchanged(account.id) ? applyHealth(account, update.health) : account;
         }));
         // 用户名只在网页登录完成时抓取一次并落库；此后的健康检查与刷新不再
         // 重新抓取——显示名以账户行里的 username_hint 为准（可手动编辑）。
-      }
+      } else setAccountsError(presentEhError(result.error.code, result.error.message));
       if (active) setAccountsLoading(false);
     });
     return () => { active = false; };
-  }, []);
+  }, [accountsReload]);
 
   return (
     <EhWorkspace
       accounts={accounts}
       accountsLoading={accountsLoading}
+      accountsError={accountsError}
+      onRetryAccounts={() => { setAccountsError(undefined); setAccountsLoading(true); setAccountsReload((value) => value + 1); }}
       onCheckHealth={async (accountId) => {
+        const version = accountVersions.current.get(accountId) ?? 0;
         const result = await ehRepository.checkLoginHealth(accountId);
+        if (version !== (accountVersions.current.get(accountId) ?? 0)) return;
         if (!result.ok) {
           showToast(presentEhError(result.error.code, result.error.message), 'error');
           return;
         }
         setAccounts((current) => current.map((account) => account.id === accountId
-          ? (() => {
-              const assets = mergeHealthAssets(account.assets, result.value.assets);
-              const exhentaiAccess = result.value.exhentaiAccess;
-              return {
-              ...account,
-              status: result.value.loggedIn ? 'verified' : 'error',
-              username: result.value.username,
-              usernameHint: result.value.username ?? account.usernameHint,
-              assets,
-              exhentaiAccess,
-              host: exhentaiAccess ? 'exhentai.org' : account.host,
-              };
-            })()
+          ? applyHealth(account, result.value)
           : account));
         const health = result.value;
         if (health.loggedIn) {
@@ -233,19 +253,24 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         showToast('E-Hentai 账户信息已更新', 'success');
       }}
       onReadCookie={async (accountId) => {
+        const version = accountVersions.current.get(accountId) ?? 0;
         const result = await ehRepository.readAccountCookie(accountId);
+        if (version !== (accountVersions.current.get(accountId) ?? 0)) return undefined;
         if (!result.ok) { showToast(presentEhError(result.error.code, result.error.message), 'error'); return undefined; }
         return result.value;
       }}
       onLogout={async (accountId) => {
         const result = await ehRepository.removeAccount(accountId);
         if (!result.ok) { showToast(presentEhError(result.error.code, result.error.message), 'error'); return; }
+        invalidateAccount(accountId);
         setAccounts((current) => current.filter((account) => account.id !== accountId));
         showToast('已登出 E-Hentai 账户', 'info');
       }}
       savingAccount={savingAccount}
       onEditUsername={async (accountId: string, username: string) => {
+        const version = accountVersions.current.get(accountId) ?? 0;
         const result = await ehRepository.setUsernameHint(accountId, username);
+        if (version !== (accountVersions.current.get(accountId) ?? 0)) return;
         if (!result.ok) throw new Error(presentEhError(result.error.code, result.error.message));
         setAccounts((current) => current.map((account) => account.id === accountId
           ? { ...account, username: username, usernameHint: username }
@@ -261,14 +286,16 @@ export function EhRouteWorkspace({ onActiveAccountChange }: { onActiveAccountCha
         // here: Cloudflare may challenge that request even though the WebView
         // login just succeeded, which used to overwrite a valid account with
         // the misleading “错误” status.
+        invalidateAccount(result.value.id);
+        const version = accountVersions.current.get(result.value.id);
         setAccounts((current) => [...current.filter((account) => account.id !== result.value.id), { ...result.value, status: 'verified' }]);
         // 仅网页登录完成时抓一次用户名并落库（一次纯 HTTP 尝试，通常被
         // Cloudflare 拦下）；抓不到就默认显示为「E 站用户」，用户要改就点
         // 账户卡上的编辑按钮原地修改。
         if (healthMissingName(result.value)) {
           void ehRepository.fetchForumUsername(result.value.id).then((resolved) => {
-            if (!resolved.ok || !resolved.value) return;
-            setAccounts((current) => current.map((account) => account.id === result.value.id
+            if (version !== accountVersions.current.get(result.value.id) || !resolved.ok || !resolved.value) return;
+            setAccounts((current) => current.map((account) => account.id === result.value.id && healthMissingName(account)
               ? { ...account, username: resolved.value ?? undefined, usernameHint: resolved.value ?? undefined }
               : account));
           });

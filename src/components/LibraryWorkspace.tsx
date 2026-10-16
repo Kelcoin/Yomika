@@ -7,6 +7,7 @@ import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Group, Panel, Separator } from './AdaptivePanels';
 import { usePageActive } from '../app/RetainedPage';
+import { EDGE_CLAIM_PX, rubberBand } from '../lib/motion';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -69,16 +70,15 @@ export function withWideCoverMark(
 }
 
 /* Overscroll. Beyond the top the list can be pulled down to refresh, beyond the
-   bottom it bounces; both are damped, so the numbers are on-screen pixels and
-   the gesture has to travel twice as far. */
-const PULL_THRESHOLD = 64;
-/** 手指要往端点外走这么远才认领这次手势（阻尼后是 6px）。在那之前一个
+   bottom it bounces. Keep the existing 128px refresh gesture while displaying
+   it through the progressive resistance curve. */
+const PULL_THRESHOLD = rubberBand(128, 104);
+/** 手指要往端点外走这么远才认领这次手势（4px，早于原生滚动的常见锁定距离）。在那之前一个
  * preventDefault 都不发：手机上起手那几像素常常先往下抖一下，一抖就被冒领的话
  * 接下来整段手势都滚不动页面——用户看到的就是「只能触发过滚刷新」。 */
-const PULL_CLAIM_PX = 12;
+const PULL_CLAIM_PX = EDGE_CLAIM_PX;
 const PULL_MAX = 104;
 const BOUNCE_MAX = 72;
-const PULL_DAMPING = 0.5;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
 
@@ -326,6 +326,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    * into `railSegments`. Only written when the tick changes. */
   const [railActive, setRailActive] = useState(0);
   const [savingMetadata, setSavingMetadata] = useState(false);
+  const [metadataError, setMetadataError] = useState<string>();
   const [localSearchQuery, setLocalSearchQuery] = useState('');
   const [localSortOrder, setLocalSortOrder] = useState<'asc' | 'desc'>('asc');
   const [localSortMode, setLocalSortMode] = useState<'title' | 'added'>('title');
@@ -395,7 +396,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const overscrollEdge = useRef<'top' | 'bottom' | undefined>(undefined);
   const overscrollStartX = useRef<number | undefined>(undefined);
   const overscrollStartY = useRef<number | undefined>(undefined);
-  /** 起手那一刻**真正会滚**的那一层，以及它的滚动位置。认定距离里那 12px 是浏览器的，
+  /** 起手那一刻**真正会滚**的那一层，以及它的滚动位置。认定距离里那几像素是浏览器的，
    * 真机上这段里页面已经滚了一点点；认领时要把这一段放回去（见 touchMove），否则那点
    * 真实滚动就留在页面上——用户 2026-10-15 报的「顶部搜索框滚出视口」正是它。 */
   const overscrollScroller = useRef<HTMLElement | undefined>(undefined);
@@ -455,13 +456,13 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     resetOverscroll();
   }, [resetOverscroll]);
 
-  /** Damped so the list cannot run away from the gesture: 100px of travel moves
-   * it 50px, and it stops at the cap however much more arrives.
+  /** Damped so the list cannot run away from the gesture: resistance increases with distance; the list moves
+   * toward its limit continuously instead of hitting a hard stop.
    *
    * 位置写 DOM，state 只在「从静止跨进这一档」时变一次——下拉指示器靠它露出来。 */
   const applyOverscroll = useCallback((travel: number) => {
     overscrollTravel.current = travel;
-    const offset = Math.max(-BOUNCE_MAX, Math.min(PULL_MAX, travel * PULL_DAMPING));
+    const offset = rubberBand(travel, travel < 0 ? BOUNCE_MAX : PULL_MAX);
     const previous = overscrollRef.current;
     overscrollRef.current = offset;
     pendingPull.current = offset;
@@ -576,7 +577,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       overscrollEdge.current = edge;
       overscrollStartX.current = event.touches[0]?.clientX ?? 0;
       overscrollStartY.current = edge ? (event.touches[0]?.clientY ?? 0) : undefined;
-      // 记住起手那一刻真正会滚的那一层与它的位置：认定距离里那 12px 是浏览器的，
+      // 记住起手那一刻真正会滚的那一层与它的位置：认定距离里那几像素是浏览器的，
       // 真机上这段里页面已经滚了一点点（见 touchMove 的认领分支）。
       overscrollScroller.current = position;
       overscrollStartScrollTop.current = position.scrollTop;
@@ -589,6 +590,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       if (event.touches.length !== 1) { cancelOverscroll(); return; }
       const y = event.touches[0]?.clientY ?? start;
       const dx = (event.touches[0]?.clientX ?? 0) - (overscrollStartX.current ?? 0);
+      if (!overscrollClaimed.current && Math.max(Math.abs(dx), Math.abs(y - start)) < PULL_CLAIM_PX) return;
       if (!overscrollClaimed.current && Math.abs(dx) > Math.abs(y - start)) { cancelOverscroll(); return; }
       const direction = edge === 'top' ? 1 : -1;
       const travel = (y - start) * direction;
@@ -618,10 +620,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         return;
       }
       // 还没到认定距离：什么都不做，也不 preventDefault。这一次手势仍然是浏览器
-      // 的，页面照滚；等手指真的往外走够 12px 再认领，那时它还没开始自己的滚动。
+      // 的，页面照滚；等手指真的往外走够认定距离再认领，那时它还没开始自己的滚动。
       if (travel < PULL_CLAIM_PX) return;
       overscrollClaimed.current = true;
-      // 认定距离那 12px 是**浏览器的**：真机上这段里页面已经滚了一点点。认领的这一刻
+      // 认定距离那几像素是**浏览器的**：真机上这段里页面已经滚了一点点。认领的这一刻
       // 把滚动位置放回起手时那一个，否则这一小段真实滚动就留在页面上——「顶部搜索框
       // 滚出视口」的一半原因在这里（另一半是列表被顶下去，看起来像一段空隙）。
       const scroller = overscrollScroller.current;
@@ -828,6 +830,17 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   // The detail pane still needs a subject, and the first archive is the sensible
   // one; the *row* is only marked pressed when the choice was made.
   const selected = filteredArchives.find((archive) => archive.archiveId === selectedId) ?? filteredArchives[0];
+  const editorIdentity = JSON.stringify([selected?.serverId, selected?.archiveId]);
+  const editorOwner = useRef({ identity: editorIdentity, busy: false, active: true });
+  if (editorOwner.current.identity !== editorIdentity) editorOwner.current = { identity: editorIdentity, busy: false, active: true };
+  const currentEditor = editorOwner.current;
+  useLayoutEffect(() => {
+    currentEditor.active = true;
+    setEditingMetadata(false);
+    setSavingMetadata(false);
+    setMetadataError(undefined);
+    return () => { currentEditor.active = false; };
+  }, [currentEditor]);
   const rows = useVirtualizer({
     count: filteredArchives.length,
     getScrollElement: () => compact ? scrollHostElement ?? null : scrollRef.current,
@@ -1067,6 +1080,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             value={searchDraft}
             onChange={(e) => editSearchDraft(e.target.value)}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key !== 'Enter') return;
               event.preventDefault();
               updateSearchQuery(searchDraft);
@@ -1317,23 +1331,35 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               )}
               {onToggleFavorite && <button className="secondary-action" type="button" aria-pressed={isFavorite} onClick={() => void onToggleFavorite()}><Star aria-hidden="true" fill={isFavorite ? 'currentColor' : 'none'} />{isFavorite ? '已收藏' : '加入收藏'}</button>}
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && editingMetadata && (
-                <form className="metadata-form" onSubmit={(event) => {
+                <form key={editorIdentity} className="metadata-form" aria-busy={savingMetadata} onSubmit={(event) => {
                   event.preventDefault();
+                  if (currentEditor.busy || !currentEditor.active) return;
+                  currentEditor.busy = true;
                   const controls = event.currentTarget.elements;
                   setSavingMetadata(true);
+                  setMetadataError(undefined);
                   void onUpdateMetadata({
                     title: (controls.namedItem('title') as HTMLInputElement).value,
                     tags: (controls.namedItem('tags') as HTMLInputElement).value,
                     summary: (controls.namedItem('summary') as HTMLTextAreaElement).value,
                   }).then((result) => {
-                    setSavingMetadata(false);
+                    if (editorOwner.current !== currentEditor || !currentEditor.active) return;
                     if (result.ok) setEditingMetadata(false);
+                    else setMetadataError(result.error?.message ?? '保存元数据失败');
+                  }).catch((error: unknown) => {
+                    if (editorOwner.current === currentEditor && currentEditor.active) setMetadataError(error instanceof Error ? error.message : '保存元数据失败');
+                  }).finally(() => {
+                    currentEditor.busy = false;
+                    if (editorOwner.current === currentEditor && currentEditor.active) setSavingMetadata(false);
                   });
                 }}>
+                  <fieldset className="metadata-edit-fields" disabled={savingMetadata}>
                   <label>标题<input name="title" aria-label="标题" autoComplete="off" defaultValue={metadata.title || selected.title} /></label>
                   <label>标签<input name="tags" aria-label="标签" autoComplete="off" spellCheck={false} defaultValue={metadata.tags} /></label>
                   <label>简介<textarea name="summary" aria-label="简介" defaultValue={metadata.summary ?? ''} /></label>
                   <button className="primary-action" type="submit" disabled={savingMetadata} aria-busy={savingMetadata}><Save aria-hidden="true" />{savingMetadata ? '保存中…' : '保存元数据'}</button>
+                  </fieldset>
+                  {metadataError && <p role="alert">{metadataError}</p>}
                 </form>
               )}
               {onDelete && (

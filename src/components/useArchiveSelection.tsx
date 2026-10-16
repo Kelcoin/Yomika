@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookmarkMinus, BookmarkPlus, Trash2 } from 'lucide-react';
 
 import type { ArchiveRecord } from '../domain/library';
@@ -44,6 +44,18 @@ export function useArchiveSelection(options: {
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingDelete, setPendingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const identity = `${scopeId ?? ''}:${serverId ?? ''}:${membership?.list ?? ''}`;
+  const selectionOwner = useRef({ identity, busy: false, active: true });
+  if (selectionOwner.current.identity !== identity) selectionOwner.current = { identity, busy: false, active: true };
+  const scopeOwner = selectionOwner.current;
+  useEffect(() => {
+    scopeOwner.active = true;
+    setSelectionMode(false);
+    setSelectedArchiveIds(new Set());
+    setPendingDelete(false);
+    setBusy(false);
+    return () => { scopeOwner.active = false; };
+  }, [scopeOwner]);
 
   const selected = useMemo(
     () => archives.filter((archive) => selectedArchiveIds.has(archive.archiveId)),
@@ -58,7 +70,8 @@ export function useArchiveSelection(options: {
   }, []);
 
   const changeMembership = useCallback(async (next: boolean) => {
-    if (!scopeId || selected.length === 0) return;
+    if (!scopeId || selected.length === 0 || !scopeOwner.active || scopeOwner.busy) return;
+    scopeOwner.busy = true;
     setBusy(true);
     try {
       const results = await Promise.all(selected.map(async archive => {
@@ -68,15 +81,17 @@ export function useArchiveSelection(options: {
         }
         return { id: archive.archiveId, ok: (await mirrorFavorites(serverId ?? archive.serverId, [archive.archiveId], next)) === 0 };
       }));
+      if (selectionOwner.current !== scopeOwner || !scopeOwner.active) return;
       const failed = results.filter(result => !result.ok).length;
       if (failed) showToast(`${failed} 个档案未能更新`, 'error');
       else showToast(next ? `已加入${membership?.label ?? '收藏夹'}` : `已移出${membership?.label ?? '收藏夹'}`, 'success');
       if (!next && membership) onRemoved(results.filter(result => result.ok).map(result => result.id));
       setSelectedArchiveIds(new Set());
     } finally {
-      setBusy(false);
+      scopeOwner.busy = false;
+      if (selectionOwner.current === scopeOwner && scopeOwner.active) setBusy(false);
     }
-  }, [membership, onRemoved, scopeId, selected, serverId, showToast]);
+  }, [membership, onRemoved, scopeId, scopeOwner, selected, serverId, showToast]);
 
   // Icon-only, like the list's own selection bar: the words are the accessible
   // name and the tooltip, and the membership's label is the only thing that
@@ -104,20 +119,30 @@ export function useArchiveSelection(options: {
   const dialogs = pendingDelete ? (
     <ArchiveDeletionConfirmation
       description={`将永久删除选中的 ${selected.length} 个档案，此操作不可撤销。`}
-      onClose={() => setPendingDelete(false)}
+      onClose={() => { if (selectionOwner.current === scopeOwner && scopeOwner.active) setPendingDelete(false); }}
       onConfirm={async (syncFavorite) => {
+        if (selectionOwner.current !== scopeOwner || !scopeOwner.active || scopeOwner.busy) return;
+        scopeOwner.busy = true;
         setBusy(true);
+        const removed: string[] = [];
         try {
-          const removed: string[] = [];
           for (const archive of selected) {
             await deleteArchiveWithFavoriteSync(archive, syncFavorite);
             removed.push(archive.archiveId);
           }
-          onRemoved(removed);
-          setSelectedArchiveIds(new Set());
-          showToast(`已删除 ${removed.length} 个档案`, 'success');
+          if (selectionOwner.current === scopeOwner && scopeOwner.active) showToast(`已删除 ${removed.length} 个档案`, 'success');
         } finally {
-          setBusy(false);
+          scopeOwner.busy = false;
+          if (selectionOwner.current === scopeOwner && scopeOwner.active) {
+            setBusy(false);
+            // Successful deletions stay successful even if a later one fails.
+            // Keep only the remaining selection so confirmation can retry it.
+            if (removed.length) {
+              onRemoved(removed);
+              const deleted = new Set(removed);
+              setSelectedArchiveIds((current) => new Set([...current].filter((id) => !deleted.has(id))));
+            }
+          }
         }
       }}
     />

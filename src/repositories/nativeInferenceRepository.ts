@@ -7,7 +7,7 @@ const InferenceCapabilitiesSchema = z.object({
   backends: z.array(z.string().min(1)), maxPixels: z.number().int().positive(), hardwareAcceleration: z.boolean(),
 });
 const InferenceJobSchema = z.object({ id: z.string().min(1), status: z.string().min(1), itemCount: z.number().int().nonnegative(), completedCount: z.number().int().nonnegative() });
-const InstalledModelSchema = z.object({
+export const InstalledModelSchema = z.object({
   id: z.string().min(1),
   version: z.string().min(1),
   /** From the installed manifest. Null means the directory has no manifest, so
@@ -22,7 +22,7 @@ const InstalledModelSchema = z.object({
 const InferenceCacheClearResultSchema = z.object({ entriesCleared: z.number().int().nonnegative() });
 /** 托管模型的目录清单。`directUrl` 是上游那份导出（HuggingFace），本仓库的
  * Release 资产是它下载不到时的兜底。 */
-const UpscaleCatalogSchema = z.object({
+export const UpscaleCatalogSchema = z.object({
   tag: z.string().min(1),
   models: z.array(z.object({
     id: z.string().min(1),

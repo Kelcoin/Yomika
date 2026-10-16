@@ -74,6 +74,9 @@ type DragState = {
   moved: boolean;
   suppressClickUntil: number;
   previousUserSelect: string;
+  lastX: number;
+  lastAt: number;
+  velocity: number;
 };
 
 type PointerStyleWatch = {
@@ -89,11 +92,22 @@ export const WHEEL_GESTURE_SETTLE_MS = 250;
 
 export function useHorizontalScroller() {
   const elementRef = useRef<HTMLElement | null>(null);
-  const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '' });
+  const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '', lastX: 0, lastAt: 0, velocity: 0 });
+  const coastRef = useRef<number>();
+  const snapRef = useRef<{ element: HTMLElement; value: string }>();
+  const restoreSnap = useCallback(() => {
+    if (snapRef.current) snapRef.current.element.style.scrollSnapType = snapRef.current.value;
+    snapRef.current = undefined;
+  }, []);
+  const stopCoast = useCallback(() => {
+    if (coastRef.current !== undefined) window.cancelAnimationFrame(coastRef.current);
+    coastRef.current = undefined;
+    restoreSnap();
+  }, [restoreSnap]);
   const gestureRef = useRef({ lastAt: 0, owns: false });
   const pointerStyleRef = useRef<PointerStyleWatch | null>(null);
 
-  const finishDrag = useCallback(() => {
+  const finishDrag = useCallback((event?: Event) => {
     const state = dragRef.current;
     if (!state.active) return;
     state.active = false;
@@ -102,7 +116,24 @@ export function useHorizontalScroller() {
     window.removeEventListener('mousemove', handleWindowMouseMove);
     window.removeEventListener('mouseup', finishDrag);
     window.removeEventListener('blur', finishDrag);
-  }, []);
+    if (event?.type !== 'mouseup' || !state.moved || !state.element || performance.now() - state.lastAt > 80 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { restoreSnap(); return; }
+    const element = state.element;
+    let velocity = Math.max(-2.5, Math.min(2.5, state.velocity));
+    let previousAt = performance.now();
+    const coast = (at: number) => {
+      if (!element.isConnected || element.closest('[hidden]')) { stopCoast(); return; }
+      const elapsed = Math.min(48, Math.max(0, at - previousAt));
+      previousAt = at;
+      const decay = Math.exp(-elapsed / 180);
+      const before = element.scrollLeft;
+      element.scrollLeft = Math.max(0, Math.min(element.scrollWidth - element.clientWidth, before + velocity * 180 * (1 - decay)));
+      velocity *= decay;
+      if (Math.abs(velocity) < .02 || element.scrollLeft === before) { stopCoast(); return; }
+      coastRef.current = window.requestAnimationFrame(coast);
+    };
+    if (Math.abs(velocity) >= .02) coastRef.current = window.requestAnimationFrame(coast);
+    else restoreSnap();
+  }, [restoreSnap, stopCoast]);
 
   const handleWindowMouseMove = useCallback((event: MouseEvent) => {
     const state = dragRef.current;
@@ -114,13 +145,25 @@ export function useHorizontalScroller() {
     // leave the suppression armed: a later keyboard activation produces a click
     // without a preceding mousedown and would be swallowed.
     state.suppressClickUntil = Date.now() + 300;
+    const now = performance.now();
+    const elapsed = now - state.lastAt;
+    if (elapsed > 0) state.velocity = (state.lastX - event.clientX) / elapsed;
+    state.lastX = event.clientX;
+    state.lastAt = now;
     state.element.scrollLeft = state.startScrollLeft - delta;
     if (event.cancelable) event.preventDefault();
   }, []);
 
-  useEffect(() => () => finishDrag(), [finishDrag]);
+  useEffect(() => {
+    const cancel = () => { stopCoast(); finishDrag(); };
+    const visibility = () => { if (document.visibilityState !== 'visible') cancel(); };
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', visibility);
+    return () => { cancel(); window.removeEventListener('blur', cancel); document.removeEventListener('visibilitychange', visibility); };
+  }, [finishDrag, stopCoast]);
 
   const handleWheel = useCallback((event: WheelEvent) => {
+    stopCoast();
     const element = (event.currentTarget as HTMLElement | null) ?? elementRef.current;
     if (!element) return;
     const delta = getHorizontalWheelDelta(event, element.scrollWidth, element.clientWidth);
@@ -141,7 +184,7 @@ export function useHorizontalScroller() {
     if (event.cancelable) event.preventDefault();
     event.stopPropagation();
     element.scrollLeft += delta * 2.4;
-  }, []);
+  }, [stopCoast]);
 
   /** 按设备档把样式落到导轨上，并跟着设备档的变化改（插拔鼠标、切换平板模式）。
    *
@@ -170,33 +213,42 @@ export function useHorizontalScroller() {
   const setRef = useCallback((element: HTMLElement | null) => {
     const previous = elementRef.current;
     if (previous === element) return;
+    stopCoast();
     if (previous) {
+      finishDrag();
       previous.removeEventListener('wheel', handleWheel, true);
+      previous.removeEventListener('touchstart', stopCoast);
       releasePointerStyle();
     }
     elementRef.current = element;
     if (!element) return;
     element.addEventListener('wheel', handleWheel, { capture: true, passive: false });
+    element.addEventListener('touchstart', stopCoast, { passive: true });
     applyPointerStyle(element);
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia(COARSE_POINTER_QUERY);
     const listener = () => applyPointerStyle(element);
     media.addEventListener?.('change', listener);
     pointerStyleRef.current = { element, media, listener };
-  }, [applyPointerStyle, handleWheel, releasePointerStyle]);
+  }, [applyPointerStyle, handleWheel, releasePointerStyle, stopCoast, finishDrag]);
 
   useEffect(() => () => releasePointerStyle(), [releasePointerStyle]);
 
   const onMouseDown = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    stopCoast();
     if (event.button !== 0 || event.currentTarget.scrollWidth <= event.currentTarget.clientWidth + 1) return;
     const element = event.currentTarget;
-    dragRef.current = { active: true, element, startX: event.clientX, startScrollLeft: element.scrollLeft, moved: false, suppressClickUntil: 0, previousUserSelect: document.body.style.userSelect };
+    // A programmatic scrollLeft write can otherwise snap at every animation
+    // frame instead of decelerating. Restore native proximity at the endpoint.
+    snapRef.current = { element, value: element.style.scrollSnapType };
+    element.style.scrollSnapType = 'none';
+    dragRef.current = { active: true, element, startX: event.clientX, startScrollLeft: element.scrollLeft, moved: false, suppressClickUntil: 0, previousUserSelect: document.body.style.userSelect, lastX: event.clientX, lastAt: performance.now(), velocity: 0 };
     document.body.style.userSelect = 'none';
     element.style.cursor = 'grabbing';
     window.addEventListener('mousemove', handleWindowMouseMove, { passive: false });
     window.addEventListener('mouseup', finishDrag, { passive: true });
     window.addEventListener('blur', finishDrag, { passive: true });
-  }, [finishDrag, handleWindowMouseMove]);
+  }, [finishDrag, handleWindowMouseMove, stopCoast]);
   const onClickCapture = useCallback((event: React.MouseEvent<HTMLElement>) => {
     const state = dragRef.current;
     if (state.suppressClickUntil === 0) return;

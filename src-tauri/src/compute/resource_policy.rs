@@ -115,8 +115,8 @@ pub fn projected_output_pixels(source_pixels: u64, scale: u32) -> u64 {
 
 /// 这一页乘上倍率之后是否还装得进预算（§12.4 的 budget 那一栏）。
 ///
-/// 用的是模型**原生**倍率，不是交付倍率：`output_scale` 是算完之后把结果缩下来，救不了中间
-/// 那一份被分配出来的像素——分配就发生在原生倍率那一档。
+/// 调用方传入整页缓冲的倍率。worker 已按交付倍率逐块缩小后拼接，
+/// 原生倍率只作用于当前带边缘的块，不再分配同倍率的完整中间帧。
 pub fn output_pixels_within_budget(source_pixels: u64, scale: u32) -> bool {
     projected_output_pixels(source_pixels, scale) <= PAGE_PIXEL_LIMIT
 }

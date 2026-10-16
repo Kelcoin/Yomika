@@ -1,6 +1,7 @@
 import { act, render } from '@testing-library/react';
 
 import { CardTagRows } from '../../src/components/CardTagRows';
+import { clearTagTranslations, installTagTranslations } from '../../src/lib/tags';
 
 /** jsdom 不做布局：胶囊宽度与槽宽都得由测试自己报。
  *
@@ -67,6 +68,17 @@ const TAGS = [
 ];
 
 describe('card tag rows', () => {
+  it('updates mounted chips when translations are installed or cleared', () => {
+    clearTagTranslations();
+    const { container } = render(<CardTagRows tags={['artist:somebody']} rowCount={1} className="tags" />);
+    const visible = () => container.querySelector('.archive-row-tag-line')?.textContent;
+    expect(visible()).toBe('somebody');
+    act(() => installTagTranslations({ artist: { somebody: '某位画师' } }));
+    expect(visible()).toBe('某位画师');
+    act(() => clearTagTranslations());
+    expect(visible()).toBe('somebody');
+  });
+
   it('re-measures the chips when a card that mounted unseen is laid out at last', () => {
     const fake = installMeasureFake();
     try {

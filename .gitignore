@@ -68,3 +68,17 @@ Thumbs.db
 # CI 构建时会往这里写一份（从 secret 解出来），本地测试密钥也放这里——都不进仓库。
 /src-tauri/gen/android/release.keystore
 /src-tauri/gen/android/keystore.local.properties
+
+# 本机运行时留下的目录。NGX/DLSS 会在「当前工作目录」旁建一个空的
+# `NVIDIA Corporation/`（仓库根、src-tauri/、src-tauri/worker/ 都出现过），
+# 别的本机工具也会落自己的目录：都不进远端。不加前导斜杠，因为它在仓库里
+# 出现的位置不固定。
+NVIDIA Corporation/
+/.agents/
+
+# scripts/ 里除「整轮验证入口」外，都是一次性的取证与变异检查脚本
+# （task*-mutation-check.ps1 之类），只在本地跑，不必进远端。已经跟踪的那些文件
+# 不受这条影响（gitignore 只管未跟踪文件）；要让它们也离开远端得另做
+# `git rm --cached`，那是独立的一步。
+/scripts/
+!/scripts/compute/verify-round.ps1

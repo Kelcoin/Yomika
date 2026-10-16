@@ -5,6 +5,7 @@ import { translateRawTag } from '../lib/tags';
 import { myTagChipStyle } from '../lib/ehMyTags';
 import { distributeTagRows } from '../lib/tagWaterfall';
 import { useEhMyTags } from './useEhMyTags';
+import { useTagTranslations } from '../lib/tagTranslationService';
 
 /** Mirrors JHenTai's horizontal tag waterfall, using the actual translated chip
  * widths. With `fill` the rows pack top-down and the overflow is dropped, so a
@@ -41,12 +42,13 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
   leading?: readonly CardTagLeadingChip[] | undefined;
 }) {
   const root = useRef<HTMLSpanElement>(null);
+  const translationRevision = useTagTranslations();
   const [measured, setMeasured] = useState<{ tags: string[]; widths: number[]; containerWidth: number }>();
   // 翻译与序列化只在标签集合变化时重算：搜索框每敲一键，档案库会重渲染
   // 所有可见卡片，这里不挡一下就是每卡 × 每键的重复工作。
   const labels = useMemo(
     () => [...leading.map((chip) => chip.label), ...tags.map(translateRawTag)],
-    [leading, tags],
+    [leading, tags, translationRevision],
   );
   // 判定胶囊按同样的类名渲染与测量，宽窄、字重才和实际显示一致。
   const chipClass = (index: number) => index < leading.length

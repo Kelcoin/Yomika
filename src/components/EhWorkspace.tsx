@@ -9,6 +9,8 @@ interface EhWorkspaceProps {
   searched?: boolean | undefined;
   searchError?: string | undefined;
   accountsLoading?: boolean | undefined;
+  accountsError?: string | undefined;
+  onRetryAccounts?: (() => void) | undefined;
   onSaveAccount?: ((input: SaveEhAccountInput) => Promise<void>) | undefined;
   onPasswordLogin?: ((username: string, password: string) => Promise<string>) | undefined;
   /** Resolves with the cookie header once the user has signed in through the
@@ -22,10 +24,13 @@ interface EhWorkspaceProps {
   onEditUsername?: ((accountId: string, username: string) => Promise<void>) | undefined;
 }
 
-export function EhWorkspace({ accounts, onCheckHealth, accountsLoading, onSaveAccount, onPasswordLogin, onBrowserLogin, onInAppLogin, savingAccount, onReadCookie, onLogout, onEditUsername }: EhWorkspaceProps) {
+export function EhWorkspace({ accounts, onCheckHealth, accountsLoading, accountsError, onRetryAccounts, onSaveAccount, onPasswordLogin, onBrowserLogin, onInAppLogin, savingAccount, onReadCookie, onLogout, onEditUsername }: EhWorkspaceProps) {
   return (
     <div>
-      <EhAccountPanel accounts={accounts} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} onInAppLogin={onInAppLogin} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} onEditUsername={onEditUsername} />
+      {accountsError ? <section className="eh-account-panel" aria-label="E-Hentai 账户">
+        <p role="alert">{accountsError}</p>
+        <button className="secondary-action" type="button" onClick={onRetryAccounts}>重新读取账户</button>
+      </section> : <EhAccountPanel accounts={accounts} onCheckHealth={onCheckHealth} loading={accountsLoading} onSave={onSaveAccount} onPasswordLogin={onPasswordLogin} onBrowserLogin={onBrowserLogin} onInAppLogin={onInAppLogin} saving={savingAccount} onReadCookie={onReadCookie} onLogout={onLogout} onEditUsername={onEditUsername} />}
     </div>
   );
 }

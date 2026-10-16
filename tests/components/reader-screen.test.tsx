@@ -8,6 +8,7 @@ import { afterEach, beforeEach, vi } from 'vitest';
 
 import { App } from '../../src/app/App';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
+import { RetainedPage } from '../../src/app/RetainedPage';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { resetOverlayBackGuardForTests } from '../../src/lib/overlayBackGuard';
@@ -274,7 +275,7 @@ describe('reader screen', () => {
 
   // 用户报的 ⑧（2026-10-11）：「移动端下点击触发顶栏/底栏中的一侧时会导致同时触发两侧」。
   // 触屏没有悬停，`hoverChrome` 永远是 `undefined`，两条栏就只能跟着同一个 `visible`
-  // 同亮同灭。手指点下去时因此按落点把那一侧钉住（收起仍然统一，鼠标那条路径也不动）。
+  // 同亮同灭。现在按落点独立切换两侧，中部点击统一收起，鼠标路径不变。
   it('summons only the bar whose band the tap landed in', async () => {
     const media = stubHoverNone(true);
     try {
@@ -287,16 +288,17 @@ describe('reader screen', () => {
       expect(topBar()).toBeInTheDocument();
       expect(bottomBar()).not.toBeInTheDocument();
 
-      // 开着的时候点另一条感应带：换过来，不是两条都亮、也不是全收。被换下去的那条
-      // 还要走 260ms 的退场（`useDelayedUnmount`），所以这里等它摘掉。
+      // 另一条感应带可以继续唤出另一侧，不用先收起当前一侧。
       fireEvent.click(reader, { clientY: window.innerHeight - 110 });
       expect(bottomBar()).toBeInTheDocument();
-      await vi.waitFor(() => expect(topBar()).not.toBeInTheDocument());
+      expect(topBar()).toBeInTheDocument();
 
-      // 点当前这一条才是收起（不看落点、两条一起走）。
+      // 再点同一条只收起这一侧，中部点击才统一收起。
       fireEvent.click(reader, { clientY: window.innerHeight - 110 });
       await vi.waitFor(() => expect(bottomBar()).not.toBeInTheDocument());
-      expect(topBar()).not.toBeInTheDocument();
+      expect(topBar()).toBeInTheDocument();
+      fireEvent.click(reader, { clientY: window.innerHeight / 2 });
+      await vi.waitFor(() => expect(topBar()).not.toBeInTheDocument());
     } finally {
       media.restore();
     }
@@ -434,6 +436,37 @@ describe('reader screen', () => {
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
     fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 700 });
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it('keeps toolbar Space, composition and modified arrows out of canvas navigation', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
+    fireEvent.keyDown(screen.getByRole('button', { name: /阅读布局/ }), { key: ' ' });
+    fireEvent.keyDown(reader, { key: 'ArrowRight', isComposing: true });
+    fireEvent.keyDown(reader, { key: 'ArrowRight', ctrlKey: true });
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+  });
+
+  it('does not capture a pointer pressed on empty reader chrome', async () => {
+    await act(async () => { renderReader(); });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
+    const capture = vi.fn();
+    reader.setPointerCapture = capture;
+    // jsdom has no native PointerEvent constructor; preserve its pointer fields
+    // explicitly so this exercises the mouse branch rather than vacuously passing.
+    const pointerDown = (target: Element, pointerId: number) => {
+      const event = new MouseEvent('pointerdown', { bubbles: true, button: 0 });
+      Object.defineProperties(event, { pointerType: { value: 'mouse' }, pointerId: { value: pointerId } });
+      fireEvent(target, event);
+    };
+    pointerDown(screen.getByRole('toolbar', { name: '阅读控制' }), 1);
+    expect(capture).not.toHaveBeenCalled();
+    pointerDown(reader, 2);
+    expect(capture).toHaveBeenCalledWith(2);
   });
 
   it('scrolls continuous pages when keyboard navigation changes progress', () => {
@@ -797,6 +830,23 @@ describe('reader screen', () => {
     await vi.waitFor(() => expect(loadPageThumbnail.mock.calls.map(([index]) => index)).toEqual([0, 1, 2, 3, 4]));
     // Only the prefetch window may be fetched at full size, never the whole archive.
     expect(loadPage.mock.calls.map(([index]) => index)).toEqual([1]);
+  });
+
+  it('closes the thumbnail panel and stops its queue when the reader becomes inactive', async () => {
+    let finish!: (url: string) => void;
+    const loadPageThumbnail = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const content = <MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages}
+      loadPageThumbnail={loadPageThumbnail} /></MemoryRouter>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
+    expect(loadPageThumbnail).toHaveBeenCalledTimes(1);
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    expect(document.querySelector('.reader-overview-backdrop')).not.toBeInTheDocument();
+    await act(async () => { finish('old-thumbnail'); });
+    expect(loadPageThumbnail).toHaveBeenCalledTimes(1);
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    expect(document.querySelector('.reader-overview-backdrop')).not.toBeInTheDocument();
   });
 
   it('turns pages with a pointer drag on desktop', () => {

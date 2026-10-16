@@ -230,3 +230,63 @@ describe('horizontal scroller', () => {
     clock.mockRestore();
   });
 });
+
+describe('mouse rail release motion', () => {
+  it('decelerates after release and stops immediately for new input', () => {
+    let at = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => at);
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++nextId, callback); return nextId; });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id); });
+    const view = render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
+    const rail = screen.getByTestId('rail');
+    setOverflow(rail, 2000, 300);
+    rail.style.scrollSnapType = 'x proximity';
+    rail.scrollLeft = 200;
+    fireEvent.mouseDown(rail, { button: 0, clientX: 120 });
+    expect(rail.style.scrollSnapType).toBe('none');
+    at = 40;
+    fireEvent.mouseMove(window, { clientX: 80 });
+    fireEvent.mouseUp(window);
+    expect(frames.size).toBe(1);
+    const advance = () => {
+      const [id, callback] = [...frames.entries()][0]!;
+      frames.delete(id);
+      at += 16;
+      callback(at);
+    };
+    const released = rail.scrollLeft;
+    advance();
+    const firstStep = rail.scrollLeft - released;
+    advance();
+    expect(rail.scrollLeft - released - firstStep).toBeGreaterThan(0);
+    expect(rail.scrollLeft - released - firstStep).toBeLessThan(firstStep);
+    fireEvent.touchStart(rail);
+    expect(frames.size).toBe(0);
+    expect(rail.style.scrollSnapType).toBe('x proximity');
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
+  it('does not coast after a held release or when reduced motion is requested', () => {
+    let at = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => at);
+    const raf = vi.spyOn(window, 'requestAnimationFrame');
+    const view = render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
+    const rail = screen.getByTestId('rail');
+    setOverflow(rail, 2000, 300);
+    fireEvent.mouseDown(rail, { button: 0, clientX: 120 });
+    at = 40; fireEvent.mouseMove(window, { clientX: 80 });
+    at = 200; fireEvent.mouseUp(window);
+    expect(raf).not.toHaveBeenCalled();
+    const pointer = stubCoarsePointer(true); // also satisfies reduced-motion query
+    fireEvent.mouseDown(rail, { button: 0, clientX: 120 });
+    at = 240; fireEvent.mouseMove(window, { clientX: 80 });
+    fireEvent.mouseUp(window);
+    expect(raf).not.toHaveBeenCalled();
+    pointer.restore();
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+});

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -24,6 +24,54 @@ const comment = {
 };
 
 describe('E-Hentai comments', () => {
+  it('ignores malformed persisted comments and loads the current gallery', async () => {
+    localStorage.setItem('yomika.eh.comments.v1:eh-a\u000012345\u0000abc', JSON.stringify({
+      comments: [null], cachedAt: Date.now(),
+    }));
+    const adapter = vi.fn(async () => ({ ok: true, value: [comment] }));
+    setInvokeAdapterForTests(adapter);
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    expect(await screen.findByText('Useful comment')).toBeInTheDocument();
+    expect(adapter).toHaveBeenCalledWith('get_eh_comments', expect.anything());
+  });
+
+  it('manual refresh bypasses the fresh snapshot', async () => {
+    let requests = 0;
+    setInvokeAdapterForTests(async () => ({ ok: true, value: [{ ...comment, body: ++requests === 1 ? 'Old comment' : 'Updated comment' }] }));
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    await screen.findByText('Old comment');
+    fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
+    await screen.findByText('Updated comment');
+    expect(requests).toBe(2);
+  });
+
+  it('retains the updated vote in memory when reopening the same gallery', async () => {
+    setInvokeAdapterForTests(async (command) => command === 'vote_eh_comment'
+      ? { ok: true, value: 6 } : { ok: true, value: [comment] });
+    const first = render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    await screen.findByText('+4');
+    fireEvent.click(screen.getByRole('button', { name: '赞同 Reader 的评论' }));
+    await screen.findByText('+6');
+    first.unmount();
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    await screen.findByText('+6');
+    expect(screen.getByRole('button', { name: '赞同 Reader 的评论' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('does not carry a composer draft or old comments into another gallery', async () => {
+    let finishSecond!: (result: unknown) => void;
+    setInvokeAdapterForTests(async (_command, args) => args?.galleryId === 'other'
+      ? new Promise((resolve) => { finishSecond = resolve; })
+      : { ok: true, value: [comment] });
+    const { rerender } = render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    await screen.findByText('Useful comment');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Draft for the first gallery' } });
+    rerender(<EhComments accountId="eh-a" galleryId="other" token="def" />);
+    expect(screen.getByRole('textbox')).toHaveValue('');
+    expect(screen.queryByText('Useful comment')).not.toBeInTheDocument();
+    await act(async () => { finishSecond({ ok: true, value: [] }); });
+  });
+
   it('renders comment metadata and updates the score in place after voting', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'get_eh_comments') return { ok: true, value: [comment] };

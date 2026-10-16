@@ -1,5 +1,5 @@
 import { ChevronDown, ClipboardCopy, Copy, Download, Info, MessageSquareWarning, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { writeClipboardText } from '../bridge/clipboard';
 import { openExternalUrl } from '../bridge/externalUrl';
@@ -70,13 +70,23 @@ function splitDetail(entry: ErrorLogEntry): { detail?: string; stack?: string } 
   if (!raw) return {};
   if (!raw.startsWith('{')) return { detail: raw };
   try {
-    const parsed = JSON.parse(raw) as { stack?: unknown; file?: unknown; line?: unknown; column?: unknown };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     const stack = typeof parsed.stack === 'string' ? parsed.stack : undefined;
     const where = typeof parsed.file === 'string'
       ? `${parsed.file}${typeof parsed.line === 'number' ? `:${parsed.line}` : ''}${typeof parsed.column === 'number' ? `:${parsed.column}` : ''}`
       : undefined;
-    // 明细里除了栈还有「在哪」：两者都留，别把现场丢掉一半。
-    return { ...(where ? { detail: where } : {}), ...(stack ? { stack } : {}) };
+    // 除了浏览器异常，计算任务也用 JSON 写错误码、原因和任务标识；分离堆栈时
+    // 只移走已经格式化的字段，其余上下文必须保留。
+    const context = { ...parsed };
+    if (stack !== undefined) delete context.stack;
+    if (where !== undefined) {
+      delete context.file;
+      if (typeof parsed.line === 'number') delete context.line;
+      if (typeof parsed.column === 'number') delete context.column;
+    }
+    const detail = [where, Object.keys(context).length > 0 ? JSON.stringify(context, null, 2) : undefined]
+      .filter((part) => part !== undefined).join('\n\n');
+    return { ...(detail ? { detail } : {}), ...(stack ? { stack } : {}) };
   } catch {
     return { detail: raw };
   }
@@ -209,14 +219,21 @@ export function useErrorLog(): ErrorLogState {
   const [platform, setPlatform] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const readGeneration = useRef(0);
+  const clearing = useRef(false);
+  const exportPending = useRef(false);
 
   const reload = useCallback(async (options?: { quiet?: boolean }) => {
+    if (clearing.current) return;
+    const generation = ++readGeneration.current;
     const quiet = options?.quiet === true;
     if (!quiet) setBusy(true);
     // 刚刚发生的失败可能还在缓冲区里：读之前先落盘，列表才是完整的。
     await flushErrorLog();
+    if (generation !== readGeneration.current) return;
     const response = await repository.list();
-    if (!quiet) setBusy(false);
+    if (generation !== readGeneration.current) return;
+    setBusy(false);
     if (response.ok) setEntries(response.value);
     else if (!quiet) showToast(response.error.message, 'error');
   }, [showToast]);
@@ -232,7 +249,8 @@ export function useErrorLog(): ErrorLogState {
   }, []);
 
   const exportLog = useCallback(async () => {
-    if (!entries?.length) return;
+    if (!entries?.length || exportPending.current) return;
+    exportPending.current = true;
     setExporting(true);
     try {
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
@@ -241,7 +259,10 @@ export function useErrorLog(): ErrorLogState {
       await flushErrorLog();
       const response = await repository.exportTo(path, exportText(entries, appInfoLines(build, platform)));
       showToast(response.ok ? `错误日志已导出到 ${path}` : response.error.message, response.ok ? 'success' : 'error');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '导出错误日志失败', 'error');
     } finally {
+      exportPending.current = false;
       setExporting(false);
     }
   }, [build, entries, platform, showToast]);
@@ -257,14 +278,22 @@ export function useErrorLog(): ErrorLogState {
   }, [build, entries, platform, showToast]);
 
   const clearLog = useCallback(async () => {
-    const response = await repository.clear();
-    if (!response.ok) {
-      showToast(response.error.message, 'error');
-      return false;
+    if (clearing.current) return false;
+    clearing.current = true;
+    readGeneration.current += 1;
+    try {
+      const response = await repository.clear();
+      if (!response.ok) {
+        showToast(response.error.message, 'error');
+        return false;
+      }
+      setEntries([]);
+      showToast(response.value > 0 ? `已清空 ${response.value} 条记录` : '没有可清空的记录', 'success');
+      return true;
+    } finally {
+      clearing.current = false;
+      setBusy(false);
     }
-    setEntries([]);
-    showToast(response.value > 0 ? `已清空 ${response.value} 条记录` : '没有可清空的记录', 'success');
-    return true;
   }, [showToast]);
 
   return { entries, build, platform, busy, exporting, reload, exportLog, copyLog, clearLog };

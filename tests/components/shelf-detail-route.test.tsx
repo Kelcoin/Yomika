@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Link, MemoryRouter } from 'react-router-dom';
+import { Link, MemoryRouter, useNavigate } from 'react-router-dom';
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
@@ -57,6 +57,66 @@ function renderApp(initialEntry: string, adapter: ReturnType<typeof makeAdapter>
 afterEach(resetInvokeAdapterForTests);
 
 describe('shelf detail route', () => {
+  it('keeps B to-read archives after a late A context-menu removal', async () => {
+    let navigate!: ReturnType<typeof useNavigate>;
+    let finish!: (value: unknown) => void;
+    let bReads = 0;
+    function Navigation() { navigate = useNavigate(); return null; }
+    const adapter = makeAdapter({
+      list_servers: () => ({ ok: true, value: ['A', 'B'].map(id => ({ id, scopeId: id, name: id, baseUrl: `https://${id}.example.com`, enabled: true })) }),
+      list_reading_list: payload => {
+        const scopeId = (payload as { scopeId: string }).scopeId;
+        if (scopeId === 'B' && ++bReads > 1) return new Promise(() => {});
+        return { ok: true, value: [{ scopeId, archiveId: 'archive-0', addedAt: 'now', updatedAt: 'now', revision: 1, deviceId: 'test', deleted: false }] };
+      },
+      get_archive_membership: () => ({ ok: true, value: { reading: true, favorites: false } }),
+      read_favorites_category: () => ({ ok: true, value: null }),
+      list_archives_by_ids: payload => ({ ok: true, value: [{ ...archive(0), serverId: (payload as { serverId: string }).serverId, title: `${(payload as { serverId: string }).serverId} archive` }] }),
+      set_reading_list: () => new Promise(resolve => { finish = resolve; }),
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/to-read?server=A']}><PreferencesProvider><ToastProvider><Navigation /><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /^A archive\b/ }), { clientX: 100, clientY: 100 });
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: '移出待看' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('menuitem', { name: '移出待看' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    act(() => navigate('/to-read?server=B'));
+    await screen.findByRole('button', { name: /^B archive\b/ });
+    await act(async () => finish({ ok: true, value: { scopeId: 'A', archiveId: 'archive-0', addedAt: 'now', updatedAt: 'now', revision: 1, deviceId: 'test', deleted: true } }));
+    expect(screen.getByRole('button', { name: /^B archive\b/ })).toBeInTheDocument();
+  });
+
+  it('closes A history confirmation on server change and ignores its late completion', async () => {
+    let navigate!: ReturnType<typeof useNavigate>;
+    let finish!: (value: unknown) => void;
+    let bReads = 0;
+    function Navigation() { navigate = useNavigate(); return null; }
+    const adapter = makeAdapter({
+      list_servers: () => ({ ok: true, value: ['A', 'B'].map(id => ({ id, scopeId: id, name: id, baseUrl: `https://${id}.example.com`, enabled: true })) }),
+      list_reading_history: payload => {
+        const scopeId = (payload as { scopeId: string }).scopeId;
+        if (scopeId === 'B' && ++bReads > 1) return new Promise(() => {});
+        return { ok: true, value: history.map(item => ({ ...item, scopeId })) };
+      },
+      list_archives_by_ids: payload => ({ ok: true, value: [archive(0), archive(1)].map(item => ({ ...item, serverId: (payload as { serverId: string }).serverId, title: `${(payload as { serverId: string }).serverId} ${item.title}` })) }),
+      delete_history_records: () => new Promise(resolve => { finish = resolve; }),
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/history?server=A']}><PreferencesProvider><ToastProvider><Navigation /><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+    await screen.findByRole('button', { name: /^A Archive 0\b/ });
+    fireEvent.click(screen.getByRole('button', { name: '多选' }));
+    fireEvent.click(screen.getByRole('button', { name: '全选已读完' }));
+    fireEvent.click(screen.getByRole('button', { name: '清理所选记录' }));
+    fireEvent.click(screen.getByRole('button', { name: '清理' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    act(() => navigate('/history?server=B'));
+    await screen.findByRole('button', { name: /^B Archive 0\b/, hidden: true });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await act(async () => finish({ ok: true, value: 2 }));
+    expect(screen.getByRole('button', { name: /^B Archive 0\b/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^B Archive 1\b/ })).toBeInTheDocument();
+  });
+
   it('opens the detail on the shelf itself, so the list on the left stays the shelf', async () => {
     const adapter = makeAdapter();
     renderApp('/history', adapter);

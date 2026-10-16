@@ -92,6 +92,8 @@ impl JobState {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_message: Option<String>,
     pub job_id: String,
     pub key: JobKey,
     pub priority: Priority,
@@ -357,6 +359,7 @@ impl Scheduler {
         let job_id = format!("job-{}", self.next_job);
         let subscription_id = self.new_subscription();
         let snapshot = JobSnapshot {
+            failure_message: None,
             job_id: job_id.clone(),
             key: key.clone(),
             priority,

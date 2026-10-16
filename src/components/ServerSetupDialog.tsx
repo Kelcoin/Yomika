@@ -1,6 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil, Save, Server, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 
 import type { CommandResult } from '../domain/result';
 import { createServerIdentity, normalizeServerUrl, type ServerIdentity } from '../domain/server';
@@ -36,7 +37,14 @@ interface ServerSetupDialogProps {
   variant?: 'action' | 'row';
 }
 
-export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action' }: ServerSetupDialogProps) {
+export function ServerSetupDialog(props: ServerSetupDialogProps) {
+  const pageActive = usePageActive();
+  return pageActive ? <ServerSetupDialogContent {...props} /> : null;
+}
+
+function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action' }: ServerSetupDialogProps) {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -46,6 +54,8 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
   // 打开编辑时 Radix 会聚焦第一个输入框并全选内容，等于替用户选中了整个名称：
   // 随手敲一个字就把名字换掉了。用 ref 在自动聚焦时把光标放到末尾。
   const nameRef = useRef<HTMLInputElement>(null);
+  const apiKeyEdited = useRef(false);
+  const pendingRef = useRef(false);
   // 保存失败（地址不通、凭据库写不进去、API Key 太长……）由 toast 说，不再在表单
   // 里留一条红字：那条红字会一直挂到对话框关掉为止，用户改完地址重试时它还在说上
   // 一次的事。toast 的层级（--z-toast 70）本来就高于对话框（--z-modal 51）。
@@ -55,11 +65,13 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
   useOverlayBackGuard(open, () => handleOpenChange(false));
 
   function handleOpenChange(next: boolean) {
+    if (pendingRef.current) return;
     setOpen(next);
     if (next) {
       setName(server?.name ?? '');
       setBaseUrl(server?.baseUrl ?? '');
       setApiKey('');
+      apiKeyEdited.current = false;
       setConfirmingDelete(false);
     }
   }
@@ -71,13 +83,15 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
     let active = true;
     void repository.readServerApiKey(server.scopeId).then((result) => {
       if (!active) return;
-      if (result.ok && result.value) setApiKey(result.value);
+      if (result.ok && result.value && !apiKeyEdited.current) setApiKey(result.value);
     });
     return () => { active = false; };
-  }, [open, server]);
+  }, [open, server?.scopeId]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pendingRef.current) return;
+    pendingRef.current = true;
     setPending(true);
     try {
       // Editing keeps the server's original identity: the scope id keys every
@@ -88,12 +102,14 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
         ? { name, baseUrl: normalizeServerUrl(baseUrl), scopeId: server.scopeId }
         : await createServerIdentity({ name, baseUrl });
       const result = await onSave({ identity, apiKey });
+      if (!mounted.current) return;
       if (result.ok) setOpen(false);
       else showToast(result.error.message, 'error');
     } catch (cause) {
-      showToast(cause instanceof Error ? cause.message : '服务器配置无效', 'error');
+      if (mounted.current) showToast(cause instanceof Error ? cause.message : '服务器配置无效', 'error');
     } finally {
-      setPending(false);
+      pendingRef.current = false;
+      if (mounted.current) setPending(false);
     }
   }
 
@@ -101,7 +117,7 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
   async function handleDelete() {
     if (!onDelete) return;
     const deleted = await onDelete();
-    if (deleted) setOpen(false);
+    if (deleted && mounted.current) setOpen(false);
   }
 
   return (
@@ -160,15 +176,15 @@ export function ServerSetupDialog({ onSave, server, onDelete, variant = 'action'
               小字：连接信息存哪里不影响用户做决定，地址框自己会说话。 */}
           <Dialog.Title className="dialog-title"><Server aria-hidden="true" />{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
           <form className="server-form" onSubmit={handleSubmit}>
-            <label>名称（可选）<input ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
-            <label>服务器地址<input name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
-            <label>API Key<input name="apiKey" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" autoComplete="off" spellCheck={false} required /></label>
+            <label>名称（可选）<input disabled={pending} ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
+            <label>服务器地址<input disabled={pending} name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
+            <label>API Key<input disabled={pending} name="apiKey" value={apiKey} onChange={(event) => { apiKeyEdited.current = true; setApiKey(event.target.value); }} type="password" autoComplete="off" spellCheck={false} required /></label>
             {/* 动作行等宽平分：删除配置（仅编辑态）与保存服务器各占一列。
                 没有「取消」——对话框本来就能点空白处或按 Esc 关掉，多一颗按钮
                 只会让「保存服务器」那一格变小、也让退出与保存看起来一样重。 */}
             <div className="dialog-actions is-balanced">
               {server && onDelete && (
-                <button className="secondary-action is-danger" type="button" onClick={() => setConfirmingDelete(true)}><Trash2 aria-hidden="true" />删除配置</button>
+                <button className="secondary-action is-danger" type="button" disabled={pending} onClick={() => setConfirmingDelete(true)}><Trash2 aria-hidden="true" />删除配置</button>
               )}
               <button className="primary-action" type="submit" disabled={pending} aria-busy={pending}><Save aria-hidden="true" />{pending ? '保存中…' : '保存服务器'}</button>
             </div>

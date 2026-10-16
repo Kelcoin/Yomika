@@ -6,6 +6,7 @@ import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
+import { RetainedPage } from '../../src/app/RetainedPage';
 import { invalidateRouteCache, readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
@@ -38,6 +39,137 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
+  it.each([false, true])('retires an incognito press or prompt when its page hides (open=%s)', async open => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const content = <MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    await screen.findByRole('heading', { name: metadata.title });
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(screen.getByRole('link', { name: '阅读' }));
+      if (open) act(() => vi.advanceTimersByTime(600));
+      view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+      act(() => vi.advanceTimersByTime(600));
+      expect(screen.queryByRole('dialog', { name: '无痕阅读', hidden: true })).not.toBeInTheDocument();
+      view.rerender(<RetainedPage active>{content}</RetainedPage>);
+      act(() => vi.advanceTimersByTime(600));
+      expect(screen.queryByRole('dialog', { name: '无痕阅读' })).not.toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rebuilds malformed recommendations from the server', async () => {
+    writeRouteCache('recommendations:server-a:archive-a', { similarPool: {}, sameCreator: [], complete: true });
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_reading_history' || command === 'find_missing_archives' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') return { ok: true, value: { items: [{ serverId: 'server-a', archiveId: 'recommendation', title: 'Recovered recommendation', pageCount: 1, updatedAt: 'now', tags: ['female:big breasts', 'artist:sample artist'] }], total: 1, hasMore: false } };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('link', { name: /Recovered recommendation/ });
+  });
+
+  it('ignores malformed cached metadata and loads the archive normally', async () => {
+    writeRouteCache('archive-detail:last:archive-a', { ...metadata, title: { stale: true } });
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    expect(() => renderDetail()).not.toThrow();
+    await screen.findByRole('heading', { name: metadata.title });
+  });
+
+  it('serializes downloads per detail and does not keep B busy or unlock it after A completes', async () => {
+    const finishes = new Map<string, (value: unknown) => void>();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: args?.archiveId, title: args?.archiveId } };
+      if (command === 'download_archive') return new Promise(resolve => { finishes.set(String(args?.archiveId), resolve); });
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const view = render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-a' });
+    const download = screen.getByRole('button', { name: '下载档案' });
+    act(() => { fireEvent.click(download); fireEvent.click(download); });
+    expect(adapter.mock.calls.filter(([command]) => command === 'download_archive')).toHaveLength(1);
+    view.rerender(<MemoryRouter><ArchiveDetailRoute archiveId="archive-b" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-b' });
+    expect(screen.getByRole('button', { name: '下载档案' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '下载档案' }));
+    await act(async () => finishes.get('archive-a')!({ ok: true, value: { status: 'completed', path: 'a.zip', taskId: 'a' } }));
+    expect(screen.getByRole('button', { name: '下载档案' })).toBeDisabled();
+    await act(async () => finishes.get('archive-b')!({ ok: true, value: { status: 'completed', path: 'b.zip', taskId: 'b' } }));
+    expect(screen.getByRole('button', { name: '下载档案' })).toBeEnabled();
+  });
+
+  it.each([false, true])('does not carry an incognito press or dialog into the next archive (open=%s)', async open => {
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: args?.archiveId, title: args?.archiveId } };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const view = render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-a' });
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(screen.getByRole('link', { name: '阅读' }));
+      if (open) act(() => vi.advanceTimersByTime(600));
+      view.rerender(<MemoryRouter><ArchiveDetailRoute archiveId="archive-b" /></MemoryRouter>);
+      act(() => vi.advanceTimersByTime(600));
+    } finally { vi.useRealTimers(); }
+    await screen.findByRole('heading', { name: 'archive-b', hidden: true });
+    expect(screen.queryByRole('dialog', { name: '无痕阅读' })).not.toBeInTheDocument();
+  });
+
+  it('retries a failed metadata load without leaving the detail route', async () => {
+    let reads = 0;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return ++reads === 1
+        ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '详情读取暂时失败', retryable: true } }
+        : { ok: true, value: metadata };
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    expect(await screen.findByRole('alert')).toHaveTextContent('详情读取暂时失败');
+    fireEvent.click(screen.getByRole('button', { name: '重试加载详情' }));
+    expect(await screen.findByRole('heading', { name: 'Archive detail' })).toBeInTheDocument();
+    expect(reads).toBe(2);
+  });
+
+  it('does not apply a pending reading-list mutation to another archive', async () => {
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: args?.archiveId, title: args?.archiveId } };
+      if (command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'set_reading_list') return new Promise(resolve => { finish = resolve; });
+      if (command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    const view = render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-a' });
+    fireEvent.click(screen.getByRole('button', { name: '加入待看' }));
+    await waitFor(() => expect(finish).toBeDefined());
+    view.rerender(<MemoryRouter><ArchiveDetailRoute archiveId="archive-b" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'archive-b' });
+    await act(async () => finish({ ok: true, value: { scopeId: 'scope-a', archiveId: 'archive-a', addedAt: '2026-10-15', updatedAt: '2026-10-15', deviceId: 'device-a', revision: 1, deleted: false } }));
+    expect(screen.getByRole('button', { name: '加入待看' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('ignores an A favorite completion after B membership has loaded', async () => {
     let finish!: (value: unknown) => void;
     const pending = new Promise(resolve => { finish = resolve; });
@@ -606,7 +738,7 @@ describe('archive detail route', () => {
       if (command === 'search_archives_page' || command === 'list_archives_page') {
         const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
         return { ok: true, value: {
-          items: [{ serverId: 'scope-a', archiveId: `for-${query}`, title: `命中 ${query}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: [query] }],
+          items: [{ serverId: server.id, archiveId: `for-${query}`, title: `命中 ${query}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: [query] }],
           total: 1,
           hasMore: false,
         } };

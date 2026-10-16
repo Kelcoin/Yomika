@@ -58,6 +58,36 @@ function makeAdapter(state: { server: string; draws: number }) {
 const shelfReads = (adapter: ReturnType<typeof makeAdapter>) => adapter.mock.calls.filter(([command]) => command === 'list_reading_history').length;
 
 describe('home random roam', () => {
+  it.each(['remote', 'fallback'] as const)('ignores a late %s draw from the previous server', async (source) => {
+    const state = { server: 'server-1', draws: 0 };
+    const base = makeAdapter(state);
+    let finishOld: ((value: unknown) => void) | undefined;
+    const oldRows = Array.from({ length: 24 }, (_, index) => drawn('server-1', 1, index));
+    setInvokeAdapterForTests(async (command, payload) => {
+      const serverId = (payload as { input?: { serverId?: string } } | undefined)?.input?.serverId;
+      if (serverId === 'server-1' && command === 'search_random_archives') {
+        if (source === 'fallback') return { ok: true, value: [] };
+        return new Promise((resolve) => { finishOld = resolve; });
+      }
+      if (serverId === 'server-1' && command === 'list_archives_page') {
+        return new Promise((resolve) => { finishOld = resolve; });
+      }
+      return base(command);
+    });
+    render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>);
+    await waitFor(() => expect(finishOld).toBeDefined());
+    state.server = 'server-2';
+    state.draws = 1;
+    await act(async () => { invalidateRouteCache(); });
+    const rail = await screen.findByRole('region', { name: '随机漫游' });
+    expect(await within(rail).findByText('Random 2-0')).toBeInTheDocument();
+    await act(async () => {
+      finishOld!({ ok: true, value: source === 'remote' ? oldRows : { items: oldRows, total: oldRows.length, hasMore: false } });
+    });
+    expect(within(rail).getByText('Random 2-0')).toBeInTheDocument();
+    expect(within(rail).queryByText('Random 1-0')).toBeNull();
+  });
+
   it('keeps the set it already drew when a shelf write asks the home page to read again', async () => {
     const state = { server: 'server-1', draws: 0 };
     const adapter = makeAdapter(state);

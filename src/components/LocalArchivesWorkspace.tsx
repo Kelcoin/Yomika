@@ -2,7 +2,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
@@ -219,6 +219,8 @@ export function LocalArchivesWorkspace() {
    * 再变成有数据的样子。 */
   const [archivesLoaded, setArchivesLoaded] = useState(false);
   const [error, setError] = useState<string>();
+  const [taskError, setTaskError] = useState<string>();
+  const [taskReload, setTaskReload] = useState(0);
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
@@ -237,8 +239,17 @@ export function LocalArchivesWorkspace() {
   const [busy, setBusy] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string>();
   const [presetDialog, setPresetDialog] = useState<{ preset?: SearchPreset } | undefined>();
+  useLayoutEffect(() => {
+    if (!pageActive) {
+      setDeletePaths(undefined);
+      setMenuTarget(undefined);
+      setPresetDialog(undefined);
+    }
+  }, [pageActive]);
 
   const openPath = searchParams.get('path');
+  const detailOwnerRef = useRef({ active: pageActive, path: openPath });
+  detailOwnerRef.current = { active: pageActive, path: openPath };
   const unfinished = tasks.some((task) => task.status === 'running' || task.status === 'queued' || task.status === 'paused');
 
   const loadArchives = useCallback(async () => {
@@ -253,12 +264,18 @@ export function LocalArchivesWorkspace() {
   useEffect(() => {
     if (!pageActive) return;
     let active = true;
+    let pending = false;
     const read = () => {
-      if (document.visibilityState === 'hidden') return;
+      if (document.visibilityState === 'hidden' || pending) return;
+      pending = true;
       void repository.listTasks().then((result) => {
-        if (!active || !result.ok) return;
-        setTasks(result.value);
+        pending = false;
+        if (!active) return;
         setLoading(false);
+        if (result.ok) {
+          setTasks(result.value);
+          setTaskError(undefined);
+        } else setTaskError(result.error.message);
       });
     };
     read();
@@ -269,7 +286,7 @@ export function LocalArchivesWorkspace() {
       window.clearInterval(timer);
       window.removeEventListener('focus', read);
     };
-  }, [pageActive, unfinished]);
+  }, [pageActive, unfinished, taskReload]);
 
   useEffect(() => {
     if (!pageActive) return;
@@ -357,7 +374,7 @@ export function LocalArchivesWorkspace() {
       showToast(`已从本地删除 ${result.value} 个档案`, 'success');
       setSelected(new Set());
       setDeletePaths(undefined);
-      if (openPath && paths.includes(openPath)) closeDetail();
+      if (openPath && paths.includes(openPath) && detailOwnerRef.current.active && detailOwnerRef.current.path === openPath) closeDetail();
       await loadArchives();
     } finally {
       setBusy(false);
@@ -514,8 +531,9 @@ export function LocalArchivesWorkspace() {
         </div>
       </div>
       {(loading || !archivesLoaded) && <StatusLine busy>正在读取本地档案…</StatusLine>}
-      {error && <p className="form-error" role="alert">{error}</p>}
-      {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && (
+      {error && <div className="form-error" role="alert">{error}<button className="secondary-action" type="button" onClick={() => void loadArchives()}>重试读取本地档案</button></div>}
+      {taskError && <div className="form-error" role="alert">{taskError}<button className="secondary-action" type="button" disabled={loading} onClick={() => { setLoading(true); setTaskReload((current) => current + 1); }}>重试读取下载任务</button></div>}
+      {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && !taskError && (
         <EmptyState
           icon={Download}
           title={query || categoryFilter ? '没有匹配的档案' : '还没有下载过档案'}
@@ -567,9 +585,9 @@ export function LocalArchivesWorkspace() {
         confirmLabel={presetDialog?.preset ? '保存名称' : '保存预设'}
         defaultValue={presetDialog?.preset?.name ?? (query || '全部本地档案')}
         validate={(value) => value.trim() ? undefined : '请填写预设名称'}
-        onConfirm={(name) => {
+        onConfirm={async (name) => {
           const preset = presetDialog?.preset;
-          void repository.saveSearchPreset({
+          const result = await repository.saveSearchPreset({
             scopeId: LOCAL_PRESET_SCOPE,
             presetId: preset?.presetId ?? `preset-${Date.now()}`,
             name,
@@ -577,12 +595,10 @@ export function LocalArchivesWorkspace() {
             sortBy: 'title',
             sortOrder: 'asc',
             categoryId: null,
-          }).then((result) => {
-            if (!result.ok) { showToast(result.error.message, 'error'); return; }
-            setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
-            showToast(preset ? '预设已重命名' : '预设已保存', 'success');
-            setPresetDialog(undefined);
           });
+          if (!result.ok) throw new Error(result.error.message);
+          setPresets((current) => [...current.filter((item) => item.presetId !== result.value.presetId), result.value]);
+          showToast(preset ? '预设已重命名' : '预设已保存', 'success');
         }}
       />
       {/* 右键/长按档案卡片、或详情页右上角的「更多操作」：菜单挂在同一棵树里，

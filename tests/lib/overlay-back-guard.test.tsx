@@ -50,6 +50,22 @@ async function pressBack() {
 }
 
 describe('overlay back guard', () => {
+  it('does not restore a popped guard after its overlay unmounts', async () => {
+    function Owner() {
+      const [shown, setShown] = useState(true);
+      return shown ? <StubbornLayer onClose={() => setShown(false)} /> : null;
+    }
+    render(<Owner />);
+    act(() => {
+      // Model the landed page entry before the deferred restore callback runs.
+      window.history.replaceState({}, '');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.queryByTestId('stubborn')).not.toBeInTheDocument();
+    await settle();
+    expect(window.history.state?.yomikaOverlay).toBeUndefined();
+  });
+
   it('marks the history entry while open and takes the mark back when closed', async () => {
     const { unmount } = render(<Layer name="menu" />);
     // 守卫条目：URL 不变（路由不动），能看见的是状态里那枚标记。

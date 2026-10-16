@@ -16,7 +16,9 @@
  * said what the animation already says, and repeated it in three sizes across
  * every route that loads anything.
  */
-export function LoadingIndicator({ label = '正在加载', size = 'md', inline = false }: { label?: string; size?: 'sm' | 'md' | 'lg'; inline?: boolean }) {
+import { YomikaMark } from './YomikaMark';
+
+export function LoadingIndicator({ label = '正在加载', size = 'md', inline = false, variant }: { label?: string; size?: 'sm' | 'md' | 'lg'; inline?: boolean; variant?: 'reader' }) {
   const mark = (
     <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
       {/* 2πr ≈ 125.7 for r=20; the dash cycle trims the arc the way the spec's
@@ -30,8 +32,9 @@ export function LoadingIndicator({ label = '正在加载', size = 'md', inline =
   // announces the same wait twice.
   if (inline) return <span className="loading-mark" aria-hidden="true">{mark}</span>;
   return (
-    <div className={`loading-indicator is-${size}`} role="status" aria-label={label}>
+    <div className={`loading-indicator is-${size}${variant === 'reader' ? ' is-reader' : ''}`} role="status" aria-label={label}>
       {mark}
+      {variant === 'reader' && <YomikaMark size={24} className="reader-loading-glyph" />}
     </div>
   );
 }

@@ -12,9 +12,11 @@ import {
   X,
   MessageCircle,
   Pencil,
+  RotateCcw,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { z } from 'zod';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
@@ -28,10 +30,12 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import {
+  ArchiveMetadataSchema,
   NativeLibraryRepository,
   type ArchiveMetadata,
 } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
+import { ArchiveRecordSchema } from '../domain/library';
 import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
 import { useToast } from './Toast';
 import { ArchiveThumbnailRail } from './ArchiveThumbnailCard';
@@ -56,6 +60,11 @@ const LONG_PRESS_MS = 500;
  * shows a loading state first. */
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
+function readDetailSnapshot(key: string, archiveId: string) {
+  const parsed = ArchiveMetadataSchema.safeParse(readRouteCache<unknown>(key, DETAIL_SNAPSHOT_FRESH_MS));
+  return parsed.success && parsed.data.archiveId === archiveId ? parsed.data : undefined;
+}
+
 function DetailGlyph() {
   return (
     <svg className="detail-panel-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -79,10 +88,11 @@ detailBasePath?: string | undefined }) {
   // archive-keyed pointer so a route remount can paint cached metadata on its
   // first render instead of flashing the loading shell while that lookup runs.
   const [metadata, setMetadata] = useState<ArchiveMetadata | undefined>(() => (
-    readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS)
+    readDetailSnapshot(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, archiveId)
   ));
   const [metadataLoading, setMetadataLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const [retryToken, setRetryToken] = useState(0);
   const [serverId, setServerId] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const favoritePageActive = usePageActive();
@@ -90,6 +100,12 @@ detailBasePath?: string | undefined }) {
   const [favoriteReady, setFavoriteReady] = useState(false);
   const [favoriteBusy, setFavoriteBusy] = useState(false);
   const [inReadingList, setInReadingList] = useState(false);
+  const [readingBusy, setReadingBusy] = useState(false);
+  const readingIdentity = `${serverParam ?? 'default'}:${archiveId}`;
+  const readingOwner = useRef({ identity: readingIdentity, generation: 0, busy: false });
+  if (readingOwner.current.identity !== readingIdentity) {
+    readingOwner.current = { identity: readingIdentity, generation: readingOwner.current.generation + 1, busy: false };
+  }
   const [message, setMessage] = useState<string>();
   const favoriteIdentity = `${serverParam ?? 'default'}:${serverId ?? ''}:${archiveId}`;
   const favoriteOwner = useRef({ identity: favoriteIdentity, generation: 0 });
@@ -124,7 +140,15 @@ detailBasePath?: string | undefined }) {
     incognitoTimer.current = undefined;
   }, []);
 
-  useEffect(() => () => { if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current); }, []);
+  useLayoutEffect(() => {
+    setIncognitoAsk(false);
+    setDeleteOpen(false);
+    incognitoPrompted.current = false;
+    return () => {
+      if (incognitoTimer.current !== undefined) window.clearTimeout(incognitoTimer.current);
+      incognitoTimer.current = undefined;
+    };
+  }, [archiveId, serverParam, favoritePageActive]);
 
   /** 详情可能开在档案库，也可能开在某个书架上（`/history/…`、`/watchlist/…`、
    *  `/to-read/…`）或首页自己的详情（`/home/…`）：返回与「档案没了」都要回到它来的
@@ -151,13 +175,15 @@ detailBasePath?: string | undefined }) {
 
   useEffect(() => {
     let active = true;
-    const lastSnapshot = readRouteCache<ArchiveMetadata>(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+    const lastSnapshot = readDetailSnapshot(`archive-detail:last:${serverParam ? `${serverParam}:` : ''}${archiveId}`, archiveId);
     setMetadata(lastSnapshot);
     setMetadataLoading(true);
     setError(undefined);
     setServerId(undefined);
     setScopeId(undefined);
     setFavorite(false);
+    setInReadingList(false);
+    setReadingBusy(false);
     setFavoriteReady(false);
     setMessage(undefined);
     setEhAccountId(undefined);
@@ -177,8 +203,8 @@ detailBasePath?: string | undefined }) {
       // Stale while revalidating: the page paints from the last visit's metadata
       // and corrects itself a beat later. Skipping the request instead would show
       // a stale title after the metadata editor wrote a new one.
-      const scopedLast = readRouteCache<ArchiveMetadata>(`archive-detail:last:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
-      const cached = readRouteCache<ArchiveMetadata>(`archive-detail:${server.id}:${archiveId}`, DETAIL_SNAPSHOT_FRESH_MS);
+      const scopedLast = readDetailSnapshot(`archive-detail:last:${server.id}:${archiveId}`, archiveId);
+      const cached = readDetailSnapshot(`archive-detail:${server.id}:${archiveId}`, archiveId);
       if (scopedLast) setMetadata(scopedLast);
       if (cached) {
         setMetadata(cached);
@@ -208,8 +234,9 @@ detailBasePath?: string | undefined }) {
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
+      const readingGeneration = readingOwner.current.generation;
       void repository.listReadingList(server.scopeId).then((result) => {
-        if (!active || !result.ok) return;
+        if (!active || !result.ok || readingOwner.current.generation !== readingGeneration) return;
         setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
       });
       void ehRepository.listAccounts().then((result) => {
@@ -219,7 +246,7 @@ detailBasePath?: string | undefined }) {
     });
 
     return () => { active = false; };
-  }, [archiveId, navigate, serverParam, showToast]);
+  }, [archiveId, navigate, serverParam, showToast, retryToken]);
 
   useEffect(() => {
     if (!serverId) return;
@@ -272,10 +299,18 @@ detailBasePath?: string | undefined }) {
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
   const [downloading, setDownloading] = useState(false);
+  const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
+  if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
+  const currentDownloadOwner = downloadOwner.current;
+  useEffect(() => {
+    currentDownloadOwner.active = true;
+    setDownloading(false);
+    return () => { currentDownloadOwner.active = false; };
+  }, [currentDownloadOwner]);
   const { open: openMenu, menu } = useArchiveContextMenu({
     onMembershipChange: (id, list, next) => {
       if (id !== archiveId || favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;
-      if (list === 'reading') setInReadingList(next); else { favoriteOwner.current.generation++; setFavorite(next); }
+      if (list === 'reading') { readingOwner.current.generation++; readingOwner.current.busy = false; setReadingBusy(false); setInReadingList(next); } else { favoriteOwner.current.generation++; setFavorite(next); }
     },
     onDeleted: () => navigate(shelfBase, { replace: true }),
   });
@@ -295,6 +330,7 @@ detailBasePath?: string | undefined }) {
       <main className="archive-detail-route">
         <button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button>
         <p className="form-error" role="alert">{error}</p>
+        <button className="secondary-action" type="button" onClick={() => setRetryToken(value => value + 1)}><RotateCcw aria-hidden="true" />重试加载详情</button>
       </main>
     );
   }
@@ -318,7 +354,7 @@ detailBasePath?: string | undefined }) {
   ];
 
   return (
-    <main className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
+    <main data-bounce-surface="" className={`archive-detail-route${metadataLoading ? ' is-loading-metadata' : ''}`} aria-labelledby="archive-detail-route-title">
       <header className="archive-detail-route-header">
         <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
         <h1 id="archive-detail-route-title" className="archive-detail-route-title" ref={titleRef}>{title || <span className="skeleton-line skeleton-line-title" aria-label="正在加载档案详情" role="status" />}</h1>
@@ -353,12 +389,18 @@ detailBasePath?: string | undefined }) {
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
         ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
-        {detailActions.includes('readingList') && <button className="secondary-action" type="button" aria-pressed={inReadingList} onClick={() => {
-          if (!scopeId) return;
+        {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
+          if (!scopeId || readingOwner.current.busy) return;
+          const identity = readingIdentity;
+          const generation = ++readingOwner.current.generation;
+          const ownsMutation = () => readingOwner.current.identity === identity && readingOwner.current.generation === generation;
+          readingOwner.current.busy = true;
+          setReadingBusy(true);
           void repository.setReadingList(scopeId, archiveId, !inReadingList).then((result) => {
+            if (!ownsMutation()) return;
             if (result.ok) setInReadingList(!result.value.deleted);
             else setMessage(result.error.message);
-          });
+          }).finally(() => { if (ownsMutation()) { readingOwner.current.busy = false; setReadingBusy(false); } });
         }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
           {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
@@ -377,9 +419,16 @@ detailBasePath?: string | undefined }) {
           }).finally(() => { if (ownsMutation()) setFavoriteBusy(false); });
         }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
         {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
-          if (!serverId || downloading) return;
+          if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active) return;
+          currentDownloadOwner.busy = true;
           setDownloading(true);
-          void repository.downloadArchive(serverId, archiveId).then((result) => showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error')).finally(() => setDownloading(false));
+          void repository.downloadArchive(serverId, archiveId).then((result) => {
+            if (downloadOwner.current !== currentDownloadOwner || !currentDownloadOwner.active) return;
+            showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
+          }).finally(() => {
+            currentDownloadOwner.busy = false;
+            if (downloadOwner.current === currentDownloadOwner && currentDownloadOwner.active) setDownloading(false);
+          });
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
         {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
@@ -464,6 +513,18 @@ type RecommendationTab = 'similar' | 'creator';
  * should not pay for them again. */
 const RECOMMENDATION_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1000;
 
+const RecommendationArchiveSchema = ArchiveRecordSchema.extend({ readPages: z.number().int().nonnegative().optional() });
+const RecommendationSnapshotSchema = z.object({
+  similarPool: RecommendationArchiveSchema.array(),
+  sameCreator: RecommendationArchiveSchema.array(),
+  complete: z.boolean().default(false),
+});
+
+function readRecommendationSnapshot(key: string, serverId: string) {
+  const parsed = RecommendationSnapshotSchema.safeParse(readRouteCache<unknown>(key, RECOMMENDATION_SNAPSHOT_FRESH_MS));
+  return parsed.success && [...parsed.data.similarPool, ...parsed.data.sameCreator].every(archive => archive.serverId === serverId) ? parsed.data : undefined;
+}
+
 /** 一条轨最多摆几张卡。取数不再受它限制：搜到的候选先全进池子（排序后只切给面板）。 */
 const RECOMMENDATION_VISIBLE_LIMIT = 15;
 
@@ -479,7 +540,7 @@ const RECOMMENDATION_SEED_LIMIT = 100;
 
 function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBasePath }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[]; detailBasePath: string }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
-  const snapshot = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+  const snapshot = useMemo(() => readRecommendationSnapshot(snapshotKey, serverId), [snapshotKey, serverId]);
   // 这次进来用哪个种子：抖动靠它决定，同一次挂载内部（含后台补搜后的重排）保持稳定。
   const [seed] = useState(createRecommendationSeed);
   const [similarPool, setSimilarPool] = useState<ArchiveRecord[]>(snapshot?.similarPool ?? []);
@@ -589,7 +650,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       };
     };
 
-    const cached = readRouteCache<RecommendationSnapshot>(snapshotKey, RECOMMENDATION_SNAPSHOT_FRESH_MS);
+    const cached = readRecommendationSnapshot(snapshotKey, serverId);
     if (cached) {
       setLoading(false);
       void (async () => {

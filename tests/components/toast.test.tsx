@@ -32,6 +32,21 @@ function Repeater() {
 }
 
 describe('toast marks', () => {
+  it('can show the same error again immediately after clearing errors', async () => {
+    function Retry() {
+      const { showToast, clearToasts } = useToast();
+      return <>
+        <button onClick={() => showToast('请求失败', 'error')}>fail</button>
+        <button onClick={() => { clearToasts('error'); showToast('请求失败', 'error'); }}>retry</button>
+      </>;
+    }
+    const user = userEvent.setup();
+    render(<ToastProvider><Retry /></ToastProvider>);
+    await user.click(screen.getByRole('button', { name: 'fail' }));
+    await user.click(screen.getByRole('button', { name: 'retry' }));
+    expect(screen.getByText('请求失败')).toBeInTheDocument();
+  });
+
   it('draws one semantic mark per type, none of them a cross', async () => {
     const user = userEvent.setup();
     render(<ToastProvider><Emitter /></ToastProvider>);

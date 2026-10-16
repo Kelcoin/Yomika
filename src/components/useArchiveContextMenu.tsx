@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { writeClipboardText } from '../bridge/clipboard';
@@ -41,10 +42,16 @@ export function useArchiveContextMenu(options: {
 } {
   const navigate = useNavigate();
   const location = useLocation();
+  const pageActive = usePageActive();
   const { showToast } = useToast();
   const [target, setTarget] = useState<ArchiveContextMenuTarget>();
   const [deleteTarget, setDeleteTarget] = useState<ArchiveRecord>();
-  const [membership, setMembership] = useState<{ scopeId: string; reading: boolean | undefined; favorites: boolean | undefined }>();
+  useLayoutEffect(() => {
+    setTarget(undefined);
+    setDeleteTarget(undefined);
+  }, [location.pathname, location.search, pageActive]);
+  const [membershipState, setMembership] = useState<{ scopeId: string; serverId: string; archiveId: string; reading: boolean | undefined; favorites: boolean | undefined }>();
+  const membership = membershipState?.serverId === target?.archive.serverId && membershipState?.archiveId === target?.archive.archiveId ? membershipState : undefined;
   const membershipRequest = useRef(0);
   useEffect(() => {
     const request = ++membershipRequest.current;
@@ -57,7 +64,7 @@ export function useArchiveContextMenu(options: {
       const [status, favorites] = await Promise.all([repository.archiveMembership(server.scopeId, target.archive.archiveId), repository.readFavoritesCategory(server.id)]);
       if (request !== membershipRequest.current) return;
       if (!status.ok || !favorites.ok) showToast('待看或收藏状态读取失败', 'error');
-      setMembership({ scopeId: server.scopeId, reading: status.ok ? status.value.reading : undefined, favorites: favorites.ok ? (favorites.value?.archives.includes(target.archive.archiveId) ?? false) : undefined });
+      setMembership({ scopeId: server.scopeId, serverId: target.archive.serverId, archiveId: target.archive.archiveId, reading: status.ok ? status.value.reading : undefined, favorites: favorites.ok ? (favorites.value?.archives.includes(target.archive.archiveId) ?? false) : undefined });
     })();
     return () => { membershipRequest.current += 1; };
   }, [target, showToast]);
@@ -72,7 +79,7 @@ export function useArchiveContextMenu(options: {
         const result = await repository.setReadingList(membership.scopeId, archive.archiveId, next);
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
       }
-      setMembership(current => current ? { ...current, [list]: next } : current);
+      setMembership(current => current?.serverId === archive.serverId && current.archiveId === archive.archiveId ? { ...current, [list]: next } : current);
       options.onMembershipChange?.(archive.archiveId, list, next);
       showToast(`${next ? '已加入' : '已移出'}${list === 'reading' ? '待看' : '收藏夹'}`, 'success');
     })();

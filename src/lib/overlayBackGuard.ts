@@ -59,6 +59,7 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
 
   useEffect(() => {
     if (!open || typeof window === 'undefined') return;
+    let active = true;
     if (!bound) {
       window.addEventListener('popstate', onPopState);
       bound = true;
@@ -67,7 +68,7 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
       depth: stack.length + 1,
       close: () => latestClose.current(),
       restore: () => {
-        if (!openRef.current || stack.includes(overlay)) return;
+        if (!active || !openRef.current || stack.includes(overlay)) return;
         overlay.depth = stack.length + 1;
         stack.push(overlay);
         pushGuard(overlay.depth);
@@ -76,6 +77,7 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
     stack.push(overlay);
     pushGuard(overlay.depth);
     return () => {
+      active = false;
       const index = stack.indexOf(overlay);
       // 历史里那一条已经被返回手势弹掉了（正是它关掉了这一层），这里不用再动历史。
       if (index < 0) return;

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { CalendarDays, ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { usePageActive } from '../app/RetainedPage';
 
 function parse(value: string): Date {
   const parts = value.split('-').map(Number);
@@ -22,6 +23,8 @@ const YEARS_PER_PAGE = 12;
 export function DatePicker({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   const selected = useMemo(() => parse(value), [value]);
   const [open, setOpen] = useState(false);
+  const pageActive = usePageActive();
+  useLayoutEffect(() => { if (!pageActive) setOpen(false); }, [pageActive]);
   /** 'days' 是日期网格，另外两档是快速跳年份/月份：只能靠左右箭头一个月一个
    * 月地挪，跨年份时要按几十下，等于没有导航。 */
   // 返回手势先收起这一层（见 overlayBackGuard）。
@@ -30,6 +33,41 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
   const [month, setMonth] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
   const [yearPage, setYearPage] = useState(() => Math.floor(selected.getFullYear() / YEARS_PER_PAGE) * YEARS_PER_PAGE);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
+  useLayoutEffect(() => {
+    if (!open) return;
+    const fit = () => {
+      const root = rootRef.current;
+      const popover = popoverRef.current;
+      if (!root || !popover) return;
+      const viewport = window.visualViewport;
+      const left = (viewport?.offsetLeft ?? 0) + 12;
+      const top = (viewport?.offsetTop ?? 0) + 12;
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      const bottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - 12;
+      const rect = root.getBoundingClientRect();
+      const width = Math.min(280, Math.max(0, viewportWidth - 24));
+      const x = Math.max(left, Math.min(rect.left, left + viewportWidth - 24 - width));
+      const below = Math.max(0, bottom - rect.bottom - 6);
+      const above = Math.max(0, rect.top - top - 6);
+      const flip = below < popover.scrollHeight && above > below;
+      setPopoverStyle({ left: x - rect.left, width, maxHeight: flip ? above : below,
+        top: flip ? 'auto' : 'calc(100% + 6px)', bottom: flip ? 'calc(100% + 6px)' : 'auto', overflowY: 'auto' });
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    window.addEventListener('scroll', fit, true);
+    window.visualViewport?.addEventListener('resize', fit);
+    window.visualViewport?.addEventListener('scroll', fit);
+    return () => {
+      window.removeEventListener('resize', fit);
+      window.removeEventListener('scroll', fit, true);
+      window.visualViewport?.removeEventListener('resize', fit);
+      window.visualViewport?.removeEventListener('scroll', fit);
+    };
+  }, [open, pane, month]);
   const days = useMemo(() => {
     const first = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
     const count = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
@@ -54,13 +92,21 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
   };
   const shiftYears = (delta: number) => setMonth(new Date(month.getFullYear() + delta, month.getMonth(), 1));
   const shiftMonths = (delta: number) => setMonth(new Date(month.getFullYear(), month.getMonth() + delta, 1));
+  const close = () => { setOpen(false); triggerRef.current?.focus(); };
 
-  return <div className="date-picker" ref={rootRef}>
+  return <div className="date-picker" ref={rootRef}
+    onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}
+    onKeyDown={(event) => {
+      if (open && event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); setOpen(false); triggerRef.current?.focus();
+      }
+    }}
+  >
     <span className="date-picker-label">{label}</span>
-    <button type="button" className="date-picker-trigger" aria-label={label} aria-expanded={open} onClick={toggle}>
+    <button ref={triggerRef} type="button" className="date-picker-trigger" aria-label={label} aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
       <CalendarDays aria-hidden="true" />{value}<ChevronRight aria-hidden="true" />
     </button>
-    {open && <div className="date-picker-popover" role="dialog" aria-label={`${label}选择器`}>
+    {open && <div ref={popoverRef} style={popoverStyle} className="date-picker-popover" role="dialog" aria-label={`${label}选择器`}>
       {pane === 'days' && <>
         <div className="date-picker-header">
           <button type="button" className="icon-button" aria-label="上一月" onClick={() => shiftMonths(-1)}><ChevronLeft /></button>
@@ -73,7 +119,7 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
           <button type="button" className="icon-button" aria-label="下一月" onClick={() => shiftMonths(1)}><ChevronRight /></button>
         </div>
         <div className="date-picker-weekdays">{labels.map((item) => <span key={item}>{item}</span>)}</div>
-        <div className="date-picker-days">{days.map((day, index) => day === null ? <span key={`empty-${index}`} /> : <button type="button" key={day} className={day === selected.getDate() && month.getMonth() === selected.getMonth() && month.getFullYear() === selected.getFullYear() ? 'is-selected' : ''} onClick={() => { onChange(format(new Date(month.getFullYear(), month.getMonth(), day))); setOpen(false); }}>{day}</button>)}</div>
+        <div className="date-picker-days">{days.map((day, index) => day === null ? <span key={`empty-${index}`} /> : <button type="button" key={day} className={day === selected.getDate() && month.getMonth() === selected.getMonth() && month.getFullYear() === selected.getFullYear() ? 'is-selected' : ''} onClick={() => { onChange(format(new Date(month.getFullYear(), month.getMonth(), day))); close(); }}>{day}</button>)}</div>
       </>}
       {pane === 'months' && <>
         <div className="date-picker-header">
@@ -91,7 +137,7 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
         </div>
         <div className="date-picker-grid is-years">{years.map((year) => <button type="button" key={year} className={year === month.getFullYear() ? 'is-selected' : ''} onClick={() => { setMonth(new Date(year, month.getMonth(), 1)); setPane('months'); }}>{year}</button>)}</div>
       </>}
-      <div className="date-picker-footer"><button type="button" className="secondary-action" onClick={() => { onChange(format(new Date())); setOpen(false); }}><CalendarDays aria-hidden="true" />今天</button><button type="button" className="secondary-action" onClick={() => setOpen(false)}><X aria-hidden="true" />取消</button></div>
+      <div className="date-picker-footer"><button type="button" className="secondary-action" onClick={() => { onChange(format(new Date())); close(); }}><CalendarDays aria-hidden="true" />今天</button><button type="button" className="secondary-action" onClick={close}><X aria-hidden="true" />取消</button></div>
     </div>}
   </div>;
 }

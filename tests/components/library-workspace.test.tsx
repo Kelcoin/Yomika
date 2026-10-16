@@ -1,3 +1,4 @@
+import { rubberBand } from '../../src/lib/motion';
 import { Profiler } from 'react';
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -159,7 +160,7 @@ describe('library workspace', () => {
     expect(onSavePreset).toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: '检索预设' }));
-    await user.click(await screen.findByRole('button', { name: '删除预设 中文汉化' }));
+    await user.click(await screen.findByRole('menuitem', { name: '删除预设 中文汉化' }));
     expect(onDeletePreset).toHaveBeenCalledWith(preset);
   });
 
@@ -534,7 +535,7 @@ describe('library workspace', () => {
     // The list itself moves with the gesture, damped to half the wheel travel,
     // and the disc comes with it.
     fireEvent.wheel(list, { deltaY: -40 });
-    expect(pull).toHaveStyle({ transform: 'translateY(20px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(40, 104)}px)` });
     expect(list.querySelector('.library-pull-indicator')).toHaveClass('is-visible');
     // Short of the threshold, so letting go springs the list back.
     await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
@@ -549,7 +550,7 @@ describe('library workspace', () => {
     // Past the threshold, releasing hands it to the refresh; the list goes back
     // to its place while the disc stays over it.
     fireEvent.wheel(list, { deltaY: -200 });
-    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(200, 104)}px)` });
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });
@@ -584,7 +585,7 @@ describe('library workspace', () => {
 
     // The last wheel notch past the end lifts the list instead of scrolling it.
     fireEvent.wheel(list, { deltaY: 100 });
-    expect(pull).toHaveStyle({ transform: 'translateY(-50px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(-100, 72)}px)` });
     // The end of the list is not a refresh, and the disc never shows for it.
     expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
     await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
@@ -632,7 +633,7 @@ describe('library workspace', () => {
     scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
 
     fireEvent.wheel(list, { deltaY: -200 });
-    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(200, 104)}px)` });
     expect(list.querySelector('.library-pull-indicator')).toBeNull();
   });
 
@@ -673,7 +674,7 @@ describe('library workspace', () => {
 
     fireEvent.touchStart(list, { touches: [{ clientY: 10 }] });
     fireEvent.touchMove(list, { touches: [{ clientY: 170 }] });
-    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
     // A held pull has not been released yet, so nothing has been asked for.
     expect(onRefresh).not.toHaveBeenCalled();
 
@@ -704,12 +705,12 @@ describe('library workspace', () => {
     // Start inside the owned list; the surrounding page supplies the scroll metrics.
     fireEvent.wheel(list, { deltaY: -200 });
     // Half the travel, capped — the same damping the list gets.
-    expect(pull).toHaveStyle({ transform: 'translateY(100px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(200, 104)}px)` });
     fireEvent.wheel(list, { deltaY: 0 });
 
     fireEvent.touchStart(list, { touches: [{ clientY: 10 }] });
     fireEvent.touchMove(list, { touches: [{ clientY: 170 }] });
-    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
     fireEvent.touchEnd(list);
     expect(onRefresh).toHaveBeenCalledTimes(1);
 
@@ -767,17 +768,17 @@ describe('library workspace', () => {
     scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
 
     fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
-    // 11px：还没到认定距离，这一格仍是浏览器在滚。
-    const short = createEvent.touchMove(list, { touches: [{ clientY: 21 }] });
+    // 3px jitter stays native; outward motion is claimed before browser slop.
+    const short = createEvent.touchMove(list, { touches: [{ clientY: 13 }] });
     fireEvent(list, short);
     expect(short.defaultPrevented).toBe(false);
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
 
-    // 越过 12px：这一档归下拉，位置跟着手指走（阻尼一半）。
+    // A clear outward move belongs to the progressive rubber band.
     const claimed = createEvent.touchMove(list, { touches: [{ clientY: 170 }] });
     fireEvent(list, claimed);
     expect(claimed.defaultPrevented).toBe(true);
-    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
 
     // 认领之后手指往回走：列表送回原位，但手势不再还给浏览器。
     const back = createEvent.touchMove(list, { touches: [{ clientY: 0 }] });
@@ -806,7 +807,7 @@ describe('library workspace', () => {
     fireEvent(list, claimed);
     expect(claimed.defaultPrevented).toBe(true);
     expect(list.scrollTop).toBe(0);
-    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
     fireEvent.touchEnd(list);
   });
 
@@ -822,7 +823,7 @@ describe('library workspace', () => {
 
     fireEvent(list, createEvent.touchStart(list, { touches: [{ clientY: 10 }] }));
     fireEvent(list, createEvent.touchMove(list, { touches: [{ clientY: 170 }] }));
-    expect(pull).toHaveStyle({ transform: 'translateY(80px)' });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
 
     list.scrollTop = 24;
     const drift = createEvent.touchMove(list, { touches: [{ clientY: 200 }] });
@@ -855,7 +856,7 @@ describe('library workspace', () => {
     for (const clientY of [40, 80, 120, 160, 200]) {
       fireEvent(list, createEvent.touchMove(list, { touches: [{ clientY }] }));
     }
-    expect(pull.style.transform).toBe('translateY(95px)');
+    expect(pull.style.transform).toBe(`translateY(${rubberBand(190, 104)}px)`);
     expect(commits.count - before).toBeLessThanOrEqual(2);
 
     fireEvent.touchEnd(list);
@@ -1154,7 +1155,7 @@ it('bounces negatively on the first bottom touch and never refreshes on release 
   scrollable(list, { scrollTop: 3200, clientHeight: 800, scrollHeight: 4000 });
   fireEvent.touchStart(list, { touches: [{ clientY: 200, clientX: 0 }] });
   fireEvent.touchMove(list, { touches: [{ clientY: 60, clientX: 0 }] });
-  expect(pull).toHaveStyle({ transform: 'translateY(-70px)' });
+  expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(-140, 72)}px)` });
   expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
   fireEvent.touchEnd(list);
   expect(onRefresh).not.toHaveBeenCalled();
@@ -1162,7 +1163,7 @@ it('bounces negatively on the first bottom touch and never refreshes on release 
   fireEvent.touchStart(list, { touches: [{ clientY: 200, clientX: 0 }] });
   fireEvent.touchMove(list, { touches: [{ clientY: 100, clientX: 0 }] });
   fireEvent.touchMove(list, { touches: [{ clientY: 60, clientX: 0 }] });
-  expect(pull).toHaveStyle({ transform: 'translateY(-70px)' });
+  expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(-140, 72)}px)` });
   fireEvent.touchMove(list, { touches: [{ clientY: 200, clientX: 0 }] });
   expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   fireEvent.touchEnd(list);
@@ -1178,7 +1179,7 @@ it('pulls vertically from an archive card inside a non-scrolling overflow wrappe
   card.style.overflowY = 'auto';
   fireEvent.touchStart(card, { touches: [{ clientY: 10, clientX: 0 }] });
   fireEvent.touchMove(card, { touches: [{ clientY: 110, clientX: 0 }] });
-  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(50px)' });
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: `translateY(${rubberBand(100, 104)}px)` });
 });
 it('limits library drag DOM writes to one paint per frame', () => {
   renderWorkspace({ archives: [archives[0]!] });
@@ -1191,5 +1192,5 @@ it('limits library drag DOM writes to one paint per frame', () => {
   expect(frames).toHaveLength(1);
   expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(0px)' });
   act(() => frames.shift()!(0));
-  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: 'translateY(50px)' });
+  expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: `translateY(${rubberBand(100, 104)}px)` });
 });

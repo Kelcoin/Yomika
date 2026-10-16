@@ -448,6 +448,10 @@
   pointer-events: none;
   /* 只有透明度会动：胶囊不再因为底栏而换位置（见下面 `.is-leaving` 那条注释）。 */
   transition: opacity var(--motion-standard);
+  opacity: 1;
+  translate: 0 0;
+  scale: 1;
+  transition-property: opacity, translate, scale;
 }
 
 /* Width-filling image: there is real room below it — take the centre slot. */.reader-page-indicator[data-placement='bottom'] {
@@ -456,7 +460,12 @@
   transform: translateX(-50%);
 }
 
-/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-visible='false'] { opacity: 0; }
+/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-visible='false'] { opacity: 0; translate: 0 6px; scale: 0.96; }
+.reader-page-indicator[data-visible='true'] { animation: reader-indicator-in var(--motion-standard) backwards; }
+@keyframes reader-indicator-in {
+  from { opacity: 0; translate: 0 6px; scale: 0.96; }
+  to { opacity: 1; translate: 0 0; scale: 1; }
+}
 
 /* 底栏在的时候胶囊不再「抬到栏顶」了（2026-10-15 用户要求：底栏一出现，页码就隐藏）。
    原来那条 `.is-raised { bottom: calc(var(--reader-toolbar-height) + …) }` 只是把重叠换成
@@ -503,13 +512,24 @@
   100% { stroke-dasharray: 2 124; stroke-dashoffset: -126; }
 }
 
+.loading-indicator.is-reader { --yomika-mark-plate: transparent; }
+.loading-indicator.is-reader > svg { grid-area: 1 / 1; }
+.loading-indicator.is-reader > .reader-loading-glyph {
+  width: 24px;
+  height: 24px;
+  animation: none;
+  color: var(--reader-primary);
+}
+.loading-indicator.is-reader .loading-indicator-arc { stroke-width: 2.5; stroke: var(--reader-primary); }
+
 /* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
    档）。它**不再有落位要推迟**：胶囊在「栏在 + 退场」整段里根本不移动（2026-10-15 改成
    隐藏，见上面那条注释），原来那条 `bottom 0s var(--duration-exit)` 是为了让它别从栏顶
    滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。 */
 .reader-page-indicator.is-leaving {
   opacity: 0;
-  transition: opacity var(--duration-exit) var(--ease-exit);
+  transition-duration: var(--duration-exit);
+  transition-timing-function: var(--ease-exit);
 }
 
 /* M3 subtitle role in an app bar: on-surface-variant. */

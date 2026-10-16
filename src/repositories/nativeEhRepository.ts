@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
+import { notifyEhAccountsChanged } from '../lib/ehAccountChanges';
 import { EhAccountSchema, EhAccountStatusSchema, EhMyTagSchema, type EhAccount, type EhAccountStatus, type EhMyTag, type SaveEhAccountInput } from '../domain/eh';
 
 const EhSearchResultSchema = z.object({
@@ -17,7 +18,7 @@ const EhSearchResponseSchema = z.object({
   galleries: z.array(EhSearchResultSchema),
 });
 
-const EhCommentSchema = z.object({
+export const EhCommentSchema = z.object({
   id: z.string().min(1),
   author: z.string(),
   body: z.string(),
@@ -32,7 +33,10 @@ export type EhSearchBridgeParams = { category?: number; page?: number };
 
 export class NativeEhRepository {
   saveAccount(input: SaveEhAccountInput): Promise<CommandResult<EhAccount>> {
-    return invokeCommand('save_eh_account', { input }, EhAccountSchema);
+    return invokeCommand('save_eh_account', { input }, EhAccountSchema).then((result) => {
+      if (result.ok) notifyEhAccountsChanged();
+      return result;
+    });
   }
   /** Signs in and returns the cookie string to store; saves nothing itself. */
   loginWithPassword(username: string, password: string): Promise<CommandResult<string>> {
@@ -71,7 +75,10 @@ export class NativeEhRepository {
     return invokeCommand('read_eh_account_cookie', { accountId }, z.string().min(1));
   }
   removeAccount(accountId: string): Promise<CommandResult<void>> {
-    return invokeCommand('remove_eh_account', { accountId }, VoidResponseSchema);
+    return invokeCommand('remove_eh_account', { accountId }, VoidResponseSchema).then((result) => {
+      if (result.ok) notifyEhAccountsChanged();
+      return result;
+    });
   }
   searchGalleries(accountId: string, query: string, params?: EhSearchBridgeParams): Promise<CommandResult<z.infer<typeof EhSearchResponseSchema>>> {
     return invokeCommand('search_eh_galleries', { accountId, query, params: params ?? {} }, EhSearchResponseSchema);

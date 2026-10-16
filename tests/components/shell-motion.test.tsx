@@ -1,3 +1,4 @@
+import { rubberBand } from '../../src/lib/motion';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -32,7 +33,7 @@ it('damps only outward edge touches, resets on return and cancel, and leaves edi
   const drag = (target: Element, y: number, x = 0) => fireEvent.touchMove(target, { touches: [{ clientY: y, clientX: x }] });
   const start = (target: Element) => fireEvent.touchStart(target, { touches: [{ clientY: 10, clientX: 0 }] });
   start(host); drag(host, 110);
-  expect(screen.getByTestId('content').style.translate).toBe('0 50px');
+  expect(screen.getByTestId('content').style.translate).toBe(`0 ${rubberBand(100)}px`);
   drag(host, 10);
   expect(screen.getByTestId('content').style.translate).toBe('0 0px');
   fireEvent.touchCancel(host);
@@ -43,7 +44,7 @@ it('damps only outward edge touches, resets on return and cancel, and leaves edi
     start(target); drag(target, 110); expect(screen.getByTestId('content').style.translate).toBe('');
   }
   host.scrollTop = 200; start(host); drag(host, 110); expect(screen.getByTestId('content').style.translate).toBe('');
-  host.scrollTop = 500; start(host); drag(host, -90); expect(screen.getByTestId('content').style.translate).toBe('0 -50px');
+  host.scrollTop = 500; start(host); drag(host, -90); expect(screen.getByTestId('content').style.translate).toBe(`0 ${rubberBand(-100)}px`);
   fireEvent.touchEnd(host); expect(screen.getByTestId('content').style.translate).toBe('0 0px');
   expect(host.style.transform).toBe(''); expect(host.style.translate).toBe('');
 });
@@ -55,7 +56,7 @@ it('uses a vertical overflow:auto region even when both computed axes are auto',
   Object.defineProperties(region, { clientHeight: { value: 500 }, scrollHeight: { value: 1000 }, clientWidth: { value: 300 }, scrollWidth: { value: 300 } });
   fireEvent.touchStart(content, { touches: [{ clientY: 10, clientX: 0 }] });
   fireEvent.touchMove(content, { touches: [{ clientY: 110, clientX: 0 }] });
-  expect(content.style.translate).toBe('0 50px');
+  expect(content.style.translate).toBe(`0 ${rubberBand(100)}px`);
   expect(region.style.transform).toBe('');
   fireEvent.touchCancel(content);
   expect(content.style.translate).toBe('');
@@ -143,7 +144,7 @@ it('coalesces card drags into one frame and leaves sideways rails native', () =>
   expect(card.style.translate).toBe('');
   expect(frames).toHaveLength(1);
   frames.shift()!(0);
-  expect(card.style.translate).toBe('0 50px');
+  expect(card.style.translate).toBe(`0 ${rubberBand(100)}px`);
   fireEvent.touchCancel(card);
   fireEvent.touchStart(card, { touches: [{ clientY: 10, clientX: 0 }] });
   fireEvent.touchMove(card, { touches: [{ clientY: 20, clientX: 100 }] });
@@ -159,12 +160,12 @@ it('keeps fixed descendants in the viewport and resets before a new overlay pain
   fireEvent.touchStart(content, { touches: [{ clientY: 10, clientX: 0 }] });
   fireEvent.touchMove(content, { touches: [{ clientY: 110, clientX: 0 }] });
   expect(content.style.translate).toBe('');
-  expect(content.style.top).toBe('50px');
+  expect(content.style.top).toBe(`${rubberBand(100)}px`);
   fireEvent.touchCancel(host);
   fixed.remove();
   fireEvent.touchStart(content, { touches: [{ clientY: 10, clientX: 0 }] });
   fireEvent.touchMove(content, { touches: [{ clientY: 110, clientX: 0 }] });
-  expect(content.style.translate).toBe('0 50px');
+  expect(content.style.translate).toBe(`0 ${rubberBand(100)}px`);
   content.append(fixed);
   await Promise.resolve();
   expect(content.style.translate).toBe('');
@@ -185,7 +186,7 @@ it('bounds claim style reads regardless of the content subtree size', () => {
   fireEvent.touchMove(content, { touches: [{ clientY: 110, clientX: 0 }] });
   expect(reads.mock.calls.length).toBeLessThanOrEqual(16);
   expect(content.style.translate).toBe('');
-  expect(content.style.top).toBe('50px');
+  expect(content.style.top).toBe(`${rubberBand(100)}px`);
   fireEvent.touchCancel(content);
   expect(content.style.top).toBe('');
 });
@@ -201,4 +202,86 @@ it('leaves a page with excessive sibling surfaces native instead of blocking inp
   expect(event.defaultPrevented).toBe(false);
   expect(reads).not.toHaveBeenCalled();
   expect(host).not.toHaveAttribute('data-edge-bounce');
+});
+
+
+it('claims a small outward move before native slop, ignoring initial diagonal jitter', () => {
+  const host = renderShell();
+  fireEvent.touchStart(host, { touches: [{ clientY: 10, clientX: 10 }] });
+  fireEvent.touchMove(host, { touches: [{ clientY: 11, clientX: 12 }] });
+  expect(host).not.toHaveAttribute('data-edge-bounce');
+  const event = new Event('touchmove', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'touches', { value: [{ clientY: 15, clientX: 10 }] });
+  fireEvent(host, event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(host).toHaveAttribute('data-edge-bounce', 'dragging');
+});
+
+it('moves a portal-only page without top writes and survives asynchronous card updates', async () => {
+  const host = renderShell();
+  const content = screen.getByTestId('content');
+  content.setAttribute('data-bounce-surface', '');
+  content.append(document.createElement('article'));
+  fireEvent.touchStart(content, { touches: [{ clientY: 10, clientX: 0 }] });
+  fireEvent.touchMove(content, { touches: [{ clientY: 110, clientX: 0 }] });
+  expect(content.style.top).toBe('');
+  expect(content.style.translate).toBe(`0 ${rubberBand(100)}px`);
+  content.firstElementChild!.append(document.createElement('img'));
+  await Promise.resolve();
+  expect(host).toHaveAttribute('data-edge-bounce', 'dragging');
+  expect(content.style.translate).toBe(`0 ${rubberBand(100)}px`);
+  fireEvent.touchCancel(content);
+  expect(content.style.translate).toBe('');
+});
+
+it('does not count hidden cached pages against the visible surface budget', () => {
+  const host = renderShell();
+  for (let index = 0; index < 24; index += 1) {
+    const panel = document.createElement('section');
+    panel.hidden = true;
+    host.append(panel);
+  }
+  fireEvent.touchStart(host, { touches: [{ clientY: 10, clientX: 0 }] });
+  fireEvent.touchMove(host, { touches: [{ clientY: 110, clientX: 0 }] });
+  expect(host).toHaveAttribute('data-edge-bounce', 'dragging');
+});
+
+it('anchors the top button to layout coordinates throughout a dock transition', () => {
+  let animatedTop = 700;
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const nav = this.classList.contains('compact-nav');
+    return { left: nav ? 100 : 0, right: nav ? 300 : 44, top: nav ? animatedTop : 0, bottom: nav ? animatedTop + 64 : 44, width: nav ? 200 : 44, height: nav ? 64 : 44 } as DOMRect;
+  });
+  const host = renderShell();
+  const nav = screen.getByRole('navigation', { name: '移动导航' });
+  nav.style.bottom = '12px';
+  const button = screen.getByRole('button', { name: '返回顶部' });
+  fireEvent(window, new Event('resize'));
+  const bottom = button.style.bottom;
+  host.scrollTop = 100; fireEvent.scroll(host);
+  expect(button).toHaveAttribute('data-nav-hidden', 'true');
+  animatedTop = 800;
+  host.scrollTop = 50; fireEvent.scroll(host);
+  expect(button).not.toHaveAttribute('data-nav-hidden');
+  expect(button.style.bottom).toBe(bottom);
+  fireEvent.transitionEnd(nav, { propertyName: 'transform' });
+  expect(button.style.bottom).toBe(bottom);
+  expect(button.style.getPropertyValue('--compact-nav-travel')).toBe('76px');
+});
+
+it('keeps dock visibility stable for tiny reversals but accumulates slow deliberate scrolling', () => {
+  const host = renderShell();
+  const nav = screen.getByRole('navigation', { name: '移动导航' });
+  const button = screen.getByRole('button', { name: '返回顶部' });
+  host.scrollTop = 100; fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  host.scrollTop = 98; fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  host.scrollTop = 96; fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  host.scrollTop = 94; fireEvent.scroll(host);
+  expect(nav).not.toHaveClass('is-hidden');
+  expect(button).not.toHaveClass('is-hidden');
+  host.scrollTop = 96; fireEvent.scroll(host);
+  expect(nav).not.toHaveClass('is-hidden');
 });

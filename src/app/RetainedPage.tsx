@@ -5,7 +5,7 @@ export const usePageActive = () => useContext(PageActiveContext);
 
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
-export function RetainedPage({ active, flow = false, children }: { active: boolean; flow?: boolean; children: ReactNode }) {
+export function RetainedPage({ active, flow = false, motionSurface = false, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; children: ReactNode }) {
   const parentActive = usePageActive();
   const visible = active && parentActive;
   const root = useRef<HTMLElement>(null);
@@ -40,6 +40,8 @@ export function RetainedPage({ active, flow = false, children }: { active: boole
     };
   }, [visible]);
   return <PageActiveContext.Provider value={visible}>
-    <section ref={root} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>
+    {/* Workspace pages keep viewport-fixed UI in body portals. The outer shell
+        and reader deliberately do not opt into this transform contract. */}
+    <section ref={root} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>
   </PageActiveContext.Provider>;
 }

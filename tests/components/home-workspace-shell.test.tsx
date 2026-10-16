@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetArchiveExistenceForTests } from '../../src/lib/archiveExistence';
+import { writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -32,6 +33,12 @@ function homePanel(): Element | null {
 }
 
 describe('home workspace container', () => {
+  it('recovers from malformed cached shelves instead of showing a render error', async () => {
+    writeRouteCache('home:shelves', { servers: { ok: true, value: [] }, history: {}, readingList: [], archives: [], randomArchives: [] });
+    renderHome();
+    await screen.findByRole('heading', { name: '添加你的 LANraragi' });
+  });
+
   it('renders the home page in the same list + detail shell as the library', async () => {
     renderHome();
     await screen.findByRole('heading', { name: '添加你的 LANraragi' });

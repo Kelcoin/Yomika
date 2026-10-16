@@ -338,25 +338,28 @@ describe('loadReaderComputedPage', () => {
           jobId: 'job-1',
           subscriptionId: 3,
           coalesced: false,
-          snapshot: snapshot({ failed: { code: 'COMPUTE_WORKER_UNAVAILABLE' } }, 2),
+          snapshot: { ...snapshot({ failed: { code: 'COMPUTE_WORKER_UNAVAILABLE' } }, 2), failureMessage: 'native allocation refused: output size' },
           evicted: null,
         },
       }),
     });
     const { cache } = readonlyCache();
     const notes: string[] = [];
+    const failures: ReaderPageFailure[] = [];
 
     const handle = await loadReaderComputedPage({
       repository: b,
       cache,
       stages: [claim()],
       submit: (repository) => repository.submitReaderPage(PAYLOAD),
-      onDiagnostic: (message) => notes.push(message),
+      onDiagnostic: (message, detail) => notes.push(`${message} ${detail?.message ?? ''}`),
+      onFailure: failure => failures.push(failure),
     });
 
     expect(handle).toBeUndefined();
     expect(peekCachedImage(cache, IDENTITY)).toBeUndefined();
-    expect(notes).toContain('阅读器算图：任务失败');
+    expect(notes).toContain('阅读器算图：任务失败 native allocation refused: output size');
+    expect(failures).toEqual([{ code: 'COMPUTE_WORKER_UNAVAILABLE', message: 'native allocation refused: output size' }]);
   });
 
   it('ignores events that belong to another page or to an older sequence', async () => {
