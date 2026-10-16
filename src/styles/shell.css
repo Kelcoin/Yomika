@@ -368,7 +368,6 @@ body::-webkit-scrollbar,
 
 @media (hover: hover) {
   .icon-action:hover:not(:disabled),
-  .eh-comment-votes-actions button:hover:not(:disabled),
   .secondary-action:hover:not(:disabled) {
     /* Derived, not a fixed token: theme presets redefine the container pair but
        used to leave the hover token at the base theme's literal value, so a
@@ -2154,19 +2153,20 @@ body::-webkit-scrollbar,
 
 .archive-detail-summary { white-space: pre-wrap; line-height: var(--leading-relaxed); }
 
-.eh-comments { display: grid; gap: var(--space-3); margin: var(--space-6) 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+.eh-comments { display: grid; min-width: 0; gap: var(--space-4); margin: var(--space-6) 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .eh-comments-heading,
 .library-controls,
 .library-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .eh-comments-heading h2 { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); }
 .eh-comments-heading h2 svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
-.eh-comments-list { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.eh-comments-count { padding: 2px 7px; border-radius: var(--radius-pill); background: var(--surface-container-high); color: var(--ink-secondary); font-size: var(--text-xs); font-weight: var(--weight-medium); font-variant-numeric: tabular-nums; }
+.eh-comments-list { display: grid; min-width: 0; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
 /* The last thing in a card is the timestamp row, and the body above it already
    separates the rows — so the bottom inset is a half step, not a full one. */
-.eh-comments-list li { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-3) var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
+.eh-comments-list li { display: grid; min-width: 0; gap: var(--space-2); padding: var(--space-3) var(--space-3) var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
 .eh-comments-list li.is-uploader { border-left: 3px solid var(--brand-vermilion); }
 .eh-comment-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.eh-comment-meta > span { display: inline-flex; align-items: center; min-width: 0; gap: var(--space-2); }
+.eh-comment-meta > span { display: inline-flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: var(--space-2); }
 /* Comment bodies inherit color and drop underlines globally, so a bare URL
    inside one would be indistinguishable from prose. */
 .eh-comment-link { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
@@ -2174,9 +2174,8 @@ body::-webkit-scrollbar,
    to sit in a boxed chip on the votes row. */
 .eh-comment-score { color: var(--state-success); font-weight: var(--weight-bold); }
 .eh-comment-score.is-negative,
-.archive-context-menu-item.is-danger,
-.eh-comment-meta time, .eh-comment-votes time { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.eh-comment-meta time svg, .eh-comment-votes time svg { width: 13px; height: 13px; }
+.archive-context-menu-item.is-danger { color: var(--state-danger); }
+.eh-comment-votes time { min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 /* The author name leads the card, so it reads a step **above** the comment body
    (--text-base 15 against the body's --text-md 14). The meta row around it keeps
    --text-xs, which is the right size for the score and the "上传者" chip. */
@@ -2184,38 +2183,64 @@ body::-webkit-scrollbar,
 .eh-comment-meta small { padding: 2px 5px; border-radius: var(--radius-control); background: var(--primary-container); color: var(--on-primary-container); }
 /* Pinned to a token: with none declared the body fell back to the UA default
    16px — off the scale, and larger than the name that is meant to lead the card. */
-.eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; line-height: var(--leading-relaxed); }
+.eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-relaxed); }
 /* Footer row: the timestamp on the left, the vote pair on the right. The row has
    to hug its content: with `min-height: 32px` and centred items, an uploader card
    (no buttons at all) still reserved 32px and left ~14px of dead space under its
    own timestamp. Bottom-aligned, the 12px stamp sits on the buttons' baseline. */
-.eh-comment-votes { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-2); }
+.eh-comment-votes { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-2); }
 .eh-comment-votes time { color: var(--ink-secondary); font-size: var(--text-xs); }
-.eh-comment-votes-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
-/* Both directions keep a persistent tonal circle and identical interactive
-   shape. A cast vote fills its circle with the solid primary — loud on purpose,
-   the quiet tonal mixes read as "slightly darker" rather than "voted". */
-.eh-comment-votes-actions button { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: var(--radius-pill); background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
+.eh-comment-votes-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: auto;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-pill);
+  background: var(--surface-container);
+}
+/* One quiet frame joins both choices; only a cast vote carries the solid theme colour. */
+.eh-comment-votes-actions button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast);
+}
 .eh-comment-votes-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 .tag-group-character h2,
 .tag-group-character h3 { background: var(--primary); color: var(--on-primary); }
 .eh-comment-votes-actions button[aria-pressed='true'] { background: var(--primary); color: var(--on-primary); }
+.eh-comment-votes-actions button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 @media (hover: hover) {
-  .eh-comment-votes-actions button[aria-pressed='true']:hover:not(:disabled) { background: var(--primary); color: var(--on-primary); }
+  .eh-comment-votes-actions button:hover:not(:disabled) { background: var(--secondary-container); color: var(--on-secondary-container); }
+  .eh-comment-votes-actions button[aria-pressed='true']:hover:not(:disabled) { background: color-mix(in srgb, var(--on-primary) 10%, var(--primary)); color: var(--on-primary); }
 }
-
-.eh-comment-votes-actions button[aria-disabled='true'] { cursor: pointer; }
-.eh-comment-votes-actions button:active:not(:disabled) { transform: translateY(1px); }
-/* The arrows stay one colour in every state — the circle's tint is what
-   announces a cast vote, not the glyph changing hue under it. */
-.eh-comment-votes-actions svg { width: 15px; height: 15px; color: var(--on-secondary-container); }
-.eh-comment-votes-actions button[aria-pressed='true'] svg { color: var(--on-primary); }
+.eh-comment-votes-actions button:active:not(:disabled) { background: var(--secondary-container); color: var(--on-secondary-container); transform: scale(0.92); }
+.eh-comment-votes-actions button[aria-pressed='true']:active:not(:disabled) { background: color-mix(in srgb, var(--on-primary) 10%, var(--primary)); color: var(--on-primary); }
+.eh-comment-votes-actions svg { width: 16px; height: 16px; }
+@media (prefers-reduced-motion: reduce) {
+  .eh-comment-votes-actions button { transition: none; }
+  .eh-comment-votes-actions button:active:not(:disabled) { transform: none; }
+}
 /* The hairline already separates the composer from the last card, so the inset
    under it is a half step — a full one read as a hole under the last timestamp. */
 .eh-comment-composer { display: grid; justify-items: end; gap: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--hairline); }
-.eh-comment-composer textarea { width: 100%; resize: vertical; }
+.eh-comment-composer textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 88px; padding: var(--space-3); border-radius: var(--radius-control); font: inherit; font-size: var(--text-md); line-height: var(--leading-relaxed); resize: vertical; }
 .eh-comment-composer button { min-width: 92px; }
 .eh-comment-composer button svg { width: 16px; height: 16px; }
+@media (max-width: 480px) {
+  .eh-comments { padding: var(--space-3); }
+  .eh-comments-heading h2 { font-size: var(--text-base); flex-wrap: wrap; }
+}
 
 .metadata-edit-page {
   width: min(100%, 900px);
@@ -6573,8 +6598,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   /* 次级动作：悬停时往容器里掺一点次级色，不是整块换底。 */
   .icon-action:is(.is-pressed, :active):not(:disabled),
-  .secondary-action:is(.is-pressed, :active):not(:disabled),
-  .eh-comment-votes-actions button:is(.is-pressed, :active):not(:disabled) {
+  .secondary-action:is(.is-pressed, :active):not(:disabled) {
     background: color-mix(in srgb, var(--on-secondary-container) 10%, var(--secondary-container));
     color: var(--on-secondary-container);
   }
@@ -6587,8 +6611,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .primary-action:is(.is-pressed, :active):not(:disabled) { background: var(--primary-hover); }
   .primary-action.is-danger:is(.is-pressed, :active):not(:disabled) { background: var(--error-hover); }
 
+  .eh-comment-votes-actions button:is(.is-pressed, :active):not(:disabled) {
+    background: var(--secondary-container);
+    color: var(--on-secondary-container);
+  }
+
   .eh-comment-votes-actions button[aria-pressed='true']:is(.is-pressed, :active):not(:disabled) {
-    background: var(--primary);
+    background: color-mix(in srgb, var(--on-primary) 10%, var(--primary));
     color: var(--on-primary);
   }
 

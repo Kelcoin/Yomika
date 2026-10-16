@@ -228,13 +228,15 @@ impl S3Client {
         mut ciphertext: Vec<u8>,
         mut etag: Option<String>,
         merge: F,
-    ) -> Result<(), RemoteError>
+    ) -> Result<Vec<u8>, RemoteError>
     where
         F: Fn(&[u8]) -> Result<Vec<u8>, RemoteError>,
     {
         for attempt in 0..3 {
             match self.put_state(account_id, &ciphertext, etag.as_deref()).await {
-                Ok(()) => return Ok(()),
+                // 与 WebDAV 同一条规矩：交回真正写上去的那一份，调用方才不会拿冲突
+                // 之前的那一版去应用本地（远端已经有别的设备的对象了）。
+                Ok(()) => return Ok(ciphertext),
                 Err(RemoteError::StateConflict) if attempt < 2 => {
                     let remote = self.get_state(account_id).await?;
                     match remote {

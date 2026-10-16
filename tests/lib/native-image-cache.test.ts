@@ -57,7 +57,7 @@ describe('NativeImageCacheAdapter', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    const transform = remoteTransform({ device: '192.168.1.9:47653', source: 'enhanced', chain: ['upscale', 'dlssnr'] });
+    const transform = remoteTransform({ device: '192.168.1.9:47653', source: 'enhanced', chain: ['upscale', 'dlssnr'], revision: 'rev-a' });
     const identity = { scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'remote' as const, pageIndex: 2, modelId: 'local-upscale', transform };
     await new NativeImageCacheAdapter().fetch(identity);
     expect(adapter).toHaveBeenCalledWith('remote_compute_process', {
@@ -68,8 +68,30 @@ describe('NativeImageCacheAdapter', () => {
         params: { op: 'upscale', chain: ['upscale', 'dlssnr'] },
       }),
     });
-    const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', chain: ['upscale', 'dlssnr'] });
+    const otherDevice = remoteTransform({ device: '192.168.1.10:47653', source: 'enhanced', chain: ['upscale', 'dlssnr'], revision: 'rev-a' });
     expect(createImageCacheKey(identity)).not.toBe(createImageCacheKey({ ...identity, transform: otherDevice }));
+  });
+
+  it('keys a remote rendition by the plan revision the server actually runs', async () => {
+    // docs/175 R11：模型内容、归一化参数、链顺序、那份 DLL 的内容都进了对面那一版身份。
+    // 设备没变、起点没变、链没变——对面换了模型权重，这一版产物就必须另起一个键。
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, remoteComputeUrl: '192.168.1.9:47653', remoteComputeToken: 'paired-token' } };
+      if (command === 'remote_compute_process') return [0x89, 0x50, 0x4e, 0x47];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const first = remoteTransform({ device: '192.168.1.9:47653', source: 'reader-page', chain: ['upscale'], revision: 'a'.repeat(64) });
+    const second = remoteTransform({ device: '192.168.1.9:47653', source: 'reader-page', chain: ['upscale'], revision: 'b'.repeat(64) });
+    const identity = { scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'remote' as const, pageIndex: 2, transform: first };
+    expect(createImageCacheKey(identity)).not.toBe(createImageCacheKey({ ...identity, transform: second }));
+
+    await new NativeImageCacheAdapter().fetch(identity);
+    // 键里那一版随请求一起过去：对面回包上会写明「这一次真正用的」是哪一版，两者对不上
+    // 就说明身份变了，那一份产物不能按老版本存下来。
+    expect(adapter).toHaveBeenCalledWith('remote_compute_process', {
+      input: expect.objectContaining({ expectedRevision: 'a'.repeat(64) }),
+    });
   });
 
   it('refuses to run a model in the host for the two computed renditions', async () => {
@@ -124,7 +146,7 @@ describe('NativeImageCacheAdapter', () => {
     const remote = await rejected({
       scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a',
       rendition: 'remote', pageIndex: 4,
-      transform: remoteTransform({ device: '192.168.1.9:47653', source: 'reader-page', chain: ['upscale'] }),
+      transform: remoteTransform({ device: '192.168.1.9:47653', source: 'reader-page', chain: ['upscale'], revision: 'rev-a' }),
     });
     expect(renditionErrorCode(remote)).toBe('COMPUTE_WORKER_BUSY');
   });

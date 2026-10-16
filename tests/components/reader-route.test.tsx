@@ -1939,6 +1939,7 @@ describe('reader route', () => {
     process?: (args: Record<string, unknown> | undefined) => unknown;
     /** 前几次问能力清单先答不上（对面刚起、网络抖一下）：默认 0。 */
     probeFailures?: number;
+    localModel?: string;
   }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     let probes = 0;
@@ -1951,7 +1952,7 @@ describe('reader route', () => {
             theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648,
             prefetchPages: 0, coverConcurrency: 4,
             // 本机一个模型都没有：这三枚按钮能亮，只可能是因为对面报了可用。
-            upscaleBackend: 'off', upscaleModel: '',
+            upscaleBackend: options.localModel ? 'cpu' : 'off', upscaleModel: options.localModel ?? '',
             remoteComputeUrl: '192.168.1.9:47653',
             remoteComputeToken: 'remote-token',
             remoteComputeOps: serializeRemoteOps({
@@ -1972,6 +1973,7 @@ describe('reader route', () => {
             service: 'yomika-compute-center',
             version: 2,
             name: 'DESKTOP-PC',
+            revision: `settings-${probes}`,
             models: [],
             capabilities: (['upscale', 'dlssnr'] as const).map((id) => ({
               id,
@@ -1982,6 +1984,8 @@ describe('reader route', () => {
           },
         };
       }
+      const host = await hostUpscaleAnswer(command, args as Record<string, unknown> | undefined);
+      if (host !== null) return host;
       if (command === 'remote_compute_process') {
         return options.process ? options.process(args) : [0x89, 0x50, 0x4e, 0x47];
       }
@@ -1995,6 +1999,70 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/remote-reader']}><App /></MemoryRouter>);
     return { calls };
   }
+
+  it('sends one original page for the full remote chain without running the local model', async () => {
+    installHost();
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, localModel: 'local-model' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await screen.findByRole('button', { name: '开启超分' });
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    });
+    await waitFor(() => expect(calls.filter(([name]) => name === 'remote_compute_process')).toHaveLength(1));
+    const request = calls.find(([name]) => name === 'remote_compute_process')?.[1]?.input as { source: string; params: { chain: string[] } };
+    expect(request.source).toBe('reader-page');
+    expect(request.params.chain).toEqual(['upscale', 'dlssnr']);
+    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+    expect(calls.some(([name]) => name === 'dlssnr_apply_page')).toBe(false);
+  });
+
+  it('reprobes changed remote settings and retries with the newly advertised revision', async () => {
+    let processed = 0;
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false },
+      process: () => ++processed === 1
+        ? { ok: false, error: { code: 'REMOTE_PLAN_CHANGED', message: 'settings changed', retryable: true } }
+        : [0x89, 0x50, 0x4e, 0x47],
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls.filter(([name]) => name === 'remote_compute_capabilities').length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(calls.filter(([name]) => name === 'remote_compute_process').length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => {
+      const last = calls.filter(([name]) => name === 'remote_compute_process').at(-1)?.[1]?.input as { expectedRevision: string };
+      expect(last.expectedRevision).toBe('settings-2');
+    });
+  });
+
+  it('runs the local model only after the remote request fails', async () => {
+    installHost();
+    let rejectRemote!: (error: Error) => void;
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false }, localModel: 'local-model',
+      process: () => new Promise((_resolve, reject) => { rejectRemote = reject; }),
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(rejectRemote).toBeTypeOf('function'));
+    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+    await act(async () => { rejectRemote(new Error('remote unavailable')); });
+    await waitFor(() => expect(calls.filter(([name]) => name === 'compute_submit_reader_page')).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+  });
+
+  it('offers local upscale when the remote machine cannot provide it', async () => {
+    installHost();
+    const { calls } = remoteReader({ ready: { upscale: false, dlssnr: false }, localModel: 'local-model' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls.filter(([name]) => name === 'compute_submit_reader_page')).toHaveLength(1));
+    expect(calls.some(([name]) => name === 'remote_compute_process')).toBe(false);
+  });
 
   it('takes the reader controls from the list the remote machine reports', async () => {
     // 第 17 项：连上远端之后，阅读器那两枚开关「能不能按」由**对面**那份清单决定。

@@ -496,11 +496,18 @@ describe('native shell configuration', () => {
     // 编排只该有一个来源。测试里没有 AppHandle，所以壳要能直接收下一份——否则这条协议只能
     // 靠「起一个真 Tauri 应用」来测，等于没有自动化证据。
     expect(center).toContain('pub manager: Option<Arc<crate::compute::manager::ComputeManager>>');
-    // 认证与 ping 排在计算之前：ping 的回答只有服务名与版本，不查令牌、不碰编排。
-    const ping = center.indexOf('request.path == "/v2/ping"');
+    // 认证与 ping 的关系：ping 的回答只有服务名与版本，不查令牌、不碰编排。
+    //
+    // 2026-10-16 的 R05 之后，「先 ping 后认证」这条**文字顺序**不再成立：认证被提到读请求体
+    // 之前（否则未认证的连接可以让服务端先把 64 MiB body 收完），于是令牌门落在读头那一段，
+    // 而 ping 那一支仍在按路径分派的后面。要钉的是**语义**——令牌门把 ping 放过去，而不是
+    // 这两行谁先谁后。
     const gate = center.indexOf('let expected = token.read()');
+    const ping = center.indexOf('request.path == "/v2/ping"');
+    expect(gate, '令牌门要在').toBeGreaterThan(-1);
     expect(ping, 'ping 那一支要在').toBeGreaterThan(-1);
-    expect(gate, '令牌检查在 ping 之后').toBeGreaterThan(ping);
+    expect(center, '令牌门把 ping 放过去').toContain('head.path != "/v2/ping"');
+    expect(ping, 'ping 的分派排在令牌门之后').toBeGreaterThan(gate);
   });
 
   it('reclaims the staging tree when a session ends and keeps the scratch name in one place', () => {

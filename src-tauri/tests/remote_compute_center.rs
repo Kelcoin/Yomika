@@ -577,3 +577,27 @@ fn one_client_leaving_does_not_take_the_other_ones_page_down() {
     center.stop();
     manager.shutdown();
 }
+
+#[test]
+fn acceptance_stopping_the_center_cancels_an_inflight_worker_subscription() {
+    let sandbox = Sandbox::new("stop-inflight");
+    sandbox.install_model(REMOTE_MODEL, "1", b"not an onnx file", 1, 2);
+    let manager = ComputeManager::start(config(&sandbox, Duration::from_secs(10)), no_events()).unwrap();
+    let (center, port) = center_with(&sandbox, &manager);
+    let page = page_png();
+    let wanted = input_id(&page);
+    let mut stream = connect(port);
+    stream.write_all(&process_request(&page)).unwrap();
+    let id = wait_until("remote worker started", HANDOFF, || running_job(&manager, &wanted));
+    center.stop();
+    let terminal = wait_until("stop cancels the subscription", CANCEL_BUDGET, || terminal_of(&manager, &id));
+    assert_eq!(terminal, JobState::Cancelled);
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut byte = [0];
+    match stream.read(&mut byte) {
+        Ok(0) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {},
+        other => panic!("stopped socket did not close: {other:?}"),
+    }
+    manager.shutdown();
+}

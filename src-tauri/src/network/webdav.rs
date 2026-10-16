@@ -403,13 +403,16 @@ impl WebdavClient {
         mut ciphertext: Vec<u8>,
         mut etag: Option<String>,
         merge: F,
-    ) -> Result<(), RemoteError>
+    ) -> Result<Vec<u8>, RemoteError>
     where
         F: Fn(&[u8]) -> Result<Vec<u8>, RemoteError>,
     {
         for attempt in 0..3 {
             match self.put_state(account_id, &ciphertext, etag.as_deref()).await {
-                Ok(()) => return Ok(()),
+                // 交回**真正写上去的那一份**。冲突重试期间远端可能又多了别的设备的
+                // 对象，调用方拿自己一开始合并出来的那一版去应用本地，这一轮同步就
+                // 白跑了：远端明明已经收下了那些对象，本机却当没看见。
+                Ok(()) => return Ok(ciphertext),
                 Err(RemoteError::StateConflict) if attempt < 2 => {
                     let remote = self.get_state(account_id).await?;
                     if let Some(remote) = remote {

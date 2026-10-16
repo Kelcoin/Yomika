@@ -1172,6 +1172,23 @@ fn upscaler_fingerprint(resolved: &Option<ResolvedUpscaler>) -> String {
     }
 }
 
+/// 这一档**实际内容**的版本，给远端处理计划的身份用（docs/175 R11）。
+///
+/// Hash the actual file even when its manifest declares a digest: an in-place
+/// replacement must not keep the previous remote plan identity. The streaming
+/// hash avoids allocating a second complete model in the host.
+pub(crate) fn upscaler_content_revision(resolved: &Option<ResolvedUpscaler>) -> String {
+    match resolved {
+        Some(ResolvedUpscaler::Onnx(path, manifest)) => {
+            match crate::compute::artifacts::hash_file(path) {
+                Ok((_, hash)) => format!("onnx:{}:{}:blake3:{}", manifest.id, manifest.version, hash),
+                Err(_) => format!("onnx:{}:{}:unreadable", manifest.id, manifest.version),
+            }
+        }
+        other => upscaler_fingerprint(other),
+    }
+}
+
 /// `enhanced` 的 revision：超分模型指纹。
 ///
 /// 从 docs/71 §11 Task 5 第 6 条起，这个串不再只是「模型 + 起点」：它还要说出
@@ -1654,20 +1671,31 @@ pub(crate) async fn run_heavy<T: Send + 'static>(
 
 /// 远端任务的闸：**不占本机那一件重活**。
 ///
-/// 远端那一步的等待时间由局域网决定（最长 180 秒），而阻塞式 HTTP 发出之后本机这一侧
-/// 没法掐断它。以前它占的就是本机 GPU 的独占闸，于是一份卡住或慢的远端请求会让用户
-/// 当前页的 DLSSNR / 超分一直排队——而这两件事根本不抢同一份资源：远端重活占的是**对面**
-/// 机器的算力，本机只做解码与编码（审计 P2-2）。所以给它自己的一条队列，两档优先级在
-/// 这里同样有用：前台那一页的远端请求插到整本预扫的前面。
+/// 远端那一步的等待时间由局域网决定（最长 180 秒），而它占的资源在**对面**那台机器上。
+/// 以前它占的就是本机 GPU 的独占闸，于是一份卡住或慢的远端请求会让用户当前页的 DLSSNR /
+/// 超分一直排队——而这两件事根本不抢同一份资源（审计 P2-2）。所以给它自己的一条队列，
+/// 两档优先级在这里同样有用：前台那一页的远端请求插到整本预扫的前面。
 ///
-/// 本机这一侧仍然一次一件（`HEAVY_QUEUE`），所以「两张图同时进来把内存顶爆」那条
-/// 保护没有松开。
-pub(crate) async fn run_remote<T: Send + 'static>(
+/// 本机这一侧仍然一次一件（`HEAVY_QUEUE`），所以「两张图同时进来把内存顶爆」那条保护
+/// 没有松开。
+///
+/// **闸门横跨的是一段异步工作**（docs/175 R04）：远端那一件要能在途取消，读盘之后的
+/// HTTP 等待必须跑在异步线程上（阻塞式 HTTP 的 future 不归任何执行器管，丢不掉）。所以
+/// 这里只负责「拿闸门 + 等这件活」，工作由调用方以 future 的形式交进来；取消了 = 那个
+/// future 被丢掉 = 闸门当场还回来。`scheduling::WorkerPriority::enter()` 因此不再适用于
+/// 这条来路（它的线程优先级是给本机那件重活用的）。
+pub(crate) async fn run_remote<T, F>(
     priority: HeavyPriority,
     task_id: Option<String>,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, String> {
-    run_on(&REMOTE_QUEUE, priority, task_id, work).await
+    work: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = T>,
+{
+    let permit = REMOTE_QUEUE.acquire(priority, task_id).await;
+    let output = work.await;
+    drop(permit);
+    Ok(output)
 }
 
 async fn run_on<T: Send + 'static>(

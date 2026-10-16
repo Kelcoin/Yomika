@@ -49,9 +49,45 @@ const PROXY_DEADLINE_MS: u64 = 600_000;
 /// 自己卡住」时命令永远挂着。比期限多一分钟。
 const PROXY_BUDGET: Duration = Duration::from_secs(660);
 
-/// 这条路上跑的引擎。worker 收到的是 `EnginePolicy::Cpu`，所以键上的后端也写 cpu
-/// ——GPU 候选接线是单独一步（docs/71 §7.4），到那时两处一起改。
-const BACKEND_LABEL: &str = "cpu";
+/// 一个阶段在任务身份里写的后端标签：与那一档声明的引擎政策是**同一件事的两种写法**，
+/// 所以由政策派生，不另写一份。
+///
+/// 从前这里硬写 `cpu`，而阶段上写的是本机执行政策：同一份输入在两个政策下会落进同一个
+/// 任务身份，产物却来自不同引擎（docs/175 R02）。
+fn backend_label(policy: EnginePolicy) -> &'static str {
+    policy.as_str()
+}
+
+/// 字节桥超分阶段的协议形状。抽成函数是为了让「引擎政策跟着本机执行政策走」这件事
+/// **可测**：写在这一档上的政策，就是 worker 里挑引擎的那一栏（`worker/src/upscale.rs`）。
+fn upscale_stage(
+    policy: EnginePolicy,
+    stage_id: &str,
+    model_spec_id: &str,
+    scale: u32,
+    output_scale: Option<u32>,
+) -> PipelineStage {
+    PipelineStage {
+        stage_id: stage_id.to_string(),
+        model_spec_id: model_spec_id.to_string(),
+        // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）
+        // ——调用方不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。
+        model: None,
+        // 内置 shader 链那一档也**不在这里填**：`manager::prepare_run` 按 `model_spec_id`
+        // 认出它名字里的那条链，再补上 `builtin`（`compute::models::StagedModel::Builtin`）。
+        builtin: None,
+        dlssnr: None,
+        min_input_edge: None,
+        output_scale,
+        // docs/175 R02：这一栏是本机执行政策的落点，不是常量。写死 `Cpu` 会让远端超分
+        // 永远按 CPU 算（绕开设置里选的 auto/gpu），worker 那一侧也就没法按政策挑引擎。
+        engine_policy: policy,
+        scale: Some(scale),
+        tile: None,
+        layers: None,
+        settings_id: None,
+    }
+}
 
 /// 交出去的两条授权名：产物落账时的名字。一条字节来路一个，两件任务挨在一起的时候
 /// 才看得出哪件产物是哪条来路交的。
@@ -65,6 +101,8 @@ pub const DLSSNR_STAGE_ID: &str = "dlssnr";
 
 /// 一件「让 worker 把这一页放大」的请求。
 pub struct UpscaleJob<'a> {
+    /// Frozen execution policy supplied by the caller.
+    pub policy: EnginePolicy,
     /// 这一页是谁。与 `settings_id` 一起构成任务身份：两者都相同 = 同一件任务（§8.1）。
     pub input_id: &'a str,
     /// 宿主算出来的身份串（`enhanced_revision`）：与旧缓存认的身份是**同一个**，
@@ -109,39 +147,46 @@ pub fn upscale(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, ProxyError> {
     let staged = stage_page(manager, job.input_id, job.stage.page)?;
+    let (key, stage) = upscale_identity(&job);
     let request = SubmitRequest {
-        key: JobKey {
-            input_id: job.input_id.to_string(),
-            settings_id: job.settings_id.to_string(),
-            source_revision: job.source_revision.to_string(),
-            backend: BACKEND_LABEL.to_string(),
-            // 字节桥不参与阅读器的代际（那是前端翻页时给的）。这两条来路的调用方都没有
-            // 代际，用固定值：`drop_generation` 对它是空操作，任务身份完全由上面四个字段决定。
-            generation: 1,
-        },
+        key,
         priority: job.priority,
         input: staged,
-        pipeline: vec![PipelineStage {
-            stage_id: job.stage.stage_id.to_string(),
-            model_spec_id: job.stage.model_spec_id.to_string(),
-            // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）
-            // ——调用方不许指名模型文件，这条在协议层就定了（docs/71 §7.2）。
-            model: None,
-            builtin: None,
-            dlssnr: None,
-            min_input_edge: None,
-            output_scale: job.output_scale,
-            engine_policy: EnginePolicy::Cpu,
-            scale: Some(job.stage.scale),
-            tile: None,
-            layers: None,
-            settings_id: None,
-        }],
+        pipeline: vec![stage],
         output_grant_id: BYTE_UPSCALE_GRANT.to_string(),
         deadline_ms: PROXY_DEADLINE_MS,
         source: None,
     };
     run(manager, request, cancelled)
+}
+
+/// 这一条来路写给调度器的任务身份与阶段。
+///
+/// 抽成函数是为了让「身份上的后端标签」与「阶段上那一栏引擎政策」**同源**这件事可测：
+/// 两处都从调用方冻结的执行政策派生。从前它们各写各的——身份写死
+/// `cpu`、阶段写本机政策——于是同一份输入在两个政策下会落进同一个任务身份，产物却来自
+/// 不同引擎（docs/175 R02）。判据落在**这里**（生产接线），不是落在它调用的纯函数上：
+/// 只把其中一处改回常量必须转红。
+fn upscale_identity(job: &UpscaleJob<'_>) -> (JobKey, PipelineStage) {
+    let policy = job.policy;
+    (
+        JobKey {
+            input_id: job.input_id.to_string(),
+            settings_id: job.settings_id.to_string(),
+            source_revision: job.source_revision.to_string(),
+            backend: backend_label(policy).to_string(),
+            // 字节桥不参与阅读器的代际（那是前端翻页时给的）。这两条来路的调用方都没有
+            // 代际，用固定值：`drop_generation` 对它是空操作，任务身份完全由上面四个字段决定。
+            generation: 1,
+        },
+        upscale_stage(
+            policy,
+            job.stage.stage_id,
+            job.stage.model_spec_id,
+            job.stage.scale,
+            job.output_scale,
+        ),
+    )
 }
 
 /// 一件「让 worker 把这一页过一遍 DLSSNR」的请求。
@@ -205,9 +250,9 @@ pub fn dlssnr(
             input_id: job.input_id.to_string(),
             settings_id: job.settings_id.to_string(),
             source_revision: job.source_revision.to_string(),
-            // DLSSNR 只有 D3D12 一条路（没有 CPU 回退），但键上写的仍是宿主这一层看到的
-            // 后端标签：换后端那一天两处一起改（与放大同一条口径）。
-            backend: BACKEND_LABEL.to_string(),
+            // DLSSNR 只有 D3D12 一条路（没有 CPU 回退），所以键上和阶段上写的都是 gpu：
+            // 由那一档的政策派生，不另写一份拼法。
+            backend: backend_label(EnginePolicy::Gpu).to_string(),
             generation: 1,
         },
         priority: job.priority,
@@ -585,6 +630,59 @@ fn extension_for(bytes: &[u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/175 R02：这一条来路写给调度器的**身份与阶段**都要带上本机执行政策，而且同源。
+    ///
+    /// 从前 `JobKey.backend` 硬写 `cpu`、阶段的 `engine_policy` 硬写 `Cpu`：同一份输入在两个
+    /// 政策下会落进同一个任务身份，产物却来自不同引擎。判据落在生产接线（`upscale_identity`）
+    /// 上，不是落在它调用的纯函数上——只把其中一处改回常量必须在这里现形。
+    ///
+    /// 2026-10-16 复审指出：上一版这条测试只断言了 `upscale_stage(政策, …)` 会把它收到的政策
+    /// 写回去（恒真），把生产接线里那一栏改回 `Cpu` 仍然全绿。现在断言的是接线本身。
+    #[test]
+    fn a_byte_bridge_stage_carries_the_local_engine_policy() {
+        let mut job = UpscaleJob {
+            policy: crate::compute::reader::engine_policy(),
+            input_id: "remote-page",
+            settings_id: "anime4k-hq/2",
+            source_revision: "rev-1",
+            priority: Priority::Foreground,
+            output_scale: None,
+            stage: StageSpec {
+                stage_id: "upscale",
+                model_spec_id: "remote-model",
+                scale: 2,
+                page: &[0u8],
+            },
+        };
+        let (key, stage) = upscale_identity(&job);
+
+        // 两处同源：只改一处（例如把身份那一栏改回写死的 `cpu`）必须在这里现形。
+        assert_eq!(
+            key.backend,
+            stage.engine_policy.as_str(),
+            "任务身份上的后端标签与阶段上的引擎政策必须是同一件事的两种写法"
+        );
+        // 而且两处都得是本机执行政策，不是常量。
+        assert_eq!(stage.engine_policy, crate::compute::reader::engine_policy());
+        assert_eq!(key.backend, crate::compute::reader::engine_policy_label());
+        // 身份里其余三栏照旧：没有别的来路混进来。
+        assert_eq!(key.input_id, "remote-page");
+        assert_eq!(key.settings_id, "anime4k-hq/2");
+        assert_eq!(key.source_revision, "rev-1");
+        assert_eq!(key.generation, 1);
+        // 标签就是政策自己的写法：三种政策各有一个名字。
+        assert_eq!(backend_label(EnginePolicy::Gpu), "gpu");
+        assert_eq!(backend_label(EnginePolicy::Auto), "auto");
+        assert_eq!(backend_label(EnginePolicy::Cpu), "cpu");
+        // A remote request can explicitly select CPU even on an Auto desktop.
+        for policy in [EnginePolicy::Cpu, EnginePolicy::Auto, EnginePolicy::Gpu] {
+            job.policy = policy;
+            let (key, stage) = upscale_identity(&job);
+            assert_eq!(stage.engine_policy, policy);
+            assert_eq!(key.backend, policy.as_str());
+        }
+    }
 
     /// 旧词汇里有词的翻过去；旧词汇里没词但前端登记过的原样报，并标成可重试。
     #[test]

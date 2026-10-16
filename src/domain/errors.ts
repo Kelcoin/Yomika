@@ -23,6 +23,7 @@ export const DomainErrorCodeSchema = z.enum([
   'INFERENCE_CANCELLED',
   /** 远端那一台超时没回话：可重试，本地会退到本机那一版继续读。 */
   'REMOTE_TIMEOUT',
+  'REMOTE_PLAN_CHANGED',
   'CACHE_QUOTA_EXCEEDED',
   'EH_UNAUTHORIZED',
   /** A sign-in attempt was refused. Distinct from EH_REAUTH_REQUIRED, which

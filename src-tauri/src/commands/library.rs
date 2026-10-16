@@ -11,7 +11,7 @@ use reqwest::Client;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use tauri::{Manager, State};
 use tokio::task::JoinSet;
 use url::Url;
@@ -1764,11 +1764,37 @@ fn transfer_archive(
         return Err("Server returned an error page instead of an archive".into());
     }
     let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    let total = if partial {
-        content_range_total(response.headers())
-            .or_else(|| response.content_length().map(|length| length + resume_from))
+    // 206 必须说清它给的是哪一段。起点不是我们要的那个偏移时，把这段追加到 `.part`
+    // 后面就是一份坏档案——宁可在这里报错，留下还能续的半份文件。
+    let resumed = if partial {
+        let range = parse_content_range(response.headers())
+            .ok_or_else(|| "Server answered 206 without a usable Content-Range".to_string())?;
+        if range.start != resume_from {
+            return Err(format!(
+                "Server resumed at byte {} instead of {resume_from}",
+                range.start
+            ));
+        }
+        // 有 Content-Length 时它必须正好是这一段：字节数对不上就说明服务端给的不是
+        // 我们要的那一段，收下去只会少一截。
+        if let Some(length) = response.content_length() {
+            let expected = range.end - range.start + 1;
+            if length != expected {
+                return Err(format!(
+                    "Server sent {length} bytes for the range {}-{}",
+                    range.start, range.end
+                ));
+            }
+        }
+        Some(range)
     } else {
-        response.content_length()
+        None
+    };
+    let total = match &resumed {
+        Some(range) => range
+            .total
+            .or_else(|| range.end.checked_add(1)),
+        None => response.content_length(),
     };
     store_archive_response(
         database,
@@ -1863,6 +1889,17 @@ fn store_archive_response(
     clear_download_signal(&task_id);
     match outcome {
         Ok(DownloadOutcome::Finished { received }) => {
+            // 已知总量时必须收满：短读（服务端提前断流、Range 给少了）不能当完成发布，
+            // 否则本地档案库里会多一份看着正常、其实是半截的文件，用户要等到解压失败
+            // 才知道。半份 `.part` 留着，用户还能再续一次。
+            if let Some(total) = total {
+                if received != total {
+                    let message =
+                        format!("Archive download stopped short: {received} of {total} bytes");
+                    mark_task_failed(database, &task_id, &message);
+                    return Err(message);
+                }
+            }
             let path = publish_archive_download(&part, directory, &filename)?;
             finish_download_task(
                 database,
@@ -1912,13 +1949,37 @@ fn store_archive_response(
     }
 }
 
-/// `Content-Range: bytes 100-999/1000` 里的总数。
-fn content_range_total(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit('/').next())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+/// `Content-Range: bytes 100-999/1000` 的三段。`*` 表示总量未知。
+///
+/// 只认 `bytes`；`end < start`、总量不大于 `end` 都属于拼错了，一律当作「没有可用的
+/// 这一段」——调用方据此拒绝这次 206，而不是把字节追加到错误的偏移上。
+struct ContentRange {
+    start: u64,
+    end: u64,
+    total: Option<u64>,
+}
+
+fn parse_content_range(headers: &reqwest::header::HeaderMap) -> Option<ContentRange> {
+    let value = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+    let (unit, rest) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, total) = rest.trim().split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let end = end.trim().parse::<u64>().ok()?;
+    if end < start || end.checked_add(1).is_none() {
+        return None;
+    }
+    let total = match total.trim() {
+        "*" => None,
+        value => Some(value.parse::<u64>().ok()?),
+    };
+    if total.is_some_and(|total| total <= end) {
+        return None;
+    }
+    Some(ContentRange { start, end, total })
 }
 
 fn archive_download_filename(archive_id: &str, metadata: &serde_json::Value) -> String {
@@ -1972,11 +2033,27 @@ fn stream_archive_to_file(
     if let Some(parent) = part.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
+    // 续传时磁盘上的长度**必须**等于请求用的那个起点：进度写库是节流的，异常退出时
+    // `.part` 可能比数据库记的 checkpoint 长（多出来的尾巴要切掉，那几块重新收），也可能
+    // 更短（调用方本该已经按磁盘长度对齐过；真遇到就报错，绝不在一份不完整的文件上继续
+    // 追加，否则中间会留一个洞）。`append(true)` 恰好绕过了这件事，所以这里显式 seek。
     let mut file = if received > 0 {
-        std::fs::OpenOptions::new()
-            .append(true)
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
             .open(part)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let on_disk = file.metadata().map_err(|error| error.to_string())?.len();
+        if on_disk < received {
+            return Err(format!(
+                "Partial file is shorter than the resume offset ({on_disk} < {received} bytes)"
+            ));
+        }
+        if on_disk > received {
+            file.set_len(received).map_err(|error| error.to_string())?;
+        }
+        file.seek(SeekFrom::Start(received))
+            .map_err(|error| error.to_string())?;
+        file
     } else {
         std::fs::File::create(part).map_err(|error| error.to_string())?
     };
@@ -2688,6 +2765,260 @@ mod archive_download_tests {
 
         assert_eq!(std::fs::read(&result.path).unwrap(), body);
         assert_eq!(only_task(&database).received_bytes, body.len() as i64);
+    }
+
+    /// 一份只回一次固定响应的 loopback HTTP 服务。下载那一半走的是阻塞 reqwest，所以
+    /// 这里也用标准库线程，不掺 tokio。
+    fn download_server(
+        status: &'static str,
+        extra_headers: String,
+        body: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/zip\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes());
+            let _ = socket.write_all(&body);
+            let _ = socket.flush();
+        });
+        (url, handle)
+    }
+
+    /// 一条「任务行已经在、要从 `checkpoint` 续」的下载请求。
+    fn resume_request(
+        url: String,
+        directory: &std::path::Path,
+        part: std::path::PathBuf,
+        filename: String,
+        task_id: String,
+        checkpoint: u64,
+        total: Option<u64>,
+    ) -> TransferRequest {
+        TransferRequest {
+            client: reqwest::blocking::Client::new(),
+            api_key: "key".into(),
+            base_url: url,
+            server_id: "scope-a".into(),
+            scope_id: "scope-a".into(),
+            archive_id: "a".repeat(40),
+            directory: directory.to_path_buf(),
+            metadata: download_metadata("测试档案"),
+            task: Some(TaskTransfer {
+                id: task_id,
+                label: "下载 测试档案".into(),
+                received: checkpoint,
+                total,
+                part,
+                final_name: filename,
+            }),
+        }
+    }
+
+    /// R08 原因 A：进度写库是节流的，异常退出时 `.part` 比数据库记的 checkpoint 长。
+    /// 续传请求是从 checkpoint 发的（`bytes=<checkpoint>-`），所以多出来的尾巴必须先
+    /// 切掉——否则旧字节会和新字节叠在一起，发布出去的档案是坏的，任务却报完成。
+    #[test]
+    fn resuming_truncates_a_part_file_that_is_longer_than_the_checkpoint() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        // 磁盘上 6 字节，数据库只记到 3：最后一块还没写进数据库就退出了。
+        std::fs::write(&part, b"abcdef").unwrap();
+        let checkpoint: u64 = 3;
+        let total: u64 = 8;
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            Some(total),
+        )
+        .unwrap();
+        pause_download_task(&database, &task_id, checkpoint);
+        // 服务端按 `bytes=3-` 从第 3 字节开始给，一直给到第 8 字节。
+        let body = b"defgh";
+
+        let result = store_archive_response(
+            &database,
+            "scope-a",
+            "scope-a",
+            &"a".repeat(40),
+            &download_metadata("测试档案"),
+            directory.path(),
+            &mut &body[..],
+            Some(total),
+            true,
+            Some(TaskTransfer {
+                id: task_id,
+                label: "下载 测试档案".into(),
+                received: checkpoint,
+                total: Some(total),
+                part: part.clone(),
+                final_name: filename,
+            }),
+        )
+        .expect("resume");
+
+        assert_eq!(result.status, "completed");
+        // 逐字节等于原文件：`abcdef` 的尾巴被切掉，接上的是从第 3 字节起的 `defgh`。
+        assert_eq!(std::fs::read(&result.path).unwrap(), b"abcdefgh");
+        assert_eq!(only_task(&database).received_bytes, total as i64);
+    }
+
+    /// R08 原因 B：206 的起点必须就是请求的那个偏移。服务端从别处给（或者干脆没带
+    /// Content-Range）时，追加下去只会拼出一份坏档案——宁可报错，留下可恢复的 `.part`。
+    #[test]
+    fn a_206_from_a_different_offset_is_refused_instead_of_appended() {
+        let (url, server) = download_server(
+            "206 Partial Content",
+            "Content-Range: bytes 0-4/9\r\n".to_string(),
+            b"01234".to_vec(),
+        );
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        std::fs::write(&part, b"abc").unwrap();
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            Some(9),
+        )
+        .unwrap();
+        pause_download_task(&database, &task_id, 3);
+
+        let error = transfer_archive(
+            &database,
+            resume_request(
+                url,
+                directory.path(),
+                part.clone(),
+                filename,
+                task_id,
+                3,
+                Some(9),
+            ),
+        )
+        .expect_err("a 206 that starts somewhere else must not be appended");
+        let _ = server.join();
+        assert!(error.contains("206") || error.contains("resume"), "{error}");
+        // 半份文件一字未动：用户还能再试一次。
+        assert_eq!(std::fs::read(&part).unwrap(), b"abc");
+        // 这一趟在动任务行之前就退出了，任务还停在暂停态，没有登记成本地档案。
+        assert_eq!(only_task(&database).status, "paused");
+    }
+
+    #[test]
+    fn acceptance_an_unrepresentable_content_range_is_refused() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::CONTENT_RANGE, "bytes 0-18446744073709551615/*".parse().unwrap());
+        assert!(parse_content_range(&headers).is_none());
+    }
+
+    #[test]
+    fn a_206_without_a_content_range_is_refused() {
+        let (url, server) = download_server("206 Partial Content", String::new(), b"def".to_vec());
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        std::fs::write(&part, b"abc").unwrap();
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            None,
+        )
+        .unwrap();
+        pause_download_task(&database, &task_id, 3);
+
+        let error = transfer_archive(
+            &database,
+            resume_request(url, directory.path(), part, filename, task_id, 3, None),
+        )
+        .expect_err("a 206 without Content-Range cannot be trusted");
+        let _ = server.join();
+        assert!(error.contains("Content-Range"), "{error}");
+    }
+
+    /// 正向对照：起点正确的 206 照样续完并发布——校验不能把正常路径一起挡掉。
+    #[test]
+    fn a_206_from_the_requested_offset_finishes_the_archive() {
+        let (url, server) = download_server(
+            "206 Partial Content",
+            "Content-Range: bytes 3-7/8\r\n".to_string(),
+            b"defgh".to_vec(),
+        );
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let filename = archive_download_filename(&"a".repeat(40), &download_metadata("测试档案"));
+        let part = directory.path().join(format!("{filename}.part"));
+        std::fs::write(&part, b"abc").unwrap();
+        let task_id = create_download_task(
+            &database,
+            "下载 测试档案",
+            "scope-a",
+            &"a".repeat(40),
+            &part,
+            Some(8),
+        )
+        .unwrap();
+        pause_download_task(&database, &task_id, 3);
+
+        let result = transfer_archive(
+            &database,
+            resume_request(
+                url,
+                directory.path(),
+                part.clone(),
+                filename,
+                task_id,
+                3,
+                Some(8),
+            ),
+        )
+        .expect("a correct 206 resumes");
+        let _ = server.join();
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(std::fs::read(&result.path).unwrap(), b"abcdefgh");
+        assert_eq!(only_task(&database).received_bytes, 8);
+    }
+
+    /// R08 收尾：已知总量时收不满不能当完成发布——半截档案混进本地档案库，比下载失败
+    /// 更坏：它看着是成功的，用户要等到解压失败才知道。
+    #[test]
+    fn a_short_body_is_not_published_as_a_finished_archive() {
+        let database = Database::open_path(":memory:").expect("database");
+        let directory = tempfile::tempdir().unwrap();
+        let total = 128 * 1024u64;
+        let body = vec![7u8; 64 * 1024];
+        let error = store(&database, directory.path(), &mut &body[..], Some(total))
+            .expect_err("a body shorter than the declared total must not publish");
+
+        assert!(error.contains("65536") && error.contains("131072"), "{error}");
+        // 没有发布出去的档案，只有那份还能续的 `.part`。
+        for entry in std::fs::read_dir(directory.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert_eq!(path.extension().and_then(|value| value.to_str()), Some("part"));
+        }
+        assert_eq!(only_task(&database).status, "failed");
     }
 
     #[test]
@@ -6529,9 +6860,9 @@ fn persist_reading_progress(
         .map_err(|error| error.to_string())?;
     // Page indexes are zero-based. Strictly above 90%, never at exactly 90%.
     // Tombstone only existing active entries, and journal once in this transaction.
-    if record.page_count > 0
-        && (i128::from(record.page_index) + 1) * 10 > i128::from(record.page_count) * 9
-    {
+    // 同一套判据也供同步/导入在批末对账用（sync::reconcile_progress_completion）：
+    // 「本地读到这一页」和「远端同步进来这一页」对「看完没看完」只能有一个口径。
+    if progress_finishes_archive(record.page_index, record.page_count) {
         let listed: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM reading_list WHERE scope_id=?1 AND archive_id=?2 AND deleted_at IS NULL)",
             params![record.scope_id, record.archive_id], |row| row.get(0),
@@ -6611,7 +6942,15 @@ fn set_reading_list_entry(
     Ok(record)
 }
 
-fn write_reading_list_entry(
+/// 「这一页算看完了」的唯一定义：严格超过 90% 才移出待看，正好 90% 不算。
+/// 页序是 0 起的，所以口径是「已读到第 page_index + 1 页」。
+/// 本地写进度（`persist_reading_progress`）与同步/导入批末的对账都调这一份，
+/// 不要在第二个地方再手写一次比较。
+pub(crate) fn progress_finishes_archive(page_index: i64, page_count: i64) -> bool {
+    page_count > 0 && (i128::from(page_index) + 1) * 10 > i128::from(page_count) * 9
+}
+
+pub(crate) fn write_reading_list_entry(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
     archive_id: &str,
@@ -7896,6 +8235,42 @@ pub async fn download_url(
     }))
 }
 
+/// 测试里的 mock 服务器读一个请求头：读到 `\r\n\r\n` 为止（或读满上限、或对端关闭），
+/// 返回这一次真的读到多少字节。
+///
+/// 「读一次就当请求读完了」并不成立：`read` 返回的是这一次读到的长度，请求可能分成
+/// 几段到，丢掉这个长度既让 clippy 默认档的 `unused_io_amount` 拦下构建，也让记下来
+/// 的请求原文可能只有半截。所以这里按上限与 EOF 两条边界收口，调用方拿到的长度就是
+/// 已经落在 buffer 里的字节数。
+#[cfg(test)]
+pub(crate) async fn read_request_head(
+    stream: &mut tokio::net::TcpStream,
+    buffer: &mut [u8],
+) -> usize {
+    use tokio::io::AsyncReadExt;
+    /// 请求头不该有这么大：到了上限就停，免得对端不发 `\r\n\r\n` 把我们一直挂着。
+    const HEAD_LIMIT: usize = 64 * 1024;
+    let limit = buffer.len().min(HEAD_LIMIT);
+    let mut total = 0;
+    while total < limit {
+        let read = stream
+            .read(&mut buffer[total..limit])
+            .await
+            .expect("read request");
+        if read == 0 {
+            break; // 对端关闭，读到的就是这些
+        }
+        total += read;
+        if buffer[..total]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n".as_slice())
+        {
+            break; // 请求头到齐
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -7931,7 +8306,7 @@ mod tests {
     async fn test_http_server(
         responses: Vec<(u16, String)>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -7939,7 +8314,7 @@ mod tests {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 8192];
-                socket.read(&mut request).await.unwrap();
+                read_request_head(&mut socket, &mut request).await;
                 let (status, body) = &responses[requests.min(responses.len() - 1)];
                 requests += 1;
                 let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
@@ -7951,13 +8326,13 @@ mod tests {
 
     #[tokio::test]
     async fn reader_body_failures_separate_truncated_transport_from_invalid_content() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 8192];
-            stream.read(&mut request).await.unwrap();
+            read_request_head(&mut stream, &mut request).await;
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort").await.unwrap();
             stream.shutdown().await.unwrap();
         });
@@ -10315,7 +10690,7 @@ mod tests {
         std::sync::Arc<Mutex<Vec<String>>>,
         tokio::task::JoinHandle<()>,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -10325,7 +10700,7 @@ mod tests {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 8192];
-                let read = socket.read(&mut request).await.unwrap();
+                let read = read_request_head(&mut socket, &mut request).await;
                 recorded
                     .lock()
                     .expect("request log")

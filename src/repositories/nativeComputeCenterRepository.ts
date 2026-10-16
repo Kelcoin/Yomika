@@ -60,6 +60,9 @@ export const RemoteCapabilitiesSchema = z.object({
   name: z.string(),
   capabilities: z.array(ComputeCapabilitySchema),
   models: z.array(z.object({ id: z.string(), kind: z.string(), label: z.string(), scale: z.number().nullable() })).default([]),
+  /** 对面那份**实际处理计划**的版本（模型内容 + 归一化参数 + 链顺序 + 那份 DLL 的内容）。
+   *  老版本对面不发这一栏，所以缺省是空串——空的就不是一版身份，别拿它建键（docs/175 R11）。 */
+  revision: z.string().default(''),
 });
 
 export type RemoteCapabilities = z.output<typeof RemoteCapabilitiesSchema>;
@@ -180,6 +183,8 @@ export class NativeComputeCenterRepository {
     archiveId: string;
     pageIndex: number;
     source?: 'reader-page' | 'enhanced';
+    /** 建键时用的那一版（能力清单给的）。对面回包说它实际用的是另一版时报错，不落缓存。 */
+    expectedRevision?: string;
     upscaleModel?: string;
     taskId?: string;
     /** 远端有自己的队列（不占本机 GPU 那一件）：档位管的是远端任务之间谁先走。 */

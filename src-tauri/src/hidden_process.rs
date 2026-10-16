@@ -78,13 +78,33 @@ mod tests {
         );
     }
 
+    /// 缺陷形态那一半的对照：一条**确定**带控制台的命令行。
+    ///
+    /// 直接用 `std::process::Command` 是不够的——子进程有没有控制台取决于**父进程**
+    /// 有没有：在终端里跑测试时它继承父进程那个（于是这条对照不会在终端里闪窗口），
+    /// 而 `cargo test` 被一个没有控制台的程序拉起时（CI、被别的工具驱动、无控制台的
+    /// runner），缺陷形态也会报 `none`，判据就退化成「在这台机器上量不到东西」。
+    /// 父进程没有控制台时改用 `CREATE_NEW_CONSOLE` 显式要一个，对照与被测路径之间
+    /// 始终有确定的区别。
+    fn defect_shaped_command(exe: &str, args: &[&str]) -> std::process::Command {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Console::GetConsoleWindow;
+        /// 给子进程新开一个控制台（`winbase.h`）。
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let parent_has_console = unsafe { !GetConsoleWindow().0.is_null() };
+        let mut command = std::process::Command::new(exe);
+        command.args(args);
+        if !parent_has_console {
+            command.creation_flags(CREATE_NEW_CONSOLE);
+        }
+        command
+    }
+
     /// 判据（缺陷 2）：从这一路拉起的控制台程序，**不许给自己长出一个控制台窗口**。
     ///
     /// 两个方向一起量：生产入口必须报 `none`，而「直接 `Command::new`」这个缺陷形态
     /// 必须报 `some`。少了后半句，前半句在一条量不到东西的机器上也会绿——那就是把
-    /// 「没量到」当成了「量过」。父进程有控制台时，缺陷形态只是**继承**、不会新开窗口
-    /// （所以这条对照不会在终端里闪一下）；父进程没有控制台时它确实新开一个，而那种
-    /// 场合本来没人看屏幕。
+    /// 「没量到」当成了「量过」。缺陷形态的构造见 [`defect_shaped_command`]。
     #[test]
     fn a_child_started_this_way_has_no_console_window() {
         let exe = std::env::current_exe().expect("当前测试二进制");
@@ -103,8 +123,7 @@ mod tests {
             ours.trim()
         );
 
-        let defect = std::process::Command::new(&exe)
-            .args(args)
+        let defect = defect_shaped_command(&exe, &args)
             .output()
             .expect("拉起子进程（缺陷形态）");
         let defect = String::from_utf8_lossy(&defect.stdout).to_string();

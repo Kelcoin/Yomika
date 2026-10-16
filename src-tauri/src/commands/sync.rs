@@ -1108,6 +1108,20 @@ fn set_journal_batch_state(
     error: Option<&str>,
 ) -> Result<(), String> {
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    set_journal_batch_state_in(&transaction, scope_id, sequences, status, error)?;
+    transaction.commit().map_err(|e| e.to_string())
+}
+
+/// 同一事务里的那一半。同步收尾要把「本地应用远端对象 + 这批日志标完成 + 账户记下
+/// 同步时刻」写成一个事务，而这三件事都只能拿 `&Transaction`（rusqlite 不支持嵌套
+/// 事务），所以拆成两层：要自己开事务的调用方走上面那个，已经在事务里的走这个。
+fn set_journal_batch_state_in(
+    transaction: &rusqlite::Transaction<'_>,
+    scope_id: &str,
+    sequences: &[i64],
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
     for sequence in sequences {
         transaction.execute(
             "UPDATE sync_journal SET status = ?1,
@@ -1117,7 +1131,7 @@ fn set_journal_batch_state(
             params![status, error, scope_id, sequence],
         ).map_err(|e| e.to_string())?;
     }
-    transaction.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn sync_error(error: impl std::fmt::Display) -> String {
@@ -1280,6 +1294,9 @@ fn compare_instants(left: &str, right: &str) -> std::cmp::Ordering {
 /// merges keep comparing correctly, and nothing is re-journaled — the objects
 /// came from the remote's journal and re-journaling them would echo them back.
 /// The return value counts the rows that actually changed.
+/// 自己开事务的那一层，只给测试用：产品路径的收尾（应用对象 / 日志标完成 / 记同步
+/// 时刻）必须在**同一个**事务里，走的是 `apply_remote_objects_in`。
+#[cfg(test)]
 fn apply_remote_objects(
     connection: &mut Connection,
     objects: &[SyncStateObject],
@@ -1287,15 +1304,96 @@ fn apply_remote_objects(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let mut applied = 0;
-    for object in objects {
-        // 同步不是用户点的那一份文件，照样按时钟比。
-        if apply_remote_object(&transaction, &object.scope_id, object, false)? {
-            applied += 1;
-        }
-    }
+    let applied = apply_remote_objects_in(&transaction, objects)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(applied)
+}
+
+/// 同一事务里的那一半（理由同 `set_journal_batch_state_in`）：同步收尾必须让
+/// 「应用对象 / 日志标完成 / 记同步时刻」同生共死。
+fn apply_remote_objects_in(
+    transaction: &rusqlite::Transaction<'_>,
+    objects: &[SyncStateObject],
+) -> Result<usize, String> {
+    let mut applied = 0;
+    let mut progressed: Vec<(String, String)> = Vec::new();
+    for object in objects {
+        // 同步不是用户点的那一份文件，照样按时钟比。
+        if apply_remote_object(transaction, &object.scope_id, object, false)? {
+            applied += 1;
+            remember_progress_candidate(&mut progressed, &object.scope_id, object);
+        }
+    }
+    // 批末才对账，而不是「边应用边删」：同一批里进度与待看谁先谁后都能收敛到同一个
+    // 结果，同一条进度被重复应用也不会多写一次墓碑。
+    reconcile_progress_completion(transaction, &progressed)?;
+    Ok(applied)
+}
+
+/// 记下「这一批里确实落地的进度对象」——只有赢过合并闸门的才算候选。
+/// 被闸门挡下的旧进度在本地什么都没改，也就没资格把待看删掉。
+fn remember_progress_candidate(
+    target: &mut Vec<(String, String)>,
+    scope_id: &str,
+    object: &SyncStateObject,
+) {
+    if object.object_type != "reading_progress" {
+        return;
+    }
+    let Ok(archive_id) = payload_text(&object.payload, "archiveId") else {
+        return;
+    };
+    let candidate = (scope_id.to_string(), archive_id);
+    if !target.contains(&candidate) {
+        target.push(candidate);
+    }
+}
+
+/// 把「这一批之后实际生效的阅读进度」与当前待看对一次账：严格超过 90% 才移出待看。
+/// 判据只有一份，就是本地写进度用的 `progress_finishes_archive`——所以「在阅读器里读到
+/// 最后一页」和「另一台设备同步进来最后一页」得到的是同一个结果。
+///
+/// 三条边界：
+/// - 只拿**现在**那一行进度做判断（同批里后一条进度盖掉前一条时，照前一条判会误删）；
+/// - 只对还挂着的待看行写墓碑（`deleted_at IS NULL`），所以重复导入 / 重复同步幂等；
+/// - 墓碑经 `write_reading_list_entry` 落账，带的是本机版本号；**不会**把远端来的进度
+///   对象原样重新 journal 出去（那是回音）。收藏夹是 `watchlist` 表的服务器分类镜像，
+///   与 `reading_list`（待看）是两回事，这里不碰。
+fn reconcile_progress_completion(
+    transaction: &rusqlite::Transaction<'_>,
+    candidates: &[(String, String)],
+) -> Result<(), String> {
+    for (scope_id, archive_id) in candidates {
+        let effective: Option<(i64, i64)> = transaction
+            .query_row(
+                "SELECT page_index, page_count FROM reading_progress
+                 WHERE scope_id = ?1 AND archive_id = ?2",
+                params![scope_id, archive_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((page_index, page_count)) = effective else {
+            continue;
+        };
+        if !crate::commands::library::progress_finishes_archive(page_index, page_count) {
+            continue;
+        }
+        let listed: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM reading_list
+                 WHERE scope_id = ?1 AND archive_id = ?2 AND deleted_at IS NULL)",
+                params![scope_id, archive_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if listed {
+            crate::commands::library::write_reading_list_entry(
+                transaction, scope_id, archive_id, false,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Merges one remote object by its type. Returns false when the object was
@@ -2099,6 +2197,7 @@ pub(crate) fn import_scoped_documents(
             .map_err(|error| error.to_string())?;
         let mut applied = 0;
         let mut skipped = 0;
+        let mut progressed: Vec<(String, String)> = Vec::new();
         for object in &objects {
             if !scope_includes(&enabled, &object.object_type) {
                 skipped += 1;
@@ -2114,6 +2213,7 @@ pub(crate) fn import_scoped_documents(
                 continue;
             }
             applied += 1;
+            remember_progress_candidate(&mut progressed, &object.scope_id, object);
             let next_clock: i64 = transaction
                 .query_row(
                     "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
@@ -2135,6 +2235,9 @@ pub(crate) fn import_scoped_documents(
                 object.payload.clone(),
             )?;
         }
+        // 导入也要收同一个尾：用户点了一份文件，里面某条进度已经读过头了，那一样要把
+        // 待看里的这条移走（否则「导入成功」而待看里还挂着看完的东西）。
+        reconcile_progress_completion(&transaction, &progressed)?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok((applied, skipped))
     })();
@@ -2283,7 +2386,7 @@ impl RemoteStore {
         ciphertext: Vec<u8>,
         etag: Option<String>,
         merge: F,
-    ) -> Result<(), crate::network::remote::RemoteError>
+    ) -> Result<Vec<u8>, crate::network::remote::RemoteError>
     where
         F: Fn(&[u8]) -> Result<Vec<u8>, crate::network::remote::RemoteError>,
     {
@@ -2323,7 +2426,12 @@ async fn sync_scope_impl(
     credentials: &dyn WebdavCredentialStore,
 ) -> CommandResult<usize> {
     let retryable = |error: &str| {
-        let mut connection = database.connection.lock().map_err(|_| ()).unwrap();
+        // 数据库锁已经坏了的时候，连「这批日志标成可重试」都写不下去。这里再 panic
+        // 一次只会把一次同步失败升级成进程崩溃，而调用方本来就要把失败交回界面。
+        let Ok(mut connection) = database.connection.lock() else {
+            eprintln!("yomika: 同步失败后没能把日志标成可重试（数据库锁不可用）：{error}");
+            return;
+        };
         let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
         let _ = set_journal_batch_state(&mut connection, scope_id, &sequences, "retryable", Some(error));
     };
@@ -2367,54 +2475,76 @@ async fn sync_scope_impl(
         Ok(bytes) => bytes,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    let result = store
+    let committed = match store
         .update_state_with_retry(&account.id, ciphertext, etag, |remote_bytes| {
             let remote_state = decode_sync_state(key, remote_bytes)
                 .map_err(crate::network::remote::RemoteError::Verification)?;
             encode_sync_state(key, &merge_sync_states(&local_state, &remote_state))
                 .map_err(crate::network::remote::RemoteError::Verification)
         })
-        .await;
-    if let Err(error) = result {
-        let message = sync_error(error);
-        retryable(&message);
-        return CommandResult::failure("NETWORK", message, true);
-    }
-
-    // 推上去了，这批日志就地标记完成。
-    let pushed = pending.len();
+        .await
     {
-        let mut connection = match database.connection.lock() {
-            Ok(connection) => connection,
-            Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
-        };
-        let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
-        if let Err(error) =
-            set_journal_batch_state(&mut connection, scope_id, &sequences, "completed", None)
-        {
-            return CommandResult::failure("UNKNOWN", error, true);
+        Ok(committed) => committed,
+        Err(error) => {
+            let message = sync_error(error);
+            retryable(&message);
+            return CommandResult::failure("NETWORK", message, true);
         }
-        // 这一次是真的推拉成功了：账户行记下时刻，界面显示「上次同步」，
-        // 自动同步也据此判断启动/回到前台时要不要补一次。
-        if let Err(error) = connection.execute(
-            "UPDATE sync_accounts SET last_sync_at = CURRENT_TIMESTAMP WHERE id = ?1",
-            params![account.id],
-        ) {
-            return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    };
+    // 要应用到本地的是**最终提交上去的那一份**，不是我们一开始合并出来的那一份：
+    // 条件写冲突重试期间远端可能已经收下了别的设备的对象（见 transport 的注释）。
+    let committed_state = match decode_sync_state(key, &committed) {
+        Ok(state) => state,
+        Err(error) => {
+            retryable(&error);
+            return CommandResult::failure("INVALID_RESPONSE", error, false);
         }
-        // 拉取：把合并后的对象落回本地表（自己那部分重复应用是无害的）。
-        let objects = merged
-            .objects
-            .values()
-            .filter(|object| object.scope_id == scope_id || object.scope_id == GLOBAL_SCOPE)
-            .filter(|object| scope_includes(enabled, &object.object_type))
-            .cloned()
-            .collect::<Vec<_>>();
-        match apply_remote_objects(&mut connection, &objects) {
-            Ok(pulled) => CommandResult::success(pushed + pulled),
-            Err(error) => CommandResult::failure("INVALID_RESPONSE", error, false),
-        }
+    };
+
+    // 推上去了，收尾三件事必须在**同一个事务**里：本地应用远端对象、这批日志标完成、
+    // 账户记下同步时刻。分开写的话，远端已经写成功而本地应用失败时，界面会显示
+    // 「上次同步」、日志也成了完成，可对象根本没落地——下一轮自动同步还以为没事。
+    let pushed = pending.len();
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
+    };
+    let transaction = match connection.transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
+    };
+    let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
+    if let Err(error) =
+        set_journal_batch_state_in(&transaction, scope_id, &sequences, "completed", None)
+    {
+        return CommandResult::failure("UNKNOWN", error, true);
     }
+    // 这一次是真的推拉成功了：账户行记下时刻，界面显示「上次同步」，
+    // 自动同步也据此判断启动/回到前台时要不要补一次。
+    if let Err(error) = transaction.execute(
+        "UPDATE sync_accounts SET last_sync_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        params![account.id],
+    ) {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    // 拉取：把最终提交的那份文档里的对象落回本地表（自己那部分重复应用是无害的）。
+    let objects = committed_state
+        .objects
+        .values()
+        .filter(|object| object.scope_id == scope_id || object.scope_id == GLOBAL_SCOPE)
+        .filter(|object| scope_includes(enabled, &object.object_type))
+        .cloned()
+        .collect::<Vec<_>>();
+    let pulled = match apply_remote_objects_in(&transaction, &objects) {
+        Ok(pulled) => pulled,
+        // 提前 return 会把事务丢掉（rusqlite 的 Transaction 在 drop 时回滚），
+        // 日志与 last_sync_at 于是跟着一起退回原样。
+        Err(error) => return CommandResult::failure("INVALID_RESPONSE", error, false),
+    };
+    if let Err(error) = transaction.commit() {
+        return CommandResult::failure("UNKNOWN", error.to_string(), true);
+    }
+    CommandResult::success(pushed + pulled)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3962,6 +4092,228 @@ mod tests {
         assert_eq!(revision, 4);
     }
 
+    /// 一条远端「阅读进度」对象。页码 0 起：20 页里的 index 17 正好 90%，18 就超过 90%。
+    fn progress_object(
+        archive_id: &str,
+        page_index: i64,
+        page_count: i64,
+        logical_clock: i64,
+    ) -> SyncStateObject {
+        remote_object(
+            "reading_progress",
+            &format!("scope-a/{archive_id}"),
+            logical_clock,
+            "2026-09-12 08:00:00",
+            serde_json::json!({
+                "archiveId": archive_id, "pageIndex": page_index, "pageCount": page_count,
+                "layout": "paged", "direction": "ltr", "coverAlone": null,
+            }),
+        )
+    }
+
+    fn reading_list_deleted_at(connection: &Connection) -> Option<String> {
+        connection
+            .query_row(
+                "SELECT deleted_at FROM reading_list WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("待看这一行")
+    }
+
+    fn add_a_reading_list_entry(connection: &Connection, revision: i64) {
+        connection
+            .execute(
+                "INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision, updated_at)
+                 VALUES ('scope-a', 'archive-a', 'device-a', NULL, ?1, '2026-09-01 08:00:00')",
+                params![revision],
+            )
+            .expect("本机待看");
+    }
+
+    #[test]
+    fn a_progress_only_sync_removes_a_finished_archive_from_the_reading_list() {
+        // 「读完自动移出待看」原来只长在本机翻页那条路（library::persist_reading_progress）。
+        // 进度从同步进来时没人执行它，于是另一台设备上读完的档案会永远挂在这台机器的待看里。
+        let mut connection = migrated_connection();
+        add_a_reading_list_entry(&connection, 1);
+        // 这一批里**只有**进度，没有待看对象——正是漏掉的那条入口。
+        let objects = remote_objects("scope-a", vec![progress_object("archive-a", 19, 20, 3)]);
+        assert_eq!(apply_remote_objects(&mut connection, &objects).expect("应用"), 1);
+
+        let (deleted_at, revision): (Option<String>, i64) = connection
+            .query_row(
+                "SELECT deleted_at, revision FROM reading_list
+                 WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("待看这一行");
+        assert!(deleted_at.is_some(), "同步进来的进度读完了，本机待看里那一条要收掉");
+        assert_eq!(revision, 2, "墓碑要带因果版本：本机这一行的版本号 +1");
+        // 而且这一笔要进日志：别的设备只有学到这次移除，才不会下次同步又把它加回来。
+        let (operation, clock): (String, i64) = connection
+            .query_row(
+                "SELECT operation, logical_clock FROM sync_journal
+                 WHERE object_type = 'watchlist' AND object_id = 'scope-a/archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("墓碑日志");
+        assert_eq!((operation.as_str(), clock), ("delete", 2), "移除要进日志，且时钟跟着墓碑走");
+    }
+
+    #[test]
+    fn progress_at_exactly_ninety_percent_keeps_the_archive_in_the_reading_list() {
+        // 判据是**严格**超过 90%（见 library::persist_reading_progress）：20 页的第 18 页
+        // 正好 90%，还留在待看里；第 19 页才移出。同步这条路必须与它同一条口径。
+        for (page_index, removed) in [(17_i64, false), (18_i64, true)] {
+            let mut connection = migrated_connection();
+            add_a_reading_list_entry(&connection, 1);
+            let objects = remote_objects(
+                "scope-a",
+                vec![progress_object("archive-a", page_index, 20, 2)],
+            );
+            assert_eq!(
+                apply_remote_objects(&mut connection, &objects).expect("应用"),
+                1,
+                "index {page_index} 的进度要落地"
+            );
+            assert_eq!(
+                reading_list_deleted_at(&connection).is_some(),
+                removed,
+                "index {page_index} / 20 页：{}",
+                if removed { "超过 90% 要移出" } else { "正好 90% 不许移出" }
+            );
+        }
+    }
+
+    #[test]
+    fn progress_and_watchlist_in_one_batch_do_not_depend_on_input_order() {
+        // 同一批里既有「读完的进度」又有「待看新增」（导入另一台设备的文件、或两台设备
+        // 同时改过）：对象在文档里谁先谁后，落地的结果必须一样——都得是收掉。
+        for reversed in [false, true] {
+            let mut connection = migrated_connection();
+            let mut list = vec![
+                progress_object("archive-a", 19, 20, 2),
+                remote_object(
+                    "watchlist",
+                    "scope-a/archive-a",
+                    2,
+                    "2026-09-12 08:00:00",
+                    serde_json::json!({"archiveId": "archive-a", "deleted": false}),
+                ),
+            ];
+            if reversed {
+                list.reverse();
+            }
+            apply_remote_objects(&mut connection, &remote_objects("scope-a", list)).expect("应用");
+            assert!(
+                reading_list_deleted_at(&connection).is_some(),
+                "reversed = {reversed}：换一下顺序结果就该一样"
+            );
+        }
+    }
+
+    #[test]
+    fn a_progress_that_loses_the_merge_gate_does_not_remove_the_reading_list_entry() {
+        // 本机已经读到 19/20、待看里又加回来了一条（用户在另一台设备上读完后又手动加回），
+        // 这时来了一份更旧的进度：它输给合并门、什么都没改，当然也不许顺手把待看删掉。
+        let mut connection = migrated_connection();
+        connection
+            .execute_batch(
+                "INSERT INTO reading_progress
+                   (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision, updated_at)
+                 VALUES ('scope-a', 'archive-a', 19, 20, 'paged', 'ltr', 'device-a', 9, '2026-09-20 08:00:00');
+                 INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision, updated_at)
+                 VALUES ('scope-a', 'archive-a', 'device-a', NULL, 2, '2026-09-21 08:00:00');",
+            )
+            .expect("本机状态");
+        let objects = remote_objects("scope-a", vec![progress_object("archive-a", 3, 20, 4)]);
+        assert_eq!(
+            apply_remote_objects(&mut connection, &objects).expect("应用"),
+            0,
+            "远端这条比本机旧，闸门要挡下它"
+        );
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_progress WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("本机进度");
+        assert_eq!(page, 19, "本机的进度不能被旧版本顶掉");
+        assert!(
+            reading_list_deleted_at(&connection).is_none(),
+            "被闸门挡下的进度不得删掉本机还留着的待看"
+        );
+    }
+
+    #[test]
+    fn a_progress_only_import_removes_the_finished_archive_and_repeats_idempotently() {
+        // 文件导入是另一条入口：同样只有进度、同样要把读完的档案从待看里收掉，
+        // 而且同一份文件导入两次不许写出第二条墓碑。
+        let mut connection = migrated_connection();
+        add_a_reading_list_entry(&connection, 1);
+        for round in 1..=2 {
+            let document =
+                document_from_objects(remote_objects("scope-a", vec![progress_object(
+                    "archive-a", 19, 20, 5,
+                )]));
+            let report =
+                import_scoped_documents(&mut connection, document, &["progress".to_string()])
+                    .expect("导入");
+            assert_eq!(report.applied, 1, "第 {round} 次导入：文件里那一条要落地");
+        }
+        assert!(
+            reading_list_deleted_at(&connection).is_some(),
+            "导入进来的进度读完了，本机待看里那一条也要收掉"
+        );
+        let tombstones: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sync_journal
+                 WHERE object_type = 'watchlist' AND operation = 'delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("墓碑数");
+        assert_eq!(tombstones, 1, "重复导入是幂等的：同一条墓碑只写一次");
+    }
+
+    #[test]
+    fn progress_completion_never_touches_the_favorites_mirror() {
+        // 收藏夹（本地 watchlist 表）是服务器收藏分类的镜像，与待看（reading_list）是
+        // 两回事：读完自动移出只许动待看，收藏夹那一行连版本号都不许改。
+        let mut connection = migrated_connection();
+        connection
+            .execute_batch(
+                "INSERT INTO watchlist (scope_id, archive_id, device_id, deleted_at, revision)
+                 VALUES ('scope-a', 'archive-a', 'device-a', NULL, 1);
+                 INSERT INTO reading_list (scope_id, archive_id, device_id, deleted_at, revision, updated_at)
+                 VALUES ('scope-a', 'archive-a', 'device-a', NULL, 1, '2026-09-01 08:00:00');",
+            )
+            .expect("本机状态");
+        apply_remote_objects(
+            &mut connection,
+            &remote_objects("scope-a", vec![progress_object("archive-a", 19, 20, 3)]),
+        )
+        .expect("应用");
+        let (favorites_deleted, favorites_revision): (Option<String>, i64) = connection
+            .query_row(
+                "SELECT deleted_at, revision FROM watchlist
+                 WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("收藏夹那一行");
+        assert!(favorites_deleted.is_none(), "收藏夹是服务器分类的镜像，不许被移出");
+        assert_eq!(favorites_revision, 1, "收藏夹那一行的版本号也不许动");
+        assert!(
+            reading_list_deleted_at(&connection).is_some(),
+            "该收掉的是待看那一条"
+        );
+    }
+
     #[test]
     fn the_credential_classes_are_not_sync_categories() {
         // 凭据不进同步：服务器条目、E-H 账户与 API Key/Cookie/同步口令各有各的进出口
@@ -4314,7 +4666,7 @@ mod tests {
             .query_row(
                 "SELECT tombstoned, logical_clock FROM dedup_non_duplicates WHERE scope_id='scope-a' AND pair_key='archive-a|archive-b'",
                 [],
-                |row| Ok((row.get::<_, i64>(0)? * 0) + row.get::<_, i64>(1)? - row.get::<_, i64>(1)?),
+                |row| row.get::<_, i64>(0),
             )
             .expect("dedup state");
         assert_eq!(tombstoned, 0);
@@ -4379,8 +4731,9 @@ mod tests {
                     break;
                 };
                 let mut buffer = vec![0_u8; 16_384];
-                let read = stream.read(&mut buffer).await.expect("read request");
-                let _ = read;
+                // 只读一次拿到的是「这一次读到的」，请求可能分几段到；这里要把请求收走，
+                // 统一走那个读到请求头为止的助手（见 commands::library::read_request_head）。
+                crate::commands::library::read_request_head(&mut stream, &mut buffer).await;
                 let body: &[u8] = if status.starts_with("200") {
                     b"ciphertext"
                 } else {
@@ -5264,6 +5617,144 @@ mod tests {
         (format!("http://{address}"), store)
     }
 
+    /// 认条件头的 WebDAV 桩：GET 带 ETag，PUT 认 If-Match / If-None-Match（`stateful_dav_server`
+    /// 两种都不认，所以冲突重试那条路一直没被测过）。
+    ///
+    /// `inject_on_first_put` 演的是「另一台设备刚好抢先写了一版」：第一次 PUT 不写调用方
+    /// 交来的字节，而是把预先编好的那份文档放进远端并回 412。之后的请求恢复正常。
+    async fn conditional_dav_server(
+        initial: Option<Vec<u8>>,
+        inject_on_first_put: Option<Vec<u8>>,
+    ) -> (String, Arc<Mutex<Option<Vec<u8>>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let store: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(initial));
+        let version: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let injection: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(inject_on_first_put));
+        let shared = Arc::clone(&store);
+        let shared_version = Arc::clone(&version);
+        let shared_injection = Arc::clone(&injection);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let shared = Arc::clone(&shared);
+                let shared_version = Arc::clone(&shared_version);
+                let shared_injection = Arc::clone(&shared_injection);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; 262_144];
+                    let mut total = 0usize;
+                    loop {
+                        let read = stream.read(&mut buffer[total..]).await.expect("read request");
+                        if read == 0 {
+                            break;
+                        }
+                        total += read;
+                        let text = String::from_utf8_lossy(&buffer[..total]);
+                        let Some(head_end) = text.find("\r\n\r\n") else {
+                            if total == buffer.len() {
+                                break;
+                            }
+                            continue;
+                        };
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|line| {
+                                let value = line.strip_prefix("Content-Length:")?;
+                                value.trim().parse::<usize>().ok()
+                            })
+                            .unwrap_or(0);
+                        if total >= head_end + 4 + length {
+                            break;
+                        }
+                        if total == buffer.len() {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buffer[..total]).to_string();
+                    let head_end = text.find("\r\n\r\n").unwrap_or(total);
+                    let head = text[..head_end].to_string();
+                    let method = head
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let body = buffer[head_end + 4..total].to_vec();
+                    let header = |name: &str| {
+                        head.lines().find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name)
+                                .then(|| value.trim().to_string())
+                        })
+                    };
+
+                    let response = {
+                        let mut store = shared.lock().expect("store");
+                        let mut version = shared_version.lock().expect("version");
+                        let (status, etag, payload): (String, String, Vec<u8>) = match method.as_str()
+                        {
+                            "GET" => match store.as_ref() {
+                                Some(bytes) => (
+                                    "200 OK".to_string(),
+                                    format!("ETag: \"etag-{version}\"\r\n"),
+                                    bytes.clone(),
+                                ),
+                                None => ("404 Not Found".to_string(), String::new(), Vec::new()),
+                            },
+                            "PUT" => {
+                                let current = format!("\"etag-{version}\"");
+                                let injected = shared_injection.lock().expect("injection").take();
+                                let conflict = if let Some(injected) = injected {
+                                    // 抢先写进来的那一版来自另一台设备。
+                                    *store = Some(injected);
+                                    *version += 1;
+                                    true
+                                } else if store.is_some()
+                                    && header("If-None-Match").as_deref() == Some("*")
+                                {
+                                    true
+                                } else {
+                                    header("If-Match").is_some_and(|value| value != current)
+                                };
+                                if conflict {
+                                    (
+                                        "412 Precondition Failed".to_string(),
+                                        String::new(),
+                                        Vec::new(),
+                                    )
+                                } else {
+                                    *store = Some(body);
+                                    *version += 1;
+                                    ("201 Created".to_string(), String::new(), Vec::new())
+                                }
+                            }
+                            _ => (
+                                "405 Method Not Allowed".to_string(),
+                                String::new(),
+                                Vec::new(),
+                            ),
+                        };
+                        let mut response = format!(
+                            "HTTP/1.1 {status}\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        )
+                        .into_bytes();
+                        response.extend_from_slice(&payload);
+                        response
+                    };
+                    stream.write_all(&response).await.expect("write response");
+                });
+            }
+        });
+        (format!("http://{address}"), store)
+    }
+
     /// 一个够用的 S3 兼容端点：GET/PUT/DELETE 一个对象，认 If-Match / If-None-Match，
     /// 并把每个请求的头部原样记下来，好断言签名与条件写。ETag 取内容的长度加校验和。
     async fn stateful_s3_server() -> (
@@ -5668,6 +6159,211 @@ mod tests {
             }
             CommandResult::Success { .. } => panic!("a foreign document was overwritten"),
         }
+    }
+
+    /// R06：条件写冲突重试之后，本地必须应用**最终提交上去的那一份**文档。
+    ///
+    /// 场景：另一台设备在本机第一次 PUT 的同一瞬间抢先写了一版（桩回 412 并把它的文档
+    /// 放进远端）。重试会重新 GET + 合并，最终提交的文档里同时有本机与那台设备的对象；
+    /// 若调用方拿冲突前自己合并出来的那一版去应用本地，那台设备的阅读进度就永远到不了
+    /// 这台机器上——而远端明明已经收下了它。
+    #[tokio::test]
+    async fn a_conflicting_write_applies_the_document_that_was_actually_committed() {
+        let key = [3_u8; 32];
+        let mut other_device = empty_state();
+        other_device.objects.insert(
+            "scope-a|reading_progress|archive-b".to_string(),
+            SyncStateObject {
+                scope_id: "scope-a".to_string(),
+                object_type: "reading_progress".to_string(),
+                object_id: "scope-a/archive-b".to_string(),
+                operation: "upsert".to_string(),
+                payload: serde_json::json!({
+                    "archiveId": "archive-b",
+                    "pageIndex": 9,
+                    "pageCount": 20,
+                    "layout": "paged",
+                    "direction": "ltr",
+                }),
+                payload_hash: "hash-b".to_string(),
+                logical_clock: 5,
+                device_id: "device-b".to_string(),
+                wall_clock: "2026-10-16 10:00:00".to_string(),
+            },
+        );
+        let injected = encode_sync_state(&key, &other_device).expect("encode injected document");
+        let (base_url, document) = conditional_dav_server(None, Some(injected)).await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO sync_accounts (id, label, base_url, username, credential_ref)
+                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
+                    params![base_url],
+                )
+                .expect("webdav account");
+            read_sync_account(&connection, "account-a").expect("account record")
+        };
+        let mut local_state = empty_state();
+        local_state.objects.insert(
+            "scope-a|reading_progress|archive-a".to_string(),
+            SyncStateObject {
+                scope_id: "scope-a".to_string(),
+                object_type: "reading_progress".to_string(),
+                object_id: "scope-a/archive-a".to_string(),
+                operation: "upsert".to_string(),
+                payload: serde_json::json!({
+                    "archiveId": "archive-a",
+                    "pageIndex": 4,
+                    "pageCount": 10,
+                    "layout": "paged",
+                    "direction": "ltr",
+                }),
+                payload_hash: "hash-a".to_string(),
+                logical_clock: 1,
+                device_id: "device-a".to_string(),
+                wall_clock: "2026-10-16 09:00:00".to_string(),
+            },
+        );
+
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &key,
+            "scope-a",
+            local_state,
+            Vec::new(),
+            &default_scope(),
+            &credentials,
+        )
+        .await;
+        assert!(
+            matches!(result, CommandResult::Success { .. }),
+            "冲突重试之后这一轮同步必须成功"
+        );
+
+        // 远端最终那份文档里两台设备的对象都在（前提：合并真的发生了）。
+        let committed_bytes = document
+            .lock()
+            .expect("document")
+            .clone()
+            .expect("a committed document");
+        let committed = decode_sync_state(&key, &committed_bytes).expect("decode committed");
+        assert!(
+            committed
+                .objects
+                .contains_key("scope-a|reading_progress|archive-b"),
+            "另一台设备的对象必须在最终提交的文档里"
+        );
+
+        // 本地应用的必须是那一份：这一条就是本条缺陷的核心。
+        let connection = database.connection.lock().expect("database lock");
+        let page: i64 = connection
+            .query_row(
+                "SELECT page_index FROM reading_progress WHERE scope_id = 'scope-a' AND archive_id = 'archive-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("另一台设备的进度必须落到本地");
+        assert_eq!(page, 9);
+    }
+
+    /// R07：远端已经写成功、本地应用却失败时，日志与「上次同步」必须一起回滚。
+    ///
+    /// 分开写的话，界面会显示「上次同步」、日志也成了完成，可对象根本没落地——下一轮
+    /// 自动同步还以为没事。所以三件事在一个事务里：任一失败，全都不生效。
+    #[tokio::test]
+    async fn a_failed_local_apply_leaves_the_journal_and_the_sync_clock_untouched() {
+        let key = [4_u8; 32];
+        // 远端文档里有一个 payload 缺 pageIndex 的对象：应用到本地一定失败。
+        let mut broken = empty_state();
+        broken.objects.insert(
+            "scope-a|reading_progress|archive-b".to_string(),
+            SyncStateObject {
+                scope_id: "scope-a".to_string(),
+                object_type: "reading_progress".to_string(),
+                object_id: "scope-a/archive-b".to_string(),
+                operation: "upsert".to_string(),
+                payload: serde_json::json!({"archiveId": "archive-b"}),
+                payload_hash: "hash-broken".to_string(),
+                logical_clock: 5,
+                device_id: "device-b".to_string(),
+                wall_clock: "2026-10-16 10:00:00".to_string(),
+            },
+        );
+        let document = encode_sync_state(&key, &broken).expect("encode broken document");
+        let (base_url, _store) = conditional_dav_server(Some(document), None).await;
+        let database = crate::db::Database::open_path(":memory:").expect("database");
+        let credentials = MemoryWebdavCredentialStore {
+            writes: Mutex::new(vec![("ref-a".to_string(), "token".to_string())]),
+            deletes: Mutex::new(Vec::new()),
+            failure: None,
+        };
+        let account = {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO sync_accounts (id, label, base_url, username, credential_ref)
+                     VALUES ('account-a', 'NAS', ?1, 'user', 'ref-a')",
+                    params![base_url],
+                )
+                .expect("webdav account");
+            read_sync_account(&connection, "account-a").expect("account record")
+        };
+        let pending = {
+            let connection = database.connection.lock().expect("database lock");
+            append_journal_entry(
+                &connection,
+                progress_journal_input("scope-a", "archive-a", "device-a", 1, 4),
+            )
+            .expect("pending journal entry")
+        };
+
+        let result = sync_scope_impl(
+            &database,
+            &account,
+            &key,
+            "scope-a",
+            empty_state(),
+            vec![pending.clone()],
+            &default_scope(),
+            &credentials,
+        )
+        .await;
+        assert!(
+            matches!(result, CommandResult::Failure { .. }),
+            "远端对象应用失败必须把这一轮报成失败"
+        );
+
+        let connection = database.connection.lock().expect("database lock");
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM sync_journal WHERE sequence = ?1",
+                params![pending.sequence],
+                |row| row.get(0),
+            )
+            .expect("journal status");
+        assert_ne!(
+            status, "completed",
+            "本地应用失败时这批日志不能还标成完成"
+        );
+        let last_sync: Option<String> = connection
+            .query_row(
+                "SELECT last_sync_at FROM sync_accounts WHERE id = 'account-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("last_sync_at");
+        assert!(
+            last_sync.is_none(),
+            "本地应用失败时不该记下「上次同步」：{last_sync:?}"
+        );
     }
 
     #[tokio::test]

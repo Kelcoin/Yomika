@@ -165,7 +165,24 @@ fn relative_for_hash(hash: &str) -> Option<String> {
 }
 
 /// 读文件并核对「它确实是那一行说的那一份」。**锁外**：这是整条路径上最慢的一步。
+#[cfg(test)]
+thread_local! {
+    // Scoped to the test's IO thread so parallel tests cannot consume the probe.
+    static BLOB_IO_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn probe_blob_io() {
+    BLOB_IO_PROBE.with(|probe| {
+        if let Some(probe) = probe.borrow_mut().take() {
+            probe();
+        }
+    });
+}
+
 fn read_verified_blob(app_data: &std::path::Path, row: &CacheEntryRow) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    probe_blob_io();
     if relative_for_hash(&row.content_hash).as_deref() != Some(row.relative.as_str()) {
         return None;
     }
@@ -559,6 +576,8 @@ fn prepare_blob(
     bytes: &[u8],
 ) -> Result<PendingBlob, String> {
     identity.validate()?;
+    #[cfg(test)]
+    probe_blob_io();
     if bytes.is_empty() {
         return Err("Invalid image cache payload".into());
     }
@@ -1763,36 +1782,25 @@ mod tests {
         }
     }
 
-    /// 在 `work` 跑着的时候，另一个线程一直去拿同一把锁：返回（拿到几次，最长等了多久）。
-    ///
-    /// 这是「锁有没有覆盖大 IO」的**直接**量法：锁要是被整段 IO 占着，探针在整段
-    /// IO 期间一次都拿不到，最长等待就是那段 IO 的长度。
-    fn listen_during<F: FnOnce()>(database: &Database, work: F) -> (usize, std::time::Duration) {
-        let running = std::sync::atomic::AtomicBool::new(true);
-        // 用作用域线程而不是 `spawn` + `move`：探针借的是外面这一把锁所在的
-        // `Database`，不是它的副本——副本会是一把**新**锁，那这个量法就没意义了。
-        std::thread::scope(|scope| {
-            let handle = scope.spawn(|| {
-                let mut acquisitions = 0usize;
-                let mut longest = std::time::Duration::ZERO;
-                while running.load(std::sync::atomic::Ordering::SeqCst) {
-                    let started = std::time::Instant::now();
-                    if let Ok(connection) = database.connection.lock() {
-                        let _: i64 = connection
-                            .query_row("SELECT 1", [], |row| row.get(0))
-                            .unwrap_or(0);
-                        let waited = started.elapsed();
-                        acquisitions += 1;
-                        longest = longest.max(waited);
-                    }
-                    std::thread::sleep(std::time::Duration::from_micros(200));
-                }
-                (acquisitions, longest)
-            });
-            work();
-            running.store(false, std::sync::atomic::Ordering::SeqCst);
-            handle.join().expect("探针线程")
-        })
+    /// Assert inside the real file-IO path that a second thread can use the DB.
+    /// A fixed acquisition count measured disk speed and Windows timer resolution,
+    /// rather than lock ownership (fast writes could finish before 20 samples).
+    fn assert_database_unlocked_during_io(database: &std::sync::Arc<Database>, work: impl FnOnce()) {
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = observed.clone();
+        let database = database.clone();
+        BLOB_IO_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    let connection = database.connection.try_lock().expect("blob IO must not hold the global DB lock");
+                    let answer: i64 = connection.query_row(LOCK_PROBE_QUERY, [], |row| row.get(0)).unwrap();
+                    assert_eq!(answer, 1);
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                }).join().expect("DB probe thread");
+            }));
+        });
+        work();
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst), "the actual blob IO path must execute the probe");
     }
 
     fn big_payload(fill: u8) -> Vec<u8> {
@@ -1803,86 +1811,28 @@ mod tests {
         bytes
     }
 
-    /// 旧形状：调用方**拿着锁**把一整页写下去。
-    ///
-    /// 留着它只为量一个数：这么写的时候全局锁被整段 IO 占着。它是前提，不是目标。
-    fn store_holding_the_lock(
-        database: &Database,
-        app_data: &std::path::Path,
-        identity: &CacheImageIdentity,
-        mime: &str,
-        bytes: &[u8],
-    ) {
-        let connection = database.connection.lock().expect("拿锁");
-        store_image_cache(&connection, app_data, identity, mime, bytes).expect("写缓存");
-    }
-
-    /// 读/写一页缓存的时候，全局 DB 锁不该被文件 IO 占住。
-    ///
-    /// 全局锁是偏好、书架、搜索这些轻查询的必经之路，而这里搬的是整整一页图 +
-    /// 一次 blake3。锁覆盖了它，就等于每翻一页都把「读偏好」堵一次。
-    ///
-    /// 旧形状在这里只做**前提记录**（不设断言，与
-    /// `crates/compute-transport/tests/pipe_probe.rs` 的 A/B 同一手法：平台或实现变了
-    /// 不该让测试崩），断言的只有目标形状。
     #[test]
     fn the_database_lock_is_free_while_a_blob_is_written() {
-        let database = online_db();
-        let app_data = temp_app_data("cache-lock-write");
-        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
-
-        let old_identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
-        let old_payload = big_payload(0x5a);
-        let (_old_acquisitions, old_longest) = listen_during(&database, || {
-            store_holding_the_lock(&database, &app_data, &old_identity, "image/png", &old_payload);
-        });
-        eprintln!("[cache-lock] 锁内落盘（旧形状）：探针最长等了 {old_longest:?}");
-
-        // 换个 identity 与填充字节：内容是内容寻址的，同一份内容会落在同一个文件上，
-        // 那样第二次写只会「目标已存在」直接跳过，量不到真正的落盘。
+        let database = std::sync::Arc::new(online_db());
+        let app_data = tempfile::tempdir().unwrap();
         let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 1);
         let payload = big_payload(0x5b);
-        let (acquisitions, longest) = listen_during(&database, || {
-            write_cached_image(&database, &app_data, &identity, "image/png", &payload)
-                .expect("写缓存");
+        assert_database_unlocked_during_io(&database, || {
+            write_cached_image(&database, app_data.path(), &identity, "image/png", &payload).unwrap();
         });
-        eprintln!(
-            "[cache-lock] 锁外落盘：探针拿到 {acquisitions} 次，最长等了 {longest:?}"
-        );
-
-        assert!(
-            acquisitions >= 20,
-            "写一整页图期间锁几乎没松过手：探针只拿到 {acquisitions} 次，最长等了 {longest:?}"
-        );
-        assert!(
-            longest < std::time::Duration::from_millis(200),
-            "探针最长等了 {longest:?}：锁被整段 IO 占住了"
-        );
     }
 
-    /// 读一页同样不该占着全局锁：锁外读文件 + 算 blake3。
     #[test]
     fn the_database_lock_is_free_while_a_blob_is_read() {
-        let database = online_db();
-        let app_data = temp_app_data("cache-lock-read");
-        std::fs::create_dir_all(app_data.join("cache/images")).expect("建缓存目录");
+        let database = std::sync::Arc::new(online_db());
+        let app_data = tempfile::tempdir().unwrap();
         let identity = CacheImageIdentity::new("scope", "archive", "reader-page", 0);
         let payload = big_payload(0x5c);
-        write_cached_image(&database, &app_data, &identity, "image/png", &payload).expect("写缓存");
-
-        let (acquisitions, longest) = listen_during(&database, || {
-            let hit = read_cached_image(&database, &app_data, &identity)
-                .expect("读缓存")
-                .expect("命中");
+        write_cached_image(&database, app_data.path(), &identity, "image/png", &payload).unwrap();
+        assert_database_unlocked_during_io(&database, || {
+            let hit = read_cached_image(&database, app_data.path(), &identity).unwrap().unwrap();
             assert_eq!(hit.bytes.len(), payload.len());
         });
-        eprintln!("[cache-lock] 锁外读盘：探针拿到 {acquisitions} 次，最长等了 {longest:?}");
-
-        assert!(acquisitions >= 5, "读一整页图期间锁几乎没松过手：探针只拿到 {acquisitions} 次");
-        assert!(
-            longest < std::time::Duration::from_millis(300),
-            "探针最长等了 {longest:?}：锁被整段 IO 占住了"
-        );
     }
 
     /// 一份写入如果在清空**之后**才收尾，不许把自己的行挂回来。

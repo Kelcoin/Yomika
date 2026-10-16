@@ -34,6 +34,19 @@ pub const DEFAULT_PORT: u16 = 47653;
 const MAX_BODY: usize = 64 * 1024 * 1024;
 /// 请求头上限。
 const MAX_HEADER: usize = 32 * 1024;
+/// 配对的请求体上限：那两个端点只收一小段 JSON，不该跟着数据端点一起按兆收
+/// （docs/175 R05）。
+const MAX_PAIR_BODY: usize = 8 * 1024;
+/// 读**请求头**的期限（整段头一次算，不是「每读一次宽限一次」）。对面连上了却不说话
+/// （半开连接、慢速滴水）不能永远占着一个连接位，也不能永远占着一条任务（docs/175 R05）。
+const HEAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// 读**请求体**的期限。一页上兆的图在局域网里够用；卡住不动的那条要放掉。
+const BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// 同时开着的连接上限：每条连接一条任务 + 一份缓冲，没有上限就是没有边界（docs/175 R05）。
+const MAX_CONNECTIONS: usize = 16;
+/// 在途请求体的总字节预算：单条上限仍是 [`MAX_BODY`]，但几条大上传叠在一起也能把内存吃光。
+/// 超出这条预算的那一条当场回 503，而不是先把体读进来再说（docs/175 R05）。
+const MAX_INFLIGHT_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 /// 服务名与版本：`/v1/ping` 用它自报家门（移动端连上时先确认对面是同类应用）。
 const SERVICE_NAME: &str = "yomika-compute-center";
@@ -115,6 +128,12 @@ pub struct RemoteCapabilities {
     pub name: String,
     pub capabilities: Vec<Capability>,
     pub models: Vec<crate::inference::RunnableModel>,
+    /// 服务端配置版本（模型内容、参数、DLL 和政策），独立于每次请求的处理链。
+    ///
+    /// `default`：这一版之前起着的服务端不会发这个键，读回来必须是「好清单 + 不知道是哪一版」，
+    /// 不能因为少一个字段就把整份能力清单丢掉。
+    #[serde(default)]
+    pub revision: String,
 }
 
 /// 服务端句柄。
@@ -259,6 +278,9 @@ struct Running {
     port: u16,
     stop: Arc<AtomicBool>,
     discovery: Option<std::thread::JoinHandle<()>>,
+    /// 这一轮服务收着的连接（docs/175 R05）：`stop` 不只是叫停 accept，
+    /// 还要把已经收下的连接一起收掉，所以句柄得留在 `Running` 上。
+    connections: Connections,
 }
 
 impl ComputeCenter {
@@ -298,17 +320,27 @@ impl ComputeCenter {
             .set_nonblocking(true)
             .map_err(|error| format!("设置非阻塞失败：{error}"))?;
         let stop = Arc::new(AtomicBool::new(false));
+        let connections = Connections::default();
         let token = Arc::clone(&self.token);
         let pairing = Arc::clone(&self.pairing);
 
         let stop_for_task = Arc::clone(&stop);
+        let connections_for_task = connections.clone();
         // `from_std` 必须在 tokio 的运行环境里调（普通测试线程里没有 reactor），
         // 所以监听套接字在这一步之前就建好了——端口占用这类错也就还能同步报出来。
         tauri::async_runtime::spawn(async move {
             let Ok(listener) = TcpListener::from_std(listener) else {
                 return;
             };
-            serve(listener, token, Arc::clone(&pairing), stop_for_task, context).await;
+            serve(
+                listener,
+                token,
+                Arc::clone(&pairing),
+                stop_for_task,
+                connections_for_task,
+                context,
+            )
+            .await;
         });
         let discovery = if port != 0 {
             let discovery_stop = Arc::clone(&stop);
@@ -316,7 +348,12 @@ impl ComputeCenter {
         } else {
             None
         };
-        *guard = Some(Running { port: bound, stop, discovery });
+        *guard = Some(Running {
+            port: bound,
+            stop,
+            discovery,
+            connections,
+        });
         Ok(bound)
     }
 
@@ -325,6 +362,12 @@ impl ComputeCenter {
         let running = self.inner.lock().ok().and_then(|mut guard| guard.take());
         if let Some(running) = running {
             running.stop.store(true, Ordering::SeqCst);
+            // 存量连接：**全部收掉**，而不是留着等它们各自的期限到点（docs/175 R05）。
+            // 从前 `stop` 只叫停 accept 那一圈，已经 spawn 出去的 handler 谁也不管，
+            // 于是一条半开连接会一直挂到它自己超时——而旧代码那条路根本没有期限。
+            // 收掉一条连接 = 把它那条任务 abort 掉：未来被丢掉，`TcpStream` 随之析构
+            // （对面立刻看到 FIN），在途的那一次计算也会在下一个取消点上退出来。
+            running.connections.close_all();
             let _ = std::net::TcpStream::connect(("127.0.0.1", running.port));
             if let Some(discovery) = running.discovery {
                 if let Ok(socket) = std::net::UdpSocket::bind("127.0.0.1:0") {
@@ -469,6 +512,315 @@ fn dlssnr_capability(
     }
 }
 
+/// 服务端设置里与远端处理有关的那几项：**一次读完就定格**（docs/175 R01）。
+///
+/// 这份快照是远端处理唯一的设置来源：请求进来时读一次，之后整条链只读它。中途再回头读本机
+/// 偏好就会出现「第一阶段按旧设置算、第二阶段按新设置算」——同一页的两个阶段各用一份模型或
+/// 参数，出来的东西既不是旧版本也不是新版本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSettings {
+    /// `off` / `cpu` / `auto`。
+    pub upscale_backend: String,
+    /// 服务端默认的超分模型 id（空 = 没配）。
+    pub upscale_model: String,
+    /// DLSSNR 的层参数（JSON 文本，空 = 用默认那一套）。
+    pub dlssnr_passes: String,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self {
+            upscale_backend: "auto".to_string(),
+            upscale_model: String::new(),
+            dlssnr_passes: String::new(),
+        }
+    }
+}
+
+impl RemoteSettings {
+    /// 从本机偏好里取这一次要用的几项。
+    pub fn from_preferences(preferences: &crate::settings::PreferenceSnapshot) -> Self {
+        Self {
+            upscale_backend: preferences.upscale_backend.clone(),
+            upscale_model: preferences.upscale_model.clone(),
+            dlssnr_passes: preferences.dlssnr_passes.clone(),
+        }
+    }
+
+    /// 超分这一档在这台机器上是不是关着的（设置里那一栏是 `off`）。
+    pub fn upscale_off(&self) -> bool {
+        self.upscale_backend == "off"
+    }
+}
+
+/// 客户端显式点名要「没有模型的最近邻」时用的 id。
+///
+/// 空 id **不算**显式点名：从前空 id 会悄悄落到最近邻上，于是「服务端压根没配模型」被回成
+/// 一次成功的超分（内容只是被放大了），客户端还会把它当成模型产物存下来。显式点名才是那条
+/// 保留下来的用途（docs/175 R01）。
+pub const EXPLICIT_NEAREST_MODEL: &str = "nearest";
+
+/// 一次远端请求的**冻结处理计划**：模型、参数、链顺序只解析一次，之后每一步都只读它。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessPlan {
+    /// 实际要做的档，按顺序（动图下会被裁掉改像素的那些）。
+    pub steps: Vec<String>,
+    /// 超分那一档实际用的模型 id（空 = 明确点名的最近邻）。
+    pub model_id: String,
+    /// 最近邻的放大倍数。
+    pub scale: Option<u32>,
+    /// 归一化之后的 DLSSNR 参数（这也是它进身份的那一版）。
+    pub dlssnr: serde_json::Value,
+    /// 这一页什么都不做、原样交回（动图，且链里没有逐帧那一档）。
+    pub passthrough: bool,
+    /// 动图这一单里被跳过的档：它们一旦先动手，动画就只剩第一帧（docs/175 R03）。
+    pub skipped: Vec<String>,
+    /// 超分这一档在缓存/调度身份里的那一串（`enhanced_revision`）。
+    pub upscale_revision: String,
+    /// 实际模型内容的版本（docs/175 R11）。
+    pub model_content: String,
+    /// DLSSNR 那一份 DLL 的内容版本（docs/175 R11）。
+    pub dll_content: String,
+    /// 这一单实际用的本地执行政策（`auto` / `cpu` / `gpu`）。
+    pub engine_policy: String,
+    /// 这份**实际处理计划**的 revision：模型内容 + DLL 内容 + 归一化参数 + 链顺序 + 政策。
+    pub revision: String,
+}
+
+impl ProcessPlan {
+    /// 把一次请求解析成计划。`settings` 是**请求进来那一刻**读到的服务端设置；`animated`
+    /// 是这一页是不是动图（由字节判定，与 [`process`] 里那条规则同一把尺子）。
+    fn resolve(
+        model_data: &Path,
+        data: &Path,
+        params: &ProcessParams,
+        settings: &RemoteSettings,
+        animated: bool,
+    ) -> Result<Self, String> {
+        let mut steps: Vec<String> = if params.chain.is_empty() {
+            if !matches!(params.op.as_str(), "upscale" | "dlssnr") {
+                return Err(format!("不认识的处理方式：{}", params.op));
+            }
+            vec![params.op.clone()]
+        } else {
+            // 改写上限是两道——两档都做一遍就是全部；重复的那一档没有第二次的意义
+            // （同样的模型吃同样的字节出来还是一样）。
+            let mut unique: Vec<String> = Vec::new();
+            for step in &params.chain {
+                if !matches!(step.as_str(), "upscale" | "dlssnr") {
+                    return Err(format!("不认识的处理方式：{step}"));
+                }
+                if !unique.iter().any(|known| known == step) {
+                    unique.push(step.clone());
+                }
+            }
+            unique
+        };
+        // 动图原样交回这一条规则只写一处：改像素的处理方式一旦先动手，出来的就只有第一帧，
+        // 回一个「看着成功、其实丢帧」的结果比报错更坏。DLSSNR 不在此列——worker 那边自己
+        // 会逐帧走一遍再编回 APNG。所以一串里有它时，把前面那些**会丢帧的档从计划里摘掉**
+        // （记在 `skipped` 里），让动画原样走到逐帧那一档（docs/175 R03）。
+        let mut skipped: Vec<String> = Vec::new();
+        let mut passthrough = false;
+        if animated {
+            if steps.iter().any(|step| step == "dlssnr") {
+                skipped = steps
+                    .iter()
+                    .filter(|step| step.as_str() != "dlssnr")
+                    .cloned()
+                    .collect();
+                steps.retain(|step| step == "dlssnr");
+            } else {
+                passthrough = true;
+                skipped = std::mem::take(&mut steps);
+            }
+        }
+        // 超分那一档用哪个模型：客户端显式点名（老客户端 / 显式最近邻）优先，否则跟随这台
+        // 服务端自己的设置。整条计划就在这里定死——不再问第二次本机偏好。
+        let named = params.model_id.as_deref().map(str::trim).unwrap_or_default();
+        let mut explicit_nearest = named == EXPLICIT_NEAREST_MODEL;
+        let mut model_id = if named.is_empty() {
+            settings.upscale_model.trim().to_string()
+        } else {
+            named.to_string()
+        };
+        if model_id == EXPLICIT_NEAREST_MODEL {
+            explicit_nearest = true;
+            model_id.clear();
+        }
+        let wants_upscale = steps.iter().any(|step| step == "upscale");
+        if wants_upscale && named.is_empty() && settings.upscale_off() {
+            return Err("服务端设置里超分是关的（off）——这一页不在这里超分".to_string());
+        }
+        if wants_upscale && model_id.is_empty() && !explicit_nearest {
+            // 没有有效模型就是**结构化不可用**，不许把最近邻伪装成所选模型成功。
+            if settings.upscale_off() {
+                return Err("服务端设置里超分是关的（off）——这一页不在这里超分".to_string());
+            }
+            return Err(format!(
+                "服务端没有配置超分模型（设置里那一栏是空的）：先在服务端选一个，或者显式指名 {EXPLICIT_NEAREST_MODEL} 用最近邻"
+            ));
+        }
+        let resolved = if wants_upscale && !explicit_nearest {
+            match crate::inference::resolve_upscaler(model_data, &model_id) {
+                Some(found) => Some(found),
+                None => return Err(format!("没有装这个超分模型：{model_id}")),
+            }
+        } else {
+            None
+        };
+        let wants_dlssnr = steps.iter().any(|step| step == "dlssnr");
+        let dlssnr = if wants_dlssnr {
+            normalized_dlssnr(params.dlssnr.as_ref(), settings)?
+        } else {
+            serde_json::Value::Null
+        };
+        let model_content = if explicit_nearest {
+            "nearest".to_string()
+        } else if wants_upscale {
+            crate::inference::upscaler_content_revision(&resolved)
+        } else {
+            String::new()
+        };
+        let dll_content = if wants_dlssnr { dll_content(data) } else { String::new() };
+        let engine_policy = plan_engine_policy(&steps, settings);
+        let mut revision = plan_revision(&steps, &model_id, &model_content, &dlssnr, &dll_content, &engine_policy);
+        if explicit_nearest {
+            revision = blake3::hash(format!("{revision}:scale:{}", params.scale.unwrap_or(2)).as_bytes()).to_hex().to_string();
+        }
+        Ok(Self {
+            steps,
+            model_id,
+            scale: params.scale,
+            dlssnr,
+            passthrough,
+            skipped,
+            upscale_revision: crate::inference::enhanced_revision(&resolved),
+            model_content,
+            dll_content,
+            engine_policy,
+            revision,
+        })
+    }
+}
+
+/// 计划身份里那一栏「这台机器打算用谁」：超分那一档是本机执行政策，DLSSNR 那一档只有显卡
+/// 一条路（没有 CPU 回退）。都从源头派生，不另写拼法。
+fn plan_engine_policy(steps: &[String], settings: &RemoteSettings) -> String {
+    if steps.iter().any(|step| step == "upscale") {
+        if settings.upscale_backend == "cpu" {
+            "cpu".to_string()
+        } else {
+            crate::compute::reader::engine_policy_label().to_string()
+        }
+    } else if steps.iter().any(|step| step == "dlssnr") {
+        "gpu".to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// 计划身份串：把「会漂移的东西」全放进去，客户端拿它当缓存键里「对面那一版」。
+///
+/// 键里只有 device/source/chain 是不够的（docs/175 R11）：服务端换了模型权重、换了参数或换
+/// 了那份 DLL，链没变、设备没变，旧产物却被当成新策略的产物接着用。这里只放**哈希与
+/// 归一化参数**，不放令牌、不放 API key。
+fn plan_revision(
+    steps: &[String],
+    model_id: &str,
+    model_content: &str,
+    dlssnr: &serde_json::Value,
+    dll_content: &str,
+    engine_policy: &str,
+) -> String {
+    let canonical = serde_json::json!({
+        "revision": 1,
+        "protocol": PROTOCOL_VERSION,
+        "steps": steps,
+        "model": model_id,
+        "modelContent": model_content,
+        "dlssnr": dlssnr,
+        "dll": dll_content,
+        "policy": engine_policy,
+    });
+    blake3::hash(canonical.to_string().as_bytes()).to_hex().to_string()
+}
+
+/// 服务端配置版本：与请求链无关，能力清单和处理响应必须返回同一语义的版本。
+///
+/// 它覆盖客户端键里没有的三样：模型内容、DLSSNR 参数、那份 DLL 的内容。链顺序由请求自带。
+fn settings_revision(model_data: &Path, data: &Path, settings: &RemoteSettings) -> String {
+    let resolved = if settings.upscale_off() || settings.upscale_model.trim().is_empty() {
+        None
+    } else {
+        crate::inference::resolve_upscaler(model_data, settings.upscale_model.trim())
+    };
+    let dlssnr = normalized_dlssnr(None, settings).unwrap_or(serde_json::Value::Null);
+    plan_revision(
+        &["upscale".to_string(), "dlssnr".to_string()],
+        settings.upscale_model.trim(),
+        &crate::inference::upscaler_content_revision(&resolved),
+        &dlssnr,
+        &dll_content(data),
+        &format!("{}:{}", settings.upscale_backend, plan_engine_policy(&["upscale".into()], settings)),
+    )
+}
+
+/// DLSSNR 那一份片段 DLL 的内容版本（读不到就是空串：那也是「这台机器上没有它」这个事实）。
+#[cfg(windows)]
+fn dll_content(data: &Path) -> String {
+    let Ok(mut file) = std::fs::File::open(crate::dlssnr::dll_path(data)) else { return String::new() };
+    let mut hasher = blake3::Hasher::new();
+    match std::io::copy(&mut file, &mut hasher) {
+        Ok(_) => format!("blake3:{}", hasher.finalize().to_hex()),
+        Err(_) => String::new(),
+    }
+}
+
+#[cfg(not(windows))]
+fn dll_content(_data: &Path) -> String {
+    String::new()
+}
+
+/// 请求里给的参数优先，没给就取服务端设置里那一份，都没有就是默认那一套。**归一化只做
+/// 一次**，结果既进计划的身份也交给 worker。
+#[cfg(windows)]
+fn normalized_dlssnr(
+    requested: Option<&serde_json::Value>,
+    settings: &RemoteSettings,
+) -> Result<serde_json::Value, String> {
+    use crate::dlssnr::DlssnrSettings;
+
+    let value = match requested {
+        Some(value) => value.clone(),
+        None if settings.dlssnr_passes.trim().is_empty() => serde_json::Value::Null,
+        None => serde_json::from_str::<serde_json::Value>(&settings.dlssnr_passes)
+            .map_err(|error| format!("服务端设置里的 DLSSNR 参数不是合法 JSON：{error}"))?,
+    };
+    let parsed = if value.is_null() {
+        DlssnrSettings::default()
+    } else {
+        serde_json::from_value::<DlssnrSettings>(value)
+            .map_err(|error| format!("DLSSNR 参数不对：{error}"))?
+    };
+    serde_json::to_value(parsed.normalized()).map_err(|error| error.to_string())
+}
+
+#[cfg(not(windows))]
+fn normalized_dlssnr(
+    requested: Option<&serde_json::Value>,
+    settings: &RemoteSettings,
+) -> Result<serde_json::Value, String> {
+    if let Some(value) = requested {
+        return Ok(value.clone());
+    }
+    if settings.dlssnr_passes.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(&settings.dlssnr_passes)
+        .map_err(|error| format!("服务端设置里的 DLSSNR 参数不是合法 JSON：{error}"))
+}
+
 /// 请求要干的事。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -503,10 +855,10 @@ impl ProcessParams {
 /// 一次处理：字节进、字节出。三个方向都收敛到这里。
 ///
 /// 三个方向**都不在宿主进程里算了**：`manager` 是算力编排的把手，装 ONNX 模型的那一档、
-/// DLSSNR 那一档都必须经由它交给 worker。这不是可选的分流——Task 8 的出口就是
-/// 「宿主进程里没有 ONNX Runtime，也没有 NGX 资源」，所以这里不能再留一条「引擎在宿主就地
-/// 跑」的兜底来路。宿主自己还能算的只剩两样：内置的 shader 链（Anime4K）与没有模型的最近邻，
-/// 它们本来也不用 ONNX Runtime。
+/// 内置的 Anime4K 那一档、DLSSNR 那一档都必须经由它交给 worker。这不是可选的分流——Task 8
+/// 的出口就是「宿主进程里没有 ONNX Runtime，也没有 NGX 资源」，所以这里不能再留一条「引擎
+/// 在宿主就地跑」的兜底来路（docs/175 R02：内置链从前是绕开 worker 在宿主 CPU 上跑的）。
+/// 宿主自己还能算的只剩一样：没有模型的最近邻，而且它现在**要点名才算**。
 ///
 /// `cancelled` 是**这条请求自己**的取消牌：对面把连接丢了就该停下（见 `handle_connection`
 /// 里那个读端观察任务）。它不是「本机用户走开了」那张牌——那两张牌各管各的。
@@ -518,95 +870,147 @@ pub fn process(
     bytes: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
+    process_planned(
+        manager,
+        model_data,
+        data,
+        params,
+        &RemoteSettings::default(),
+        bytes,
+        cancelled,
+    )
+    .map(|(bytes, _plan)| bytes)
+}
+
+/// 带服务端设置快照的那一版：服务端自己那条来路走它，并把实际用的计划一起交回去
+/// （响应头要靠它说「这一次真正用的是哪一版」，docs/175 R11）。
+///
+/// 设置在这里读**一次**，整条链只读这份计划——中途不再回头读本机偏好（docs/175 R01）。
+pub fn process_planned(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    model_data: &Path,
+    data: &Path,
+    params: &ProcessParams,
+    settings: &RemoteSettings,
+    bytes: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(Vec<u8>, ProcessPlan), String> {
     if bytes.is_empty() {
         return Err("请求体是空的（要发图片字节）".to_string());
     }
-    // 要做哪几档：`chain` 说了算，没给就按 `op` 单做一档。改写上限是两道——两档都做一遍
-    // 就是全部；重复的那一档没有第二次的意义（同样的模型吃同样的字节出来还是一样）。
-    let steps: Vec<&str> = if params.chain.is_empty() {
-        vec![params.op.as_str()]
-    } else {
-        let mut seen: Vec<&str> = Vec::new();
-        for step in &params.chain {
-            let step = step.as_str();
-            if !matches!(step, "upscale" | "dlssnr") {
-                return Err(format!("不认识的处理方式：{step}"));
-            }
-            if !seen.contains(&step) {
-                seen.push(step);
-            }
-        }
-        seen
-    };
-    // 动图原样交回这一条规则只写一处：改像素的两种处理方式一旦动手，出来的就只有第一
-    // 帧，回一个「看着成功、其实丢帧」的结果比报错更坏。DLSSNR 不在此列——worker 那边
-    // 自己会逐帧走一遍再编回 APNG（见 `worker/src/dlssnr.rs`）；一串里有它，整串都不走
-    // 这条短路（它前面几档也改像素）。
-    if !steps.contains(&"dlssnr") && crate::cache::is_animated_image(bytes) {
-        return Ok(bytes.to_vec());
+    let plan = ProcessPlan::resolve(
+        model_data,
+        data,
+        params,
+        settings,
+        crate::cache::is_animated_image(bytes),
+    )?;
+    if plan.passthrough {
+        return Ok((bytes.to_vec(), plan));
     }
     let mut current = bytes.to_vec();
-    for step in steps {
+    for step in plan.steps.clone() {
         if cancelled() {
             return Err("对面把这条连接丢了".to_string());
         }
-        current = match step {
-            "upscale" => upscale_bytes(manager, model_data, params, &current, cancelled)?,
-            "dlssnr" => dlssnr_bytes(manager, data, params, &current, cancelled)?,
+        current = match step.as_str() {
+            "upscale" => upscale_bytes(manager, model_data, &plan, &current, cancelled)?,
+            "dlssnr" => dlssnr_bytes(manager, data, &plan, &current, cancelled)?,
             other => return Err(format!("不认识的处理方式：{other}")),
         };
     }
-    Ok(current)
+    let resolved = if plan.model_id.is_empty() { None } else {
+        crate::inference::resolve_upscaler(model_data, &plan.model_id)
+    };
+    if plan.steps.iter().any(|step| step == "upscale") && !plan.model_id.is_empty()
+        && crate::inference::upscaler_content_revision(&resolved) != plan.model_content {
+        return Err("超分模型在处理期间发生变化，请重新请求".into());
+    }
+    if plan.steps.iter().any(|step| step == "dlssnr") && dll_content(data) != plan.dll_content {
+        return Err("DLSSNR DLL 在处理期间发生变化，请重新请求".into());
+    }
+    Ok((current, plan))
 }
 
-/// 超分：装了 ONNX 模型的那一档交给计算进程，其余两档（内置 shader 链、没有模型的
-/// 最近邻）留在宿主——`run_host_upscale_bytes` 自己会把 ONNX 那一档顶回来。
+/// 超分：装了 ONNX 模型的那一档与**内置 shader 链**那一档都交给计算进程，宿主只留下
+/// 「显式点名的最近邻」那一条（`plan.model_id` 为空时才是它）。
+///
+/// docs/175 R02：内置链从前走的是 `run_host_upscale_bytes`，于是它在**宿主 CPU 上**跑——
+/// 既绕开了本地执行政策（设置里选了 auto/gpu 也照样按 CPU 算），也绕开了 worker 那一侧的
+/// 引擎选择与回退报告。现在两档都只说「要哪一档」，引擎由 worker 按政策挑。
 fn upscale_bytes(
     manager: Option<&crate::compute::manager::ComputeManager>,
     model_data: &Path,
-    params: &ProcessParams,
+    plan: &ProcessPlan,
     source: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
-    let model_id = params.model_id.as_deref().unwrap_or_default();
-    let resolved = crate::inference::resolve_upscaler(model_data, model_id);
-    match &resolved {
-        Some(crate::inference::ResolvedUpscaler::Onnx(_, manifest)) => {
-            let manager = manager.ok_or_else(no_orchestration)?;
-            let settings_id = crate::inference::enhanced_revision(&resolved);
-            let input_id = format!("remote:{}", blake3::hash(source).to_hex());
-            crate::compute::proxy::upscale(
-                manager,
-                crate::compute::proxy::UpscaleJob {
-                    input_id: &input_id,
-                    settings_id: &settings_id,
-                    // 这一页是从网络那头来的字节，没有本机归档与页码可讲；四元身份里的
-                    // 这一栏就照实说「远端字节」，而不是借一个像模像样的页码。
-                    source_revision: "remote-bytes",
-                    // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
-                    priority: crate::compute::scheduler::Priority::Background,
-                    // 倍数由模型说了算（`scale` 是模型自己的属性），这里不再让请求体
-                    // 覆盖它——覆盖会让同一份输入因参数不同落进两个任务身份。
-                    output_scale: None,
-                    stage: crate::compute::proxy::StageSpec {
-                        stage_id: crate::compute::reader::UPSCALE_STAGE_ID,
-                        model_spec_id: model_id,
-                        scale: manifest.scale.clamp(1, 4),
-                        page: source,
-                    },
-                },
-                cancelled,
-            )
-            .map_err(proxy_failure)
-        }
-        _ => crate::inference::run_host_upscale_bytes(model_data, model_id, source, params.scale),
+    let model_id = plan.model_id.as_str();
+    let resolved = if model_id.is_empty() {
+        None
+    } else {
+        crate::inference::resolve_upscaler(model_data, model_id)
+    };
+    if !model_id.is_empty() && (resolved.is_none()
+        || crate::inference::upscaler_content_revision(&resolved) != plan.model_content) {
+        return Err("超分模型在计划解析后发生变化，请重新请求".into());
     }
+    // 交给计算进程的那两档：ONNX 用模型自己的倍率，内置链用链自己的倍率。
+    let delegated: Option<(&str, u32)> = match &resolved {
+        Some(crate::inference::ResolvedUpscaler::Onnx(_, manifest)) => {
+            Some((model_id, manifest.scale.clamp(1, 4)))
+        }
+        // 内置链的名字就是它的模型 id：`compute::models` 认出来之后补 `builtin`。
+        Some(crate::inference::ResolvedUpscaler::Anime4k(preset)) => {
+            Some((preset.id, preset.scale.clamp(1, 4)))
+        }
+        None => None,
+    };
+    let Some((model_spec_id, scale)) = delegated else {
+        return crate::inference::run_host_upscale_bytes(model_data, model_id, source, plan.scale);
+    };
+    let manager = manager.ok_or_else(no_orchestration)?;
+    let input_id = format!("remote:{}", blake3::hash(source).to_hex());
+    crate::compute::proxy::upscale(
+        manager,
+        crate::compute::proxy::UpscaleJob {
+            input_id: &input_id,
+            policy: if plan.engine_policy == "cpu" {
+                yomika_compute_protocol::EnginePolicy::Cpu
+            } else {
+                crate::compute::reader::engine_policy()
+            },
+            // Include actual model content and the frozen policy in the scheduler key.
+            settings_id: &plan.revision,
+            // 这一页是从网络那头来的字节，没有本机归档与页码可讲；四元身份里的
+            // 这一栏就照实说「远端字节」，而不是借一个像模像样的页码。
+            source_revision: "remote-bytes",
+            // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
+            priority: crate::compute::scheduler::Priority::Background,
+            // 倍数由模型说了算（`scale` 是模型自己的属性），这里不再让请求体
+            // 覆盖它——覆盖会让同一份输入因参数不同落进两个任务身份。
+            output_scale: None,
+            stage: crate::compute::proxy::StageSpec {
+                stage_id: crate::compute::reader::UPSCALE_STAGE_ID,
+                model_spec_id,
+                scale,
+                page: source,
+            },
+        },
+        cancelled,
+    )
+    .map_err(proxy_failure)
 }
 
-/// 编排没起来时的说法：这条来路现在**只能**走 worker，宿主手里已经没有引擎了，
-/// 所以这是一句诚实的「没法算」，不是「过会儿再来」。
+/// 编排没起来时的说法：远端超分**只走计算进程**。
+///
+/// 2026-10-16 复审指出旧文案「宿主手里已经没有它的引擎了」说过头了：
+/// `inference::run_host_upscale_bytes` 仍然编在宿主里、也仍然能开内置链，只是**这条来路
+/// 已经不给它输入**——远端页面在这里一律先解析成计划（`upscale_bytes` 的 `resolved`），
+/// 内置链与 ONNX 两档都进 `delegated` 交给 worker，只有「显式不点名模型」的最近邻才落到
+/// 宿主（`model_id` 为空那一支）。所以这句话说「这条来路只走计算进程」，不说「宿主没有引擎」。
 fn no_orchestration() -> String {
-    "计算编排还没起来，这一页没法交给计算进程（宿主这边已经没有它的引擎了）".to_string()
+    "计算编排还没起来，这一页没法交给计算进程（远端超分只走计算进程）".to_string()
 }
 
 /// 字节桥的错误压成字符串：这一层没有错误码可回（HTTP 那边统一回
@@ -627,18 +1031,20 @@ fn proxy_failure(error: crate::compute::proxy::ProxyError) -> String {
 fn dlssnr_bytes(
     manager: Option<&crate::compute::manager::ComputeManager>,
     data: &Path,
-    params: &ProcessParams,
+    plan: &ProcessPlan,
     source: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
     use crate::dlssnr::DlssnrSettings;
 
-    let settings: DlssnrSettings = match &params.dlssnr {
-        Some(value) => serde_json::from_value::<DlssnrSettings>(value.clone())
-            .map_err(|error| format!("DLSSNR 参数不对：{error}"))?
-            .normalized(),
-        None => DlssnrSettings::default(),
-    };
+    // 参数取自计划：归一化在 `ProcessPlan::resolve` 里已经做过一次，这里不再回头问请求、
+    // 也不再问本机偏好（docs/175 R01）。
+    if dll_content(data) != plan.dll_content {
+        return Err("DLSSNR DLL 在计划解析后发生变化，请重新请求".into());
+    }
+    let settings: DlssnrSettings = serde_json::from_value::<DlssnrSettings>(plan.dlssnr.clone())
+        .map_err(|error| format!("DLSSNR 参数不对：{error}"))?
+        .normalized();
     crate::dlssnr::runtime_gate_with(
         data,
         crate::dlssnr::engine_facts(
@@ -649,7 +1055,7 @@ fn dlssnr_bytes(
         .gpu,
     )?;
     let manager = manager.ok_or_else(no_orchestration)?;
-    let settings_id = crate::dlssnr::output_revision(data, None, &settings);
+    let settings_id = plan.revision.clone();
     let input_id = format!("remote:{}", blake3::hash(source).to_hex());
     let outcome = crate::compute::proxy::dlssnr(
         manager,
@@ -688,7 +1094,7 @@ fn dlssnr_bytes(
 fn dlssnr_bytes(
     _manager: Option<&crate::compute::manager::ComputeManager>,
     _data: &Path,
-    _params: &ProcessParams,
+    _plan: &ProcessPlan,
     _source: &[u8],
     _cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
@@ -738,7 +1144,28 @@ impl RequestError {
     }
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, RequestError> {
+/// 请求头读完了、体还没读的那一段（docs/175 R05）。
+///
+/// 拆开是因为「先读满体再鉴权」是这条来路最大的一个坑：一条令牌不对的连接也能让本机先
+/// 备下一份 64 MB 的缓冲，而且在体读进来之前它不占任何预算。
+struct RequestHead {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    content_length: usize,
+    /// 读头那一次多读进来的字节——它们已经是体的开头了，不能丢。
+    leftover: Vec<u8>,
+}
+
+impl RequestHead {
+    fn header(&self, name: &str) -> &str {
+        self.headers.get(name).map(String::as_str).unwrap_or_default()
+    }
+}
+
+/// 只读请求头，不读体。头上给一个期限（docs/175 R05）：一个字节一个字节发的半开连接
+/// 从前可以让服务端一直等它。
+async fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestError> {
     let mut buffer = Vec::with_capacity(8 * 1024);
     let header_end = loop {
         if let Some(at) = find_headers_end(&buffer) {
@@ -751,9 +1178,23 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, RequestError> {
             ));
         }
         let mut chunk = [0u8; 8 * 1024];
-        let read = stream.read(&mut chunk).await.map_err(|error| {
-            RequestError::bad_request("INVALID_RESPONSE", format!("读请求失败：{error}"))
-        })?;
+        let read = match tokio::time::timeout(HEAD_DEADLINE, stream.read(&mut chunk)).await {
+            Ok(Ok(read)) => read,
+            Ok(Err(error)) => {
+                return Err(RequestError::bad_request(
+                    "INVALID_RESPONSE",
+                    format!("读请求失败：{error}"),
+                ))
+            }
+            Err(_) => {
+                return Err(RequestError {
+                    status: 408,
+                    reason: "Request Timeout",
+                    code: "INVALID_RESPONSE",
+                    message: format!("请求头没有在 {} 秒内发完", HEAD_DEADLINE.as_secs()),
+                })
+            }
+        };
         if read == 0 {
             return Err(RequestError::bad_request(
                 "INVALID_RESPONSE",
@@ -815,12 +1256,44 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, RequestError> {
         });
     }
 
-    let mut body = buffer[header_end + 4..].to_vec();
+    Ok(RequestHead {
+        method,
+        path,
+        headers,
+        content_length,
+        leftover: buffer[header_end + 4..].to_vec(),
+    })
+}
+
+/// 读体：只读对面声明的那点字节，给一个总期限（docs/175 R05）。期限到了还没读满就当场
+/// 报「不完整」，而不是把这条连接无限期挂在读上。
+async fn read_request_body(
+    stream: &mut TcpStream,
+    content_length: usize,
+    leftover: Vec<u8>,
+) -> Result<Vec<u8>, RequestError> {
+    let mut body = leftover;
+    let deadline = tokio::time::Instant::now() + BODY_DEADLINE;
     while body.len() < content_length {
         let mut chunk = vec![0u8; (content_length - body.len()).min(64 * 1024)];
-        let read = stream.read(&mut chunk).await.map_err(|error| {
-            RequestError::bad_request("INCOMPLETE_BODY", format!("读请求体失败：{error}"))
-        })?;
+        let read = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(read)) => read,
+            Ok(Err(error)) => {
+                return Err(RequestError::bad_request(
+                    "INCOMPLETE_BODY",
+                    format!("读请求体失败：{error}"),
+                ))
+            }
+            Err(_) => {
+                return Err(RequestError::bad_request(
+                    "INCOMPLETE_BODY",
+                    format!(
+                        "请求体没在期限内读完：声明 {content_length} 字节，只收到 {}",
+                        body.len()
+                    ),
+                ))
+            }
+        };
         if read == 0 {
             break;
         }
@@ -839,12 +1312,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, RequestError> {
     }
     body.truncate(content_length);
 
-    Ok(Request {
-        method,
-        path,
-        headers,
-        body,
-    })
+    Ok(body)
 }
 
 fn find_headers_end(buffer: &[u8]) -> Option<usize> {
@@ -860,10 +1328,30 @@ async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), String> {
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    write_response_with(stream, status, reason, content_type, &[], body).await
+}
+
+/// 带额外响应头的那一版：远端处理那条来路要用它说「这一次真正用的是哪一版计划」
+/// （docs/175 R11）。做成参数而不是常量，别的来路的回包形状一个字节都不变。
+async fn write_response_with<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Result<(), String> {
+    let mut header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    for (name, value) in extra {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
+    }
+    header.push_str("\r\n");
     stream
         .write_all(header.as_bytes())
         .await
@@ -938,11 +1426,140 @@ fn notify_pairing_code(context: &ServerContext, code: &str, name: &str, peer: &s
     );
 }
 
+/// 服务这一侧收着的连接（docs/175 R05）。
+///
+/// 从前 `serve` 是「接一个就 spawn 一个」：连接数没有上限、请求体在读完之前没有期限、
+/// 几条大上传可以叠在一起把内存吃光，`stop` 也只叫停 accept 那一圈。四样东西在这里收口。
+#[derive(Clone, Default)]
+struct Connections {
+    inner: Arc<ConnectionsInner>,
+}
+
+#[derive(Default)]
+struct ConnectionsInner {
+    /// 连接号 -> 那条连接的任务。`stop` 要把它们全 abort 掉，所以句柄得留着；
+    /// 占位时先放 `None`（任务还没 spawn 出来），`attach` 再补上。
+    open: Mutex<std::collections::BTreeMap<u64, Option<tauri::async_runtime::JoinHandle<()>>>>,
+    /// 在途请求体的字节数——对面**声明**的长度，还没读进来就先占着。单条上限是
+    /// [`MAX_BODY`]，但几条大上传叠在一起也能把内存吃光。
+    inflight: std::sync::atomic::AtomicUsize,
+    next_id: std::sync::atomic::AtomicU64,
+    closed: AtomicBool,
+}
+
+/// 一条请求体额度：这条连接走完（或者断了）就还回去。
+struct BodyReservation {
+    connections: Connections,
+    bytes: usize,
+}
+
+impl Drop for BodyReservation {
+    fn drop(&mut self) {
+        self.connections
+            .inner
+            .inflight
+            .fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
+impl Connections {
+    fn len(&self) -> usize {
+        self.inner
+            .open
+            .lock()
+            .map(|open| open.len())
+            .unwrap_or(0)
+    }
+
+    /// 占一个连接位。满了回 `None`：调用方当场回 503，而不是先接下来再慢慢排。
+    fn reserve(&self) -> Option<u64> {
+        let mut open = self.inner.open.lock().ok()?;
+        if self.inner.closed.load(Ordering::SeqCst) || open.len() >= MAX_CONNECTIONS {
+            return None;
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        open.insert(id, None);
+        Some(id)
+    }
+
+    /// 把 spawn 出来的任务挂到已经占好的号上。任务在挂上来之前就结束的话，
+    /// 号可能已被 `finish` 或 `stop` 摘掉；缺号时必须 abort，避免脱管任务。
+    fn attach(&self, id: u64, task: tauri::async_runtime::JoinHandle<()>) {
+        if let Ok(mut open) = self.inner.open.lock() {
+            if let Some(slot) = open.get_mut(&id) {
+                *slot = Some(task);
+                return;
+            }
+        }
+        // stop can remove a reserved slot before spawn returns its handle.
+        task.abort();
+    }
+
+    fn finish(&self, id: u64) {
+        if let Ok(mut open) = self.inner.open.lock() {
+            open.remove(&id);
+        }
+    }
+
+    /// 占住「声明了这么多字节的体」。超出总预算回 `None`（调用方回 503），
+    /// 而不是先把体读进来再说。
+    fn hold_body(&self, declared: usize) -> Option<BodyReservation> {
+        loop {
+            let current = self.inner.inflight.load(Ordering::SeqCst);
+            if current.saturating_add(declared) > MAX_INFLIGHT_BODY_BYTES {
+                return None;
+            }
+            if self
+                .inner
+                .inflight
+                .compare_exchange(current, current + declared, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Some(BodyReservation {
+                    connections: self.clone(),
+                    bytes: declared,
+                });
+            }
+        }
+    }
+
+    /// 停服务：把已经收下的连接全收掉（abort 掉任务 = 丢掉未来 = 析构 `TcpStream`）。
+    fn close_all(&self) {
+        let open = match self.inner.open.lock() {
+            Ok(mut open) => {
+                self.inner.closed.store(true, Ordering::SeqCst);
+                std::mem::take(&mut *open)
+            },
+            Err(_) => return,
+        };
+        for (_, task) in open {
+            if let Some(task) = task {
+                task.abort();
+            }
+        }
+    }
+}
+
+/// Dropping a handler (including stop/abort) cancels its blocking computation and
+/// its socket reader. A detached JoinHandle alone would keep both alive.
+struct RequestLifetime {
+    gone: Arc<AtomicBool>,
+    watcher: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl Drop for RequestLifetime {
+    fn drop(&mut self) {
+        self.gone.store(true, Ordering::SeqCst);
+        self.watcher.abort();
+    }
+}
+
 async fn serve(
     listener: TcpListener,
     token: Arc<RwLock<String>>,
     pairing: Arc<PairingState>,
     stop: Arc<AtomicBool>,
+    connections: Connections,
     context: ServerContext,
 ) {
     loop {
@@ -950,16 +1567,29 @@ async fn serve(
             break;
         }
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok((mut stream, _)) => {
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
+                // 连接数上限（docs/175 R05）：满了当场说清楚，而不是接下来慢慢排。
+                // 这一条连请求头都还没读——回包不需要先读头（`Connection: close`）。
+                let Some(id) = connections.reserve() else {
+                    let body = error_body(
+                        "COMPUTE_RESOURCE_LIMIT",
+                        &format!("连接已经满了（上限 {MAX_CONNECTIONS} 条）：过一会儿再试"),
+                    );
+                    let _ = write_json(&mut stream, 503, "Service Unavailable", &body).await;
+                    continue;
+                };
                 let token = Arc::clone(&token);
                 let pairing = Arc::clone(&pairing);
                 let context = context.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = handle_connection(stream, token, pairing, context).await;
+                let for_task = connections.clone();
+                let task = tauri::async_runtime::spawn(async move {
+                    let _ = handle_connection(stream, token, pairing, context, for_task.clone()).await;
+                    for_task.finish(id);
                 });
+                connections.attach(id, task);
             }
             // 单个连接出错不该让服务停：继续接下一个。
             Err(_) => continue,
@@ -972,14 +1602,79 @@ async fn handle_connection(
     token: Arc<RwLock<String>>,
     pairing: Arc<PairingState>,
     context: ServerContext,
+    connections: Connections,
 ) -> Result<(), String> {
-    let request = match read_request(&mut stream).await {
-        Ok(request) => request,
+    let head = match read_request_head(&mut stream).await {
+        Ok(head) => head,
         Err(error) => {
             let body = error_body(error.code, &error.message);
             write_json(&mut stream, error.status, error.reason, &body).await?;
             return Ok(());
         }
+    };
+
+    // 配对那两个端点只收一小段 JSON：体上限比数据端点小得多（docs/175 R05）。
+    let pairing_endpoint = matches!(head.path.as_str(), "/v2/pair/request" | "/v2/pair/confirm");
+    if pairing_endpoint && head.content_length > MAX_PAIR_BODY {
+        let error = RequestError {
+            status: 413,
+            reason: "Payload Too Large",
+            code: "INVALID_RESPONSE",
+            message: format!(
+                "配对的请求体太大（{} 字节，上限 {MAX_PAIR_BODY}）",
+                head.content_length
+            ),
+        };
+        let body = error_body(error.code, &error.message);
+        write_json(&mut stream, error.status, error.reason, &body).await?;
+        return Ok(());
+    }
+
+    // 令牌要在**体读进来之前**判（docs/175 R05）：从前是先读满整个体再鉴权，于是
+    // 一条令牌不对的连接也能让本机先备下一份 64 MB 的缓冲。配对入口与 ping 不看令牌
+    // （配对靠的是六位码，ping 只自报家门）。
+    if !pairing_endpoint && head.path != "/v2/ping" {
+        let expected = token.read().map(|guard| guard.clone()).unwrap_or_default();
+        let presented = head.header("x-yomika-token");
+        if !token_matches(&expected, presented) && !pairing.authorized(presented) {
+            let body = error_body("UNAUTHORIZED", "令牌不对（在桌面端设置页复制一份）");
+            return write_json(&mut stream, 401, "Unauthorized", &body).await;
+        }
+    }
+
+    // 在途请求体的总预算（docs/175 R05）：声明了体就先占额度，这条连接走完再还。
+    // 占不下就当场回 503，而不是先把体读进来。
+    let _reservation = if head.content_length > 0 {
+        match connections.hold_body(head.content_length) {
+            Some(reservation) => Some(reservation),
+            None => {
+                let body = error_body(
+                    "COMPUTE_RESOURCE_LIMIT",
+                    &format!(
+                        "在途请求体到预算了（上限 {MAX_INFLIGHT_BODY_BYTES} 字节）：过一会儿再试"
+                    ),
+                );
+                return write_json(&mut stream, 503, "Service Unavailable", &body).await;
+            }
+        }
+    } else {
+        None
+    };
+
+    // 体在过了令牌与预算之后才读进来。
+    let body = match read_request_body(&mut stream, head.content_length, head.leftover).await {
+        Ok(body) => body,
+        Err(error) => {
+            let payload = error_body(error.code, &error.message);
+            write_json(&mut stream, error.status, error.reason, &payload).await?;
+            return Ok(());
+        }
+    };
+    let request = Request {
+        method: head.method,
+        path: head.path,
+        headers: head.headers,
+        body,
     };
 
     // 配对入口只给出临时请求号；凭据必须凭被配对端显示的六位码取得。
@@ -1012,22 +1707,25 @@ async fn handle_connection(
         };
     }
 
-    // 数据端点仍要求凭配对码取得的令牌。
+    // 数据端点仍要求凭配对码取得的令牌（上面已经判过：这里不再重复读头）。
     if request.path == "/v2/ping" && request.method == "GET" {
         let body = serde_json::json!({ "service": SERVICE_NAME, "version": PROTOCOL_VERSION });
         return write_json(&mut stream, 200, "OK", &body.to_string()).await;
     }
 
-    let expected = token.read().map(|guard| guard.clone()).unwrap_or_default();
-    let presented = request
-        .headers
-        .get("x-yomika-token")
-        .cloned()
-        .unwrap_or_default();
-    if !token_matches(&expected, &presented) && !pairing.authorized(&presented) {
-        let body = error_body("UNAUTHORIZED", "令牌不对（在桌面端设置页复制一份）");
-        return write_json(&mut stream, 401, "Unauthorized", &body).await;
-    }
+    // 服务端设置**在这里读一次**，之后整条链只读这份快照（docs/175 R01）：从前来路会在
+    // 中途回头看本机偏好，于是同一页的两个阶段各用一份模型或参数。
+    let settings = match context.app.as_ref() {
+        Some(app) => match preferences(app) {
+            Ok(snapshot) => RemoteSettings::from_preferences(&snapshot),
+            Err(error) => {
+                let body = error_body("UNAVAILABLE", &format!("读服务端设置失败：{error}"));
+                return write_json(&mut stream, 503, "Service Unavailable", &body).await;
+            }
+        },
+        // 没有壳（单测直接起中心的那种用法）：没有本机偏好可读，那就是「什么都没配」。
+        None => RemoteSettings::default(),
+    };
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/v2/capabilities") => {
@@ -1035,13 +1733,26 @@ async fn handle_connection(
             // 取法与 `/v2/process` 同一条：取不到就是 None，那一档按装配事实答。
             let manager = context.manager();
             let name = host_name();
-            let payload = RemoteCapabilities {
+            let payload = tauri::async_runtime::spawn_blocking(move || {
+              let mut available = capabilities(&context.model_data, &context.data, manager.as_deref());
+              if let Some(upscale) = available.iter_mut().find(|item| item.id == "upscale") {
+                if settings.upscale_off() || settings.upscale_model.trim().is_empty()
+                    || crate::inference::resolve_upscaler(&context.model_data, settings.upscale_model.trim()).is_none() {
+                    upscale.ready = false;
+                    upscale.detail = "服务端未启用有效的默认超分模型".into();
+                }
+              }
+              RemoteCapabilities {
                 service: SERVICE_NAME.to_string(),
                 version: PROTOCOL_VERSION,
                 name,
-                capabilities: capabilities(&context.model_data, &context.data, manager.as_deref()),
+                capabilities: available,
                 models: crate::inference::runnable_models(&context.model_data),
-            };
+                // docs/175 R11：客户端键里 device/source/chain 三样都不含模型内容、
+                // 参数与 DLL 内容，这一栏就是补上那三样的「实际处理计划身份」。
+                revision: settings_revision(&context.model_data, &context.data, &settings),
+              }
+            }).await.map_err(|error| format!("读取服务端能力失败：{error}"))?;
             let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
             write_json(&mut stream, 200, "OK", &body).await
         }
@@ -1096,29 +1807,57 @@ async fn handle_connection(
                     gone.store(true, Ordering::SeqCst);
                 })
             };
+            let lifetime = RequestLifetime { gone: Arc::clone(&gone), watcher };
             let cancelled = {
                 let gone = Arc::clone(&gone);
                 move || gone.load(Ordering::SeqCst)
             };
             let processed = tauri::async_runtime::spawn_blocking(move || {
-                process(manager.as_deref(), &model_data, &data, &params, &body, &cancelled)
+                // Keep the body budget until the blocking task actually releases the body.
+                let _reservation = _reservation;
+                let revision = settings_revision(&model_data, &data, &settings);
+                process_planned(
+                    manager.as_deref(),
+                    &model_data,
+                    &data,
+                    &params,
+                    &settings,
+                    &body,
+                    &cancelled,
+                ).and_then(|(bytes, plan)| {
+                    if revision != settings_revision(&model_data, &data, &settings) {
+                        return Err("服务端模型或 DLL 在处理期间发生变化，请重新请求".into());
+                    }
+                    Ok((bytes, plan, revision))
+                })
             })
             .await
             .map_err(|error| format!("等待计算进程的线程没能回来：{error}"))
             .and_then(|inner| inner);
             // 算完了就没必要再盯着对面；对面已经走了的话，下面那次回包会写失败——那不是错误，
             // 是「它自己不要了」。
-            watcher.abort();
+            drop(lifetime);
             match processed {
                 // 跳过动图时回的是 GIF/WebP 的原始字节，标签跟着 sniff 走才不会撒谎；
                 // 正常路径产出 PNG，sniff 出来的仍然是 image/png，行为不变。
-                Ok(bytes) => {
+                Ok((bytes, plan, revision)) => {
                     let content_type = crate::cache::sniff_image_mime(
                         "application/octet-stream",
                         &bytes,
                     )
                     .unwrap_or_else(|| "application/octet-stream".to_string());
-                    write_response(&mut writer, 200, "OK", &content_type, &bytes).await
+                    // docs/175 R11：回包里标明**这一次真正用的**是哪一版计划。客户端拿它
+                    // 与自己做键时用的那一版对账，对不上就不会把这份产物当那一版存下来。
+                    write_response_with(
+                        &mut writer,
+                        200,
+                        "OK",
+                        &content_type,
+                        &[("x-yomika-plan-revision", plan.revision.as_str()),
+                          ("x-yomika-settings-revision", revision.as_str())],
+                        &bytes,
+                    )
+                    .await
                 }
                 Err(error) => {
                     let body = error_body("INFERENCE_UNAVAILABLE", &format!("{op}：{error}"));
@@ -1139,6 +1878,47 @@ fn blocking_client() -> Result<reqwest::blocking::Client, String> {
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|error| error.to_string())
+}
+
+/// 异步客户端：远端这一件要能在途取消，所以走 async 那一套（docs/175 R04）。
+/// 连接超时和阻塞版一样短——远端多半在局域网里；读超时留给推理。
+fn async_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// 归一成 PNG：对面那条路只认「一张图」，动图之外都得先解成像素再编回去。
+fn to_png_payload(bytes: Vec<u8>) -> Result<Vec<u8>, RemoteFailure> {
+    let normalized = image::load_from_memory(&bytes)
+        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法解码：{error}")))?
+        .to_rgba8();
+    let mut png = Vec::new();
+    use image::ImageEncoder;
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            normalized.as_raw(),
+            normalized.width(),
+            normalized.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法转换为 PNG：{error}")))?;
+    Ok(png)
+}
+
+/// 盯着取消牌，牌一翻就返回（docs/175 R04）。
+///
+/// 25 毫秒一格：对「翻页之后立刻掐断」够用，又不至于把 CPU 转起来。取消牌本身是个
+/// `AtomicBool`（`cancel::TaskGuard`），没有唤醒机制，所以这里只能轮询。
+async fn wait_until_cancelled(cancel: &crate::inference::cancel::CancelToken) {
+    const TICK: std::time::Duration = std::time::Duration::from_millis(25);
+    loop {
+        if cancel.cancelled() {
+            return;
+        }
+        tokio::time::sleep(TICK).await;
+    }
 }
 
 fn error_body(code: &str, message: &str) -> String {
@@ -1238,11 +2018,40 @@ pub fn remote_process(
     params: &ProcessParams,
     bytes: Vec<u8>,
 ) -> Result<Vec<u8>, RemoteFailure> {
+    tauri::async_runtime::block_on(remote_process_cancellable(
+        url,
+        token,
+        params,
+        bytes,
+        &crate::inference::cancel::CancelToken::none(),
+        None,
+    ))
+}
+
+/// 发一页给远端，并且让取消牌**直接管到在途的那一次请求**（docs/175 R04）。
+///
+/// 取消发生在传输层：一边等回复、一边盯着取消牌，牌一翻就把这次请求整个丢掉——`reqwest`
+/// 的 future 被 drop 之后连接随之断开，对面那次推理成了没人要的结果，本机那条远端队列
+/// 当场放人（见 `remote_compute_process`）。从前是「等满 180 秒、拿到结果再丢掉」：旧页
+/// 翻得越快，堵在队列上的旧请求越多。
+pub async fn remote_process_cancellable(
+    url: &str,
+    token: &str,
+    params: &ProcessParams,
+    bytes: Vec<u8>,
+    cancel: &crate::inference::cancel::CancelToken,
+    expected_revision: Option<&str>,
+) -> Result<Vec<u8>, RemoteFailure> {
     // 动图只有 DLSSNR 那条路认它（对面逐帧跑完编回 APNG）；超分没有逐帧实现，
     // 发过去只会被压成第一帧，所以照旧原样交回（前端把失败当可重试）。判定必须在下面
     // 那次「归一成 PNG」之前——归一化本身就已经把动图压成第一帧了。
     let animated = crate::cache::is_animated_image(&bytes);
-    if animated && params.op != "dlssnr" {
+    let includes_dlssnr = if params.chain.is_empty() {
+        params.op == "dlssnr"
+    } else {
+        params.chain.iter().any(|step| step == "dlssnr")
+    };
+    if animated && !includes_dlssnr {
         return Ok(bytes);
     }
     let base = normalize_base(url).map_err(RemoteFailure::protocol)?;
@@ -1261,26 +2070,27 @@ pub fn remote_process(
         // 保住了，不会因为对面不会处理而变差。
         bytes
     } else {
-        let normalized = image::load_from_memory(&bytes)
-            .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法解码：{error}")))?
-            .to_rgba8();
-        let mut png = Vec::new();
-        use image::ImageEncoder;
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(normalized.as_raw(), normalized.width(), normalized.height(), image::ExtendedColorType::Rgba8)
-            .map_err(|error| RemoteFailure::protocol(format!("待处理图像无法转换为 PNG：{error}")))?;
-        png
+        // 归一成 PNG 是纯 CPU 活（几兆的解码 + 编码）：放到阻塞线程上，别占着异步线程。
+        // 这一步不看取消牌：它只有几十毫秒，半路丢掉已经解出来的像素也没有意义。
+        tauri::async_runtime::spawn_blocking(move || to_png_payload(bytes))
+            .await
+            .map_err(|error| RemoteFailure::protocol(error.to_string()))??
     };
-    let response = blocking_client()
+    let request = async_client()
         .map_err(RemoteFailure::protocol)?
         .post(format!("{base}/v2/process"))
         .header("x-yomika-token", token)
         .header("x-yomika-params", encoded)
         .header("content-type", "application/octet-stream")
         .timeout(PROCESS_TIMEOUT)
-        .body(payload)
-        .send()
-        .map_err(|error| {
+        .body(payload);
+    // 取消牌与这次传输赛跑（docs/175 R04）。`biased` 让取消牌先看一眼：已经翻页的那一页
+    // 根本不该再把请求发出去。这一局输给取消牌就 `return`——future 被丢掉、连接断开，
+    // 对面的推理也就没人要了（从前是等它跑完再丢结果，传输本身一直占着）。
+    let response = tokio::select! {
+        biased;
+        _ = wait_until_cancelled(cancel) => return Err(RemoteFailure::cancelled()),
+        response = request.send() => response.map_err(|error| {
             if error.is_timeout() {
                 RemoteFailure::timeout(format!(
                     "对面 {} 秒没有回话（一页大图 + 一个模型）：可以重试，或者把图切小、改用本机处理",
@@ -1289,7 +2099,8 @@ pub fn remote_process(
             } else {
                 RemoteFailure::request(error)
             }
-        })?;
+        })?,
+    };
     let status = response.status();
     let content_type = response
         .headers()
@@ -1297,10 +2108,21 @@ pub fn remote_process(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = response
-        .bytes()
-        .map_err(RemoteFailure::request)?
-        .to_vec();
+    // New servers expose settings and request-plan revisions separately. The cache
+    // expected revision comes from capabilities, so compare settings with settings.
+    // Older servers only expose the plan header (or neither header).
+    let used_revision = response
+        .headers()
+        .get("x-yomika-settings-revision")
+        .or_else(|| response.headers().get("x-yomika-plan-revision"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    // 回包也可能在传的中途被取消（一页几兆、对面还慢）：同样赛一次。
+    let body = tokio::select! {
+        biased;
+        _ = wait_until_cancelled(cancel) => return Err(RemoteFailure::cancelled()),
+        body = response.bytes() => body.map_err(RemoteFailure::request)?.to_vec(),
+    };
     if !status.is_success() {
         return Err(RemoteFailure::response(status.as_u16(), &String::from_utf8_lossy(&body)));
     }
@@ -1308,6 +2130,13 @@ pub fn remote_process(
         return Err(RemoteFailure::protocol(format!(
             "对面回的不是图片（{content_type}）"
         )));
+    }
+    // 身份对不上：这一份产物是照**另一版**处理计划算出来的，按本机这个键存下去就会
+    // 让下次拿旧键命中一份不是那一版的图。对面那一版已经变了，重探一次再取。
+    if let (Some(expected), Some(used)) = (expected_revision, used_revision.as_deref()) {
+        if expected != used {
+            return Err(RemoteFailure::plan_changed(expected, used));
+        }
     }
     Ok(body)
 }
@@ -1337,6 +2166,18 @@ impl RemoteFailure {
         }
     }
 
+    /// 客户端这一侧不想要了（用户翻页）：这不是失败，是取消（docs/175 R04）。
+    ///
+    /// 码沿用本机那条路的 `INFERENCE_CANCELLED`——前端把它当「这一页这一档的结果」，
+    /// 既不入错误日志也不重试（`src/domain/errors.ts`）。
+    fn cancelled() -> Self {
+        Self {
+            code: "INFERENCE_CANCELLED",
+            message: "这一页的处理已取消".to_string(),
+            retryable: false,
+        }
+    }
+
     fn request(error: reqwest::Error) -> Self {
         if error.is_timeout() { Self::timeout(error.to_string()) }
         else if error.is_builder() || error.is_decode() || error.is_redirect() {
@@ -1358,6 +2199,19 @@ impl RemoteFailure {
             code: "REMOTE_UNAVAILABLE",
             message,
             retryable: false,
+        }
+    }
+
+    /// 对面实际用的那一版处理计划与本机建键用的那一版**不是同一版**（docs/175 R11）。
+    ///
+    /// 不重试就等于永远看不见这一页：对面重开一次、或设置改回去就又能算了，所以是可重试的。
+    fn plan_changed(expected: &str, used: &str) -> Self {
+        Self {
+            code: "REMOTE_PLAN_CHANGED",
+            message: format!(
+                "对面换了一版处理计划（它实际用的是 {used}，本机这一版是 {expected}）：这份产物不算那一版，重新探一次对面再取"
+            ),
+            retryable: true,
         }
     }
 }
@@ -1672,6 +2526,11 @@ pub struct RemoteProcessInput {
     /// 从哪一版开始发：`reader-page` / `enhanced`。
     #[serde(default)]
     pub source: Option<String>,
+    /// 建**本机缓存键**时用的那一版处理计划身份（能力清单给的那一份，docs/175 R11）。
+    /// 对面回包上会写明「这一次真正用的」是哪一版；两者对不上就说明身份在往返之间变了，
+    /// 这一份产物不能按老版本存下来。老版本客户端不发这一栏（缺省即不校验）。
+    #[serde(default)]
+    pub expected_revision: Option<String>,
     /// 起点那一版是哪个模型产出的（与 DLSSNR 那条路同一个规矩：起点按产出它的
     /// 模型存，要算出同一个 revision 才读得到）。
     #[serde(default)]
@@ -1703,15 +2562,17 @@ pub async fn remote_compute_process(
     // DLSSNR / 超分排在它后面是纯粹的浪费（审计 P2-2）。
     let priority = crate::inference::HeavyPriority::parse(input.priority.as_deref());
     let task_id = input.task_id.clone();
-    let result = crate::inference::run_remote(priority, task_id, move || {
-        let database = app.state::<crate::db::Database>();
-        remote_process_cached_page(&database, &data, &input)
+    // 闸门（远端那条队列）照旧一次只放一件，但**由异步这一侧拿着**：取消要能管到在途
+    // 传输，那一段就必须跑在异步线程上，而不是整块塞进阻塞线程（docs/175 R04）。
+    let database = app.state::<crate::db::Database>();
+    let result = crate::inference::run_remote(priority, task_id, async {
+        remote_process_cached_page(&database, &data, &input).await
     })
     .await?;
     Ok(crate::domain::result::into_binary_response(result))
 }
 
-fn remote_process_cached_page(
+async fn remote_process_cached_page(
     database: &crate::db::Database,
     data_dir: &std::path::Path,
     input: &RemoteProcessInput,
@@ -1745,16 +2606,24 @@ fn remote_process_cached_page(
         Ok(None) => return CommandResult::failure("LRR_NOT_FOUND", "Page is not cached yet", true),
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    // 两道检查：发出**之前**取消就不再发（省掉对面一次推理），发出**之后**取消则按
-    // 取消处理结果（见下面的 match）。真正的中断要靠异步 HTTP，那是以后的事。
+    // 两道检查：发出**之前**取消就不再发（省掉对面一次推理）；发出**之后**取消则由
+    // `remote_process_cancellable` 在传输层当场掐断（docs/175 R04）。
     if guard.cancelled() {
         return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
     }
 
-    match remote_process(&input.url, &input.token, &input.params, page.bytes) {
-        // 已经发出去的那一次没法从这一侧掐断（阻塞式 HTTP），但结果回来时要是已经没人
-        // 要了，就把它按取消处理：不把一页已经翻过去的图当成「成功」交上去，也让它早
-        // 一点从那条队列上退下来（审计 P2-2 的「响应后丢弃」落到原生这一侧）。
+    match remote_process_cancellable(
+        &input.url,
+        &input.token,
+        &input.params,
+        page.bytes,
+        &guard.token(),
+        input.expected_revision.as_deref(),
+    )
+    .await
+    {
+        // 取消现在真能掐断在途传输（`remote_process_cancellable`）；这一条兜的是「回复
+        // 刚好赶在取消之前回来」那一拍：已经没人要的图不能当成「成功」交上去。
         Ok(_) if guard.cancelled() => {
             CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
         }
@@ -2039,13 +2908,21 @@ mod tests {
         assert_eq!(capabilities.capabilities.len(), 2);
         assert!(capabilities.capabilities.iter().all(|item| !item.ready));
 
-        // 处理一张 1×1 的图：没有模型时走最近邻，回的是 PNG。
+        // 处理一张 1×1 的图。服务端没配模型时**不再悄悄走最近邻**（docs/175 R01）：
+        // 回一张「看着成功、其实没跑模型」的图，客户端会把它当成模型产物存下来。
         let params = ProcessParams {
             chain: Vec::new(),
             op: "upscale".into(),
             model_id: None,
             scale: Some(2),
             dlssnr: None,
+        };
+        let no_model = remote_process(&base, "token-123", &params, one_pixel_png()).expect_err("没有模型要拒绝");
+        assert!(no_model.message.contains("没有配置超分模型"), "{}", no_model.message);
+        // 而**显式点名最近邻**的那条用途还在：客户端要的本来就是放大，不是模型。
+        let params = ProcessParams {
+            model_id: Some(EXPLICIT_NEAREST_MODEL.to_string()),
+            ..params
         };
         let bytes = remote_process(&base, "token-123", &params, one_pixel_png()).expect("处理");
         assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a], "回的是 PNG");
@@ -2071,6 +2948,161 @@ mod tests {
     /// 单测里那几条来路不测取消：交一张「永远不取消」的牌。**不写成内联的 `|| false`**——
     /// 判据（`tests/contracts/native-config.test.ts`）钉的就是「这个文件里没有一条把取消
     /// 写死的来路」，那样写会连测试一起钉进去。
+    /// docs/175 R04：客户端取消要能**停掉在途的那一次传输**，不是等它跑完再丢结果。
+    ///
+    /// 判据有两条，缺一不可：一来对面**看到连接断了**（这一条才分得清「掐断了传输」与
+    /// 「结果回来时顺手丢掉」），二来本地立刻拿到取消、而不是等满 180 秒超时。
+    #[test]
+    fn a_cancelled_remote_request_stops_the_transfer_in_flight() {
+        use std::io::Read as _;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::time::{Duration, Instant};
+
+        // 一个「只收请求、不回话」的对端：连接一直拿着，除非客户端自己断开。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (in_flight_tx, in_flight_rx) = std::sync::mpsc::channel::<()>();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<bool>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 4096];
+            let _ = stream.read(&mut head);
+            let _ = in_flight_tx.send(());
+            // 再读一次：客户端把传输丢掉时这里会读到 0（EOF）。
+            let mut tail = [0u8; 64];
+            let _ = dropped_tx.send(matches!(stream.read(&mut tail), Ok(0)));
+        });
+
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let flag_in_task = std::sync::Arc::clone(&flag);
+        let params = ProcessParams {
+            chain: Vec::new(),
+            op: "upscale".into(),
+            model_id: Some("remote-model".into()),
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let runner = std::thread::spawn(move || {
+            let cancel = crate::inference::cancel::CancelToken::watch(flag_in_task);
+            let started = Instant::now();
+            let code = match tauri::async_runtime::block_on(remote_process_cancellable(
+                &url,
+                "token",
+                &params,
+                one_pixel_png(),
+                &cancel,
+                None,
+            )) {
+                Ok(_) => "ok".to_string(),
+                Err(error) => error.code.to_string(),
+            };
+            (code, started.elapsed())
+        });
+        // 等这次传输真的在途了再翻牌——这正是「用户在等的时候翻了页」。
+        std::thread::spawn(move || {
+            if in_flight_rx.recv_timeout(Duration::from_secs(10)).is_ok() {
+                flag.store(true, AtomicOrdering::SeqCst);
+            }
+        });
+
+        assert_eq!(
+            dropped_rx.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(true),
+            "对面没有看到连接被掐断：在途传输没停"
+        );
+        let (code, elapsed) = runner.join().unwrap();
+        assert_eq!(code, "INFERENCE_CANCELLED");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "取消没能在途生效：等了 {elapsed:?}"
+        );
+        let _ = server.join();
+    }
+
+    /// docs/175 R11（客户端那一半）：回包上写的「实际用的那一版」与本机建键用的那一版对不上
+    /// 时，这一份产物不能当本机那一版收下——否则下次拿同一个键就命中一份**不是那一版**的图。
+    #[test]
+    fn a_remote_answer_that_ran_a_different_plan_is_refused() {
+        use std::io::{Read as _, Write as _};
+
+        /// 一个只会回「一张 PNG + 它说自己用的是哪一版」的对端；`None` 表示干脆不说
+        /// （老版本对面的样子）。
+        fn image_server(announced: Option<String>) -> (String, std::thread::JoinHandle<()>) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut head = [0u8; 4096];
+                let _ = stream.read(&mut head);
+                let png = one_pixel_png();
+                let revision = match announced {
+                    Some(announced) => format!("x-yomika-plan-revision: {announced}\r\n"),
+                    None => String::new(),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n{revision}connection: close\r\n\r\n",
+                    png.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&png);
+            });
+            (url, handle)
+        }
+
+        let params = ProcessParams {
+            chain: Vec::new(),
+            op: "upscale".into(),
+            model_id: Some("remote-model".into()),
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let expected = "a".repeat(64);
+
+        // ① 对面上换了一版：这一份不算本机那一版。
+        let (url, server) = image_server(Some("b".repeat(64)));
+        let error = tauri::async_runtime::block_on(remote_process_cancellable(
+            &url,
+            "token",
+            &params,
+            one_pixel_png(),
+            &crate::inference::cancel::CancelToken::none(),
+            Some(expected.as_str()),
+        ))
+        .expect_err("对面跑的是另一版，不该当成功收下");
+        assert_eq!(error.code, "REMOTE_PLAN_CHANGED");
+        assert!(error.message.contains(&"b".repeat(64)), "{}", error.message);
+        assert!(error.retryable, "重探一次对面就能算，该允许重试");
+        let _ = server.join();
+
+        // ② 同一版照旧收下（这一条防「一律拒绝」那种假绿）。
+        let (url, server) = image_server(Some(expected.clone()));
+        let bytes = tauri::async_runtime::block_on(remote_process_cancellable(
+            &url,
+            "token",
+            &params,
+            one_pixel_png(),
+            &crate::inference::cancel::CancelToken::none(),
+            Some(expected.as_str()),
+        ))
+        .expect("同一版该收下");
+        assert!(!bytes.is_empty());
+        let _ = server.join();
+
+        // ③ 对面根本不说（老版本）：没有可对的那一版，照旧收下。
+        let (url, server) = image_server(None);
+        let bytes = tauri::async_runtime::block_on(remote_process_cancellable(
+            &url,
+            "token",
+            &params,
+            one_pixel_png(),
+            &crate::inference::cancel::CancelToken::none(),
+            Some(expected.as_str()),
+        ))
+        .expect("老版本对面不发这一头时不该被拒");
+        assert!(!bytes.is_empty());
+        let _ = server.join();
+    }
+
     fn cancelled_never() -> bool {
         false
     }
@@ -2082,6 +3114,18 @@ mod tests {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("连上服务");
         let _ = stream.write_all(request);
         let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    /// 与 `raw_request` 一样说一段原始 HTTP，但**不半关**写方向——真正的客户端在拿到回包
+    /// 之前不会关它。上游把「读端读到 EOF」当成「对面把连接丢了」并据此取消这一次订阅，半关
+    /// 会有同样的样子；那条语义是另一条用例要的，不该顺手把这一条也碰成取消。
+    fn raw_request_keeping_the_write_side_open(port: u16, request: &[u8]) -> String {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("连上服务");
+        let _ = stream.write_all(request);
         let mut response = Vec::new();
         let _ = stream.read_to_end(&mut response);
         String::from_utf8_lossy(&response).to_string()
@@ -2230,6 +3274,20 @@ mod tests {
     }
 
     #[test]
+    fn an_animated_page_in_a_combined_chain_is_sent_to_the_remote() {
+        let params = ProcessParams {
+            chain: vec!["upscale".into(), "dlssnr".into()],
+            op: "upscale".into(),
+            model_id: None,
+            scale: None,
+            dlssnr: None,
+        };
+        let refused = remote_process("http://127.0.0.1:9/", "token", &params, animated_gif())
+            .expect_err("DLSSNR in the chain must not silently return the unprocessed animation");
+        assert_eq!(refused.code, "NETWORK");
+    }
+
+    #[test]
     fn an_animated_page_reaches_dlssnr_as_an_animation() {
         // 动图只有 DLSSNR 那条路认它，所以 op 是 dlssnr 时**不许**在本地把它交回去：
         // 交回去等于这个功能对动图根本没生效。
@@ -2268,4 +3326,600 @@ mod tests {
         );
         center.stop();
     }
+
+    /// docs/175 R01：服务端设置只读一次、冻成一份计划；**默认跟随服务端**，而「没有有效
+    /// 模型」要结构化不可用，不许把最近邻伪装成成功。
+    ///
+    /// 从前模型只从 `params.model_id` 来（客户端不传就是空串），于是服务端设置里选的那个
+    /// 模型从来没进过远端计算；空 id 又一路落到最近邻上，回一张「成功」的放大图。
+    #[test]
+    fn a_plan_freezes_the_servers_settings_before_the_first_step() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        install_fake_onnx_upscaler(dir.path(), "server-model");
+        let params = ProcessParams {
+            chain: Vec::new(),
+            op: "upscale".into(),
+            // 客户端**不点模型**：老客户端本来就是这样，远端那一版该由服务端设置决定。
+            model_id: None,
+            scale: None,
+            dlssnr: None,
+        };
+        let settings = RemoteSettings {
+            upscale_backend: "auto".into(),
+            upscale_model: "server-model".into(),
+            dlssnr_passes: String::new(),
+        };
+        let plan =
+            ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).expect("定计划");
+        assert_eq!(plan.model_id, "server-model", "默认要跟随服务端设置");
+        assert!(
+            !plan.model_content.is_empty() && plan.model_content != "nearest",
+            "计划要带上模型内容版本：{plan:?}"
+        );
+        assert_eq!(plan.revision.len(), 64, "身份是 blake3 十六进制：{}", plan.revision);
+
+        // 同一份设置定两次是同一版；换了模型内容就是另一版（客户端键里缺的就是它）。
+        let again =
+            ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).expect("定计划");
+        assert_eq!(plan.revision, again.revision, "同一份设置要定出同一版计划");
+        install_fake_onnx_upscaler(dir.path(), "server-model-2");
+        let other = RemoteSettings {
+            upscale_model: "server-model-2".into(),
+            ..settings.clone()
+        };
+        let changed =
+            ProcessPlan::resolve(dir.path(), dir.path(), &params, &other, false).expect("定计划");
+        assert_ne!(plan.revision, changed.revision, "换了模型内容必须是另一版计划");
+
+        // 服务端没配模型、客户端也没显式点名：结构化不可用（不是最近邻）。
+        let none = ProcessPlan::resolve(dir.path(), dir.path(), &params, &RemoteSettings::default(), false)
+            .expect_err("没有模型要说不可用");
+        assert!(none.contains("没有配置超分模型"), "{none}");
+        // 设置里超分是关的：另一句话，同样不是最近邻。
+        let off = RemoteSettings {
+            upscale_backend: "off".into(),
+            ..RemoteSettings::default()
+        };
+        let off = ProcessPlan::resolve(dir.path(), dir.path(), &params, &off, false).expect_err("关掉要说不可用");
+        assert!(off.contains("超分是关的"), "{off}");
+
+        // 显式指名最近邻的那条用途还在，而且计划里说清它是最近邻。
+        let nearest = ProcessParams {
+            model_id: Some(EXPLICIT_NEAREST_MODEL.into()),
+            ..params.clone()
+        };
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &nearest, &RemoteSettings::default(), false)
+            .expect("显式最近邻");
+        assert!(plan.model_id.is_empty());
+        assert_eq!(plan.model_content, "nearest");
+        assert_eq!(
+            plan.upscale_revision,
+            crate::inference::enhanced_revision(&None),
+            "最近邻在缓存身份里还是原来那一版"
+        );
+    }
+
+    /// docs/175 R02：内置 shader 链也不再在**本进程**里跑——它和 ONNX 那一档一样交给计算
+    /// 进程，引擎由 worker 按本机执行政策挑。宿主这边没有编排时要说「没人算」。
+    ///
+    /// 从前这一档走 `run_host_upscale_bytes` 里 `Anime4k` 那一条：没有编排也照样在宿主 CPU
+    /// 上算出一张，既绕开设置里选的 auto/gpu，也绕开 worker 的引擎选择与回退报告。
+    #[test]
+    fn a_builtin_shader_chain_is_handed_to_the_compute_process() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let params = ProcessParams {
+            chain: Vec::new(),
+            op: "upscale".into(),
+            model_id: Some("anime4k-hq".into()),
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let error = process(None, dir.path(), dir.path(), &params, &one_pixel_png(), &cancelled_never)
+            .expect_err("内置链不该在宿主里跑");
+        assert!(error.contains("计算编排还没起来"), "{error}");
+        // 计划里说的也是交给计算进程的那一档：链的名字就是模型 id。
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &RemoteSettings::default(), false)
+            .expect("定计划");
+        assert_eq!(plan.model_id, "anime4k-hq");
+        // 这一档的引擎政策由 `proxy` 那边钉（`a_byte_bridge_stage_carries_the_local_engine_policy`）：
+        // 计划的政策串与阶段上那一栏是同一个来源。
+        assert!(!plan.engine_policy.is_empty(), "计划要记下这一单用谁：{plan:?}");
+    }
+
+    /// docs/175 R03：动图在多阶段链里要保持动画——会把它压成第一帧的第一步必须从计划里摘掉。
+    #[test]
+    fn an_animated_page_keeps_its_frames_in_a_combined_chain() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let params = ProcessParams {
+            chain: vec!["upscale".into(), "dlssnr".into()],
+            op: "upscale".into(),
+            model_id: None,
+            scale: Some(2),
+            dlssnr: None,
+        };
+        // 服务端（这个测试里）没配模型：要是第一步还留在计划里，这里会先在那一档以「没有配置
+        // 超分模型」失败，动画连逐帧那一档都到不了。
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &RemoteSettings::default(), true)
+            .expect("动图不该卡在会丢帧的第一步上");
+        assert_eq!(plan.steps, vec!["dlssnr".to_string()], "只剩逐帧那一档");
+        assert_eq!(plan.skipped, vec!["upscale".to_string()], "摘掉的档要记在计划里");
+        assert!(!plan.passthrough);
+
+        // 链里没有逐帧那一档：整页原样交回（谁也不许动手）。
+        let only_upscale = ProcessParams {
+            chain: vec!["upscale".into()],
+            ..params.clone()
+        };
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &only_upscale, &RemoteSettings::default(), true)
+            .expect("定计划");
+        assert!(plan.passthrough);
+        assert_eq!(plan.skipped, vec!["upscale".to_string()]);
+
+        // 静态页照旧：第一步要模型，没有就说不可用（而不是被摘掉）。
+        let error = ProcessPlan::resolve(dir.path(), dir.path(), &params, &RemoteSettings::default(), false)
+            .expect_err("静态页第一步要模型");
+        assert!(error.contains("没有配置超分模型"), "{error}");
+    }
+
+    /// docs/175 R03（端到端那一半）：对面看到的必须是「轮到逐帧那一档了」，而不是先去做那个
+    /// 会把动画压成第一帧的第一步。
+    #[test]
+    fn an_animated_page_in_a_combined_chain_skips_the_frame_destroying_step() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 门控排在「编排没起来」之前，所以这里先让它过（它只要求那份 DLL 是个文件）。
+        let feature = dir.path().join("dlssnr");
+        std::fs::create_dir_all(&feature).expect("建片段目录");
+        std::fs::write(feature.join("nvngx_dlssnr.dll"), vec![0u8; 64]).expect("写假片段");
+        let (center, port) = server_for(dir.path());
+        let base = format!("127.0.0.1:{port}");
+        let params = ProcessParams {
+            chain: vec!["upscale".into(), "dlssnr".into()],
+            op: "upscale".into(),
+            model_id: None,
+            scale: None,
+            dlssnr: None,
+        };
+        let refused = remote_process(&base, "token-123", &params, animated_gif()).expect_err("没有编排时该拒绝");
+        assert!(
+            !refused.message.contains("没有配置超分模型"),
+            "对面先去做了会丢帧的第一步：{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("dlssnr：计算编排"),
+            "对面没走到逐帧那一档：{}",
+            refused.message
+        );
+        center.stop();
+    }
+
+    /// docs/175 R11：回包要标明**这一次真正用的**那一版计划身份，而且它等于服务端跑的那一份。
+    #[test]
+    fn a_response_declares_the_plan_revision_it_actually_used() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let params = ProcessParams {
+            chain: Vec::new(),
+            op: "upscale".into(),
+            // 显式最近邻：这条来路不需要编排，所以能拿回一个 200（要验的就是 200 上的头）。
+            model_id: Some(EXPLICIT_NEAREST_MODEL.into()),
+            scale: Some(2),
+            dlssnr: None,
+        };
+        let encoded = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&params).expect("参数"))
+        };
+        let png = one_pixel_png();
+        let mut request = format!(
+            "POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: token-123\r\nx-yomika-params: {encoded}\r\ncontent-length: {}\r\n\r\n",
+            png.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&png);
+        let response = raw_request_keeping_the_write_side_open(port, &request);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        // 它必须等于**这一单**计划算出来的那一版，不是常量、也不是能力清单那一版（清单说的
+        // 是「当前设置这一版」，与「这一单实际用了什么」是两件事）。
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &RemoteSettings::default(), false)
+            .expect("定计划");
+        assert!(
+            response
+                .to_lowercase()
+                .contains(&format!("x-yomika-plan-revision: {}", plan.revision)),
+            "回包没带它真正用的那一版：{}",
+            response
+        );
+        // 令牌不在身份里：它是 64 位十六进制哈希，而且 `plan_revision` 的签名里根本没有
+        // 凭据这一路（逐项敏感性见 `the_plan_revision_is_a_pure_function_of_the_enumerated_plan_inputs`）。
+        //
+        // 2026-10-16 复审指出「只断言哈希里不含 token-123」是弱证据（换个写法照样能过），
+        // 所以这里只留长度这一条结构事实，把「哪些东西进身份、哪些不进」交给那条逐项判据。
+        assert_eq!(plan.revision.len(), 64);
+        center.stop();
+    }
+
+    /// docs/175 R11：身份是**计划输入**的纯函数——枚举进 JSON 的每一项变了都得换一版。
+    ///
+    /// 这条替掉原来那句弱断言（「哈希里不含 token-123」）：证明「凭据进不去」的办法不是找
+    /// 字符串，而是证明身份只由这五样计划输入决定，且 `plan_revision` 的签名里没有凭据参数
+    /// （它收的是步骤、模型 id/内容、归一化参数、DLL 内容、本机政策）。
+    /// 把 JSON 里任何一项删掉或写死，下面相应的 `assert_ne!` 就会转红。
+    #[test]
+    fn the_plan_revision_is_a_pure_function_of_the_enumerated_plan_inputs() {
+        let steps = vec!["upscale".to_string(), "dlssnr".to_string()];
+        let params = serde_json::json!({ "passes": 1 });
+        let base = plan_revision(
+            &steps,
+            "server-model",
+            "blake3:aaa",
+            &params,
+            "blake3:bbb",
+            "auto",
+        );
+        assert_eq!(base.len(), 64, "身份是 blake3 十六进制：{base}");
+        // 同输入同输出：没有时钟、没有随机、没有进程状态混进来。
+        assert_eq!(
+            base,
+            plan_revision(
+                &steps,
+                "server-model",
+                "blake3:aaa",
+                &params,
+                "blake3:bbb",
+                "auto"
+            ),
+            "同一份计划输入必须定出同一版身份"
+        );
+        // 逐项敏感性：链顺序、模型 id、模型内容、归一化参数、DLL 内容、本机政策。
+        assert_ne!(
+            base,
+            plan_revision(
+                &["upscale".to_string()],
+                "server-model",
+                "blake3:aaa",
+                &params,
+                "blake3:bbb",
+                "auto"
+            ),
+            "链顺序变了必须是另一版身份"
+        );
+        assert_ne!(
+            base,
+            plan_revision(
+                &steps,
+                "other-model",
+                "blake3:aaa",
+                &params,
+                "blake3:bbb",
+                "auto"
+            ),
+            "模型 id 变了必须是另一版身份"
+        );
+        assert_ne!(
+            base,
+            plan_revision(
+                &steps,
+                "server-model",
+                "blake3:ccc",
+                &params,
+                "blake3:bbb",
+                "auto"
+            ),
+            "模型内容变了必须是另一版身份"
+        );
+        assert_ne!(
+            base,
+            plan_revision(
+                &steps,
+                "server-model",
+                "blake3:aaa",
+                &serde_json::json!({ "passes": 2 }),
+                "blake3:bbb",
+                "auto"
+            ),
+            "归一化参数变了必须是另一版身份"
+        );
+        assert_ne!(
+            base,
+            plan_revision(
+                &steps,
+                "server-model",
+                "blake3:aaa",
+                &params,
+                "blake3:ddd",
+                "auto"
+            ),
+            "DLL 内容变了必须是另一版身份"
+        );
+        assert_ne!(
+            base,
+            plan_revision(
+                &steps,
+                "server-model",
+                "blake3:aaa",
+                &params,
+                "blake3:bbb",
+                "gpu"
+            ),
+            "本机执行政策变了必须是另一版身份"
+        );
+    }
+
+    /// docs/175 R11：能力清单上那一版身份覆盖客户端键里没有的三样——模型内容、归一化参数、
+    /// 那份 DLL 的内容。链没变、设备没变，服务端换了模型权重也是另一版。
+    #[test]
+    fn the_advertised_revision_covers_the_model_contents() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        install_fake_onnx_upscaler(dir.path(), "server-model");
+        let settings = RemoteSettings {
+            upscale_backend: "auto".into(),
+            upscale_model: "server-model".into(),
+            dlssnr_passes: String::new(),
+        };
+        let before = settings_revision(dir.path(), dir.path(), &settings);
+        assert_eq!(before.len(), 64, "身份是 blake3 十六进制：{before}");
+        assert_eq!(
+            before,
+            settings_revision(dir.path(), dir.path(), &settings),
+            "同一份设置要定出同一版身份"
+        );
+
+        // 同一个模型 id、**内容**换了：客户端键里少的就是它。
+        std::fs::write(
+            dir.path().join("models").join("server-model").join("1").join("model.onnx"),
+            b"other-weights",
+        )
+        .expect("换权重");
+        assert_ne!(
+            before,
+            settings_revision(dir.path(), dir.path(), &settings),
+            "换了模型内容必须是另一版身份"
+        );
+        // 参数也是身份的一部分。
+        let other = RemoteSettings {
+            dlssnr_passes: "{\"passes\":1}".into(),
+            ..settings.clone()
+        };
+        assert_ne!(
+            settings_revision(dir.path(), dir.path(), &settings),
+            settings_revision(dir.path(), dir.path(), &other),
+            "换了归一化参数必须是另一版身份"
+        );
+
+        // 那份 DLL 的内容同样是身份的一部分（客户端键里也没有它）。
+        #[cfg(windows)]
+        {
+            let before_dll = settings_revision(dir.path(), dir.path(), &settings);
+            let feature = dir.path().join("dlssnr");
+            std::fs::create_dir_all(&feature).expect("建片段目录");
+            std::fs::write(feature.join("nvngx_dlssnr.dll"), vec![0u8; 64]).expect("写假片段");
+            assert_ne!(
+                before_dll,
+                settings_revision(dir.path(), dir.path(), &settings),
+                "换了 DLL 内容是另一版身份"
+            );
+        }
+    }
+
+    /// 一条**能分段发**的原始连接。R05 那几条要验的正是「对面还没发完」时服务这边怎么办，
+    /// 所以不能在帮手里把请求一次写完，也不能指望 `read_to_end` 会及时回来。
+    struct RawSocket {
+        stream: std::net::TcpStream,
+    }
+
+    impl RawSocket {
+        fn connect(port: u16) -> Self {
+            let stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("连上服务");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .expect("读超时");
+            Self { stream }
+        }
+
+        fn send(&mut self, bytes: &[u8]) {
+            use std::io::Write;
+            let _ = self.stream.write_all(bytes);
+        }
+
+        /// 一直读到对面关连接为止，最多等 `limit`。回「收到的字节」与「看没看到 EOF」。
+        fn read_until_eof(&mut self, limit: std::time::Duration) -> (String, bool) {
+            use std::io::Read;
+            let started = std::time::Instant::now();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                if started.elapsed() > limit {
+                    return (String::from_utf8_lossy(&received).to_string(), false);
+                }
+                match self.stream.read(&mut chunk) {
+                    Ok(0) => return (String::from_utf8_lossy(&received).to_string(), true),
+                    Ok(read) => received.extend_from_slice(&chunk[..read]),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => return (String::from_utf8_lossy(&received).to_string(), true),
+                }
+            }
+        }
+    }
+
+    /// 一条数据端点的请求头（体还没发），`length` 是**声明**的体长。
+    fn data_head(length: usize, token: &str) -> String {
+        format!(
+            "POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\nx-yomika-token: {token}\r\ncontent-length: {length}\r\n\r\n"
+        )
+    }
+
+    /// docs/175 R05：数据端点**先认证，再读体**。
+    ///
+    /// 从前读头与读体是同一段：令牌不对的请求也要先把声明的体收完（限 64 MB）才轮到认证。
+    /// 一条没有令牌的连接于是能把服务的一条任务与一份缓冲占满整段读体时间，而它连门都进不来。
+    #[test]
+    fn an_unauthenticated_request_is_refused_before_its_body_is_read() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let mut socket = RawSocket::connect(port);
+        // 声明一个满上限的体，然后**一个字节都不发**：认证必须排在这之前。
+        socket.send(data_head(MAX_BODY, "不是这份令牌").as_bytes());
+        let started = std::time::Instant::now();
+        let (response, closed) = socket.read_until_eof(std::time::Duration::from_secs(4));
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "令牌不对要当场拒绝，而不是等体读完：{response:?}"
+        );
+        assert!(closed, "401 之后这条连接就该收掉");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "拒绝没有等体：{:?}",
+            started.elapsed()
+        );
+        center.stop();
+    }
+
+    /// docs/175 R05：连上却不把头说完的连接有期限（半开连接不能一直占着连接位）。
+    #[test]
+    fn a_connection_that_never_finishes_its_head_is_dropped() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let mut socket = RawSocket::connect(port);
+        // 头没写完，后面的字节永远不发。
+        socket.send(b"POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        // 期限是 `HEAD_DEADLINE`（5 秒），这里给 9 秒的余量：超了就是没有期限。
+        let (_, closed) = socket.read_until_eof(std::time::Duration::from_secs(9));
+        assert!(closed, "读头没有期限：这条连接会一直占着一个连接位");
+        center.stop();
+    }
+
+    /// docs/175 R05：连上来的连接数有上限，超了要当场说清楚，而不是接下来慢慢排。
+    #[test]
+    fn too_many_open_connections_are_refused_with_a_reason() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        // 先占满上限：每一条都只发半截头，于是都停在「读头」这一步不走。
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let mut socket = RawSocket::connect(port);
+            socket.send(b"POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+            held.push(socket);
+        }
+        // 让服务把这些连接都收进去（accept 与计数都在服务那一侧）。
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut extra = RawSocket::connect(port);
+        extra.send(data_head(2, "token-123").as_bytes());
+        let (response, _) = extra.read_until_eof(std::time::Duration::from_secs(3));
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "超上限要当场拒绝，而不是排队等：{response:?}"
+        );
+        assert!(response.contains("连接"), "要说清是哪一档满了：{response}");
+        drop(held);
+        center.stop();
+    }
+
+    /// docs/175 R05：在途请求体的**总字节**也有预算（单条上限不能挡住「几条一起上」）。
+    #[test]
+    fn the_in_flight_body_budget_is_enforced() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        // 两条各声明满上限的体：都通过了认证，但体一个字节都不发（一直挂着）。
+        let mut first = RawSocket::connect(port);
+        first.send(data_head(MAX_BODY, "token-123").as_bytes());
+        let mut second = RawSocket::connect(port);
+        second.send(data_head(MAX_BODY, "token-123").as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 第三条再声明一个满上限的体：总预算放不下，要当场回 503。
+        let mut third = RawSocket::connect(port);
+        third.send(data_head(MAX_BODY, "token-123").as_bytes());
+        let (response, _) = third.read_until_eof(std::time::Duration::from_secs(3));
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "在途预算放不下就不该先把体读进来：{response:?}"
+        );
+        assert!(
+            response.contains("在途") || response.contains("预算"),
+            "要说清是哪一档满了：{response}"
+        );
+        drop(first);
+        drop(second);
+        center.stop();
+    }
+
+    /// docs/175 R05：**停服务要把已经收下的连接关掉**。
+    ///
+    /// 从前 `stop` 只把 accept 那一圈叫停、再停 UDP：已经 spawn 出去的 handler 谁也不管，
+    /// 于是半开连接会一直挂到它自己的读超时（旧代码里那条路根本没有期限）。
+    #[test]
+    fn stopping_the_server_closes_the_connections_it_is_holding() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (center, port) = server_for(dir.path());
+        let mut socket = RawSocket::connect(port);
+        socket.send(b"POST /v2/process HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        center.stop();
+        let (_, closed) = socket.read_until_eof(std::time::Duration::from_secs(3));
+        assert!(closed, "停服务要把它已经收下的连接关掉，不能等对面自己超时");
+    }
+    #[test]
+    fn acceptance_capability_revision_is_accepted_by_a_real_process_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (center, port) = server_for(dir.path());
+        let url = format!("127.0.0.1:{port}");
+        let advertised = remote_capabilities(&url, "token-123").unwrap();
+        let params = ProcessParams { chain: vec![], op: "upscale".into(),
+            model_id: Some(EXPLICIT_NEAREST_MODEL.into()), scale: Some(2), dlssnr: None };
+        let result = tauri::async_runtime::block_on(remote_process_cancellable(
+            &url, "token-123", &params, one_pixel_png(),
+            &crate::inference::cancel::CancelToken::none(), Some(&advertised.revision)));
+        center.stop();
+        assert!(result.is_ok(), "the advertised settings revision must validate a single-stage response: {result:?}");
+    }
+
+    #[test]
+    fn acceptance_server_policy_and_scale_are_part_of_the_frozen_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = RemoteSettings { upscale_backend: "cpu".into(),
+            upscale_model: "anime4k-hq".into(), dlssnr_passes: String::new() };
+        let params = ProcessParams { chain: vec![], op: "upscale".into(),
+            model_id: None, scale: Some(2), dlssnr: None };
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).unwrap();
+        assert_eq!(plan.engine_policy, "cpu");
+        let off = RemoteSettings { upscale_backend: "off".into(), ..settings.clone() };
+        assert!(ProcessPlan::resolve(dir.path(), dir.path(), &params, &off, false).is_err());
+        let nearest = ProcessParams { model_id: Some(EXPLICIT_NEAREST_MODEL.into()), ..params };
+        let p2 = ProcessPlan::resolve(dir.path(), dir.path(), &nearest, &settings, false).unwrap();
+        let p3 = ProcessPlan::resolve(dir.path(), dir.path(), &ProcessParams { scale: Some(3), ..nearest }, &settings, false).unwrap();
+        assert_ne!(p2.revision, p3.revision);
+    }
+
+    #[test]
+    fn acceptance_stop_between_reserve_and_attach_cancels_the_task() {
+        let connections = Connections::default();
+        let id = connections.reserve().unwrap();
+        connections.close_all();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = tx.send(());
+        });
+        connections.attach(id, task);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(1)).is_err(), "closed connection spawned an untracked task");
+        assert!(connections.reserve().is_none(), "a stopped registry must stay closed");
+    }
+
+    #[test]
+    fn acceptance_a_replaced_model_cannot_run_under_the_old_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        install_fake_onnx_upscaler(dir.path(), "server-model");
+        let settings = RemoteSettings { upscale_model: "server-model".into(), ..RemoteSettings::default() };
+        let params = ProcessParams { chain: vec![], op: "upscale".into(), model_id: None, scale: None, dlssnr: None };
+        let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).unwrap();
+        std::fs::write(dir.path().join("models/server-model/1/model.onnx"), b"changed weights").unwrap();
+        let error = upscale_bytes(None, dir.path(), &plan, &one_pixel_png(), &cancelled_never).unwrap_err();
+        assert!(error.contains("发生变化"), "must reject stale model before handing it to a worker: {error}");
+    }
+
 }

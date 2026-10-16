@@ -227,9 +227,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 时候先报一句网络错。 */
   const [remoteCapabilities, setRemoteCapabilities] = useState<{ address: string; value: RemoteCapabilities }>();
   const remoteAddress = preferences.remoteComputeUrl.trim();
+  const remoteRevisionRef = useRef('');
+  remoteRevisionRef.current = remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value.revision : '';
+  const [remoteProbeFailed, setRemoteProbeFailed] = useState<string>();
+  const [remoteProbeEpoch, setRemoteProbeEpoch] = useState(0);
+  const lastRejectedRemoteRevisionRef = useRef<string>();
   useEffect(() => {
     if (!remoteConfigured) {
       setRemoteCapabilities(undefined);
+      setRemoteProbeFailed(undefined);
       return;
     }
     let cancelled = false;
@@ -241,15 +247,17 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const result = await centerRepository.remoteCapabilities(remoteAddress, preferences.remoteComputeToken);
         if (cancelled) return;
         if (result.ok) {
+          setRemoteProbeFailed(undefined);
           setRemoteCapabilities({ address: remoteAddress, value: result.value });
           return;
         }
         if (attempt < 2) await new Promise((resolve) => { window.setTimeout(resolve, 400 * (attempt + 1)); });
         if (cancelled) return;
       }
+      setRemoteProbeFailed(remoteAddress);
     })();
     return () => { cancelled = true; };
-  }, [centerRepository, remoteConfigured, remoteAddress, preferences.remoteComputeToken]);
+  }, [centerRepository, remoteConfigured, remoteAddress, preferences.remoteComputeToken, remoteProbeEpoch]);
   /** 只有「这一台」的清单算数：换设备的瞬间旧答案（另一个地址）一律过期。 */
   const remoteServiceUp = (service: RemoteService) => remoteServiceReady(
     remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value : undefined,
@@ -309,10 +317,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // the same pixels at four times the bytes — strictly worse than the plain
   // page. Upscaling therefore needs a model, not just a backend.
   //
-  // 走远端时这两条都不看本机：一档在这一台能不能用，由**对面**那份能力清单说了算。
+  // 远端能力决定远端服务能否使用；本地模型只在探测完成后提供回退。
+  const localUpscaleConfigured = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+  // Wait for the remote probe before allowing local fallback on a cold start.
+  const remoteProbed = remoteCapabilities?.address === remoteAddress || remoteProbeFailed === remoteAddress;
   const upscaleConfigured = remoteConfigured
-    ? remoteServiceUp('upscale')
-    : preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+    ? remoteServiceUp('upscale') || (remoteProbed && localUpscaleConfigured)
+    : localUpscaleConfigured;
   // Settings grant availability; every reading session starts with original images.
   /** 一档在这一次阅读里到底能不能用：远端看对面的清单，本机看自己跑不跑得起来。 */
   const dlssnrAvailable = remoteConfigured ? remoteServiceUp('dlssnr') : dlssnrRequested && dlssnrReady;
@@ -335,7 +346,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   useEffect(() => { if (!dlssnrAvailable) setDlssnrWanted(false); }, [dlssnrAvailable]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
   /** 处理中那枚小胶囊写什么：正在跑哪一档就说哪一档。远端/DLSSNR 在链路上另算一步，
-   * 它失败时本机那一版会顶上（见下面的降级），所以这里说的是「正在算」而不是
+   * 远端失败后才尝试本地超分（见下面的降级），所以这里说的是「正在算」而不是
    * 「一定会变」。 */
   const [derivingStage, setDerivingStage] = useState<'upscale' | 'dlssnr' | 'remote'>();
   const derivingLabel = derivingStage === 'upscale' ? '超分处理中…'
@@ -404,7 +415,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const visiblePagesRef = useRef<ReadonlySet<number>>(new Set());
   /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
-   * 结果）；本地超分是前两者的输入。
+   * 结果）；远端直接接收原图；本地超分仅在远端失败时回退，本地 DLSSNR 可接收本地超分结果。
    *
    * `remoteChain` 是交给远端的那一串（按顺序做哪几档），做几档由**阅读器里开着
    * 哪几档**决定，模型与参数不跟着走。 */
@@ -854,7 +865,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         }
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
-        setDerivingStage(job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
+        setDerivingStage(job.engine === 'remote' ? 'remote' : job.upscaleModel ? 'upscale' : job.engine === 'local' ? undefined : job.engine);
         // 一次任务一个取消牌：切页 / 换开关 / 离开阅读器时把它掐掉。原生那侧一次只
         // 允许一件重活，不掐的话用户要看的那一页排在旧任务后面。
         const taskBase = `${context.generation}:${job.generation}:${pageIndex}:${derivedTaskSeqRef.current += 1}`;
@@ -871,121 +882,113 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         let jobFailure: ReaderPageFailure | undefined;
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
-          /** 本地这一步（超分）在这一版里是**一条链**，任何一档都先走它。
-           *
-           * 为什么要一条链：链的产物只有内容寻址的落点、没有按修订号登记的缓存行——出了
-           * 这件任务，没人能按身份把它找回来。8-g① 在取产物那一步把行补上了
-           * （`cache::adopt_published_blob`），所以更高档（dlssnr / remote）终于能把本地
-           * 这一版当**输入**按身份读回来：它们接着这条路往下多走一步，不再各走一条
-           * 「只有宿主会在进程里跑模型」的旧命令。
-           *
-           * 这一版没成，阅读器照旧显示原图（§9.1 ⑦）。 */
-          const chainUpscaleModel = job.upscaleModel || undefined;
-          const enhancedFromPageIdentity: ImageCacheIdentity = {
-            ...identity,
-            rendition: 'enhanced',
-            modelId: job.upscaleModel,
-            source: 'reader-page',
-            priority,
-            taskId: `${taskBase}:enhanced`,
-          };
-          const renditions = await loadLocalRenditions({
-            repository: computeRepository,
-            cache: imageCache,
-            signal: controller.signal,
-            scopeId: context.scopeId,
-            archiveId: context.archiveId,
-            pageIndex,
-            generation: job.generation,
-            priority,
-            upscaleModel: chainUpscaleModel,
-            enhancedFromPageIdentity,
-            onEngine: (model, engine) => noticeEngineFallback(model, engine),
-            // 链路上的诊断必须落到 error.log：产物解不开、租借拿不到这些**不弹提示**，
-            // 没人接这条线时用户在日志里只能看到一个静悄悄失败的页面。
-            onDiagnostic: (message, detail) => logError('reader/compute', message, detail),
-            // 本地这一版没落地时的原因（`loadLocalRenditions` 判的），只可能是超分这一步。
-            onFailure: (_stage, model, failure) => {
-              jobFailure = failure;
-              noticeUpscaleFailure(model, failure);
-            },
-          });
-          const enhanced = renditions.enhanced;
-          // 从这儿往下两条路共用：谁拿到了句柄谁进这套账。
+          // Remote owns the complete chain: upload the original once and only
+          // download the final result. Local compute is a fallback, never a prerequisite.
+          let derived: ImageHandle | undefined;
+          if (job.engine === 'remote') {
+            setDerivingStage('remote');
+            derived = await imageCache.load({
+              ...identity,
+              rendition: 'remote',
+              transform: remoteTransform({
+                device: preferences.remoteComputeUrl,
+                source: 'reader-page',
+                chain: job.remoteChain,
+                // 对面那份设置换过（换模型、换 DLSSNR 参数、换 DLL）就是**另一版**产物，
+                // 不能拿旧键去命中。探到的是另一台的答案时算「还不知道」，落空串。
+                revision: remoteRevisionRef.current,
+              }),
+              priority,
+              taskId: `${taskBase}:remote`,
+            }, { signal: controller.signal }).catch((error: unknown) => {
+              const code = renditionErrorCode(error);
+              if (code === 'REMOTE_PLAN_CHANGED' && mountedRef.current
+                  && contextRef.current?.generation === context.generation
+                  && job.generation === derivedGenerationRef.current) {
+                const rejected = `${preferences.remoteComputeUrl}:${remoteRevisionRef.current}`;
+                if (lastRejectedRemoteRevisionRef.current !== rejected) {
+                  lastRejectedRemoteRevisionRef.current = rejected;
+                  setRemoteProbeEpoch((epoch) => epoch + 1);
+                }
+              }
+              if (code !== undefined) {
+                jobFailure = error instanceof Error ? { code, message: error.message } : { code };
+              }
+              return undefined;
+            });
+          }
           if (controller.signal.aborted) {
-            if (enhanced) imageCache.release(enhanced);
+            if (derived) imageCache.release(derived);
             continue;
           }
-          // 优先级就是结果本身：超分 > 原图。
-          const local = enhanced;
-          if (local && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
-            retainDerived(pageIndex, local);
-          }
-          if (job.upscaleModel && !enhanced) {
-            noticeStageFailure('upscale', job.upscaleModel, upscaleFailureRef.current);
-          }
-          /** 远端 / DLSSNR 那一步的输入：本地做了什么就从那一步的产物接着做。 */
-          const baseRendition: DlssnrSource = enhanced ? 'enhanced' : 'reader-page';
-          /** 这一档（DLSSNR / 远端）自己那一份失败。它**不走**本地链的 `onFailure`：那条路
-           * 报的是「本地哪一阶段没落地」，这里报的是「后面这一步没算出来」。两处都归到
-           * `jobFailure` 上，下面那句「阵发失败不算做过」才看得见它——只报个提示、不带码的
-           * 话，队列满/worker 被杀这类现场问题会把这一页永久记成「做过了」（docs/71:645 第四句）。 */
-          let engineFailure: ReaderPageFailure | undefined;
-          let derived = local;
-          if (job.engine === 'dlssnr' || job.engine === 'remote') {
-            setDerivingStage(job.engine);
-            // 远端 / DLSSNR 是「这一页最终由谁画」里更高的一档，产物替代本地产物
-            // （本地那一版只是它的输入，收掉）。
-            const processed = await imageCache.load(job.engine === 'dlssnr'
-              ? {
+          if (!derived) {
+            if (job.upscaleModel) setDerivingStage('upscale');
+            const enhancedFromPageIdentity: ImageCacheIdentity = {
+              ...identity,
+              rendition: 'enhanced',
+              modelId: job.upscaleModel,
+              source: 'reader-page',
+              priority,
+              taskId: `${taskBase}:enhanced`,
+            };
+            const renditions = await loadLocalRenditions({
+              repository: computeRepository,
+              cache: imageCache,
+              signal: controller.signal,
+              scopeId: context.scopeId,
+              archiveId: context.archiveId,
+              pageIndex,
+              generation: job.generation,
+              priority,
+              upscaleModel: job.upscaleModel || undefined,
+              enhancedFromPageIdentity,
+              onEngine: (model, engine) => noticeEngineFallback(model, engine),
+              onDiagnostic: (message, detail) => logError('reader/compute', message, detail),
+              onFailure: (_stage, model, failure) => {
+                jobFailure = failure;
+                noticeUpscaleFailure(model, failure);
+              },
+            });
+            const enhanced = renditions.enhanced;
+            if (controller.signal.aborted) {
+              if (enhanced) imageCache.release(enhanced);
+              continue;
+            }
+            derived = enhanced;
+            if (enhanced && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
+              retainDerived(pageIndex, enhanced);
+            }
+            if (job.upscaleModel && !enhanced) {
+              noticeStageFailure('upscale', job.upscaleModel, upscaleFailureRef.current);
+            }
+            // Local DLSSNR may build on local upscale. A remote request already
+            // included DLSSNR, so a remote failure only falls back to local upscale.
+            if (job.engine === 'dlssnr') {
+              setDerivingStage('dlssnr');
+              const baseRendition: DlssnrSource = enhanced ? 'enhanced' : 'reader-page';
+              const processed = await imageCache.load({
                 ...identity,
                 rendition: 'dlssnr',
                 transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
                   parseDlssnrPasses(dlssnrPassesRef.current),
                 )),
-                // 起点是按「产出它的模型」存的：本地那一版用的是哪个超分模型，
-                // 原生那侧才算得出同一个 revision。
                 ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
                 priority,
-                taskId: `${taskBase}:${job.engine}`,
-              }
-              : {
-                ...identity,
-                rendition: 'remote',
-                // 只报「这一页要做哪几档」；模型、放大倍数、层参数都由对面那份设置决定。
-                transform: remoteTransform({
-                  device: preferences.remoteComputeUrl,
-                  source: baseRendition,
-                  chain: job.remoteChain,
-                }),
-                ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
-                taskId: `${taskBase}:${job.engine}`,
+                taskId: `${taskBase}:dlssnr`,
               }, { signal: controller.signal }).catch((error: unknown) => {
-              // 失败不抛给外面（这一档本来就是可选的高档，本地那一版已经画出来了），
-              // 但**码要留下**：`RenditionError` 带着原生那句的 code，见下面的判定。
-              const code = renditionErrorCode(error);
-              if (code !== undefined) {
-                // `exactOptionalPropertyTypes` 下 `message?: string` 不能收 `string | undefined`，
-                // 所以有文案才带上这一栏。
-                engineFailure = error instanceof Error ? { code, message: error.message } : { code };
+                const code = renditionErrorCode(error);
+                if (code !== undefined) {
+                  jobFailure = error instanceof Error ? { code, message: error.message } : { code };
+                }
+                return undefined;
+              });
+              if (controller.signal.aborted) {
+                if (processed) imageCache.release(processed);
+                continue;
               }
-              return undefined;
-            });
-            if (controller.signal.aborted) {
-              if (processed) imageCache.release(processed);
-              continue;
+              if (processed) derived = processed;
+              else noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
             }
-            if (processed) {
-              derived = processed;
-            } else if (job.engine === 'dlssnr') {
-              // DLSSNR 这一档失败时本地那一版顶上（没有本地版本就是原图），并且要说一
-              // 次原因：不然用户看到的是「开着却没反应」。
-              noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
-            }
-            // 这一步失败也要算进 `jobFailure`：下面判「阵发失败不算做过」时认的就是它。
-            if (engineFailure) jobFailure = engineFailure;
-            // 不写「远端失败」的提示：远端地址与令牌的失败在错误日志里，而且那一档本
-            // 来就是本机处理的可选替代（本机这一版已经画出来了）。
           }
           if (!controller.signal.aborted && job.generation === derivedGenerationRef.current
               && jobFailure && RETRYABLE_COMPUTE_ERROR_CODES.has(jobFailure.code)) {
@@ -1019,7 +1022,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             imageCache.release(derived);
             continue;
           }
-          // 落到这里第二次只可能是「本地那一版先上屏、再换成 DLSSNR / 远端结果」那条
+          // 落到这里第二次只可能是「本地那一版先上屏、再换成 DLSSNR 结果」那条
           // 渐进路径：`retainDerived` 会把这一页换到更好的那一版（同一版则什么都不做），
           // 而不是把更好的那一版丢掉。
           retainDerived(pageIndex, derived);
@@ -1124,21 +1127,24 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       derivedSweepRef.current = undefined;
       return;
     }
-    const engine: 'remote' | 'dlssnr' | 'local' = remoteConfigured
+    const useRemote = remoteConfigured
+      && (!upscaleEnabled || remoteServiceUp('upscale'))
+      && (!dlssnrConfigured || remoteServiceUp('dlssnr'));
+    const engine: 'remote' | 'dlssnr' | 'local' = useRemote
       ? 'remote'
-      : dlssnrConfigured
+      : !remoteConfigured && dlssnrConfigured
         ? 'dlssnr'
         : 'local';
     /** 交给远端的那一串：阅读器里开着哪几档就做哪几档，顺序固定「超分 → DLSSNR」
      *  ——超分出来的像素是 DLSSNR 更好的输入。模型与参数不跟着走（对面
      *  按自己那份设置跑），所以这一串变了才需要重算。 */
-    const remoteChain: readonly RemoteService[] = remoteConfigured
+    const remoteChain: readonly RemoteService[] = useRemote
       ? [
-        ...(upscaleEnabled ? (['upscale'] as const) : []),
+        ...(upscaleEnabled && remoteServiceUp('upscale') ? (['upscale'] as const) : []),
         ...(dlssnrConfigured ? (['dlssnr'] as const) : []),
       ]
       : [];
-    const upscaleModel = upscaleEnabled ? preferences.upscaleModel : '';
+    const upscaleModel = upscaleEnabled && preferences.upscaleBackend !== 'off' ? preferences.upscaleModel : '';
     // 后台任务从游标补进队列时取不到这里的局部变量，所以在排这一轮的时候留一份。
     derivedConfigRef.current = { upscaleModel, engine, remoteChain };
     let queued = false;
@@ -1206,7 +1212,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // 队列里可能已经有后台那一档的活，所以这里不能只看 `queued`。
     // 等清理落地那一关在 `runDerivedQueue` 里（闸门只设一处）。
     if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
-  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, remoteConfigured, runDerivedQueue, upscaleEnabled]);
+  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, preferences.upscaleBackend, remoteConfigured, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
@@ -1219,8 +1225,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     preferences.upscaleModel,
     releaseDerived,
     remoteConfigured,
+    remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value.revision : undefined,
     upscaleEnabled,
   ]);
+
+  useEffect(() => {
+    if (pageActive && remoteConfigured) requestDerived([...visiblePagesRef.current]);
+  }, [pageActive, remoteConfigured, remoteCapabilities, requestDerived]);
 
   useEffect(() => {
     mountedRef.current = true;

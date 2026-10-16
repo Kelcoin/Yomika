@@ -187,6 +187,7 @@ fn proxy_job<'a>(
     output_scale: Option<u32>,
 ) -> UpscaleJob<'a> {
     UpscaleJob {
+        policy: yomika_compute_protocol::EnginePolicy::Auto,
         input_id: "scope-a:archive-a:0",
         settings_id: "rev-test",
         source_revision: "reader-page",

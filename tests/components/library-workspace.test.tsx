@@ -82,12 +82,14 @@ describe('library workspace', () => {
     // the resizable separator (tabIndex=0) instead of the input.
     input.focus();
 
-    await user.keyboard('artist');
-    expect(input).toHaveValue('artist');
+    // Use free text with no tag candidate: Enter on an open candidate list
+    // intentionally selects that candidate (covered in tag-suggest.test.tsx).
+    await user.keyboard('free-text-query-824f2');
+    expect(input).toHaveValue('free-text-query-824f2');
     expect(onSearchQueryChange).not.toHaveBeenCalled();
 
     await user.keyboard('{Enter}');
-    expect(onSearchQueryChange).toHaveBeenCalledWith('artist');
+    expect(onSearchQueryChange).toHaveBeenCalledWith('free-text-query-824f2');
 
     onSearchQueryChange.mockClear();
     await user.clear(input);

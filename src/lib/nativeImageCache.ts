@@ -144,6 +144,9 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         archiveId: identity.archiveId,
         pageIndex: identity.pageIndex,
         source: remote.source,
+        // 键里那一版身份也带过去：对面回包上会写明**这一次真正用的**是哪一版，两者不一样
+        // 就说明处理计划的身份在我们眼皮底下变了，这一份产物不能按老版本存下来（R11）。
+        ...(remote.revision ? { expectedRevision: remote.revision } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
         // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
@@ -215,6 +218,12 @@ export function remoteTransform(input: {
   device: string;
   source: DlssnrSource;
   chain: readonly string[];
+  /** 服务端配置版本（能力清单给的那一版，与单次请求的计划版本分开）。
+   *
+   *  模型内容、归一化参数、执行政策、DLL 内容都算进这一版；链顺序由 chain 单独表示。对面换了模型权重
+   *  或换了一层参数，同一台设备、同一起点、同一串服务就是**另一版**，键也就跟着变。
+   *  它不是凭据（是哈希），所以进键不进日志。 */
+  revision: string;
 }): string {
   return JSON.stringify(input);
 }
@@ -223,15 +232,17 @@ function parseRemoteOpsTransform(transform: string | undefined): {
   device: string;
   source: DlssnrSource;
   chain: string[];
+  revision: string;
 } {
-  const fallback = { device: '', source: 'reader-page' as DlssnrSource, chain: ['upscale'] };
+  const fallback = { device: '', source: 'reader-page' as DlssnrSource, chain: ['upscale'], revision: '' };
   if (!transform) return fallback;
   try {
-    const parsed = JSON.parse(transform) as { device?: unknown; source?: unknown; chain?: unknown };
+    const parsed = JSON.parse(transform) as { device?: unknown; source?: unknown; chain?: unknown; revision?: unknown };
     return {
       device: typeof parsed.device === 'string' ? parsed.device : '',
       source: parsed.source === 'enhanced' ? parsed.source : 'reader-page',
       chain: Array.isArray(parsed.chain) ? parsed.chain.filter((step): step is string => typeof step === 'string') : fallback.chain,
+      revision: typeof parsed.revision === 'string' ? parsed.revision : '',
     };
   } catch {
     return fallback;

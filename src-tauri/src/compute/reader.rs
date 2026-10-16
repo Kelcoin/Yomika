@@ -35,9 +35,10 @@ pub const READER_UPSCALE_GRANT_ID: &str = "reader-upscale";
 /// 静默变成 CPU；auto 可显式回退并展示原因」）。`platform_preference` 只说「想用哪个」，
 /// 能不能用由 worker 那一侧的实测探针决定：探针不过就退 CPU，并把原因写进
 /// `EngineReport::fallback`。所以这里问 `Auto` 是**问**，不是承诺。
-/// `pub(super)` 而不是私有：宿主里别的算路（`super::proxy`）问的是同一件事——这台机器想用
-/// 哪个运行库。
-pub(super) fn engine_policy() -> EnginePolicy {
+/// `pub(crate)` 而不是私有：宿主里别的算路（`super::proxy`、字节桥 `compute_center`）问的是
+/// 同一件事——这台机器想用哪个运行库。远端处理计划的身份里也要带上它，所以它得从 `compute`
+/// 里露出来。
+pub(crate) fn engine_policy() -> EnginePolicy {
     let preferred = platform_preference()
         .first()
         .copied()
@@ -50,7 +51,7 @@ pub(super) fn engine_policy() -> EnginePolicy {
 }
 
 /// 键上那个后端标签：与引擎政策是同一件事的两种写法，所以由政策派生，不另写一份。
-pub(super) fn engine_policy_label() -> &'static str {
+pub(crate) fn engine_policy_label() -> &'static str {
     engine_policy().as_str()
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Clock3, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import { MessageCircle, RefreshCw, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { z } from 'zod';
 import type { EhComment } from '../services/ehClient';
 import { EhCommentSchema, NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -170,7 +170,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCo
   return (
     <section className="eh-comments" aria-label="E-Hentai 评论">
       <div className="eh-comments-heading">
-        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
+        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论{comments.length > 0 && <span className="eh-comments-count" aria-label={`${comments.length} 条评论`}>{comments.length}</span>}</h2>
         <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
       </div>
       {loading && comments.length === 0
@@ -184,14 +184,14 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCo
           </div>
           <p>{renderCommentBody(comment.body)}</p>
           <div className="eh-comment-votes">
-            <time dateTime={comment.postedAt ? comment.postedAt.replace(' ', 'T') : undefined}><Clock3 aria-hidden="true" />{comment.postedAt || '时间未知'}</time>
+            <time dateTime={comment.postedAt ? comment.postedAt.replace(' ', 'T') : undefined}>{comment.postedAt || '时间未知'}</time>
             {!comment.isUploader && (
-              <span className="eh-comment-votes-actions">
-                {/* Both buttons stay live and identical in shape; the cast
-                    direction is announced by the solid fill and aria-pressed,
+              <span className="eh-comment-votes-actions" role="group" aria-label={`${comment.author || '匿名用户'} 的评论投票`}>
+                {/* The paired controls share one frame; the selected
+                    direction is announced by the theme fill and aria-pressed,
                     and clicking it again cancels the vote. */}
-                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ArrowUp aria-hidden="true" /></button>
-                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ArrowDown aria-hidden="true" /></button>
+                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbsUp aria-hidden="true" /></button>
+                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbsDown aria-hidden="true" /></button>
               </span>
             )}
           </div>

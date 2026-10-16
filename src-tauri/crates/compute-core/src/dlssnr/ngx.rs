@@ -162,7 +162,11 @@ struct ParameterVtable {
 
 const _: () = {
     // 每个虚函数在表里的槽位（偏移 / 8），从上往下照头的顺序数。
-    assert!(std::mem::offset_of!(ParameterVtable, set_u64) == 8 * 0);
+    //
+    // 第一槽写成 `0` 而不是 `8 * 0`：后者会被常量折叠成零，默认 Clippy 的
+    // `erasing_op` 判红（它要的是「这一行在算槽位」，而不是「这一行恒等于零」）。
+    // 断言本身没变——`set_u64` 就是这张表的起点。
+    assert!(std::mem::offset_of!(ParameterVtable, set_u64) == 0);
     assert!(std::mem::offset_of!(ParameterVtable, set_f64) == 8 * 5);
     assert!(std::mem::offset_of!(ParameterVtable, set_f32) == 8 * 6);
     assert!(std::mem::offset_of!(ParameterVtable, set_u32) == 8 * 3);

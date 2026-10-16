@@ -128,8 +128,10 @@ pub fn ensure(beside: &Path, fallback_dir: &Path, payload: Option<&[u8]>) -> Pat
         return beside.to_path_buf();
     };
     let name = format!("{stem}-{}{extension}", short_hex(&digest));
-    // 名字就是摘要，写又是先 `.part` 再 rename，所以长度对得上就当作它完好；
-    // 真读坏了还有握手那一步的构建戳把门。这里不为了保险再哈希 24 MB——那是启动路径。
+    // 名字里带摘要只能说明「这一份是本代写下的」，说明不了「里面还是这些字节」：
+    // 截断还能靠长度看出来，等长损坏（改了内容、长度不变）只有实打实算一遍摘要才看得见。
+    // 所以这里过一遍 sha256——24 MB 一次，只在启动路径上发生，换来的是坏副本当场重铺，
+    // 而不是「握手拒一次 → 重试还拉起同一份 → 再拒一次」那个自己咬自己的圈。
     let wanted = u64::from(u32_at(payload, MAGIC.len() + 4));
     let mut directories: Vec<&Path> = Vec::new();
     if let Some(parent) = beside.parent() {
@@ -144,7 +146,7 @@ pub fn ensure(beside: &Path, fallback_dir: &Path, payload: Option<&[u8]>) -> Pat
         last = extracted.clone();
         if extracted.is_file() {
             match std::fs::metadata(&extracted) {
-                Ok(meta) if meta.len() == wanted => {
+                Ok(meta) if meta.len() == wanted && file_matches_digest(&extracted, &digest) => {
                     forget_older(&extracted, &stem, &extension);
                     return extracted;
                 }
@@ -172,6 +174,18 @@ pub fn ensure(beside: &Path, fallback_dir: &Path, payload: Option<&[u8]>) -> Pat
         }
     }
     last
+}
+
+/// 落在磁盘上的这一份，是不是载荷头记的那份字节。
+///
+/// 名字里已经带摘要，但名字证明的是「谁写的这一份」，证明不了「里面的字节还是不是它」：
+/// 被截断还能靠长度对不上看出来，等长损坏只看长度则完全看不出来。这里每个候选目录最多
+/// 算一次（目录数是固定的：主 exe 旁边、必要时再退一处），所以启动路径上的代价是有界的。
+fn file_matches_digest(path: &Path, expected: &[u8; 32]) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => sha2::Sha256::digest(&bytes)[..] == expected[..],
+        Err(_) => false,
+    }
 }
 
 /// 先写临时名再 `rename`：中途崩了也只会留下一个 `.part-*`，不会留下一份「看着在、
@@ -391,5 +405,134 @@ mod tests {
         assert!(!stale.exists(), "上一代那一份该被收走（24 MB 一份，升级几次就是几百兆）");
         assert!(stranger.exists(), "名字不像我们落的文件不许碰");
         assert!(resolved.is_file());
+    }
+
+    /// 名字里带的是这一代的摘要，可字节已经被换成了**等长**的别的东西（磁盘坏块、上一代
+    /// 进程写坏、杀毒软件改过）。只比长度的话这里会把它当成完好的缓存原样交出去——握手
+    /// 于是每一页都拒一次，而「重试」只重起同一份坏文件，永远好不了。
+    #[test]
+    fn a_same_length_corrupted_extraction_is_repaired_from_the_payload() {
+        let sandbox = tempfile::tempdir().expect("临时目录");
+        let bytes = vec![0x5au8; 21];
+        let payload = pack(&bytes);
+        let target = sandbox.path().join("yomika-compute-worker.exe");
+
+        let first = ensure(&target, &sandbox.path().join("data"), Some(&payload));
+        assert_eq!(std::fs::read(&first).expect("读回来"), bytes, "首次提取的是载荷里那一条");
+
+        std::fs::write(&first, vec![b'X'; bytes.len()]).expect("等长覆盖");
+        let second = ensure(&target, &sandbox.path().join("data"), Some(&payload));
+
+        assert_eq!(
+            std::fs::read(&second).expect("读回来"),
+            bytes,
+            "等长损坏的副本必须用载荷重铺，不能原样交出去"
+        );
+        assert_eq!(first, second, "重铺还是同一个受控名字：随身载荷在哪一代，落地名就在哪一代");
+    }
+
+    /// 截断的副本（`.part` 之外的一种：写了一半就被打断）与「首选目录写不进去、只能落到
+    /// 数据目录」这两种现场也要能好——后者的那一份同样是等长损坏的。
+    #[test]
+    fn a_truncated_copy_and_a_read_only_preferred_directory_are_recovered() {
+        let sandbox = tempfile::tempdir().expect("临时目录");
+        let bytes = vec![0x44u8; 4096];
+        let payload = pack(&bytes);
+
+        // ① 截断：长度对不上。
+        let target = sandbox.path().join("yomika-compute-worker.exe");
+        let first = ensure(&target, &sandbox.path().join("data"), Some(&payload));
+        std::fs::write(&first, &bytes[..7]).expect("截断");
+        let repaired = ensure(&target, &sandbox.path().join("data"), Some(&payload));
+        assert_eq!(std::fs::read(&repaired).expect("读回来"), bytes, "截断的副本要重铺");
+
+        // ② 首选目录写不进去（装到 `Program Files` 下是同一个形状）：落点退到数据目录，
+        //    那一份等长损坏之后仍然要在数据目录里就地重铺。
+        let blocked = sandbox.path().join("read-only");
+        std::fs::write(&blocked, b"not a directory").expect("摆一个挡路的文件");
+        let beside = blocked.join("yomika-compute-worker.exe");
+        let fallback = sandbox.path().join("data");
+        let resolved = ensure(&beside, &fallback, Some(&payload));
+        assert_eq!(resolved.parent(), Some(fallback.as_path()));
+        std::fs::write(&resolved, vec![b'Y'; bytes.len()]).expect("等长覆盖");
+        let repaired = ensure(&beside, &fallback, Some(&payload));
+        assert_eq!(
+            std::fs::read(&repaired).expect("读回来"),
+            bytes,
+            "首选目录只读时，也要在还能写的那一处把损坏的缓存铺好"
+        );
+    }
+
+    /// 「进程占用」那一种现场：这一代的缓存已经有了、还是**等长损坏**的，而它正被一个
+    /// 进程独占打开（正在跑的那一份 worker 就是这种形状）。首选目录里既改不了也删不掉，
+    /// 那就退到还能写的那一处铺一份好的——而不是把坏的那份原样交回去，让握手反复拒、
+    /// 「重试」反复重起同一份坏文件。
+    #[cfg(windows)]
+    #[test]
+    fn a_corrupted_extraction_held_open_by_a_process_is_replaced_elsewhere() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let sandbox = tempfile::tempdir().expect("临时目录");
+        let bytes = vec![0x66u8; 4096];
+        let payload = pack(&bytes);
+        let target = sandbox.path().join("yomika-compute-worker.exe");
+        let fallback = sandbox.path().join("data");
+
+        let first = ensure(&target, &fallback, Some(&payload));
+        std::fs::write(&first, vec![b'Z'; bytes.len()]).expect("等长覆盖");
+        // share_mode(0)：谁都别想改它、删它、顶替它——Windows 上的「占用」就是这一档。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&first)
+            .expect("独占打开这一份");
+
+        let resolved = ensure(&target, &fallback, Some(&payload));
+
+        assert_eq!(
+            resolved.parent(),
+            Some(fallback.as_path()),
+            "首选目录里那一份被占着换不了，就该落到还能写的那一处"
+        );
+        assert_eq!(
+            std::fs::read(&resolved).expect("读回来"),
+            bytes,
+            "换不过去也要有一份好的可跑"
+        );
+        drop(held);
+        assert_eq!(
+            std::fs::read(&first).expect("读回来"),
+            vec![b'Z'; bytes.len()],
+            "被占着的那一份不许动（改不动是事实，但不是我们把它删了）"
+        );
+    }
+
+    /// 「两个实例竞争提取」：两个宿主同时把同一代缓存铺到同一个目录里（另一条进程、
+    /// 或者同一台机器上开了两个实例）。落盘是「先 `.part` 再 rename」，所以谁先谁后
+    /// 都不该让哪一边读到半截；这一条钉的是「竞争下的可见性」，不是摘要修复本身。
+    #[test]
+    fn two_instances_racing_to_extract_both_get_the_whole_worker() {
+        let sandbox = tempfile::tempdir().expect("临时目录");
+        let bytes = vec![0x5au8; 64 * 1024];
+        let payload = pack(&bytes);
+        let target = sandbox.path().join("yomika-compute-worker.exe");
+        let fallback = sandbox.path().join("data");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let target = target.clone();
+                let fallback = fallback.clone();
+                let payload = payload.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let resolved = ensure(&target, &fallback, Some(&payload));
+                    std::fs::read(&resolved).expect("读回来")
+                })
+            })
+            .collect();
+        for handle in handles {
+            let landed = handle.join().expect("线程");
+            assert_eq!(landed, bytes, "竞争提取时每一边都必须拿到完整的 worker");
+        }
     }
 }
